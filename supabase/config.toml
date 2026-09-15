@@ -457,3 +457,13 @@ entrypoint = "./functions/activity/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/capability/index.ts"
+
+# verify_jwt = false is LOAD-BEARING, not copied boilerplate. The default is TRUE, and with it the
+# gateway demands a Bearer JWT before the handler runs -- so an anonymous prefetch of the pasted
+# link would 401 and the whole premise of H0 ("one URL, no install, no typed token", safe to
+# prefetch or unfurl) would be false in production while every test still passed. The document
+# authorises nothing and needs no caller identity, which is exactly why it must not require one.
+[functions.h0]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/h0/index.ts"
