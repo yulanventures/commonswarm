@@ -72,6 +72,10 @@ test("the stable reference and Caddy source retain their route invariants", asyn
   assert.match(caddyfile, /try_files \{path\}\/index\.html \{path\}/);
   assert.doesNotMatch(caddyfile, /try_files\s+@cleanUrl|=404/);
   assert.match(caddyfile, /error @dotfile 404/);
+  assert.match(
+    caddyfile,
+    /\{http\.error\.status_code\} == 404 \|\| \{http\.error\.status_code\} == 400/,
+  );
   assert.match(caddyfile, /root \* \/srv\/commonswarm\/site\/current/);
 
   for (const artifact of inventory.artifacts) {
@@ -79,7 +83,18 @@ test("the stable reference and Caddy source retain their route invariants", asyn
     const slashRoute = inventory.routes.find((candidate) => candidate.path === slashPath);
     assert.equal(slashRoute?.status, 200, `${slashPath} must serve the file without a redirect`);
   }
-  for (const path of ["/__commonswarm_missing__", "/__commonswarm_missing__.txt/", "/_astro/", "/fonts/", "/.well-known/security.txt"]) {
+  for (const path of [
+    "/__commonswarm_missing__",
+    "/__commonswarm_missing__.txt/",
+    "/_astro/",
+    "/fonts/",
+    "/.well-known/security.txt",
+    "/install.sh/foo",
+    "/llms.txt/x",
+    "/og.png/x",
+    "/index.html/foo",
+    "/fonts/inter-latin.woff2/x",
+  ]) {
     const route = inventory.routes.find((candidate) => candidate.path === path);
     assert.equal(route?.status, 404, `${path} must be in the negative inventory`);
     assert.equal(route?.bodyShape?.kind, "vercel-not-found", `${path} must record Vercel's 404 body shape`);
@@ -168,6 +183,7 @@ test("Caddy 2.11 adapts and serves every stable reference route", async (t) => {
   assert.match(serialized, /try_files.*index\.html/);
   assert.match(serialized, /path_regexp.*dotfile/);
   assert.match(serialized, /path_regexp.*fileWithSlash/);
+  assert.match(serialized, /status_code.*404.*status_code.*400/);
   assert.doesNotMatch(serialized, /@cleanUrl/);
 
   const inventory = await reference();

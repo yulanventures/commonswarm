@@ -1,8 +1,8 @@
 {
   "schemaVersion": 2,
-  "recordedAt": "2026-09-16T21:32:27.788Z",
+  "recordedAt": "2026-09-16T22:14:45.416Z",
   "origin": "https://commonswarm.com",
-  "gitCommit": "ef24893a3a14ba71782f5235daedd1fb0e48eda8",
+  "gitCommit": "568b9490c0b7308580ebc8c7258a87328e33c3c6",
   "siteBuildSha256": "bcf5cbdc91ce0a370bd7cb5b7dc74f6380338b2a5bbb15ba74f283c6ca5d4fd4",
   "requestMethod": "GET",
   "requestIntervalMs": 550,
@@ -105,7 +105,7 @@
       "observedFileCount": 6
     }
   ],
-  "routeCount": 78,
+  "routeCount": 83,
   "routes": [
     {
       "path": "/",
@@ -888,6 +888,38 @@
       }
     },
     {
+      "path": "/fonts/inter-latin.woff2/x",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "extra segment below font file"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
+      }
+    },
+    {
       "path": "/fonts/jetbrains-mono-latin-ext.woff2",
       "sources": [
         {
@@ -1088,6 +1120,38 @@
       }
     },
     {
+      "path": "/index.html/foo",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "extra segment below root HTML file"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
+      }
+    },
+    {
       "path": "/install.sh",
       "sources": [
         {
@@ -1125,6 +1189,38 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      }
+    },
+    {
+      "path": "/install.sh/foo",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "extra segment below shell script"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {
@@ -1248,6 +1344,38 @@
       }
     },
     {
+      "path": "/llms.txt/x",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "extra segment below text file"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
+      }
+    },
+    {
       "path": "/og.png",
       "sources": [
         {
@@ -1285,6 +1413,38 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      }
+    },
+    {
+      "path": "/og.png/x",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "extra segment below image file"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {

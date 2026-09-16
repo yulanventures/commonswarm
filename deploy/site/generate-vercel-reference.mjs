@@ -90,6 +90,11 @@ for (const [path, label] of [
   ["/_astro/", "fingerprinted asset directory without index"],
   ["/fonts/", "static directory without index"],
   ["/.well-known/security.txt", "dotfile-shaped path"],
+  ["/install.sh/foo", "extra segment below shell script"],
+  ["/llms.txt/x", "extra segment below text file"],
+  ["/og.png/x", "extra segment below image file"],
+  ["/index.html/foo", "extra segment below root HTML file"],
+  ["/fonts/inter-latin.woff2/x", "extra segment below font file"],
 ]) {
   const sources = routeSources.get(path) ?? [];
   sources.push({ kind: "case", label });
