@@ -14,7 +14,26 @@ This lane deployed nothing. HezLead runs every command in this file.
 - Secrets: vault item `CommonSwarm self-hosted Supabase env` rendered to `/home/commonswarm/.env`, mode `0600`.
 - TLS: the internal CA at `/etc/ssl/yulan-internal-ca.pem`; database certificate SANs are `db.commonswarm.internal` and `172.31.0.10`.
 
-Before this stack starts, change the edge lane's `mem_limit` from `2g` to `512m` and keep its loopback port `9000`. The edge owned function lane must pass the internal CA explicitly as `ssl.ca` with `rejectUnauthorized: true` in every `postgres(...)` client while the URL keeps `sslmode=verify-full`. The temporary local rehearsal copy used the public certificate, base64 encoded, in `SWARM_DATABASE_TLS_CA_B64`; the edge router must pass that name to the `command`, `read`, `capability`, and `activity` workers. `postgres` 3.4.9 ignored the CA path and the Deno or Node process CA settings in an Edge Runtime user worker, which was measured as `UnknownIssuer`. This N-db lane does not edit `supabase/functions/**`. The total is then PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB reserved headroom: 4060 MB.
+Before this stack starts, change the edge lane's `mem_limit` from `2g` to `512m` and keep its loopback port `9000`. The edge owned function lane must pass the internal CA explicitly as `ssl.ca` with `rejectUnauthorized: true` in every `postgres(...)` client while the URL keeps `sslmode=verify-full`. The edge router must pass `SWARM_DATABASE_TLS_CA_B64` to the `command`, `read`, `capability`, and `activity` workers. The value is the base64 encoding of the public internal CA certificate.
+
+Apply this shape where each of the four functions constructs its database client:
+
+```ts
+// Keep the existing SWARM_DATABASE_URL/SUPABASE_DB_URL resolution.
+const tlsCaB64 = Deno.env.get("SWARM_DATABASE_TLS_CA_B64");
+const internalDatabase = new URL(databaseUrl).hostname === "db.commonswarm.internal";
+if (internalDatabase && !tlsCaB64) {
+  throw new Error("SWARM_DATABASE_TLS_CA_B64 is required for the internal database");
+}
+const db = postgres(databaseUrl, {
+  ...(tlsCaB64
+    ? { ssl: { ca: atob(tlsCaB64), rejectUnauthorized: true } }
+    : {}),
+  // Preserve each function's existing options here.
+});
+```
+
+Keep `sslmode=verify-full` in the box database URL and omit `sslrootcert` from that URL. The temporary rehearsal copy made this exact `ssl` change and `create_workspace` returned HTTP 200 with `accepted`. Without it, `postgres` 3.4.9 returned `UnknownIssuer` even when the CA was supplied as a file URL or a Deno or Node process CA. Adding `sslrootcert` to the URL failed because this client sent it to PostgreSQL as an invalid startup parameter. This N-db lane does not edit `supabase/functions/**` or the edge router. The total is then PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB reserved headroom: 4060 MB.
 
 Every database URL used by GoTrue, PostgREST, Storage API, and edge-runtime must name `db.commonswarm.internal` and include `sslmode=verify-full`. GoTrue, PostgREST, and Storage API use `sslrootcert=/etc/ssl/yulan-internal-ca.pem`. The edge runtime's `postgres` 3.4.9 URLs omit `sslrootcert`; that client sends an unrecognized `sslrootcert` query key to PostgreSQL as a startup parameter. The edge function supplies the CA in the `ssl.ca` option described below. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. Never use the IP in a service database URL.
 

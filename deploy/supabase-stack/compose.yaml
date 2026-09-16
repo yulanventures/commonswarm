@@ -1,7 +1,6 @@
 name: commonswarm-supabase-stack
 
-# N-db production pins. The lead replaces only these image lines after reading
-# the hosted health endpoints during the box rehearsal; see VERSIONS.md.
+# N-db production pins measured by the lead on 2026-09-16; see VERSIONS.md.
 x-memory-budget:
   postgres: 1536m
   realtime: 512m
@@ -13,7 +12,7 @@ x-memory-budget:
 
 services:
   postgres:
-    image: public.ecr.aws/supabase/postgres:17.6.1.106
+    image: public.ecr.aws/supabase/postgres:17.6.1.147
     container_name: commonswarm-postgres
     restart: unless-stopped
     init: true
@@ -60,8 +59,10 @@ services:
       test:
         - CMD-SHELL
         - >-
-          PGPASSWORD="$${POSTGRES_PASSWORD}" psql -U "$${POSTGRES_USER}"
-          -h /var/run/postgresql -d "$${POSTGRES_DB}" -Atqc 'select 1' >/dev/null
+          PGPASSWORD="$${POSTGRES_PASSWORD}" PGSSLMODE=verify-full
+          PGSSLROOTCERT=/etc/ssl/yulan-internal-ca.pem
+          psql -U "$${POSTGRES_USER}" -h 172.31.0.10
+          -d "$${POSTGRES_DB}" -Atqc 'select 1' >/dev/null
       interval: 10s
       timeout: 3s
       retries: 12
@@ -71,7 +72,7 @@ services:
         ipv4_address: 172.31.0.10
 
   gotrue:
-    image: public.ecr.aws/supabase/gotrue:v2.193.1
+    image: public.ecr.aws/supabase/gotrue:v2.197.0
     container_name: commonswarm-gotrue
     restart: unless-stopped
     init: true
@@ -178,7 +179,7 @@ services:
         ipv4_address: 172.31.0.13
 
   storage-api:
-    image: public.ecr.aws/supabase/storage-api:v1.67.15
+    image: public.ecr.aws/supabase/storage-api:v1.77.5
     container_name: commonswarm-storage-api
     restart: unless-stopped
     init: true

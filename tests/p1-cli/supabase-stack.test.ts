@@ -19,6 +19,14 @@ const memory = {
   "storage-api": 300,
 } as const;
 
+const images = {
+  postgres: "public.ecr.aws/supabase/postgres:17.6.1.147",
+  gotrue: "public.ecr.aws/supabase/gotrue:v2.197.0",
+  postgrest: "public.ecr.aws/supabase/postgrest:v14.5",
+  realtime: "public.ecr.aws/supabase/realtime:v2.86.3",
+  "storage-api": "public.ecr.aws/supabase/storage-api:v1.77.5",
+} as const;
+
 function serviceBlock(source: string, name: string): string {
   const marker = `  ${name}:\n`;
   const start = source.indexOf(marker, source.indexOf("services:\n"));
@@ -62,11 +70,18 @@ function validateStack(
     const actual = Number(block.match(/mem_limit:\s*(\d+)m/)?.[1] ?? NaN);
     if (actual !== expected) errors.push(`memory ${service}`);
   }
+  for (const [service, expected] of Object.entries(images)) {
+    const block = serviceBlock(composeSource, service);
+    if (!block.includes(`image: ${expected}`)) errors.push(`image ${service}`);
+  }
   const postgres = serviceBlock(composeSource, "postgres");
   if (/^ {4}ports:/m.test(postgres) || /^ {6}-\s*["']?127\.0\.0\.1:\d+:5432/m.test(postgres)) {
     errors.push("postgres port published");
   }
   if (!/ipv4_address:\s*172\.31\.0\.10/.test(postgres)) errors.push("postgres fixed ip");
+  if (!/PGSSLMODE=verify-full[\s\S]*PGSSLROOTCERT=[^\s]+[\s\S]*-h 172\.31\.0\.10/.test(postgres)) {
+    errors.push("postgres TLS health path");
+  }
   if (!/name:\s*commonswarm-net\n\s+external:\s*true/.test(composeSource)) {
     errors.push("external network");
   }
@@ -127,6 +142,20 @@ test("stack controls reject their named mutations", () => {
       /postgres port published/,
     ],
     ["memory split", compose.replace("    mem_limit: 300m\n    env_file: \*stack-env", "    mem_limit: 700m\n    env_file: *stack-env"), envExample, caddy, /memory gotrue/],
+    [
+      "production image pin",
+      compose.replace("supabase/gotrue:v2.197.0", "supabase/gotrue:v2.196.0"),
+      envExample,
+      caddy,
+      /image gotrue/,
+    ],
+    [
+      "postgres socket health",
+      compose.replace("-h 172.31.0.10", "-h /var/run/postgresql"),
+      envExample,
+      caddy,
+      /postgres TLS health path/,
+    ],
     [
       "compose secret",
       compose.replace("    init: true\n    mem_limit: 1536m", "    init: true\n    JWT_SECRET: hardcoded-value\n    mem_limit: 1536m"),

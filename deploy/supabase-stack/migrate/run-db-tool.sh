@@ -55,5 +55,5 @@ docker run --rm \
   --volume "$service_file:/run/commonswarm-pg-service.conf:ro" \
   "${ca_mount[@]}" \
   --entrypoint /bin/bash \
-  public.ecr.aws/supabase/postgres:17.6.1.106 \
+  public.ecr.aws/supabase/postgres:17.6.1.147 \
   "/work/migrate/$script_name"
