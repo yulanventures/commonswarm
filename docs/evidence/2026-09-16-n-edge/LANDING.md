@@ -34,3 +34,13 @@ vs production 1.2 / 1.1 / 0.9 s — ruled acceptable until N-db.
 
 ## NOT ESTABLISHED at landing
 The DNS cutover itself; a GitHub sign-in through the box path; the forced 4-wide pool exhaustion on the box.
+
+## Fix round 6 landed (RIGOUR fold, no pair), merge 774dd9ad of 80f7de9e
+
+Codex gpt-5.6-sol high on top of 70d17d08: `InvalidWorkerCreation` maps to 504 `WORKER_LIMIT`; `WorkerAlreadyRetired`
+retried around worker creation and fetch; CORS on Caddy's function-upstream error responses; `stop_grace_period: 80s` for
+the 70 s drain; the local Kong versus hosted OPTIONS record corrected. Proof on the pinned image (parallelism 1, wait 1000 ms,
+five simultaneous 2.5 s requests): 70d17d08 gave one 200 and four 500; 80f7de9e gives one 200 and four 504, all with
+wildcard CORS; an unreachable function upstream through Caddy gives 502 with wildcard CORS. Maker gates all exit 0; four
+mutations each fail a test. On main after the merge: tests/p1-cli/edge-runtime-box.test.ts 12/12, compose config exit 0.
+NOT deployed to the box yet (the box runs 70d17d08, edge-staging only); it ships with the next box release.
