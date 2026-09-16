@@ -1,0 +1,74 @@
+# Post-N-db site block. Install as /etc/caddy/sites/10-commonswarm-api.caddy.
+api.commonswarm.com {
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+
+	# The N-edge lane already serves the five functions on this loopback port.
+	handle /functions/v1/* {
+		reverse_proxy 127.0.0.1:9000 {
+			transport http {
+				response_header_timeout 65s
+			}
+		}
+	}
+
+	# GoTrue, PostgREST, and Storage API listen without the gateway prefix.
+	handle_path /auth/v1/* {
+		reverse_proxy 127.0.0.1:18001
+	}
+
+	handle_path /rest/v1/* {
+		reverse_proxy 127.0.0.1:18002
+	}
+
+	handle_path /storage/v1/* {
+		reverse_proxy 127.0.0.1:18004
+	}
+
+	# supabase-js asks for /realtime/v1/websocket. Realtime serves it at
+	# /socket/websocket and selects the self-host tenant from Host.
+	handle /realtime/v1/websocket* {
+		uri replace /realtime/v1/websocket /socket/websocket
+		reverse_proxy 127.0.0.1:18003 {
+			header_up Host realtime-dev
+			header_up X-Forwarded-Host {host}
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	# Keep the Realtime REST surface available for service checks and tooling.
+	handle /realtime/v1/api/* {
+		uri strip_prefix /realtime/v1
+		reverse_proxy 127.0.0.1:18003 {
+			header_up Host realtime-dev
+			header_up X-Forwarded-Host {host}
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}
+
+# 48-HOUR SUPABASE-ORIGIN FALLBACK — KEEP COMMENTED UNTIL THE ROLLBACK
+# DATABASE AND OBJECT RECONCILIATION IN RUNBOOK.md IS COMPLETE.
+# (supabase_origin_fallback) {
+# 	reverse_proxy https://ukezjcnxjvkpkeezxaew.supabase.co {
+# 		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
+# 		transport http {
+# 			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
+# 			versions 1.1
+# 		}
+# 	}
+# }
+# handle /auth/v1/* { import supabase_origin_fallback }
+# handle /rest/v1/* { import supabase_origin_fallback }
+# handle /realtime/v1/* { import supabase_origin_fallback }
+# handle /storage/v1/* { import supabase_origin_fallback }
+# handle /functions/v1/* { import supabase_origin_fallback }
