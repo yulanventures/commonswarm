@@ -221,6 +221,7 @@ async function command(
   bearer: string,
   body: Record<string, unknown>,
   commandId = randomUUID(),
+  workspaceId: string = f.workspace,
 ): Promise<CommandResult> {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
@@ -231,7 +232,7 @@ async function command(
     body: JSON.stringify({
       command_id: commandId,
       client_version: "0.1.0",
-      workspace_id: f.workspace,
+      workspace_id: workspaceId,
       stream: { kind: "workspace" },
       command: body,
     }),
@@ -536,5 +537,189 @@ test("agent-join credential lifecycle", async (t) => {
     assert.ok(rows[0].run_ended_at instanceof Date);
     assert.ok(rows[0].device_revoked_at instanceof Date);
     assert.equal(rows[0].visible_agent_revoked_at, null);
+  });
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * Quotas, added after a review arm FAILED the first version of this lane. Each uses its own fresh
+ * workspace so principal and credential counts are exactly what the test sets up.
+ * ------------------------------------------------------------------------------------------- */
+
+async function addPlainPrincipals(g: Fixture, n: number): Promise<void> {
+  for (let i = 0; i < n; i++) {
+    await sql`
+      INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${randomUUID()}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${`filler-${randomUUID()}`})
+    `;
+  }
+}
+
+/** A registrar principal, device and run, plus the credential row that owns them. */
+async function addRegistrar(g: Fixture, state: "live" | "expired"): Promise<string> {
+  const principal = randomUUID();
+  const device = randomUUID();
+  const run = randomUUID();
+  const credential = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label)
+      VALUES (${device}::uuid, ${g.ownerId}::uuid, ${`Join registrar ${credential}`})`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${principal}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${`join-registrar-${credential}`})`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
+      VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
+    const hash = createHash("sha256").update(`swm_join_${randomBytes(32).toString("base64url")}`).digest();
+    const locator = randomBytes(16).toString("base64url");
+    if (state === "live") {
+      await tx`INSERT INTO swarm.agent_join_credentials (
+          id, workspace_id, owner_user_id, registrar_principal_id, registrar_run_id,
+          credential_hash, locator, seat_cap, seats_used, expires_at, mint_command_id)
+        VALUES (${credential}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${principal}::uuid,
+          ${run}::uuid, ${hash}, ${locator}, 3, 0, statement_timestamp() + interval '1 hour',
+          ${randomUUID()})`;
+    } else {
+      /* Created 25 hours ago and expired 1 hour ago: exactly the 24-hour maximum, so the table's
+       * own CHECKs accept it. The trigger guards UPDATE and DELETE, not INSERT. */
+      await tx`INSERT INTO swarm.agent_join_credentials (
+          id, workspace_id, owner_user_id, registrar_principal_id, registrar_run_id,
+          credential_hash, locator, seat_cap, seats_used, created_at, expires_at, mint_command_id)
+        VALUES (${credential}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${principal}::uuid,
+          ${run}::uuid, ${hash}, ${locator}, 3, 0,
+          statement_timestamp() - interval '25 hours', statement_timestamp() - interval '1 hour',
+          ${randomUUID()})`;
+    }
+  });
+  return credential;
+}
+
+async function memberOf(g: Fixture, role: "member" | "admin" = "member") {
+  const user = await createUser();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${user.id}::uuid, 'Join Quota Member')`;
+    await tx`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${g.workspace}::uuid, ${user.id}::uuid, ${role})`;
+  });
+  return user;
+}
+
+const mintIn = (g: Fixture, jwt: string, commandId = randomUUID()) =>
+  command(jwt, { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, commandId, g.workspace);
+
+test("agent-join credential quotas", async (t) => {
+  await t.test("an EXPIRED credential's registrar frees its principal slot; a LIVE one still holds it", async () => {
+    /* The finding: a registrar was revoked only on explicit revoke, so an ordinary expiry left it
+     * counted against the 50-principal ceiling forever, hidden from every view — enough expiries and
+     * a workspace could no longer create agents, with nothing visible to revoke.
+     *
+     * Setup reaches exactly 50 unrevoked principals: the fixture's 1, 47 fillers, one LIVE registrar
+     * and one EXPIRED registrar. Only 49 should count. The first create must succeed; that takes the
+     * count to 50, so the second must be refused. The pair proves both halves: the expired registrar
+     * is excluded (first 200) and the live one is not (second 403). */
+    const g = await createFixture();
+    await addPlainPrincipals(g, 47);
+    await addRegistrar(g, "live");
+    await addRegistrar(g, "expired");
+    const create = (name: string) =>
+      command(g.ownerJwt, { kind: "create_agent_principal", name }, randomUUID(), g.workspace);
+    const first = await create(`after-expiry-${randomUUID()}`);
+    assert.equal(first.status, 200, `expired registrar must not count: ${JSON.stringify(first.body)}`);
+    const second = await create(`at-ceiling-${randomUUID()}`);
+    assert.equal(second.status, 403, `live registrar must still count: ${JSON.stringify(second.body)}`);
+    assert.equal(second.body.error, "principal_limit_reached");
+  });
+
+  await t.test("an expired credential can create no seat, enforced by the table itself", async () => {
+    const g = await createFixture();
+    const expired = await addRegistrar(g, "expired");
+    await assert.rejects(
+      sql`UPDATE swarm.agent_join_credentials SET seats_used = 1 WHERE id = ${expired}::uuid`,
+      /SWARM_AGENT_JOIN_CREDENTIAL_IMMUTABLE/,
+    );
+    /* Positive control: the same update on a LIVE credential is allowed, so the refusal above comes
+     * from the expiry rule and not from seats being frozen outright. */
+    const live = await addRegistrar(g, "live");
+    await sql`UPDATE swarm.agent_join_credentials SET seats_used = 1 WHERE id = ${live}::uuid`;
+    const rows = await sql<{ seats_used: number }[]>`
+      SELECT seats_used FROM swarm.agent_join_credentials WHERE id = ${live}::uuid`;
+    assert.equal(rows[0].seats_used, 1);
+  });
+
+  await t.test("live credentials are capped per person, then per workspace, with no row written", async () => {
+    /* The finding: minting had no bound, so one member could mint until the principal ceiling was
+     * gone. Five per person; twenty per workspace. */
+    const g = await createFixture();
+    const liveCount = async (owner?: string) => (await sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM swarm.agent_join_credentials
+      WHERE workspace_id = ${g.workspace}::uuid
+        AND (${owner ?? null}::uuid IS NULL OR owner_user_id = ${owner ?? null}::uuid)`)[0].n;
+
+    for (let i = 0; i < 5; i++) {
+      const ok = await mintIn(g, g.ownerJwt);
+      assert.equal(ok.status, 200, `owner mint ${i + 1}: ${JSON.stringify(ok.body)}`);
+    }
+    const sixth = await mintIn(g, g.ownerJwt);
+    assert.equal(sixth.status, 403, JSON.stringify(sixth.body));
+    assert.deepEqual(
+      { error: sixth.body.error, scope: sixth.body.scope, limit: sixth.body.limit },
+      { error: "join_credential_limit_reached", scope: "identity", limit: 5 },
+    );
+    assert.equal(await liveCount(g.ownerId), "5");
+
+    for (let m = 0; m < 3; m++) {
+      const member = await memberOf(g);
+      for (let i = 0; i < 5; i++) {
+        const ok = await mintIn(g, member.jwt);
+        assert.equal(ok.status, 200, `member ${m} mint ${i + 1}: ${JSON.stringify(ok.body)}`);
+      }
+    }
+    assert.equal(await liveCount(), "20");
+    const late = await memberOf(g);
+    const refused = await mintIn(g, late.jwt);
+    assert.equal(refused.status, 403, JSON.stringify(refused.body));
+    assert.deepEqual(
+      { error: refused.body.error, scope: refused.body.scope, limit: refused.body.limit },
+      { error: "join_credential_limit_reached", scope: "workspace", limit: 20 },
+    );
+    assert.equal(await liveCount(late.id), "0", "a refused mint writes no row");
+  });
+
+  await t.test("six concurrent mints with room for one produce exactly one registrar", async () => {
+    /* A BEHAVIOUR test of the ceiling under concurrent calls — and explicitly NOT a test of the lock.
+     * With the advisory lock removed this still passed locally: the local edge runtime does not
+     * interleave these transactions, so the race the lock prevents never occurs here. The lock is
+     * pinned structurally in tests/p1-cli/agent-join-credential.test.ts. This test stays because it
+     * proves the ceiling refuses the other five with principal_limit_reached. */
+    const g = await createFixture();
+    await addPlainPrincipals(g, 48);
+    const results = await Promise.all(Array.from({ length: 6 }, () => mintIn(g, g.ownerJwt)));
+    const accepted = results.filter((r) => r.status === 200).length;
+    assert.equal(accepted, 1, `accepted ${accepted}: ${results.map((r) => r.status).join(",")}`);
+    for (const r of results.filter((r) => r.status !== 200)) {
+      assert.equal(r.status, 403);
+      assert.equal(r.body.error, "principal_limit_reached");
+    }
+  });
+
+  await t.test("a refused revoke audits WHICH refusal, while the caller sees one 403", async () => {
+    const g = await createFixture();
+    const minted = await mintIn(g, g.ownerJwt);
+    assert.equal(minted.status, 200, JSON.stringify(minted.body));
+    const stranger = await memberOf(g);
+    const revoke = (id: string) =>
+      command(stranger.jwt, { kind: "revoke_agent_join_credential", join_credential_id: id }, randomUUID(), g.workspace);
+    const reasonFor = async () => (await sql<{ reason: string }[]>`
+      SELECT reason FROM swarm.audit_log
+      WHERE command_kind = 'revoke_agent_join_credential'
+        AND workspace_id = ${g.workspace}::uuid
+        AND actor_user = ${stranger.id}::uuid
+      ORDER BY audit_id DESC LIMIT 1`)[0]?.reason;
+
+    const notPermitted = await revoke(String(minted.body.join_credential_id));
+    assert.equal(notPermitted.status, 403);
+    assert.equal(await reasonFor(), "agent_join_credential_not_permitted");
+
+    const notFound = await revoke(randomUUID());
+    assert.equal(notFound.status, 403);
+    assert.deepEqual(notFound.body, notPermitted.body, "the caller cannot tell the two apart");
+    assert.equal(await reasonFor(), "agent_join_credential_not_found");
   });
 });

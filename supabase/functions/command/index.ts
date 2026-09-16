@@ -696,6 +696,20 @@ const AGENT_JOIN_SEAT_CAP_MAX = 10;
 const AGENT_JOIN_TTL_MIN_HOURS = 1;
 const AGENT_JOIN_TTL_MAX_HOURS = 24;
 
+/*
+ * LIVE join credentials a person, and a workspace, may hold at once. "Live" is unrevoked and
+ * unexpired, so a slot frees itself within AGENT_JOIN_TTL_MAX_HOURS without anyone acting.
+ * A review arm found minting had NO bound: one member could mint until the 50-principal ceiling was
+ * gone, because each credential's hidden registrar holds a principal slot while it lives.
+ *  - per person 5: the done-test needs one credential; a person inviting several hosts at once needs
+ *    a handful. Five caps what one member can pin, so a teammate cannot be starved by one person.
+ *  - per workspace 20: with every slot taken, registrars hold 20 of the 50 principal slots and at
+ *    least 30 remain for real agents.
+ * No traffic exists to measure yet; revisit these with the first week of production mints.
+ */
+const AGENT_JOIN_LIVE_PER_USER_LIMIT = 5;
+const AGENT_JOIN_LIVE_PER_WORKSPACE_LIMIT = 20;
+
 /**
  * §5's no-teammate-DoS rule: (a) is per-issuing-identity and re-mintable after
  * the window, (b) is a resource-creation ceiling on the tenant doing the
@@ -5414,6 +5428,43 @@ type RevokeAgentJoinCredentialCommand = Extract<
 >;
 
 /**
+ * Lock the workspace's principal ceiling, then count the principals that consume it.
+ *
+ * ONE HELPER FOR EVERY CEILING CHECK, so the join mint and create_agent_principal cannot drift. Two
+ * review findings live here:
+ *  - EXPIRED REGISTRARS NEVER FREED THEIR SLOT. A registrar is revoked only when its credential is
+ *    explicitly revoked. A credential that simply expired left its registrar live forever, counted
+ *    against FREE_TIER_PRINCIPAL_LIMIT and hidden from every view — so enough ordinary expiries would
+ *    have stopped a workspace creating agents, with nothing visible to revoke. The registrar of a
+ *    revoked OR expired credential is no longer counted.
+ *  - THE COUNT RACED. Under READ COMMITTED two concurrent requests could both read `live < limit`
+ *    and both insert. A transaction-scoped advisory lock on the workspace serialises every ceiling
+ *    check; it is released at commit or rollback. Lock order is ceiling first, then any per-name
+ *    lock, everywhere, so the two cannot deadlock.
+ */
+async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise<number> {
+  await tx`
+    SELECT pg_advisory_xact_lock(
+      hashtext(${workspaceId}::text),
+      hashtext('principal-ceiling')
+    )
+  `;
+  const rows = await tx<{ live: string }[]>`
+    SELECT count(*)::text AS live
+    FROM swarm.agent_principals AS p
+    WHERE p.workspace_id = ${workspaceId}::uuid
+      AND p.revoked_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM swarm.agent_join_credentials AS c
+        WHERE c.registrar_principal_id = p.principal_id
+          AND (c.revoked_at IS NOT NULL OR c.expires_at <= statement_timestamp())
+      )
+  `;
+  return Number(rows[0]?.live ?? "0");
+}
+
+/**
  * Create one join credential and its G3 registrar identity.
  *
  * The caller supplies only seat_cap and ttl_hours. IDs, the registrar name,
@@ -5482,15 +5533,41 @@ async function mintAgentJoinCredential(
       : { status: 409, body: { error: "command_id_conflict" } };
   }
 
-  // A registrar is hidden from the roster, but it is still a durable principal
-  // and therefore consumes one slot from the existing resource ceiling.
-  const principalRows = await tx<{ live: string }[]>`
-    SELECT count(*)::text AS live
-    FROM swarm.agent_principals AS p
-    WHERE p.workspace_id = ${route.workspaceId}::uuid
-      AND p.revoked_at IS NULL
+  // A registrar is hidden from the roster, but while its credential lives it is a durable principal
+  // and consumes one slot from the ceiling. SEATS ARE NOT RESERVED HERE: a credential with seat_cap 10
+  // does not hold 10 slots. Each registration is checked against the ceiling when it happens, and
+  // refused cleanly there if the workspace is full. Reserving at mint would refuse an owner with 45
+  // agents who expects only two hosts to join.
+  const live = await lockAndCountLivePrincipals(tx, route.workspaceId);
+  const liveCredentials = await tx<{ mine: string; workspace: string }[]>`
+    SELECT
+      count(*) FILTER (WHERE c.owner_user_id = ${userId}::uuid)::text AS mine,
+      count(*)::text AS workspace
+    FROM swarm.agent_join_credentials AS c
+    WHERE c.workspace_id = ${route.workspaceId}::uuid
+      AND c.revoked_at IS NULL
+      AND c.expires_at > statement_timestamp()
   `;
-  if (Number(principalRows[0]?.live ?? "0") >= FREE_TIER_PRINCIPAL_LIMIT) {
+  const mine = Number(liveCredentials[0]?.mine ?? "0");
+  const inWorkspace = Number(liveCredentials[0]?.workspace ?? "0");
+  if (mine >= AGENT_JOIN_LIVE_PER_USER_LIMIT || inWorkspace >= AGENT_JOIN_LIVE_PER_WORKSPACE_LIMIT) {
+    const scope = mine >= AGENT_JOIN_LIVE_PER_USER_LIMIT ? "identity" : "workspace";
+    const limit = scope === "identity"
+      ? AGENT_JOIN_LIVE_PER_USER_LIMIT
+      : AGENT_JOIN_LIVE_PER_WORKSPACE_LIMIT;
+    return await auditRefusal(tx, auth, MINT_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "quota",
+      reason: "agent_join_live_limit_reached",
+      detail: [ignoredIdentity, `scope=${scope}`, `live=${scope === "identity" ? mine : inWorkspace}`]
+        .filter(Boolean).join("; "),
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, {
+      status: 403,
+      body: { error: "join_credential_limit_reached", scope, limit },
+    });
+  }
+  if (live >= FREE_TIER_PRINCIPAL_LIMIT) {
     return await auditRefusal(tx, auth, MINT_AGENT_JOIN_CREDENTIAL_KIND, {
       outcome: "quota",
       reason: "workspace_principal_limit_reached",
@@ -5681,9 +5758,14 @@ async function revokeAgentJoinCredential(
     (row.owner_user_id === userId ||
       route.membershipRole === "owner" || route.membershipRole === "admin");
   if (!mayRevoke) {
+    /* The caller gets the same 403 either way, so the HTTP response never reveals whether a credential
+     * id exists. The AUDIT row must still say which: an arm noted an unauthorised attempt was logged
+     * as "not found", hiding a permission violation from whoever reads the log. */
     return await auditRefusal(tx, auth, REVOKE_AGENT_JOIN_CREDENTIAL_KIND, {
       outcome: "authz",
-      reason: "agent_join_credential_not_found",
+      reason: row === undefined
+        ? "agent_join_credential_not_found"
+        : "agent_join_credential_not_permitted",
       detail: ignoredIdentity,
       workspaceId: route.workspaceId,
       streamId: route.streamId,
@@ -6616,7 +6698,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3588 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3602 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -6828,13 +6910,7 @@ async function enforceFreeTierBudget(
   }
 
   if (command.kind === "create_agent_principal") {
-    const principalRows = await tx<{ live: string }[]>`
-      SELECT count(*)::text AS live
-      FROM swarm.agent_principals
-      WHERE workspace_id = ${route.workspaceId}::uuid
-        AND revoked_at IS NULL
-    `;
-    const live = Number(principalRows[0]?.live ?? "0");
+    const live = await lockAndCountLivePrincipals(tx, route.workspaceId);
     if (live >= FREE_TIER_PRINCIPAL_LIMIT) {
       return await refuse(
         "workspace_principal_limit_reached",

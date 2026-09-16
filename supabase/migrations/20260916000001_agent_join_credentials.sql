@@ -86,6 +86,9 @@ BEGIN
     OR NEW.created_at IS DISTINCT FROM OLD.created_at
     OR NEW.mint_command_id IS DISTINCT FROM OLD.mint_command_id
     OR NEW.seats_used < OLD.seats_used
+    -- An expired credential can create no seat. Registration will check expiry too; this makes it an
+    -- invariant of the table rather than a promise of one caller. Added after a review arm noted it.
+    OR (NEW.seats_used > OLD.seats_used AND OLD.expires_at <= statement_timestamp())
     OR (
       NEW.seats_used IS DISTINCT FROM OLD.seats_used
       AND (OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NOT NULL)

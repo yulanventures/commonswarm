@@ -2,6 +2,8 @@
  * Pure controls for H0 join credentials. Reached by test:p1-cli's glob.
  */
 import assert from "node:assert/strict";
+import ts from "typescript";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
@@ -82,4 +84,50 @@ test("the schema holds a digest and separate locator with database bounds", asyn
     /REVOKE ALL ON TABLE swarm\.agent_join_credentials FROM PUBLIC, anon, authenticated/,
   );
   assert.match(sql, /registrar_principal_id = p\.principal_id/);
+});
+
+test("every principal-ceiling count takes the workspace lock first, in the one shared helper", () => {
+  /* WHY THIS IS STRUCTURAL. A server test fires six concurrent mints with room for one and expects
+   * exactly one to succeed. With the lock REMOVED that test still passed 16/16 locally: the local edge
+   * runtime does not interleave those transactions, so the race it guards against never happens there.
+   * A control that cannot fail proves nothing about the lock, so the lock is pinned here instead:
+   *  - the helper takes pg_advisory_xact_lock BEFORE its count;
+   *  - it is the ONLY place in the command edge that counts swarm.agent_principals, so no ceiling
+   *    check can bypass it (enumerated by AST: one such count exists);
+   *  - both ceiling checks call it. */
+  const path = new URL("../../supabase/functions/command/index.ts", import.meta.url);
+  const source = readFileSync(path, "utf8");
+  const file = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
+  const enclosingFunction = (node: ts.Node): string => {
+    let parent: ts.Node | undefined = node.parent;
+    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
+    return parent && ts.isFunctionDeclaration(parent) && parent.name ? parent.name.text : "<top>";
+  };
+  const helper = "lockAndCountLivePrincipals";
+  const counts: { at: number; fn: string }[] = [];
+  const locks: { at: number; fn: string }[] = [];
+  let helperCalls = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isTaggedTemplateExpression(node)) {
+      const text = node.template.getText(file);
+      if (/count\(\*\)/i.test(text) && /swarm\.agent_principals/.test(text)) {
+        counts.push({ at: node.getStart(file), fn: enclosingFunction(node) });
+      }
+      if (/pg_advisory_xact_lock/.test(text) && /principal-ceiling/.test(text)) {
+        locks.push({ at: node.getStart(file), fn: enclosingFunction(node) });
+      }
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === helper) {
+      helperCalls++;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+
+  assert.equal(counts.length, 1, `principal counts in the command edge: ${counts.length}`);
+  assert.equal(counts[0]!.fn, helper, "the only principal count must live in the shared helper");
+  assert.equal(locks.length, 1, "exactly one principal-ceiling lock");
+  assert.equal(locks[0]!.fn, helper, "the lock must be taken inside the helper");
+  assert.ok(locks[0]!.at < counts[0]!.at, "the lock must be taken BEFORE the count");
+  assert.equal(helperCalls, 2, "both ceiling checks — the join mint and create_agent_principal — use it");
 });

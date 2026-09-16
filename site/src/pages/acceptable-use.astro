@@ -23,16 +23,16 @@
  *
  * THE NUMBERS ARE READ OUT OF THE CODE, NOT ASSUMED:
  *   10 live workspaces per verified identity -> FREE_TIER_WORKSPACE_LIMIT,
- *                                               supabase/functions/command/index.ts:730
+ *                                               supabase/functions/command/index.ts:744
  *                                              (the query excludes archived_at rows;
  *                                              cswarm workspace close archives one --
  *                                              src/cli.ts, human sessions only)
  *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :623
  *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :624
- *   fixed clock hour, not rolling           -> incrementRateBucket, :5024 uses
+ *   fixed clock hour, not rolling           -> incrementRateBucket, :5038 uses
  *                                              date_trunc('hour', ...)
  *   body 1-8000                             -> migrations/20260827000001_expand_signal_body.sql
- *   about <= 500, until <= 30d              -> index.ts:1930-1938 (SIGNAL_MAX_UNTIL_MS)
+ *   about <= 500, until <= 30d              -> index.ts:1944-1952 (SIGNAL_MAX_UNTIL_MS)
  *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :608
  *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :613
  *   (no single default to publish: the protocol default is 1 hour,
