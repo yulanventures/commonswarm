@@ -115,6 +115,23 @@ Written for a cold successor. The H0 lanes have their own file:
   SUPABASE_SERVICE_ROLE_KEY (legacy service_role JWT; a read-only Storage bucket list returned 200),
   SWARM_DATABASE_URL and SUPABASE_DB_URL (commonswarm_edge via aws-0 pooler 6543), SWARM_SELF_SERVE=1.
 
+## LIVE ON THE BOX, NO PUBLIC TRAFFIC YET (~20:20Z)
+
+- lane/edge-runtime-box tip **76487b81** (Codex sol high + one lead commit adding edge-staging.commonswarm.com to
+  the site block) is unpacked at /home/commonswarm/edge/releases/76487b81, `current` symlink, Compose project
+  `commonswarm-edge`, container `commonswarm-edge-edge-runtime-1` HEALTHY on 127.0.0.1:9000, using
+  /home/commonswarm/.env (production database via commonswarm_edge). Stop with
+  `docker compose -p commonswarm-edge down` in ~/edge/current/deploy/edge-runtime.
+- Box-local smoke: h0 document 200 (0.23 s); malformed command 400 (1.07 s — the command edge touches the
+  production database); unknown function 404; GET /read 405 (POST only).
+- Caddy: /etc/caddy/sites/10-commonswarm-api.caddy (from the lane file) serves api.commonswarm.com and
+  edge-staging.commonswarm.com; `caddy validate` passed on the box; reloaded. Through Caddy with
+  `--resolve edge-staging.commonswarm.com:443:127.0.0.1`: h0 document 200 (12 ms); /storage/v1/status 200 via
+  supabase.co; /auth/v1/health and /rest/v1/ 401 without an apikey (expected). The placeholder
+  00-commonswarm-placeholder.caddy is untouched (N-site replaces it).
+- No DNS record points at the box yet: api.commonswarm.com is still the Supabase CNAME; edge-staging does not exist.
+- Review pair on 76487b81 dispatched: grok (worktree arms-nedge-grok) and antigravity (inline).
+
 ## IN FLIGHT
 
 - `lane/edge-runtime-box` (Codex sol high, prompt `maker-n-edge.txt` in the session scratchpad): router with the
