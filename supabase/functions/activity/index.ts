@@ -90,11 +90,15 @@ async function handle(request: Request): Promise<Response> {
   if (frame === null) return json(400, { error: "invalid_request" });
   const tokenHash = await sha256(token);
 
-  return await db.begin(async (tx) => {
-    await tx.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-    await tx.unsafe("SET LOCAL ROLE swarm_command");
-    await tx.unsafe("SET LOCAL search_path = swarm, pg_catalog");
-    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+  // One BEGIN with the isolation level and one statement for the local settings:
+  // each round trip costs about 110 ms from the Falkenstein box to us-east-1.
+  return await db.begin("isolation level read committed", async (tx) => {
+    await tx`
+      SELECT
+        set_config('role', 'swarm_command', true),
+        set_config('search_path', 'swarm, pg_catalog', true),
+        set_config('lock_timeout', '5s', true)
+    `;
 
     const agent = await loadAgentCredential(tx, tokenHash);
     if (agent === null) return json(401, { error: "unauthenticated" });

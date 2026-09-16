@@ -11293,10 +11293,11 @@ async function handlePostRequest(request: Request): Promise<Response> {
       const drain = (async () => {
         try {
           await db.begin(async (drainTx) => {
-            await drainTx.unsafe("SET LOCAL ROLE swarm_command");
-            await drainTx.unsafe(
-              "SET LOCAL search_path = swarm, pg_catalog",
-            );
+            await drainTx`
+              SELECT
+                set_config('role', 'swarm_command', true),
+                set_config('search_path', 'swarm, pg_catalog', true)
+            `;
             await drainFilePurgeQueue(drainTx, fileStorage(), 10);
           });
         } catch (error) {

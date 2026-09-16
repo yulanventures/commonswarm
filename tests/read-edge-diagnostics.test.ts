@@ -327,6 +327,20 @@ function assertRoundTripFold(readSource: string, commandSource: string): void {
   );
 }
 
+/** Every edge function: no transaction opens with a bare BEGIN followed by separate SET statements. */
+const EDGE_FUNCTIONS = ["command", "read", "capability", "activity"] as const;
+
+function assertNoUnfoldedSetup(name: string, source: string): void {
+  assert.equal(
+    /unsafe\(\s*"SET (TRANSACTION|LOCAL ROLE|LOCAL lock_timeout)/.test(source),
+    false,
+    `${name}: a transaction still sends SET TRANSACTION, SET LOCAL ROLE, or SET LOCAL lock_timeout as its own round trip`,
+  );
+  const bareBegins = [...source.matchAll(/db\.begin\(async \((\w+)\) => \{\s*await \1(\.unsafe\(|`\s*SELECT\s+set_config\('role')/g)].length;
+  const drainOnly = name === "command" ? 1 : 0;
+  assert.equal(bareBegins, drainOnly, `${name}: a request transaction opens with BEGIN and sets its isolation level separately`);
+}
+
 test("read and command fold transaction setup without changing its settings", () => {
   const readSource = readFileSync(
     join(process.cwd(), "supabase/functions/read/index.ts"),
@@ -337,6 +351,22 @@ test("read and command fold transaction setup without changing its settings", ()
     "utf8",
   );
   assertRoundTripFold(readSource, commandSource);
+});
+
+test("every edge function folds its transaction setup (activity has a 5 s client budget)", () => {
+  for (const name of EDGE_FUNCTIONS) {
+    assertNoUnfoldedSetup(name, readFileSync(join(process.cwd(), `supabase/functions/${name}/index.ts`), "utf8"));
+  }
+  const activity = readFileSync(join(process.cwd(), "supabase/functions/activity/index.ts"), "utf8");
+  const capability = readFileSync(join(process.cwd(), "supabase/functions/capability/index.ts"), "utf8");
+  for (const [name, source] of [["activity", activity], ["capability", capability]] as const) {
+    assert.equal([...source.matchAll(/db\.begin\("isolation level read committed", async \(tx\) =>/g)].length, 1, `${name}: BEGIN carries the isolation level`);
+    assert.throws(
+      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SELECT 1;\`; await tx.unsafe("SET LOCAL ROLE ${role}"); await tx\`SELECT`)),
+      undefined,
+      `${name}: mutation (role back to its own SET LOCAL ROLE) must fail`,
+    );
+  }
 });
 
 test("round-trip fold controls reject each latency regression", () => {
