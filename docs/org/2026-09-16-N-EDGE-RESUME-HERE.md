@@ -132,6 +132,23 @@ Written for a cold successor. The H0 lanes have their own file:
 - No DNS record points at the box yet: api.commonswarm.com is still the Supabase CNAME; edge-staging does not exist.
 - Review pair on 76487b81 dispatched: grok (worktree arms-nedge-grok) and antigravity (inline).
 
+## N-SITE ON THE BOX, NO PUBLIC TRAFFIC YET (~20:45Z)
+
+- lane/site-on-box tip 97ab1455 (Codex sol high, fix round 1, plus two lead commits: rsync `--chmod` dropped
+  because the operator mac's openrsync rejects it — finalize-release.sh normalizes modes on the box; and
+  site-staging.commonswarm.com added to the site block). The first two real deploys FAILED CLOSED (npm --prefix from
+  the worktree; then rsync --chmod); the third succeeded: /srv/commonswarm/site/current →
+  releases/20260916T203700Z-8e618e37acbb-b2b8ac1e64e0bdc3, files 644, dirs 755.
+- Caddy: /etc/caddy/sites/20-commonswarm-site.caddy serves commonswarm.com, www, site-staging; validated; reloaded.
+  HezLead's placeholder removed (backup /root/00-commonswarm-placeholder.caddy.bak-20260916).
+- DNS: NEW proxied A records edge-staging.commonswarm.com and site-staging.commonswarm.com → 178.105.29.28.
+  commonswarm.com and www still A 76.76.21.21 (Vercel, DNS-only); api still CNAME to supabase (DNS-only).
+- Parity through Cloudflare on site-staging (parity-check.mjs): every HTML route, install.sh, llms.txt, SKILL.md and
+  404s match; the only 21 differences are Cloudflare rewriting cache-control to max-age=14400 on static-extension
+  files (zone Browser Cache TTL default). Asked HezLead to set "Respect Existing Headers" (6dcb6ba0) or accept.
+- The mini's system resolver cached the new names as missing; measurement scripts route only the staging names to a
+  Cloudflare IP with a Node --require preload (docs/evidence/2026-09-16-n-edge/latency-dns-override.cjs).
+
 ## IN FLIGHT
 
 - `lane/edge-runtime-box` (Codex sol high, prompt `maker-n-edge.txt` in the session scratchpad): router with the
