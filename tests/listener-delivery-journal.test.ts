@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  isStoredRecordOversized,
+  readSecureJsonFile,
+  StoredRecordOversizedError,
+} from "../src/cloud/storage.js";
+import {
   ackCommandId,
   claimCommandId,
   openListenerDeliveryJournal,
@@ -37,6 +42,30 @@ const SENTINEL_VALUES = [
 async function makeTempDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), "cswarm-journal-test-"));
 }
+
+test("D-053: oversized stored JSON is classified by type, not wording", async () => {
+  const typed = new StoredRecordOversizedError();
+  const impostor = new Error("stored record is larger than this store accepts");
+  assert.equal(typed.message, impostor.message, "the wording is identical");
+  assert.equal(isStoredRecordOversized(typed), true);
+  assert.equal(isStoredRecordOversized(impostor), false);
+  assert.equal(isStoredRecordOversized({ message: typed.message }), false);
+
+  const dir = await makeTempDir();
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, "oversized.json");
+    await writeFile(path, "x".repeat(64), { mode: 0o600 });
+    const error = await readSecureJsonFile(path, 8).then(
+      () => null,
+      (failure: unknown) => failure,
+    );
+    assert.ok(error instanceof StoredRecordOversizedError);
+    assert.equal(isStoredRecordOversized(error), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 function assertNoSentinelInError(err: Error): void {
   for (const val of SENTINEL_VALUES) {

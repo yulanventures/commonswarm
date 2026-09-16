@@ -81,6 +81,23 @@ export interface CredentialStoreOptions {
   securityPath?: string;
 }
 
+/**
+ * Local store rejected a JSON file that exceeded its byte ceiling.
+ * Callers classify with `isStoredRecordOversized`, never with the message.
+ */
+export class StoredRecordOversizedError extends Error {
+  readonly name = "StoredRecordOversizedError";
+
+  constructor() {
+    super("stored record is larger than this store accepts");
+  }
+}
+
+/** D-053: identity only. A same-worded Error is not this failure. */
+export function isStoredRecordOversized(error: unknown): boolean {
+  return error instanceof StoredRecordOversizedError;
+}
+
 interface ProcessResult {
   code: number;
   stdout: string;
@@ -383,7 +400,7 @@ export async function readSecureJsonFile(
     await secureCredentialFile(path);
     const raw = await readFile(path, "utf8");
     if (Buffer.byteLength(raw, "utf8") > maxBytes) {
-      throw new Error("stored record is larger than this store accepts");
+      throw new StoredRecordOversizedError();
     }
     return raw;
   } catch (error) {
@@ -402,7 +419,7 @@ export async function readSecureJsonFileIfPresent(
     await secureCredentialFile(path);
     const raw = await readFile(path, "utf8");
     if (Buffer.byteLength(raw, "utf8") > maxBytes) {
-      throw new Error("stored record is larger than this store accepts");
+      throw new StoredRecordOversizedError();
     }
     return raw;
   } catch (error) {
@@ -480,7 +497,7 @@ abstract class LockedCredentialStore implements CredentialStore {
     try {
       raw = await readSecureJsonFile(this.profilePath, MAX_PROFILE_BYTES);
     } catch (error) {
-      if ((error as Error).message.startsWith("stored record is larger")) {
+      if (isStoredRecordOversized(error)) {
         throw new Error("stored credential profile is malformed");
       }
       throw error;

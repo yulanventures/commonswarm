@@ -5,6 +5,7 @@
 import { isAbsolute, join } from "node:path";
 import { types } from "node:util";
 import {
+  isStoredRecordOversized,
   readSecureJsonFile,
   withFileLock,
   writeSecureJsonFile,
@@ -19,6 +20,19 @@ const UUID_RE =
 const COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
 const SIGNAL_FINGERPRINT_RE = /^[0-9a-f]{64}$/;
 const MAX_JOURNAL_BYTES = 8192;
+const JOURNAL_MALFORMED = "stored delivery journal is malformed";
+
+async function readJournalFile(path: string): Promise<string | null> {
+  try {
+    return await readSecureJsonFile(path, MAX_JOURNAL_BYTES);
+  } catch (error) {
+    if (isStoredRecordOversized(error)) {
+      throw new Error(JOURNAL_MALFORMED);
+    }
+    throw error;
+  }
+}
+
 const ISO_8601_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(?:Z|([+-]\d{2}):(\d{2}))$/;
 
@@ -684,19 +698,7 @@ class FileListenerDeliveryJournal implements ListenerDeliveryJournal {
   }
 
   private async readRecordUnlocked(): Promise<ListenerDeliveryJournalRecord> {
-    let raw: string | null;
-    try {
-      raw = await readSecureJsonFile(this.journalPath, MAX_JOURNAL_BYTES);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.message.startsWith("stored record is larger") ||
-          error.message.includes("larger than this store accepts"))
-      ) {
-        throw new Error("stored delivery journal is malformed");
-      }
-      throw error;
-    }
+    const raw = await readJournalFile(this.journalPath);
 
     if (raw === null) {
       throw new Error("stored delivery journal does not exist");
@@ -1040,19 +1042,7 @@ export async function openListenerDeliveryJournal(
   });
 
   return await withFileLock(journal.instanceDirectory, "delivery-journal", async () => {
-    let raw: string | null;
-    try {
-      raw = await readSecureJsonFile(journal.journalPath, MAX_JOURNAL_BYTES);
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        (error.message.startsWith("stored record is larger") ||
-          error.message.includes("larger than this store accepts"))
-      ) {
-        throw new Error("stored delivery journal is malformed");
-      }
-      throw error;
-    }
+    const raw = await readJournalFile(journal.journalPath);
 
     if (raw === null) {
       const record: ListenerDeliveryJournalRecord = {
