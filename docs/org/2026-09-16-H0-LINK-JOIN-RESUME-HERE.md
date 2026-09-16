@@ -14,7 +14,14 @@ mechanism questions in §7 are closed by lanes, with evidence from running code.
 
 ## STATE: FOUR LANES ON MAIN, TWO LANES IN FIX ROUNDS AFTER FAILED PAIRS, NOTHING DEPLOYED
 
-**Update 2026-09-16 ~19:30Z (read this first).**
+**Update 2026-09-16 ~20:00Z (read this first).** LANE 3b IS ON MAIN: merge 8c5cb6cc of the reviewed SHA
+08fbb0cd (grok PASS + antigravity PASS on that exact SHA); record in docs/evidence/2026-09-16-h0-lane3b/LANDING.md,
+which lists five RIGOUR items owed as a follow-up series. OPERATOR ORDER (87d053dd): CommonSwarm moves fully off
+Supabase and Vercel onto yulan-vps-1 — N-edge (by 2026-09-18) → N-db → N-storage → N-auth-realtime, with N-site in
+parallel, then N-retire. NEW H0 and H lanes wait until after N-db; H lane 1 still lands when its pair is clean.
+N-edge state: docs/org/2026-09-16-N-EDGE-RESUME-HERE.md.
+
+**Update 2026-09-16 ~19:30Z.**
 - **Lane 3b** is `8f76c8a8` on `lane/h0-register` (one commit, trailers declare gpt-5.6-sol). Pair: antigravity
   FAIL, grok FAIL. Lead-verified: a token revoked before first use is revived by a same-attempt retry
   (CONFIRMED); H0 seats DO renew through `renew_agent_token` (grok, live 200, 1-hour successors) — ruled
