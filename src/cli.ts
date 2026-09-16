@@ -286,7 +286,7 @@ import {
   ListenerRenewalUnavailableError,
   listenerRestartCommand,
   readListenerCredentialState,
-  runListenerHookCheck,
+  runListenerHookCheck, HOOK_PROCESS_TIMEOUT_MS,
   renderListenerAttendanceCanary,
   runListenerAttendanceCanary,
   writeListenerCredentialState,
@@ -7867,7 +7867,7 @@ async function runHook(args: Arguments): Promise<void> {
     // called their callback before the hook advances its high-water.
     const hardExit = setTimeout(() => {
       process.exit(0);
-    }, 3_000);
+    }, HOOK_PROCESS_TIMEOUT_MS);
     hardExit.unref();
     const httpClient = new ListenerHttpClient();
     const hostSessionId = await hookHostSessionIdFromStdin();

@@ -12,8 +12,14 @@ import {
 import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
+import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
 
-export const AGENT_CHECK_TIMEOUT_MS = 3_000;
+export {
+  AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
+  AGENT_CHECK_STARTUP_ALLOWANCE_MS,
+  AGENT_CHECK_TIMEOUT_MS,
+  HOST_HOOK_TIMEOUT_SECONDS,
+} from "./agent-check-budget.js";
 export const AGENT_CHECK_PAGE_SIZE = 20;
 export const AGENT_CHECK_PREVIEW_CHARS = 1_000;
 export const AGENT_CHECK_BODY_BUDGET = 4_000;

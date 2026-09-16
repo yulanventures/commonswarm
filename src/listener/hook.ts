@@ -34,6 +34,10 @@ import {
   withFileLock,
   writeSecureJsonFile,
 } from "../cloud/storage.js";
+import {
+  AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
+  AGENT_CHECK_TIMEOUT_MS,
+} from "../cloud/agent-check-budget.js";
 import { defaultListenerStateDirectory } from "./file-store.js";
 import { FileBrainDigestStore } from "./brain-digest.js";
 import {
@@ -64,7 +68,12 @@ const HOOK_SURFACE_LOCK = "hook-surface";
 const GLOBAL_STATE_LOCK = "hook-check";
 const HOOK_LOCK_TIMEOUT_MS = 250;
 
-export const HOOK_CHECK_TIMEOUT_MS = 3_000;
+/* `cswarm hook install claude` does not write a host timeout. Keep this check on
+ * the receive-hook budget so both turn-check paths have the same internal bound. */
+export const HOOK_CHECK_TIMEOUT_MS = AGENT_CHECK_TIMEOUT_MS;
+/** Starts after process start-up and leaves the measured output allowance. */
+export const HOOK_PROCESS_TIMEOUT_MS =
+  HOOK_CHECK_TIMEOUT_MS + AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
 export const HOOK_DEFAULT_COOLDOWN_SECONDS = 30;
 export const HOOK_SURFACED_IDS_MAX = 1_024;
 /* The hook injects previews into the model's context at prompt time. Operator
@@ -1152,7 +1161,7 @@ export async function checkListenerHooks(
   }
 }
 
-/** Own the three-second ceiling and always resolve to safe stdout text. */
+/** Own the derived check ceiling and always resolve to safe stdout text. */
 export async function runListenerHookCheck(options: HookCheckOptions = {}): Promise<string> {
   const controller = new AbortController();
   const deadlineMs = Date.now() + HOOK_CHECK_TIMEOUT_MS;
