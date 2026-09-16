@@ -12,16 +12,26 @@ Spec of record: `docs/design/2026-09-15-H0-LINK-JOIN.md` at **v10, `394fef2f`**,
 `spec/h0-link-join` (NOT on main). CSwarmStrategist ruled "A": no more spec versions; the three open
 mechanism questions in §7 are closed by lanes, with evidence from running code.
 
-## STATE: FOUR LANES WRITTEN, THREE ON MAIN, NOTHING DEPLOYED
+## STATE: FOUR LANES ON MAIN, TWO MAKERS RUNNING, NOTHING DEPLOYED
 
 | lane | what | where | pair |
 |---|---|---|---|
 | 1 | seven-verb table + generated agent document | main `13e6d8fc` | grok PASS, antigravity PASS |
 | 2 | `supabase/functions/h0/` edge function serving the document | main, `24b1df45` through `36383bd4` (4 commits) | grok PASS, antigravity PASS |
 | 4a | the paste a human copies (`src/h0/paste.ts`) | main, `de7f1389` through `5cd5e91b` (6 commits) | antigravity PASS, grok PASS |
-| 3a | agent-join credential: table, mint, revoke, hidden registrar | `lane/h0-join-credential` `a7741ca3` | IN REVIEW (grok + antigravity dispatched) |
+| 3a | agent-join credential: table, mint, revoke, hidden registrar | main, `165114ee` through `b4198f98` (3 commits) | grok PASS, antigravity PASS |
+| 3b | registration: `register_agent_seat` on the command edge | `lane/h0-register` from `b4198f98` | Codex Maker (gpt-5.6-sol xhigh) RUNNING; prompt `maker-lane3b.txt` in the session scratchpad |
 
-`main` = `5cd5e91b`. CI (agent trailers, commit identity) green on each landing.
+`main` = `b4198f98`. CI (agent trailers, commit identity) green on each landing through `5cd5e91b`;
+`b4198f98` was in progress when this was written.
+
+**Item H runs in parallel.** Lane 1 (the command table becomes the dispatcher, MCP spec v20 `c72f0916`
+§3, on local branch `spec/mcp-server`, not pushed) is with a second Codex Maker on
+`lane/mcp-command-table`. It must not edit the files lane 3b edits (`supabase/**`,
+`tests/p1-server/**`, `tests/p1-cli/citation-drift.test.ts`, `site/src/lib/agent-connect.ts`, the mint
+observer test, `acceptable-use.astro`); its `src/cli.ts` citation changes for those files go to
+`docs/evidence/2026-09-16-h-lane1/CITATIONS.md` and the lead applies them at landing. v20 never had its
+pair: H0 took priority first. Lane 1 does not depend on the connect design the v19 and v20 arms failed.
 
 **LIVE vs WRITTEN.** Nothing in H0 is live. The h0 function is not deployed. No H0 migration is
 applied to production. No npm release carries H0. The paste is not wired into the app — the live
@@ -34,10 +44,11 @@ messages (messages are immutable, so corrections live there).
 
 ## NEXT, in order
 
-1. **Land lane 3a** once its pair returns. Its commit message says the full `test:p1-server` suite
-   has NOT passed in one run: two runs failed on DIFFERENT tests with local-stack transport errors
-   (gateway "invalid response", socket "other side closed"), and each failing file passed alone.
-2. **Lane 3b: registration.** The atomic fold in ONE transaction: attempt row keyed
+1. **Lane 3a is LANDED** (`b4198f98`). A full `test:p1-server` run passed 201/201 (exit 0) with nothing
+   else running in that worktree, on the lane BEFORE its final commit. That commit changed tests only; its
+   server file then passed 16/16 alone, with six mutations each confirmed applied. The two earlier failed
+   runs had a build running in the same worktree at the time.
+2. **Lane 3b: registration (Maker running).** The atomic fold in ONE transaction: attempt row keyed
    `(join_credential, attemptId)` + seat consumed (`seats_used`, schema already caps it) + principal
    + device + run + renewal grant + token. Attribution to the credential's REGISTRAR principal and
    run. Retry with the same `attemptId` replaces an UNUSED token only. Spec §5.
@@ -60,9 +71,13 @@ messages (messages are immutable, so corrections live there).
 
 ## NOT ESTABLISHED
 
+- **An H0 seat has no renew path.** The seven verbs include no renew verb, so lane 3b mints the seat token
+  for 24 hours (`H0_SEAT_TOKEN_TTL_HOURS`) and still creates the renewal grant. A joined agent stops
+  working after a day. Whether that is acceptable for launch is a Strategist decision, asked 2026-09-16.
+
 - Any H0 path on production. The three-host done-test.
 - Whether two sentences are enough for each host to register unprompted.
-- A green full `test:p1-server` run on lane 3a.
+- A green full `test:p1-server` run on lane 3a's FINAL commit (see NEXT item 1 for what did run).
 
 ## CORRECTIONS TO PUBLISHED CLAIMS (retired wording kept, because readers may meet it)
 
@@ -89,8 +104,8 @@ messages (messages are immutable, so corrections live there).
 
 ## Processes and worktrees at time of writing
 
-Worktrees under the session scratchpad: `wt-h0-lane3` (lane 3a), `arms-h-codex/tree`,
-`arms-h-grok/tree`, `wt-itemg` (item G, `lane/wake-liveness`, paused behind H0), `wt-itemh`
-(`spec/h0-link-join`). antigravity also created a worktree of this repo at
-`~/.gemini/antigravity-cli/scratch/commonswarm`; remove it when its reviews are done. A local Supabase
-(Docker) is running, started by the lane 3a Maker.
+Worktrees under the session scratchpad: `wt-h0-lane3b` (lane 3b), `wt-h-lane1` (item H lane 1),
+`arms-h-codex/tree`,
+`arms-h-grok/tree`, `wt-itemg` (item G, `lane/wake-liveness`, paused behind H, I and J), `wt-itemh`
+(`spec/h0-link-join`). The antigravity scratch worktree of this repo was removed. A local Supabase
+(Docker) is running, started by the lane 3a Maker; lane 3b uses it, and nothing else may.
