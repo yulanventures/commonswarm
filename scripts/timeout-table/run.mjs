@@ -167,7 +167,7 @@ export async function runTable(options) {
         const invocation = clientInvocation(options.client, ["--version"]);
         const result = await runChild(invocation.command, invocation.args, { env: process.env });
         if (result.code === 0) startupValues.push(result.durationMs);
-        if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs, undefined, { ref: false });
+        if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs);
       }
     }
     for (const [name, operation] of operations) {
@@ -201,7 +201,7 @@ export async function runTable(options) {
         }
         else if (requests.length > 0) durations.push(Math.max(...requests.map(row => row.duration_ms)));
         else durations.push(result.durationMs);
-        if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs, undefined, { ref: false });
+        if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs);
       }
       measurements.set(name, { durations, realTimeouts, realExitCodes: name === "check" && options.client ? realExitCodes : null });
     }
