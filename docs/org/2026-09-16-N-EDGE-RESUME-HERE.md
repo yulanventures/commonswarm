@@ -40,6 +40,20 @@ Written for a cold successor. The H0 lanes have their own file:
   the vault); host Postgres listens on 172.31.0.1 for containers with TLS and scram; nightly pg_dump already
   includes `commonswarm`. R2 bucket commonswarm-files and the DNS token are with Anvil.
 
+## N-db feasibility, measured 2026-09-16 ~20:00Z (values never printed)
+
+- Clients hold the LEGACY anon JWT: CLI profiles (`anon_key`), site/.env PUBLIC_SUPABASE_ANON_KEY, and the live
+  `commonswarm:anon-key` meta on commonswarm.com. Not the sb_publishable key (which only hosted Supabase's gateway
+  understands).
+- Management API `GET /v1/projects/ukezjcnxjvkpkeezxaew/postgrest` returns `jwt_secret` (88 chars); an HMAC-SHA256
+  check shows it signs the legacy anon JWT. So self-hosted gotrue/postgrest/realtime/storage-api configured with it
+  accept every existing client key: "clients unchanged" is feasible. `GET .../config/auth` returns the GitHub OAuth
+  client secret (`external_github_secret`) for self-hosted gotrue. The management token is the Supabase CLI's
+  keychain entry "Supabase CLI" (sbp_ token).
+- OPEN, asked HezLead (b4e62dfa): a dedicated `supabase/postgres` 17 CONTAINER for CommonSwarm (Supabase's
+  cluster-wide roles anon, authenticated, service_role, authenticator, supabase_* admins and its extensions,
+  isolated from PromptEden) versus the shared host cluster's `commonswarm` database. Lead recommends the container.
+
 ## HezLead (box operator) answers, 19:37Z — binding for the cutover
 
 - **Cap** (60949772): if staging p95 for ONE COMMAND exceeds 2.0 s, or any CLI or listener timeout trips, STOP and
