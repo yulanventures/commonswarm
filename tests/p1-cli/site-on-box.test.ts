@@ -17,9 +17,17 @@ interface Route {
   status: number;
   contentType: string | null;
   headers: Record<string, string | null>;
+  bodyShape?: {
+    kind: string;
+    lineCount: number;
+    firstLine: string;
+    codeLine: string;
+    hasTerminalNewline: boolean;
+  };
 }
 
 interface Reference {
+  schemaVersion: number;
   artifactCount: number;
   stableArtifactCount: number;
   artifacts: string[];
@@ -31,6 +39,11 @@ interface Reference {
     status: number;
     contentType: string;
     headers: Record<string, string | null>;
+    trailingSlash: {
+      status: number;
+      contentType: string;
+      headers: Record<string, string | null>;
+    };
     observedFileCount: number;
   }>;
 }
@@ -54,15 +67,22 @@ test("the stable reference and Caddy source retain their route invariants", asyn
     ),
   );
   assert.equal(inventory.routeCount, inventory.routes.length);
+  assert.equal(inventory.schemaVersion, 2);
   assert.match(caddyfile, /handle @cleanUrl \{/);
   assert.match(caddyfile, /try_files \{path\}\/index\.html \{path\}/);
   assert.doesNotMatch(caddyfile, /try_files\s+@cleanUrl|=404/);
   assert.match(caddyfile, /error @dotfile 404/);
   assert.match(caddyfile, /root \* \/srv\/commonswarm\/site\/current/);
 
-  for (const path of ["/__commonswarm_missing__", "/_astro/", "/fonts/", "/.well-known/security.txt"]) {
+  for (const artifact of inventory.artifacts) {
+    const slashPath = `/${artifact}/`;
+    const slashRoute = inventory.routes.find((candidate) => candidate.path === slashPath);
+    assert.equal(slashRoute?.status, 200, `${slashPath} must serve the file without a redirect`);
+  }
+  for (const path of ["/__commonswarm_missing__", "/__commonswarm_missing__.txt/", "/_astro/", "/fonts/", "/.well-known/security.txt"]) {
     const route = inventory.routes.find((candidate) => candidate.path === path);
     assert.equal(route?.status, 404, `${path} must be in the negative inventory`);
+    assert.equal(route?.bodyShape?.kind, "vercel-not-found", `${path} must record Vercel's 404 body shape`);
   }
   assert.match(caddyfile, /header @install Content-Type "application\/x-sh"/);
   assert.match(caddyfile, /header @markdown Content-Type "text\/markdown; charset=utf-8"/);
@@ -76,6 +96,10 @@ test("the stable reference and Caddy source retain their route invariants", asyn
     inventory.fingerprintedAssetPolicies.map((policy) => policy.extension).sort(),
     [".css", ".js"],
   );
+  for (const policy of inventory.fingerprintedAssetPolicies) {
+    assert.equal(policy.trailingSlash.status, 200);
+    assert.equal(policy.trailingSlash.contentType, policy.contentType);
+  }
 });
 
 async function unusedPort(): Promise<number> {
@@ -91,6 +115,7 @@ function requestLocal(port: number, path: string): Promise<{
   status: number | undefined;
   contentType: string | null;
   headers: Record<string, string | string[] | undefined>;
+  body: string;
 }> {
   return new Promise((resolveRequest, rejectRequest) => {
     const outgoing = httpRequest({
@@ -100,13 +125,15 @@ function requestLocal(port: number, path: string): Promise<{
       method: "GET",
       headers: { host: "commonswarm.com" },
     }, (response) => {
-      response.resume();
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
       response.on("end", () => resolveRequest({
         status: response.statusCode,
         contentType: typeof response.headers["content-type"] === "string"
           ? response.headers["content-type"]
           : null,
         headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
       }));
     });
     outgoing.on("error", rejectRequest);
@@ -114,7 +141,7 @@ function requestLocal(port: number, path: string): Promise<{
   });
 }
 
-test("Caddy 2.11 adapts and serves all 52 stable reference routes", async (t) => {
+test("Caddy 2.11 adapts and serves every stable reference route", async (t) => {
   const available = spawnSync("docker", ["image", "inspect", "caddy:2.11"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -140,6 +167,7 @@ test("Caddy 2.11 adapts and serves all 52 stable reference routes", async (t) =>
   assert.match(serialized, /The page could not be found/);
   assert.match(serialized, /try_files.*index\.html/);
   assert.match(serialized, /path_regexp.*dotfile/);
+  assert.match(serialized, /path_regexp.*fileWithSlash/);
   assert.doesNotMatch(serialized, /@cleanUrl/);
 
   const inventory = await reference();
@@ -186,6 +214,14 @@ test("Caddy 2.11 adapts and serves all 52 stable reference routes", async (t) =>
       assert.equal(response.contentType, route.contentType, `${route.path}: content-type`);
       for (const name of inventory.recordedHeaders) {
         assert.equal(response.headers[name] ?? null, route.headers[name], `${route.path}: ${name}`);
+      }
+      if (route.bodyShape) {
+        const lines = response.body.replace(/\n$/, "").split("\n");
+        assert.equal(lines.length, route.bodyShape.lineCount, `${route.path}: 404 body line count`);
+        assert.equal(lines[0], route.bodyShape.firstLine, `${route.path}: 404 first line`);
+        assert.equal(lines[2], route.bodyShape.codeLine, `${route.path}: 404 code line`);
+        assert.ok(lines[4], `${route.path}: 404 request id placeholder`);
+        assert.equal(response.body.endsWith("\n"), route.bodyShape.hasTerminalNewline, `${route.path}: 404 terminal newline`);
       }
     }
   } finally {
@@ -304,6 +340,7 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     await execFileAsync("sh", [join(deployRoot, "finalize-release.sh"), temporary, final, siteRoot], {
       cwd: fixture,
       encoding: "utf8",
+      env: { ...process.env, CLICOLOR_FORCE: "1" },
       timeout: 10_000,
     });
     assert.equal(await readFile(join(final, "_astro/old.js"), "utf8"), "old");
@@ -336,6 +373,8 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     assert.match(deployScript, /rsync -a --delete "\$checkout\/site\/dist\/"/);
     assert.doesNotMatch(deployScript.replace(/^\s*#.*$/gm, ""), /--chmod/);
     assert.doesNotMatch(deployScript, /readlink -f|find .*-(?:maxdepth|printf)|date .*%N/);
+    const finalizeScript = await readFile(join(deployRoot, "finalize-release.sh"), "utf8");
+    assert.doesNotMatch(finalizeScript.replace(/^\s*#.*$/gm, ""), /\bls\b/);
     const names = await Promise.all([0, 1].map(async () =>
       (await execFileAsync("sh", [join(deployRoot, "deploy.sh"), "--dry-run", "--release-name"], {
         cwd: fixture,
@@ -351,18 +390,64 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
   }
 });
 
+test("a prune error after the live switch is a warning, not a failed deploy", async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-prune-warning-"));
+  try {
+    const siteRoot = join(fixture, "site");
+    const releases = join(siteRoot, "releases");
+    const bin = join(fixture, "bin");
+    await mkdir(releases, { recursive: true });
+    await mkdir(bin);
+    const oldNames = Array.from({ length: 5 }, (_, index) =>
+      `2026091${index}T000000Z-111111111111-000000000000000${index}`,
+    );
+    for (const name of oldNames) await mkdir(join(releases, name));
+    await symlink(`releases/${oldNames[4]}`, join(siteRoot, "current"));
+    const finalName = "20260916T000000Z-222222222222-aaaaaaaaaaaaaaaa";
+    const temporary = join(releases, `${finalName}.tmp`);
+    const final = join(releases, finalName);
+    await mkdir(temporary);
+    const rmWrapper = join(bin, "rm");
+    await writeFile(rmWrapper, `#!/bin/sh
+case "$*" in
+  *${oldNames[0]}*) printf 'injected prune failure\\n' >&2; exit 73 ;;
+esac
+exec /bin/rm "$@"
+`);
+    await chmod(rmWrapper, 0o755);
+
+    const result = await execFileAsync(
+      "sh",
+      [join(deployRoot, "finalize-release.sh"), temporary, final, siteRoot],
+      {
+        cwd: fixture,
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLICOLOR_FORCE: "1" },
+        timeout: 10_000,
+      },
+    );
+    assert.match(result.stderr, /Warning: could not prune old release/);
+    assert.equal(await readlink(join(siteRoot, "current")), `releases/${finalName}`);
+    assert.equal((await readdir(releases)).includes(oldNames[0]), true);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("pre-cutover uses staging through Cloudflare and keeps direct-origin fallback", async () => {
   const runbook = await readFile(join(deployRoot, "RUNBOOK.md"), "utf8");
   const parity = await readFile(join(deployRoot, "parity-check.mjs"), "utf8");
   assert.match(runbook, /parity-check\.mjs https:\/\/site-staging\.commonswarm\.com --allow-cloudflare-browser-ttl/);
   assert.match(runbook, /U=https:\/\/site-staging\.commonswarm\.com/);
-  assert.match(runbook, /21 static-extension files/);
+  assert.match(runbook, /before file-slash routes were added.*21 URLs/);
   assert.match(runbook, /parity-check\.mjs https:\/\/BOX_ADDRESS --host commonswarm\.com --ca \.\/cloudflare-origin-ca-root\.pem/);
   assert.match(runbook, /curl -sS --cacert \.\/cloudflare-origin-ca-root\.pem --resolve commonswarm\.com:443:BOX_ADDRESS/);
   assert.doesNotMatch(runbook, /NODE_TLS_REJECT_UNAUTHORIZED|-k\b|--insecure\b/);
   assert.match(parity, /flag === "--ca"/);
   assert.match(parity, /flag === "--allow-cloudflare-browser-ttl"/);
   assert.match(parity, /caPath \? await readFile\(caPath\)/);
+  assert.match(runbook, /parity-check\.mjs https:\/\/commonswarm\.com --allow-cloudflare-browser-ttl/);
+  assert.match(runbook, /Drop the option.*unflagged check passes/);
 });
 
 test("site env validator rejects a service-role JWT without printing it", async () => {
@@ -486,6 +571,11 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
         status: 200,
         contentType: "application/javascript; charset=utf-8",
         headers: { "cache-control": "public, max-age=0, must-revalidate" },
+        trailingSlash: {
+          status: 200,
+          contentType: "application/javascript; charset=utf-8",
+          headers: { "cache-control": "public, max-age=0, must-revalidate" },
+        },
       }],
     }));
     await assert.rejects(
@@ -499,6 +589,7 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
         const result = error as { code?: number; stderr?: string };
         assert.equal(result.code, 1);
         assert.match(result.stderr ?? "", /\/_astro\/dependency\.DEP456\.js: cache-control expected/);
+        assert.match(result.stderr ?? "", /\/_astro\/future\.NEW123\.js\/: cache-control expected/);
         return true;
       },
     );
@@ -555,6 +646,11 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
         status: 200,
         contentType: "application/javascript; charset=utf-8",
         headers: { "cache-control": cacheControl },
+        trailingSlash: {
+          status: 200,
+          contentType: "application/javascript; charset=utf-8",
+          headers: { "cache-control": cacheControl },
+        },
       }],
     };
     await writeFile(referencePath, JSON.stringify(baseReference));
@@ -580,7 +676,7 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
       [...checkerArgs, "--allow-cloudflare-browser-ttl"],
       { cwd: fixture, encoding: "utf8", timeout: 10_000 },
     );
-    assert.match(allowed.stdout, /Allowed 2 Cloudflare browser-TTL rewrite/);
+    assert.match(allowed.stdout, /Allowed 3 Cloudflare browser-TTL rewrite/);
     assert.match(allowed.stdout, /Parity passed/);
 
     await writeFile(referencePath, JSON.stringify({

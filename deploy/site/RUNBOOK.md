@@ -27,7 +27,7 @@ From the committed revision to release:
 deploy/site/deploy.sh yulan-vps-1
 ```
 
-The script builds from a clean archive, creates a timestamped directory with a random suffix under `/srv/commonswarm/site/releases`, and switches `/srv/commonswarm/site/current` atomically. It carries forward old `/_astro` files for in-flight pages, keeps new files when names match, and retains the five newest releases.
+The script builds from a clean archive, creates a timestamped directory with a random suffix under `/srv/commonswarm/site/releases`, and switches `/srv/commonswarm/site/current` atomically. It carries forward old `/_astro` files for in-flight pages, keeps new files when names match, and retains the five newest releases. Cleanup after the live switch is best-effort: a prune error is logged but does not mark a successful switch as failed.
 
 ## Check through Cloudflare before DNS moves
 
@@ -37,9 +37,9 @@ Use the staging name. It exercises Cloudflare, TLS, Caddy, and the release witho
 node deploy/site/parity-check.mjs https://site-staging.commonswarm.com --allow-cloudflare-browser-ttl
 ```
 
-The Cloudflare zone currently changes `cache-control` from `public, max-age=0, must-revalidate` to `public, max-age=14400, must-revalidate` on 21 static-extension files. The operator accepted this for cutover and will change the Browser Cache TTL zone setting later. The option above permits only that exact rewrite on `.css`, `.js`, `.png`, `.svg`, and `.woff2` paths. It permits no status, content-type, security-header, path, or other cache change. Without the option, the checker reports all 21 differences and exits nonzero.
+The last staging check before file-slash routes were added found this accepted difference on 21 URLs: Cloudflare changed `cache-control` from `public, max-age=0, must-revalidate` to `public, max-age=14400, must-revalidate`. The operator accepted it for cutover and will change the Browser Cache TTL zone setting later. The option above permits only that exact rewrite on `.css`, `.js`, `.png`, `.svg`, and `.woff2` paths, including their trailing-slash forms. It permits no status, content-type, security-header, path, or other cache change. Without the option, the checker reports every such rewrite and exits nonzero.
 
-The result must say that all routes passed and that 21 browser-TTL rewrites were allowed. Do not move DNS if it reports another difference.
+The result must say that all routes passed and list only allowed browser-TTL rewrites. Do not move DNS if it reports another difference.
 
 Run the production controls against the staging name:
 
@@ -67,8 +67,10 @@ curl -sS --cacert ./cloudflare-origin-ca-root.pem --resolve commonswarm.com:443:
 
 1. Lower the TTL for the `commonswarm.com` and `www.commonswarm.com` records before the move.
 2. Change both records to the Hetzner address. Keep the Cloudflare proxy and TLS settings unchanged.
-3. Run `node deploy/site/parity-check.mjs https://commonswarm.com`.
+3. Run `node deploy/site/parity-check.mjs https://commonswarm.com --allow-cloudflare-browser-ttl` while the zone still overrides Browser Cache TTL.
 4. Repeat every production control above with `U=https://commonswarm.com`.
+
+After the Cloudflare Browser Cache TTL setting stops changing the origin value, run the checker once without `--allow-cloudflare-browser-ttl`. Drop the option from later checks only after that unflagged check passes.
 
 ## Roll back
 

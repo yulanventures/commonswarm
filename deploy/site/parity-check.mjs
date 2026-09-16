@@ -77,11 +77,26 @@ function get(url, hostOverride) {
 }
 
 function allowsCloudflareCacheRewrite(path, name, expected, actual) {
+  const pathname = new URL(path, baseUrl).pathname.replace(/\/+$/, "");
   return allowCloudflareBrowserTtl &&
     name === "cache-control" &&
     expected === vercelCacheControl &&
     actual === cloudflareBrowserCacheControl &&
-    cloudflareStaticExtensions.has(extname(new URL(path, baseUrl).pathname));
+    cloudflareStaticExtensions.has(extname(pathname));
+}
+
+function matchesBodyShape(shape, body) {
+  if (!shape) return true;
+  if (shape.kind !== "vercel-not-found") return false;
+  const hasTerminalNewline = body.endsWith("\n");
+  const lines = body.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+  return lines.length === shape.lineCount &&
+    lines[0] === shape.firstLine &&
+    lines[1] === "" &&
+    lines[2] === shape.codeLine &&
+    lines[3] === "" &&
+    lines[4].length > 0 &&
+    hasTerminalNewline === shape.hasTerminalNewline;
 }
 
 function compare(expected, response) {
@@ -98,6 +113,9 @@ function compare(expected, response) {
   }
   if (actual.contentType !== expected.contentType) {
     differences.push(`${expected.path}: content-type expected ${JSON.stringify(expected.contentType)}, got ${JSON.stringify(actual.contentType)}`);
+  }
+  if (!matchesBodyShape(expected.bodyShape, response.body)) {
+    differences.push(`${expected.path}: body does not match recorded ${expected.bodyShape.kind} shape`);
   }
   for (const name of reference.recordedHeaders) {
     if (actual.headers[name] === expected.headers[name]) continue;
@@ -179,6 +197,18 @@ while (fingerprintedQueue.length > 0) {
   } catch (error) {
     differences.push(`${expected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const slashPolicy = policy.trailingSlash ?? policy;
+  const slashExpected = {
+    path: `${path}/`,
+    status: slashPolicy.status,
+    contentType: slashPolicy.contentType,
+    headers: slashPolicy.headers,
+  };
+  try {
+    compare(slashExpected, await get(new URL(slashExpected.path, baseUrl), host));
+  } catch (error) {
+    differences.push(`${slashExpected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 if (allowedDifferences.length > 0) {
@@ -187,7 +217,8 @@ if (allowedDifferences.length > 0) {
   );
 }
 
-const routeCount = reference.routes.length + checkedFingerprintedPaths.size;
+const fingerprintedRouteCount = checkedFingerprintedPaths.size * 2;
+const routeCount = reference.routes.length + fingerprintedRouteCount;
 if (differences.length > 0) {
   console.error(`Parity failed with ${differences.length} difference(s):`);
   for (const difference of differences) console.error(`- ${difference}`);
@@ -195,6 +226,7 @@ if (differences.length > 0) {
 } else {
   console.log(
     `Parity passed for ${routeCount} routes ` +
-    `(${reference.routes.length} fixed, ${checkedFingerprintedPaths.size} discovered assets) against ${baseUrl}.`,
+    `(${reference.routes.length} fixed, ${checkedFingerprintedPaths.size} discovered assets / ` +
+    `${fingerprintedRouteCount} asset routes) against ${baseUrl}.`,
   );
 }

@@ -1,8 +1,8 @@
 {
-  "schemaVersion": 1,
-  "recordedAt": "2026-09-16T20:22:28.203Z",
+  "schemaVersion": 2,
+  "recordedAt": "2026-09-16T21:32:27.788Z",
   "origin": "https://commonswarm.com",
-  "gitCommit": "81c81f3deadc242d026c1bd5f994bc9f15e35047",
+  "gitCommit": "ef24893a3a14ba71782f5235daedd1fb0e48eda8",
   "siteBuildSha256": "bcf5cbdc91ce0a370bd7cb5b7dc74f6380338b2a5bbb15ba74f283c6ca5d4fd4",
   "requestMethod": "GET",
   "requestIntervalMs": 550,
@@ -60,6 +60,19 @@
         "permissions-policy": null,
         "location": null
       },
+      "trailingSlash": {
+        "status": 200,
+        "contentType": "text/css; charset=utf-8",
+        "headers": {
+          "strict-transport-security": "max-age=63072000",
+          "cache-control": "public, max-age=0, must-revalidate",
+          "content-security-policy": null,
+          "x-frame-options": null,
+          "referrer-policy": null,
+          "permissions-policy": null,
+          "location": null
+        }
+      },
       "observedFileCount": 8
     },
     {
@@ -76,10 +89,23 @@
         "permissions-policy": null,
         "location": null
       },
+      "trailingSlash": {
+        "status": 200,
+        "contentType": "application/javascript; charset=utf-8",
+        "headers": {
+          "strict-transport-security": "max-age=63072000",
+          "cache-control": "public, max-age=0, must-revalidate",
+          "content-security-policy": null,
+          "x-frame-options": null,
+          "referrer-policy": null,
+          "permissions-policy": null,
+          "location": null
+        }
+      },
       "observedFileCount": 6
     }
   ],
-  "routeCount": 52,
+  "routeCount": 78,
   "routes": [
     {
       "path": "/",
@@ -119,6 +145,18 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {
@@ -139,6 +177,50 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
+      }
+    },
+    {
+      "path": "/__commonswarm_missing__.txt/",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "missing file path with trailing slash"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {
@@ -159,6 +241,18 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {
@@ -203,6 +297,26 @@
     },
     {
       "path": "/acceptable-use/index.html",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "acceptable-use/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/acceptable-use/index.html/",
       "sources": [
         {
           "kind": "artifact",
@@ -282,6 +396,26 @@
       }
     },
     {
+      "path": "/alternatives/crewai/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "alternatives/crewai/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/alternatives/langgraph",
       "sources": [
         {
@@ -342,7 +476,47 @@
       }
     },
     {
+      "path": "/alternatives/langgraph/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "alternatives/langgraph/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/api.md",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "api.md"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/markdown; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/api.md/",
       "sources": [
         {
           "kind": "artifact",
@@ -422,7 +596,47 @@
       }
     },
     {
+      "path": "/app/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "app/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/apple-touch-icon.png",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "apple-touch-icon.png"
+        }
+      ],
+      "status": 200,
+      "contentType": "image/png",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/apple-touch-icon.png/",
       "sources": [
         {
           "kind": "artifact",
@@ -502,7 +716,47 @@
       }
     },
     {
+      "path": "/download/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "download/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/favicon.svg",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "favicon.svg"
+        }
+      ],
+      "status": 200,
+      "contentType": "image/svg+xml",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/favicon.svg/",
       "sources": [
         {
           "kind": "artifact",
@@ -539,10 +793,42 @@
         "referrer-policy": null,
         "permissions-policy": null,
         "location": null
+      },
+      "bodyShape": {
+        "kind": "vercel-not-found",
+        "lineCount": 5,
+        "firstLine": "The page could not be found",
+        "codeLine": "NOT_FOUND",
+        "blankLineIndexes": [
+          1,
+          3
+        ],
+        "finalLine": "non-empty-request-id",
+        "hasTerminalNewline": true
       }
     },
     {
       "path": "/fonts/inter-latin-ext.woff2",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "fonts/inter-latin-ext.woff2"
+        }
+      ],
+      "status": 200,
+      "contentType": "font/woff2",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/fonts/inter-latin-ext.woff2/",
       "sources": [
         {
           "kind": "artifact",
@@ -582,6 +868,26 @@
       }
     },
     {
+      "path": "/fonts/inter-latin.woff2/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "fonts/inter-latin.woff2"
+        }
+      ],
+      "status": 200,
+      "contentType": "font/woff2",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/fonts/jetbrains-mono-latin-ext.woff2",
       "sources": [
         {
@@ -602,7 +908,47 @@
       }
     },
     {
+      "path": "/fonts/jetbrains-mono-latin-ext.woff2/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "fonts/jetbrains-mono-latin-ext.woff2"
+        }
+      ],
+      "status": 200,
+      "contentType": "font/woff2",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/fonts/jetbrains-mono-latin.woff2",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "fonts/jetbrains-mono-latin.woff2"
+        }
+      ],
+      "status": 200,
+      "contentType": "font/woff2",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/fonts/jetbrains-mono-latin.woff2/",
       "sources": [
         {
           "kind": "artifact",
@@ -682,6 +1028,26 @@
       }
     },
     {
+      "path": "/guides/claude-code-subagents/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "guides/claude-code-subagents/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/index.html",
       "sources": [
         {
@@ -702,7 +1068,47 @@
       }
     },
     {
+      "path": "/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/install.sh",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "install.sh"
+        }
+      ],
+      "status": 200,
+      "contentType": "application/x-sh",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/install.sh/",
       "sources": [
         {
           "kind": "artifact",
@@ -782,6 +1188,26 @@
       }
     },
     {
+      "path": "/invite/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "invite/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/llms.txt",
       "sources": [
         {
@@ -802,7 +1228,47 @@
       }
     },
     {
+      "path": "/llms.txt/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "llms.txt"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/plain; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/og.png",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "og.png"
+        }
+      ],
+      "status": 200,
+      "contentType": "image/png",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/og.png/",
       "sources": [
         {
           "kind": "artifact",
@@ -882,6 +1348,26 @@
       }
     },
     {
+      "path": "/orchestration/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "orchestration/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/privacy",
       "sources": [
         {
@@ -942,7 +1428,47 @@
       }
     },
     {
+      "path": "/privacy/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "privacy/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/site.webmanifest",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "site.webmanifest"
+        }
+      ],
+      "status": 200,
+      "contentType": "application/manifest+json; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/site.webmanifest/",
       "sources": [
         {
           "kind": "artifact",
@@ -982,7 +1508,47 @@
       }
     },
     {
+      "path": "/sitemap.xml/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "sitemap.xml"
+        }
+      ],
+      "status": 200,
+      "contentType": "application/xml",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/skills/cswarm/SKILL.md",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "skills/cswarm/SKILL.md"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/markdown; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/skills/cswarm/SKILL.md/",
       "sources": [
         {
           "kind": "artifact",
@@ -1062,6 +1628,26 @@
       }
     },
     {
+      "path": "/start/index.html/",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "start/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
       "path": "/terms",
       "sources": [
         {
@@ -1103,6 +1689,26 @@
     },
     {
       "path": "/terms/index.html",
+      "sources": [
+        {
+          "kind": "artifact",
+          "file": "terms/index.html"
+        }
+      ],
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/terms/index.html/",
       "sources": [
         {
           "kind": "artifact",

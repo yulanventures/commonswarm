@@ -10,6 +10,12 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 			Cache-Control "public, max-age=0, must-revalidate"
 		}
 
+		# Vercel treats a slash after a file name as the file itself. Remove that
+		# slash before MIME matching and file lookup. This also turns a missing
+		# file-with-slash into the normal 404 path instead of Caddy's 400.
+		@fileWithSlash path_regexp fileWithSlash ^(.+\.[^/]+)/$
+		rewrite @fileWithSlash {re.fileWithSlash.1}
+
 		@install path /install.sh
 		header @install Content-Type "application/x-sh"
 
@@ -32,19 +38,30 @@ https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commo
 		@cleanUrl not path */
 		handle @cleanUrl {
 			try_files {path}/index.html {path}
-			file_server
+			file_server {
+				disable_canonical_uris
+			}
 		}
 
 		# Vercel also serves /x/ without a redirect. Missing indexes stay 404.
 		handle {
 			rewrite * {path}index.html
-			file_server
+			file_server {
+				disable_canonical_uris
+			}
 		}
 	}
 
 	handle_errors {
 		@notFound expression {http.error.status_code} == 404
 		header @notFound Content-Type "text/plain; charset=utf-8"
-		respond @notFound "The page could not be found" 404
+		respond @notFound <<BODY
+The page could not be found
+
+NOT_FOUND
+
+commonswarm::not-found
+
+BODY 404
 	}
 }

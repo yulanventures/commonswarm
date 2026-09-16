@@ -57,24 +57,44 @@ for stale_temp in "$releases"/*.tmp; do
   [ -d "$stale_temp" ] || continue
   [ -L "$stale_temp" ] && continue
   [ "$stale_temp" = "$temporary_release" ] && continue
-  [ -n "$(find "$stale_temp" -prune -type d -mmin +60 -print)" ] || continue
+  stale_marker=$(find "$stale_temp" -prune -type d -mmin +60 -print 2>/dev/null || true)
+  [ -n "$stale_marker" ] || continue
   case "$stale_temp" in
-    "$releases"/*) rm -rf -- "$stale_temp" ;;
-    *) printf 'Refusing temporary prune outside releases directory: %s\n' "$stale_temp" >&2; exit 1 ;;
+    "$releases"/*)
+      if ! rm -rf -- "$stale_temp"; then
+        printf 'Warning: could not prune stale temporary release: %s\n' "$stale_temp" >&2
+      fi
+      ;;
+    *) printf 'Warning: refusing temporary prune outside releases directory: %s\n' "$stale_temp" >&2 ;;
   esac
 done
 
-# Release names contain no whitespace. Keep the five newest successful releases.
-kept=0
-for old_release in $(ls -1dt "$releases"/20* 2>/dev/null); do
+# The timestamp at the start of each release name sorts oldest first. Shell glob
+# expansion cannot contain colour codes, unlike ls output. Only the releases
+# older than the newest five are candidates. Pruning is best-effort because the
+# live symlink has already changed and cleanup must not turn a good deploy red.
+LC_ALL=C
+export LC_ALL
+release_count=0
+for old_release in "$releases"/20??????T??????Z-????????????-????????????????; do
+  [ -d "$old_release" ] || continue
+  [ -L "$old_release" ] && continue
+  release_count=$((release_count + 1))
+done
+prune_count=$((release_count - 5))
+[ "$prune_count" -gt 0 ] || prune_count=0
+for old_release in "$releases"/20??????T??????Z-????????????-????????????????; do
+  [ "$prune_count" -gt 0 ] || break
+  [ -d "$old_release" ] || continue
+  [ -L "$old_release" ] && continue
+  prune_count=$((prune_count - 1))
+  [ "$old_release" = "$final_release" ] && continue
   case "$old_release" in
-    *.tmp) continue ;;
+    "$releases"/*)
+      if ! rm -rf -- "$old_release"; then
+        printf 'Warning: could not prune old release: %s\n' "$old_release" >&2
+      fi
+      ;;
+    *) printf 'Warning: refusing release prune outside releases directory: %s\n' "$old_release" >&2 ;;
   esac
-  kept=$((kept + 1))
-  if [ "$kept" -gt 5 ]; then
-    case "$old_release" in
-      "$releases"/*) rm -rf -- "$old_release" ;;
-      *) printf 'Refusing prune outside releases directory: %s\n' "$old_release" >&2; exit 1 ;;
-    esac
-  fi
 done
