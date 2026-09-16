@@ -62,3 +62,30 @@ The row set is generated from these arrays. It is not a list typed separately
 into the JSON snapshot. Exit-code counts are generated from the recorded rows
 in `tests/p1-cli/fixtures/command-dispatch-baseline-counts.json`; this README
 does not restate those numbers.
+
+## One-time migration scan
+
+`SCAN.txt` records one text scan used while moving dispatch into
+`AGENT_COMMANDS`. Nothing gates on this scan. Its output is an inventory, not a
+proof. A zero means only that this scanner found zero matches; it means nothing
+about whether another dispatcher exists.
+
+The scan cannot see a `Map`, a renamed variable, computed
+property access, or dispatch in another shape. The structural gates in
+`tests/p1-cli/command-table-gates.test.ts` do not rely on this scan. They
+apply a statement-shape allowlist to all of `main()`, before and after the
+sole direct `AGENT_COMMANDS[verb]` lookup, and to each parsed-argument function
+that `main()` calls between that lookup and the selected handler.
+
+## Dispatch trace cost
+
+`src/dispatch-trace.ts` ships in `dist/` and is bundled into
+`dist-release/cswarm`. It publishes the selected handler name through Node's
+`diagnostics_channel`. With no subscriber, which is the normal user case, the
+publish is a no-op apart from one function call and the channel's subscriber
+check. The baseline preload subscribes to the same shipped instrument. No test
+replacement is used after conversion.
+
+Setup, check, and receive emit a separate trace name for every flag-selected
+mode or sub-action. The same names are recorded before and after conversion,
+so a route that reaches a sibling handler changes its baseline row.

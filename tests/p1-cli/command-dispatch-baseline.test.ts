@@ -109,7 +109,9 @@ async function commandEntryCoverage(): Promise<readonly CommandEntryCoverage[]> 
   };
   const ordered = (rows: readonly CommandEntryCoverage[]) =>
     [...rows].sort((left, right) => left.key.localeCompare(right.key));
-  if (cli.AGENT_COMMANDS === undefined) return ordered(LEGACY_COMMAND_ENTRY_COVERAGE);
+  // Commit 1 recorded this inventory before the table existed. Now the table must be exported: a missing or renamed
+  // export fails here instead of silently comparing the inventory with itself.
+  assert.ok(cli.AGENT_COMMANDS, "AGENT_COMMANDS must be exported from src/cli.ts");
   const result: CommandEntryCoverage[] = [];
   const add = (key: string, raw: unknown) => {
     const entry = raw as Omit<CommandEntryCoverage, "key" | "variants"> & { variants: Record<string, unknown> };

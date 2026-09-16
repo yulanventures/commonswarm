@@ -9083,7 +9083,7 @@ function commandVariant(
   handler: AgentCommandHandler,
   help: readonly string[],
 ): AgentCommandVariant {
-  return { id, handler, help };
+  return { id, handler, help: help.map(resolveHelpLine) };
 }
 
 function selectedVariants<const Variants extends Readonly<Record<string, AgentCommandVariant>>>(
@@ -9095,6 +9095,24 @@ function selectedVariants<const Variants extends Readonly<Record<string, AgentCo
     select: (args) => choose(args),
     [selectedVariantsBrand]: true,
   };
+}
+
+function resolveHelpLine(marker: string): string {
+  const lines = `${usage()}\n${onboardingUsage()}`
+    .split("\n")
+    .filter(line => line.startsWith("  cswarm "))
+    .map(line => line.trim())
+    .filter(line => line.length > 0);
+  const exact = lines.find(line => line === marker);
+  if (exact !== undefined) return exact;
+  const matches = lines.filter(line =>
+    line.startsWith(marker) &&
+    (!/[a-z0-9]$/i.test(marker) || /^\s|^$/.test(line.slice(marker.length, marker.length + 1)))
+  );
+  if (matches.length !== 1) {
+    throw new Error(`help marker must identify one whole usage line: ${marker}`);
+  }
+  return matches[0]!;
 }
 
 function group(
@@ -9181,7 +9199,7 @@ const acceptVariants = {
   positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://", "cswarm accept <invitation-token>"]),
 };
 const inboxVariants = {
-  read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url"]),
+  read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]"]),
   notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify"]),
   follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow"]),
 };
@@ -9260,7 +9278,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
    * refusal entries are therefore unreachable for the same inputs as on main.
    */
   invite: group({
-    create: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Create an invitation.", mutates: true, flags: [...humanFlags, "email"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite [--url"] }),
+    create: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Create an invitation.", mutates: true, flags: [...humanFlags, "email"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite [--url <url> --anon-key <key>] [--workspace-id <uuid>] --email <email>"] }),
     revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke"] }),
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "create", () => new UsageError("unknown invite command"), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
@@ -9323,7 +9341,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has("notify") ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", "notify"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
   workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use"], workspaceErrorJson: true }),
-  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm new"] }),
+  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm new \"<workspace name>\"", "cswarm new --name"] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
   principal: group({
     create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create"] }),
@@ -9334,7 +9352,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   token: group({
     mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint"] }),
-    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke"] }),
+    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke [--url", "cswarm token revoke (--agent-token-file"] }),
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "mint", (args) => new Error(`unknown token command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),

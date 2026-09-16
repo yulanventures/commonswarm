@@ -1,0 +1,75 @@
+Command run once (re-run at the round-6 fold, after the rebase onto 9543527b):
+
+rg -n --sort path '(^|[^A-Za-z])(verb|action|command|subcommand) (===|!==)|\.includes\(' src/cli.ts src/onboarding-cli.ts src/cloud
+
+Output:
+
+src/cli.ts:666:      if (!name || name.includes("=")) {
+src/cli.ts:1849:  if (action === "show") {
+src/cli.ts:1883:  if (action === "set") {
+src/cli.ts:1903:  if (action === "clear") {
+src/cli.ts:2445:  if (action === "create") {
+src/cli.ts:2483:  if (action === "revoke") {
+src/cli.ts:2549:  if (action === "revoke") {
+src/cli.ts:2570:  if (action !== "mint") {
+src/cli.ts:2692:  if (action !== "resume") {
+src/cli.ts:3028:      if (!["merged", "pr", "archive", "discard"].includes(disposition)) {
+src/cli.ts:3211:  if (!["working-on", "note", "ask"].includes(value)) {
+src/cli.ts:6229:        executable.includes("/") ||
+src/cli.ts:6230:        executable.includes("\\")
+src/cli.ts:6255:        executable.includes("/") ||
+src/cli.ts:6256:        executable.includes("\\")
+src/cli.ts:7149:  if (command === "stop") {
+src/cli.ts:7155:  let status = command === "stop"
+src/cli.ts:7195:  const installed = command === "status"
+src/cli.ts:7282:    action === "enable" || action === "disable" || action === "recover"
+src/cli.ts:7319:  if (action === "status") {
+src/cli.ts:7352:  if (action === "stop") {
+src/cli.ts:7376:  if (action !== "start") {
+src/cli.ts:7506:      (hook as Record<string, unknown>).command === expected
+src/cli.ts:7855:  if (command === "check") {
+src/cli.ts:7898:  if (command !== "install" && command !== "uninstall") {
+src/cli.ts:7902:    command === "install"
+src/cli.ts:7910:  if (command === "uninstall" && !args.has("write")) {
+src/cli.ts:7922:  const principalId = command === "install" ? await hookInstallPrincipalId(args) : null;
+src/cli.ts:7924:  if (command === "install" && !args.has("write")) {
+src/cli.ts:7931:  const updated = command === "install"
+src/cli.ts:7946:    command === "install"
+src/cli.ts:9266:  session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm session ${action}`] })])), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
+src/cli.ts:9407:      if (entry.tool === null || !entry.transports.includes(transport)) continue;
+src/cli.ts:9423:  const entry = action !== undefined && Object.hasOwn(root.subcommands, action) ? root.subcommands[action] : undefined;
+src/cli.ts:9470:  if (!verb || verb === "help" || args.has("help")) {
+src/cli.ts:9471:    if (verb === "help") args.assertShape([], 1);
+src/cloud/agent-channel.ts:328:            error instanceof DeliveryProtocolError || (error instanceof DeliveryHttpError && [400, 401, 403, 426].includes(error.status))) throw error;
+src/cloud/agent-connection-codec.ts:68:  return cleaned.includes(TOKEN_MARKER);
+src/cloud/agent-connection-token.ts:45:    if (parsed.protocol !== "https:" && !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) throw new Error();
+src/cloud/agent-connection-token.ts:149:    const isBase32 = BASE32_ALPHABET.includes(upper);
+src/cloud/agent-credential-input.ts:165:      !ACCEPTED_AGENT_CREDENTIAL_MESSAGES.includes(artifact.message as string)) {
+src/cloud/agent-host.ts:35:    if (executable === "Codex" && row.executable.includes("/Codex.app/")) return "codex-desktop";
+src/cloud/agent-host.ts:37:    if (["grok", "opencode", "gemini"].includes(executable)) return "unknown";
+src/cloud/agent-host.ts:38:    if (!["node", "zsh", "bash", "sh", "env"].includes(executable)) {
+src/cloud/agent-onboarding-contract.ts:40:  return typeof body === "string" && body.length >= MESSAGE_BLOB_MIN_LENGTH && !body.includes("\n");
+src/cloud/agent-profile.ts:94:    throw new AgentSetupError("connection_invalid", raw.includes("\\_") || /^\s*```/.test(raw)
+src/cloud/agent-profile.ts:127:    if (parsed.protocol !== "https:" && !["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) throw new Error();
+src/cloud/agent-receive.ts:67:      !RECEIVE_MODES.includes(binding.requested_mode) || !RECEIVE_PROVIDERS.includes(binding.provider) ||
+src/cloud/agent-receive.ts:144:      const remaining = g.hooks.filter(h => !h || typeof h !== "object" || ![command, previous].includes((h as Record<string, unknown>).command as string));
+src/cloud/agent-receive.ts:206:  if (!(RECEIVE_MODES as readonly string[]).includes(options.mode)) throw new AgentSetupError("receive_mode_invalid", `--mode must be ${RECEIVE_MODES.join(" or ")}.`);
+src/cloud/agent-receive.ts:208:  if (!(RECEIVE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+src/cloud/agent-receive.ts:213:  if (options.mode === "wake" && !(RECEIVE_WAKE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("wake_host_unsupported", `Wake supports --provider ${RECEIVE_WAKE_PROVIDERS.join(" or ")}. Use --mode turn on this host.`);
+src/cloud/agent-receive.ts:273:      !(RECEIVE_HOOK_EVENTS as readonly string[]).includes(event.hook_event_name) ||
+src/cloud/auth.ts:284:    while (pending.includes("\n")) {
+src/cloud/capability-link.ts:95:  if (!loopback && !CAPABILITY_ALLOWED_HOSTS.includes(parsed.hostname)) {
+src/cloud/channels.ts:106:  return RESERVED_CHANNEL_SLUGS.includes(normalizeChannelSlug(value));
+src/cloud/command-client.ts:595:      verb === "mint"
+src/cloud/command-client.ts:643:      verb === "mint" ? "was created" : "was revoked"
+src/cloud/session-cli.ts:50:  if (value === undefined || !(SESSION_MODES as readonly string[]).includes(value)) {
+src/cloud/session-cli.ts:59:    !(SESSION_PROVIDERS as readonly string[]).includes(value)
+src/cloud/session-cli.ts:393:      DEAD_PROOF_ON_STOP.includes(error.code)
+src/cloud/session-context.ts:297:  return (allowed as readonly string[]).includes(value) ? value as T : null;
+src/cloud/session-context.ts:767:    !(SESSION_RECEIVER_KINDS as readonly string[]).includes(row.kind) ||
+src/cloud/session-context.ts:813:  if (!(SESSION_RECEIVER_KINDS as readonly string[]).includes(kind)) {
+src/cloud/session-proof.ts:68:  return (AGENT_SESSION_PROOF_HEADERS as readonly string[]).includes(lower);
+src/cloud/signals.ts:464:    !["user", "agent"].includes(row.from_kind) ||
+
+This output deliberately contains false positives and handler-internal mode
+checks. No conclusion is drawn from its count or from any future zero.
