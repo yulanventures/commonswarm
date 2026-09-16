@@ -17,6 +17,31 @@ Written for a cold successor. The H0 lanes have their own file:
   N-db (Postgres onto the box), then storage to R2, then sign-in. In-flight lanes 3b and H lane 1 land when their
   pairs are clean. New H0 and H lanes wait until after N-db.
 
+## HezLead (box operator) answers, 19:37Z — binding for the cutover
+
+- **Cap** (60949772): if staging p95 for ONE COMMAND exceeds 2.0 s, or any CLI or listener timeout trips, STOP and
+  tell HezLead. Fallback, only on that measurement: a temporary $24 DigitalOcean NYC droplet (2 vCPU / 4 GB, about
+  10 ms from us-east-1) running the same container until N-db lands. Reason Ashburn is impossible: the Hetzner
+  account is capped at 8 vCPUs until about 2026-09-30, and yulan-vps-1 uses all 8.
+- Cheap wins inside the lane are allowed if they are pure refactors on the same SHA review: batch per-command
+  statements into one function or CTE where the code already allows it. No semantic changes.
+- Record in the lane report: p50/p95 per command, per read, per wake, and the statement count per command,
+  measured on `edge-staging.commonswarm.com`.
+- **Staging name approved:** `edge-staging.commonswarm.com`. Zone rule: `<service>-staging.commonswarm.com` for
+  staging, `<service>.commonswarm.com` for production, and nothing on the box without a site block in
+  /etc/caddy/sites/.
+- **Cloudflare token:** HezLead cannot read secrets; Anvil (who created the item) is re-saving it with the bare API
+  value in the main field. Check the item again about 20:40Z.
+- **Custom-domain cutover, in THIS order, inside the window** (b056e841): (a) Caddy on the box proxies /auth/v1/*,
+  /rest/v1/*, /storage/v1/*, /realtime/v1/* to the project URL with the Host header rewritten to the project host
+  — REHEARSE ON STAGING NOW; (b) deactivate the custom domain in Supabase yourself, do not let it lapse; (c) change
+  the GitHub OAuth app callback to the project URL's /auth/v1/callback and set GoTrue's Site URL and redirect
+  allow-list to the app's real URLs; (d) verify one GitHub sign-in end to end before lifting anything. If the OAuth
+  app is on Tom's GitHub account and cannot be edited, give HezLead the exact settings page and the new value.
+  Without (b)-(d), Supabase deactivates the domain on its next check and GoTrue's external URL reverts, which breaks
+  the GitHub OAuth callback.
+- Box access: in as `ops`; every change reversible and noted in the lane report. HezLead is the box operator.
+
 ## MEASURED FACTS
 
 - api.commonswarm.com is a DNS-only CNAME to ukezjcnxjvkpkeezxaew.supabase.co (Supabase custom domain for the
