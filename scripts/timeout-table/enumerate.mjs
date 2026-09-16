@@ -151,10 +151,10 @@ export function enumerateText(file, text) {
   visitConstants(sourceFile);
 
   const rows = [];
-  const add = (node, name, raw, detector) => {
+  const add = (node, name, raw) => {
     if (!Number.isFinite(raw) || raw < 0) return;
     const line = location(sourceFile, node);
-    rows.push({ id: `${file}:${line}:${name}`, ...normalizedValue(raw, name, file, node), detector });
+    rows.push({ id: `${file}:${line}:${name}`, ...normalizedValue(raw, name, file, node) });
   };
   const visit = node => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
@@ -162,25 +162,25 @@ export function enumerateText(file, text) {
       const isConst = ts.isVariableDeclarationList(node.parent) &&
         (node.parent.flags & ts.NodeFlags.Const) !== 0;
       const value = isConst ? numericValue(node.initializer, constants) : null;
-      if (value !== null) add(node.name, node.name.text, value, "named-constant");
+      if (value !== null) add(node.name, node.name.text, value);
     }
     if (ts.isCallExpression(node)) {
       const name = callName(node.expression);
       const value = node.arguments[0] ? directNumericValue(node.arguments[0]) : null;
-      if (name === "AbortSignal.timeout" && value !== null) add(node.expression, name, value, "abort-signal");
+      if (name === "AbortSignal.timeout" && value !== null) add(node.expression, name, value);
       else if ((name === "setTimeout" || name === "setInterval") && value === null && node.arguments[1]) {
         const delay = directNumericValue(node.arguments[1]);
-        if (delay !== null) add(node.expression, name, delay, "timer-call");
+        if (delay !== null) add(node.expression, name, delay);
       } else if ((name === "setTimeout" || name === "setInterval") && value !== null) {
         // Promise timers from node:timers/promises take the delay as argument zero.
-        add(node.expression, name, value, "timer-call");
+        add(node.expression, name, value);
       }
     }
     if (ts.isPropertyAssignment(node)) {
       const name = propertyName(node.name);
       if (name && ["timeoutMs", "timeout", "connect_timeout"].includes(name)) {
         const value = directNumericValue(node.initializer);
-        if (value !== null) add(node.name, name, value, "timeout-property");
+        if (value !== null) add(node.name, name, value);
       }
     }
     ts.forEachChild(node, visit);

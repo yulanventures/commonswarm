@@ -76,7 +76,7 @@ test("delayed local endpoint makes the rendered row pass below half-budget and f
   const id = "fixture.ts:1:TIMEOUT_MS";
   const report = markdownReport({
     baseUrl: target.url,
-    inventory: [{ id, value_ms: 100, unit_note: "milliseconds", detector: "named-constant" }],
+    inventory: [{ id, value_ms: 100, unit_note: "milliseconds" }],
     mapping: { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } },
     measurements: new Map([["fixture", { durations: slow, realTimeouts: 0 }]]), startup: null,
   });

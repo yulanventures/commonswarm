@@ -44,7 +44,7 @@ node scripts/timeout-table/run.mjs \
 
 `--client` has no default. Without it, client operations are `NOT RUN`; the auth-settings probe and uncapped source check can still run. `--runs` defaults to 20. `--pause-ms` defaults to 500. Percentiles use the nearest-rank method.
 
-The preload changes only requests whose origin equals the profile URL. It records only transport, method, path without query, status, and duration. It records WebSocket connect timing when a measured operation opens one. The operations above do not open Realtime, so Realtime needs a separate measurement.
+The preload changes only requests whose origin equals the profile URL. It records only method, path without query, status, and duration. A WebSocket uses method `CONNECT`. The operations above do not open Realtime, so Realtime needs a separate measurement.
 
 ## Operations
 

@@ -33,7 +33,6 @@ function record(row) {
   // This allowlist is the privacy boundary. Do not add headers, bodies, query,
   // fragments, credentials, or the original URL.
   appendFileSync(logPath, `${JSON.stringify({
-    transport: row.transport,
     method: row.method,
     path: row.path,
     status: row.status,
@@ -52,11 +51,11 @@ if (typeof originalFetch === "function") {
     const method = String(init?.method ?? (typeof input === "object" && input?.method) ?? "GET").toUpperCase();
     try {
       const response = await originalFetch.call(this, forwarded, init);
-      record({ transport: "fetch", method, path: url.pathname, status: response.status,
+      record({ method, path: url.pathname, status: response.status,
         duration_ms: performance.now() - started });
       return response;
     } catch (error) {
-      record({ transport: "fetch", method, path: url.pathname, status: "ERROR",
+      record({ method, path: url.pathname, status: "ERROR",
         duration_ms: performance.now() - started });
       throw error;
     }
@@ -74,7 +73,7 @@ if (typeof OriginalWebSocket === "function") {
       const finish = status => {
         if (done) return;
         done = true;
-        record({ transport: "websocket", method: "CONNECT", path: target.pathname, status,
+        record({ method: "CONNECT", path: target.pathname, status,
           duration_ms: performance.now() - started });
       };
       this.addEventListener("open", () => finish(101), { once: true });
