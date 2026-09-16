@@ -52,7 +52,6 @@ The preload changes only requests whose origin equals the profile URL. It record
 |---|---|---|---|
 | `check` | safe-read | `check.json` only inside the private profile copy | the complete private copy and isolated home |
 | `inbox --limit 1` | safe-read | nothing | nothing |
-| `members` | safe-read | nothing | nothing |
 | `file ls` | safe-read | nothing | nothing |
 | `GET /auth/v1/settings` | safe-read | nothing | nothing |
 
