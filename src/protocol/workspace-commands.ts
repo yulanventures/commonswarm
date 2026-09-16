@@ -142,6 +142,15 @@ export type WorkspaceCommand =
       scopes: string[];
       ttl_ms?: number;
     }
+  | {
+      kind: 'mint_agent_join_credential';
+      seat_cap: number;
+      ttl_hours: number;
+    }
+  | {
+      kind: 'revoke_agent_join_credential';
+      join_credential_id: string;
+    }
   | { kind: 'revoke_agent_token'; token_id: string }
   | {
       /**
@@ -386,6 +395,8 @@ export const HUMAN_ONLY_COMMANDS = new Set<WorkspaceCommand['kind']>([
   'revoke_agent_principal',
   'set_agent_model',
   'mint_agent_token',
+  'mint_agent_join_credential',
+  'revoke_agent_join_credential',
   'enable_agent_management',
   'disable_agent_management',
   'recover_agent_session',
@@ -1432,6 +1443,8 @@ export function decideWorkspace(
     case 'enable_agent_management':
     case 'disable_agent_management':
     case 'recover_agent_session':
+    case 'mint_agent_join_credential':
+    case 'revoke_agent_join_credential':
     case 'acquire_agent_session':
     case 'renew_agent_session':
     case 'release_agent_session':

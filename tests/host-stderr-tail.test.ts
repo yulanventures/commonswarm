@@ -21,11 +21,12 @@ import {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const AGENT_TOKEN = `swm_agt_${"A".repeat(43)}`;
+const AGENT_JOIN_CREDENTIAL = `swm_join_${"J".repeat(43)}`;
 const WAKE_TOPIC = `cswarm-wake:${"B".repeat(43)}`;
 const SHORT_WAKE = `cswarm-wake:${"C".repeat(42)}`;
 
 const SECRET_SHAPE_SWEEP_ROOTS = ["src", "supabase/functions"] as const;
-const SECRET_SHAPE_LITERAL = "swm_(?:agt|inv|cap)_";
+const SECRET_SHAPE_LITERAL = "swm_(?:agt|inv|cap|join)_";
 const SECRET_SHAPE_DEFINER = "src/host/credential-redaction.ts";
 const SECRET_SHAPE_READERS = [
   "src/listener/supervisor.ts",
@@ -199,6 +200,7 @@ test("a single unterminated line too long for the ring is dropped WHOLE, not tru
 test("redactCredentialText path: token and wake-topic shapes in stderr and in a tool title", () => {
   const shapes: Array<[string, string, RegExp]> = [
     ["agent-token", AGENT_TOKEN, /swm_agt_/i],
+    ["agent-join-credential", AGENT_JOIN_CREDENTIAL, /swm_join_/i],
     ["wake-topic", WAKE_TOPIC, /cswarm-wake:/i],
   ];
   const failures: string[] = [];
@@ -281,4 +283,3 @@ test("SECRET_SHAPE_RE readers are the listed files and no other src or edge copy
     );
   }
 });
-

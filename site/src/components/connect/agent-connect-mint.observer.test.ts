@@ -7,11 +7,11 @@
  * be true for that, and each has its own test below.
  *   1. The request must NAME the kind. Omitting it is not "no opinion" — the command function
  *      falls back to "timeboxed" with a 30-day horizon
- *      (supabase/functions/command/index.ts:1957-1959, 2888-2891), which is the month every
+ *      (supabase/functions/command/index.ts:2380-2382, 3337-3340), which is the month every
  *      web-added agent used to die after.
  *   2. `renewal_horizon_ms` must be ABSENT from the JSON. The validator accepts standing only
- *      when the key is `undefined` (index.ts:1963-1964); a present `null` fails validation and
- *      returns 400 (index.ts:2015-2018), even though the wire TYPE declares `number | null`.
+ *      when the key is `undefined` (index.ts:2387); a present `null` fails validation and
+ *      returns 400 (index.ts:2441), even though the wire TYPE declares `number | null`.
  *      `JSON.stringify` drops undefined but SERIALISES null, so this is a real distinction and
  *      the test asserts on the serialised string, not on the object. An object assertion alone
  *      would pass for a body that gets rejected by the deployment.
@@ -124,7 +124,7 @@ test("the mint never puts renewal_horizon_ms on the wire, not even as null", asy
   assert.equal(
     Object.hasOwn(sent[0]!.command, "renewal_horizon_ms"),
     false,
-    "a present null is refused with 400 by index.ts:1963-1964",
+    "a present null is refused with 400 by index.ts:2387",
   );
   /* The load-bearing assertion. A property set to `undefined` satisfies the check above and is
    * still correct because JSON.stringify drops it; an explicit null satisfies neither. */

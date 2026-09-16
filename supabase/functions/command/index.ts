@@ -196,6 +196,15 @@ type ConnectCommand =
     renewal_kind?: "timeboxed" | "standing";
     renewal_horizon_ms?: number | null;
   }
+  | {
+    kind: "mint_agent_join_credential";
+    seat_cap: number;
+    ttl_hours: number;
+  }
+  | {
+    kind: "revoke_agent_join_credential";
+    join_credential_id: string;
+  }
   | { kind: "revoke_agent_token"; token_id: string }
   // Self-description: no target field on purpose — the presenting agent
   // credential IS the subject, the same fence shape as renew_agent_token.
@@ -380,6 +389,15 @@ type WorkspaceCommand =
     renewal_kind: "timeboxed" | "standing";
     renewal_horizon_ms: number | null;
   }
+  | {
+    kind: "mint_agent_join_credential";
+    seat_cap: number;
+    ttl_hours: number;
+  }
+  | {
+    kind: "revoke_agent_join_credential";
+    join_credential_id: string;
+  }
   | { kind: "revoke_agent_token"; token_id: string }
   | { kind: "declare_agent_model"; model: string | null }
   | {
@@ -483,6 +501,10 @@ interface StoredResponse {
   principal_id?: string;
   token_id?: string;
   run_id?: string;
+  join_credential_id?: string;
+  locator?: string;
+  seat_cap?: number;
+  seats_used?: number;
   workspace_id?: string;
   /**
    * Capability-URL replay fields. The raw swm_cap_ token is deliberately absent:
@@ -602,6 +624,8 @@ const SIGNAL_CREDENTIAL_LIMIT = 120;
 const SIGNAL_WORKSPACE_LIMIT = 1000;
 const COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
+const AGENT_JOIN_CREDENTIAL_RE = /^swm_join_[A-Za-z0-9_-]{43}$/;
+const AGENT_JOIN_LOCATOR_RE = /^[A-Za-z0-9_-]{22}$/;
 const INVITATION_TOKEN_RE = /^swm_inv_[A-Za-z0-9_-]{43}$/;
 /**
  * The shape the anonymous capability endpoint will require of a presented
@@ -621,6 +645,8 @@ const CREATE_WORKSPACE_KIND = "create_workspace";
 const RENEW_AGENT_TOKEN_KIND = "renew_agent_token";
 const MINT_CAPABILITY_KIND = "mint_capability_url";
 const REVOKE_CAPABILITY_KIND = "revoke_capability_url";
+const MINT_AGENT_JOIN_CREDENTIAL_KIND = "mint_agent_join_credential";
+const REVOKE_AGENT_JOIN_CREDENTIAL_KIND = "revoke_agent_join_credential";
 /**
  * The exit from an idle suspension. Not a WORKSPACE_COMMAND_KIND and not in the
  * reducer: it changes no authority, grants nothing, and emits no event — it
@@ -660,6 +686,15 @@ const capabilityUrlsEnabled = Deno.env.get("SWARM_CAPABILITY_URLS") === "1";
 const CAPABILITY_TTL_MS = 24 * 60 * 60 * 1000;
 const CAPABILITY_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const CAPABILITY_MIN_TTL_MS = 60 * 1000;
+
+// The database repeats every bound. Ten seats covers H0's three-host done-test
+// with headroom without turning one pasted secret into an open-ended inviter.
+const AGENT_JOIN_SEAT_CAP_MIN = 1;
+const AGENT_JOIN_SEAT_CAP_MAX = 10;
+// The credential is pasted into model context. A one-to-24-hour window is long
+// enough for same-day handoff and keeps the exposure measured in hours.
+const AGENT_JOIN_TTL_MIN_HOURS = 1;
+const AGENT_JOIN_TTL_MAX_HOURS = 24;
 
 /**
  * §5's no-teammate-DoS rule: (a) is per-issuing-identity and re-mintable after
@@ -888,6 +923,8 @@ const COMMAND_KINDS = [
   "archive_workspace",
   "create_agent_principal",
   "mint_agent_token",
+  MINT_AGENT_JOIN_CREDENTIAL_KIND,
+  REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
   "revoke_agent_principal",
   "set_agent_model",
   "revoke_agent_token",
@@ -924,6 +961,8 @@ const CONNECT_COMMAND_KINDS = [
   "archive_workspace",
   "create_agent_principal",
   "mint_agent_token",
+  MINT_AGENT_JOIN_CREDENTIAL_KIND,
+  REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
   "revoke_agent_principal",
   "set_agent_model",
 ] as const;
@@ -1382,15 +1421,20 @@ function hexToBytes(value: string): Uint8Array {
   );
 }
 
-function opaqueToken(prefix: "swm_inv_" | "swm_agt_" | "swm_cap_"): string {
-  const bytes = new Uint8Array(32);
+function randomBase64Url(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);
   const binary = String.fromCharCode(...bytes);
-  const encoded = btoa(binary)
+  return btoa(binary)
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/u, "");
-  return `${prefix}${encoded}`;
+}
+
+function opaqueToken(
+  prefix: "swm_inv_" | "swm_agt_" | "swm_cap_" | "swm_join_",
+): string {
+  return `${prefix}${randomBase64Url(32)}`;
 }
 
 async function setTransaction(tx: Sql): Promise<void> {
@@ -2272,6 +2316,45 @@ function validateCommand(
           reason: "revoke_agent_principal fields are malformed",
         };
     }
+    if (cmd.kind === MINT_AGENT_JOIN_CREDENTIAL_KIND) {
+      const valid = exactKeys(cmd, ["kind", "seat_cap", "ttl_hours"]) &&
+        integer(cmd.seat_cap, AGENT_JOIN_SEAT_CAP_MIN) &&
+        (cmd.seat_cap as number) <= AGENT_JOIN_SEAT_CAP_MAX &&
+        integer(cmd.ttl_hours, AGENT_JOIN_TTL_MIN_HOURS) &&
+        (cmd.ttl_hours as number) <= AGENT_JOIN_TTL_MAX_HOURS;
+      return valid
+        ? {
+          ok: true,
+          command: {
+            kind: MINT_AGENT_JOIN_CREDENTIAL_KIND,
+            seat_cap: cmd.seat_cap as number,
+            ttl_hours: cmd.ttl_hours as number,
+          },
+        }
+        : {
+          ok: false,
+          status: 400,
+          reason:
+            `mint_agent_join_credential requires seat_cap ${AGENT_JOIN_SEAT_CAP_MIN}..${AGENT_JOIN_SEAT_CAP_MAX} and ttl_hours ${AGENT_JOIN_TTL_MIN_HOURS}..${AGENT_JOIN_TTL_MAX_HOURS}`,
+        };
+    }
+    if (cmd.kind === REVOKE_AGENT_JOIN_CREDENTIAL_KIND) {
+      return exactKeys(cmd, ["kind", "join_credential_id"]) &&
+          typeof cmd.join_credential_id === "string" &&
+          UUID_RE.test(cmd.join_credential_id)
+        ? {
+          ok: true,
+          command: {
+            kind: REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+            join_credential_id: cmd.join_credential_id.toLowerCase(),
+          },
+        }
+        : {
+          ok: false,
+          status: 400,
+          reason: "revoke_agent_join_credential requires one UUID join_credential_id",
+        };
+    }
     // Explicit mint arm only — never fall through from revoke kinds into a
     // mint prepare that would invent a live credential.
     if (cmd.kind !== "mint_agent_token") {
@@ -2510,6 +2593,18 @@ function storedResponse(value: unknown): StoredResponse {
       ? { token_id: response.token_id }
       : {}),
     ...(typeof response.run_id === "string" ? { run_id: response.run_id } : {}),
+    ...(typeof response.join_credential_id === "string"
+      ? { join_credential_id: response.join_credential_id }
+      : {}),
+    ...(typeof response.locator === "string"
+      ? { locator: response.locator }
+      : {}),
+    ...(typeof response.seat_cap === "number"
+      ? { seat_cap: response.seat_cap }
+      : {}),
+    ...(typeof response.seats_used === "number"
+      ? { seats_used: response.seats_used }
+      : {}),
     ...(typeof response.workspace_id === "string"
       ? { workspace_id: response.workspace_id }
       : {}),
@@ -3171,6 +3266,17 @@ async function prepareWorkspaceCommand(
     };
   } else if (wire.kind === "revoke_agent_token") {
     command = { kind: "revoke_agent_token", token_id: wire.token_id };
+  } else if (wire.kind === MINT_AGENT_JOIN_CREDENTIAL_KIND) {
+    command = {
+      kind: MINT_AGENT_JOIN_CREDENTIAL_KIND,
+      seat_cap: wire.seat_cap,
+      ttl_hours: wire.ttl_hours,
+    };
+  } else if (wire.kind === REVOKE_AGENT_JOIN_CREDENTIAL_KIND) {
+    command = {
+      kind: REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+      join_credential_id: wire.join_credential_id,
+    };
   } else if (wire.kind === "declare_agent_model") {
     command = { kind: "declare_agent_model", model: wire.model };
   } else if (wire.kind === "submit_feedback") {
@@ -5298,6 +5404,421 @@ async function auditRefusal(
   return result;
 }
 
+type MintAgentJoinCredentialCommand = Extract<
+  ConnectCommand,
+  { kind: "mint_agent_join_credential" }
+>;
+type RevokeAgentJoinCredentialCommand = Extract<
+  ConnectCommand,
+  { kind: "revoke_agent_join_credential" }
+>;
+
+/**
+ * Create one join credential and its G3 registrar identity.
+ *
+ * The caller supplies only seat_cap and ttl_hours. IDs, the registrar name,
+ * the device label, the public locator and the secret are all server-derived.
+ * Every write uses the transaction passed by handleTransaction, so a failure
+ * at any later insert rolls the registrar device, principal and run back with
+ * the credential.
+ */
+async function mintAgentJoinCredential(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: MintAgentJoinCredentialCommand,
+  commandId: string,
+  hash: string,
+  minClientVersion: string,
+  ignoredIdentity: string | null,
+): Promise<HttpResult> {
+  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+    return await auditRefusal(tx, auth, MINT_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "authz",
+      reason: "agent_join_credential_kind_forbidden",
+      detail: ignoredIdentity,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, { status: 403, body: { error: "forbidden" } });
+  }
+  const userId = auth.actor.user;
+
+  // Replay before any quota read. The first mint may itself have filled a
+  // limit, and its retry must still receive the stored safe metadata.
+  const existingRows = await tx<{
+    workspace_id: string;
+    stream_id: string;
+    request_hash: string;
+    response: unknown;
+  }[]>`
+    SELECT workspace_id, stream_id, request_hash, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.credentialKind}
+      AND principal_id = ${canonicalPrincipal(auth.actor)}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  const existing = existingRows[0];
+  if (existing) {
+    const matches = existing.request_hash === hash &&
+      existing.workspace_id === route.workspaceId &&
+      existing.stream_id === route.streamId;
+    await insertAudit(tx, {
+      auth,
+      commandKind: MINT_AGENT_JOIN_CREDENTIAL_KIND,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+      outcome: matches ? "replayed" : "conflict",
+      reason: matches ? null : "agent_join_command_id_conflict",
+      detail: ignoredIdentity,
+      hash,
+    });
+    // The ledger never stores join_credential, so replay can never re-issue it.
+    return matches
+      ? replayResult(
+        storedResponse(existing.response),
+        MINT_AGENT_JOIN_CREDENTIAL_KIND,
+      )
+      : { status: 409, body: { error: "command_id_conflict" } };
+  }
+
+  // A registrar is hidden from the roster, but it is still a durable principal
+  // and therefore consumes one slot from the existing resource ceiling.
+  const principalRows = await tx<{ live: string }[]>`
+    SELECT count(*)::text AS live
+    FROM swarm.agent_principals AS p
+    WHERE p.workspace_id = ${route.workspaceId}::uuid
+      AND p.revoked_at IS NULL
+  `;
+  if (Number(principalRows[0]?.live ?? "0") >= FREE_TIER_PRINCIPAL_LIMIT) {
+    return await auditRefusal(tx, auth, MINT_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "quota",
+      reason: "workspace_principal_limit_reached",
+      detail: ignoredIdentity,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, {
+      status: 403,
+      body: {
+        error: "principal_limit_reached",
+        limit: FREE_TIER_PRINCIPAL_LIMIT,
+      },
+    });
+  }
+
+  const joinCredentialId = crypto.randomUUID();
+  const registrarPrincipalId = crypto.randomUUID();
+  const registrarRunId = crypto.randomUUID();
+  const registrarDeviceId = crypto.randomUUID();
+  const locator = randomBase64Url(16);
+  const secret = opaqueToken("swm_join_");
+  if (
+    !AGENT_JOIN_CREDENTIAL_RE.test(secret) ||
+    !AGENT_JOIN_LOCATOR_RE.test(locator)
+  ) {
+    throw new Error("minted agent-join material does not match its wire shape");
+  }
+  const credentialHash = await sha256(secret);
+
+  // A full server UUID makes both values collision-free under the existing
+  // workspace principal-name uniqueness rule. They use no request text because
+  // these are service rows, not agent-chosen identity.
+  const registrarName = `join-registrar-${joinCredentialId}`;
+  const registrarDeviceLabel = `Join registrar ${joinCredentialId}`;
+  await tx`
+    INSERT INTO swarm.devices (device_id, user_id, label)
+    VALUES (
+      ${registrarDeviceId}::uuid,
+      ${userId}::uuid,
+      ${registrarDeviceLabel}
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.agent_principals (
+      principal_id, workspace_id, owner_user_id, name
+    ) VALUES (
+      ${registrarPrincipalId}::uuid,
+      ${route.workspaceId}::uuid,
+      ${userId}::uuid,
+      ${registrarName}
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
+    VALUES (
+      ${registrarRunId}::uuid,
+      ${registrarPrincipalId}::uuid,
+      ${registrarDeviceId}::uuid
+    )
+  `;
+  const issued = await tx<{ expires_at: Date }[]>`
+    INSERT INTO swarm.agent_join_credentials (
+      id, workspace_id, owner_user_id,
+      registrar_principal_id, registrar_run_id,
+      credential_hash, locator, seat_cap, seats_used,
+      expires_at, mint_command_id
+    ) VALUES (
+      ${joinCredentialId}::uuid,
+      ${route.workspaceId}::uuid,
+      ${userId}::uuid,
+      ${registrarPrincipalId}::uuid,
+      ${registrarRunId}::uuid,
+      ${credentialHash},
+      ${locator},
+      ${command.seat_cap},
+      0,
+      statement_timestamp() + interval '1 hour' * ${command.ttl_hours},
+      ${commandId}
+    )
+    RETURNING expires_at
+  `;
+  const expiresAt = issued[0]?.expires_at;
+  if (!expiresAt) throw new Error("agent-join credential insert returned no row");
+
+  // This is the complete replay-safe response. The raw secret is added only to
+  // the fresh HTTP body below and never enters Postgres.
+  const response: StoredResponse = {
+    ok: true,
+    event_ids: [],
+    join_credential_id: joinCredentialId,
+    locator,
+    seat_cap: command.seat_cap,
+    seats_used: 0,
+    expires_at: expiresAt.toISOString(),
+  };
+  const ledgered = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.credentialKind},
+      ${canonicalPrincipal(auth.actor)},
+      ${commandId},
+      ${route.workspaceId}::uuid,
+      ${route.streamId}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (ledgered.length === 0) {
+    throw new LedgerRace(
+      auth,
+      commandId,
+      MINT_AGENT_JOIN_CREDENTIAL_KIND,
+      route.workspaceId,
+      route.streamId,
+      hash,
+    );
+  }
+  await insertAudit(tx, {
+    auth,
+    commandKind: MINT_AGENT_JOIN_CREDENTIAL_KIND,
+    workspaceId: route.workspaceId,
+    streamId: route.streamId,
+    outcome: "accepted",
+    detail: [ignoredIdentity, `join_credential_id=${joinCredentialId}`]
+      .filter(Boolean).join("; "),
+    hash,
+  });
+  return {
+    status: 200,
+    body: {
+      status: "accepted",
+      ...response,
+      events: [],
+      min_client_version: minClientVersion,
+      join_credential: secret,
+    },
+  };
+}
+
+/** Revoke the inviter without changing any seats registered through it. */
+async function revokeAgentJoinCredential(
+  tx: Sql,
+  route: Route,
+  auth: AuthContext,
+  command: RevokeAgentJoinCredentialCommand,
+  commandId: string,
+  hash: string,
+  minClientVersion: string,
+  ignoredIdentity: string | null,
+): Promise<HttpResult> {
+  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+    return await auditRefusal(tx, auth, REVOKE_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "authz",
+      reason: "agent_join_credential_kind_forbidden",
+      detail: ignoredIdentity,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, { status: 403, body: { error: "forbidden" } });
+  }
+  const userId = auth.actor.user;
+  const rows = await tx<{
+    owner_user_id: string;
+    registrar_principal_id: string;
+    registrar_run_id: string;
+    registrar_device_id: string;
+    revoked_at: Date | null;
+  }[]>`
+    SELECT
+      c.owner_user_id,
+      c.registrar_principal_id,
+      c.registrar_run_id,
+      r.device_id AS registrar_device_id,
+      c.revoked_at
+    FROM swarm.agent_join_credentials AS c
+    JOIN swarm.agent_runs AS r
+      ON r.run_id = c.registrar_run_id
+     AND r.principal_id = c.registrar_principal_id
+    WHERE c.id = ${command.join_credential_id}::uuid
+      AND c.workspace_id = ${route.workspaceId}::uuid
+    LIMIT 1
+  `;
+  const row = rows[0];
+  const mayRevoke = row !== undefined &&
+    (row.owner_user_id === userId ||
+      route.membershipRole === "owner" || route.membershipRole === "admin");
+  if (!mayRevoke) {
+    return await auditRefusal(tx, auth, REVOKE_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "authz",
+      reason: "agent_join_credential_not_found",
+      detail: ignoredIdentity,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, { status: 403, body: { error: "forbidden" } });
+  }
+
+  const existingRows = await tx<{
+    workspace_id: string;
+    stream_id: string;
+    request_hash: string;
+    response: unknown;
+  }[]>`
+    SELECT workspace_id, stream_id, request_hash, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = ${auth.credentialKind}
+      AND principal_id = ${canonicalPrincipal(auth.actor)}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  const existing = existingRows[0];
+  if (existing) {
+    const matches = existing.request_hash === hash &&
+      existing.workspace_id === route.workspaceId &&
+      existing.stream_id === route.streamId;
+    await insertAudit(tx, {
+      auth,
+      commandKind: REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+      outcome: matches ? "replayed" : "conflict",
+      reason: matches ? null : "agent_join_command_id_conflict",
+      detail: ignoredIdentity,
+      hash,
+    });
+    return matches
+      ? replayResult(
+        storedResponse(existing.response),
+        REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+      )
+      : { status: 409, body: { error: "command_id_conflict" } };
+  }
+  if (row.revoked_at !== null) {
+    return await auditRefusal(tx, auth, REVOKE_AGENT_JOIN_CREDENTIAL_KIND, {
+      outcome: "domain",
+      reason: "agent_join_credential_already_revoked",
+      detail: ignoredIdentity,
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+    }, { status: 409, body: { error: "already_revoked" } });
+  }
+
+  const revoked = await tx<{ revoked_at: Date }[]>`
+    UPDATE swarm.agent_join_credentials
+    SET revoked_at = statement_timestamp(), revoked_by = ${userId}::uuid
+    WHERE id = ${command.join_credential_id}::uuid
+      AND workspace_id = ${route.workspaceId}::uuid
+      AND revoked_at IS NULL
+    RETURNING revoked_at
+  `;
+  const revokedAt = revoked[0]?.revoked_at;
+  if (!revokedAt) throw new Error("agent-join credential revocation lost its row");
+
+  // One registrar belongs to one credential. Ending these service rows makes
+  // the lifecycle explicit; no agent token or joined-seat principal is named.
+  await tx`
+    UPDATE swarm.agent_runs
+    SET ended_at = statement_timestamp()
+    WHERE run_id = ${row.registrar_run_id}::uuid
+      AND ended_at IS NULL
+  `;
+  await tx`
+    UPDATE swarm.agent_principals
+    SET revoked_at = statement_timestamp()
+    WHERE principal_id = ${row.registrar_principal_id}::uuid
+      AND revoked_at IS NULL
+  `;
+  await tx`
+    UPDATE swarm.devices
+    SET revoked_at = statement_timestamp()
+    WHERE device_id = ${row.registrar_device_id}::uuid
+      AND revoked_at IS NULL
+  `;
+
+  const response: StoredResponse = {
+    ok: true,
+    event_ids: [],
+    join_credential_id: command.join_credential_id,
+    revoked_at: revokedAt.toISOString(),
+  };
+  const ledgered = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      ${auth.credentialKind},
+      ${canonicalPrincipal(auth.actor)},
+      ${commandId},
+      ${route.workspaceId}::uuid,
+      ${route.streamId}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (ledgered.length === 0) {
+    throw new LedgerRace(
+      auth,
+      commandId,
+      REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+      route.workspaceId,
+      route.streamId,
+      hash,
+    );
+  }
+  await insertAudit(tx, {
+    auth,
+    commandKind: REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+    workspaceId: route.workspaceId,
+    streamId: route.streamId,
+    outcome: "accepted",
+    detail: ignoredIdentity,
+    hash,
+  });
+  return {
+    status: 200,
+    body: {
+      status: "accepted",
+      ...response,
+      events: [],
+      min_client_version: minClientVersion,
+    },
+  };
+}
+
 /**
  * The checks mint and revoke share, in the order §7 requires. The feature gate
  * answers first so that while the on-ramp is dark the response cannot be used to
@@ -6095,7 +6616,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3450 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3588 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -7679,6 +8200,31 @@ async function handleTransaction(
     }
     const hash = requestHash(auth.actor, command);
     await afterStep(6);
+
+    if (command.kind === MINT_AGENT_JOIN_CREDENTIAL_KIND) {
+      return await mintAgentJoinCredential(
+        tx,
+        route,
+        auth,
+        command,
+        commandId,
+        hash,
+        minClientVersion,
+        ignoredIdentity,
+      );
+    }
+    if (command.kind === REVOKE_AGENT_JOIN_CREDENTIAL_KIND) {
+      return await revokeAgentJoinCredential(
+        tx,
+        route,
+        auth,
+        command,
+        commandId,
+        hash,
+        minClientVersion,
+        ignoredIdentity,
+      );
+    }
 
     if (kind === CLAIM_AGENT_INBOX_KIND || kind === ACK_AGENT_DELIVERY_KIND) {
       const agent = auth.agent;

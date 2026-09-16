@@ -23,7 +23,7 @@ const CONTROL_AND_SEPARATOR_STRIP_RE = new RegExp(
  * on another string can miss. Replace sites compile `gi` from this source.
  */
 export const SECRET_SHAPE_RE = new RegExp(
-  `swm_(?:agt|inv|cap)_[^${SEPARATOR_CLASS_SOURCE}]*|cswarm-wake:[A-Za-z0-9_-]{43}`,
+  `swm_(?:agt|inv|cap|join)_[^${SEPARATOR_CLASS_SOURCE}]*|cswarm-wake:[A-Za-z0-9_-]{43}`,
   "i",
 );
 

@@ -763,6 +763,8 @@ var HUMAN_ONLY_COMMANDS = /* @__PURE__ */ new Set([
   "revoke_agent_principal",
   "set_agent_model",
   "mint_agent_token",
+  "mint_agent_join_credential",
+  "revoke_agent_join_credential",
   "enable_agent_management",
   "disable_agent_management",
   "recover_agent_session"
@@ -1557,6 +1559,8 @@ function decideWorkspace(state, cmd, ctx) {
     case "enable_agent_management":
     case "disable_agent_management":
     case "recover_agent_session":
+    case "mint_agent_join_credential":
+    case "revoke_agent_join_credential":
     case "acquire_agent_session":
     case "renew_agent_session":
     case "release_agent_session":
