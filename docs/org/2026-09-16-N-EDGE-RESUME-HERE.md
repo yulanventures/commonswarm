@@ -3,7 +3,28 @@
 Written for a cold successor. The H0 lanes have their own file:
 `docs/org/2026-09-16-H0-LINK-JOIN-RESUME-HERE.md`.
 
-## STATE AT 22:35Z — cutover ROLLED BACK; read this first
+## STATE AT 23:15Z — read this first
+
+- **N-site LIVE (production):** commonswarm.com and www are A 178.105.29.28 proxied since 23:01:38Z (HezLead holds the
+  zone rights; rollback A 76.76.21.21 DNS-only). Merge dc585c9c of 8cd2ba3c; controls 18/18; GitHub sign-in through the
+  box app verified by the Strategist, server-side session 23:06:54Z. Record: docs/evidence/2026-09-16-n-site/. Vercel stays
+  deployed until the operator confirms deletion.
+- **api.commonswarm.com is still the Supabase CNAME.** The Falkenstein box cannot carry the edge functions: with the fold,
+  `cswarm check` (0.1.71, 3 s) is p95 3.02 s through edge-staging (Supabase today 1.03 s). Tables:
+  scratchpad `window/tt/{api,box}-timeout-table.md`, tool on `lane/timeout-table` (not landed; lead fix 1eab9161+ for an
+  unref'd timer). The edges move with path C (NYC droplet, HezLead provisioning via the Strategist) or path B (N-db window).
+- LANDED today on main: edge fold (merge 45b903c5, evidence docs/evidence/2026-09-16-edge-fold/), N-edge fix round 6
+  (774dd9ad), N-site. The box container runs main 4cb8c5fe behind edge-staging only.
+- IN FLIGHT: `lane/n-db-stack` fix round 2 (Codex xhigh; antigravity FAILED 7c0c9a5a, four PRODUCTION claims verified by
+  the lead: run-db-tool argument pass-through, soft read-only freeze with no abort undo, Caddy fallback outside the site
+  block, backup_ro without BYPASSRLS; grok arm on 7c0c9a5a still running); `lane/check-budget` (derive
+  AGENT_CHECK_TIMEOUT_MS / HOOK_CHECK_TIMEOUT_MS from the host hook ceiling, next CLI release); `lane/mcp-command-table`
+  (H lane 1) round-3 pair on b19dc934.
+- NEXT for the droplet: deploy the same reviewed edge release there, a second staging name, the full timeout table
+  (plus a bounded-write bench for AGENT_SEEN 5 s and ACTIVITY 5 s, which the tool does not run), then re-cut with
+  controls that include `cswarm check` and a listener wake.
+
+## STATE AT 22:35Z — cutover ROLLED BACK (history)
 
 - Steps 1-3 ran (merge 0a04de20 of 70d17d08; api DNS on the box 22:07:58Z; 14/14 controls). Then `cswarm check`
   (0.1.71, budget `AGENT_CHECK_TIMEOUT_MS = 3_000`) timed out 5/5 through the box, 3.14-3.57 s. DNS rolled back at
