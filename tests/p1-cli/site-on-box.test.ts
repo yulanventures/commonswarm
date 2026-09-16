@@ -523,7 +523,7 @@ test("Cloudflare TTL option allows only the exact static-extension rewrite", asy
     response.statusCode = 200;
     response.setHeader("cache-control", request.url === "/page"
       ? "public, max-age=0, must-revalidate"
-      : "public, max-age=14400");
+      : "public, max-age=14400, must-revalidate");
     if (request.url === "/page") {
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.end('<script src="/_astro/fresh.HASH.js"></script>');

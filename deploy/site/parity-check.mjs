@@ -52,7 +52,7 @@ const policyByExtension = new Map(
 );
 const cloudflareStaticExtensions = new Set([".css", ".js", ".png", ".svg", ".woff2"]);
 const vercelCacheControl = "public, max-age=0, must-revalidate";
-const cloudflareBrowserCacheControl = "public, max-age=14400";
+const cloudflareBrowserCacheControl = "public, max-age=14400, must-revalidate"; // measured through Cloudflare 2026-09-16
 
 function get(url, hostOverride) {
   return new Promise((resolveRequest, rejectRequest) => {

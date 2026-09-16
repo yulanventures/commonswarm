@@ -37,7 +37,7 @@ Use the staging name. It exercises Cloudflare, TLS, Caddy, and the release witho
 node deploy/site/parity-check.mjs https://site-staging.commonswarm.com --allow-cloudflare-browser-ttl
 ```
 
-The Cloudflare zone currently changes `cache-control` from `public, max-age=0, must-revalidate` to `public, max-age=14400` on 21 static-extension files. The operator accepted this for cutover and will change the Browser Cache TTL zone setting later. The option above permits only that exact rewrite on `.css`, `.js`, `.png`, `.svg`, and `.woff2` paths. It permits no status, content-type, security-header, path, or other cache change. Without the option, the checker reports all 21 differences and exits nonzero.
+The Cloudflare zone currently changes `cache-control` from `public, max-age=0, must-revalidate` to `public, max-age=14400, must-revalidate` on 21 static-extension files. The operator accepted this for cutover and will change the Browser Cache TTL zone setting later. The option above permits only that exact rewrite on `.css`, `.js`, `.png`, `.svg`, and `.woff2` paths. It permits no status, content-type, security-header, path, or other cache change. Without the option, the checker reports all 21 differences and exits nonzero.
 
 The result must say that all routes passed and that 21 browser-TTL rewrites were allowed. Do not move DNS if it reports another difference.
 
