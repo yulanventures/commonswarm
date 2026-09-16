@@ -46,6 +46,10 @@ const reference = JSON.parse(await readFile(referencePath, "utf8"));
 const differences = [];
 const allowedDifferences = [];
 const ca = caPath ? await readFile(caPath) : undefined;
+const baseHostname = new URL(baseUrl).hostname;
+const loopback = baseHostname === "127.0.0.1" || baseHostname === "localhost" || baseHostname === "::1";
+const requestIntervalMs = loopback ? 0 : Math.max(500, Number(reference.requestIntervalMs) || 500);
+let nextRequestAt = 0;
 
 const policyByExtension = new Map(
   (reference.fingerprintedAssetPolicies ?? []).map((policy) => [policy.extension, policy]),
@@ -54,7 +58,10 @@ const cloudflareStaticExtensions = new Set([".css", ".js", ".png", ".svg", ".wof
 const vercelCacheControl = "public, max-age=0, must-revalidate";
 const cloudflareBrowserCacheControl = "public, max-age=14400, must-revalidate"; // measured through Cloudflare 2026-09-16
 
-function get(url, hostOverride) {
+async function get(url, hostOverride) {
+  const waitMs = Math.max(0, nextRequestAt - Date.now());
+  if (waitMs > 0) await new Promise((done) => setTimeout(done, waitMs));
+  nextRequestAt = Date.now() + requestIntervalMs;
   return new Promise((resolveRequest, rejectRequest) => {
     const transport = url.protocol === "https:" ? https : http;
     const request = transport.request(url, {

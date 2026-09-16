@@ -446,6 +446,7 @@ test("pre-cutover uses staging through Cloudflare and keeps direct-origin fallba
   assert.match(parity, /flag === "--ca"/);
   assert.match(parity, /flag === "--allow-cloudflare-browser-ttl"/);
   assert.match(parity, /caPath \? await readFile\(caPath\)/);
+  assert.match(parity, /Math\.max\(500, Number\(reference\.requestIntervalMs\)/);
   assert.match(runbook, /parity-check\.mjs https:\/\/commonswarm\.com --allow-cloudflare-browser-ttl/);
   assert.match(runbook, /Drop the option.*unflagged check passes/);
 });

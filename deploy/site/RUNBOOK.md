@@ -40,6 +40,7 @@ node deploy/site/parity-check.mjs https://site-staging.commonswarm.com --allow-c
 The last staging check before file-slash routes were added found this accepted difference on 21 URLs: Cloudflare changed `cache-control` from `public, max-age=0, must-revalidate` to `public, max-age=14400, must-revalidate`. The operator accepted it for cutover and will change the Browser Cache TTL zone setting later. The option above permits only that exact rewrite on `.css`, `.js`, `.png`, `.svg`, and `.woff2` paths, including their trailing-slash forms. It permits no status, content-type, security-header, path, or other cache change. Without the option, the checker reports every such rewrite and exits nonzero.
 
 The result must say that all routes passed and list only allowed browser-TTL rewrites. Do not move DNS if it reports another difference.
+For non-loopback URLs, the checker uses the reference's 550 ms request interval so the check stays below two requests per second.
 
 Run the production controls against the staging name:
 
