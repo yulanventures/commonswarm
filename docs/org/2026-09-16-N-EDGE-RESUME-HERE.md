@@ -149,6 +149,17 @@ Written for a cold successor. The H0 lanes have their own file:
 - The mini's system resolver cached the new names as missing; measurement scripts route only the staging names to a
   Cloudflare IP with a Node --require preload (docs/evidence/2026-09-16-n-edge/latency-dns-override.cjs).
 
+## INCIDENT, contained (~20:41Z)
+
+Installing lane 47c33aad's commonswarm.caddy as /etc/caddy/sites/10-commonswarm-api.caddy made Caddy reject its whole
+config: the file had a GLOBAL options block (`servers { trusted_proxies ... }`), which an imported site file cannot
+carry. The lead's `caddy validate | tail -1` hid the failure, so `systemctl reload caddy` ran and failed. Restored the
+76487b81 file, validated with the exit checked, reloaded (exit 0, active); site and edge staging both 200 on the box.
+Only the staging names point at the box, so no public user was affected. HezLead told (8070b19c). The edge container
+runs 47c33aad (healthy, 21.75 MiB / 512 MiB) with the OLD Caddy file. Fix round 3 moves the servers settings into a
+separate snippet for the operator's main Caddyfile and validates the box-shaped config. HezLead accepted the 4 h
+Browser Cache TTL for the cutover (2f6cd159).
+
 ## IN FLIGHT
 
 - `lane/edge-runtime-box` (Codex sol high, prompt `maker-n-edge.txt` in the session scratchpad): router with the
