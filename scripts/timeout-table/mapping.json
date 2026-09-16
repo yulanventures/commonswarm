@@ -1,0 +1,193 @@
+{
+  "version": 1,
+  "rows": {
+    "site/src/lib/agent-connect.ts:102:COMMAND_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "site/src/lib/agent-connect.ts:102,194-217", "detail": "Browser device registration, identity creation, and credential mint commands.",
+      "operation": { "name": "browser-agent-connect", "class": "not-run", "writes": ["device, principal, or agent credential state"], "removes": [], "reason": "The calls change membership or credentials and cannot be cleaned up without changing that state again.", "proxy": "No fair read-only proxy exists for the command statements." }
+    },
+    "site/src/lib/auth-providers.ts:82:AUTH_SETTINGS_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/auth/v1/settings"], "citation": "site/src/lib/auth-providers.ts:82,183-205", "detail": "GoTrue provider settings read.",
+      "operation": { "name": "auth-settings", "class": "safe-read", "writes": [], "removes": [], "reason": "GET reads public authentication settings." }
+    },
+    "site/src/lib/commonswarm.ts:69:BROWSER_REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command", "/functions/v1/read", "/rest/v1/...", "/storage/v1/...", "/auth/v1/..."], "citation": "site/src/lib/commonswarm.ts:69,479-493", "detail": "Shared browser request deadline used by reads and commands.",
+      "operation": { "name": "browser-shared-request", "class": "not-run", "writes": [], "removes": [], "reason": "One shared constant covers browser-only human and agent paths; a CLI profile cannot exercise that client code.", "proxy": "No single request represents every browser call site." }
+    },
+    "src/cli.ts:3294:TURN_BUDGET_CREDENTIAL_MARGIN_MS": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/cli.ts:3294", "detail": "Margin reserved for credential work around an external model turn.",
+      "operation": { "name": "listener-turn-margin", "class": "not-run", "writes": [], "removes": [], "reason": "Not a network request timeout." }
+    },
+    "src/cli.ts:7821:setTimeout": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cli.ts:7818-7843", "detail": "Wait for Claude hook JSON on stdin.",
+      "operation": { "name": "hook-stdin", "class": "not-run", "writes": [], "removes": [], "reason": "Local stdin wait." }
+    },
+    "src/cli.ts:7868:setTimeout": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cli.ts:7864-7871", "detail": "Hard process ceiling for hook check.",
+      "operation": { "name": "hook-hard-exit", "class": "not-run", "writes": [], "removes": [], "reason": "Local process ceiling; the related network proxy is reported under HOOK_CHECK_TIMEOUT_MS." }
+    },
+    "src/cloud/agent-check.ts:16:AGENT_CHECK_TIMEOUT_MS": {
+      "class": "network-api", "scope": "whole-operation", "endpoints": ["/functions/v1/read", "/functions/v1/command"], "citation": "src/cloud/agent-check.ts:16,144-205", "detail": "Whole check: local profile and cursor reads, credential renewal if due, directory read, and inbox page read.",
+      "operation": { "name": "check", "class": "safe-read", "writes": ["private-copy check.json cursor/cache only"], "removes": ["entire private profile copy"], "reason": "Uncapped source check measures true wall time; the released client supplies timeout counts. The copy omits optional expires_at and uses an isolated HOME, so it cannot renew or read the running seat's state." }
+    },
+    "src/cloud/agent-check.ts:19:AGENT_CHECK_BODY_BUDGET": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/agent-check.ts:19,163-187", "detail": "Non-time character budget for rendered message bodies.",
+      "operation": { "name": "check-body-size", "class": "not-run", "writes": [], "removes": [], "reason": "Size bound, not a wait." }
+    },
+    "src/cloud/agent-grok-bot-gateway.ts:31:AbortSignal.timeout": {
+      "class": "external", "scope": "per-request", "endpoints": [], "citation": "src/cloud/agent-grok-bot-gateway.ts:22-40", "detail": "Request to a local Grok Bot third-party gateway.",
+      "operation": { "name": "grok-bot-gateway", "class": "not-run", "writes": [], "removes": [], "reason": "External local service, not CommonSwarm network API." }
+    },
+    "src/cloud/agent-host.ts:14:timeout": {
+      "class": "external", "scope": "per-request", "endpoints": [], "citation": "src/cloud/agent-host.ts:11-18", "detail": "Child ps process used for host detection.",
+      "operation": { "name": "host-ps", "class": "not-run", "writes": [], "removes": [], "reason": "Child process timeout." }
+    },
+    "src/cloud/agent-receive.ts:146:timeout": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/agent-receive.ts:134-148", "detail": "Claude Code hook ceiling, in seconds; it includes client start-up plus check.",
+      "operation": { "name": "claude-hook", "class": "not-run", "writes": [], "removes": [], "reason": "External host hook; client start-up is measured separately." }
+    },
+    "src/cloud/agent-receive.ts:257:timeoutMs": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/agent-receive.ts:249-257", "detail": "Receive configuration file lock.",
+      "operation": { "name": "receive-config-lock", "class": "not-run", "writes": [], "removes": [], "reason": "Local file lock." }
+    },
+    "src/cloud/agent-receive.ts:91:timeoutMs": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/agent-receive.ts:83-91", "detail": "Receive binding update file lock.",
+      "operation": { "name": "receive-update-lock", "class": "not-run", "writes": [], "removes": [], "reason": "Local file lock." }
+    },
+    "src/cloud/agent-setup.ts:17:AGENT_SETUP_TIMEOUT_MS": {
+      "class": "network-api", "scope": "whole-operation", "endpoints": ["/functions/v1/read", "/functions/v1/command"], "citation": "src/cloud/agent-setup.ts:17,37-66", "detail": "Setup identity proof: credential renewal if due plus directory and inbox reads.",
+      "operation": { "name": "agent-setup", "class": "not-run", "proxy_operation": "check", "writes": [], "removes": [], "reason": "Setup changes the saved profile.", "proxy": "Check uses the same credential session and the same two read resources in parallel; it is the closest read-only statement-count proxy." }
+    },
+    "src/cloud/agent-signal-receipts.ts:9:AGENT_SEEN_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/agent-signal-receipts.ts:9,48-76", "detail": "Rendered-broadcast receipt command.",
+      "operation": { "name": "signals-seen", "class": "not-run", "writes": ["signals_seen receipt rows"], "removes": [], "reason": "Receipts are durable and have no cleanup command.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/auth.ts:16:CALLBACK_TIMEOUT_MS": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/auth.ts:16,300-338", "detail": "Wait for the local OAuth callback or pasted callback URL.",
+      "operation": { "name": "oauth-callback", "class": "not-run", "writes": [], "removes": [], "reason": "Local callback wait; login is excluded because it changes credentials." }
+    },
+    "src/cloud/command-client.ts:1023:setTimeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:1002-1050", "detail": "Workspace connect and membership commands.",
+      "operation": { "name": "connect-command", "class": "not-run", "writes": ["workspace or membership state"], "removes": [], "reason": "Changes membership or workspace state.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/command-client.ts:1128:setTimeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:1095-1160", "detail": "Capability mint or revoke command.",
+      "operation": { "name": "capability-command", "class": "not-run", "writes": ["capability state"], "removes": [], "reason": "Credential-like capability state changes are excluded.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/command-client.ts:1202:setTimeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:1183-1220", "detail": "Channel create, rename, or archive command.",
+      "operation": { "name": "channel-command", "class": "not-run", "writes": ["channel state"], "removes": [], "reason": "Channel mutations are visible and are not cleanly reversible.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/command-client.ts:385:SIGNAL_REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "whole-operation", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:385,1298-1350", "detail": "Whole signal write including retry and response body.",
+      "operation": { "name": "signal-write", "class": "not-run", "writes": ["immutable workspace signal"], "removes": [], "reason": "Signals are immutable and cannot be cleaned up.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/command-client.ts:870:setTimeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:852-889", "detail": "Agent model declaration command.",
+      "operation": { "name": "declare-agent-model", "class": "not-run", "writes": ["agent model label"], "removes": [], "reason": "Changes the running seat's displayed model.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/command-client.ts:920:setTimeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/command-client.ts:899-945", "detail": "Generic task command.",
+      "operation": { "name": "task-command", "class": "not-run", "writes": ["task event"], "removes": [], "reason": "Task events are durable and cannot be removed.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/current-target.ts:293:AbortSignal.timeout": {
+      "class": "external", "scope": "per-request", "endpoints": [], "citation": "src/cloud/current-target.ts:275-307", "detail": "Fetches /start from the installer web origin, outside the API target.",
+      "operation": { "name": "site-discovery", "class": "not-run", "writes": [], "removes": [], "reason": "External site discovery, not a CommonSwarm API request." }
+    },
+    "src/cloud/delivery.ts:65:DELIVERY_REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/delivery.ts:65,750-817", "detail": "Delivery claim, lease, and acknowledgement commands.",
+      "operation": { "name": "delivery-command", "class": "not-run", "writes": ["delivery claim, lease, or acknowledgement"], "removes": [], "reason": "Each operation changes delivery state and cannot be undone.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/feedback.ts:24:REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/feedback.ts:24,37-69", "detail": "Product feedback command.",
+      "operation": { "name": "feedback", "class": "not-run", "writes": ["human-visible feedback row"], "removes": [], "reason": "Feedback is visible and has no cleanup command.", "proxy": "No fair read-only command proxy exists." }
+    },
+    "src/cloud/files.ts:180:REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/read", "/functions/v1/command", "/storage/v1/..."], "citation": "src/cloud/files.ts:180,210-237,467-555", "detail": "File command, file list/download grant read, and storage transfer deadline.",
+      "operation": { "name": "file-ls", "class": "safe-read", "writes": [], "removes": [], "reason": "Lists files through the read edge and changes no workspace state." }
+    },
+    "src/cloud/renewal-grants.ts:115:AbortSignal.timeout": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/read"], "citation": "src/cloud/renewal-grants.ts:101-121", "detail": "Standing renewal grant status read.",
+      "operation": { "name": "renewal-grants", "class": "not-run", "proxy_operation": "inbox", "writes": [], "removes": [], "reason": "There is no CLI verb for this read.", "proxy": "Inbox reaches the same authenticated read function with one resource query and comparable parsing; unlike feed, it does not post rendered-broadcast receipts." }
+    },
+    "src/cloud/renewal.ts:131:RENEW_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/command"], "citation": "src/cloud/renewal.ts:131,399-431", "detail": "Agent credential renewal command.",
+      "operation": { "name": "credential-renewal", "class": "not-run", "writes": ["successor credential and renewal state"], "removes": [], "reason": "Credential rotation is explicitly excluded.", "proxy": "No proxy is fair because the credential and grant statements are specific to renewal." }
+    },
+    "src/cloud/seed.ts:272:timeout": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/seed.ts:268-273", "detail": "Postgres client close timeout, specified in seconds.",
+      "operation": { "name": "postgres-close", "class": "not-run", "writes": [], "removes": [], "reason": "Direct database client, not the client HTTP API." }
+    },
+    "src/cloud/seed.ts:86:connect_timeout": {
+      "class": "external", "scope": "per-request", "endpoints": [], "citation": "src/cloud/seed.ts:74-89", "detail": "Postgres connection timeout, specified in seconds.",
+      "operation": { "name": "postgres-connect", "class": "not-run", "writes": [], "removes": [], "reason": "Direct database client, not the client HTTP API." }
+    },
+    "src/cloud/signals.ts:37:SIGNAL_READ_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/read", "/rest/v1/..."], "citation": "src/cloud/signals.ts:37,881-928", "detail": "Signal directory and page read, including response body.",
+      "operation": { "name": "inbox", "class": "safe-read", "writes": [], "removes": [], "reason": "Reads one inbox page through the agent read edge." }
+    },
+    "src/cloud/storage.ts:25:LOCK_TIMEOUT_MS": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/cloud/storage.ts:25,193-248", "detail": "Local credential and state file-lock acquisition.",
+      "operation": { "name": "storage-lock", "class": "not-run", "writes": [], "removes": [], "reason": "Local file lock." }
+    },
+    "src/host/bounds.ts:10:ACP_DEFAULT_REQUEST_TIMEOUT_MS": {
+      "class": "external", "scope": "per-request", "endpoints": [], "citation": "src/host/bounds.ts:10; src/host/transport.ts:126-156", "detail": "Agent Client Protocol request to a child model process.",
+      "operation": { "name": "acp-request", "class": "not-run", "writes": [], "removes": [], "reason": "External child process." }
+    },
+    "src/host/bounds.ts:11:ACP_VERSION_CHECK_TIMEOUT_MS": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/host/bounds.ts:11; src/host/codex.ts:214-233", "detail": "Version probe child process.",
+      "operation": { "name": "provider-version", "class": "not-run", "writes": [], "removes": [], "reason": "External child process." }
+    },
+    "src/host/bounds.ts:12:ACP_CANARY_TIMEOUT_MS": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/host/bounds.ts:12; src/listener/grok-model.ts:175-186", "detail": "ACP permission canary against a child model process.",
+      "operation": { "name": "provider-canary", "class": "not-run", "writes": [], "removes": [], "reason": "External child process." }
+    },
+    "src/listener/activity.ts:15:ACTIVITY_REQUEST_TIMEOUT_MS": {
+      "class": "network-api", "scope": "per-request", "endpoints": ["/functions/v1/activity"], "citation": "src/listener/activity.ts:15,86-120", "detail": "Listener activity frame publish.",
+      "operation": { "name": "activity-frame", "class": "not-run", "writes": ["ephemeral activity frame visible in the workspace"], "removes": [], "reason": "A frame is visible and there is no cleanup request.", "proxy": "The activity function has no read-only operation." }
+    },
+    "src/listener/brain-digest.ts:17:BRAIN_DIGEST_LOCK_TIMEOUT_MS": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/brain-digest.ts:17,154-164", "detail": "Brain digest local file lock.",
+      "operation": { "name": "brain-digest-lock", "class": "not-run", "writes": [], "removes": [], "reason": "Local file lock." }
+    },
+    "src/listener/control.ts:1068:setTimeout": {
+      "class": "local", "scope": "per-request", "endpoints": [], "citation": "src/listener/control.ts:1057-1071", "detail": "Local control-socket poll pause.",
+      "operation": { "name": "control-poll", "class": "not-run", "writes": [], "removes": [], "reason": "Local control socket." }
+    },
+    "src/listener/control.ts:46:CONTROL_TIMEOUT_MS": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/control.ts:46,1190-1212", "detail": "Local listener control-socket request deadline.",
+      "operation": { "name": "control-socket", "class": "not-run", "writes": [], "removes": [], "reason": "Local control socket." }
+    },
+    "src/listener/hook.ts:65:HOOK_LOCK_TIMEOUT_MS": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/hook.ts:65,334-343", "detail": "Local hook cursor and high-water file locks.",
+      "operation": { "name": "hook-lock", "class": "not-run", "writes": [], "removes": [], "reason": "Local file lock." }
+    },
+    "src/listener/hook.ts:67:HOOK_CHECK_TIMEOUT_MS": {
+      "class": "network-api", "scope": "whole-operation", "endpoints": ["/functions/v1/read", "/functions/v1/command"], "citation": "src/listener/hook.ts:67,1150-1173", "detail": "Whole hook check including local state, credential renewal if due, and network reads.",
+      "operation": { "name": "hook-check", "class": "not-run", "proxy_operation": "check", "writes": [], "removes": [], "reason": "The hook scans ambient profiles, which the lane must not read.", "proxy": "Private-profile check exercises the same credential and read calls and separately records client start-up." }
+    },
+    "src/listener/hook.ts:89:HOOK_RENDER_BUDGET_BYTES": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/hook.ts:89,707-729", "detail": "Non-time output byte budget.",
+      "operation": { "name": "hook-render-size", "class": "not-run", "writes": [], "removes": [], "reason": "Size bound, not a wait." }
+    },
+    "src/listener/http-client.ts:19:LISTENER_HTTP_IDLE_TIMEOUT_MS": {
+      "class": "local", "scope": "per-request", "endpoints": [], "citation": "src/listener/http-client.ts:19,90-115,136-147", "detail": "Local keep-alive pool idle-close timer; it does not cap an in-flight API request.",
+      "operation": { "name": "http-idle-close", "class": "not-run", "writes": [], "removes": [], "reason": "Local socket lifecycle bound." }
+    },
+    "src/listener/supervisor.ts:237:TAIL_SERIALIZED_BUDGET_BYTES": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/supervisor.ts:237", "detail": "Non-time serialized log-tail size budget.",
+      "operation": { "name": "tail-size", "class": "not-run", "writes": [], "removes": [], "reason": "Size bound, not a wait." }
+    },
+    "src/listener/types.ts:78:LISTENER_PROMPT_TIMEOUT_MS": {
+      "class": "external", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/types.ts:63-80,119-125", "detail": "Whole child-model prompt budget.",
+      "operation": { "name": "listener-prompt", "class": "not-run", "writes": [], "removes": [], "reason": "External child model process." }
+    },
+    "src/listener/wake.ts:16:WAKE_CLAIMS_PER_MINUTE_BUDGET": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/listener/wake.ts:16,300-315", "detail": "Non-time local claim-rate count budget.",
+      "operation": { "name": "wake-rate-count", "class": "not-run", "writes": [], "removes": [], "reason": "Count bound, not a wait." }
+    },
+    "src/onboarding-cli.ts:68:setTimeout": {
+      "class": "local", "scope": "whole-operation", "endpoints": [], "citation": "src/onboarding-cli.ts:61-70", "detail": "Local stdin drain ceiling after setup input.",
+      "operation": { "name": "setup-stdin", "class": "not-run", "writes": [], "removes": [], "reason": "Local stdin wait." }
+    }
+  }
+}
