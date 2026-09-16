@@ -54,16 +54,18 @@ log() {
 }
 
 source_psql() {
-  PGDATABASE="$SOURCE_DATABASE_URL" psql -X --set=ON_ERROR_STOP=1 "$@" </dev/null
+  : "${PGSERVICEFILE:?run through run-db-tool.sh so the database URL stays out of argv}"
+  PGSERVICE=source psql -X --set=ON_ERROR_STOP=1 "$@" </dev/null
 }
 
 target_psql() {
-  PGDATABASE="$TARGET_DATABASE_URL" psql -X --set=ON_ERROR_STOP=1 "$@" </dev/null
+  : "${PGSERVICEFILE:?run through run-db-tool.sh so the database URL stays out of argv}"
+  PGSERVICE=target psql -X --set=ON_ERROR_STOP=1 "$@" </dev/null
 }
 
 make_temp_sql() {
   local file
-  file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-n-db.XXXXXX.sql")"
+  file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-n-db-sql.XXXXXX")"
   chmod 0600 "$file"
   printf '%s\n' "$file"
 }

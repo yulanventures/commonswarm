@@ -14,13 +14,10 @@ if [[ ! -f "$source_counts" ]]; then
 fi
 
 query_file="$(make_temp_sql)"
-target_counts="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-counts.XXXXXX.tsv")"
+target_counts="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-counts.XXXXXX")"
 trap 'rm -f "$query_file" "$target_counts"' EXIT
 chmod 0600 "$target_counts"
 cat >"$query_file" <<'SQL'
-\pset tuples_only on
-\pset format unaligned
-\pset fieldsep '|'
 SELECT format(
   'SELECT %L, count(*)::bigint FROM %I.%I;',
   schemaname || '.' || tablename,
@@ -34,7 +31,8 @@ ORDER BY schemaname, tablename
 \gexec
 SQL
 
-target_psql --file "$query_file" >"$target_counts" 2>>"$LOG_FILE"
+target_psql --tuples-only --no-align --field-separator '|' --file "$query_file" \
+  >"$target_counts" 2>>"$LOG_FILE"
 if ! diff -u "$source_counts" "$target_counts" >>"$LOG_FILE" 2>&1; then
   log "row-count verification failed; see the protected log"
   exit 1

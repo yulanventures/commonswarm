@@ -14,14 +14,11 @@ for file in roles.sql database.dump manifest.txt source-counts.tsv storage-objec
   fi
 done
 
-target_psql --file "$MIGRATION_ARTIFACT_DIR/roles.sql" >>"$LOG_FILE" 2>&1
-log "application roles restored without passwords"
-
 service_file="${PGSERVICEFILE:-}"
 remove_service=false
 if [[ -z "$service_file" ]]; then
   require_commands node
-  service_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-pg-service.XXXXXX.conf")"
+  service_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-pg-service.XXXXXX")"
   chmod 0600 "$service_file"
   PG_SERVICE_OUTPUT="$service_file" node "$MIGRATE_DIR/make-pg-service.mjs" </dev/null
   remove_service=true
@@ -30,6 +27,9 @@ cleanup() {
   if [[ "$remove_service" == true ]]; then rm -f "$service_file"; fi
 }
 trap cleanup EXIT
+
+PGSERVICEFILE="$service_file" target_psql --file "$MIGRATION_ARTIFACT_DIR/roles.sql" >>"$LOG_FILE" 2>&1
+log "application roles restored without passwords"
 
 PGSERVICEFILE="$service_file" PGSERVICE=target pg_restore \
   --clean \

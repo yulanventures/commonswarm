@@ -14,9 +14,11 @@ This lane deployed nothing. HezLead runs every command in this file.
 - Secrets: vault item `CommonSwarm self-hosted Supabase env` rendered to `/home/commonswarm/.env`, mode `0600`.
 - TLS: the internal CA at `/etc/ssl/yulan-internal-ca.pem`; database certificate SANs are `db.commonswarm.internal` and `172.31.0.10`.
 
-Before this stack starts, change the edge lane's `mem_limit` from `2g` to `512m`. Keep its loopback port `9000`. The total is then PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB reserved headroom: 4060 MB.
+Before this stack starts, change the edge lane's `mem_limit` from `2g` to `512m` and keep its loopback port `9000`. The edge owned function lane must pass the internal CA explicitly as `ssl.ca` with `rejectUnauthorized: true` in every `postgres(...)` client while the URL keeps `sslmode=verify-full`. The temporary local rehearsal copy used the public certificate, base64 encoded, in `SWARM_DATABASE_TLS_CA_B64`; the edge router must pass that name to the `command`, `read`, `capability`, and `activity` workers. `postgres` 3.4.9 ignored the CA path and the Deno or Node process CA settings in an Edge Runtime user worker, which was measured as `UnknownIssuer`. This N-db lane does not edit `supabase/functions/**`. The total is then PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB reserved headroom: 4060 MB.
 
-Every database URL used by GoTrue, PostgREST, Storage API, and edge-runtime must name `db.commonswarm.internal` and include `sslmode=verify-full` plus the CA path. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. Never use the IP in a service database URL.
+Every database URL used by GoTrue, PostgREST, Storage API, and edge-runtime must name `db.commonswarm.internal` and include `sslmode=verify-full`. GoTrue, PostgREST, and Storage API use `sslrootcert=/etc/ssl/yulan-internal-ca.pem`. The edge runtime's `postgres` 3.4.9 URLs omit `sslrootcert`; that client sends an unrecognized `sslrootcert` query key to PostgreSQL as a startup parameter. The edge function supplies the CA in the `ssl.ca` option described below. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. Never use the IP in a service database URL.
+
+The edge URLs authenticate as `commonswarm_edge` with `COMMONSWARM_EDGE_DB_PASSWORD`. They do not use the shared PostgreSQL service password. GoTrue uses `supabase_auth_admin`, PostgREST uses `authenticator`, Storage API uses `supabase_storage_admin`, and Realtime uses `supabase_admin`.
 
 ## What moves in the dump
 
@@ -30,9 +32,9 @@ Every database URL used by GoTrue, PostgREST, Storage API, and edge-runtime must
 - `supabase_migrations`: applied migration history.
 - `realtime`: the broadcast table functions and CommonSwarm RLS policies. Ephemeral `realtime.messages` rows are excluded.
 
-The target image creates `_realtime`, `extensions`, `graphql_public`, `net`, `pgbouncer`, `supabase_functions`, and `vault`. They are excluded so the image and pinned services own their internal migrations. `setup-realtime.sh` creates the self-host tenant and empty `supabase_realtime` publication after restore. The product uses Broadcast only, so no table belongs in that publication.
+The target image creates `_realtime`, `extensions`, `graphql_public`, `net`, `pgbouncer`, `supabase_functions`, and `vault`. They are excluded so the image and pinned services own their internal migrations. `seed-realtime-tenant.sh` uses the pinned application to create the encrypted self-host tenant. `setup-realtime.sh` enables TLS on that extension and creates the empty `supabase_realtime` publication after restore. The product uses Broadcast only, so no table belongs in that publication.
 
-The role artifact contains only `swarm_*` and `commonswarm_*` role definitions and memberships. It excludes image roles such as `anon`, `authenticated`, `service_role`, `authenticator`, and `supabase_*`. It contains no password verifier. `prepare-target.sh` assigns fresh SCRAM verifiers from the vault.
+The role artifact contains `swarm_*` and `commonswarm_*` role definitions and memberships. It also carries the no-login `supabase_realtime_admin` owner because the PostgreSQL image does not create that role. It excludes image-created roles such as `anon`, `authenticated`, `service_role`, `authenticator`, `supabase_admin`, `supabase_auth_admin`, and `supabase_storage_admin`. It contains no password verifier. `prepare-target.sh` assigns fresh SCRAM verifiers from the vault.
 
 ## Box rehearsal from a fresh production dump
 
@@ -41,7 +43,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 1. Confirm the target is the container and the source is the us-east-1 project. Confirm the PostgreSQL source reports 17.6. Do not use the host cluster's `commonswarm` database.
 2. Read production versions from the public health endpoints. Record them. Update the named `image:` line in `compose.yaml` if needed. A changed pin requires a new rehearsal from step 1.
 3. Install the internal CA and server certificate. Check certificate SANs and mode `0600` on the private key.
-4. Render `/home/commonswarm/.env` from the one vault item and check mode `0600`. Use the legacy HS256 JWT secret for `JWT_SECRET`, `GOTRUE_JWT_SECRET`, `PGRST_JWT_SECRET`, `API_JWT_SECRET`, and `AUTH_JWT_SECRET`. Use the existing anon and service-role JWTs.
+4. Render `/home/commonswarm/.env` from the one vault item and check mode `0600`. Use the legacy HS256 JWT secret for `JWT_SECRET`, `GOTRUE_JWT_SECRET`, `PGRST_JWT_SECRET`, `API_JWT_SECRET`, and `AUTH_JWT_SECRET`. Use the existing anon and service-role JWTs. `DB_ENC_KEY` is exactly 16 high-entropy ASCII characters. `API_JWT_JWKS` is the valid production JWKS JSON, not an empty string. Keep `SEED_SELF_HOST=false`; `seed-realtime-tenant.sh` turns it on only for its one-shot application seed.
 5. Start PostgreSQL only:
 
    ```sh
@@ -50,16 +52,25 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    docker compose -p commonswarm-supabase-stack ps
    ```
 
-6. With the production source URL present only in the environment, run `migrate/run-db-tool.sh dump-source.sh <absolute-artifact-dir>`. This creates a custom dump, password-free role SQL, per-table source counts, and the Storage object manifest. Logs and artifacts are mode `0600` under the protected directory.
+6. Choose a new absolute artifact directory. With the production source URL present only in the environment, run the dump. This creates a custom dump, password-free role SQL, per-table source counts, and the Storage object manifest. Logs and artifacts are mode `0600` under the protected directory.
+
+   ```sh
+   export ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
+   deploy/supabase-stack/migrate/run-db-tool.sh dump-source.sh "$ARTIFACT_DIR"
+   ```
+
 7. Stop every target service except PostgreSQL. Run, in order:
 
    ```sh
-   deploy/supabase-stack/migrate/run-db-tool.sh restore-target.sh <absolute-artifact-dir>
-   deploy/supabase-stack/migrate/run-db-tool.sh prepare-target.sh <absolute-artifact-dir>
-   docker compose -p commonswarm-supabase-stack up -d realtime
-   deploy/supabase-stack/migrate/run-db-tool.sh setup-realtime.sh <absolute-artifact-dir>
+   export ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
+   deploy/supabase-stack/migrate/run-db-tool.sh restore-target.sh "$ARTIFACT_DIR"
+   deploy/supabase-stack/migrate/run-db-tool.sh prepare-target.sh "$ARTIFACT_DIR"
+   COMMONSWARM_ENV_FILE=/home/commonswarm/.env \
+     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" \
+     deploy/supabase-stack/migrate/seed-realtime-tenant.sh
+   deploy/supabase-stack/migrate/run-db-tool.sh setup-realtime.sh "$ARTIFACT_DIR"
    docker compose -p commonswarm-supabase-stack restart realtime
-   deploy/supabase-stack/migrate/run-db-tool.sh verify-counts.sh <absolute-artifact-dir>
+   deploy/supabase-stack/migrate/run-db-tool.sh verify-counts.sh "$ARTIFACT_DIR"
    ```
 
 8. Start GoTrue, PostgREST, and Storage API. Run `migrate/copy-storage.sh` with source and target Storage URLs and service-role keys in the environment. It uploads every manifest object and verifies target SHA-256 and size.

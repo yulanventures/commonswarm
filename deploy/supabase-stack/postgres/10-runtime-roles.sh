@@ -29,6 +29,9 @@ ALTER ROLE supabase_admin PASSWORD :'postgres_password';
 ALTER DATABASE postgres SET "app.settings.jwt_secret" TO :'jwt_secret';
 ALTER DATABASE postgres SET "app.settings.jwt_exp" TO :'jwt_exp';
 
+CREATE SCHEMA IF NOT EXISTS _realtime AUTHORIZATION supabase_admin;
+ALTER SCHEMA _realtime OWNER TO supabase_admin;
+
 DO $do$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'backup_ro') THEN
