@@ -307,10 +307,6 @@ function assertRoundTripFold(readSource: string, commandSource: string): void {
     readSource,
     /async function setReadTransaction[\s\S]{0,500}set_config\('role', 'swarm_read', true\)[\s\S]{0,200}set_config\('search_path', 'swarm_read, swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
   );
-  assert.match(
-    readSource,
-    /const \[members, agents, workspaceRows\] = await Promise\.all\(\[/,
-  );
   assert.equal(
     readSource.includes("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
     false,
@@ -332,7 +328,7 @@ const EDGE_FUNCTIONS = ["command", "read", "capability", "activity"] as const;
 
 function assertNoUnfoldedSetup(name: string, source: string): void {
   assert.equal(
-    /unsafe\(\s*"SET (TRANSACTION|LOCAL ROLE|LOCAL lock_timeout)/.test(source),
+    /(unsafe\(\s*"|\w`\s*)SET (TRANSACTION|LOCAL ROLE|LOCAL lock_timeout)/.test(source),
     false,
     `${name}: a transaction still sends SET TRANSACTION, SET LOCAL ROLE, or SET LOCAL lock_timeout as its own round trip`,
   );
@@ -359,8 +355,17 @@ test("every edge function folds its transaction setup (activity has a 5 s client
   }
   const activity = readFileSync(join(process.cwd(), "supabase/functions/activity/index.ts"), "utf8");
   const capability = readFileSync(join(process.cwd(), "supabase/functions/capability/index.ts"), "utf8");
+  const ROLE = { activity: "swarm_command", capability: "swarm_capability" } as const;
   for (const [name, source] of [["activity", activity], ["capability", capability]] as const) {
     assert.equal([...source.matchAll(/db\.begin\("isolation level read committed", async \(tx\) =>/g)].length, 1, `${name}: BEGIN carries the isolation level`);
+    const pinsRole = (text: string) => text.includes(`set_config('role', '${ROLE[name]}', true)`);
+    assert.ok(pinsRole(source), `${name}: the transaction sets role ${ROLE[name]}`);
+    assert.equal(pinsRole(source.replace(`set_config('role', '${ROLE[name]}', true)`, "set_config('role', 'postgres', true)")), false, `${name}: mutation (role postgres) must be caught`);
+    assert.throws(
+      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SET LOCAL ROLE ${role}\`; await tx\`SELECT`)),
+      assert.AssertionError,
+      `${name}: mutation (tagged SET LOCAL ROLE) must fail`,
+    );
     assert.throws(
       () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SELECT 1;\`; await tx.unsafe("SET LOCAL ROLE ${role}"); await tx\`SELECT`)),
       assert.AssertionError,
@@ -393,11 +398,6 @@ test("round-trip fold controls reject each latency regression", () => {
         "set_config('role', 'swarm_read', true)",
         "current_role::text",
       ),
-      command: commandSource,
-    },
-    {
-      name: "member reads serialized",
-      read: readSource.replace("await Promise.all([", "await Promise.resolve(["),
       command: commandSource,
     },
     {

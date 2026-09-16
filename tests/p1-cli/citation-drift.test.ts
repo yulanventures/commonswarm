@@ -124,7 +124,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "agent-connect-mint.observer.test.ts (timeboxed fallback, prepared)",
     file: "supabase/functions/command/index.ts",
-    lines: [3405, 3408],
+    lines: [3407, 3410],
     contains: 'renewal_kind: wire.renewal_kind ?? "timeboxed"',
   },
   {
