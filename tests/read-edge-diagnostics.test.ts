@@ -295,3 +295,133 @@ test("the read function keeps browser CORS wired — preflight branch and respon
   );
   assert.match(source, /withCommandCors\(request, response/);
 });
+
+function assertRoundTripFold(readSource: string, commandSource: string): void {
+  assert.equal(
+    [...readSource.matchAll(
+      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
+    )].length,
+    1,
+  );
+  assert.match(
+    readSource,
+    /async function setReadTransaction[\s\S]{0,500}set_config\('role', 'swarm_read', true\)[\s\S]{0,200}set_config\('search_path', 'swarm_read, swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
+  );
+  assert.equal(
+    readSource.includes("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
+    false,
+  );
+  assert.equal(
+    [...commandSource.matchAll(
+      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
+    )].length,
+    2,
+  );
+  assert.match(
+    commandSource,
+    /async function setTransaction[\s\S]{0,500}set_config\('role', 'swarm_command', true\)[\s\S]{0,200}set_config\('search_path', 'swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
+  );
+}
+
+/** Every edge function: no transaction opens with a bare BEGIN followed by separate SET statements. */
+const EDGE_FUNCTIONS = ["command", "read", "capability", "activity"] as const;
+
+function assertNoUnfoldedSetup(name: string, source: string): void {
+  assert.equal(
+    /(unsafe\(\s*"|\w`\s*)SET (TRANSACTION|LOCAL ROLE|LOCAL lock_timeout)/.test(source),
+    false,
+    `${name}: a transaction still sends SET TRANSACTION, SET LOCAL ROLE, or SET LOCAL lock_timeout as its own round trip`,
+  );
+  const bareBegins = [...source.matchAll(/db\.begin\(async \((\w+)\) => \{\s*await \1(\.unsafe\(|`\s*SELECT\s+set_config\('role')/g)].length;
+  const drainOnly = name === "command" ? 1 : 0;
+  assert.equal(bareBegins, drainOnly, `${name}: a request transaction opens with BEGIN and sets its isolation level separately`);
+}
+
+test("read and command fold transaction setup without changing its settings", () => {
+  const readSource = readFileSync(
+    join(process.cwd(), "supabase/functions/read/index.ts"),
+    "utf8",
+  );
+  const commandSource = readFileSync(
+    join(process.cwd(), "supabase/functions/command/index.ts"),
+    "utf8",
+  );
+  assertRoundTripFold(readSource, commandSource);
+});
+
+test("every edge function folds its transaction setup (activity has a 5 s client budget)", () => {
+  for (const name of EDGE_FUNCTIONS) {
+    assertNoUnfoldedSetup(name, readFileSync(join(process.cwd(), `supabase/functions/${name}/index.ts`), "utf8"));
+  }
+  const activity = readFileSync(join(process.cwd(), "supabase/functions/activity/index.ts"), "utf8");
+  const capability = readFileSync(join(process.cwd(), "supabase/functions/capability/index.ts"), "utf8");
+  const ROLE = { activity: "swarm_command", capability: "swarm_capability" } as const;
+  for (const [name, source] of [["activity", activity], ["capability", capability]] as const) {
+    assert.equal([...source.matchAll(/db\.begin\("isolation level read committed", async \(tx\) =>/g)].length, 1, `${name}: BEGIN carries the isolation level`);
+    const pinsRole = (text: string) => text.includes(`set_config('role', '${ROLE[name]}', true)`);
+    assert.ok(pinsRole(source), `${name}: the transaction sets role ${ROLE[name]}`);
+    assert.equal(pinsRole(source.replace(`set_config('role', '${ROLE[name]}', true)`, "set_config('role', 'postgres', true)")), false, `${name}: mutation (role postgres) must be caught`);
+    assert.throws(
+      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SET LOCAL ROLE ${role}\`; await tx\`SELECT`)),
+      assert.AssertionError,
+      `${name}: mutation (tagged SET LOCAL ROLE) must fail`,
+    );
+    assert.throws(
+      () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SELECT 1;\`; await tx.unsafe("SET LOCAL ROLE ${role}"); await tx\`SELECT`)),
+      assert.AssertionError,
+      `${name}: mutation (role back to its own SET LOCAL ROLE) must fail`,
+    );
+  }
+});
+
+test("round-trip fold controls reject each latency regression", () => {
+  const readSource = readFileSync(
+    join(process.cwd(), "supabase/functions/read/index.ts"),
+    "utf8",
+  );
+  const commandSource = readFileSync(
+    join(process.cwd(), "supabase/functions/command/index.ts"),
+    "utf8",
+  );
+  const mutations = [
+    {
+      name: "read BEGIN options removed",
+      read: readSource.replace(
+        'db.begin("isolation level read committed", async (tx) =>',
+        "db.begin(async (tx) =>",
+      ),
+      command: commandSource,
+    },
+    {
+      name: "read role setting removed",
+      read: readSource.replace(
+        "set_config('role', 'swarm_read', true)",
+        "current_role::text",
+      ),
+      command: commandSource,
+    },
+    {
+      name: "command BEGIN options removed",
+      read: readSource,
+      command: commandSource.replace(
+        'db.begin("isolation level read committed", async (tx) =>',
+        "db.begin(async (tx) =>",
+      ),
+    },
+    {
+      name: "command search path removed",
+      read: readSource,
+      command: commandSource.replace(
+        "set_config('search_path', 'swarm, pg_catalog', true)",
+        "current_setting('search_path')",
+      ),
+    },
+  ];
+  for (const mutation of mutations) {
+    assert.throws(
+      () => assertRoundTripFold(mutation.read, mutation.command),
+      assert.AssertionError,
+      mutation.name,
+    );
+  }
+});

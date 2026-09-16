@@ -19,7 +19,7 @@
  *
  * Step 1 is not optional and is the step that is easy to miss from a browser. The command
  * function checks the mint's device binding against swarm.devices directly
- * (supabase/functions/command/index.ts:3218-3228): the device row must exist, be owned by the
+ * (supabase/functions/command/index.ts:3220-3230): the device row must exist, be owned by the
  * calling human, and not be revoked, or the mint is a bare 403 with no explanation. So the
  * browser has to be a registered device before it can mint anything.
  *
@@ -461,7 +461,7 @@ export interface AgentCredential {
  * (supabase/migrations/20260723000001_p1_schema.sql:196), so a generated id is accepted rather
  * than dangling. What this page did NOT establish is how that binding behaves for the lease
  * verbs — the only authorisation check on an agent credential that was read while writing this
- * is the scope check at supabase/functions/command/index.ts:9225-9231, which is what
+ * is the scope check at supabase/functions/command/index.ts:9227-9233, which is what
  * `post_signal` needs.
  *
  * NO AUTOMATIC RETRY. The CLI's comment on command ids records what a blind retry cost once:
@@ -567,7 +567,7 @@ export async function mintAgentCredential(
  *
  * `horizon_expires_at` is returned unconditionally on an accepted mint
  * (supabase/functions/command/index.ts:10787-10792) — an ISO string for timeboxed, null for
- * standing — and the idempotent replay path carries it through (index.ts:2688-2691).
+ * standing — and the idempotent replay path carries it through (index.ts:2690-2693).
  *
  * ABSENT READS AS UNKNOWN, NOT AS A GUESS. A deployment old enough to omit the field answers
  * null here, and `grantKind` reads null beside it; agent-prompt.ts then uses its wording for a

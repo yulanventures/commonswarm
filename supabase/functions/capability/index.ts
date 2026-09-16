@@ -405,11 +405,14 @@ async function bodyIsEmpty(request: Request): Promise<boolean> {
   }
 }
 
+/** The isolation level travels with BEGIN; the local settings go in one statement. */
 async function setTransaction(tx: Sql): Promise<void> {
-  await tx.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-  await tx.unsafe("SET LOCAL ROLE swarm_capability");
-  await tx.unsafe("SET LOCAL search_path = swarm, pg_catalog");
-  await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+  await tx`
+    SELECT
+      set_config('role', 'swarm_capability', true),
+      set_config('search_path', 'swarm, pg_catalog', true),
+      set_config('lock_timeout', '5s', true)
+  `;
 }
 
 /**
@@ -612,7 +615,7 @@ async function handle(request: Request): Promise<Response> {
   const methodOk = request.method === "POST";
   const bodyEmpty = methodOk ? await bodyIsEmpty(request) : true;
 
-  return await db.begin(async (tx) => {
+  return await db.begin("isolation level read committed", async (tx) => {
     await setTransaction(tx);
 
     // Caller-keyed first: this is the arm that actually refuses.

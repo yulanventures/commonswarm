@@ -57,6 +57,18 @@ const db = postgres(databaseUrl, {
   connect_timeout: 10,
 });
 
+type Sql = postgres.TransactionSql<Record<string, unknown>>;
+
+/** Keep the existing local settings while installing them in one statement. */
+async function setReadTransaction(tx: Sql): Promise<void> {
+  await tx`
+    SELECT
+      set_config('role', 'swarm_read', true),
+      set_config('search_path', 'swarm_read, swarm, pg_catalog', true),
+      set_config('lock_timeout', '5s', true)
+  `;
+}
+
 interface SignalReadRequest {
   resource: "signals";
   workspace_id: string;
@@ -412,14 +424,11 @@ async function handle(
   }
   const tokenHash = agentCredential ? await sha256(token) : null;
 
-  return await db.begin(async (tx) => {
+  return await db.begin("isolation level read committed", async (tx) => {
     setPhase("session_setup");
-    await tx.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
     // Spec: the read transaction never assumes swarm_command. Start as
     // swarm_read and authenticate/count through the narrow SECURITY DEFINER.
-    await tx.unsafe("SET LOCAL ROLE swarm_read");
-    await tx.unsafe("SET LOCAL search_path = swarm_read, swarm, pg_catalog");
-    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+    await setReadTransaction(tx);
 
     if (humanUserId !== null) {
       await tx`
@@ -566,21 +575,22 @@ async function handle(
       });
     }
     await tx`
-      SELECT set_config(
-        'request.jwt.claims',
-        ${JSON.stringify({
-          sub: agent.owner_user_id,
-          role: "authenticated",
-          /* swarm_read.agent_execution_sessions admits a row for this role
-           * only when this claim matches principal_id. */
-          agent_principal_id: agent.principal_id,
-        })},
-        true
-      )
+      SELECT
+        set_config(
+          'request.jwt.claims',
+          ${JSON.stringify({
+            sub: agent.owner_user_id,
+            role: "authenticated",
+            /* swarm_read.agent_execution_sessions admits a row for this role
+             * only when this claim matches principal_id. */
+            agent_principal_id: agent.principal_id,
+          })},
+          true
+        ),
+        set_config('search_path', 'swarm_read, auth, pg_catalog', true)
     `;
     // Stay as swarm_read for membership-gated views. The definer already
     // stamped first-use; this path never elevates to swarm_command.
-    await tx.unsafe("SET LOCAL search_path = swarm_read, auth, pg_catalog");
     if (body.resource === "channels") {
       /* Same eight columns and the same slug order the human REST read takes,
        * so `cswarm channel ls` renders identically whichever credential ran it.
