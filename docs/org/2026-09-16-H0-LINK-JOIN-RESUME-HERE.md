@@ -57,7 +57,13 @@ messages (messages are immutable, so corrections live there).
    the single caller of `claimAgentInbox`, `supabase/functions/command/index.ts` claim branch (was
    `:8597`), and prove an H0 seat's claim is refused while its ack succeeds. Per-message ack carries
    message id + effect ordinal (SWARM-CLOUD.md:470).
-4. Wire the paste into the app's "Invite an agent" flow; release; deploy; run the three-host done-test.
+4. **Lane 4b, the app's "Add an agent" on the link-join** — prompt drafted (`maker-lane4b-DRAFT.txt` in the
+   session scratchpad). Held because host memory pressure read level 2 with two Makers running.
+5. **Lane 5a, poll + ack + the listener fence** — prompt drafted (`maker-lane5a-DRAFT.txt`). Starts after
+   3b lands: it edits `command/index.ts` and needs the attempt-row marker.
+6. **Lane 5b, the h0 function forwards register, ask, note, reply, working-on** to the command edge. After
+   5a (both edit `supabase/functions/h0/`).
+7. Release; deploy (resolve the ref first); run the three-host done-test.
 
 ## DEFERRED OR ACCEPTED, stated so nobody rediscovers them
 
@@ -79,8 +85,9 @@ messages (messages are immutable, so corrections live there).
   The ruling also said a seat past 30 days "re-registers through the same invite by replaying its
   registration". That CANNOT work on main: the join credential expires within 24 hours (CHECK in
   `20260916000001_agent_join_credentials.sql`), and spec §5 refuses a replay whose token was used.
-  Sent back as signal `90346c31`. Default until ruled otherwise: after 30 days, ask the human for a new
-  invite.
+  Sent back as signal `90346c31`; the Strategist AGREED and withdrew the replay sentence (`0fd36319`,
+  16:41Z): after 30 days the seat stops and the document says to ask the human for a new invite. Invite TTL
+  stays in hours; renewal beyond 30 days is item H's session renew.
 
 - Any H0 path on production. The three-host done-test.
 - Whether two sentences are enough for each host to register unprompted.
