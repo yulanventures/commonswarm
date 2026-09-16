@@ -19,6 +19,7 @@ import {
   writeSessionContext,
 } from "../../src/cloud/session-context.js";
 import { generateSessionKey } from "../../src/cloud/session-proof.js";
+import { AGENT_SESSION_KEY_RE } from "../../src/cloud/session-wire.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -200,7 +201,7 @@ test("parseSessionContext refuses a short key and a token copy field", () => {
     (error: unknown) =>
       error instanceof SessionContextError && error.code === "session_context_corrupt",
   );
-  assert.equal(generateSessionKey().length, 43);
+  assert.match(generateSessionKey(), AGENT_SESSION_KEY_RE);
 });
 
 test("default session root is under config, not a repo", () => {

@@ -6,21 +6,22 @@ import {
   AGENT_SESSION_PROOF_HEADERS,
   type AgentSessionProof,
 } from "./session-contract.js";
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const SESSION_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
+import {
+  AGENT_SESSION_ID_RE,
+  AGENT_SESSION_KEY_BYTES,
+  AGENT_SESSION_KEY_RE,
+} from "./session-wire.js";
 
 export function generateSessionKey(): string {
-  return randomBytes(32).toString("base64url");
+  return randomBytes(AGENT_SESSION_KEY_BYTES).toString("base64url");
 }
 
 export function isSessionKey(value: string): boolean {
-  return SESSION_KEY_RE.test(value);
+  return AGENT_SESSION_KEY_RE.test(value);
 }
 
 export function isSessionUuid(value: string): boolean {
-  return UUID_RE.test(value);
+  return AGENT_SESSION_ID_RE.test(value);
 }
 
 /** SHA-256 hex of the key string, matching the server acquire `key_hash`. */
@@ -41,7 +42,7 @@ export function parseSessionProof(value: unknown): AgentSessionProof | null {
     return null;
   }
   const row = value as Record<string, unknown>;
-  if (typeof row.session_id !== "string" || !UUID_RE.test(row.session_id)) {
+  if (typeof row.session_id !== "string" || !AGENT_SESSION_ID_RE.test(row.session_id)) {
     return null;
   }
   if (
@@ -51,7 +52,7 @@ export function parseSessionProof(value: unknown): AgentSessionProof | null {
   ) {
     return null;
   }
-  if (typeof row.key !== "string" || !SESSION_KEY_RE.test(row.key)) return null;
+  if (typeof row.key !== "string" || !AGENT_SESSION_KEY_RE.test(row.key)) return null;
   return {
     session_id: row.session_id.toLowerCase(),
     generation: row.generation,
