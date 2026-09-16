@@ -106,7 +106,9 @@ remote_temp=$remote_root/releases/$release.tmp
 remote_release=$remote_root/releases/$release
 
 ssh "$box" "set -eu; mkdir -p '$remote_root/releases'; test ! -e '$remote_temp'; test ! -e '$remote_release'; mkdir '$remote_temp'" </dev/null
-rsync -a --delete --chmod=D755,F644 "$checkout/site/dist/" "$box:$remote_temp/" </dev/null
+# No --chmod: macOS ships openrsync, which rejects it (measured on the operator mini, 2026-09-16).
+# finalize-release.sh normalizes every directory to 755 and file to 644 on the box before the swap.
+rsync -a --delete "$checkout/site/dist/" "$box:$remote_temp/" </dev/null
 ssh "$box" sh -s -- "$remote_temp" "$remote_release" "$remote_root" < "$script_dir/finalize-release.sh"
 
 printf 'Deployed release %s to %s. The five newest releases were kept for rollback.\n' "$release" "$box"

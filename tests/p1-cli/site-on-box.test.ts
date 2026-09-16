@@ -253,7 +253,10 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     );
 
     const deployScript = await readFile(join(deployRoot, "deploy.sh"), "utf8");
-    assert.match(deployScript, /rsync -a --delete --chmod=D755,F644/);
+    // The upload runs on the operator's mac, whose openrsync rejects --chmod; modes are normalized on the box by
+    // finalize-release.sh (proved by the 0700/0600 fixture above).
+    assert.match(deployScript, /rsync -a --delete "\$checkout\/site\/dist\/"/);
+    assert.doesNotMatch(deployScript.replace(/^\s*#.*$/gm, ""), /--chmod/);
     const names = await Promise.all([0, 1].map(async () =>
       (await execFileAsync("sh", [join(deployRoot, "deploy.sh"), "--dry-run", "--release-name"], {
         cwd: fixture,
