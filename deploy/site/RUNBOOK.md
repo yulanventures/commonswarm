@@ -70,6 +70,7 @@ curl -sS --cacert ./cloudflare-origin-ca-root.pem --resolve commonswarm.com:443:
 2. Change both records to the Hetzner address. Keep the Cloudflare proxy and TLS settings unchanged.
 3. Run `node deploy/site/parity-check.mjs https://commonswarm.com --allow-cloudflare-browser-ttl` while the zone still overrides Browser Cache TTL.
 4. Repeat every production control above with `U=https://commonswarm.com`.
+5. Judge the result through public DNS (`dig @1.1.1.1`) or after flushing your resolver. On 2026-09-16 the operator's mini kept the old DNS-only Vercel answer until flushed: a path probe from a stale resolver reports Vercel even when the switch worked. Tell the two origins apart with the `x-vercel-id` response header (present only on Vercel) and `cf-ray` (present through the Cloudflare proxy).
 
 After the Cloudflare Browser Cache TTL setting stops changing the origin value, run the checker once without `--allow-cloudflare-browser-ttl`. Drop the option from later checks only after that unflagged check passes.
 

@@ -33,8 +33,21 @@ Listener wake: HezLead's reply 9a6e9417 created 23:02:00.338Z, surfaced at the l
 Both records back to A 76.76.21.21, DNS-only, TTL auto. Vercel project `coswarm-site` stays deployed and untouched until
 the operator confirms deletion.
 
-## Not established at this commit
+## GitHub sign-in through the box-served app (Strategist 7c0d6066)
 
-- GitHub sign-in returning to /app on the box: the Strategist runs it in the operator's Chrome.
-- Resolver caches: clients that cached the DNS-only answer see Vercel for up to 300 s after 23:01:38Z; both serve the
-  same bytes.
+In the operator's Chrome at 23:07:19Z: /app loaded signed in (CICD roster); Sign out showed the sign-in panel (email
+link, GitHub, Google); Sign in with GitHub went through GitHub and returned to /app signed in as Ridgeio in about 12 s;
+roster and feed rendered. Server side (production auth schema, read-only query, timestamps and provider only):
+`auth.sessions` gained one session at 23:06:54Z for a GitHub identity, and no other session in 23:04-23:10Z.
+`auth.audit_log_entries` has no rows in that window. **N-site accepted as in production by the Strategist.**
+
+## Worth knowing
+
+- Client DNS caches outlive the switch: the mini's resolver kept the DNS-only Vercel answer until flushed. The previous
+  records had TTL auto (300 s) and were not proxied, so a client can see Vercel for up to five minutes, longer if its
+  resolver ignores TTLs. Both origins served the same bytes, so nothing broke. Judge a cutover through 1.1.1.1 or after
+  a resolver flush (deploy/site/RUNBOOK.md now says so).
+
+## Not established
+
+- Behaviour under Vercel-only features the reference does not record (for example image optimization or analytics).
