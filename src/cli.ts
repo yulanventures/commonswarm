@@ -2,9 +2,26 @@
 
 import { randomUUID } from "node:crypto";
 import { recordDispatch } from "./dispatch-trace.js";
-import { AGENT_PROFILE_COMMANDS, isBlobBody } from "./cloud/agent-onboarding-contract.js";
+import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
-import { ONBOARDING_BOOLEAN_FLAGS, ONBOARDING_VALUE_FLAGS, onboardingUsage, runOnboardingCommand } from "./onboarding-cli.js";
+import {
+  ONBOARDING_BOOLEAN_FLAGS,
+  ONBOARDING_VALUE_FLAGS,
+  onboardingUsage,
+  runCheckHook,
+  runCheckMessage,
+  runCheckMessages,
+  runReceiveConfigure,
+  runReceiveConfirm,
+  runReceiveIdle,
+  runReceiveServe,
+  runReceiveStatus,
+  runReceiveTest,
+  runResumeSnapshot,
+  runSetupGuide,
+  runSetupImport,
+  runSetupVersion,
+} from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { open, unlink } from "node:fs/promises";
@@ -626,20 +643,25 @@ const CLI_BUILD_VERSION = packageVersion();
 
 export class Arguments {
   readonly positionals: string[] = [];
+  private readonly leadingPositionals: string[] = [];
   private readonly flags = new Map<string, string[]>();
 
   constructor(values: string[]) {
     let positionalOnly = false;
+    let sawOption = false;
     for (let index = 0; index < values.length; index += 1) {
       const value = values[index]!;
       if (positionalOnly || !value.startsWith("--")) {
         this.positionals.push(value);
+        if (!sawOption) this.leadingPositionals.push(value);
         continue;
       }
       if (value === "--") {
+        sawOption = true;
         positionalOnly = true;
         continue;
       }
+      sawOption = true;
       const name = value.slice(2);
       if (!name || name.includes("=")) {
         throw new Error(`invalid option: ${value}`);
@@ -702,17 +724,28 @@ export class Arguments {
     return [...(this.flags.get(name) ?? [])];
   }
 
-  async expandAgentProfile(): Promise<void> {
+  // Main swallowed hook-check errors only when `hook check` preceded every
+  // option. Parsed `positionals` alone loses that order, so the parser records
+  // this subset and error handling can use the selected entry plus parsed data.
+  startsWithLeadingPositionals(...values: readonly string[]): boolean {
+    return values.every((value, index) => this.leadingPositionals[index] === value);
+  }
+
+  async expandAgentProfile(
+    profileMode: "refuse" | "native" | "expand",
+    hostSessionId: "keep" | "drop",
+  ): Promise<void> {
     const path = this.optional("profile");
     if (path === undefined) return;
-    if (!(AGENT_PROFILE_COMMANDS as readonly string[]).includes(this.positionals[0] ?? "")) {
+    if (profileMode === "refuse") {
       throw new AgentSetupError("profile_command_invalid", `--profile is supported by: ${AGENT_PROFILE_COMMANDS.join(", ")}.`);
     }
+    if (profileMode === "native") return;
     const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key", "workspace-id"].filter(flag => this.has(flag));
     if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", `Do not combine --profile with ${conflicts.map(flag => `--${flag}`).join(", ")}.`);
     const profile = await readAgentProfile(path);
     await readProfileCredential(profile);
-    if (this.has("host-session-id") && !["session", "listen"].includes(this.positionals[0]!)) {
+    if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
       if (selected) {
         const explicit = this.optional("session-context");
@@ -2823,19 +2856,6 @@ const CAPABILITY_DISCLOSED_FIELDS = [
   "workspace.age_days",
   "expires_at",
 ] as const;
-
-async function runLink(args: Arguments): Promise<void> {
-  const subcommand = args.positionals[1];
-  if (subcommand === "new") {
-    await runLinkNew(args);
-    return;
-  }
-  if (subcommand === "revoke") {
-    await runLinkRevoke(args);
-    return;
-  }
-  throw new UsageError(`unknown link command: ${subcommand ?? "(missing)"}`);
-}
 
 async function runLinkNew(args: Arguments): Promise<void> {
   args.assertShape(
@@ -7445,23 +7465,6 @@ async function runSession(args: Arguments): Promise<void> {
   }
 }
 
-async function runListen(args: Arguments): Promise<void> {
-  const command = args.positionals[1];
-  if (command === "start") {
-    await runListenStart(args);
-    return;
-  }
-  if (command === "status" || command === "stop") {
-    await runListenStatusOrStop(args, command);
-    return;
-  }
-  if (command === "canary") {
-    await runListenCanary(args);
-    return;
-  }
-  throw new UsageError("listen requires start, status, stop, or canary");
-}
-
 const CLAUDE_HOOK_COMMAND = "cswarm hook check";
 
 function scopedClaudeHookCommand(principalId: string): string {
@@ -8455,14 +8458,6 @@ async function runBrainPut(args: Arguments): Promise<void> {
   );
 }
 
-async function runBrain(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  if (action === "ls") return await runBrainLs(args);
-  if (action === "get") return await runBrainGet(args);
-  if (action === "put") return await runBrainPut(args);
-  throw new UsageError("cswarm brain takes ls, get, or put");
-}
-
 async function runFeedback(args: Arguments): Promise<void> {
   const body = args.positionals[1];
   if (!body) {
@@ -8726,62 +8721,6 @@ async function runChannelArchive(args: Arguments): Promise<void> {
   );
 }
 
-/**
- * The subcommands, once. Dispatch reads this table and so does the sentence a
- * caller sees when they name something else, so a fifth subcommand cannot be
- * added to one and left out of the other. `runFile` and `runBrain` still type
- * their lists; this one does not, and they are the next ones to fix.
- */
-const CHANNEL_SUBCOMMANDS: Record<
-  string,
-  (args: Arguments) => Promise<void>
-> = {
-  create: runChannelCreate,
-  ls: runChannelLs,
-  rename: runChannelRename,
-  archive: runChannelArchive,
-};
-
-/**
- * The subcommand names, for the gate that compares dispatch with help.
- *
- * Exported so the test reads the SET rather than parsing the refusal sentence
- * for it. A review arm pointed out that parsing that sentence is a typed
- * assumption about English punctuation: it would fail on a legitimate rewording
- * and it is not the thing under test.
- */
-export const CHANNEL_SUBCOMMAND_NAMES: readonly string[] = Object.keys(
-  CHANNEL_SUBCOMMANDS,
-);
-
-async function runChannel(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  const chosen = action === undefined
-    ? undefined
-    : CHANNEL_SUBCOMMANDS[action];
-  if (chosen === undefined) {
-    const names = Object.keys(CHANNEL_SUBCOMMANDS);
-    throw new UsageError(
-      `cswarm channel takes ${names.slice(0, -1).join(", ")}, or ${
-        names[names.length - 1]
-      }`,
-    );
-  }
-  return await chosen(args);
-}
-
-async function runFile(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  if (action === "put") return await runFilePut(args);
-  if (action === "ls") return await runFileLs(args);
-  if (action === "get") return await runFileGet(args);
-  if (action === "rm") return await runFileRm(args);
-  if (action === "restore") return await runFileRestore(args);
-  throw new UsageError(
-    "cswarm file takes put, ls, get, rm, or restore",
-  );
-}
-
 async function runTaskCommand(args: Arguments): Promise<void> {
   args.assertShape(
     [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS],
@@ -8951,7 +8890,547 @@ async function runSeed(args: Arguments): Promise<void> {
   }
 }
 
+async function runLogin(args: Arguments): Promise<void> {
+  args.assertShape([...TARGET_FLAGS, "no-browser"], 1);
+  const cloud = await target(args);
+  const credentials = await store(args, cloud);
+  process.stderr.write(
+    "Swarm stores the rotating refresh credential in the OS keychain when available; the access token remains in memory only.\n",
+  );
+  const result = await login({
+    target: cloud,
+    store: credentials,
+    openBrowser: args.has("no-browser") ? async () => false : undefined,
+  });
+  await writeCurrentTarget(cloud);
+  process.stdout.write(
+    `Login complete for ${result.userId}. This device (${result.deviceId}) is registered so its agent credentials can be governed independently; refresh credential: ${result.storage}; ${
+      result.workspaceId
+        ? `workspace ${result.workspaceId} is now selected`
+        : "no workspace is selected yet—run cswarm workspaces, then cswarm use <full-id|exact-name>"
+    }.\n`,
+  );
+}
+
+async function runLogout(args: Arguments): Promise<void> {
+  args.assertShape([...TARGET_FLAGS, "device", "all-devices", "local"], 1);
+  if (args.optional("device") !== undefined) {
+    throw new Error(
+      "--device is deferred until the server-side device authority endpoint ships",
+    );
+  }
+  const cloud = await target(args);
+  const credentials = await store(args, cloud);
+  const allDevices = args.has("all-devices");
+  const localOnly = args.has("local");
+  if (localOnly && allDevices) {
+    throw new Error(
+      "--local clears only this device and never contacts the server, so it cannot be combined with --all-devices",
+    );
+  }
+  const outcome = await logout(
+    cloud,
+    credentials,
+    allDevices ? "global" : "local",
+    { localOnly },
+  );
+  process.stdout.write(logoutMessage(outcome, allDevices));
+}
+
+// Flag-selected modes stay explicit in AGENT_COMMANDS while their handler body stays unchanged.
+const runAcceptLinkStdinMode: AgentCommandHandler = async (args) => await runAccept(args);
+const runAcceptLegacyStdinMode: AgentCommandHandler = async (args) => await runAccept(args);
+const runAcceptPositionalMode: AgentCommandHandler = async (args) => await runAccept(args);
+const runInboxNotifyMode: AgentCommandHandler = async (args) => await runSignalRead(args, true);
+const runInboxFollowMode: AgentCommandHandler = async (args) => await runSignalRead(args, true);
+const runInboxReadMode: AgentCommandHandler = async (args) => await runSignalRead(args, true);
+
+export type AgentCommandTransport = "stdio" | "http";
+export type AgentCommandProfileMode = "refuse" | "native" | "expand";
+export type AgentCommandHostSessionPolicy = "keep" | "drop";
+type AgentCommandHandler = (args: Arguments) => Promise<void>;
+
+export interface AgentCommandArgumentSchema {
+  type: "object";
+  properties: Record<string, { type: "string" | "boolean" | "array"; items?: { type: "string" } }>;
+  additionalProperties: false;
+}
+
+type AgentCommandTool =
+  | { tool: string; reason?: never }
+  | { tool: null; reason: string };
+
+export type AgentCommandVariant = {
+  id: string;
+  handler: AgentCommandHandler;
+  help: readonly string[];
+};
+
+const selectedVariantsBrand = Symbol("declared command variants");
+
+type DeclaredVariantSelection = {
+  variants: Readonly<Record<string, AgentCommandVariant>>;
+  select(args: Arguments): string;
+  readonly [selectedVariantsBrand]: true;
+};
+
+export type AgentCommandEntry = AgentCommandTool & {
+  variants: Readonly<Record<string, AgentCommandVariant>>;
+  select(args: Arguments): string;
+  description: string;
+  argumentSchema: AgentCommandArgumentSchema;
+  mutates: boolean;
+  flags: readonly string[];
+  transports: readonly AgentCommandTransport[];
+  profile: AgentCommandProfileMode;
+  hostSessionId: AgentCommandHostSessionPolicy;
+  profileListOrder?: number;
+  visible: boolean;
+  bootstrap: boolean;
+  errorMode: "standard" | "onboarding" | "hook-check";
+  workspaceErrorJson: boolean;
+};
+
+export type AgentCommandGroup = {
+  subcommands: Record<string, AgentCommandEntry>;
+  choose(args: Arguments): string | undefined;
+  refusal: AgentCommandEntry;
+  profileListOrder?: number;
+};
+
+type AgentCommandRoot = AgentCommandEntry | AgentCommandGroup;
+
+const ALL_TRANSPORTS = ["stdio", "http"] as const;
+const STDIO_ONLY = ["stdio"] as const;
+const BOOLEAN_ARGUMENT_FLAGS = new Set<string>(BOOLEAN_FLAGS);
+
+function commandArgumentSchema(flags: readonly string[]): AgentCommandArgumentSchema {
+  const properties: AgentCommandArgumentSchema["properties"] = {
+    positionals: { type: "array", items: { type: "string" } },
+  };
+  for (const flag of flags) {
+    properties[flag] = { type: BOOLEAN_ARGUMENT_FLAGS.has(flag) ? "boolean" : "string" };
+  }
+  return { type: "object", properties, additionalProperties: false };
+}
+
+type AgentCommandCommonOptions = AgentCommandTool & {
+  description: string;
+  mutates: boolean;
+  flags: readonly string[];
+  transports: readonly AgentCommandTransport[];
+  profile: AgentCommandProfileMode;
+  hostSessionId: AgentCommandHostSessionPolicy;
+  profileListOrder?: number;
+  visible: boolean;
+  bootstrap?: boolean;
+  errorMode?: AgentCommandEntry["errorMode"];
+  workspaceErrorJson?: boolean;
+};
+
+type AgentCommandSelectionOptions =
+  | { handler: AgentCommandHandler; help: readonly string[]; variants?: never; select?: never }
+  | ({ handler?: never; help?: never } & DeclaredVariantSelection);
+
+function commandFlags(
+  flags: readonly string[],
+  profile: AgentCommandProfileMode,
+): readonly string[] {
+  const base = flags.filter(flag => flag !== "profile" && flag !== "host-session-id");
+  return profile === "refuse" ? base : ["profile", "host-session-id", ...base];
+}
+
+function commandEntry(
+  options: AgentCommandCommonOptions & AgentCommandSelectionOptions,
+): AgentCommandEntry {
+  const flags = commandFlags(options.flags, options.profile);
+  if (options.handler !== undefined) {
+    const { handler, help, ...common } = options;
+    const defaultVariant = commandVariant("default", handler, help ?? []);
+    return {
+      ...common,
+      flags,
+      variants: { default: defaultVariant },
+      select: () => "default",
+      argumentSchema: commandArgumentSchema(flags),
+      bootstrap: options.bootstrap ?? false,
+      errorMode: options.errorMode ?? (options.bootstrap ? "onboarding" : "standard"),
+      workspaceErrorJson: options.workspaceErrorJson ?? false,
+    };
+  }
+  const { variants, select, ...common } = options;
+  return {
+    ...common,
+    flags,
+    variants,
+    select,
+    argumentSchema: commandArgumentSchema(flags),
+    bootstrap: options.bootstrap ?? false,
+    errorMode: options.errorMode ?? (options.bootstrap ? "onboarding" : "standard"),
+    workspaceErrorJson: options.workspaceErrorJson ?? false,
+  };
+}
+
+function traced(handlerName: string, handler: AgentCommandHandler): AgentCommandHandler {
+  return async (args) => {
+    recordDispatch(handlerName);
+    await handler(args);
+  };
+}
+
+function commandVariant(
+  id: string,
+  handler: AgentCommandHandler,
+  help: readonly string[],
+): AgentCommandVariant {
+  return { id, handler, help };
+}
+
+function selectedVariants<const Variants extends Readonly<Record<string, AgentCommandVariant>>>(
+  variants: Variants,
+  choose: (args: Arguments) => keyof Variants & string,
+): DeclaredVariantSelection {
+  return {
+    variants,
+    select: (args) => choose(args),
+    [selectedVariantsBrand]: true,
+  };
+}
+
+function group(
+  subcommands: Record<string, AgentCommandEntry>,
+  choose: AgentCommandGroup["choose"],
+  refusal: (args: Arguments, names: readonly string[]) => Error,
+  options: {
+    refusalPolicy: Pick<AgentCommandEntry, "flags" | "profile" | "hostSessionId">;
+    profileListOrder?: number;
+    refusalTrace?: string;
+    refusalErrorMode?: AgentCommandEntry["errorMode"];
+  },
+): AgentCommandGroup {
+  const names = Object.keys(subcommands);
+  if (names.length === 0) throw new Error("a command group needs at least one subcommand");
+  const refuseHandler: AgentCommandHandler = async (args) => {
+    throw refusal(args, names);
+  };
+  const handler = options.refusalTrace === undefined
+    ? refuseHandler
+    : traced(options.refusalTrace, refuseHandler);
+  return {
+    subcommands,
+    choose,
+    refusal: commandEntry({
+      ...noTool("invalid sub-action refusal; never an MCP tool"),
+      handler,
+      description: "Reject an invalid sub-action.",
+      mutates: false,
+      flags: options.refusalPolicy.flags,
+      transports: [],
+      profile: options.refusalPolicy.profile,
+      hostSessionId: options.refusalPolicy.hostSessionId,
+      visible: false,
+      help: [],
+      errorMode: options.refusalErrorMode ?? "standard",
+    }),
+    ...(options.profileListOrder === undefined ? {} : { profileListOrder: options.profileListOrder }),
+  };
+}
+
+const REFUSE_PROFILE: Pick<AgentCommandEntry, "profile" | "hostSessionId"> = {
+  profile: "refuse",
+  hostSessionId: "drop",
+};
+const EXPAND_PROFILE: Pick<AgentCommandEntry, "profile" | "hostSessionId"> = {
+  profile: "expand",
+  hostSessionId: "drop",
+};
+const EXPAND_PROFILE_KEEP_HOST: Pick<AgentCommandEntry, "profile" | "hostSessionId"> = {
+  profile: "expand",
+  hostSessionId: "keep",
+};
+const NATIVE_PROFILE: Pick<AgentCommandEntry, "profile" | "hostSessionId"> = {
+  profile: "native",
+  hostSessionId: "keep",
+};
+
+const humanFlags = [...TARGET_FLAGS, "workspace-id", "json"] as const;
+const agentFlags = [
+  "profile", "host-session-id", ...TARGET_FLAGS, "workspace-id",
+  ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS,
+] as const;
+const noTool = (reason: string) => ({ tool: null, reason }) as const;
+export const CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER = "CLI-only until item L";
+
+const setupVariants = {
+  import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file"]),
+  version: commandVariant("version", runSetupVersion, ["cswarm setup --check-version"]),
+  guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"]),
+};
+const checkVariants = {
+  messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile"]),
+  message: commandVariant("message", runCheckMessage, ["cswarm check --profile"]),
+  hook: commandVariant("hook", runCheckHook, ["cswarm check --profile"]),
+};
+const resumeVariants = {
+  inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file"]),
+  profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile"]),
+};
+const acceptVariants = {
+  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin"]),
+  legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin"]),
+  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://", "cswarm accept <invitation-token>"]),
+};
+const inboxVariants = {
+  read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url"]),
+  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify"]),
+  follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow"]),
+};
+
+/**
+ * The command table is the only verb dispatcher. Closed sub-actions are nested,
+ * while flag-selected modes stay behind one key and are chosen by select().
+ */
+export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
+  setup: commandEntry({
+    ...noTool("bootstrap imports a credential before an MCP tool session exists"),
+    ...selectedVariants(setupVariants, (args) => args.has("check-version") ? "version" : args.positionals[1] === "guide" ? "guide" : "import"),
+    description: "Import an agent connection or show setup information.",
+    mutates: true,
+    flags: ["connection-file", "profile", "host-session-id", "json", "check-version"],
+    transports: STDIO_ONLY,
+    ...NATIVE_PROFILE,
+    visible: true,
+    bootstrap: true,
+  }),
+  check: commandEntry({
+    tool: "check",
+    ...selectedVariants(checkVariants, (args) => args.has("hook") ? "hook" : args.has("message-id") ? "message" : "messages"),
+    description: "Read new directed messages for this agent.",
+    mutates: true,
+    flags: ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"],
+    transports: ALL_TRANSPORTS,
+    ...NATIVE_PROFILE,
+    visible: true,
+    errorMode: "onboarding",
+  }),
+  receive: group({
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive configure"], bootstrap: true }),
+    status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status"], bootstrap: true }),
+    test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test"], bootstrap: true }),
+    confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm"], bootstrap: true }),
+    idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle"], bootstrap: true }),
+    serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve"], bootstrap: true }),
+  }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
+    refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
+    refusalTrace: "runOnboardingCommand:receive-refusal",
+    refusalErrorMode: "onboarding",
+  }),
+
+  "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
+  hook: group({
+    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check"], errorMode: "hook-check" }),
+    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install"] }),
+    uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall"] }),
+  }, (args) => args.positionals[1], () => new UsageError("hook requires check, install, or uninstall"), {
+    refusalPolicy: { flags: ["cooldown", "principal-id", "write", "user", "repo"], ...REFUSE_PROFILE },
+    refusalTrace: "runHook",
+  }),
+  listen: group({
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start"] }),
+    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
+    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary"] }),
+  }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
+    profileListOrder: 13,
+    refusalTrace: "runListen",
+  }),
+  session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm session ${action}`] })])), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
+    profileListOrder: 14,
+    refusalTrace: "runSession",
+  }),
+  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login"] }),
+  logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout"] }),
+  /*
+   * These selectors deliberately preserve the old handlers' order. Invite sent
+   * every action except "revoke" to its create path. Member, workspace, and
+   * grant selected their only handler before that handler rejected shape or
+   * action. Token sent every action except "revoke" to mint. Their explicit
+   * refusal entries are therefore unreachable for the same inputs as on main.
+   */
+  invite: group({
+    create: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Create an invitation.", mutates: true, flags: [...humanFlags, "email"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite [--url"] }),
+    revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke"] }),
+  }, (args) => args.positionals[1] === "revoke" ? "revoke" : "create", () => new UsageError("unknown invite command"), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+  }),
+  member: group({ remove: commandEntry({ ...noTool("human membership administration; never a model tool"), handler: traced("runMember", runMember), description: "Remove a workspace member.", mutates: true, flags: [...humanFlags, "confirm"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm member remove"] }) }, () => "remove", (args) => new UsageError(`unknown member command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+  }),
+  workspace: group({ close: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runWorkspace", runWorkspace), description: "Close a workspace.", mutates: true, flags: [...TARGET_FLAGS, "confirm", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspace close"] }) }, () => "close", (args) => new UsageError(`unknown workspace command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: [...TARGET_FLAGS, "confirm", "json"], ...REFUSE_PROFILE },
+  }),
+  target: group({
+    show: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Show the saved Cloud target.", mutates: false, flags: ["json", "reveal-anon-key"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target [show]"] }),
+    set: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Save a Cloud target.", mutates: true, flags: ["url", "anon-key", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target set"] }),
+    clear: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Clear the saved Cloud target.", mutates: true, flags: ["json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target clear"] }),
+  }, (args) => args.positionals[1] ?? "show", (args) => new Error(`unknown target command: ${args.positionals[1]}`), {
+    refusalPolicy: { flags: [...TARGET_FLAGS, "json"], ...REFUSE_PROFILE },
+    refusalTrace: "runTarget",
+  }),
+  status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status"], workspaceErrorJson: true }),
+  whoami: commandEntry({ tool: "whoami", handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami"] }),
+  resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
+  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback"] }),
+  channel: group({
+    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel create"] }),
+    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls"] }),
+    rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename"] }),
+    archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive"] }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 15,
+    refusalTrace: "runChannel",
+  }),
+  file: group({
+    put: commandEntry({ ...noTool("multi-phase upload retries need item L's durable resume record"), handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put"], workspaceErrorJson: true }),
+    ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get"], workspaceErrorJson: true }),
+    rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm"], workspaceErrorJson: true }),
+    restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore"], workspaceErrorJson: true }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 10,
+    refusalTrace: "runFile",
+  }),
+  brain: group({
+    ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get"], workspaceErrorJson: true }),
+    put: commandEntry({ ...noTool(`${CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER}: multi-phase upload retries need item L's durable resume record`), handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put"], workspaceErrorJson: true }),
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
+    profileListOrder: 9,
+    refusalTrace: "runBrain",
+  }),
+  members: commandEntry({ tool: "members", handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members"] }),
+  "working-on": commandEntry({ tool: "working_on", handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: ["cswarm working-on"], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: ["cswarm note"], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: ["cswarm ask"], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
+  receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt"], workspaceErrorJson: true }),
+  feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed"], workspaceErrorJson: true }),
+  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has("notify") ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", "notify"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
+  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces"], workspaceErrorJson: true }),
+  use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use"], workspaceErrorJson: true }),
+  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm new"] }),
+  accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
+  principal: group({
+    create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create"] }),
+    revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke"] }),
+  }, (args) => args.positionals[1], (args) => new Error(`unknown principal command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+    refusalTrace: "runPrincipal",
+  }),
+  token: group({
+    mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint"] }),
+    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke"] }),
+  }, (args) => args.positionals[1] === "revoke" ? "revoke" : "mint", (args) => new Error(`unknown token command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+  }),
+  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+  }),
+  link: group({
+    new: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkNew), description: "Create a capability link.", mutates: true, flags: [...humanFlags, "task-id", "ttl-ms", "site"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link new"] }),
+    revoke: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkRevoke), description: "Revoke a capability link.", mutates: true, flags: [...humanFlags, "capability-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link revoke"] }),
+  }, (args) => args.positionals[1], (args) => new UsageError(`unknown link command: ${args.positionals[1] ?? "(missing)"}`), {
+    refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
+    refusalTrace: "runLink",
+  }),
+  command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind>"] }),
+  dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood"] }),
+  "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture"] }),
+};
+
+function isCommandGroup(root: AgentCommandRoot): root is AgentCommandGroup {
+  return "subcommands" in root;
+}
+
+function commandEntries(root: AgentCommandRoot): AgentCommandEntry[] {
+  return isCommandGroup(root) ? Object.values(root.subcommands) : [root];
+}
+
+export const AGENT_PROFILE_COMMANDS: readonly string[] = Object.entries(AGENT_COMMANDS)
+  .map(([verb, root]) => ({
+    verb,
+    order: isCommandGroup(root) ? root.profileListOrder : root.profileListOrder,
+  }))
+  .filter((row): row is { verb: string; order: number } => row.order !== undefined)
+  .sort((left, right) => left.order - right.order)
+  .map(row => row.verb);
+
+export const CHANNEL_SUBCOMMAND_NAMES: readonly string[] = Object.keys(
+  (AGENT_COMMANDS.channel as AgentCommandGroup).subcommands,
+);
+
+export interface AgentToolDescription {
+  name: string;
+  description: string;
+  inputSchema: AgentCommandArgumentSchema;
+  mutates: boolean;
+  flags: readonly string[];
+}
+
+export function agentToolsForTransport(transport: AgentCommandTransport): AgentToolDescription[] {
+  const tools: AgentToolDescription[] = [];
+  for (const root of Object.values(AGENT_COMMANDS)) {
+    for (const entry of commandEntries(root)) {
+      if (entry.tool === null || !entry.transports.includes(transport)) continue;
+      tools.push({
+        name: entry.tool,
+        description: entry.description,
+        inputSchema: entry.argumentSchema,
+        mutates: entry.mutates,
+        flags: entry.flags,
+      });
+    }
+  }
+  return tools;
+}
+
+function selectCommandEntry(root: AgentCommandRoot, args: Arguments): AgentCommandEntry {
+  if (!isCommandGroup(root)) return root;
+  const action = root.choose(args);
+  const entry = action !== undefined && Object.hasOwn(root.subcommands, action) ? root.subcommands[action] : undefined;
+  return entry ?? root.refusal;
+}
+
+function selectCommandVariant(
+  entry: AgentCommandEntry,
+  args: Arguments,
+): AgentCommandVariant {
+  const id = entry.select(args);
+  const variant = entry.variants[id];
+  if (variant === undefined) {
+    throw new Error(`command select returned undeclared variant: ${id}`);
+  }
+  return variant;
+}
+
+let selectedCommandContext: {
+  entry: AgentCommandEntry;
+  variant: AgentCommandVariant;
+  args: Arguments;
+} | null = null;
+
 async function main(): Promise<void> {
+  selectedCommandContext = null;
+  /*
+   * Meta-command rule, copied from the conditions below: a leading --version
+   * or -v; args.has("help"); the bare verb help; or !verb (no POSITIONAL).
+   * These are the only paths allowed to answer before AGENT_COMMANDS is read.
+   */
   // `--version` is checked against RAW ARGV before parsing, because the parser treats an
   // unknown `--flag` as one requiring a value — so `cswarm --version` failed with
   // "--version requires a value", on the single most-typed diagnostic a user has.
@@ -8975,213 +9454,17 @@ async function main(): Promise<void> {
     process.stdout.write(`${usage()}\n${onboardingUsage()}\n`);
     return;
   }
-  if (await runOnboardingCommand(args)) return;
-  await args.expandAgentProfile();
-  if (verb === "__listen-supervisor") {
-    recordDispatch("runListenSupervisor");
-    await runListenSupervisor(args);
-    return;
+  const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
+  if (root === undefined) {
+    // The old dispatcher expanded profiles before its unknown-command refusal.
+    await args.expandAgentProfile("refuse", "drop");
+    throw new UsageError(`unknown command: ${verb}`);
   }
-  if (verb === "hook") {
-    recordDispatch("runHook");
-    await runHook(args);
-    return;
-  }
-  if (verb === "listen") {
-    recordDispatch("runListen");
-    await runListen(args);
-    return;
-  }
-  if (verb === "session") {
-    recordDispatch("runSession");
-    await runSession(args);
-    return;
-  }
-  if (verb === "login") {
-    recordDispatch("main.login");
-    args.assertShape([...TARGET_FLAGS, "no-browser"], 1);
-    const cloud = await target(args);
-    const credentials = await store(args, cloud);
-    process.stderr.write(
-      "Swarm stores the rotating refresh credential in the OS keychain when available; the access token remains in memory only.\n",
-    );
-    const result = await login({
-      target: cloud,
-      store: credentials,
-      openBrowser: args.has("no-browser") ? async () => false : undefined,
-    });
-    await writeCurrentTarget(cloud);
-    process.stdout.write(
-      `Login complete for ${result.userId}. This device (${result.deviceId}) is registered so its agent credentials can be governed independently; refresh credential: ${result.storage}; ${
-        result.workspaceId
-          ? `workspace ${result.workspaceId} is now selected`
-          : "no workspace is selected yet—run cswarm workspaces, then cswarm use <full-id|exact-name>"
-      }.\n`,
-    );
-    return;
-  }
-  if (verb === "logout") {
-    recordDispatch("main.logout");
-    args.assertShape([...TARGET_FLAGS, "device", "all-devices", "local"], 1);
-    if (args.optional("device") !== undefined) {
-      throw new Error(
-        "--device is deferred until the server-side device authority endpoint ships",
-      );
-    }
-    const cloud = await target(args);
-    const credentials = await store(args, cloud);
-    const allDevices = args.has("all-devices");
-    const localOnly = args.has("local");
-    if (localOnly && allDevices) {
-      throw new Error(
-        "--local clears only this device and never contacts the server, so it cannot be combined with --all-devices",
-      );
-    }
-    const outcome = await logout(
-      cloud,
-      credentials,
-      allDevices ? "global" : "local",
-      { localOnly },
-    );
-    process.stdout.write(logoutMessage(outcome, allDevices));
-    return;
-  }
-  if (verb === "invite") {
-    recordDispatch("runInvite");
-    await runInvite(args);
-    return;
-  }
-  if (verb === "member") {
-    recordDispatch("runMember");
-    await runMember(args);
-    return;
-  }
-  if (verb === "workspace") {
-    recordDispatch("runWorkspace");
-    await runWorkspace(args);
-    return;
-  }
-  if (verb === "target") {
-    recordDispatch("runTarget");
-    await runTarget(args);
-    return;
-  }
-  if (verb === "status") {
-    recordDispatch("runStatus");
-    await runStatus(args);
-    return;
-  }
-  if (verb === "whoami") {
-    recordDispatch("runWhoami");
-    await runWhoami(args);
-    return;
-  }
-  if (verb === "resume") {
-    recordDispatch("runResume");
-    await runResume(args);
-    return;
-  }
-  if (verb === "feedback") {
-    recordDispatch("runFeedback");
-    await runFeedback(args);
-    return;
-  }
-  if (verb === "channel") {
-    recordDispatch("runChannel");
-    await runChannel(args);
-    return;
-  }
-  if (verb === "file") {
-    recordDispatch("runFile");
-    await runFile(args);
-    return;
-  }
-  if (verb === "brain") {
-    recordDispatch("runBrain");
-    await runBrain(args);
-    return;
-  }
-  if (verb === "members") {
-    recordDispatch("runMembers");
-    await runMembers(args);
-    return;
-  }
-  if (verb === "working-on" || verb === "note" || verb === "ask") {
-    recordDispatch(`runPostSignal:${verb}`);
-    await runPostSignal(args, verb);
-    return;
-  }
-  if (verb === "reply") {
-    recordDispatch("runReply");
-    await runReply(args);
-    return;
-  }
-  if (verb === "receipt") {
-    recordDispatch("runReceipt");
-    await runReceipt(args);
-    return;
-  }
-  if (verb === "feed" || verb === "inbox") {
-    recordDispatch(`runSignalRead:${verb}`);
-    await runSignalRead(args, verb === "inbox");
-    return;
-  }
-  if (verb === "workspaces") {
-    recordDispatch("runWorkspaces");
-    await runWorkspaces(args);
-    return;
-  }
-  if (verb === "use") {
-    recordDispatch("runUse");
-    await runUse(args);
-    return;
-  }
-  if (verb === "new") {
-    recordDispatch("runNew");
-    await runNew(args);
-    return;
-  }
-  if (verb === "accept") {
-    recordDispatch("runAccept");
-    await runAccept(args);
-    return;
-  }
-  if (verb === "principal") {
-    recordDispatch("runPrincipal");
-    await runPrincipal(args);
-    return;
-  }
-  if (verb === "token") {
-    recordDispatch("runToken");
-    await runToken(args);
-    return;
-  }
-  if (verb === "grant") {
-    recordDispatch("runGrant");
-    await runGrant(args);
-    return;
-  }
-  if (verb === "link") {
-    recordDispatch("runLink");
-    await runLink(args);
-    return;
-  }
-  if (verb === "command") {
-    recordDispatch("runTaskCommand");
-    await runTaskCommand(args);
-    return;
-  }
-  if (verb === "dogfood") {
-    recordDispatch("runDogfood");
-    await runDogfood(args);
-    return;
-  }
-  if (verb === "seed-fixture") {
-    recordDispatch("runSeed");
-    await runSeed(args);
-    return;
-  }
-  throw new UsageError(`unknown command: ${verb}`);
+  const entry = selectCommandEntry(root, args);
+  const variant = selectCommandVariant(entry, args);
+  selectedCommandContext = { entry, variant, args };
+  await args.expandAgentProfile(entry.profile, entry.hostSessionId);
+  await variant.handler(args);
 }
 
 /**

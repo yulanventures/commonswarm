@@ -130,103 +130,111 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   }
 }
 
-export async function runOnboardingCommand(args: OnboardingArguments): Promise<boolean> {
-  const verb = args.positionals[0];
-  if (verb === "setup") {
-    if (args.has("check-version")) {
-      recordDispatch("runOnboardingCommand:setup-version");
-      args.assertShape(["check-version"], 1);
-      await output({ setup_version: AGENT_CONNECTION_VERSION });
-    } else if (args.positionals[1] === "guide") {
-      recordDispatch("runOnboardingCommand:setup-guide");
-      args.assertShape([], 2);
-      await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
-    } else {
-      recordDispatch("runOnboardingCommand:setup-import");
-      args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
-      if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
-      await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
-    }
-    return true;
-  }
-  if (verb === "check") {
-    args.assertShape(["profile", "host-session-id", "force", "full", "message-id", "json", "hook"], 1);
-    if (args.has("hook")) {
-      recordDispatch("runOnboardingCommand:check-hook");
-      if (args.has("full") || args.has("message-id") || args.has("json")) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
-      await runTurnHook(args);
-    } else if (args.has("message-id")) {
-      recordDispatch("runOnboardingCommand:check-message");
-      if (args.has("full")) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
-      const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
-      await output({ source: "local_preview_cache", message });
-    } else {
-      recordDispatch("runOnboardingCommand:check-messages");
-      if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
-      await checkAgentMessages({
-        profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
-        present: async result => args.has("json") ? output(result) : writeOnboardingOutput(renderAgentCheck(result)),
-      });
-    }
-    return true;
-  }
-  if (verb === "receive") {
-    const action = args.positionals[1];
-    const common = ["profile", "host-session-id", "json"];
-    if (action === "configure") {
-      recordDispatch("runOnboardingCommand:receive-configure");
-      args.assertShape([...common, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], 2);
-      await output(await configureAgentReceive({
-        profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
-        hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
-        grokBotAgentId: args.optional("grok-bot-agent-id"),
-        execution: { command: process.execPath, args: [...process.execArgv, resolve(process.argv[1]!)] },
-      }));
-    } else if (action === "status") {
-      recordDispatch("runOnboardingCommand:receive-status");
-      args.assertShape(common, 2);
-      await output(receiveStatus(await readReceiveBinding(args.required("profile"), args.optional("host-session-id"))));
-    } else if (action === "test") {
-      recordDispatch("runOnboardingCommand:receive-test");
-      args.assertShape(common, 2);
-      await output(await requestReceiveCanary(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
-    } else if (action === "confirm") {
-      recordDispatch("runOnboardingCommand:receive-confirm");
-      args.assertShape([...common, "signal-id", "receipt"], 2);
-      const { confirmAgentChannel } = await import("./cloud/agent-channel.js");
-      await output(await confirmAgentChannel({ profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")), signalId: args.required("signal-id"), receipt: args.required("receipt") }));
-    } else if (action === "idle") {
-      recordDispatch("runOnboardingCommand:receive-idle");
-      args.assertShape(common, 2);
-      const { markGrokBotIdle } = await import("./cloud/agent-channel-grok-bot.js");
-      await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
-    } else if (action === "serve") {
-      recordDispatch("runOnboardingCommand:receive-serve");
-      args.assertShape(["profile", "host-session-id"], 2);
-      const { serveAgentChannel } = await import("./cloud/agent-channel.js");
-      const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
-      const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
-      if (binding?.provider === "grok-bot") {
-        const { serveGrokBotChannel } = await import("./cloud/agent-channel-grok-bot.js");
-        await serveGrokBotChannel(options);
-      } else await serveAgentChannel(options);
-    } else {
-      recordDispatch("runOnboardingCommand:receive-refusal");
-      throw new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands.");
-    }
-    return true;
-  }
-  if (verb === "resume" && args.has("profile")) {
-    recordDispatch("runOnboardingCommand:resume-profile");
-    args.assertShape(["profile", "host-session-id", "json"], 1);
-    const path = privatePath(args.required("profile"));
-    const profile = await readAgentProfile(path);
-    const binding = await readReceiveBinding(path, args.optional("host-session-id"));
-    await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
-      authenticated_now: false, ...receiveStatus(binding),
-      instruction: turnCheckInstruction(path, binding?.host_session_id),
-    });
-    return true;
-  }
-  return false;
+export async function runSetupImport(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:setup-import");
+  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+  if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
+  await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
+}
+
+export async function runSetupVersion(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:setup-version");
+  args.assertShape(["check-version"], 1);
+  await output({ setup_version: AGENT_CONNECTION_VERSION });
+}
+
+export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:setup-guide");
+  args.assertShape([], 2);
+  await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
+}
+
+const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+
+export async function runCheckHook(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:check-hook");
+  args.assertShape(CHECK_FLAGS, 1);
+  if (args.has("full") || args.has("message-id") || args.has("json")) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
+  await runTurnHook(args);
+}
+
+export async function runCheckMessage(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:check-message");
+  args.assertShape(CHECK_FLAGS, 1);
+  if (args.has("full")) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
+  const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
+  await output({ source: "local_preview_cache", message });
+}
+
+export async function runCheckMessages(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:check-messages");
+  args.assertShape(CHECK_FLAGS, 1);
+  if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
+  await checkAgentMessages({
+    profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id"), full: args.has("full"),
+    present: async result => args.has("json") ? output(result) : writeOnboardingOutput(renderAgentCheck(result)),
+  });
+}
+
+const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
+
+export async function runReceiveConfigure(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-configure");
+  args.assertShape([...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], 2);
+  await output(await configureAgentReceive({
+    profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
+    hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
+    grokBotAgentId: args.optional("grok-bot-agent-id"),
+    execution: { command: process.execPath, args: [...process.execArgv, resolve(process.argv[1]!)] },
+  }));
+}
+
+export async function runReceiveStatus(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-status");
+  args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  await output(receiveStatus(await readReceiveBinding(args.required("profile"), args.optional("host-session-id"))));
+}
+
+export async function runReceiveTest(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-test");
+  args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  await output(await requestReceiveCanary(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
+}
+
+export async function runReceiveConfirm(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-confirm");
+  args.assertShape([...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"], 2);
+  const { confirmAgentChannel } = await import("./cloud/agent-channel.js");
+  await output(await confirmAgentChannel({ profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")), signalId: args.required("signal-id"), receipt: args.required("receipt") }));
+}
+
+export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-idle");
+  args.assertShape(RECEIVE_COMMON_FLAGS, 2);
+  const { markGrokBotIdle } = await import("./cloud/agent-channel-grok-bot.js");
+  await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
+}
+
+export async function runReceiveServe(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:receive-serve");
+  args.assertShape(["profile", "host-session-id"], 2);
+  const { serveAgentChannel } = await import("./cloud/agent-channel.js");
+  const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
+  const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
+  if (binding?.provider === "grok-bot") {
+    const { serveGrokBotChannel } = await import("./cloud/agent-channel-grok-bot.js");
+    await serveGrokBotChannel(options);
+  } else await serveAgentChannel(options);
+}
+
+export async function runResumeSnapshot(args: OnboardingArguments): Promise<void> {
+  recordDispatch("runOnboardingCommand:resume-profile");
+  args.assertShape(["profile", "host-session-id", "json"], 1);
+  const path = privatePath(args.required("profile"));
+  const profile = await readAgentProfile(path);
+  const binding = await readReceiveBinding(path, args.optional("host-session-id"));
+  await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
+    authenticated_now: false, ...receiveStatus(binding),
+    instruction: turnCheckInstruction(path, binding?.host_session_id),
+  });
 }
