@@ -13,15 +13,119 @@ export interface FunctionRoute {
   pathname: string;
 }
 
+export type GatewayResolution =
+  | { route: FunctionRoute; response: null }
+  | { route: null; response: Response };
+
 const FUNCTION_PREFIX = "/functions/v1/";
 export const FUNCTIONS_BASE_PATH = "/functions/v1";
 export const KONG_NO_ROUTE_BODY = {
   message: "no Route matched with those values",
 } as const;
+export const KONG_PREFLIGHT_METHODS =
+  "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS,TRACE,CONNECT";
+export const KONG_FUNCTION_NOT_FOUND_BODY = "Function not found";
+export const WORKER_LIMIT_BODY = {
+  code: "WORKER_LIMIT",
+  message:
+    "Worker failed to respond due to a resource limit (please check logs)",
+} as const;
+export const WORKER_LIMIT_STATUS = 504;
+export const REQUIRED_MAIN_ENV = [
+  "SUPABASE_URL",
+  "SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SWARM_SELF_SERVE",
+] as const;
 const FUNCTION_NAME_SET = new Set<string>(FUNCTION_NAMES);
+const WORKER_LIMIT_ERROR_NAMES = new Set([
+  "WorkerRequestIdleTimeout",
+  "WorkerRequestCancelled",
+]);
 
 export function isFunctionsBasePath(pathname: string): boolean {
   return pathname === FUNCTIONS_BASE_PATH;
+}
+
+export function isFunctionsGatewayPath(pathname: string): boolean {
+  return pathname.startsWith(`${FUNCTIONS_BASE_PATH}/`);
+}
+
+export function gatewayPreflight(request: Request): Response {
+  const requestedHeaders = request.headers.get(
+    "access-control-request-headers",
+  );
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": KONG_PREFLIGHT_METHODS,
+      ...(requestedHeaders === null
+        ? {}
+        : { "access-control-allow-headers": requestedHeaders }),
+    },
+  });
+}
+
+export function functionNotFoundResponse(): Response {
+  return new Response(KONG_FUNCTION_NOT_FOUND_BODY, {
+    status: 404,
+    headers: {
+      "content-type": "text/plain; charset=UTF-8",
+      "access-control-allow-origin": "*",
+    },
+  });
+}
+
+export function kongNoRouteResponse(): Response {
+  return new Response(JSON.stringify(KONG_NO_ROUTE_BODY), {
+    status: 404,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+export function resolveGatewayRequest(request: Request): GatewayResolution {
+  const pathname = new URL(request.url).pathname;
+  if (isFunctionsBasePath(pathname)) {
+    return { route: null, response: kongNoRouteResponse() };
+  }
+  const route = resolveFunctionRoute(pathname);
+  if (route === null) {
+    return { route: null, response: functionNotFoundResponse() };
+  }
+  if (request.method === "OPTIONS") {
+    return { route: null, response: gatewayPreflight(request) };
+  }
+  return { route, response: null };
+}
+
+export function rewriteFunctionRequest(
+  request: Request,
+  pathname: string,
+): Request {
+  const url = new URL(request.url);
+  url.pathname = pathname;
+  return new Request(url, request);
+}
+
+export function isWorkerLimitError(error: unknown): boolean {
+  return error instanceof Error && WORKER_LIMIT_ERROR_NAMES.has(error.name);
+}
+
+export function isWorkerAlreadyRetired(error: unknown): boolean {
+  return error instanceof Error && error.name === "WorkerAlreadyRetired";
+}
+
+/** Retry only creation, once. A request body has not reached a worker yet. */
+export async function createWorkerWithRetiredRetry<T>(
+  create: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await create();
+  } catch (error) {
+    if (!isWorkerAlreadyRetired(error)) throw error;
+    return await create();
+  }
 }
 
 /**

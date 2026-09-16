@@ -6,7 +6,15 @@ This package runs the five existing Supabase Edge Functions in
 The main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
 `capability`, `activity`, and `h0` to separate user workers, and gives each worker
 the path Supabase Kong gives it: `/<name>/...`. An unknown name returns 404 before
-a worker starts.
+a worker starts. A known function's `OPTIONS` request gets Kong's wildcard
+gateway preflight before a worker starts. Other requests still use each
+function's CORS policy. Query strings, methods, headers, and bodies are kept.
+
+Boot requires `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
+`SUPABASE_SERVICE_ROLE_KEY`, and `SWARM_SELF_SERVE`, plus one supported database
+URL name. A retired worker creation is retried once, before any request body has
+reached a worker. A full worker pool or an idle worker timeout returns the hosted
+HTTP 504 status with the runtime's `WORKER_LIMIT` body.
 
 Each worker has a 96 MiB memory limit and a 150-second wall-clock limit. Four
 workers can use at most 384 MiB, leaving 128 MiB of the container's 512 MiB hard
@@ -14,7 +22,9 @@ limit for the main runtime, module cache, and process overhead. The hosted
 256 MiB per-worker reference does not fit this box budget, so the box uses the
 measured lower cap while keeping the hosted wall-clock reference. Caddy waits 165
 seconds for response headers: the hosted 150-second worker limit plus 15 seconds
-of proxy margin. Function request bodies are capped at 128 KiB; the 60-second
+of proxy margin. The runtime response-idle limit is also 150 seconds, so it does
+not end a valid worker before that reference. Function request bodies are capped
+at 128 KiB; the 60-second
 read timeout permits that body at about 2.2 KiB/s. File bytes up to 25 MiB go
 straight to Storage and do not pass through a function request body.
 
@@ -60,8 +70,12 @@ Supabase client calls in those files.
 | `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Supabase project origin; Caddy keeps the websocket upgrade |
 | every other path | compatibility fallback | Supabase project origin |
 
-The reverse proxy sends the project origin as both HTTP `Host` and TLS SNI. This
-avoids sending the custom-domain host back to itself.
+The reverse proxy sends the project origin as HTTP `Host`,
+`X-Forwarded-Host`, and TLS SNI. It fixes `X-Forwarded-Proto` to `https`, so
+GoTrue cannot derive its callback origin from the public proxy name. The Caddy
+global options trust only Cloudflare's ranges pinned on 2026-09-16, then replace
+`X-Forwarded-For` with Caddy's derived visitor address. This lets capability
+rate limiting use the visitor instead of a Cloudflare edge or spoofed header.
 
 ## Known box state
 

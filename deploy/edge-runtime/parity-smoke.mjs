@@ -98,10 +98,42 @@ try {
   assert.deepEqual(await json(capability), { error: "method_not_allowed" });
   report("capability method control", capability.status);
 
+  const preflight = await response(
+    "/functions/v1/command?query-is-preserved=true",
+    {
+      method: "OPTIONS",
+      headers: {
+        "access-control-request-headers":
+          "authorization,x-client-info,apikey,content-type",
+      },
+    },
+  );
+  assert.equal(preflight.status, 200);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.equal(
+    preflight.headers.get("access-control-allow-headers"),
+    "authorization,x-client-info,apikey,content-type",
+  );
+  assert.equal(
+    preflight.headers.get("access-control-allow-methods"),
+    "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS,TRACE,CONNECT",
+  );
+  assert.equal(await preflight.text(), "");
+  report("gateway preflight", preflight.status);
+
   const unknown = await response("/functions/v1/not-a-function");
   assert.equal(unknown.status, 404);
-  assert.deepEqual(await json(unknown), { error: "function_not_found" });
+  assert.equal(unknown.headers.get("access-control-allow-origin"), "*");
+  assert.match(unknown.headers.get("content-type") ?? "", /^text\/plain;/);
+  assert.equal(await unknown.text(), "Function not found");
   report("unknown function", unknown.status);
+
+  const unknownPreflight = await response("/functions/v1/not-a-function", {
+    method: "OPTIONS",
+  });
+  assert.equal(unknownPreflight.status, 404);
+  assert.equal(await unknownPreflight.text(), "Function not found");
+  report("unknown function preflight", unknownPreflight.status);
 } finally {
   if (userId) {
     const removed = await admin.auth.admin.deleteUser(userId);

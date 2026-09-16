@@ -7,9 +7,11 @@ through Cloudflare.
 
 ## NOT ESTABLISHED
 
-1. **NOT ESTABLISHED — the production cutover.** Staging proxying works, but the
-   deliberate custom-domain deactivation, OAuth and GoTrue changes, production
-   DNS move, production controls, and rollback have not run.
+1. **NOT ESTABLISHED — auth callbacks and custom-domain TLS after proxy
+   cutover.** Staging proxying works, but the deliberate custom-domain
+   deactivation, OAuth and GoTrue changes, production DNS move, production
+   controls, and rollback have not run. Only a controlled live cutover can
+   establish that callback and TLS sequence.
 2. **NOT ESTABLISHED — the three 1Password items named below exist or contain the
    current material.** An operator must confirm them without printing values.
 3. **NOT ESTABLISHED — this lane did not inspect the box firewall, certificate
@@ -53,7 +55,8 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
 - [ ] **NOT RUN** — write the environment item to `/home/commonswarm/.env` by a
   protected editor or approved 1Password file workflow. It must contain only the
   needed names from `env.example`. Do not set either `SWARM_CMD_TEST_*` name. Set
-  `SWARM_ENV` to the production value used by CommonSwarm.
+  `SWARM_ENV` to the production value used by CommonSwarm. `SWARM_SELF_SERVE`
+  is a required boot value; confirm its name is present without printing it.
 - [ ] **NOT RUN** — set ownership and mode without reading the file:
 
   ```sh
@@ -67,6 +70,9 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
 - [ ] **NOT RUN** — copy `commonswarm.caddy` to
   `/etc/caddy/sites/commonswarm.caddy` and import that directory from the main
   Caddyfile.
+- [ ] **NOT RUN** — compare the Cloudflare proxy ranges in the Caddy file, pinned
+  2026-09-16, with Cloudflare's current published list. Review and update the
+  file before install if that list changed.
 
 ## 3. Start the edge runtime
 
@@ -106,7 +112,12 @@ repository. The examples below call that file `/run/commonswarm-smoke.curl`.
   or the configured feature-off response when they are disabled. Confirm the
   container log names no boot or module error.
 - [ ] **NOT RUN** — request `/functions/v1/not-a-function`. Expect the main
-  service's 404 body `{"error":"function_not_found"}`.
+  service's 404 text body `Function not found` and
+  `Access-Control-Allow-Origin: *`.
+- [ ] **NOT RUN** — send `OPTIONS` to `/functions/v1/command` with an
+  `Access-Control-Request-Headers` value. Expect HTTP 200, wildcard origin, the
+  same requested header list, Kong's method list, and an empty body. Repeat for
+  an unknown function and expect its normal 404, not a preflight success.
 
 Remove `/run/commonswarm-smoke.curl` after the checks.
 
@@ -125,7 +136,9 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 - [ ] **NOT RUN** — through staging, check `/auth/v1/settings`, one membership
   REST read, one signed Storage request, and a Realtime subscription. Confirm
   Auth, REST, Storage, and Realtime reach the project URL with the upstream Host
-  rewritten to `ukezjcnxjvkpkeezxaew.supabase.co`.
+  and `X-Forwarded-Host` rewritten to `ukezjcnxjvkpkeezxaew.supabase.co`, and
+  `X-Forwarded-Proto` set to `https`. Confirm the capability function sees the
+  visitor address, not the Cloudflare edge address.
 - [ ] **NOT RUN** — do not open the production window until every staging check
   passes. Record failures; do not compensate by raising timeouts.
 
@@ -135,8 +148,9 @@ The order in this section is binding.
 
 - [ ] **NOT RUN — (a)** — confirm Caddy on the box routes `/functions/v1` to the
   local runtime and proxies `/auth/v1/*`, `/rest/v1/*`, `/storage/v1/*`, and
-  `/realtime/v1/*` to the project URL with its Host header rewritten. Confirm the
-  complete rehearsal on `edge-staging.commonswarm.com` is recorded as passing.
+  `/realtime/v1/*` to the project URL with its Host and `X-Forwarded-Host`
+  rewritten and its forwarded scheme set to `https`. Confirm the complete
+  rehearsal on `edge-staging.commonswarm.com` is recorded as passing.
 - [ ] **NOT RUN — (b)** — inside the approved window, deliberately deactivate
   the Supabase custom domain in the Supabase dashboard. Do not wait for it to
   lapse or fail on its own. Record the dashboard state and time.

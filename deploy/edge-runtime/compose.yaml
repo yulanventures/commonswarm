@@ -22,8 +22,10 @@ services:
       - "60000"
       - --request-wait-timeout
       - "10000"
+      # Match the hosted 150 s response-idle reference. The main worker limit
+      # is also 150 s, and Caddy keeps another 15 s of proxy margin.
       - --user-worker-request-idle-timeout
-      - "65000"
+      - "150000"
       - --graceful-exit-timeout
       - "70"
     ports:
