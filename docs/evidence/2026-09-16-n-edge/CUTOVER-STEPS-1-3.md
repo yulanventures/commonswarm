@@ -8,8 +8,8 @@
 3. **Path proof:** the h0 document (served ONLY by the box) through api.commonswarm.com returned 200 at 22:09:17Z, about
    80 s after the switch — also through the mini's system resolver, with the h0 function's x-robots-tag. So while
    Supabase's custom hostname is still ACTIVE, Cloudflare routes api.commonswarm.com to our proxied record (the box).
-   Before the switch the same check returned 404 (negative-control-pre-switch.log).
-4. **Step-3 controls through the box (step3-controls-2026-09-16T2210Z.log): 14/14 PASS** — h0 200; CLI members 2.73 s,
+   Before the switch the same check returned 404 (negative-control-pre-switch.txt).
+4. **Step-3 controls through the box (step3-controls-2026-09-16T2210Z.txt): 14/14 PASS** — h0 200; CLI members 2.73 s,
    feed 2.51 s, receipt 2.14 s; file put 13.20 s, get round trip identical 9.52 s, rm; Realtime subscribe 1180 ms and
    broadcast 1386 ms; /auth/v1/health 200, /auth/v1/settings 200, /storage/v1/status 200, /rest/v1/ 401; site /start
    publishes api.commonswarm.com. Edge container healthy, 194 MiB / 512 MiB, 0 restarts.

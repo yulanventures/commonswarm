@@ -1,0 +1,16 @@
+PASS  h0 document via api host is 200 through cloudflare  cf-ray present
+PASS  cli members  exit=0 2.73s
+PASS  cli feed  exit=0 2.51s
+PASS  cli receipt (command edge)  exit=0 2.14s
+PASS  file put  exit=0 13.20s
+PASS  file get round trip identical  exit=0 9.52s
+PASS  file rm  exit=0
+PASS  realtime subscribe  https://api.commonswarm.com subscribe: SUBSCRIBED after 1180 ms
+PASS  realtime broadcast round trip  https://api.commonswarm.com broadcast round trip: 1386
+PASS  /auth/v1/health is 200  got 200
+PASS  /auth/v1/settings is 200  got 200
+PASS  /storage/v1/status is 200  got 200
+PASS  /rest/v1/ is 401  got 401
+PASS  site /start publishes api.commonswarm.com  
+
+STEP-3 CONTROLS: 14/14 passed
