@@ -1,0 +1,209 @@
+name: commonswarm-supabase-stack
+
+# N-db production pins. The lead replaces only these image lines after reading
+# the hosted health endpoints during the box rehearsal; see VERSIONS.md.
+x-memory-budget:
+  postgres: 1536m
+  realtime: 512m
+  gotrue: 300m
+  postgrest: 300m
+  storage-api: 300m
+  edge-runtime-external: 512m
+  reserved-headroom: 600m
+
+services:
+  postgres:
+    image: public.ecr.aws/supabase/postgres:17.6.1.106
+    container_name: commonswarm-postgres
+    restart: unless-stopped
+    init: true
+    mem_limit: 1536m
+    shm_size: 256m
+    env_file: &stack-env
+      - path: ${COMMONSWARM_ENV_FILE:-/home/commonswarm/.env}
+        required: false
+    labels:
+      commonswarm.required-env: >-
+        POSTGRES_DB,POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_INITDB_ARGS,
+        JWT_SECRET,JWT_EXP,BACKUP_RO_PASSWORD
+    command:
+      - postgres
+      - -D
+      - /etc/postgresql
+      - -c
+      - hba_file=/etc/postgresql-custom/pg_hba.conf
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/postgresql-custom/server.crt
+      - -c
+      - ssl_key_file=/etc/postgresql-custom/server.key
+      - -c
+      - ssl_ca_file=/etc/ssl/yulan-internal-ca.pem
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - shared_buffers=512MB
+    volumes:
+      - ${COMMONSWARM_POSTGRES_DATA_DIR:-/var/lib/commonswarm/postgres}:/var/lib/postgresql/data
+      - ${COMMONSWARM_DB_CERT_FILE:-/etc/ssl/commonswarm/db.crt}:/etc/postgresql-custom/server.crt:ro
+      - ${COMMONSWARM_DB_KEY_FILE:-/etc/ssl/commonswarm/db.key}:/etc/postgresql-custom/server.key:ro
+      - ${COMMONSWARM_CA_FILE:-/etc/ssl/yulan-internal-ca.pem}:/etc/ssl/yulan-internal-ca.pem:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql-custom/pg_hba.conf:ro
+      - ./postgres/10-runtime-roles.sh:/docker-entrypoint-initdb.d/99-commonswarm-runtime-roles.sh:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 60s
+    networks:
+      commonswarm-net:
+        ipv4_address: 172.31.0.10
+
+  gotrue:
+    image: public.ecr.aws/supabase/gotrue:v2.193.1
+    container_name: commonswarm-gotrue
+    restart: unless-stopped
+    init: true
+    mem_limit: 300m
+    env_file: *stack-env
+    labels:
+      commonswarm.required-env: >-
+        API_EXTERNAL_URL,GOTRUE_API_HOST,GOTRUE_API_PORT,GOTRUE_DB_DRIVER,
+        GOTRUE_DB_DATABASE_URL,GOTRUE_SITE_URL,GOTRUE_URI_ALLOW_LIST,
+        GOTRUE_DISABLE_SIGNUP,GOTRUE_EXTERNAL_EMAIL_ENABLED,
+        GOTRUE_MAILER_AUTOCONFIRM,GOTRUE_MAILER_SECURE_EMAIL_CHANGE_ENABLED,
+        GOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED,
+        GOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL,GOTRUE_JWT_SECRET,
+        GOTRUE_JWT_ADMIN_ROLES,GOTRUE_JWT_AUD,GOTRUE_JWT_DEFAULT_GROUP_NAME,
+        GOTRUE_JWT_EXP,GOTRUE_JWT_VALID_METHODS,
+        GOTRUE_EXTERNAL_GITHUB_ENABLED,GOTRUE_EXTERNAL_GITHUB_CLIENT_ID,
+        GOTRUE_EXTERNAL_GITHUB_SECRET,GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI,
+        GOTRUE_SMTP_HOST,GOTRUE_SMTP_PORT,GOTRUE_SMTP_USER,GOTRUE_SMTP_PASS,
+        GOTRUE_SMTP_ADMIN_EMAIL,GOTRUE_SMTP_SENDER_NAME
+    ports:
+      - "127.0.0.1:18001:9999"
+    extra_hosts: &db-host
+      - "db.commonswarm.internal:172.31.0.10"
+    volumes: &service-ca
+      - ${COMMONSWARM_CA_FILE:-/etc/ssl/yulan-internal-ca.pem}:/etc/ssl/yulan-internal-ca.pem:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9999/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      commonswarm-net:
+        ipv4_address: 172.31.0.11
+
+  postgrest:
+    image: public.ecr.aws/supabase/postgrest:v14.5
+    container_name: commonswarm-postgrest
+    restart: unless-stopped
+    init: true
+    mem_limit: 300m
+    env_file: *stack-env
+    labels:
+      commonswarm.required-env: >-
+        PGRST_DB_URI,PGRST_DB_SCHEMAS,PGRST_DB_EXTRA_SEARCH_PATH,
+        PGRST_DB_ANON_ROLE,PGRST_DB_MAX_ROWS,PGRST_JWT_SECRET,
+        PGRST_ADMIN_SERVER_PORT
+    ports:
+      - "127.0.0.1:18002:3000"
+    extra_hosts: *db-host
+    volumes: *service-ca
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/3001 &&
+          printf 'GET /live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          IFS= read -r status <&3 && [[ "$${status}" == *' 200 '* ]]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      commonswarm-net:
+        ipv4_address: 172.31.0.12
+
+  realtime:
+    image: public.ecr.aws/supabase/realtime:v2.86.3
+    container_name: commonswarm-realtime
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
+    env_file: *stack-env
+    labels:
+      commonswarm.required-env: >-
+        APP_NAME,PORT,DB_HOST,DB_PORT,DB_USER,DB_PASSWORD,DB_NAME,DB_SSL,
+        DB_SSL_CA_CERT,DB_AFTER_CONNECT_QUERY,DB_ENC_KEY,API_JWT_SECRET,
+        API_JWT_JWKS,METRICS_JWT_SECRET,SECRET_KEY_BASE,SEED_SELF_HOST,
+        SELF_HOST_TENANT_NAME,RUN_JANITOR,RLIMIT_NOFILE,ERL_AFLAGS,
+        SLOT_NAME_SUFFIX
+    ports:
+      - "127.0.0.1:18003:4000"
+    extra_hosts: *db-host
+    volumes: *service-ca
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "-H", "Host:realtime-dev", "http://127.0.0.1:4000/api/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 45s
+    networks:
+      commonswarm-net:
+        ipv4_address: 172.31.0.13
+
+  storage-api:
+    image: public.ecr.aws/supabase/storage-api:v1.67.15
+    container_name: commonswarm-storage-api
+    restart: unless-stopped
+    init: true
+    mem_limit: 300m
+    env_file: *stack-env
+    labels:
+      commonswarm.required-env: >-
+        ANON_KEY,SERVICE_KEY,AUTH_JWT_SECRET,JWT_JWKS,DATABASE_URL,
+        TENANT_ID,REGION,STORAGE_BACKEND,STORAGE_S3_BUCKET,
+        STORAGE_S3_ENDPOINT,STORAGE_S3_FORCE_PATH_STYLE,STORAGE_S3_REGION,
+        AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,FILE_SIZE_LIMIT,
+        UPLOAD_FILE_SIZE_LIMIT,UPLOAD_FILE_SIZE_LIMIT_STANDARD,
+        SIGNED_UPLOAD_URL_EXPIRATION_TIME,S3_PROTOCOL_ENABLED,
+        ENABLE_IMAGE_TRANSFORMATION
+    ports:
+      - "127.0.0.1:18004:5000"
+    extra_hosts: *db-host
+    volumes: *service-ca
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:5000/status"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 45s
+    networks:
+      commonswarm-net:
+        ipv4_address: 172.31.0.14
+
+networks:
+  commonswarm-net:
+    name: commonswarm-net
+    external: true
