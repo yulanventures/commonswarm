@@ -34,7 +34,10 @@ export function onboardingUsage(): string {
   return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] [--host-session-id <id>] [--json]
   cswarm setup --check-version
   cswarm setup guide
-  cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full | --message-id <uuid>] [--json]
+  cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
+  cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]
+  cswarm check --profile <absolute-path> --host-session-id <id> --hook
+  cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]
   cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]
   cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]
   cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]

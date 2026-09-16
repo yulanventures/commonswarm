@@ -9167,9 +9167,9 @@ const setupVariants = {
   guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"]),
 };
 const checkVariants = {
-  messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile"]),
-  message: commandVariant("message", runCheckMessage, ["cswarm check --profile"]),
-  hook: commandVariant("hook", runCheckHook, ["cswarm check --profile"]),
+  messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]"]),
+  message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id"]),
+  hook: commandVariant("hook", runCheckHook, ["cswarm check --profile <absolute-path> --host-session-id <id> --hook"]),
 };
 const resumeVariants = {
   inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file"]),
@@ -9549,14 +9549,18 @@ export function isCliMain(): boolean {
 
 if (isCliMain()) {
   main().catch((error) => {
-    if (["setup", "check", "receive"].includes(process.argv[2] ?? "") && process.argv.includes("--json")) {
+    const selected = selectedCommandContext;
+    if (selected?.entry.errorMode === "onboarding" && selected.args.has("json")) {
       process.stdout.write(`${JSON.stringify({ ok: false, error: {
         code: error instanceof AgentSetupError ? error.code : "onboarding_failed", message: safeError(error),
       } })}\n`);
       process.exitCode = 1;
       return;
     }
-    if (process.argv[2] === "hook" && process.argv[3] === "check") {
+    if (
+      selected?.entry.errorMode === "hook-check" &&
+      selected.args.startsWithLeadingPositionals("hook", "check")
+    ) {
       process.exitCode = 0;
       return;
     }
@@ -9574,22 +9578,8 @@ if (isCliMain()) {
     }
     if (error instanceof WorkspaceCliError) {
       const structured = error.structured();
-      const verb = process.argv[2];
-      const json = process.argv.includes("--json") &&
-        (
-          verb === "status" ||
-          verb === "workspaces" ||
-          verb === "use" ||
-          verb === "working-on" ||
-          verb === "note" ||
-          verb === "ask" ||
-          verb === "reply" ||
-          verb === "receipt" ||
-          verb === "feed" ||
-          verb === "inbox" ||
-          verb === "file" ||
-          verb === "brain"
-        );
+      const json = selected?.entry.workspaceErrorJson === true &&
+        selected.args.has("json");
       if (json) {
         process.stdout.write(`${JSON.stringify(structured, null, 2)}\n`);
       } else {
@@ -9624,7 +9614,7 @@ if (isCliMain()) {
       return;
     }
     if (error instanceof FileCommandRefused) {
-      if (process.argv.includes("--json")) {
+      if (selected?.args.has("json")) {
         process.stdout.write(
           `${JSON.stringify(
             {
