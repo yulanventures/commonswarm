@@ -1,0 +1,63 @@
+services:
+  edge-runtime:
+    image: public.ecr.aws/supabase/edge-runtime:v1.73.13
+    entrypoint:
+      - /bin/bash
+      - /home/deno/deploy/bootstrap.sh
+    command:
+      - start
+      - --main-service
+      - /home/deno/main
+      - --port
+      - "9000"
+      - --policy
+      - per_worker
+      # 4 workers × 96 MiB = 384 MiB. The last 128 MiB of the 512 MiB
+      # container budget remains for the main runtime and overhead.
+      - --max-parallelism
+      - "4"
+      # Function bodies are capped at 128 KiB. File bytes up to 25 MiB go to
+      # Storage, not a function. 60 s permits the max body at about 2.2 KiB/s.
+      - --request-read-timeout
+      - "60000"
+      - --request-wait-timeout
+      - "10000"
+      # Match the hosted 150 s response-idle reference. The main worker limit
+      # is also 150 s, and Caddy keeps another 15 s of proxy margin.
+      - --user-worker-request-idle-timeout
+      - "150000"
+      - --graceful-exit-timeout
+      - "70"
+    ports:
+      - "127.0.0.1:9000:9000"
+    env_file:
+      # Compose can validate this file away from the box. The main service
+      # still refuses to start when its required variables are missing.
+      - path: /home/commonswarm/.env
+        required: false
+    volumes:
+      - ./main:/home/deno/main:ro
+      - ./bootstrap.sh:/home/deno/deploy/bootstrap.sh:ro
+      - ./h0-deno.json:/home/deno/deploy/h0-deno.json:ro
+      - ../../supabase/functions:/home/deno/functions-source:ro
+      - ../../src:/var/src:ro
+      - edge-runtime-cache:/root/.cache/deno
+    mem_limit: 512m
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - /usr/bin/bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          IFS= read -r status <&3 && [[ "$${status}" == *' 200 '* ]]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  edge-runtime-cache:
