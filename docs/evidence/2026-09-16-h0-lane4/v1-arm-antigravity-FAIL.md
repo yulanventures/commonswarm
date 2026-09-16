@@ -15,7 +15,7 @@ performs a strict, contiguous 43-character exact substring match against `input.
 
 * **Partial Substrings / High-Entropy Leaks:** Base64url encoding carries 6 bits per character. 43 characters provide ~258 bits of entropy. If a URL contains 42 characters of `secretBody`, 252 bits of entropy leak directly into scanner/previewer logs while only 64 possibilities remain to brute force. `carriesSecret` returns `false` and accepts the URL.
 * **Path Normalisation & Split Secrets:** An attacker or buggy caller splitting the secret across path segments (e.g. `/agent-doc/${secretBody.slice(0, 21)}/${secretBody.slice(21)}`) leaks 100% of the credential entropy to every scanner, reverse proxy, and CDN access log. Neither segment matches `secretBody` contiguously, so `carriesSecret` never triggers.
-* **Percent-Encoding Error Handling Blindspot:** 
+* **Percent-Encoding Error Handling Blindspot:**
   ```typescript
   try {
     decodedDocumentUrl = decodeURIComponent(input.documentUrl);
