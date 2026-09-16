@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
-  "recordedAt": "2026-09-16T19:39:36.962Z",
+  "recordedAt": "2026-09-16T20:22:28.203Z",
   "origin": "https://commonswarm.com",
-  "gitCommit": "48995569e460dcc41eb672758b2ff455ff72722d",
+  "gitCommit": "81c81f3deadc242d026c1bd5f994bc9f15e35047",
   "siteBuildSha256": "bcf5cbdc91ce0a370bd7cb5b7dc74f6380338b2a5bbb15ba74f283c6ca5d4fd4",
   "requestMethod": "GET",
   "requestIntervalMs": 550,
@@ -16,21 +16,8 @@
     "location"
   ],
   "artifactCount": 39,
+  "stableArtifactCount": 25,
   "artifacts": [
-    "_astro/AgentConnect.astro_astro_type_script_index_0_lang.CHcC5iyl.js",
-    "_astro/Base.CU6LT-wJ.css",
-    "_astro/InviteOnramp.astro_astro_type_script_index_0_lang.ZRbrgpMg.js",
-    "_astro/LegalDoc.Daa6a9l3.css",
-    "_astro/LiveDashboard.astro_astro_type_script_index_0_lang.DstZoBsl.js",
-    "_astro/ProviderButtons.CN7eqX0J.css",
-    "_astro/SeoPage.CgLd2bSp.css",
-    "_astro/app.DsKIrXFC.css",
-    "_astro/commonswarm.BdF9KN8q.js",
-    "_astro/download.DVdIFD0c.css",
-    "_astro/index.C86F041I.css",
-    "_astro/invite.BCWwAYMm.css",
-    "_astro/member-invite.BwXJ_Iex.js",
-    "_astro/signal-text.DhtO2iKq.js",
     "acceptable-use/index.html",
     "alternatives/crewai/index.html",
     "alternatives/langgraph/index.html",
@@ -57,7 +44,42 @@
     "start/index.html",
     "terms/index.html"
   ],
-  "routeCount": 65,
+  "fingerprintedAssetCountAtRecording": 14,
+  "fingerprintedAssetPolicies": [
+    {
+      "extension": ".css",
+      "pathPattern": "/_astro/*.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "observedFileCount": 8
+    },
+    {
+      "extension": ".js",
+      "pathPattern": "/_astro/*.js",
+      "status": 200,
+      "contentType": "application/javascript; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      },
+      "observedFileCount": 6
+    }
+  ],
+  "routeCount": 52,
   "routes": [
     {
       "path": "/",
@@ -69,6 +91,26 @@
       ],
       "status": 200,
       "contentType": "text/html; charset=utf-8",
+      "headers": {
+        "strict-transport-security": "max-age=63072000",
+        "cache-control": "public, max-age=0, must-revalidate",
+        "content-security-policy": null,
+        "x-frame-options": null,
+        "referrer-policy": null,
+        "permissions-policy": null,
+        "location": null
+      }
+    },
+    {
+      "path": "/.well-known/security.txt",
+      "sources": [
+        {
+          "kind": "case",
+          "label": "dotfile-shaped path"
+        }
+      ],
+      "status": 404,
+      "contentType": "text/plain; charset=utf-8",
       "headers": {
         "strict-transport-security": "max-age=63072000",
         "cache-control": "public, max-age=0, must-revalidate",
@@ -109,286 +151,6 @@
       ],
       "status": 404,
       "contentType": "text/plain; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/AgentConnect.astro_astro_type_script_index_0_lang.CHcC5iyl.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/AgentConnect.astro_astro_type_script_index_0_lang.CHcC5iyl.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/Base.CU6LT-wJ.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/Base.CU6LT-wJ.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/InviteOnramp.astro_astro_type_script_index_0_lang.ZRbrgpMg.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/InviteOnramp.astro_astro_type_script_index_0_lang.ZRbrgpMg.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/LegalDoc.Daa6a9l3.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/LegalDoc.Daa6a9l3.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/LiveDashboard.astro_astro_type_script_index_0_lang.DstZoBsl.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/LiveDashboard.astro_astro_type_script_index_0_lang.DstZoBsl.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/ProviderButtons.CN7eqX0J.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/ProviderButtons.CN7eqX0J.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/SeoPage.CgLd2bSp.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/SeoPage.CgLd2bSp.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/app.DsKIrXFC.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/app.DsKIrXFC.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/commonswarm.BdF9KN8q.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/commonswarm.BdF9KN8q.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/download.DVdIFD0c.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/download.DVdIFD0c.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/index.C86F041I.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/index.C86F041I.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/invite.BCWwAYMm.css",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/invite.BCWwAYMm.css"
-        }
-      ],
-      "status": 200,
-      "contentType": "text/css; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/member-invite.BwXJ_Iex.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/member-invite.BwXJ_Iex.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
-      "headers": {
-        "strict-transport-security": "max-age=63072000",
-        "cache-control": "public, max-age=0, must-revalidate",
-        "content-security-policy": null,
-        "x-frame-options": null,
-        "referrer-policy": null,
-        "permissions-policy": null,
-        "location": null
-      }
-    },
-    {
-      "path": "/_astro/signal-text.DhtO2iKq.js",
-      "sources": [
-        {
-          "kind": "artifact",
-          "file": "_astro/signal-text.DhtO2iKq.js"
-        }
-      ],
-      "status": 200,
-      "contentType": "application/javascript; charset=utf-8",
       "headers": {
         "strict-transport-security": "max-age=63072000",
         "cache-control": "public, max-age=0, must-revalidate",

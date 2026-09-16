@@ -4,7 +4,9 @@ set -eu
 usage() {
   printf '%s\n' \
     'Usage: deploy/site/deploy.sh <ssh-host>' \
-    '       deploy/site/deploy.sh --dry-run --dist <dist-directory>' >&2
+    '       deploy/site/deploy.sh --dry-run --dist <dist-directory>' \
+    '       deploy/site/deploy.sh --dry-run --npm-ci <site-directory>' \
+    '       deploy/site/deploy.sh --dry-run --release-name' >&2
   exit 2
 }
 
@@ -24,12 +26,44 @@ validate_dist() {
   fi
 }
 
+run_site_npm() {
+  site_dir=$1
+  shift
+  (cd "$site_dir" && npm "$@" </dev/null)
+}
+
+release_name() {
+  release_random=$(LC_ALL=C od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+  [ "${#release_random}" -eq 16 ] || {
+    printf 'Refusing deploy: could not create a unique release suffix.\n' >&2
+    return 1
+  }
+  printf '%s-%s-%s\n' \
+    "$(date -u +%Y%m%dT%H%M%SZ)" \
+    "$(git -C "$repo_root" rev-parse --short=12 HEAD)" \
+    "$release_random"
+}
+
 if [ "${1:-}" = "--dry-run" ]; then
-  [ "${2:-}" = "--dist" ] || usage
-  [ "$#" -eq 3 ] || usage
-  validate_dist "$3"
-  printf 'Dry run passed: the built /start backend URL is present.\n'
-  exit 0
+  case "${2:-}" in
+    --dist)
+      [ "$#" -eq 3 ] || usage
+      validate_dist "$3"
+      printf 'Dry run passed: the built /start backend URL is present.\n'
+      exit 0
+      ;;
+    --npm-ci)
+      [ "$#" -eq 3 ] || usage
+      run_site_npm "$3" ci
+      exit 0
+      ;;
+    --release-name)
+      [ "$#" -eq 2 ] || usage
+      release_name
+      exit 0
+      ;;
+    *) usage ;;
+  esac
 fi
 
 [ "$#" -eq 1 ] || usage
@@ -46,12 +80,7 @@ if [ ! -f "$env_file" ]; then
   printf 'Refusing deploy: site/.env is missing.\n' >&2
   exit 1
 fi
-for variable in PUBLIC_SUPABASE_URL PUBLIC_SUPABASE_ANON_KEY; do
-  if ! grep -Eq "^${variable}=.+$" "$env_file"; then
-    printf 'Refusing deploy: site/.env lacks a non-empty %s value.\n' "$variable" >&2
-    exit 1
-  fi
-done
+node "$script_dir/validate-site-env.mjs" "$env_file" </dev/null
 
 temp_root=$(mktemp -d "${TMPDIR:-/tmp}/commonswarm-site-deploy.XXXXXX")
 cleanup() {
@@ -67,17 +96,17 @@ ln -s "$env_file" "$checkout/site/.env"
 
 # Astro does not remove stale output. Keep this even though the archive starts clean.
 rm -rf -- "$checkout/site/dist"
-npm --prefix "$checkout/site" ci
-npm --prefix "$checkout/site" run build
+run_site_npm "$checkout/site" ci
+run_site_npm "$checkout/site" run build
 validate_dist "$checkout/site/dist"
 
-release="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$repo_root" rev-parse --short=12 HEAD)"
+release=$(release_name)
 remote_root=/srv/commonswarm/site
 remote_temp=$remote_root/releases/$release.tmp
 remote_release=$remote_root/releases/$release
 
-ssh "$box" "mkdir -p '$remote_temp'" </dev/null
-rsync -a --delete "$checkout/site/dist/" "$box:$remote_temp/" </dev/null
-ssh "$box" "set -eu; mv '$remote_temp' '$remote_release'; ln -sfn 'releases/$release' '$remote_root/current.next'; mv -Tf '$remote_root/current.next' '$remote_root/current'" </dev/null
+ssh "$box" "set -eu; mkdir -p '$remote_root/releases'; test ! -e '$remote_temp'; test ! -e '$remote_release'; mkdir '$remote_temp'" </dev/null
+rsync -a --delete --chmod=D755,F644 "$checkout/site/dist/" "$box:$remote_temp/" </dev/null
+ssh "$box" sh -s -- "$remote_temp" "$remote_release" "$remote_root" < "$script_dir/finalize-release.sh"
 
-printf 'Deployed release %s to %s. Previous releases were kept for rollback.\n' "$release" "$box"
+printf 'Deployed release %s to %s. The five newest releases were kept for rollback.\n' "$release" "$box"

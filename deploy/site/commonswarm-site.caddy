@@ -20,14 +20,24 @@ https://commonswarm.com, https://www.commonswarm.com {
 		@xml path *.xml
 		header @xml Content-Type "application/xml"
 
-		# Vercel serves both /x and /x/ from Astro's x/index.html without a redirect.
-		@trailingSlash path */
-		rewrite @trailingSlash {path}index.html
+		# Vercel returns 404 for dotfile-shaped paths. Never expose a file that was
+		# copied into the release by mistake.
+		@dotfile path_regexp dotfile (?:^|/)\.
+		error @dotfile 404
 
+		# Vercel serves /x from Astro's x/index.html without a redirect. A handle
+		# applies the matcher to try_files; try_files itself takes file candidates only.
 		@cleanUrl not path */
-		try_files @cleanUrl {path}/index.html {path} =404
+		handle @cleanUrl {
+			try_files {path}/index.html {path}
+			file_server
+		}
 
-		file_server
+		# Vercel also serves /x/ without a redirect. Missing indexes stay 404.
+		handle {
+			rewrite * {path}index.html
+			file_server
+		}
 	}
 
 	handle_errors {

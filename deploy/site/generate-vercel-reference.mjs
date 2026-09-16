@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { readdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, relative, resolve, sep } from "node:path";
+import { dirname, extname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
@@ -51,8 +51,10 @@ for (const path of files) {
   digest.update("\0");
 }
 
+const fingerprintedFiles = files.filter((file) => file.startsWith("_astro/"));
+const stableFiles = files.filter((file) => !file.startsWith("_astro/"));
 const routeSources = new Map();
-for (const file of files) {
+for (const file of stableFiles) {
   for (const path of requestPathsFor(file)) {
     const sources = routeSources.get(path) ?? [];
     sources.push({ kind: "artifact", file });
@@ -64,10 +66,31 @@ for (const [path, label] of [
   ["/__commonswarm_missing__", "unknown path"],
   ["/_astro/", "fingerprinted asset directory without index"],
   ["/fonts/", "static directory without index"],
+  ["/.well-known/security.txt", "dotfile-shaped path"],
 ]) {
   const sources = routeSources.get(path) ?? [];
   sources.push({ kind: "case", label });
   routeSources.set(path, sources);
+}
+
+const fingerprintedAssetPolicies = [];
+for (const extension of [...new Set(fingerprintedFiles.map(extname))].sort()) {
+  const sample = fingerprintedFiles.find((file) => extname(file) === extension);
+  const response = await fetch(new URL(`/${sample}`, baseUrl), {
+    method: "GET",
+    redirect: "manual",
+    headers: { "user-agent": "CommonSwarm-Vercel-Parity-Inventory/1.0" },
+  });
+  await response.arrayBuffer();
+  fingerprintedAssetPolicies.push({
+    extension,
+    pathPattern: `/_astro/*${extension}`,
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    headers: Object.fromEntries(recordedHeaders.map((name) => [name, response.headers.get(name)])),
+    observedFileCount: fingerprintedFiles.filter((file) => extname(file) === extension).length,
+  });
+  await new Promise((done) => setTimeout(done, 550));
 }
 
 const routes = [];
@@ -107,6 +130,15 @@ for (const route of routes) {
     });
   }
 }
+for (const policy of fingerprintedAssetPolicies) {
+  if (policy.status !== 200) {
+    mismatches.push({
+      path: policy.pathPattern,
+      kind: "dist-assets-exist-but-vercel-does-not-serve",
+      status: policy.status,
+    });
+  }
+}
 
 const reference = {
   schemaVersion: 1,
@@ -118,11 +150,17 @@ const reference = {
   requestIntervalMs: 550,
   recordedHeaders,
   artifactCount: files.length,
-  artifacts: files,
+  stableArtifactCount: stableFiles.length,
+  artifacts: stableFiles,
+  fingerprintedAssetCountAtRecording: fingerprintedFiles.length,
+  fingerprintedAssetPolicies,
   routeCount: routes.length,
   routes,
   mismatches,
 };
 
 await writeFile(outputPath, `${JSON.stringify(reference, null, 2)}\n`, "utf8");
-console.log(`Wrote ${relative(repoRoot, outputPath)} with ${files.length} artifacts and ${routes.length} routes.`);
+console.log(
+  `Wrote ${relative(repoRoot, outputPath)} with ${stableFiles.length} stable artifacts, ` +
+  `${fingerprintedFiles.length} fingerprinted assets, and ${routes.length} fixed routes.`,
+);
