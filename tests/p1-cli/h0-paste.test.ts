@@ -1,3 +1,8 @@
+/*
+ * Controls on the paste a human copies to invite an agent.
+ *
+ * Gate: tests/p1-cli/**\/*.test.ts is globbed by `npm run test:p1-cli`. `npm test` does not run it.
+ */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -6,117 +11,126 @@ import ts from "typescript";
 import { h0AgentPaste } from "../../src/h0/paste.js";
 import { H0_VERB_NAMES } from "../../src/h0/verbs.js";
 
-const JOIN_CREDENTIAL = `swm_join_${"A".repeat(43)}`;
+/* A body with mixed case and every base64url symbol class, so a case-folding or prefix-only check
+ * cannot pass by accident. 43 characters. */
+const SECRET_BODY = "Zq9-Kx7_Wm3LpRt5Vb2NcYh8Jd4Gf6Sa1Qe0Uo-Ti_X";
+const JOIN_CREDENTIAL = `swm_join_${SECRET_BODY}`;
 const DOCUMENT_URL = "https://commonswarm.com/agent/h0-doc";
+const paste = (documentUrl: string, joinCredential = JOIN_CREDENTIAL) =>
+  h0AgentPaste({ joinCredential, documentUrl });
+const refusesSecret = (documentUrl: string) =>
+  assert.throws(() => paste(documentUrl), /must not contain the join credential or any part of it/, documentUrl);
+
+test("the secret body fixture is exactly 43 base64url characters", () => {
+  assert.match(SECRET_BODY, /^[A-Za-z0-9_-]{43}$/);
+});
 
 test("the whole H0 agent paste matches the reviewed golden text", () => {
+  /* READ BEFORE UPDATING: this is what a human copies. A golden pins whatever the paste says, errors
+   * included, so diff it against the register endpoint's contract, not only against your intent. */
   assert.equal(
-    h0AgentPaste({ joinCredential: JOIN_CREDENTIAL, documentUrl: DOCUMENT_URL }),
+    paste(DOCUMENT_URL),
     [
-      "Fetch the agent document at the URL below.",
-      `The single-purpose join credential is ${JOIN_CREDENTIAL}; use it only to register.`,
+      "Fetch the agent document at the URL below; fetching it needs no credential.",
+      "Then call register once, sending only this single-purpose join credential:",
+      JOIN_CREDENTIAL,
       DOCUMENT_URL,
     ].join("\n"),
   );
 });
 
+test("the credential stands on a line of its own and appears nowhere else", () => {
+  /* An earlier version ended a sentence with the credential and a semicolon; a model extracting the
+   * token can take the semicolon with it. */
+  const lines = paste(DOCUMENT_URL).split("\n");
+  assert.equal(lines.filter((line) => line === JOIN_CREDENTIAL).length, 1);
+  assert.equal(lines.filter((line) => line.includes(SECRET_BODY)).length, 1);
+});
+
+test("the returned URL is the canonical form that was validated, not the raw input", () => {
+  const lines = paste("https://CommonSwarm.com").split("\n");
+  assert.equal(lines.at(-1), "https://commonswarm.com/");
+});
+
 test("a document URL with a query string is refused", () => {
-  assert.throws(
-    () => h0AgentPaste({ joinCredential: JOIN_CREDENTIAL, documentUrl: `${DOCUMENT_URL}?x=1` }),
-    /documentUrl must not contain a query string/,
-  );
+  assert.throws(() => paste(`${DOCUMENT_URL}?x=1`), /must not contain a query string/);
 });
 
 test("a document URL with a fragment is refused", () => {
-  assert.throws(
-    () => h0AgentPaste({ joinCredential: JOIN_CREDENTIAL, documentUrl: `${DOCUMENT_URL}#frag` }),
-    /documentUrl must not contain a fragment/,
-  );
+  assert.throws(() => paste(`${DOCUMENT_URL}#frag`), /must not contain a fragment/);
 });
 
-test("a document URL containing the join credential is refused", () => {
-  assert.throws(
-    () => h0AgentPaste({
-      joinCredential: JOIN_CREDENTIAL,
-      documentUrl: `${DOCUMENT_URL}/${JOIN_CREDENTIAL}`,
-    }),
-    /documentUrl must not contain the join credential/,
-  );
+test("a document URL carrying userinfo is refused", () => {
+  /* Shows commonswarm.com to a human and fetches attacker.example. */
+  assert.throws(() => paste("https://commonswarm.com@attacker.example/agent/h0-doc"), /must not contain userinfo/);
+  assert.throws(() => paste("https://user:pass@commonswarm.com/agent/h0-doc"), /must not contain userinfo/);
+});
+
+test("a malformed percent-escape is refused rather than skipping the decoded check", () => {
+  /* The first version fell back to the undecoded string, which turned the decoded check off. */
+  assert.throws(() => paste(`${DOCUMENT_URL}/bad%FF`), /malformed percent-escape/);
+});
+
+test("secret material in the URL is refused in every shape a coding mistake could produce", () => {
+  const percent = (s: string) => [...s].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).join("");
+  refusesSecret(`${DOCUMENT_URL}/${JOIN_CREDENTIAL}`);                         // whole credential
+  refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY}`);                             // body without its prefix
+  refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY.slice(0, 42)}`);                // all but one character
+  refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY.slice(0, 21)}/${SECRET_BODY.slice(21)}`); // split in two
+  refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY.slice(10, 22)}`);               // one 12-character window
+  refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY.toLowerCase()}`);               // case-folded
+  refusesSecret(`${DOCUMENT_URL}/${percent(SECRET_BODY.slice(0, 20))}`);       // percent-encoded
+  refusesSecret(`${DOCUMENT_URL}/${percent(SECRET_BODY.slice(0, 20)).replaceAll("%", "%25")}`); // double
+});
+
+test("a URL sharing fewer than 12 consecutive characters with the secret is not refused", () => {
+  /* The positive control for the window: the check must not refuse ordinary URLs by accident. */
+  assert.doesNotThrow(() => paste(`${DOCUMENT_URL}/${SECRET_BODY.slice(0, 11)}`));
 });
 
 test("a malformed join credential is refused", () => {
   for (const joinCredential of [
-    `swm_agt_${"A".repeat(43)}`,
-    `swm_join_${"A".repeat(42)}`,
-    `swm_join_${"A".repeat(44)}`,
-    `swm_join_${"A".repeat(42)}.`,
+    `swm_agt_${SECRET_BODY}`,
+    `swm_join_${SECRET_BODY.slice(0, 42)}`,
+    `swm_join_${SECRET_BODY}A`,
+    `swm_join_${SECRET_BODY.slice(0, 42)}.`,
   ]) {
-    assert.throws(
-      () => h0AgentPaste({ joinCredential, documentUrl: DOCUMENT_URL }),
-      /joinCredential must be swm_join_ followed by 43 base64url characters/,
-    );
+    assert.throws(() => paste(DOCUMENT_URL, joinCredential), /joinCredential must be swm_join_ followed by 43 base64url characters/);
   }
 });
 
-test("the pre-auth verb is not a string literal in the paste source", () => {
-  const source = readFileSync(new URL("../../src/h0/paste.ts", import.meta.url), "utf8");
-  const file = ts.createSourceFile(
-    "src/h0/paste.ts",
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const typedVerbLiterals: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (
-      ts.isStringLiteralLike(node) ||
-      ts.isTemplateHead(node) ||
-      ts.isTemplateMiddle(node) ||
-      ts.isTemplateTail(node)
-    ) {
-      /* EVERY H0 verb name, read from the table — not the typed word "register". The first
-       * version searched for today's name only, so a renamed verb typed into this source would
-       * have passed a test whose whole job is to stop typed verb names. */
-      for (const verb of H0_VERB_NAMES) {
-        if (new RegExp(`\\b${verb}\\b`).test(node.text)) typedVerbLiterals.push(node.text);
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(file);
-  assert.deepEqual(typedVerbLiterals, []);
-});
-
 test("a plaintext document URL is refused unless the host is loopback", () => {
-  /* The agent reads the register endpoint from this document, so plaintext here means the join
-   * credential is POSTed in cleartext. */
   for (const documentUrl of [
     "http://commonswarm.com/agent/h0-doc",
     "http://api.commonswarm.com/functions/v1/h0/agent-doc/abc",
     "ftp://commonswarm.com/agent/h0-doc",
   ]) {
-    assert.throws(
-      () => h0AgentPaste({ joinCredential: JOIN_CREDENTIAL, documentUrl }),
-      /documentUrl must be HTTPS/,
-      documentUrl,
-    );
+    assert.throws(() => paste(documentUrl), /documentUrl must be HTTPS/, documentUrl);
   }
   for (const documentUrl of [
     "http://127.0.0.1:54321/functions/v1/h0/agent-doc/abc",
     "http://localhost:54321/functions/v1/h0/agent-doc/abc",
+    "http://[::1]:54321/functions/v1/h0/agent-doc/abc",
   ]) {
-    assert.doesNotThrow(() => h0AgentPaste({ joinCredential: JOIN_CREDENTIAL, documentUrl }), documentUrl);
+    assert.doesNotThrow(() => paste(documentUrl), documentUrl);
   }
 });
 
-test("a document URL carrying only the secret BODY of the credential is refused", () => {
-  /* The prefix is public; the 43 characters are the secret. Use a credential whose body is
-   * distinguishable from the prefix so the check cannot pass by matching the prefix alone. */
-  const credential = `swm_join_${"Zq9-".repeat(10)}Zq9`;
-  const body = credential.slice("swm_join_".length);
-  assert.throws(
-    () => h0AgentPaste({ joinCredential: credential, documentUrl: `${DOCUMENT_URL}/${body}` }),
-    /documentUrl must not contain the join credential/,
-  );
+test("no H0 verb name is typed as a string literal in the paste source", () => {
+  /* EVERY verb name, read from the table, matched as a whole word inside string and template
+   * literals by AST. Known limit, stated: this catches a typed name, not one assembled at runtime
+   * from pieces ("reg" + "ister") — that is fighting the test, not a plausible slip. */
+  const source = readFileSync(new URL("../../src/h0/paste.ts", import.meta.url), "utf8");
+  const file = ts.createSourceFile("src/h0/paste.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const typed: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      for (const verb of H0_VERB_NAMES) {
+        if (new RegExp(`\\b${verb}\\b`, "i").test(node.text)) typed.push(`${verb}: ${node.text}`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.deepEqual(typed, []);
 });
