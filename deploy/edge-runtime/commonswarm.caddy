@@ -7,7 +7,10 @@
 	}
 }
 
-api.commonswarm.com {
+# edge-staging.commonswarm.com is the approved staging name (HezLead, zone rule <service>-staging). It serves the
+# same routes so the cutover can be rehearsed before api.commonswarm.com moves; this block gets no api traffic until
+# the api DNS record points at the box.
+api.commonswarm.com, edge-staging.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 
 	# The CLI, site, listener activity publisher, and H0 client call these functions.
