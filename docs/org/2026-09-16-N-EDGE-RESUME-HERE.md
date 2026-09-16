@@ -3,6 +3,28 @@
 Written for a cold successor. The H0 lanes have their own file:
 `docs/org/2026-09-16-H0-LINK-JOIN-RESUME-HERE.md`.
 
+## STATE AT 22:35Z — cutover ROLLED BACK; read this first
+
+- Steps 1-3 ran (merge 0a04de20 of 70d17d08; api DNS on the box 22:07:58Z; 14/14 controls). Then `cswarm check`
+  (0.1.71, budget `AGENT_CHECK_TIMEOUT_MS = 3_000`) timed out 5/5 through the box, 3.14-3.57 s. DNS rolled back at
+  22:13:01Z; verified 22:14:19Z (h0 404, check exit 0 in 1.32 s). Step 4 never started. Record:
+  docs/evidence/2026-09-16-n-edge/CUTOVER-ROLLBACK.md. api.commonswarm.com is the Supabase CNAME again (LIVE).
+- Ruling c05b6dda: **A and B in parallel, first gate wins.** A = the round-trip fold in its own edge lane, then a
+  table of EVERY client timeout constant measured through edge-staging; gate 2x headroom at p95 over 20 runs each,
+  check included on the 0.1.71 client; if clear before 2026-09-18, re-cut (DNS, h0 proof, controls, hold at step 3).
+  B = N-db window; if ready first, move functions and Postgres together. Also: raise AGENT_CHECK_TIMEOUT_MS to a
+  derived value in the next CLI release; every control table includes `cswarm check` and a listener wake.
+- In flight (lanes in the lead's scratchpad): `lane/edge-fold` (N-db fold commit 2df793c6 cherry-picked onto main
+  as 3b96c80b + a lead citation fix; gates, then pair, then deploy to the box container for edge-staging only);
+  `lane/timeout-table` (Codex Maker: generated constant list from tag v0.1.71, mapping test, runner through a
+  rewritten origin with a private profile copy); `lane/n-db-stack` fix round 1 (Codex); N-edge fix round 6 and
+  N-site fix round 4 (Codex RIGOUR folds, land without a pair).
+- **Path C (Strategist 23cabedf, 22:24:57Z):** HezLead's pre-approved fallback (cap 60949772 below), a temporary
+  DigitalOcean NYC droplet (2 vCPU / 4 GB, about 10 ms from us-east-1), starts in parallel with A and B. The
+  Strategist asks HezLead for it directly. When it exists: deploy the same reviewed image, env and Caddy block behind
+  a second staging name, run the full timeout table against both boxes, re-cut to whichever clears the gate. The
+  droplet is torn down the day N-db lands. Falkenstein keeps N-db, N-site and the remote MCP endpoint.
+
 ## Rulings (CSwarmStrategist, operator-confirmed)
 
 - 28830ab6 (19:04Z): the edge functions run on yulan-vps-1, off Supabase, by **2026-09-18**. This is the top
