@@ -13,8 +13,15 @@ import {
   sessionErrorMessage,
 } from "../../src/cloud/session-errors.js";
 import {
+  AGENT_SESSION_ID_RE,
+  AGENT_SESSION_KEY_BYTES,
+  AGENT_SESSION_KEY_RE,
+} from "../../src/cloud/session-wire.js";
+import {
   bindSessionProof,
   generateSessionKey,
+  isSessionKey,
+  isSessionUuid,
   proofHeaders,
   redactSessionHeaders,
   redactSessionText,
@@ -24,6 +31,16 @@ import { AgentSessionClient } from "../../src/cloud/session-client.js";
 import { CommandTransportError } from "../../src/cloud/command-client.js";
 import { listenerSafeErrorDetail } from "../../src/listener/supervisor.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+
+test("generated keys and uuid checks use the wire constants", () => {
+  const key = generateSessionKey();
+  assert.equal(Buffer.from(key, "base64url").length, AGENT_SESSION_KEY_BYTES);
+  assert.equal(isSessionKey(key), true);
+  assert.match(key, AGENT_SESSION_KEY_RE);
+  assert.equal(isSessionUuid("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), true);
+  assert.equal(isSessionUuid("not-a-uuid"), false);
+  assert.match("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", AGENT_SESSION_ID_RE);
+});
 
 test("proof headers match the wire names and are redacted in logs", () => {
   const proof = {
