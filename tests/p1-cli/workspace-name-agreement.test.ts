@@ -44,7 +44,7 @@ const directory = (name: unknown): SignalDirectory =>
  * SELECT on swarm.workspaces: `permission denied for table workspaces`. */
 test("the agent identity reads the workspace name from the view the app reads", () => {
   const edge = read("supabase/functions/read/index.ts");
-  const block = /const workspaceRows = await tx<\{ name: string \}\[\]>`([\s\S]*?)`;/.exec(edge)?.[1];
+  const block = /tx<\{ name: string \}\[\]>`([\s\S]*?)`/.exec(edge)?.[1];
   assert.ok(block, "the read edge no longer selects a workspace name for the agent identity");
   assert.match(
     block!,

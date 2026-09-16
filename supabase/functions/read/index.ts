@@ -649,9 +649,10 @@ async function handle(
        * `archived_at IS NULL`, so archiving revokes the agent and the handler returns 403 at
        * the membership gate above. The null branch below is for a deployment that does not
        * send the field, not for archived rows. */
-      // These reads share the same role, claims, search path, and snapshot.
-      // Queue them together so postgres.js sends one wire batch instead of
-      // waiting for three Falkenstein/us-east-1 round trips.
+      // These reads share the same role, claims, and search path. Under READ COMMITTED
+      // each statement still takes its own snapshot, exactly as the sequential form did.
+      // Queue them together so postgres.js pipelines them on the transaction's connection
+      // instead of waiting for three Falkenstein/us-east-1 round trips.
       const [members, agents, workspaceRows] = await Promise.all([
         tx<Record<string, unknown>[]>`
           SELECT user_id, display_name
