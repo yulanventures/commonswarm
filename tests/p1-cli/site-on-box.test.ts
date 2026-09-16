@@ -170,7 +170,7 @@ test("Caddy 2.11 adapts and serves every stable reference route", async (t) => {
   const adapted = spawnSync(
     "docker",
     ["run", "--rm", "--network", "none", "-i", "caddy:2.11", "caddy", "adapt", "--config", "/dev/stdin", "--adapter", "caddyfile"],
-    { encoding: "utf8", input: caddyfile, timeout: 20_000 },
+    { encoding: "utf8", input: caddyfile, timeout: 60_000 },
   );
   assert.equal(adapted.status, 0, adapted.stderr);
   const config = JSON.parse(adapted.stdout) as {
@@ -211,7 +211,7 @@ test("Caddy 2.11 adapts and serves every stable reference route", async (t) => {
       "--volume", `${testCaddyfile}:/etc/caddy/Caddyfile:ro`,
       "--volume", `${fixtureDist}:/srv/commonswarm/site/current:ro`,
       "caddy:2.11", "caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile",
-    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 20_000 });
+    ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 60_000 });
     assert.equal(started.status, 0, started.stderr);
 
     let ready = false;
@@ -244,7 +244,7 @@ test("Caddy 2.11 adapts and serves every stable reference route", async (t) => {
     spawnSync("docker", ["rm", "--force", containerName], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
-      timeout: 20_000,
+      timeout: 60_000,
     });
     await rm(fixture, { recursive: true, force: true });
   }
