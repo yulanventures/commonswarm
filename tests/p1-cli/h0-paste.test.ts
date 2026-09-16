@@ -31,25 +31,31 @@ test("the whole H0 agent paste matches the reviewed golden text", () => {
   assert.equal(
     paste(DOCUMENT_URL),
     [
-      "Fetch the agent document at the URL below; fetching it needs no credential.",
+      "Fetch the agent document at this URL; fetching it needs no credential:",
+      DOCUMENT_URL,
       "Then call register once, sending only this single-purpose join credential:",
       JOIN_CREDENTIAL,
-      DOCUMENT_URL,
     ].join("\n"),
   );
 });
 
-test("the credential stands on a line of its own and appears nowhere else", () => {
+test("each value is on its own line, directly under the sentence that names it", () => {
   /* An earlier version ended a sentence with the credential and a semicolon; a model extracting the
    * token can take the semicolon with it. */
   const lines = paste(DOCUMENT_URL).split("\n");
   assert.equal(lines.filter((line) => line === JOIN_CREDENTIAL).length, 1);
   assert.equal(lines.filter((line) => line.includes(SECRET_BODY)).length, 1);
+  /* An arm noted the URL once sat under a line ending "credential:". Each colon now introduces the
+   * value on the very next line, and only that value. */
+  const credentialIntro = lines.findIndex((line) => line.endsWith("join credential:"));
+  assert.equal(lines[credentialIntro + 1], JOIN_CREDENTIAL, "the credential directly follows its label");
+  const urlIntro = lines.findIndex((line) => line.startsWith("Fetch the agent document"));
+  assert.equal(lines[urlIntro + 1], DOCUMENT_URL, "the URL directly follows the fetch sentence");
 });
 
 test("the returned URL is the canonical form that was validated, not the raw input", () => {
   const lines = paste("https://CommonSwarm.com").split("\n");
-  assert.equal(lines.at(-1), "https://commonswarm.com/");
+  assert.equal(lines[1], "https://commonswarm.com/");
 });
 
 test("a document URL with a query string is refused", () => {
@@ -71,7 +77,7 @@ test("a malformed percent-escape is refused rather than skipping the decoded che
   assert.throws(() => paste(`${DOCUMENT_URL}/bad%FF`), /malformed percent-escape/);
 });
 
-test("secret material in the URL is refused in every shape a coding mistake could produce", () => {
+test("secret material with 12 contiguous characters of the body is refused, in many shapes", () => {
   const percent = (s: string) => [...s].map((c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`).join("");
   refusesSecret(`${DOCUMENT_URL}/${JOIN_CREDENTIAL}`);                         // whole credential
   refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY}`);                             // body without its prefix
@@ -83,8 +89,13 @@ test("secret material in the URL is refused in every shape a coding mistake coul
   refusesSecret(`${DOCUMENT_URL}/${percent(SECRET_BODY.slice(0, 20)).replaceAll("%", "%25")}`); // double
 });
 
-test("a URL sharing fewer than 12 consecutive characters with the secret is not refused", () => {
-  /* The positive control for the window: the check must not refuse ordinary URLs by accident. */
+test("THE STATED LIMIT: pieces shorter than 12 characters are not refused", () => {
+  /* Two jobs. It is the positive control for the window — the check must not refuse ordinary URLs by
+   * accident. And it pins the limit the source states, so the limit cannot silently change: a
+   * secret chopped into 11-character chunks passes this guard. An arm caught an earlier test name
+   * claiming "every shape a coding mistake could produce". */
+  const chunks = SECRET_BODY.match(/.{1,11}/g)!;
+  assert.doesNotThrow(() => paste(`${DOCUMENT_URL}/${chunks.join("/")}`));
   assert.doesNotThrow(() => paste(`${DOCUMENT_URL}/${SECRET_BODY.slice(0, 11)}`));
 });
 

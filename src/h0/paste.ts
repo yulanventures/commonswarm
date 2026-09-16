@@ -16,12 +16,17 @@ const JOIN_CREDENTIAL_RE = /^swm_join_[A-Za-z0-9_-]{43}$/;
  * value that link previewers, scanners, proxies and CDN logs all see — for example, a future lane
  * using the credential, or part of it, as the locator.
  *
- * Within that model it is deliberately wide: any 12-character window of the 43-character secret
- * body (about 72 bits), in any letter case, after repeated percent-decoding, anywhere in the URL,
- * is refused. That covers the whole credential, the body without its public prefix, a partial
- * prefix, a secret split across path segments, a case-folded hostname, and single or double
- * percent-encoding. It cannot detect a secret that has been transformed (hashed, reversed,
- * re-encoded as hex), and it does not try to.
+ * Within that model it refuses any 12 CONTIGUOUS characters of the 43-character secret body
+ * (about 72 bits), in any letter case, after repeated percent-decoding, anywhere in the URL. That
+ * covers the whole credential, the body without its public prefix, a truncated body, a secret split
+ * into pieces AS LONG AS one piece keeps 12 contiguous characters, a case-folded hostname, and
+ * single or double percent-encoding.
+ *
+ * WHAT IT MISSES, stated because an arm caught an earlier version of this comment overclaiming:
+ * a piece shorter than 12 characters, so a secret chopped into short chunks passes; the public
+ * `swm_join_` prefix, which carries no entropy and is not checked at all; and any transformed
+ * secret (hashed, reversed, hex). A window short enough to catch short chunks would start refusing
+ * ordinary URLs, so the line is drawn at 12 on purpose.
  */
 const SECRET_WINDOW = 12;
 
@@ -99,19 +104,22 @@ export function h0AgentPaste(input: H0AgentPasteInput): string {
   }
 
   /*
-   * THE CREDENTIAL IS ON A LINE OF ITS OWN. An earlier version ended a sentence with it —
+   * EACH VALUE STANDS ON ITS OWN LINE, DIRECTLY UNDER THE SENTENCE THAT NAMES IT. An earlier version
+   * ended a sentence with the credential —
    * `...credential is swm_join_…; use it only to …` — and a model extracting the token from prose can
    * easily take the adjoining semicolon with it, which the register endpoint's exact shape check then
    * refuses. The first sentence also says the document needs no credential, because a model handed a
-   * secret next to a URL may otherwise send it when fetching the URL.
+   * secret next to a URL may otherwise send it when fetching the URL. And the URL now follows the
+   * fetch sentence rather than sitting under a line ending "credential:", which invited an agent to
+   * read the wrong value as the credential.
    *
    * The URL returned is the parsed, canonical form that was actually validated, not the raw input.
    */
   const verb = preauthVerb();
   return [
-    "Fetch the agent document at the URL below; fetching it needs no credential.",
+    "Fetch the agent document at this URL; fetching it needs no credential:",
+    document.href,
     `Then call ${verb} once, sending only this single-purpose join credential:`,
     input.joinCredential,
-    document.href,
   ].join("\n");
 }
