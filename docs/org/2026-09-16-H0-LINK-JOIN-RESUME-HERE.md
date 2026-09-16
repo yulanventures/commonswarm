@@ -71,9 +71,16 @@ messages (messages are immutable, so corrections live there).
 
 ## NOT ESTABLISHED
 
-- **An H0 seat has no renew path.** The seven verbs include no renew verb, so lane 3b mints the seat token
-  for 24 hours (`H0_SEAT_TOKEN_TTL_HOURS`) and still creates the renewal grant. A joined agent stops
-  working after a day. Whether that is acceptable for launch is a Strategist decision, asked 2026-09-16.
+- **An H0 seat has no renew path, by ruling.** Strategist 2026-09-16 16:39Z: no eighth verb and no 24-hour
+  seat. The seat token lives `AGENT_TOKEN_MAX_TTL_MS` (30 days, `src/protocol/workspace-commands.ts`, equal
+  to the connect picker default). The renewal grant is still created, and the agent document's first
+  paragraph states the lifetime, generated from the constant. Lane 3b's Maker was dispatched with a
+  24-hour constant BEFORE the ruling, so that change is owed in lane 3b before its pair.
+  The ruling also said a seat past 30 days "re-registers through the same invite by replaying its
+  registration". That CANNOT work on main: the join credential expires within 24 hours (CHECK in
+  `20260916000001_agent_join_credentials.sql`), and spec §5 refuses a replay whose token was used.
+  Sent back as signal `90346c31`. Default until ruled otherwise: after 30 days, ask the human for a new
+  invite.
 
 - Any H0 path on production. The three-host done-test.
 - Whether two sentences are enough for each host to register unprompted.
