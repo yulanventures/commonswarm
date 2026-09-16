@@ -605,26 +605,33 @@ const mintIn = (g: Fixture, jwt: string, commandId = randomUUID()) =>
   command(jwt, { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 }, commandId, g.workspace);
 
 test("agent-join credential quotas", async (t) => {
-  await t.test("an EXPIRED credential's registrar frees its principal slot; a LIVE one still holds it", async () => {
+  await t.test("expired registrars free their slots and a live one holds its slot — asymmetric, so every wrong exclusion is caught", async () => {
     /* The finding: a registrar was revoked only on explicit revoke, so an ordinary expiry left it
-     * counted against the 50-principal ceiling forever, hidden from every view — enough expiries and
-     * a workspace could no longer create agents, with nothing visible to revoke.
+     * counted against the 50-principal ceiling forever, hidden from every view.
      *
-     * Setup reaches exactly 50 unrevoked principals: the fixture's 1, 47 fillers, one LIVE registrar
-     * and one EXPIRED registrar. Only 49 should count. The first create must succeed; that takes the
-     * count to 50, so the second must be refused. The pair proves both halves: the expired registrar
-     * is excluded (first 200) and the live one is not (second 403). */
+     * AN EARLIER VERSION OF THIS TEST PROVED LESS THAN ITS COMMIT SAID. It used ONE live and ONE
+     * expired registrar and called the pair of results proof of "both halves". A review arm inverted
+     * the predicate — excluding the LIVE registrar and counting the EXPIRED one — and the test stayed
+     * green: with one of each, excluding either leaves the same count. So the setup is now ASYMMETRIC,
+     * one live and TWO expired, so each wrong implementation lands on a different count:
+     *
+     *   rows: fixture 1 + fillers 46 + live 1 + expired 2 = 50 unrevoked principals
+     *   correct   (exclude expired only)  counts 48 -> create, create, REFUSE
+     *   inverted  (exclude live only)     counts 49 -> create, REFUSE
+     *   none      (count every registrar) counts 50 -> REFUSE
+     *   all       (exclude every registrar) counts 47 -> create, create, create
+     *
+     * Only the correct implementation produces exactly [200, 200, 403]. */
     const g = await createFixture();
-    await addPlainPrincipals(g, 47);
+    await addPlainPrincipals(g, 46);
     await addRegistrar(g, "live");
     await addRegistrar(g, "expired");
-    const create = (name: string) =>
-      command(g.ownerJwt, { kind: "create_agent_principal", name }, randomUUID(), g.workspace);
-    const first = await create(`after-expiry-${randomUUID()}`);
-    assert.equal(first.status, 200, `expired registrar must not count: ${JSON.stringify(first.body)}`);
-    const second = await create(`at-ceiling-${randomUUID()}`);
-    assert.equal(second.status, 403, `live registrar must still count: ${JSON.stringify(second.body)}`);
-    assert.equal(second.body.error, "principal_limit_reached");
+    await addRegistrar(g, "expired");
+    const create = () =>
+      command(g.ownerJwt, { kind: "create_agent_principal", name: `probe-${randomUUID()}` }, randomUUID(), g.workspace);
+    const statuses: number[] = [];
+    for (let i = 0; i < 3; i++) statuses.push((await create()).status);
+    assert.deepEqual(statuses, [200, 200, 403], `create statuses ${statuses.join(",")}`);
   });
 
   await t.test("an expired credential can create no seat, enforced by the table itself", async () => {

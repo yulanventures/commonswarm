@@ -110,7 +110,9 @@ test("every principal-ceiling count takes the workspace lock first, in the one s
   const visit = (node: ts.Node): void => {
     if (ts.isTaggedTemplateExpression(node)) {
       const text = node.template.getText(file);
-      if (/count\(\*\)/i.test(text) && /swarm\.agent_principals/.test(text)) {
+      /* ANY count form, not only `count(*)`: an arm noted a new inline ceiling check written as
+       * `count(1)` or `count(p.principal_id)` would have slipped past the one-count rule. */
+      if (/\bcount\s*\(/i.test(text) && /swarm\.agent_principals/.test(text)) {
         counts.push({ at: node.getStart(file), fn: enclosingFunction(node) });
       }
       if (/pg_advisory_xact_lock/.test(text) && /principal-ceiling/.test(text)) {
