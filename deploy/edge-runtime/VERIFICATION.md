@@ -19,6 +19,13 @@ mixed requests, and a healthy `docker restart` with zero restarts.
 4. The repository Caddy fragment validates with `caddy:2.11` and dummy
    certificates. The box's full Caddyfile was not read or validated by this lane.
 
+The lead measured that installing `47c33aad` as
+`/etc/caddy/sites/10-commonswarm-api.caddy` made the box reject its complete
+configuration. The site fragment carried a global options block, but imported
+site files cannot define that block. The lead restored the prior file and the
+box remained healthy. Fix round 3 separates those settings and validates the
+same main-file-plus-site-import shape used by the box.
+
 ## Image and environment
 
 - Read-only manifest inspection confirmed that edge-runtime `v1.73.13` publishes
@@ -59,6 +66,12 @@ Fix round 2 added these applied-and-restored mutations:
 | Supabase forwarded host | changed `X-Forwarded-Host` to the public host | 1 |
 | Cloudflare trust boundary | removed one pinned proxy range | 1 |
 | runtime response idle | changed 150 seconds back to 65 seconds | 1 |
+
+Fix round 3 added this applied-and-restored mutation:
+
+| Control | Applied mutation | Pure test exit | Box-shaped validation exit |
+|---|---|---:|---:|
+| imported site boundary | put the global options block back in `commonswarm.caddy` | 1 | 1 |
 
 ## Fix round 1 controls
 
@@ -130,3 +143,13 @@ removed after every run.
   `https`, and `X-Forwarded-For` to the trusted derived client address. It also
   checks all 22 Cloudflare ranges pinned on 2026-09-16 and the HTTP/1.1
   unbuffered Realtime proxy.
+
+## Fix round 3 controls
+
+- `commonswarm.caddy` contains site snippets and the named site block only. The
+  Cloudflare `servers { ... }` settings are in
+  `caddy-global-servers.caddy`, which is written for insertion inside the box
+  operator's existing global options block.
+- A box-shaped main Caddyfile with those settings and `import sites/*.caddy`
+  validates. The same shape without the settings also validates. In the second
+  state only visitor-IP derivation and capability rate-limit keying are wrong.

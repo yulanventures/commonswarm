@@ -2,9 +2,17 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const path = process.argv[2];
+const trustMode = process.argv[3] ?? "with-trusted-proxies";
 if (!path) {
-  throw new Error("usage: node check-caddy-adapted.mjs <adapted-json>");
+  throw new Error(
+    "usage: node check-caddy-adapted.mjs <adapted-json> " +
+      "[with-trusted-proxies|without-trusted-proxies]",
+  );
 }
+assert.ok(
+  trustMode === "with-trusted-proxies" ||
+    trustMode === "without-trusted-proxies",
+);
 
 const config = JSON.parse(await readFile(path, "utf8"));
 const servers = Object.values(config.apps?.http?.servers ?? {});
@@ -35,13 +43,19 @@ const cloudflareRanges = [
   "2a06:98c0::/29",
   "2c0f:f248::/32",
 ];
-assert.equal(server.trusted_proxies?.source, "static");
-assert.deepEqual(server.trusted_proxies?.ranges, cloudflareRanges);
-assert.equal(server.trusted_proxies_strict, 1);
-assert.deepEqual(server.client_ip_headers, [
-  "CF-Connecting-IP",
-  "X-Forwarded-For",
-]);
+if (trustMode === "with-trusted-proxies") {
+  assert.equal(server.trusted_proxies?.source, "static");
+  assert.deepEqual(server.trusted_proxies?.ranges, cloudflareRanges);
+  assert.equal(server.trusted_proxies_strict, 1);
+  assert.deepEqual(server.client_ip_headers, [
+    "CF-Connecting-IP",
+    "X-Forwarded-For",
+  ]);
+} else {
+  assert.equal(server.trusted_proxies, undefined);
+  assert.equal(server.trusted_proxies_strict, undefined);
+  assert.equal(server.client_ip_headers, undefined);
+}
 
 const proxies = [];
 function collect(value) {
@@ -83,6 +97,7 @@ assert.deepEqual(local.headers?.request?.set?.["X-Forwarded-For"], [
 assert.equal(local.transport?.response_header_timeout, 165_000_000_000);
 
 process.stdout.write(
-  `adapted Caddy JSON: ${projectProxies.length} Supabase routes and ` +
+  `adapted Caddy JSON (${trustMode}): ` +
+    `${projectProxies.length} Supabase routes and ` +
     `${localProxies.length} local route verified\n`,
 );

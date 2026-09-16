@@ -67,12 +67,20 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
 - [ ] **NOT RUN** — place the certificate and key at
   `/etc/caddy/certs/commonswarm.com.pem` and
   `/etc/caddy/certs/commonswarm.com.key`. Make the key readable only by Caddy.
+- [ ] **NOT RUN — box-operator prerequisite before cutover** — paste the
+  `servers { ... }` lines from `caddy-global-servers.caddy` inside the main
+  `/etc/caddy/Caddyfile` global options block. Do not put that fragment under
+  `sites/`. Without these settings, the site remains valid and routes traffic,
+  but Caddy sees the Cloudflare peer instead of the visitor. Capability rate
+  limits then use the wrong shared client key. No other route behavior depends
+  on these settings.
+- [ ] **NOT RUN** — compare the Cloudflare proxy ranges in
+  `caddy-global-servers.caddy`, pinned 2026-09-16, with Cloudflare's current
+  published list. Review and update the fragment before the operator pastes it
+  if that list changed.
 - [ ] **NOT RUN** — copy `commonswarm.caddy` to
-  `/etc/caddy/sites/commonswarm.caddy` and import that directory from the main
-  Caddyfile.
-- [ ] **NOT RUN** — compare the Cloudflare proxy ranges in the Caddy file, pinned
-  2026-09-16, with Cloudflare's current published list. Review and update the
-  file before install if that list changed.
+  `/etc/caddy/sites/10-commonswarm-api.caddy`. The box main Caddyfile already
+  imports `sites/*.caddy`. The site file must not contain a global options block.
 
 ## 3. Start the edge runtime
 

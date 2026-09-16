@@ -73,9 +73,22 @@ Supabase client calls in those files.
 The reverse proxy sends the project origin as HTTP `Host`,
 `X-Forwarded-Host`, and TLS SNI. It fixes `X-Forwarded-Proto` to `https`, so
 GoTrue cannot derive its callback origin from the public proxy name. The Caddy
-global options trust only Cloudflare's ranges pinned on 2026-09-16, then replace
-`X-Forwarded-For` with Caddy's derived visitor address. This lets capability
-rate limiting use the visitor instead of a Cloudflare edge or spoofed header.
+global options must include the `servers { ... }` fragment from
+`caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on
+2026-09-16, then replaces `X-Forwarded-For` with Caddy's derived visitor
+address. This lets capability rate limiting use the visitor instead of a
+Cloudflare edge or spoofed header. `commonswarm.caddy` is only an imported site
+file and deliberately contains no global options block.
+
+## Caddy validation shape
+
+Do not validate `commonswarm.caddy` by itself. The box imports it from a main
+Caddyfile that already owns the global options block. Build both local fixtures
+with `build-caddy-validation-fixture.mjs`: mode `with-trusted-proxies` pastes the
+server fragment inside that block; mode `without-trusted-proxies` models the
+valid state before the box operator applies it. Validate each generated
+`Caddyfile` with `caddy:2.11` and dummy certificate mounts. The adapted-JSON
+checker accepts the same mode as its second argument.
 
 ## Known box state
 

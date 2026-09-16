@@ -328,6 +328,10 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     resolve(repoRoot, "deploy/edge-runtime/commonswarm.caddy"),
     "utf8",
   );
+  const globalServers = await readFile(
+    resolve(repoRoot, "deploy/edge-runtime/caddy-global-servers.caddy"),
+    "utf8",
+  );
   assert.match(
     caddy,
     /@edge_functions path \/functions\/v1 \/functions\/v1\/\*/,
@@ -340,11 +344,14 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     /handle \/realtime\/v1\/\* \{\s*import supabase_realtime_origin\s*\}/,
   );
   assert.match(
-    caddy,
+    globalServers,
     /trusted_proxies static 173\.245\.48\.0\/20[\s\S]*?2c0f:f248::\/32/,
   );
-  assert.match(caddy, /trusted_proxies_strict/);
-  assert.match(caddy, /client_ip_headers CF-Connecting-IP X-Forwarded-For/);
+  assert.match(globalServers, /trusted_proxies_strict/);
+  assert.match(
+    globalServers,
+    /client_ip_headers CF-Connecting-IP X-Forwarded-For/,
+  );
 
   const upstreamHost = "ukezjcnxjvkpkeezxaew.supabase.co";
   assert.equal(
@@ -367,4 +374,23 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
       []).length,
     3,
   );
+});
+
+test("Caddy site import cannot contain a global options block", async () => {
+  const site = await readFile(
+    resolve(repoRoot, "deploy/edge-runtime/commonswarm.caddy"),
+    "utf8",
+  );
+  const globalServers = await readFile(
+    resolve(repoRoot, "deploy/edge-runtime/caddy-global-servers.caddy"),
+    "utf8",
+  );
+
+  assert.doesNotMatch(site, /^\s*\{\s*$/m);
+  assert.match(
+    globalServers,
+    /^# Paste these lines INSIDE the box main Caddyfile's existing global options/m,
+  );
+  assert.match(globalServers, /^servers \{/m);
+  assert.doesNotMatch(globalServers, /^\s*\{\s*$/m);
 });
