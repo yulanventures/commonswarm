@@ -113,7 +113,10 @@ test("check succeeds below its budget and times out without moving the cursor ab
   const first = signal(1);
   const below = await checkAgentMessages({
     profilePath,
-    fetcher: fetcher([first], AGENT_CHECK_TIMEOUT_MS - 100),
+    /* 600 ms below the budget, not 100: in-budget work (profile, lock, credential) under host load took more than
+     * 100 ms in a full gate run. This row proves the check enforces the constant, whatever its value; a revert to a
+     * typed 3,000 is caught by the ceiling-arithmetic test above, not here. */
+    fetcher: fetcher([first], AGENT_CHECK_TIMEOUT_MS - 600),
     present: async () => {},
   });
   assert.deepEqual(below.messages.map(row => row.id), [first.id]);
@@ -121,7 +124,7 @@ test("check succeeds below its budget and times out without moving the cursor ab
   const second = signal(2);
   await assert.rejects(checkAgentMessages({
     profilePath,
-    fetcher: fetcher([first, second], AGENT_CHECK_TIMEOUT_MS + 100),
+    fetcher: fetcher([first, second], AGENT_CHECK_TIMEOUT_MS + 300),
     present: async () => {},
   }), { code: "check_timeout" });
   const timedOutState = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
