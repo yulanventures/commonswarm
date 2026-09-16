@@ -1,6 +1,5 @@
 import {
   COMMAND_TEST_HOOKS,
-  createWorkerWithRetiredRetry,
   FUNCTION_ENV_NAMES,
   type FunctionName,
   isWorkerLimitError,
@@ -10,6 +9,7 @@ import {
   rewriteFunctionRequest,
   WORKER_LIMIT_BODY,
   WORKER_LIMIT_STATUS,
+  withWorkerRetiredRetry,
 } from "./router.ts";
 
 declare const EdgeRuntime: {
@@ -71,21 +71,25 @@ async function handle(request: Request): Promise<Response> {
   if (gateway.response !== null) return gateway.response;
   const route = gateway.route;
 
-  const worker = await createWorkerWithRetiredRetry(() =>
-    EdgeRuntime.userWorkers.create({
+  // Supabase's Kong removes only /functions/v1. Preserve the function name,
+  // the remaining path, the query, method, headers, body, and signal.
+  // Clone before the first fetch so a retired worker can be replaced even if
+  // fetch disturbed the first request body. The bounded retry covers both
+  // userWorkers.create and worker.fetch, matching the upstream main service.
+  const attemptRequests = [request, request.clone()] as const;
+  return await withWorkerRetiredRetry(async (attemptNumber) => {
+    const original = attemptRequests[attemptNumber];
+    const worker = await EdgeRuntime.userWorkers.create({
       servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
       memoryLimitMb: USER_WORKER_MEMORY_MB,
       workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
       noModuleCache: false,
       envVars: environmentFor(route.functionName),
-    })
-  );
-
-  // Supabase's Kong removes only /functions/v1. Preserve the function name,
-  // the remaining path, the query, method, headers, body, and signal.
-  const forwarded = rewriteFunctionRequest(request, route.pathname);
-  EdgeRuntime.applySupabaseTag(request, forwarded);
-  return await worker.fetch(forwarded);
+    });
+    const forwarded = rewriteFunctionRequest(original, route.pathname);
+    EdgeRuntime.applySupabaseTag(original, forwarded);
+    return await worker.fetch(forwarded);
+  });
 }
 
 Deno.serve((request) =>

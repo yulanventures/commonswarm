@@ -61,6 +61,17 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 		}
 	}
 
+	# Keep restart-time upstream failures readable to browser clients. This
+	# matcher scopes the error route to functions; successful responses never
+	# enter handle_errors and pass through unchanged.
+	handle_errors {
+		@edge_function_error path /functions/v1 /functions/v1/*
+		handle @edge_function_error {
+			header Access-Control-Allow-Origin "*"
+			respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
+		}
+	}
+
 	# supabase-js and the CLI use GoTrue for OAuth, OTP, refresh, user, and logout.
 	handle /auth/v1/* {
 		import supabase_origin

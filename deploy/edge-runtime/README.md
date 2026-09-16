@@ -6,17 +6,19 @@ This package runs the five existing Supabase Edge Functions in
 The main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
 `capability`, `activity`, and `h0` to separate user workers, and gives each worker
 the path Supabase Kong gives it: `/<name>/...`. An unknown name returns 404 before
-a worker starts. A known function's `OPTIONS` request gets Kong's wildcard
-gateway preflight before a worker starts. Other requests still use each
+a worker starts. A known function's `OPTIONS` request gets the hosted gateway's
+wildcard preflight before a worker starts. Other requests still use each
 function's CORS policy. Query strings, methods, headers, and bodies are kept.
 
 Boot requires `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
 `SUPABASE_SERVICE_ROLE_KEY`, and one supported database URL name.
 `SWARM_SELF_SERVE` must equal `1`; another non-empty value would let the service
-start while production workspace creation remains disabled. A retired worker
-creation is retried once, before any request body has reached a worker. A full
-worker pool or an idle worker timeout returns the hosted HTTP 504 status with
-the runtime's `WORKER_LIMIT` body.
+start while production workspace creation remains disabled. A
+`WorkerAlreadyRetired` from either worker creation or fetch retries the complete
+create-and-fetch operation once, with a cloned request for the second fetch. A
+pool-wait `InvalidWorkerCreation`, full worker pool cancellation, or idle worker
+timeout returns the hosted HTTP 504 status with the runtime's `WORKER_LIMIT`
+body.
 
 Each worker has a 96 MiB memory limit and a 150-second wall-clock limit. Four
 workers can use at most 384 MiB, leaving 128 MiB of the container's 512 MiB hard
@@ -29,6 +31,8 @@ not end a valid worker before that reference. Function request bodies are capped
 at 128 KiB; the 60-second
 read timeout permits that body at about 2.2 KiB/s. File bytes up to 25 MiB go
 straight to Storage and do not pass through a function request body.
+Compose gives shutdown 80 seconds before SIGKILL. This leaves 10 seconds beyond
+the runtime's configured 70-second graceful worker-drain window.
 
 The later H0 poll may hold a worker for 50 seconds. The poll lane must not enable
 that path until it prevents H0 polls from occupying all four slots and starving

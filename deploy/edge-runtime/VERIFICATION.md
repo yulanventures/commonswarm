@@ -88,6 +88,15 @@ Fix round 5 added these applied-and-restored mutations:
 | bare Realtime routes | removed bare `/realtime/v1` from its matcher | 1 | 1 |
 | self-serve boot value | allowed `SWARM_SELF_SERVE=0` | 1 | — |
 
+Fix round 6 added these applied-and-restored mutations:
+
+| Control | Applied mutation | Pure test exit | Adapted-JSON proof exit |
+|---|---|---:|---:|
+| pool-wait classification | removed `InvalidWorkerCreation` from the stable-name set | 1 | — |
+| retired fetch retry | moved `worker.fetch` outside the bounded retry | 1 | — |
+| graceful stop margin | reduced `stop_grace_period` from 80 s to 70 s | 1 | — |
+| restart-time function CORS | removed the error-route wildcard origin header | 1 | 1 |
+
 ## Fix round 1 controls
 
 - Local Kong 2.8.1 answered bare `/functions/v1` with HTTP 404 and
@@ -137,15 +146,21 @@ removed after every run.
 
 ## Fix round 2 controls
 
-- Local Kong 2.8.1 answered a known function `OPTIONS` with HTTP 200, wildcard
-  origin, the requested header list echoed, the method list
-  `GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS,TRACE,CONNECT`, and an empty body.
+- Local Kong 2.8.1 passed a known-function preflight to the worker. With
+  requested method `POST` and requested headers `authorization, content-type,
+  apikey`, that worker response was HTTP 204. Staging used Supabase's hosted
+  gateway plugin instead: HTTP 200, wildcard origin, the requested header list
+  echoed, the method list
+  `GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS,TRACE,CONNECT`, and an empty body. The
+  router reproduces the hosted-plugin response because this box replaces the
+  hosted edge path, while local Kong 2.8.1 is only a development-stack version.
   Unknown GET and `OPTIONS` both returned HTTP 404, text `Function not found`,
-  and wildcard origin. The router now matches these cases.
+  and wildcard origin; the router matches those cases too.
 - Inspection of the pinned local runtime source found the stable
   `WORKER_LIMIT` JSON body. The lead supplied hosted HTTP 504 as the required
   status. `WorkerRequestIdleTimeout` and `WorkerRequestCancelled` now map to
-  that pair. An actual exhausted-pool response was not forced in this lane.
+  that pair. An actual exhausted-pool response was not forced in that round;
+  fix round 6 supplies the pinned-image control below.
 - One `WorkerAlreadyRetired` during worker creation retries once. A second
   retirement escapes the bounded helper.
 - The runtime response-idle limit and worker wall clock are 150 seconds. Caddy
@@ -217,3 +232,29 @@ headers and continues to set its visitor-derived `X-Forwarded-For`.
 - HezLead measured the 22-range trusted-proxy block in the box main Caddyfile.
   The runbook now verifies its adapted form instead of telling the operator to
   paste a second copy.
+
+## Fix round 6 controls
+
+- The pinned `public.ecr.aws/supabase/edge-runtime:v1.73.13` ran on loopback
+  with `--max-parallelism 1`, `--request-wait-timeout 1000`, and five
+  simultaneous GETs to one worker that held each accepted request for 2.5
+  seconds. With the exact `70d17d08` main service, one request returned 200 and
+  four pool-wait requests returned HTTP 500
+  `{"error":"internal_error"}`. With this fix, the same run returned one 200
+  and four HTTP 504 responses with the stable `WORKER_LIMIT` body. Every 500
+  and 504 response had `Access-Control-Allow-Origin: *`. Both containers were
+  stopped and removed.
+- `InvalidWorkerCreation` now joins the stable worker-limit name set. The
+  classifier does not inspect presentation text. A `WorkerAlreadyRetired`
+  retry now wraps worker creation and fetch together; the second attempt uses
+  a request clone made before the first fetch.
+- A loopback `caddy:2.11` run with no function upstream returned HTTP 502 and
+  `Access-Control-Allow-Origin: *` for `/functions/v1/read`. The error matcher
+  covers the bare path and its subtree. Adapted JSON puts that response-header
+  handler only under the server error routes, so successful proxy responses
+  remain unchanged.
+- Compose waits 80 seconds before SIGKILL. The runtime has 70 seconds to drain
+  workers, leaving 10 seconds for shutdown overhead.
+- The local-Kong and staging preflight measurements differ as recorded in the
+  corrected fix-round-2 control. The router intentionally follows staging's
+  hosted gateway plugin because it replaces that public edge path.
