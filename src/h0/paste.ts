@@ -37,10 +37,11 @@ function preauthVerb(): string {
   return H0_PREAUTH_VERBS[0]!;
 }
 
-/** Decode until stable, so double-encoding cannot hide a value. A malformed escape is REFUSED. */
+/** Decode until stable, so nested encoding cannot hide a value. A malformed escape is REFUSED. */
+const MAX_DECODE_ROUNDS = 4;
 function fullyDecoded(value: string): string {
   let current = value;
-  for (let round = 0; round < 4; round++) {
+  for (let round = 0; round < MAX_DECODE_ROUNDS; round++) {
     let next: string;
     try {
       next = decodeURIComponent(current);
@@ -53,7 +54,10 @@ function fullyDecoded(value: string): string {
     if (next === current) return current;
     current = next;
   }
-  return current;
+  /* The first version fell through and returned a value that was STILL encoded after the last
+   * round, so five nested encodings hid a secret silently. An arm found it. Our app never builds a
+   * URL like that, so it is refused. */
+  throw new Error("documentUrl has excessively nested percent-encoding");
 }
 
 /** Build the complete message that a human pastes into a fresh agent session. */
@@ -84,9 +88,11 @@ export function h0AgentPaste(input: H0AgentPasteInput): string {
   }
   /* `https://commonswarm.com@attacker.example/doc` shows one host to a human and fetches another.
    * Our URLs never carry userinfo, so any is refused. */
+  /* Both halves: `https://:pass@host/` has an empty username and a password. */
   if (document.username !== "" || document.password !== "") {
     throw new Error("documentUrl must not contain userinfo");
   }
+  /* The raw `includes` is not redundant: `https://host/doc?` parses to an EMPTY search. */
   if (input.documentUrl.includes("?") || document.search !== "") {
     throw new Error("documentUrl must not contain a query string");
   }
@@ -95,11 +101,15 @@ export function h0AgentPaste(input: H0AgentPasteInput): string {
   }
 
   const secretBody = input.joinCredential.slice(JOIN_CREDENTIAL_PREFIX.length).toLowerCase();
+  /* `document.href` is not redundant with the raw input: the URL parser strips ASCII tab, CR and
+   * LF, so a secret split by those characters is contiguous ONLY in the parsed form. */
   const haystack = [input.documentUrl, document.href, fullyDecoded(input.documentUrl),
     fullyDecoded(document.href)].join("\n").toLowerCase();
   for (let start = 0; start + SECRET_WINDOW <= secretBody.length; start++) {
     if (haystack.includes(secretBody.slice(start, start + SECRET_WINDOW))) {
-      throw new Error("documentUrl must not contain the join credential or any part of it");
+      throw new Error(
+        `documentUrl must not contain ${SECRET_WINDOW} or more consecutive characters of the join credential`,
+      );
     }
   }
 
@@ -116,10 +126,17 @@ export function h0AgentPaste(input: H0AgentPasteInput): string {
    * The URL returned is the parsed, canonical form that was actually validated, not the raw input.
    */
   const verb = preauthVerb();
+  /*
+   * ONLY THE LINE BEFORE THE CREDENTIAL ENDS IN "credential:". The previous wording ended the fetch
+   * line that way too, so an agent taking "the line after `credential:`" would pick the URL first.
+   * And the register sentence points at the document for the call's fields: "sending only this
+   * credential" could be read as "the body is this one field", while register also requires
+   * `attemptId` and `name`.
+   */
   return [
-    "Fetch the agent document at this URL; fetching it needs no credential:",
+    "First fetch this agent document; reading it requires no login or key:",
     document.href,
-    `Then call ${verb} once, sending only this single-purpose join credential:`,
+    `Then call ${verb} once as that document describes, using this single-purpose join credential:`,
     input.joinCredential,
   ].join("\n");
 }

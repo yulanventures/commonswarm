@@ -19,7 +19,7 @@ const DOCUMENT_URL = "https://commonswarm.com/agent/h0-doc";
 const paste = (documentUrl: string, joinCredential = JOIN_CREDENTIAL) =>
   h0AgentPaste({ joinCredential, documentUrl });
 const refusesSecret = (documentUrl: string) =>
-  assert.throws(() => paste(documentUrl), /must not contain the join credential or any part of it/, documentUrl);
+  assert.throws(() => paste(documentUrl), /must not contain 12 or more consecutive characters of the join credential/, documentUrl);
 
 test("the secret body fixture is exactly 43 base64url characters", () => {
   assert.match(SECRET_BODY, /^[A-Za-z0-9_-]{43}$/);
@@ -31,9 +31,9 @@ test("the whole H0 agent paste matches the reviewed golden text", () => {
   assert.equal(
     paste(DOCUMENT_URL),
     [
-      "Fetch the agent document at this URL; fetching it needs no credential:",
+      "First fetch this agent document; reading it requires no login or key:",
       DOCUMENT_URL,
-      "Then call register once, sending only this single-purpose join credential:",
+      "Then call register once as that document describes, using this single-purpose join credential:",
       JOIN_CREDENTIAL,
     ].join("\n"),
   );
@@ -49,8 +49,14 @@ test("each value is on its own line, directly under the sentence that names it",
    * value on the very next line, and only that value. */
   const credentialIntro = lines.findIndex((line) => line.endsWith("join credential:"));
   assert.equal(lines[credentialIntro + 1], JOIN_CREDENTIAL, "the credential directly follows its label");
-  const urlIntro = lines.findIndex((line) => line.startsWith("Fetch the agent document"));
+  const urlIntro = lines.findIndex((line) => line.startsWith("First fetch this agent document"));
   assert.equal(lines[urlIntro + 1], DOCUMENT_URL, "the URL directly follows the fetch sentence");
+  /* ONLY ONE LINE ends in "credential:". An arm noted the fetch line once did too, so an agent
+   * taking "the line after `credential:`" would have picked the URL first. */
+  assert.deepEqual(
+    lines.map((line, index) => [line, index] as const).filter(([line]) => /credential:$/i.test(line)).map(([, i]) => i),
+    [credentialIntro],
+  );
 });
 
 test("the returned URL is the canonical form that was validated, not the raw input", () => {
@@ -60,16 +66,22 @@ test("the returned URL is the canonical form that was validated, not the raw inp
 
 test("a document URL with a query string is refused", () => {
   assert.throws(() => paste(`${DOCUMENT_URL}?x=1`), /must not contain a query string/);
+  /* A bare `?` parses to an EMPTY search, so only the raw check catches it. */
+  assert.throws(() => paste(`${DOCUMENT_URL}?`), /must not contain a query string/);
 });
 
 test("a document URL with a fragment is refused", () => {
   assert.throws(() => paste(`${DOCUMENT_URL}#frag`), /must not contain a fragment/);
+  /* A bare `#` parses to an EMPTY hash, so only the raw check catches it. */
+  assert.throws(() => paste(`${DOCUMENT_URL}#`), /must not contain a fragment/);
 });
 
 test("a document URL carrying userinfo is refused", () => {
   /* Shows commonswarm.com to a human and fetches attacker.example. */
   assert.throws(() => paste("https://commonswarm.com@attacker.example/agent/h0-doc"), /must not contain userinfo/);
   assert.throws(() => paste("https://user:pass@commonswarm.com/agent/h0-doc"), /must not contain userinfo/);
+  /* Password-only: the username is EMPTY, so a username-only check would pass it. */
+  assert.throws(() => paste("https://:pass@commonswarm.com/agent/h0-doc"), /must not contain userinfo/);
 });
 
 test("a malformed percent-escape is refused rather than skipping the decoded check", () => {
@@ -87,6 +99,15 @@ test("secret material with 12 contiguous characters of the body is refused, in m
   refusesSecret(`${DOCUMENT_URL}/${SECRET_BODY.toLowerCase()}`);               // case-folded
   refusesSecret(`${DOCUMENT_URL}/${percent(SECRET_BODY.slice(0, 20))}`);       // percent-encoded
   refusesSecret(`${DOCUMENT_URL}/${percent(SECRET_BODY.slice(0, 20)).replaceAll("%", "%25")}`); // double
+  /* TAB and NEWLINE splits into pieces SHORTER than the window: the URL parser strips tab, CR and
+   * LF, so the secret is contiguous ONLY in the parsed href. An arm showed dropping href from the
+   * haystack left every case green. The first version of these two lines split the body into two
+   * 21-character halves — each half already matched a 12-character window in the RAW input, so they
+   * passed without href and proved nothing about it. Six-character chunks can only match once the
+   * parser joins them. */
+  const chunked = (separator: string) => SECRET_BODY.match(/.{1,6}/g)!.join(separator);
+  refusesSecret(`${DOCUMENT_URL}/${chunked("\t")}`);
+  refusesSecret(`${DOCUMENT_URL}/${chunked("\n")}`);
 });
 
 test("THE STATED LIMIT: pieces shorter than 12 characters are not refused", () => {
@@ -144,4 +165,21 @@ test("no H0 verb name is typed as a string literal in the paste source", () => {
   };
   visit(file);
   assert.deepEqual(typed, []);
+});
+
+test("four or more nested percent-encoding layers are refused; three still decode", () => {
+  /* The first version returned a still-encoded value after its last decode round, which hid a secret
+   * behind enough layers. An arm found it. The boundary is MEASURED, not reasoned: layers 1-3 decode
+   * to a stable value inside the round limit, layer 4 does not. `%41` is a VALID escape for "A";
+   * an earlier draft of this test wrapped an INVALID escape and passed by hitting the
+   * malformed-escape refusal instead of the one it names. */
+  const layered = (layers: number) => {
+    let segment = "%41";
+    for (let i = 1; i < layers; i++) segment = segment.replace("%", "%25");
+    return `${DOCUMENT_URL}/${segment}`;
+  };
+  assert.doesNotThrow(() => paste(layered(3)), "three layers must decode normally");
+  for (const layers of [4, 6]) {
+    assert.throws(() => paste(layered(layers)), /excessively nested percent-encoding/, `${layers} layers`);
+  }
 });
