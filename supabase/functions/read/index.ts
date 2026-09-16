@@ -57,6 +57,18 @@ const db = postgres(databaseUrl, {
   connect_timeout: 10,
 });
 
+type Sql = postgres.TransactionSql<Record<string, unknown>>;
+
+/** Keep the existing local settings while installing them in one statement. */
+async function setReadTransaction(tx: Sql): Promise<void> {
+  await tx`
+    SELECT
+      set_config('role', 'swarm_read', true),
+      set_config('search_path', 'swarm_read, swarm, pg_catalog', true),
+      set_config('lock_timeout', '5s', true)
+  `;
+}
+
 interface SignalReadRequest {
   resource: "signals";
   workspace_id: string;
@@ -412,14 +424,11 @@ async function handle(
   }
   const tokenHash = agentCredential ? await sha256(token) : null;
 
-  return await db.begin(async (tx) => {
+  return await db.begin("isolation level read committed", async (tx) => {
     setPhase("session_setup");
-    await tx.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
     // Spec: the read transaction never assumes swarm_command. Start as
     // swarm_read and authenticate/count through the narrow SECURITY DEFINER.
-    await tx.unsafe("SET LOCAL ROLE swarm_read");
-    await tx.unsafe("SET LOCAL search_path = swarm_read, swarm, pg_catalog");
-    await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+    await setReadTransaction(tx);
 
     if (humanUserId !== null) {
       await tx`
@@ -566,21 +575,22 @@ async function handle(
       });
     }
     await tx`
-      SELECT set_config(
-        'request.jwt.claims',
-        ${JSON.stringify({
-          sub: agent.owner_user_id,
-          role: "authenticated",
-          /* swarm_read.agent_execution_sessions admits a row for this role
-           * only when this claim matches principal_id. */
-          agent_principal_id: agent.principal_id,
-        })},
-        true
-      )
+      SELECT
+        set_config(
+          'request.jwt.claims',
+          ${JSON.stringify({
+            sub: agent.owner_user_id,
+            role: "authenticated",
+            /* swarm_read.agent_execution_sessions admits a row for this role
+             * only when this claim matches principal_id. */
+            agent_principal_id: agent.principal_id,
+          })},
+          true
+        ),
+        set_config('search_path', 'swarm_read, auth, pg_catalog', true)
     `;
     // Stay as swarm_read for membership-gated views. The definer already
     // stamped first-use; this path never elevates to swarm_command.
-    await tx.unsafe("SET LOCAL search_path = swarm_read, auth, pg_catalog");
     if (body.resource === "channels") {
       /* Same eight columns and the same slug order the human REST read takes,
        * so `cswarm channel ls` renders identically whichever credential ran it.
@@ -620,36 +630,6 @@ async function handle(
       return json(200, { grants });
     }
     if (body.resource === "members") {
-      const members = await tx<Record<string, unknown>[]>`
-        SELECT user_id, display_name
-        FROM swarm_read.member_profiles
-        WHERE workspace_id = ${body.workspace_id}::uuid
-        ORDER BY user_id ASC
-      `;
-      const agents = await tx<Record<string, unknown>[]>`
-        SELECT
-          p.principal_id,
-          p.name,
-          p.owner_user_id,
-          p.managed_at,
-          s.lifecycle_state,
-          s.provider,
-          s.host_label,
-          s.host_session_ref,
-          s.session_id,
-          s.started_at,
-          s.renewed_at,
-          s.expired_at,
-          (s.expired_at IS NOT NULL AND s.expired_at > statement_timestamp()) AS is_live
-        FROM swarm_read.agent_principals AS p
-        LEFT JOIN swarm_read.agent_execution_sessions s ON s.principal_id = p.principal_id
-        JOIN swarm_read.member_profiles AS owner
-          ON owner.workspace_id = p.workspace_id
-         AND owner.user_id = p.owner_user_id
-        WHERE p.workspace_id = ${body.workspace_id}::uuid
-          AND p.revoked_at IS NULL
-        ORDER BY p.principal_id ASC
-      `;
       /* The workspace's HUMAN name, so an agent and a person call one workspace the same
        * thing — read from swarm_read.workspaces, the SAME view the app's switcher reads.
        *
@@ -669,12 +649,47 @@ async function handle(
        * `archived_at IS NULL`, so archiving revokes the agent and the handler returns 403 at
        * the membership gate above. The null branch below is for a deployment that does not
        * send the field, not for archived rows. */
-      const workspaceRows = await tx<{ name: string }[]>`
-        SELECT name
-        FROM swarm_read.workspaces
-        WHERE workspace_id = ${agent.principal_workspace_id}::uuid
-        LIMIT 1
-      `;
+      // These reads share the same role, claims, search path, and snapshot.
+      // Queue them together so postgres.js sends one wire batch instead of
+      // waiting for three Falkenstein/us-east-1 round trips.
+      const [members, agents, workspaceRows] = await Promise.all([
+        tx<Record<string, unknown>[]>`
+          SELECT user_id, display_name
+          FROM swarm_read.member_profiles
+          WHERE workspace_id = ${body.workspace_id}::uuid
+          ORDER BY user_id ASC
+        `,
+        tx<Record<string, unknown>[]>`
+          SELECT
+            p.principal_id,
+            p.name,
+            p.owner_user_id,
+            p.managed_at,
+            s.lifecycle_state,
+            s.provider,
+            s.host_label,
+            s.host_session_ref,
+            s.session_id,
+            s.started_at,
+            s.renewed_at,
+            s.expired_at,
+            (s.expired_at IS NOT NULL AND s.expired_at > statement_timestamp()) AS is_live
+          FROM swarm_read.agent_principals AS p
+          LEFT JOIN swarm_read.agent_execution_sessions s ON s.principal_id = p.principal_id
+          JOIN swarm_read.member_profiles AS owner
+            ON owner.workspace_id = p.workspace_id
+           AND owner.user_id = p.owner_user_id
+          WHERE p.workspace_id = ${body.workspace_id}::uuid
+            AND p.revoked_at IS NULL
+          ORDER BY p.principal_id ASC
+        `,
+        tx<{ name: string }[]>`
+          SELECT name
+          FROM swarm_read.workspaces
+          WHERE workspace_id = ${agent.principal_workspace_id}::uuid
+          LIMIT 1
+        `,
+      ]);
       return json(200, {
         members,
         agents,

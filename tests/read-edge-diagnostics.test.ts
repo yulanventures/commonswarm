@@ -295,3 +295,103 @@ test("the read function keeps browser CORS wired — preflight branch and respon
   );
   assert.match(source, /withCommandCors\(request, response/);
 });
+
+function assertRoundTripFold(readSource: string, commandSource: string): void {
+  assert.equal(
+    [...readSource.matchAll(
+      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
+    )].length,
+    1,
+  );
+  assert.match(
+    readSource,
+    /async function setReadTransaction[\s\S]{0,500}set_config\('role', 'swarm_read', true\)[\s\S]{0,200}set_config\('search_path', 'swarm_read, swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
+  );
+  assert.match(
+    readSource,
+    /const \[members, agents, workspaceRows\] = await Promise\.all\(\[/,
+  );
+  assert.equal(
+    readSource.includes("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"),
+    false,
+  );
+  assert.equal(
+    [...commandSource.matchAll(
+      /db\.begin\("isolation level read committed", async \(tx\) =>/g,
+    )].length,
+    2,
+  );
+  assert.match(
+    commandSource,
+    /async function setTransaction[\s\S]{0,500}set_config\('role', 'swarm_command', true\)[\s\S]{0,200}set_config\('search_path', 'swarm, pg_catalog', true\)[\s\S]{0,200}set_config\('lock_timeout', '5s', true\)/,
+  );
+}
+
+test("read and command fold transaction setup without changing its settings", () => {
+  const readSource = readFileSync(
+    join(process.cwd(), "supabase/functions/read/index.ts"),
+    "utf8",
+  );
+  const commandSource = readFileSync(
+    join(process.cwd(), "supabase/functions/command/index.ts"),
+    "utf8",
+  );
+  assertRoundTripFold(readSource, commandSource);
+});
+
+test("round-trip fold controls reject each latency regression", () => {
+  const readSource = readFileSync(
+    join(process.cwd(), "supabase/functions/read/index.ts"),
+    "utf8",
+  );
+  const commandSource = readFileSync(
+    join(process.cwd(), "supabase/functions/command/index.ts"),
+    "utf8",
+  );
+  const mutations = [
+    {
+      name: "read BEGIN options removed",
+      read: readSource.replace(
+        'db.begin("isolation level read committed", async (tx) =>',
+        "db.begin(async (tx) =>",
+      ),
+      command: commandSource,
+    },
+    {
+      name: "read role setting removed",
+      read: readSource.replace(
+        "set_config('role', 'swarm_read', true)",
+        "current_role::text",
+      ),
+      command: commandSource,
+    },
+    {
+      name: "member reads serialized",
+      read: readSource.replace("await Promise.all([", "await Promise.resolve(["),
+      command: commandSource,
+    },
+    {
+      name: "command BEGIN options removed",
+      read: readSource,
+      command: commandSource.replace(
+        'db.begin("isolation level read committed", async (tx) =>',
+        "db.begin(async (tx) =>",
+      ),
+    },
+    {
+      name: "command search path removed",
+      read: readSource,
+      command: commandSource.replace(
+        "set_config('search_path', 'swarm, pg_catalog', true)",
+        "current_setting('search_path')",
+      ),
+    },
+  ];
+  for (const mutation of mutations) {
+    assert.throws(
+      () => assertRoundTripFold(mutation.read, mutation.command),
+      undefined,
+      mutation.name,
+    );
+  }
+});

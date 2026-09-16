@@ -1483,10 +1483,12 @@ function opaqueToken(
 }
 
 async function setTransaction(tx: Sql): Promise<void> {
-  await tx.unsafe("SET TRANSACTION ISOLATION LEVEL READ COMMITTED");
-  await tx.unsafe("SET LOCAL ROLE swarm_command");
-  await tx.unsafe("SET LOCAL search_path = swarm, pg_catalog");
-  await tx.unsafe("SET LOCAL lock_timeout = '5s'");
+  await tx`
+    SELECT
+      set_config('role', 'swarm_command', true),
+      set_config('search_path', 'swarm, pg_catalog', true),
+      set_config('lock_timeout', '5s', true)
+  `;
 }
 
 /**
@@ -8884,7 +8886,7 @@ async function handleTransaction(
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
-  return await db.begin(async (tx) => {
+  return await db.begin("isolation level read committed", async (tx) => {
     await beforeStep(2);
     await setTransaction(tx);
     await afterStep(2);
@@ -11016,7 +11018,7 @@ async function handleTransaction(
 }
 
 async function resolveLedgerRace(error: LedgerRace): Promise<HttpResult> {
-  return await db.begin(async (tx) => {
+  return await db.begin("isolation level read committed", async (tx) => {
     await setTransaction(tx);
 
     if (
