@@ -9,11 +9,17 @@ type JsonSchema = Record<string, unknown>;
  * the recipient constants here broke `npm run check:tests` for exactly that reason, so the
  * enforcement's constants are passed IN by the caller instead. The argument is REQUIRED: a default
  * would be a typed copy of the rule, which is the defect this whole item exists to prevent.
- * index.ts passes SIGNAL_RECIPIENT_KINDS and SIGNAL_RECIPIENT_MAX, and a test pins that by AST.
+ * index.ts passes the constants below from the server modules, and a test pins that by AST.
  */
-export interface RecipientRule {
-  readonly kinds: readonly string[];
-  readonly max: number;
+export interface WireRule {
+  /** SIGNAL_RECIPIENT_KINDS, supabase/functions/_shared/channels.ts */
+  readonly recipientKinds: readonly string[];
+  /** SIGNAL_RECIPIENT_MAX, supabase/functions/_shared/channels.ts */
+  readonly recipientMax: number;
+  /** DELIVERY_ACK_OUTCOMES, supabase/functions/command/durable-delivery.ts */
+  readonly ackOutcomes: readonly string[];
+  /** DELIVERY_CLIENT_ERROR_CODES, supabase/functions/command/durable-delivery.ts */
+  readonly ackErrorCodes: Iterable<string>;
 }
 
 interface DocumentField {
@@ -40,10 +46,22 @@ interface DocumentVerb {
  * this branch rebases onto it, the mapping is at least EXPLICIT and a test asserts it covers every
  * field the table declares, so a new field cannot silently default to "string".
  */
-function fieldJsonTypes(recipients: RecipientRule): Record<string, JsonSchema> {
+function fieldJsonTypes(wire: WireRule): Record<string, JsonSchema> {
   return {
     wait: { type: "integer", minimum: 0, maximum: 50 },
     surfaced: { type: "boolean" },
+    /*
+     * CLOSED SETS, and they were typed as open strings. `outcome` is DeliveryAckOutcome — the server
+     * refuses anything outside DELIVERY_ACK_OUTCOMES (command/index.ts:1583-1584). `last_error_code`
+     * must be null unless the outcome is failed_terminal, and then one of DELIVERY_CLIENT_ERROR_CODES
+     * (:1586-1589). An earlier commit left `outcome` open and wrote that the constants could not be
+     * loaded under Node because durable-delivery.ts imports postgres. That was never run. Its only
+     * import is `import type`, erased at runtime; tsx, tsc and deno check all load it (measured, exit
+     * 0 each). An unmeasured negative, corrected. The conditional between the two fields is beyond a
+     * per-field schema, so each field's note states it.
+     */
+    outcome: { type: "string", enum: [...wire.ackOutcomes] },
+    last_error_code: { type: "string", enum: [...wire.ackErrorCodes, null] },
     /*
      * `to` IS AN ARRAY OF RECIPIENT OBJECTS, and every earlier version of this document said it was a
      * string. Both review arms passed that. The wire is `to?: SignalRecipient[]`
@@ -62,14 +80,14 @@ function fieldJsonTypes(recipients: RecipientRule): Record<string, JsonSchema> {
        * recipient twice. The server also folds `id` case before that duplicate check, which
        * `uniqueItems` cannot express — the schema is a guide to a valid body, the parser the law. */
       minItems: 1,
-      maxItems: recipients.max,
+      maxItems: wire.recipientMax,
       uniqueItems: true,
       items: {
         type: "object",
         additionalProperties: false,
         required: ["kind", "id"],
         properties: {
-          kind: { type: "string", enum: [...recipients.kinds] },
+          kind: { type: "string", enum: [...wire.recipientKinds] },
           id: { type: "string", format: "uuid" },
         },
       },
@@ -92,20 +110,20 @@ function fieldJsonTypes(recipients: RecipientRule): Record<string, JsonSchema> {
  */
 const STRING_FIELDS: readonly string[] = [
   "joinCredential", "attemptId", "name", "icon", "ackBatch",
-  "signal_id", "lease_id", "listener_instance_id", "outcome", "last_error_code",
+  "signal_id", "lease_id", "listener_instance_id",
   "body", "requestId",
 ];
 
 export function fieldJsonTypeNames(): readonly string[] {
-  return Object.keys(fieldJsonTypes({ kinds: [], max: 0 }));
+  return Object.keys(fieldJsonTypes({ recipientKinds: [], recipientMax: 0, ackOutcomes: [], ackErrorCodes: [] }));
 }
 
 export function stringFieldNames(): readonly string[] {
   return STRING_FIELDS;
 }
 
-function fieldSchema(field: DocumentField, recipients: RecipientRule): JsonSchema {
-  const declared = fieldJsonTypes(recipients)[field.name];
+function fieldSchema(field: DocumentField, wire: WireRule): JsonSchema {
+  const declared = fieldJsonTypes(wire)[field.name];
   if (declared === undefined && !STRING_FIELDS.includes(field.name)) {
     /* NOT A DEFAULT. An arm noted that STRING_FIELDS was exported for the test and never read
      * here, so the partition was a test gate while the RUNTIME still fell through to "string" for
@@ -129,9 +147,9 @@ function fieldSchema(field: DocumentField, recipients: RecipientRule): JsonSchem
   return base;
 }
 
-function requestSchema(verb: DocumentVerb, recipients: RecipientRule): JsonSchema {
+function requestSchema(verb: DocumentVerb, wire: WireRule): JsonSchema {
   const properties = Object.fromEntries(
-    verb.fields.map((field) => [field.name, fieldSchema(field, recipients)]),
+    verb.fields.map((field) => [field.name, fieldSchema(field, wire)]),
   );
   const required = verb.fields
     .filter((field) => field.presence === "required")
@@ -145,7 +163,7 @@ function requestSchema(verb: DocumentVerb, recipients: RecipientRule): JsonSchem
   };
 }
 
-function verbPath(verb: DocumentVerb, recipients: RecipientRule): Record<string, unknown> {
+function verbPath(verb: DocumentVerb, wire: WireRule): Record<string, unknown> {
   return {
     post: {
       operationId: verb.name,
@@ -155,7 +173,7 @@ function verbPath(verb: DocumentVerb, recipients: RecipientRule): Record<string,
         required: true,
         content: {
           "application/json": {
-            schema: requestSchema(verb, recipients),
+            schema: requestSchema(verb, wire),
           },
         },
       },
@@ -170,7 +188,7 @@ function verbPath(verb: DocumentVerb, recipients: RecipientRule): Record<string,
 export function buildH0AgentDocument(
   verbs: readonly DocumentVerb[],
   description: string,
-  recipients: RecipientRule,
+  wire: WireRule,
 ): Record<string, unknown> {
   return {
     openapi: "3.1.0",
@@ -181,7 +199,7 @@ export function buildH0AgentDocument(
     },
     servers: [{ url: "/functions/v1/h0" }],
     paths: Object.fromEntries(
-      verbs.map((verb) => [`/${verb.name}`, verbPath(verb, recipients)]),
+      verbs.map((verb) => [`/${verb.name}`, verbPath(verb, wire)]),
     ),
     components: {
       securitySchemes: {

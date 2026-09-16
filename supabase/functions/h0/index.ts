@@ -11,12 +11,21 @@ import {
   SIGNAL_RECIPIENT_KINDS,
   SIGNAL_RECIPIENT_MAX,
 } from "../_shared/channels.ts";
-/* The recipient rule is the ENFORCEMENT's own constants, passed in because core.ts must stay a
- * leaf. A test pins by AST that these two identifiers, from this module, are what is passed. */
+import {
+  DELIVERY_ACK_OUTCOMES,
+  DELIVERY_CLIENT_ERROR_CODES,
+} from "../command/durable-delivery.ts";
+/* The wire rule is the ENFORCEMENT's own constants, passed in because core.ts must stay a leaf. A
+ * test pins by AST that exactly these imported identifiers are what is passed. */
 const agentDocument = buildH0AgentDocument(
   H0_VERBS,
   h0AgentDocumentDescription(),
-  { kinds: SIGNAL_RECIPIENT_KINDS, max: SIGNAL_RECIPIENT_MAX },
+  {
+    recipientKinds: SIGNAL_RECIPIENT_KINDS,
+    recipientMax: SIGNAL_RECIPIENT_MAX,
+    ackOutcomes: DELIVERY_ACK_OUTCOMES,
+    ackErrorCodes: DELIVERY_CLIENT_ERROR_CODES,
+  },
 );
 
 Deno.serve((request) => {

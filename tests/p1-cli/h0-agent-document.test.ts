@@ -19,12 +19,21 @@ import {
   SIGNAL_RECIPIENT_KINDS,
   SIGNAL_RECIPIENT_MAX,
 } from "../../supabase/functions/_shared/channels.js";
+import {
+  DELIVERY_ACK_OUTCOMES,
+  DELIVERY_CLIENT_ERROR_CODES,
+} from "../../supabase/functions/command/durable-delivery.js";
 
-/* The enforcement's own constants — the same two index.ts passes. */
-const RECIPIENTS = { kinds: SIGNAL_RECIPIENT_KINDS, max: SIGNAL_RECIPIENT_MAX };
+/* The enforcement's own constants — the same four index.ts passes. */
+const WIRE = {
+  recipientKinds: SIGNAL_RECIPIENT_KINDS,
+  recipientMax: SIGNAL_RECIPIENT_MAX,
+  ackOutcomes: DELIVERY_ACK_OUTCOMES,
+  ackErrorCodes: DELIVERY_CLIENT_ERROR_CODES,
+};
 
 function agentDocument(): Record<string, unknown> {
-  return buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
+  return buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
 }
 
 function documentPaths(document: Record<string, unknown>): string[] {
@@ -53,13 +62,13 @@ test("agent document paths are generated from the H0 verb table", () => {
   const mutatedTable = [...H0_VERBS, addedVerb];
   assert.deepEqual(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), RECIPIENTS),
+      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), WIRE),
     ),
     mutatedTable.map((verb) => `/${verb.name}`).sort(),
   );
   assert.ok(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), RECIPIENTS),
+      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), WIRE),
     ).includes(
       `/${addedVerb.name}`,
     ),
@@ -150,7 +159,7 @@ test("the document is served on BOTH the public path and the gateway-stripped pa
    *
    * NOT ESTABLISHED: no live `functions deploy` or `functions serve` request was made. This is
    * established from the CLI's Kong template and the serve worker, not from production. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
   const paths = [
     "https://api.commonswarm.com/functions/v1/h0/agent-doc/abc123",
     "https://api.commonswarm.com/h0/agent-doc/abc123",
@@ -192,7 +201,7 @@ test("every table field is EITHER typed OR declared string — an exact partitio
 
 test("error responses carry the no-store and robots headers too", () => {
   /* Test 3 only ever checked a 200. An arm noted the 500 path was never exercised. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
   const cases = [
     handleH0Request(new Request("https://api.commonswarm.com/h0/nope"), document),
     handleH0Request(
@@ -217,7 +226,7 @@ test("HEAD and OPTIONS work, because the link must be safe to UNFURL", () => {
    * requirement, which nothing previously tested.
    *
    * HEAD returns the GET's status and headers with a NULL body, per the HTTP spec. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
   const url = "https://api.commonswarm.com/h0/agent-doc/abc";
 
   const head = handleH0Request(new Request(url, { method: "HEAD" }), document);
@@ -242,7 +251,7 @@ test("the agent document GET is readable cross-origin", () => {
    * and reads no cookie or Authorization header. Without it a browser agent or OpenAPI viewer is
    * blocked from a document that is already public. Pinned here so that if a future lane adds an
    * endpoint that DOES carry a credential, copying this header is a visible, deliberate act. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
   const response = handleH0Request(
     new Request("https://api.commonswarm.com/h0/agent-doc/abc"),
     document,
@@ -256,7 +265,7 @@ test("the agent document GET is readable cross-origin", () => {
 type WireKind = "string" | "number" | "boolean" | "array";
 interface WireMember { optional: boolean; nullable: boolean; kind: WireKind }
 
-function wireMembers(rel: string, interfaceName: string): Map<string, WireMember> {
+function wireMembers(rel: string, interfaceName: string, expectedMembers: number): Map<string, WireMember> {
   const path = fileURLToPath(new URL(`../../${rel}`, import.meta.url));
   const file = ts.createSourceFile(rel, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
   let found: ts.InterfaceDeclaration | undefined;
@@ -287,7 +296,8 @@ function wireMembers(rel: string, interfaceName: string): Map<string, WireMember
       : "string";
     members.set(member.name.text, { optional: member.questionToken !== undefined, nullable, kind });
   }
-  assert.ok(members.size >= 5, `extracted only ${members.size} members of ${interfaceName}`);
+  /* An EXACT count, not a floor: a floor detects an empty extraction but not a partial one. */
+  assert.equal(members.size, expectedMembers, `extracted ${members.size} members of ${interfaceName}`);
   return members;
 }
 
@@ -306,8 +316,8 @@ test("every field's JSON TYPE matches the wire member it maps to", () => {
    * holds for every reference these verbs reach today and would misread an object type. */
   const document = agentDocument() as { paths: Record<string, any> };
   const wires: Record<string, Map<string, WireMember>> = {
-    ack: wireMembers("supabase/functions/command/durable-delivery.ts", "AckAgentDeliveryCommand"),
-    signal: wireMembers("supabase/functions/command/index.ts", "SignalCommand"),
+    ack: wireMembers("supabase/functions/command/durable-delivery.ts", "AckAgentDeliveryCommand", 7),
+    signal: wireMembers("supabase/functions/command/index.ts", "SignalCommand", 13),
   };
   const verbWire: Record<string, "ack" | "signal"> = {
     ack: "ack", ask: "signal", note: "signal", reply: "signal", "working-on": "signal",
@@ -331,6 +341,13 @@ test("every field's JSON TYPE matches the wire member it maps to", () => {
         member.kind,
         `${verb.name}.${field.name}: document says ${base}, wire ${wireName} is ${member.kind}`,
       );
+      /* NULLABILITY, in the unsafe direction: the document may be stricter than the wire (refuse a
+       * null the server would accept, on a field the agent can simply omit) but must never tell an
+       * agent null is allowed where the server refuses it. An arm noted the first version of this
+       * test computed nullability and never asserted it. */
+      if (Array.isArray(declared) && declared.includes("null")) {
+        assert.ok(member.nullable, `${verb.name}.${field.name}: document allows null, wire ${wireName} does not`);
+      }
       compared++;
     }
   }
@@ -347,7 +364,7 @@ test("an unclassified field THROWS where the schema is built, independent of the
     fields: [...register.fields, { name: "unclassified_probe", presence: "omittable", nullable: false }],
   }] as unknown as typeof H0_VERBS;
   assert.throws(
-    () => buildH0AgentDocument(mutated, h0AgentDocumentDescription(), RECIPIENTS),
+    () => buildH0AgentDocument(mutated, h0AgentDocumentDescription(), WIRE),
     /unclassified_probe.*neither typed nor declared a string field/,
   );
 });
@@ -364,7 +381,7 @@ test("the OPTIONS preflight carries the no-store, robots and CORS headers", () =
   assert.equal(response.headers.get("access-control-allow-origin"), "*");
 });
 
-test("the whole served OpenAPI document equals its REVIEWED golden", () => {
+test("the whole served OpenAPI document equals its REVIEWED golden", async () => {
   /* Pins every schema, summary, security block and required list, which the path-key test does
    * not. READ THIS BEFORE UPDATING THE FIXTURE: a golden pins whatever the document says, errors
    * included. The first attempt at this fixture would have pinned `to` as a string. When it fails,
@@ -373,15 +390,22 @@ test("the whole served OpenAPI document equals its REVIEWED golden", () => {
     fileURLToPath(new URL("./fixtures/h0-agent-document.golden.json", import.meta.url)),
     "utf8",
   ));
-  assert.deepEqual(agentDocument(), golden);
+  /* Through the real handler, not only the builder: an arm noted the builder-only version would
+   * stay green if the handler served something else. */
+  const response = handleH0Request(
+    new Request("https://api.commonswarm.com/h0/agent-doc/abc"),
+    agentDocument(),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), golden);
 });
 
-test("index.ts passes the ENFORCEMENT's recipient constants, not a copy", () => {
-  /* core.ts takes the recipient rule as an argument so it can stay a leaf. That moves the risk to
-   * the call site: index.ts could pass a typed `{ kinds: ["user", "agent"], max: 8 }` and every
-   * other test would stay green, because the tests pass the real constants themselves. So the
-   * wiring is pinned by AST: the third argument's `kinds` and `max` must be the identifiers
-   * SIGNAL_RECIPIENT_KINDS and SIGNAL_RECIPIENT_MAX, imported from ../_shared/channels.ts. */
+test("index.ts passes the ENFORCEMENT's wire constants, not a copy", () => {
+  /* core.ts takes the wire rule as an argument so it can stay a leaf. That moves the risk to the
+   * call site: index.ts could pass a typed copy and every other test would stay green, because the
+   * tests pass the real constants themselves. So the wiring is pinned by AST: each property of the
+   * third argument must be the named constant, imported from its server module, and not shadowed
+   * by a local declaration of the same name. */
   const rel = "supabase/functions/h0/index.ts";
   const file = ts.createSourceFile(
     rel,
@@ -389,15 +413,23 @@ test("index.ts passes the ENFORCEMENT's recipient constants, not a copy", () => 
     ts.ScriptTarget.Latest,
     true,
   );
-  const imported = new Set<string>();
+  const imported = new Map<string, string>();
+  const declaredLocally: string[] = [];
   let passed: Record<string, string> | undefined;
   const visit = (node: ts.Node): void => {
     if (
       ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text === "../_shared/channels.ts" &&
       node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
     ) {
-      for (const element of node.importClause.namedBindings.elements) imported.add(element.name.text);
+      for (const element of node.importClause.namedBindings.elements) {
+        imported.set(element.name.text, node.moduleSpecifier.text);
+      }
+    }
+    /* A local declaration of the same name would shadow the import and pass an identifier check
+     * while passing a typed copy. An arm raised exactly that. */
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) declaredLocally.push(node.name.text);
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) {
+      declaredLocally.push(node.name.text);
     }
     if (
       ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
@@ -417,7 +449,45 @@ test("index.ts passes the ENFORCEMENT's recipient constants, not a copy", () => 
     ts.forEachChild(node, visit);
   };
   visit(file);
-  assert.deepEqual(passed, { kinds: "SIGNAL_RECIPIENT_KINDS", max: "SIGNAL_RECIPIENT_MAX" });
-  assert.ok(imported.has("SIGNAL_RECIPIENT_KINDS") && imported.has("SIGNAL_RECIPIENT_MAX"),
-    "both constants must be imported from ../_shared/channels.ts");
+  const expected = {
+    recipientKinds: ["SIGNAL_RECIPIENT_KINDS", "../_shared/channels.ts"],
+    recipientMax: ["SIGNAL_RECIPIENT_MAX", "../_shared/channels.ts"],
+    ackOutcomes: ["DELIVERY_ACK_OUTCOMES", "../command/durable-delivery.ts"],
+    ackErrorCodes: ["DELIVERY_CLIENT_ERROR_CODES", "../command/durable-delivery.ts"],
+  } as const;
+  assert.deepEqual(
+    passed,
+    Object.fromEntries(Object.entries(expected).map(([key, [name]]) => [key, name])),
+  );
+  for (const [name, module] of Object.values(expected)) {
+    assert.equal(imported.get(name), module, `${name} must be imported from ${module}`);
+    assert.ok(!declaredLocally.includes(name), `${name} is redeclared locally and shadows the import`);
+  }
+});
+
+test("closed sets are served as the SERVER's sets: outcome, last_error_code, and the recipient item", () => {
+  /* The type test reads a named type reference such as DeliveryAckOutcome as "string", so it cannot
+   * see a closed set typed as an open string. That is how `outcome` stayed open. The values are
+   * compared here to the server's own constants, and the recipient item's properties to the
+   * SignalRecipient interface read by AST — an arm noted `to` was checked only as "array", so a
+   * wrong item schema would have passed. */
+  const document = agentDocument() as { paths: Record<string, any> };
+  const props = (verb: string) =>
+    document.paths[`/${verb}`].post.requestBody.content["application/json"].schema.properties;
+
+  assert.deepEqual(props("ack").outcome.enum, [...DELIVERY_ACK_OUTCOMES]);
+  assert.deepEqual(props("ack").last_error_code.enum, [...DELIVERY_CLIENT_ERROR_CODES, null]);
+  assert.deepEqual(props("ack").last_error_code.type, ["string", "null"]);
+
+  const recipient = wireMembers("supabase/functions/_shared/channels.ts", "SignalRecipient", 2);
+  for (const verb of ["ask", "note"]) {
+    const item = props(verb).to.items;
+    assert.deepEqual(Object.keys(item.properties).sort(), [...recipient.keys()].sort(),
+      `${verb}.to item properties must be exactly SignalRecipient's members`);
+    assert.deepEqual([...item.required].sort(), [...recipient.entries()]
+      .filter(([, member]) => !member.optional).map(([name]) => name).sort());
+    assert.equal(item.additionalProperties, false, "isRecipientEntry refuses any extra key");
+    assert.deepEqual(item.properties.kind.enum, [...SIGNAL_RECIPIENT_KINDS]);
+    assert.equal(props(verb).to.maxItems, SIGNAL_RECIPIENT_MAX);
+  }
 });

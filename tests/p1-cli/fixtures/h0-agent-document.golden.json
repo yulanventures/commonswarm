@@ -129,12 +129,26 @@
                     "description": "null only when outcome is `observed`; a UUID otherwise"
                   },
                   "outcome": {
-                    "type": "string"
+                    "type": "string",
+                    "enum": [
+                      "replied",
+                      "observed",
+                      "queued",
+                      "expired",
+                      "failed_terminal"
+                    ]
                   },
                   "last_error_code": {
                     "type": [
                       "string",
                       "null"
+                    ],
+                    "enum": [
+                      "provider_refused",
+                      "local_effect_failed",
+                      "host_session_failed",
+                      "credential_unavailable",
+                      null
                     ],
                     "description": "PRESENT ALWAYS, null unless outcome is `failed_terminal`"
                   },
