@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { recordDispatch } from "./dispatch-trace.js";
 import { AGENT_PROFILE_COMMANDS, isBlobBody } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
 import { ONBOARDING_BOOLEAN_FLAGS, ONBOARDING_VALUE_FLAGS, onboardingUsage, runOnboardingCommand } from "./onboarding-cli.js";
@@ -8977,22 +8978,27 @@ async function main(): Promise<void> {
   if (await runOnboardingCommand(args)) return;
   await args.expandAgentProfile();
   if (verb === "__listen-supervisor") {
+    recordDispatch("runListenSupervisor");
     await runListenSupervisor(args);
     return;
   }
   if (verb === "hook") {
+    recordDispatch("runHook");
     await runHook(args);
     return;
   }
   if (verb === "listen") {
+    recordDispatch("runListen");
     await runListen(args);
     return;
   }
   if (verb === "session") {
+    recordDispatch("runSession");
     await runSession(args);
     return;
   }
   if (verb === "login") {
+    recordDispatch("main.login");
     args.assertShape([...TARGET_FLAGS, "no-browser"], 1);
     const cloud = await target(args);
     const credentials = await store(args, cloud);
@@ -9015,6 +9021,7 @@ async function main(): Promise<void> {
     return;
   }
   if (verb === "logout") {
+    recordDispatch("main.logout");
     args.assertShape([...TARGET_FLAGS, "device", "all-devices", "local"], 1);
     if (args.optional("device") !== undefined) {
       throw new Error(
@@ -9040,110 +9047,137 @@ async function main(): Promise<void> {
     return;
   }
   if (verb === "invite") {
+    recordDispatch("runInvite");
     await runInvite(args);
     return;
   }
   if (verb === "member") {
+    recordDispatch("runMember");
     await runMember(args);
     return;
   }
   if (verb === "workspace") {
+    recordDispatch("runWorkspace");
     await runWorkspace(args);
     return;
   }
   if (verb === "target") {
+    recordDispatch("runTarget");
     await runTarget(args);
     return;
   }
   if (verb === "status") {
+    recordDispatch("runStatus");
     await runStatus(args);
     return;
   }
   if (verb === "whoami") {
+    recordDispatch("runWhoami");
     await runWhoami(args);
     return;
   }
   if (verb === "resume") {
+    recordDispatch("runResume");
     await runResume(args);
     return;
   }
   if (verb === "feedback") {
+    recordDispatch("runFeedback");
     await runFeedback(args);
     return;
   }
   if (verb === "channel") {
+    recordDispatch("runChannel");
     await runChannel(args);
     return;
   }
   if (verb === "file") {
+    recordDispatch("runFile");
     await runFile(args);
     return;
   }
   if (verb === "brain") {
+    recordDispatch("runBrain");
     await runBrain(args);
     return;
   }
   if (verb === "members") {
+    recordDispatch("runMembers");
     await runMembers(args);
     return;
   }
   if (verb === "working-on" || verb === "note" || verb === "ask") {
+    recordDispatch(`runPostSignal:${verb}`);
     await runPostSignal(args, verb);
     return;
   }
   if (verb === "reply") {
+    recordDispatch("runReply");
     await runReply(args);
     return;
   }
   if (verb === "receipt") {
+    recordDispatch("runReceipt");
     await runReceipt(args);
     return;
   }
   if (verb === "feed" || verb === "inbox") {
+    recordDispatch(`runSignalRead:${verb}`);
     await runSignalRead(args, verb === "inbox");
     return;
   }
   if (verb === "workspaces") {
+    recordDispatch("runWorkspaces");
     await runWorkspaces(args);
     return;
   }
   if (verb === "use") {
+    recordDispatch("runUse");
     await runUse(args);
     return;
   }
   if (verb === "new") {
+    recordDispatch("runNew");
     await runNew(args);
     return;
   }
   if (verb === "accept") {
+    recordDispatch("runAccept");
     await runAccept(args);
     return;
   }
   if (verb === "principal") {
+    recordDispatch("runPrincipal");
     await runPrincipal(args);
     return;
   }
   if (verb === "token") {
+    recordDispatch("runToken");
     await runToken(args);
     return;
   }
   if (verb === "grant") {
+    recordDispatch("runGrant");
     await runGrant(args);
     return;
   }
   if (verb === "link") {
+    recordDispatch("runLink");
     await runLink(args);
     return;
   }
   if (verb === "command") {
+    recordDispatch("runTaskCommand");
     await runTaskCommand(args);
     return;
   }
   if (verb === "dogfood") {
+    recordDispatch("runDogfood");
     await runDogfood(args);
     return;
   }
   if (verb === "seed-fixture") {
+    recordDispatch("runSeed");
     await runSeed(args);
     return;
   }
