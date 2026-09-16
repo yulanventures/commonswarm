@@ -1,0 +1,51 @@
+services:
+  edge-runtime:
+    image: public.ecr.aws/supabase/edge-runtime:v1.73.13
+    command:
+      - start
+      - --main-service
+      - /home/deno/main
+      - --port
+      - "9000"
+      - --policy
+      - per_worker
+      - --max-parallelism
+      - "6"
+      - --request-read-timeout
+      - "15000"
+      - --request-wait-timeout
+      - "10000"
+      - --user-worker-request-idle-timeout
+      - "65000"
+      - --graceful-exit-timeout
+      - "70"
+    ports:
+      - "127.0.0.1:9000:9000"
+    env_file:
+      # Compose can validate this file away from the box. The main service
+      # still refuses to start when its required variables are missing.
+      - path: /home/commonswarm/.env
+        required: false
+    volumes:
+      - ./main:/home/deno/main:ro
+      - ./workers:/home/deno/workers:ro
+      - ../../supabase/functions:/home/deno/functions:ro
+      - ../../src:/home/src:ro
+      - edge-runtime-cache:/root/.cache/deno
+    mem_limit: 2g
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          IFS= read -r status <&3 && [[ "$${status}" == *' 200 '* ]]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  edge-runtime-cache:

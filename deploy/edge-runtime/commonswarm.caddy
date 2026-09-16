@@ -1,0 +1,48 @@
+(supabase_origin) {
+	reverse_proxy https://ukezjcnxjvkpkeezxaew.supabase.co {
+		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
+		transport http {
+			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
+		}
+	}
+}
+
+api.commonswarm.com {
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+
+	# The CLI, site, listener activity publisher, and H0 client call these functions.
+	handle /functions/v1/* {
+		reverse_proxy 127.0.0.1:9000 {
+			transport http {
+				# A later H0 poll can wait 50 seconds. Keep 15 seconds of margin.
+				response_header_timeout 65s
+			}
+		}
+	}
+
+	# supabase-js and the CLI use GoTrue for OAuth, OTP, refresh, user, and logout.
+	handle /auth/v1/* {
+		import supabase_origin
+	}
+
+	# The CLI and site use PostgREST for workspace, signal, channel, file, and invite rows.
+	handle /rest/v1/* {
+		import supabase_origin
+	}
+
+	# The site and command function use Storage object and signed-URL endpoints.
+	handle /storage/v1/* {
+		import supabase_origin
+	}
+
+	# supabase-js uses this websocket route for wake, feed, and activity channels.
+	# Caddy forwards websocket upgrades automatically through reverse_proxy.
+	handle /realtime/v1/* {
+		import supabase_origin
+	}
+
+	# Keep every other Supabase project path available during and after cutover.
+	handle {
+		import supabase_origin
+	}
+}
