@@ -458,6 +458,10 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
       response.setHeader("content-type", "text/html; charset=utf-8");
       response.setHeader("cache-control", "public, max-age=0, must-revalidate");
       response.end('<script src="/_astro/future.NEW123.js"></script>');
+    } else if (request.url === "/_astro/future.NEW123.js") {
+      response.setHeader("content-type", "application/javascript; charset=utf-8");
+      response.setHeader("cache-control", "public, max-age=0, must-revalidate");
+      response.end('import "./dependency.DEP456.js";');
     } else {
       response.setHeader("content-type", "application/javascript; charset=utf-8");
       response.setHeader("cache-control", "public, max-age=1");
@@ -494,7 +498,7 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
       (error: unknown) => {
         const result = error as { code?: number; stderr?: string };
         assert.equal(result.code, 1);
-        assert.match(result.stderr ?? "", /\/_astro\/future\.NEW123\.js: cache-control expected/);
+        assert.match(result.stderr ?? "", /\/_astro\/dependency\.DEP456\.js: cache-control expected/);
         return true;
       },
     );
@@ -509,7 +513,8 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
 test("parity has no local dist dependency", async () => {
   const source = await readFile(join(deployRoot, "parity-check.mjs"), "utf8");
   assert.doesNotMatch(source, /site\/dist|--dist|readdir|filesBelow/);
-  assert.match(source, /collectFingerprintedAssets\(response\.body, fingerprintedPaths\)/);
+  assert.match(source, /collectFingerprintedAssets\(response\.body, expected\.path, fingerprintedPaths\)/);
+  assert.match(source, /collectFingerprintedAssets\(response\.body, expected\.path, dependencies\)/);
 });
 
 test("Cloudflare TTL option allows only the exact static-extension rewrite", async () => {

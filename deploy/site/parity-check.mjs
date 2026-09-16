@@ -109,11 +109,28 @@ function compare(expected, response) {
   }
 }
 
-function collectFingerprintedAssets(html, paths) {
-  const attribute = /(?:src|href)=["']([^"'<>]+)["']/gi;
-  for (const match of html.matchAll(attribute)) {
-    const url = new URL(match[1], baseUrl);
-    if (url.pathname.startsWith("/_astro/")) paths.add(url.pathname);
+function collectFingerprintedAssets(source, documentPath, paths) {
+  const documentExtension = extname(new URL(documentPath, baseUrl).pathname);
+  const references = documentPath.startsWith("/_astro/")
+    ? [[/["']([^"']+)["']/g, true]]
+    : [[/(?:src|href)=["']([^"'<>]+)["']/gi, false]];
+  if (documentExtension === ".css") {
+    references.push([/url\(\s*["']?([^"')\s]+)["']?\s*\)/gi, false]);
+  }
+  const documentUrl = new URL(documentPath, baseUrl);
+  for (const [pattern, requireKnownExtension] of references) {
+    for (const match of source.matchAll(pattern)) {
+      let url;
+      try {
+        url = new URL(match[1], documentUrl);
+      } catch {
+        continue;
+      }
+      if (url.pathname.startsWith("/_astro/") &&
+          (!requireKnownExtension || policyByExtension.has(extname(url.pathname)))) {
+        paths.add(url.pathname);
+      }
+    }
   }
 }
 
@@ -128,7 +145,7 @@ for (const expected of reference.routes) {
   }
   compare(expected, response);
   if (expected.status === 200 && expected.contentType?.startsWith("text/html")) {
-    collectFingerprintedAssets(response.body, fingerprintedPaths);
+    collectFingerprintedAssets(response.body, expected.path, fingerprintedPaths);
   }
 }
 
@@ -136,19 +153,29 @@ if (policyByExtension.size > 0 && fingerprintedPaths.size === 0) {
   differences.push("HTML routes exposed no /_astro assets; hashed-asset parity was not reached");
 }
 
-const fingerprintedRoutes = [...fingerprintedPaths].sort().map((path) => {
+const fingerprintedQueue = [...fingerprintedPaths].sort();
+const checkedFingerprintedPaths = new Set();
+while (fingerprintedQueue.length > 0) {
+  const path = fingerprintedQueue.shift();
+  if (checkedFingerprintedPaths.has(path)) continue;
+  checkedFingerprintedPaths.add(path);
   const extension = extname(path);
   const policy = policyByExtension.get(extension);
   if (!policy) {
     differences.push(`${path}: no recorded Vercel policy for extension ${extension || "(none)"}`);
-    return undefined;
+    continue;
   }
-  return { path, status: policy.status, contentType: policy.contentType, headers: policy.headers };
-}).filter(Boolean);
-
-for (const expected of fingerprintedRoutes) {
+  const expected = { path, status: policy.status, contentType: policy.contentType, headers: policy.headers };
   try {
-    compare(expected, await get(new URL(expected.path, baseUrl), host));
+    const response = await get(new URL(expected.path, baseUrl), host);
+    compare(expected, response);
+    const dependencies = new Set();
+    collectFingerprintedAssets(response.body, expected.path, dependencies);
+    for (const dependency of dependencies) {
+      if (!checkedFingerprintedPaths.has(dependency) && !fingerprintedQueue.includes(dependency)) {
+        fingerprintedQueue.push(dependency);
+      }
+    }
   } catch (error) {
     differences.push(`${expected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -160,7 +187,7 @@ if (allowedDifferences.length > 0) {
   );
 }
 
-const routeCount = reference.routes.length + fingerprintedRoutes.length;
+const routeCount = reference.routes.length + checkedFingerprintedPaths.size;
 if (differences.length > 0) {
   console.error(`Parity failed with ${differences.length} difference(s):`);
   for (const difference of differences) console.error(`- ${difference}`);
@@ -168,6 +195,6 @@ if (differences.length > 0) {
 } else {
   console.log(
     `Parity passed for ${routeCount} routes ` +
-    `(${reference.routes.length} fixed, ${fingerprintedRoutes.length} discovered assets) against ${baseUrl}.`,
+    `(${reference.routes.length} fixed, ${checkedFingerprintedPaths.size} discovered assets) against ${baseUrl}.`,
   );
 }
