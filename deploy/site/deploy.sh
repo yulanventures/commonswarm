@@ -62,7 +62,8 @@ trap cleanup EXIT HUP INT TERM
 checkout=$temp_root/checkout
 mkdir -p "$checkout"
 git -C "$repo_root" archive --format=tar HEAD | tar -xf - -C "$checkout"
-cp "$env_file" "$checkout/site/.env"
+# Let Astro read the operator's existing 0600 file. Do not make another secret-bearing file.
+ln -s "$env_file" "$checkout/site/.env"
 
 # Astro does not remove stale output. Keep this even though the archive starts clean.
 rm -rf -- "$checkout/site/dist"
