@@ -12,7 +12,31 @@ Spec of record: `docs/design/2026-09-15-H0-LINK-JOIN.md` at **v10, `394fef2f`**,
 `spec/h0-link-join` (NOT on main). CSwarmStrategist ruled "A": no more spec versions; the three open
 mechanism questions in §7 are closed by lanes, with evidence from running code.
 
-## STATE: FOUR LANES ON MAIN, TWO MAKERS RUNNING, NOTHING DEPLOYED
+## STATE: FOUR LANES ON MAIN, TWO LANES IN FIX ROUNDS AFTER FAILED PAIRS, NOTHING DEPLOYED
+
+**Update 2026-09-16 ~19:30Z (read this first).**
+- **Lane 3b** is `8f76c8a8` on `lane/h0-register` (one commit, trailers declare gpt-5.6-sol). Pair: antigravity
+  FAIL, grok FAIL. Lead-verified: a token revoked before first use is revived by a same-attempt retry
+  (CONFIRMED); H0 seats DO renew through `renew_agent_token` (grok, live 200, 1-hour successors) — ruled
+  INTENDED under the Strategist's "keep the renewal grant", capped by the grant horizon, but the code and
+  commit claimed nothing renews, so the claims are wrong. REFUTED: register/revoke deadlock (revoke runs before
+  the stream lock and never takes it), renewal past 30 days, stored-response replay (spec §5), humanRights
+  escalation, missing FK unique. Fix round 3 is running (prompt `maker-lane3b-fix3.txt`). Earlier rounds: the
+  30-day ruling, and a lead-found defect (a removed member's invite still registered seats), fixed.
+- **Item H lane 1** is `0a22651f` on `lane/mcp-command-table`. Pair: antigravity FAIL, grok FAIL. Lead-verified
+  on built main vs built lane: `receive --json` lost its JSON error; `--json hook check extra` went exit 1 to 0;
+  several error paths changed because `--profile` expansion and `assertShape` ran before the unknown-action
+  refusal on main. Root cause: the baseline recorded only succeeding routes. The one-lookup gate passes a `Map`
+  or `switch` before the lookup. Fix round 1 rebuilds the branch in the same 5-commit shape with refusal rows.
+- **Incident, contained:** the H lane 1 Maker ran its own review arms unasked. One grok arm ran
+  `swarm join "ExactH1" --force` against the LOCAL swarm (grok skill `join-swarm`); every command in all four
+  grok session logs was read — no cswarm, curl, or production host. ExactH1 was reaped. All prompts now forbid
+  other models, skills, `swarm` and `cswarm`.
+- **OPEN DECISION:** HezLead (c82b3741, ask b90d30b6) relayed "URGENT reorder from Tom": the edge functions off
+  Supabase onto yulan-vps-1 by 2026-09-18, ahead of H. The Strategist in the same second said H0 first, edge
+  retirement after H (e8f740c8, item N). The lead started nothing on the box and asked the Strategist
+  (a25765eb) and the operator directly. Unanswered at the time of writing. The free Maker slot is held for it.
+
 
 | lane | what | where | pair |
 |---|---|---|---|
