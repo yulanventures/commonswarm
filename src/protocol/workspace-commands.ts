@@ -22,9 +22,13 @@ export const AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1_000;
  * once-a-month human reauthorisation checkpoint, so no bearer credential of any kind can
  * outlive a month without a person touching it. "Never expire" was considered and refused —
  * a pasted prompt is a standing transcript, and a non-expiring secret in one is a backdoor.
- * The web connect flow DEFAULTS to 24h and offers 7d/30d; rotation SUCCESSORS stay short
+ * The web connect flow defaults to 30d and offers 24h/7d/30d; rotation SUCCESSORS stay short
  * (renewal.ts keeps its own 8h successor cap); this bounds only the bootstrap. */
 export const AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+/* H0 has no public renew verb, but session renewal may issue short successors from its grant.
+ * The initial token and grant share this horizon, and no successor may pass it. When the horizon
+ * ends, the seat stops and the agent asks the human who invited it for a new invite. */
+export const H0_SEAT_TOKEN_TTL_MS = AGENT_TOKEN_MAX_TTL_MS;
 
 // §2.3 continuous-renewal horizon. A worksession that runs for weeks must not
 // be paid for by lengthening the bearer token: the TTL constants above stay
@@ -146,6 +150,22 @@ export type WorkspaceCommand =
       kind: 'mint_agent_join_credential';
       seat_cap: number;
       ttl_hours: number;
+    }
+  | {
+      /**
+       * H0 registration. Every identity and binding field is minted by the
+       * command adapter after it resolves and locks the join credential. The
+       * request supplies only attempt_id and name; they never enter this core
+       * without the adapter-derived fields beside them.
+       */
+      kind: 'register_agent_seat';
+      attempt_id: string;
+      principal_id: string;
+      run_id: string;
+      token_id: string;
+      name: string;
+      scopes: string[];
+      ttl_ms: number;
     }
   | {
       kind: 'revoke_agent_join_credential';
@@ -280,7 +300,7 @@ export interface RenewalFacts {
 export interface DecideWorkspaceCtx {
   now: number;
   actor: Actor;
-  credential_kind: 'human' | 'agent';
+  credential_kind: 'human' | 'agent' | 'join';
   /** Exact presenting token, populated only for an agent capability credential. */
   presenting_token_id: string | null;
   command_id: string;
@@ -624,6 +644,19 @@ export function decideWorkspace(
     return authz('bad_state', 'credential has no server-derived human owner');
   }
 
+  /* A join credential is a one-command authority. Keep both directions here
+   * as defense in depth: an adapter cannot use one for an ordinary command,
+   * and a human or agent credential cannot call the registration reducer. */
+  if (
+    (ctx.credential_kind === 'join' && cmd.kind !== 'register_agent_seat')
+    || (cmd.kind === 'register_agent_seat' && ctx.credential_kind !== 'join')
+  ) {
+    return authz(
+      'credential_kind_forbidden',
+      'register_agent_seat requires the resolved join credential and that credential authorizes no other command',
+    );
+  }
+
   if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== 'human') {
     return authz('credential_kind_forbidden', 'command requires an interactive human credential');
   }
@@ -653,6 +686,74 @@ export function decideWorkspace(
 
   if (!state) {
     return authz('workspace_not_found', 'workspace is unavailable');
+  }
+
+  if (cmd.kind === 'register_agent_seat') {
+    if (ctx.role(user_id) === null) {
+      return authz('bad_state', 'credential owner is not a current workspace member');
+    }
+    if (state.principals[cmd.principal_id] || state.tokens[cmd.token_id]) {
+      return domain(
+        ctx,
+        cmd.kind,
+        'bad_state',
+        'server-generated registration identity already exists',
+      );
+    }
+    if (
+      !cmd.run_id
+      || !cmd.attempt_id
+      || !Number.isFinite(cmd.ttl_ms)
+      || cmd.ttl_ms <= 0
+      || cmd.ttl_ms > AGENT_TOKEN_MAX_TTL_MS
+    ) {
+      return domain(
+        ctx,
+        cmd.kind,
+        'binding_required',
+        'registration requires server-derived attempt, run, and bounded token lifetime',
+      );
+    }
+    if (
+      cmd.scopes.length === 0
+      || cmd.scopes.some((scope) => scopeWords(scope).size === 0)
+      || cmd.scopes.some(isAgentScopeDenylisted)
+    ) {
+      return domain(
+        ctx,
+        cmd.kind,
+        'scope_not_allowed',
+        'registration scopes must be concrete agent scopes',
+      );
+    }
+    const humanRights = new Set(ctx.humanRights(ctx.actor));
+    if (cmd.scopes.some((scope) => !humanRights.has(scope))) {
+      return domain(
+        ctx,
+        cmd.kind,
+        'scope_not_allowed',
+        'registration scopes exceed the credential owner rights',
+      );
+    }
+    return accept([
+      env(ctx, 'AgentPrincipalCreated', {
+        principal_id: cmd.principal_id,
+        owner_user_id: user_id,
+        name: cmd.name,
+        model: null,
+        created_at: ctx.now,
+      }),
+      env(ctx, 'AgentTokenMinted', {
+        token_id: cmd.token_id,
+        principal_id: cmd.principal_id,
+        run_id: cmd.run_id,
+        task_id: cmd.attempt_id,
+        epoch: 0,
+        scopes: [...cmd.scopes],
+        issued_at: ctx.now,
+        expires_at: ctx.now + cmd.ttl_ms,
+      }),
+    ]);
   }
 
   // Invitation acceptance is the sole non-member command: the capability hash

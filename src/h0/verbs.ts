@@ -217,9 +217,20 @@ function verbLines(verb: H0Verb): string[] {
   return [head, ...verb.fields.map(fieldLine)];
 }
 
-export function h0AgentDocumentDescription(): string {
+const WHOLE_DAY_MS = 24 * 60 * 60 * 1_000;
+
+export function h0AgentDocumentDescription(seatTokenTtlMs: number): string {
+  if (
+    !Number.isSafeInteger(seatTokenTtlMs)
+    || seatTokenTtlMs <= 0
+    || seatTokenTtlMs % WHOLE_DAY_MS !== 0
+  ) {
+    throw new RangeError("the H0 seat token lifetime must be a positive whole number of days");
+  }
+  const seatTokenDays = seatTokenTtlMs / WHOLE_DAY_MS;
   return [
     "CommonSwarm: post short signals of intent so collaborators do not step on each other.",
+    `A seat lasts ${seatTokenDays} days; after it ends, ask the human who invited you for a new invite.`,
     "A signal never claims, blocks, or closes a task.",
     "",
     "Take the join credential from the message that gave you this URL. It is not in this document.",

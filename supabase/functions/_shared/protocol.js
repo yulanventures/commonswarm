@@ -747,6 +747,7 @@ function reduceWorkspaceStream(events) {
 var INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1e3;
 var AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
+var H0_SEAT_TOKEN_TTL_MS = AGENT_TOKEN_MAX_TTL_MS;
 var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
 var RENEWAL_HORIZON_MAX_MS = 90 * 24 * 60 * 60 * 1e3;
 var RENEWAL_MAX_SUCCESSORS_DEFAULT = 800;
@@ -939,6 +940,12 @@ function decideWorkspace(state, cmd, ctx) {
   if (!user_id) {
     return authz2("bad_state", "credential has no server-derived human owner");
   }
+  if (ctx.credential_kind === "join" && cmd.kind !== "register_agent_seat" || cmd.kind === "register_agent_seat" && ctx.credential_kind !== "join") {
+    return authz2(
+      "credential_kind_forbidden",
+      "register_agent_seat requires the resolved join credential and that credential authorizes no other command"
+    );
+  }
   if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== "human") {
     return authz2("credential_kind_forbidden", "command requires an interactive human credential");
   }
@@ -966,6 +973,63 @@ function decideWorkspace(state, cmd, ctx) {
   }
   if (!state) {
     return authz2("workspace_not_found", "workspace is unavailable");
+  }
+  if (cmd.kind === "register_agent_seat") {
+    if (ctx.role(user_id) === null) {
+      return authz2("bad_state", "credential owner is not a current workspace member");
+    }
+    if (state.principals[cmd.principal_id] || state.tokens[cmd.token_id]) {
+      return domain2(
+        ctx,
+        cmd.kind,
+        "bad_state",
+        "server-generated registration identity already exists"
+      );
+    }
+    if (!cmd.run_id || !cmd.attempt_id || !Number.isFinite(cmd.ttl_ms) || cmd.ttl_ms <= 0 || cmd.ttl_ms > AGENT_TOKEN_MAX_TTL_MS) {
+      return domain2(
+        ctx,
+        cmd.kind,
+        "binding_required",
+        "registration requires server-derived attempt, run, and bounded token lifetime"
+      );
+    }
+    if (cmd.scopes.length === 0 || cmd.scopes.some((scope) => scopeWords(scope).size === 0) || cmd.scopes.some(isAgentScopeDenylisted)) {
+      return domain2(
+        ctx,
+        cmd.kind,
+        "scope_not_allowed",
+        "registration scopes must be concrete agent scopes"
+      );
+    }
+    const humanRights = new Set(ctx.humanRights(ctx.actor));
+    if (cmd.scopes.some((scope) => !humanRights.has(scope))) {
+      return domain2(
+        ctx,
+        cmd.kind,
+        "scope_not_allowed",
+        "registration scopes exceed the credential owner rights"
+      );
+    }
+    return accept2([
+      env2(ctx, "AgentPrincipalCreated", {
+        principal_id: cmd.principal_id,
+        owner_user_id: user_id,
+        name: cmd.name,
+        model: null,
+        created_at: ctx.now
+      }),
+      env2(ctx, "AgentTokenMinted", {
+        token_id: cmd.token_id,
+        principal_id: cmd.principal_id,
+        run_id: cmd.run_id,
+        task_id: cmd.attempt_id,
+        epoch: 0,
+        scopes: [...cmd.scopes],
+        issued_at: ctx.now,
+        expires_at: ctx.now + cmd.ttl_ms
+      })
+    ]);
   }
   if (cmd.kind === "accept_invitation") {
     if (!ctx.identityVerified(user_id)) {
@@ -1615,6 +1679,7 @@ export {
   FEEDBACK_CATEGORIES,
   FEEDBACK_CONTEXT_MAX_BYTES,
   FILE_VERSION_PRECONDITION_FAILED,
+  H0_SEAT_TOKEN_TTL_MS,
   HUMAN_ONLY_COMMANDS,
   INVITATION_MAX_TTL_MS,
   RENEWAL_HORIZON_DEFAULT_MS,

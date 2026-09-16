@@ -94,7 +94,8 @@ test("every principal-ceiling count takes the workspace lock first, in the one s
    *  - the helper takes pg_advisory_xact_lock BEFORE its count;
    *  - it is the ONLY place in the command edge that counts swarm.agent_principals, so no ceiling
    *    check can bypass it (enumerated by AST: one such count exists);
-   *  - both ceiling checks call it. */
+   *  - all three ceiling checks call it: credential mint, seat registration,
+   *    and ordinary principal creation. */
   const path = new URL("../../supabase/functions/command/index.ts", import.meta.url);
   const source = readFileSync(path, "utf8");
   const file = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
@@ -131,5 +132,9 @@ test("every principal-ceiling count takes the workspace lock first, in the one s
   assert.equal(locks.length, 1, "exactly one principal-ceiling lock");
   assert.equal(locks[0]!.fn, helper, "the lock must be taken inside the helper");
   assert.ok(locks[0]!.at < counts[0]!.at, "the lock must be taken BEFORE the count");
-  assert.equal(helperCalls, 2, "both ceiling checks — the join mint and create_agent_principal — use it");
+  assert.equal(
+    helperCalls,
+    3,
+    "all ceiling checks — join mint, seat registration, and create_agent_principal — use it",
+  );
 });

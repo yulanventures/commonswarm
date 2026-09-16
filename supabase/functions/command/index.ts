@@ -121,6 +121,7 @@ import {
   decideWorkspace,
   DISPOSITIONS,
   FEEDBACK_CATEGORIES,
+  H0_SEAT_TOKEN_TTL_MS,
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   reduceTask,
@@ -129,6 +130,7 @@ import {
   RENEWAL_HORIZON_MAX_MS,
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
   requestHash,
+  SCHEMA_VERSION,
 } from "../_shared/protocol.js";
 
 interface Actor {
@@ -223,6 +225,11 @@ type ConnectCommand =
   // is exactly the escalation the fence exists to stop.
   | { kind: "renew_agent_token" };
 
+interface RegisterAgentSeatCommand {
+  kind: "register_agent_seat";
+  attempt_id: string;
+  name: string;
+}
 
 interface SignalCommand {
   kind: "post_signal";
@@ -299,6 +306,7 @@ type DeliveryCommand = ClaimAgentInboxCommand | AckAgentDeliveryCommand;
 type ValidatedCommand =
   | Command
   | ConnectCommand
+  | RegisterAgentSeatCommand
   | SignalCommand
   | ChannelCommand
   | SignalsSeenCommand
@@ -398,6 +406,16 @@ type WorkspaceCommand =
     kind: "revoke_agent_join_credential";
     join_credential_id: string;
   }
+  | {
+    kind: "register_agent_seat";
+    attempt_id: string;
+    principal_id: string;
+    run_id: string;
+    token_id: string;
+    name: string;
+    scopes: string[];
+    ttl_ms: number;
+  }
   | { kind: "revoke_agent_token"; token_id: string }
   | { kind: "declare_agent_model"; model: string | null }
   | {
@@ -452,7 +470,7 @@ interface RenewalFacts {
 interface WorkspaceDecideCtx {
   now: number;
   actor: Actor;
-  credential_kind: "human" | "agent";
+  credential_kind: "human" | "agent" | "join";
   presenting_token_id: string | null;
   command_id: string;
   workspace_id: string;
@@ -502,6 +520,7 @@ interface StoredResponse {
   token_id?: string;
   run_id?: string;
   join_credential_id?: string;
+  attempt_id?: string;
   locator?: string;
   seat_cap?: number;
   seats_used?: number;
@@ -647,6 +666,7 @@ const MINT_CAPABILITY_KIND = "mint_capability_url";
 const REVOKE_CAPABILITY_KIND = "revoke_capability_url";
 const MINT_AGENT_JOIN_CREDENTIAL_KIND = "mint_agent_join_credential";
 const REVOKE_AGENT_JOIN_CREDENTIAL_KIND = "revoke_agent_join_credential";
+const REGISTER_AGENT_SEAT_KIND = "register_agent_seat";
 /**
  * The exit from an idle suspension. Not a WORKSPACE_COMMAND_KIND and not in the
  * reducer: it changes no authority, grants nothing, and emits no event — it
@@ -668,6 +688,7 @@ const RESUME_RENEWAL_GRANT_KIND = "resume_renewal_grant";
  * anything still reachable.
  */
 const STRANDED_SUCCESSOR_TOMBSTONE = "stranded_successor";
+const STRANDED_REGISTRATION_TOKEN_TOMBSTONE = "stranded_registration_token";
 
 /**
  * §7's zero-install on-ramp is a P5 public surface while the mechanism itself
@@ -939,6 +960,7 @@ const COMMAND_KINDS = [
   "mint_agent_token",
   MINT_AGENT_JOIN_CREDENTIAL_KIND,
   REVOKE_AGENT_JOIN_CREDENTIAL_KIND,
+  REGISTER_AGENT_SEAT_KIND,
   "revoke_agent_principal",
   "set_agent_model",
   "revoke_agent_token",
@@ -1188,6 +1210,15 @@ interface AuthContext {
   interactiveAuthAtSeconds: number | null;
 }
 
+interface JoinAuthContext {
+  credentialKind: "join";
+  credentialId: string;
+  deviceId: string;
+  actor: Actor;
+}
+
+type AuditAuthContext = AuthContext | JoinAuthContext;
+
 interface Route {
   workspaceId: string;
   streamId: string;
@@ -1225,7 +1256,7 @@ interface HttpResult {
 }
 
 interface Audit {
-  auth: AuthContext;
+  auth: AuditAuthContext;
   commandKind: string;
   workspaceId?: string | null;
   streamId?: string | null;
@@ -2217,6 +2248,26 @@ function validateCommand(
       };
   }
 
+  if (cmd.kind === REGISTER_AGENT_SEAT_KIND) {
+    const valid = exactKeys(cmd, ["kind", "attempt_id", "name"]) &&
+      typeof cmd.attempt_id === "string" && UUID_RE.test(cmd.attempt_id) &&
+      boundedText(cmd.name, 80);
+    return valid
+      ? {
+        ok: true,
+        command: {
+          kind: REGISTER_AGENT_SEAT_KIND,
+          attempt_id: (cmd.attempt_id as string).toLowerCase(),
+          name: cmd.name as string,
+        },
+      }
+      : {
+        ok: false,
+        status: 400,
+        reason: "register_agent_seat requires one UUID attempt_id and a name of 1..80 characters",
+      };
+  }
+
   if ((CONNECT_COMMAND_KINDS as readonly string[]).includes(cmd.kind)) {
     if (cmd.kind === "archive_workspace") {
       return exactKeys(cmd, ["kind"])
@@ -2609,6 +2660,9 @@ function storedResponse(value: unknown): StoredResponse {
     ...(typeof response.run_id === "string" ? { run_id: response.run_id } : {}),
     ...(typeof response.join_credential_id === "string"
       ? { join_credential_id: response.join_credential_id }
+      : {}),
+    ...(typeof response.attempt_id === "string"
+      ? { attempt_id: response.attempt_id }
       : {}),
     ...(typeof response.locator === "string"
       ? { locator: response.locator }
@@ -3535,7 +3589,10 @@ async function loadRenewalFacts(
             AND NOT EXISTS (
               SELECT 1
               FROM swarm.revocation_tombstones AS sr
-              WHERE sr.kind = ${STRANDED_SUCCESSOR_TOMBSTONE}
+              WHERE sr.kind IN (
+                  ${STRANDED_SUCCESSOR_TOMBSTONE},
+                  ${STRANDED_REGISTRATION_TOKEN_TOMBSTONE}
+                )
                 AND sr.target_id = l.token_id
             )
         )
@@ -5464,6 +5521,921 @@ async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise
   return Number(rows[0]?.live ?? "0");
 }
 
+interface LockedJoinCredential {
+  id: string;
+  workspace_id: string;
+  owner_user_id: string;
+  registrar_principal_id: string;
+  registrar_run_id: string;
+  registrar_device_id: string;
+  stream_id: string;
+  seat_cap: number;
+  seats_used: number;
+  revoked_at: Date | null;
+  unexpired: boolean;
+}
+
+interface RegistrationStreamFrame {
+  headSeq: number;
+  now: number;
+}
+
+interface ExistingJoinAttempt {
+  principal_id: string;
+  run_id: string;
+  token_id: string;
+  first_used_at: Date | null;
+  renewal_grant_id: string;
+  lineage_id: string;
+  token_revoked_at: Date | null;
+  token_expires_at: Date;
+  principal_revoked_at: Date | null;
+  run_ended_at: Date | null;
+  grant_revoked_at: Date | null;
+  grant_horizon_expires_at: Date;
+}
+
+async function lockJoinCredential(
+  tx: Sql,
+  credentialHash: Uint8Array,
+): Promise<LockedJoinCredential | null> {
+  const rows = await tx<LockedJoinCredential[]>`
+    SELECT
+      c.id,
+      c.workspace_id,
+      c.owner_user_id,
+      c.registrar_principal_id,
+      c.registrar_run_id,
+      r.device_id AS registrar_device_id,
+      s.stream_id,
+      c.seat_cap,
+      c.seats_used,
+      c.revoked_at,
+      c.expires_at > statement_timestamp() AS unexpired
+    FROM swarm.agent_join_credentials AS c
+    JOIN swarm.agent_runs AS r
+      ON r.run_id = c.registrar_run_id
+     AND r.principal_id = c.registrar_principal_id
+    JOIN swarm.streams AS s
+      ON s.workspace_id = c.workspace_id
+     AND s.kind = 'workspace'
+    WHERE c.credential_hash = ${credentialHash}
+    LIMIT 1
+    FOR UPDATE OF c
+  `;
+  return rows[0] ?? null;
+}
+
+async function lockJoinCredentialOwnerMembership(
+  tx: Sql,
+  credential: LockedJoinCredential,
+): Promise<boolean> {
+  const rows = await tx<{ revoked_at: Date | null }[]>`
+    SELECT revoked_at
+    FROM swarm.memberships
+    WHERE workspace_id = ${credential.workspace_id}::uuid
+      AND user_id = ${credential.owner_user_id}::uuid
+    FOR SHARE
+  `;
+  return rows[0]?.revoked_at === null;
+}
+
+function joinAuth(credential: LockedJoinCredential): JoinAuthContext {
+  return {
+    credentialKind: "join",
+    credentialId: credential.id,
+    deviceId: credential.registrar_device_id,
+    actor: {
+      user: credential.owner_user_id,
+      agent_principal: credential.registrar_principal_id,
+      run: credential.registrar_run_id,
+    },
+  };
+}
+
+function joinRoute(credential: LockedJoinCredential): Route {
+  return {
+    workspaceId: credential.workspace_id,
+    streamId: credential.stream_id,
+    membershipRole: null,
+    membershipRevokedAt: null,
+  };
+}
+
+async function lockRegistrationStream(
+  tx: Sql,
+  route: Route,
+): Promise<RegistrationStreamFrame> {
+  const rows = await tx<{ head_seq: string | number; now_ms: string | number }[]>`
+    SELECT
+      s.head_seq,
+      floor(extract(epoch FROM statement_timestamp()) * 1000)::bigint AS now_ms
+    FROM swarm.streams AS s
+    WHERE s.stream_id = ${route.streamId}::uuid
+      AND s.workspace_id = ${route.workspaceId}::uuid
+    FOR UPDATE
+  `;
+  const row = rows[0];
+  if (!row) throw new Error("join credential workspace stream disappeared");
+  return { headSeq: Number(row.head_seq), now: Number(row.now_ms) };
+}
+
+async function appendRegistrationEvents(
+  tx: Sql,
+  route: Route,
+  frame: RegistrationStreamFrame,
+  events: readonly EventEnvelope[],
+): Promise<void> {
+  await appendEvents(tx, events);
+  if (events.length > 0) {
+    await tx`
+      UPDATE swarm.streams
+      SET head_seq = ${frame.headSeq + events.length}
+      WHERE stream_id = ${route.streamId}::uuid
+        AND workspace_id = ${route.workspaceId}::uuid
+    `;
+  }
+}
+
+async function storeRegistrationResponse(
+  tx: Sql,
+  credential: LockedJoinCredential,
+  commandId: string,
+  hash: string,
+  response: StoredResponse,
+): Promise<void> {
+  const rows = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id,
+      workspace_id, stream_id, request_hash, response
+    ) VALUES (
+      'join',
+      ${credential.id},
+      ${commandId},
+      ${credential.workspace_id}::uuid,
+      ${credential.stream_id}::uuid,
+      ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO UPDATE
+      SET response = EXCLUDED.response
+      WHERE swarm.idempotency_keys.request_hash = EXCLUDED.request_hash
+        AND swarm.idempotency_keys.workspace_id = EXCLUDED.workspace_id
+        AND swarm.idempotency_keys.stream_id = EXCLUDED.stream_id
+    RETURNING command_id
+  `;
+  if (rows.length !== 1) {
+    throw new Error("registration idempotency response conflicted after credential lock");
+  }
+}
+
+function registrationEvent(
+  credential: LockedJoinCredential,
+  commandId: string,
+  frame: RegistrationStreamFrame,
+  offset: number,
+  type: string,
+  payload: Record<string, unknown>,
+): EventEnvelope {
+  return {
+    workspace_id: credential.workspace_id,
+    stream_id: credential.stream_id,
+    seq: frame.headSeq + offset,
+    event_id: crypto.randomUUID(),
+    command_id: commandId,
+    type,
+    schema_version: SCHEMA_VERSION,
+    actor_user: credential.owner_user_id,
+    actor_agent_principal: credential.registrar_principal_id,
+    actor_run: credential.registrar_run_id,
+    occurred_at_server: frame.now,
+    payload,
+  };
+}
+
+async function refuseRegistrationDomain(
+  tx: Sql,
+  credential: LockedJoinCredential,
+  auth: JoinAuthContext,
+  route: Route,
+  frame: RegistrationStreamFrame,
+  commandId: string,
+  command: RegisterAgentSeatCommand,
+  hash: string,
+  minClientVersion: string,
+  status: number,
+  error: string,
+  reason: string,
+  message: string,
+  auditOutcome: string = "domain",
+  extra: Record<string, unknown> = {},
+): Promise<HttpResult> {
+  const event = registrationEvent(
+    credential,
+    commandId,
+    frame,
+    1,
+    "CommandRejected",
+    {
+      workspace_id: credential.workspace_id,
+      command: REGISTER_AGENT_SEAT_KIND,
+      reason,
+      detail: message,
+      attempt_id: command.attempt_id,
+    },
+  );
+  await appendRegistrationEvents(tx, route, frame, [event]);
+  const response: StoredResponse = {
+    ok: false,
+    reason,
+    detail: message,
+    class: "domain",
+    event_ids: [event.event_id],
+    join_credential_id: credential.id,
+    attempt_id: command.attempt_id,
+    workspace_id: credential.workspace_id,
+  };
+  await storeRegistrationResponse(tx, credential, commandId, hash, response);
+  await insertAudit(tx, {
+    auth,
+    commandKind: REGISTER_AGENT_SEAT_KIND,
+    workspaceId: credential.workspace_id,
+    streamId: credential.stream_id,
+    outcome: auditOutcome,
+    reason,
+    detail: `attempt_id=${command.attempt_id}; ${message}`,
+    hash,
+  });
+  return {
+    status,
+    body: {
+      status: "rejected",
+      error,
+      message,
+      ...extra,
+      ...response,
+      events: [event],
+      min_client_version: minClientVersion,
+    },
+  };
+}
+
+async function replaceUnusedRegistrationToken(
+  tx: Sql,
+  credential: LockedJoinCredential,
+  auth: JoinAuthContext,
+  route: Route,
+  frame: RegistrationStreamFrame,
+  command: RegisterAgentSeatCommand,
+  existing: ExistingJoinAttempt,
+  commandId: string,
+  hash: string,
+  minClientVersion: string,
+): Promise<HttpResult> {
+  const revoked = await tx<{ token_id: string }[]>`
+    UPDATE swarm.agent_tokens
+    SET revoked_at = ${new Date(frame.now)}
+    WHERE token_id = ${existing.token_id}::uuid
+      AND principal_id = ${existing.principal_id}::uuid
+      AND run_id = ${existing.run_id}::uuid
+      AND first_used_at IS NULL
+      AND revoked_at IS NULL
+      AND expires_at > ${new Date(frame.now)}
+      AND EXISTS (
+        SELECT 1 FROM swarm.agent_principals AS p
+        WHERE p.principal_id = ${existing.principal_id}::uuid
+          AND p.revoked_at IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM swarm.agent_runs AS r
+        WHERE r.run_id = ${existing.run_id}::uuid
+          AND r.principal_id = ${existing.principal_id}::uuid
+          AND r.ended_at IS NULL
+      )
+      AND EXISTS (
+        SELECT 1 FROM swarm.renewal_grants AS g
+        WHERE g.renewal_grant_id = ${existing.renewal_grant_id}::uuid
+          AND g.principal_id = ${existing.principal_id}::uuid
+          AND g.run_id = ${existing.run_id}::uuid
+          AND g.revoked_at IS NULL
+          AND g.horizon_expires_at > ${new Date(frame.now)}
+      )
+    RETURNING token_id
+  `;
+  if (revoked.length !== 1) {
+    return await refuseRegistrationDomain(
+      tx,
+      credential,
+      auth,
+      route,
+      frame,
+      commandId,
+      command,
+      hash,
+      minClientVersion,
+      409,
+      "registration_token_already_used",
+      "registration_token_already_used",
+      "Revoke that seat and register again.",
+    );
+  }
+  await tx`
+    INSERT INTO swarm.revocation_tombstones (kind, target_id, created_by)
+    VALUES (
+      ${STRANDED_REGISTRATION_TOKEN_TOMBSTONE},
+      ${existing.token_id}::uuid,
+      ${credential.owner_user_id}::uuid
+    )
+    ON CONFLICT (kind, target_id) DO NOTHING
+  `;
+
+  const tokenId = crypto.randomUUID();
+  const secret = opaqueToken("swm_agt_");
+  if (!AGENT_TOKEN_RE.test(secret)) {
+    throw new Error("replacement registration token does not match its wire shape");
+  }
+  const tokenHash = await sha256(secret);
+  const expiresAt = new Date(Math.min(
+    frame.now + H0_SEAT_TOKEN_TTL_MS,
+    existing.grant_horizon_expires_at.getTime(),
+  ));
+  await tx`
+    INSERT INTO swarm.agent_tokens (
+      token_id, principal_id, run_id, task_id, epoch,
+      scopes, token_hash, issued_at, expires_at, lineage_id,
+      renewal_grant_id
+    ) VALUES (
+      ${tokenId}::uuid,
+      ${existing.principal_id}::uuid,
+      ${existing.run_id}::uuid,
+      ${command.attempt_id}::uuid,
+      0,
+      ${tx.json([...P0_AGENT_SCOPES])}::jsonb,
+      ${tokenHash},
+      ${new Date(frame.now)},
+      ${expiresAt},
+      ${existing.lineage_id}::uuid,
+      ${existing.renewal_grant_id}::uuid
+    )
+  `;
+  await tx`
+    UPDATE swarm.agent_join_attempts
+    SET token_id = ${tokenId}::uuid
+    WHERE join_credential_id = ${credential.id}::uuid
+      AND attempt_id = ${command.attempt_id}::uuid
+  `;
+
+  const events = [
+    registrationEvent(
+      credential,
+      commandId,
+      frame,
+      1,
+      "AgentTokenRevoked",
+      { token_id: existing.token_id, revoked_at: frame.now },
+    ),
+    registrationEvent(
+      credential,
+      commandId,
+      frame,
+      2,
+      "AgentTokenMinted",
+      {
+        token_id: tokenId,
+        principal_id: existing.principal_id,
+        run_id: existing.run_id,
+        task_id: command.attempt_id,
+        epoch: 0,
+        scopes: [...P0_AGENT_SCOPES],
+        issued_at: frame.now,
+        expires_at: expiresAt.getTime(),
+      },
+    ),
+  ];
+  await appendRegistrationEvents(tx, route, frame, events);
+  const response: StoredResponse = {
+    ok: true,
+    event_ids: events.map((event) => event.event_id),
+    join_credential_id: credential.id,
+    attempt_id: command.attempt_id,
+    principal_id: existing.principal_id,
+    run_id: existing.run_id,
+    token_id: tokenId,
+    seats_used: credential.seats_used,
+    seat_cap: credential.seat_cap,
+    workspace_id: credential.workspace_id,
+    expires_at: expiresAt.toISOString(),
+  };
+  await storeRegistrationResponse(tx, credential, commandId, hash, response);
+  await insertAudit(tx, {
+    auth,
+    commandKind: REGISTER_AGENT_SEAT_KIND,
+    workspaceId: credential.workspace_id,
+    streamId: credential.stream_id,
+    outcome: "recovered",
+    reason: "unused_registration_token_replaced",
+    detail:
+      `attempt_id=${command.attempt_id}; principal_id=${existing.principal_id}; run_id=${existing.run_id}; old_token_id=${existing.token_id}; token_id=${tokenId}`,
+    hash,
+  });
+  const freshOnly = { agent_token: secret };
+  return {
+    status: 200,
+    body: {
+      status: "accepted",
+      ...response,
+      events,
+      min_client_version: minClientVersion,
+      ...freshOnly,
+    },
+  };
+}
+
+async function registerAgentSeat(
+  tx: Sql,
+  body: RequestBody,
+  credentialHash: Uint8Array,
+): Promise<HttpResult> {
+  const credential = await lockJoinCredential(tx, credentialHash);
+  if (
+    credential === null || credential.revoked_at !== null ||
+    credential.unexpired !== true
+  ) {
+    logCommandFailure(
+      "command_pre_auth_failure",
+      REGISTER_AGENT_SEAT_KIND,
+      "authn",
+      "join credential refused",
+    );
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const auth = joinAuth(credential);
+  const route = joinRoute(credential);
+  /* Workspace commands lock the stream before they update memberships. Take the same lock first,
+   * then hold this owner's membership FOR SHARE so a concurrent removal serializes on the row:
+   * either registration commits before removal, or it observes the revoked membership. */
+  const frame = await lockRegistrationStream(tx, route);
+  if (!await lockJoinCredentialOwnerMembership(tx, credential)) {
+    logCommandFailure(
+      "command_pre_auth_failure",
+      REGISTER_AGENT_SEAT_KIND,
+      "authn",
+      "join credential refused",
+    );
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const ignoredIdentity = forgedActorDetail(body);
+  if (Object.hasOwn(body, "from")) {
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "validation",
+      reason: "client-supplied from is forbidden",
+      detail: ignoredIdentity,
+    });
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+
+  const validation = validateCommand(body.command);
+  if (!validation.ok || validation.command.kind !== REGISTER_AGENT_SEAT_KIND) {
+    const reason = validation.ok
+      ? "register_agent_seat exact-kind gate failed"
+      : validation.reason;
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "validation",
+      reason,
+      detail: ignoredIdentity,
+    });
+    return {
+      status: validation.ok ? 403 : validation.status,
+      body: validation.ok
+        ? { error: "forbidden" }
+        : { error: "invalid_request", message: reason },
+    };
+  }
+  const command = validation.command;
+  const configRows = await tx<{ value: unknown }[]>`
+    SELECT value FROM swarm.config WHERE key = 'min_client_version' LIMIT 1
+  `;
+  const minClientVersion = configRows[0]?.value;
+  if (typeof minClientVersion !== "string") {
+    throw new Error("min_client_version config is missing or malformed");
+  }
+  if (typeof body.client_version !== "string") {
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "validation",
+      reason: "invalid client_version",
+    });
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  const versionOrder = compareSemver(body.client_version, minClientVersion);
+  if (versionOrder === null) {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  if (versionOrder < 0) {
+    return {
+      status: 426,
+      body: { error: "upgrade_required", min_client_version: minClientVersion },
+    };
+  }
+
+  const commandId = String(body.command_id);
+  const hash = requestHash(auth.actor, command);
+  const ledgerRows = await tx<{
+    request_hash: string;
+    workspace_id: string;
+    stream_id: string;
+  }[]>`
+    SELECT request_hash, workspace_id, stream_id
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = 'join'
+      AND principal_id = ${credential.id}
+      AND command_id = ${commandId}
+    LIMIT 1
+  `;
+  const ledger = ledgerRows[0];
+  if (
+    ledger && (
+      ledger.request_hash !== hash ||
+      ledger.workspace_id !== credential.workspace_id ||
+      ledger.stream_id !== credential.stream_id
+    )
+  ) {
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "conflict",
+      reason: "command_id_conflict",
+      detail: ignoredIdentity,
+      hash,
+    });
+    return { status: 409, body: { error: "command_id_conflict" } };
+  }
+
+  const attemptRows = await tx<ExistingJoinAttempt[]>`
+    SELECT
+      a.principal_id,
+      a.run_id,
+      a.token_id,
+      t.first_used_at,
+      t.renewal_grant_id,
+      t.lineage_id,
+      t.revoked_at AS token_revoked_at,
+      t.expires_at AS token_expires_at,
+      p.revoked_at AS principal_revoked_at,
+      r.ended_at AS run_ended_at,
+      g.revoked_at AS grant_revoked_at,
+      g.horizon_expires_at AS grant_horizon_expires_at
+    FROM swarm.agent_join_attempts AS a
+    JOIN swarm.agent_tokens AS t
+      ON t.token_id = a.token_id
+     AND t.principal_id = a.principal_id
+     AND t.run_id = a.run_id
+    JOIN swarm.agent_principals AS p
+      ON p.principal_id = a.principal_id
+     AND p.workspace_id = a.workspace_id
+     AND p.owner_user_id = a.owner_user_id
+    JOIN swarm.agent_runs AS r
+      ON r.run_id = a.run_id
+     AND r.principal_id = a.principal_id
+    JOIN swarm.renewal_grants AS g
+      ON g.renewal_grant_id = t.renewal_grant_id
+     AND g.principal_id = a.principal_id
+     AND g.run_id = a.run_id
+    WHERE a.join_credential_id = ${credential.id}::uuid
+      AND a.attempt_id = ${command.attempt_id}::uuid
+    FOR UPDATE OF a, t, p, r, g
+  `;
+  const existing = attemptRows[0];
+  if (existing) {
+    /* The outer check classifies the refusal for the caller. The UPDATE inside replacement is the
+     * atomic safety fence and repeats first_used_at plus every liveness condition before minting. */
+    if (existing.first_used_at !== null) {
+      return await refuseRegistrationDomain(
+        tx,
+        credential,
+        auth,
+        route,
+        frame,
+        commandId,
+        command,
+        hash,
+        minClientVersion,
+        409,
+        "registration_token_already_used",
+        "registration_token_already_used",
+        "Revoke that seat and register again.",
+      );
+    }
+    if (
+      existing.token_revoked_at !== null ||
+      existing.token_expires_at.getTime() <= frame.now ||
+      existing.principal_revoked_at !== null ||
+      existing.run_ended_at !== null ||
+      existing.grant_revoked_at !== null ||
+      existing.grant_horizon_expires_at.getTime() <= frame.now
+    ) {
+      return await refuseRegistrationDomain(
+        tx,
+        credential,
+        auth,
+        route,
+        frame,
+        commandId,
+        command,
+        hash,
+        minClientVersion,
+        409,
+        "registration_seat_revoked",
+        "registration_seat_revoked",
+        "This seat was revoked. Register again with a new attempt.",
+      );
+    }
+    return await replaceUnusedRegistrationToken(
+      tx,
+      credential,
+      auth,
+      route,
+      frame,
+      command,
+      existing,
+      commandId,
+      hash,
+      minClientVersion,
+    );
+  }
+
+  if (credential.seats_used >= credential.seat_cap) {
+    return await refuseRegistrationDomain(
+      tx,
+      credential,
+      auth,
+      route,
+      frame,
+      commandId,
+      command,
+      hash,
+      minClientVersion,
+      409,
+      "join_credential_seat_cap_reached",
+      "join_credential_seat_cap_reached",
+      "This join credential has no seats left. Mint a new join credential or revoke a seat.",
+      "domain",
+      { seat_cap: credential.seat_cap, seats_used: credential.seats_used },
+    );
+  }
+
+  const live = await lockAndCountLivePrincipals(tx, credential.workspace_id);
+  if (live >= FREE_TIER_PRINCIPAL_LIMIT) {
+    return await refuseRegistrationDomain(
+      tx,
+      credential,
+      auth,
+      route,
+      frame,
+      commandId,
+      command,
+      hash,
+      minClientVersion,
+      403,
+      "principal_limit_reached",
+      "workspace_principal_limit_reached",
+      `This workspace has reached its ${FREE_TIER_PRINCIPAL_LIMIT}-principal limit. Revoke a principal and register again.`,
+      "quota",
+      { limit: FREE_TIER_PRINCIPAL_LIMIT },
+    );
+  }
+
+  const state = await loadWorkspaceState(tx, route);
+  const principalId = crypto.randomUUID();
+  const deviceId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
+  const grantId = crypto.randomUUID();
+  const tokenId = crypto.randomUUID();
+  const lineageId = crypto.randomUUID();
+  const secret = opaqueToken("swm_agt_");
+  if (!AGENT_TOKEN_RE.test(secret)) {
+    throw new Error("registration token does not match its wire shape");
+  }
+  const tokenHash = await sha256(secret);
+  const reducerCommand: WorkspaceCommand = {
+    kind: REGISTER_AGENT_SEAT_KIND,
+    attempt_id: command.attempt_id,
+    principal_id: principalId,
+    run_id: runId,
+    token_id: tokenId,
+    name: command.name,
+    scopes: [...P0_AGENT_SCOPES],
+    ttl_ms: H0_SEAT_TOKEN_TTL_MS,
+  };
+  let nextSeq = frame.headSeq;
+  const ctx: WorkspaceDecideCtx = {
+    now: frame.now,
+    actor: auth.actor,
+    credential_kind: "join",
+    presenting_token_id: null,
+    command_id: commandId,
+    workspace_id: credential.workspace_id,
+    stream_id: credential.stream_id,
+    operatorAllowed: () => false,
+    role: (userId) => {
+      const member = state.members[userId];
+      return member?.revoked_at === null ? member.role : null;
+    },
+    inviteeAlreadyMember: () => false,
+    identityVerified: () => false,
+    humanRights: () => [...P0_AGENT_SCOPES],
+    landingAuthorityChangeResolved: () => false,
+    nextSeq: () => ++nextSeq,
+    nextEventId: () => crypto.randomUUID(),
+  };
+  const decision = decideWorkspace(state, reducerCommand, ctx) as Decision;
+  if (!decision.ok) {
+    if (decision.class === "authz") {
+      throw new Error(`registration reducer refused adapter-derived authority: ${decision.reason}`);
+    }
+    await appendRegistrationEvents(tx, route, frame, decision.events);
+    const response: StoredResponse = {
+      ok: false,
+      reason: decision.reason,
+      detail: decision.detail,
+      class: decision.class,
+      event_ids: decision.events.map((event) => event.event_id),
+      join_credential_id: credential.id,
+      attempt_id: command.attempt_id,
+      workspace_id: credential.workspace_id,
+    };
+    await storeRegistrationResponse(tx, credential, commandId, hash, response);
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "domain",
+      reason: decision.reason,
+      detail: decision.detail,
+      hash,
+    });
+    return {
+      status: 409,
+      body: {
+        status: "rejected",
+        error: decision.reason,
+        message: decision.detail,
+        ...response,
+        events: decision.events,
+        min_client_version: minClientVersion,
+      },
+    };
+  }
+
+  const expiresAt = new Date(frame.now + H0_SEAT_TOKEN_TTL_MS);
+  await tx`
+    INSERT INTO swarm.devices (device_id, user_id, label)
+    VALUES (
+      ${deviceId}::uuid,
+      ${credential.owner_user_id}::uuid,
+      ${`H0 seat ${command.attempt_id}`}
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.agent_principals (
+      principal_id, workspace_id, owner_user_id, name, model, created_at
+    ) VALUES (
+      ${principalId}::uuid,
+      ${credential.workspace_id}::uuid,
+      ${credential.owner_user_id}::uuid,
+      ${command.name},
+      NULL,
+      ${new Date(frame.now)}
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
+    VALUES (
+      ${runId}::uuid,
+      ${principalId}::uuid,
+      ${deviceId}::uuid
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.renewal_grants (
+      renewal_grant_id, workspace_id, principal_id, run_id,
+      kind, max_successors, successors_used, horizon_expires_at,
+      bound_device_id, created_by
+    ) VALUES (
+      ${grantId}::uuid,
+      ${credential.workspace_id}::uuid,
+      ${principalId}::uuid,
+      ${runId}::uuid,
+      'timeboxed',
+      ${RENEWAL_MAX_SUCCESSORS_DEFAULT},
+      0,
+      ${expiresAt},
+      NULL,
+      ${credential.owner_user_id}::uuid
+    )
+  `;
+  await tx`
+    INSERT INTO swarm.agent_tokens (
+      token_id, principal_id, run_id, task_id, epoch,
+      scopes, token_hash, issued_at, expires_at, lineage_id,
+      renewal_grant_id
+    ) VALUES (
+      ${tokenId}::uuid,
+      ${principalId}::uuid,
+      ${runId}::uuid,
+      ${command.attempt_id}::uuid,
+      0,
+      ${tx.json([...P0_AGENT_SCOPES])}::jsonb,
+      ${tokenHash},
+      ${new Date(frame.now)},
+      ${expiresAt},
+      ${lineageId}::uuid,
+      ${grantId}::uuid
+    )
+  `;
+  const spent = await tx<{ seats_used: number }[]>`
+    UPDATE swarm.agent_join_credentials
+    SET seats_used = seats_used + 1
+    WHERE id = ${credential.id}::uuid
+      AND seats_used < seat_cap
+      AND revoked_at IS NULL
+      AND expires_at > statement_timestamp()
+    RETURNING seats_used
+  `;
+  if (spent.length !== 1) {
+    throw new Error("locked join credential could not spend its checked seat");
+  }
+  const seatsUsed = spent[0]?.seats_used;
+  if (typeof seatsUsed !== "number") {
+    throw new Error("seat spend returned no count");
+  }
+  await tx`
+    INSERT INTO swarm.agent_join_attempts (
+      join_credential_id, attempt_id, workspace_id, owner_user_id,
+      principal_id, run_id, token_id
+    ) VALUES (
+      ${credential.id}::uuid,
+      ${command.attempt_id}::uuid,
+      ${credential.workspace_id}::uuid,
+      ${credential.owner_user_id}::uuid,
+      ${principalId}::uuid,
+      ${runId}::uuid,
+      ${tokenId}::uuid
+    )
+  `;
+  await appendRegistrationEvents(tx, route, frame, decision.events);
+
+  const response: StoredResponse = {
+    ok: true,
+    event_ids: decision.events.map((event) => event.event_id),
+    join_credential_id: credential.id,
+    attempt_id: command.attempt_id,
+    principal_id: principalId,
+    run_id: runId,
+    token_id: tokenId,
+    seats_used: seatsUsed,
+    seat_cap: credential.seat_cap,
+    workspace_id: credential.workspace_id,
+    expires_at: expiresAt.toISOString(),
+  };
+  await storeRegistrationResponse(tx, credential, commandId, hash, response);
+  await insertAudit(tx, {
+    auth,
+    commandKind: REGISTER_AGENT_SEAT_KIND,
+    workspaceId: credential.workspace_id,
+    streamId: credential.stream_id,
+    outcome: "accepted",
+    detail:
+      `attempt_id=${command.attempt_id}; principal_id=${principalId}; run_id=${runId}; token_id=${tokenId}`,
+    hash,
+  });
+  const freshOnly = { agent_token: secret };
+  return {
+    status: 200,
+    body: {
+      status: "accepted",
+      ...response,
+      events: decision.events,
+      min_client_version: minClientVersion,
+      ...freshOnly,
+    },
+  };
+}
+
 /**
  * Create one join credential and its G3 registrar identity.
  *
@@ -6698,7 +7670,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3602 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3659 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -7906,6 +8878,7 @@ async function handleTransaction(
   body: RequestBody,
   verifiedHuman: VerifiedHuman | null,
   agentTokenHash: Uint8Array | null,
+  joinCredentialHash: Uint8Array | null,
   sessionProofParse: AgentSessionProofParse,
   acquireProofParse: AgentSessionAcquireParse,
 ): Promise<HttpResult> {
@@ -7915,6 +8888,13 @@ async function handleTransaction(
     await beforeStep(2);
     await setTransaction(tx);
     await afterStep(2);
+
+    if (kind === REGISTER_AGENT_SEAT_KIND) {
+      if (joinCredentialHash === null) {
+        return { status: 403, body: { error: "forbidden" } };
+      }
+      return await registerAgentSeat(tx, body, joinCredentialHash);
+    }
 
     await beforeStep(3);
     const auth = agentTokenHash !== null
@@ -10210,7 +11190,21 @@ async function handlePostRequest(request: Request): Promise<Response> {
   const acquireProofParse = parseAgentSessionAcquireHeaders(request.headers);
 
   const credential = bearer(request);
-  if (!credential) {
+  let verifiedHuman: VerifiedHuman | null = null;
+  let agentTokenHash: Uint8Array | null = null;
+  let joinCredentialHash: Uint8Array | null = null;
+  if (kind === REGISTER_AGENT_SEAT_KIND) {
+    if (credential === null || !AGENT_JOIN_CREDENTIAL_RE.test(credential)) {
+      logCommandFailure(
+        "command_pre_auth_failure",
+        kind,
+        "authn",
+        "join credential refused",
+      );
+      return json(403, { error: "forbidden" });
+    }
+    joinCredentialHash = await sha256(credential);
+  } else if (credential === null) {
     logCommandFailure(
       "command_pre_auth_failure",
       kind,
@@ -10218,11 +11212,17 @@ async function handlePostRequest(request: Request): Promise<Response> {
       "missing bearer",
     );
     return json(401, { error: "unauthenticated" });
-  }
-
-  let verifiedHuman: VerifiedHuman | null = null;
-  let agentTokenHash: Uint8Array | null = null;
-  if (credential.startsWith("swm_agt_")) {
+  } else if (credential.startsWith("swm_join_")) {
+    // Exact-kind gate: a join credential authorizes registration and no other
+    // command, even when the other command body is malformed or unknown.
+    logCommandFailure(
+      "command_pre_auth_failure",
+      kind,
+      "authz",
+      "join credential kind forbidden",
+    );
+    return json(403, { error: "forbidden" });
+  } else if (credential.startsWith("swm_agt_")) {
     if (!AGENT_TOKEN_RE.test(credential)) {
       logCommandFailure(
         "command_pre_auth_failure",
@@ -10279,6 +11279,7 @@ async function handlePostRequest(request: Request): Promise<Response> {
       body,
       verifiedHuman,
       agentTokenHash,
+      joinCredentialHash,
       sessionProofParse,
       acquireProofParse,
     );

@@ -411,6 +411,12 @@ test("acceptable-use comment cites active lines for file caps and index.ts limit
   checkIndex(/INVITATION_MAX_TTL_MS, :(\d+)/, "INVITATION_MAX_TTL_MS");
   checkIndex(/AGENT_TOKEN_MAX_TTL_MS, :(\d+)/, "AGENT_TOKEN_MAX_TTL_MS");
 
+  const aboutMatch = /about <= 500[\s\S]*?index\.ts:(\d+)-(\d+)/.exec(page);
+  assert.ok(aboutMatch, "acceptable-use missing citation for the about bound");
+  const aboutSlice = index.slice(Number(aboutMatch[1]) - 1, Number(aboutMatch[2])).join("\n");
+  assert.ok(aboutSlice.includes("cmd.about.length <= 500"),
+    `index.ts:${aboutMatch[1]}-${aboutMatch[2]} missing the about bound`);
+
   const untilMatch = /index\.ts:(\d+)-(\d+)\s*\(SIGNAL_MAX_UNTIL_MS\)/.exec(page);
   assert.ok(untilMatch, "acceptable-use missing citation for SIGNAL_MAX_UNTIL_MS");
   const untilSlice = index.slice(Number(untilMatch[1]) - 1, Number(untilMatch[2])).join("\n");
