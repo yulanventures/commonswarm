@@ -17,6 +17,29 @@ Written for a cold successor. The H0 lanes have their own file:
   N-db (Postgres onto the box), then storage to R2, then sign-in. In-flight lanes 3b and H lane 1 land when their
   pairs are clean. New H0 and H lanes wait until after N-db.
 
+## The whole move and the N-db ruling (19:34Z-19:51Z)
+
+- Standing order 87d053dd: CommonSwarm fully off Supabase and Vercel onto yulan-vps-1, as fast as possible, no
+  Strategist ask between items: N-edge (by 2026-09-18) → N-db → N-storage (R2) → N-auth-realtime (OAuth and
+  sessions in Postgres, WebSocket wake) → N-retire (operator confirms deletion); N-site (off Vercel) in parallel
+  any time. H0 and H resume after N-db.
+- **N-db = option A** (7806c57c): Postgres moves TOGETHER with self-hosted gotrue, postgrest, realtime and
+  storage-api on the box, pointed at the box's Postgres, Caddy routing /auth/v1, /rest/v1, /realtime/v1,
+  /storage/v1 to them. One cutover window; clients unchanged; humans sign in once more (say so in the release
+  note; Supabase's asymmetric JWT signing keys cannot be exported); agent tokens (swm_agt_ rows) survive.
+  Conditions: a full rehearsal on the box from a fresh dump (auth and storage schemas included) with the
+  production controls green BEFORE the window; the us-east-1 project read-only during the window; a final dump;
+  48 h fallback. N-storage and N-auth-realtime then replace those containers one at a time, no deadline.
+- **Site: on the box behind Caddy** (lane/site-on-box). Cloudflare Pages is noted as the fallback only if the box
+  fails a parity check.
+- Box facts from HezLead (ef5d054a): user commonswarm in docker and sitesadm (Caddy validate/reload without a
+  password); Docker network commonswarm-net 172.31.0.0/24, gateway 172.31.0.1; main Caddyfile is only
+  `import sites/*.caddy`, placeholder at /etc/caddy/sites/00-commonswarm-placeholder.caddy (ours to overwrite);
+  box Postgres database `commonswarm`, owner commonswarm_admin (non-superuser), commonswarm_app (CONNECT only), no
+  passwords yet (set with `sudo -u commonswarm psql -U commonswarm_admin -d commonswarm` and `\password`, into
+  the vault); host Postgres listens on 172.31.0.1 for containers with TLS and scram; nightly pg_dump already
+  includes `commonswarm`. R2 bucket commonswarm-files and the DNS token are with Anvil.
+
 ## HezLead (box operator) answers, 19:37Z — binding for the cutover
 
 - **Cap** (60949772): if staging p95 for ONE COMMAND exceeds 2.0 s, or any CLI or listener timeout trips, STOP and
