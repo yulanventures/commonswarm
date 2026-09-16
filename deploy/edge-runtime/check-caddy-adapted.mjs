@@ -100,6 +100,31 @@ assert.equal(realtime.length, 1);
 assert.deepEqual(realtime[0].transport.versions, ["1.1"]);
 assert.equal(realtime[0].flush_interval, -1);
 
+function containsObject(value, target) {
+  if (value === target) return true;
+  if (value === null || typeof value !== "object") return false;
+  return Object.values(value).some((child) => containsObject(child, target));
+}
+
+const realtimePathMatchers = [];
+function collectRealtimePathMatchers(value) {
+  if (value === null || typeof value !== "object") return;
+  if (
+    Array.isArray(value.match) &&
+    value.match.some((matcher) => Array.isArray(matcher.path)) &&
+    containsObject(value.handle, realtime[0])
+  ) {
+    for (const matcher of value.match) {
+      if (Array.isArray(matcher.path)) {
+        realtimePathMatchers.push(...matcher.path);
+      }
+    }
+  }
+  for (const child of Object.values(value)) collectRealtimePathMatchers(child);
+}
+collectRealtimePathMatchers(server.routes);
+assert.deepEqual(realtimePathMatchers, ["/realtime/v1", "/realtime/v1/*"]);
+
 const local = localProxies[0];
 assert.equal(local.headers?.request?.delete, undefined);
 assert.deepEqual(local.headers?.request?.set?.["X-Forwarded-For"], [

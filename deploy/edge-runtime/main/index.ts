@@ -4,7 +4,8 @@ import {
   FUNCTION_ENV_NAMES,
   type FunctionName,
   isWorkerLimitError,
-  REQUIRED_MAIN_ENV,
+  mainEnvironmentProblems,
+  mainJsonResponse,
   resolveGatewayRequest,
   rewriteFunctionRequest,
   WORKER_LIMIT_BODY,
@@ -35,30 +36,15 @@ const USER_WORKER_MEMORY_MB = 96;
 const USER_WORKER_TIMEOUT_MS = 150_000;
 
 function assertRequiredEnvironment(): void {
-  const missing = REQUIRED_MAIN_ENV.filter((name) => !Deno.env.get(name));
-  if (!Deno.env.get("SWARM_DATABASE_URL") && !Deno.env.get("SUPABASE_DB_URL")) {
-    missing.push(
-      "SWARM_DATABASE_URL or SUPABASE_DB_URL" as typeof missing[number],
-    );
-  }
-  if (missing.length > 0) {
+  const problems = mainEnvironmentProblems((name) => Deno.env.get(name));
+  if (problems.length > 0) {
     throw new Error(
-      `edge-runtime environment is missing: ${missing.join(", ")}`,
+      `edge-runtime environment is invalid: ${problems.join(", ")}`,
     );
   }
 }
 
 assertRequiredEnvironment();
-
-function json(status: number, body: Record<string, unknown>): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
-}
 
 function environmentFor(functionName: FunctionName): Array<[string, string]> {
   const isTest = Deno.env.get("SWARM_ENV") === "test";
@@ -76,7 +62,7 @@ function environmentFor(functionName: FunctionName): Array<[string, string]> {
 async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health") {
-    return json(200, { status: "ok" });
+    return mainJsonResponse(200, { status: "ok" });
   }
   // This keeps bare-path, unknown-function, and preflight behavior in one pure
   // resolver. Kong answers a known function's preflight before the worker;
@@ -105,9 +91,9 @@ async function handle(request: Request): Promise<Response> {
 Deno.serve((request) =>
   handle(request).catch((error: unknown) => {
     if (isWorkerLimitError(error)) {
-      return json(WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY);
+      return mainJsonResponse(WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY);
     }
     console.error("edge-runtime request failed", error);
-    return json(500, { error: "internal_error" });
+    return mainJsonResponse(500, { error: "internal_error" });
   })
 );

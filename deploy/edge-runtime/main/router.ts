@@ -37,6 +37,8 @@ export const REQUIRED_MAIN_ENV = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "SWARM_SELF_SERVE",
 ] as const;
+export const SELF_SERVE_ENV_REASON =
+  "SWARM_SELF_SERVE must equal 1 because production workspace creation requires self-serve mode";
 const FUNCTION_NAME_SET = new Set<string>(FUNCTION_NAMES);
 const WORKER_LIMIT_ERROR_NAMES = new Set([
   "WorkerRequestIdleTimeout",
@@ -67,6 +69,20 @@ export function gatewayPreflight(request: Request): Response {
   });
 }
 
+export function mainJsonResponse(
+  status: number,
+  body: Record<string, unknown>,
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    },
+  });
+}
+
 export function functionNotFoundResponse(): Response {
   return new Response(KONG_FUNCTION_NOT_FOUND_BODY, {
     status: 404,
@@ -78,10 +94,23 @@ export function functionNotFoundResponse(): Response {
 }
 
 export function kongNoRouteResponse(): Response {
-  return new Response(JSON.stringify(KONG_NO_ROUTE_BODY), {
-    status: 404,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+  return mainJsonResponse(404, KONG_NO_ROUTE_BODY);
+}
+
+export function mainEnvironmentProblems(
+  environment: (name: string) => string | undefined,
+): string[] {
+  const problems: string[] = REQUIRED_MAIN_ENV.filter(
+    (name) => name !== "SWARM_SELF_SERVE" && !environment(name),
+  );
+  if (!environment("SWARM_DATABASE_URL") && !environment("SUPABASE_DB_URL")) {
+    problems.push("SWARM_DATABASE_URL or SUPABASE_DB_URL");
+  }
+  const selfServe = environment("SWARM_SELF_SERVE");
+  if (selfServe !== "1") {
+    problems.push(SELF_SERVE_ENV_REASON);
+  }
+  return problems;
 }
 
 export function resolveGatewayRequest(request: Request): GatewayResolution {

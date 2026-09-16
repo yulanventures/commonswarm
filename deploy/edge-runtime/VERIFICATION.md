@@ -9,9 +9,9 @@ mixed requests, and a healthy `docker restart` with zero restarts.
 ## NOT ESTABLISHED
 
 1. **Auth callbacks and custom-domain TLS after proxy cutover.** Staging
-   proxying works. Custom-domain deactivation, OAuth and GoTrue changes,
-   production DNS, production controls, and rollback have not run. Only a
-   controlled live cutover can establish that callback and TLS sequence.
+   proxying works. Production DNS, Management API custom-domain deactivation,
+   production controls, and rollback have not run. Only a controlled live
+   cutover can establish that callback and TLS sequence.
 2. Fix round 1 did not inspect box certificate files, 1Password items, firewall,
    DNS, or operator access.
 3. Production function behavior, production database access, and hosted edge
@@ -80,6 +80,14 @@ Fix round 4 added these applied-and-restored mutations:
 | Supabase Cloudflare header removal | removed the `CF-Connecting-IP` delete | 1 |
 | Supabase forwarded chain | restored the project-route `X-Forwarded-For` override | 1 |
 
+Fix round 5 added these applied-and-restored mutations:
+
+| Control | Applied mutation | Pure test exit | Adapted-JSON proof exit |
+|---|---|---:|---:|
+| main-service CORS | removed wildcard origin from main JSON responses | 1 | — |
+| bare Realtime routes | removed bare `/realtime/v1` from its matcher | 1 | 1 |
+| self-serve boot value | allowed `SWARM_SELF_SERVE=0` | 1 | — |
+
 ## Fix round 1 controls
 
 - Local Kong 2.8.1 answered bare `/functions/v1` with HTTP 404 and
@@ -146,10 +154,10 @@ removed after every run.
   known-function preflight, unknown GET, and unknown `OPTIONS`. Start, health,
   parity, and stop all returned exit 0; the `--rm` container was removed.
 - Caddy's adapted JSON check requires five Supabase-origin proxies to set
-  `Host` and `X-Forwarded-Host` to the project host, `X-Forwarded-Proto` to
-  `https`, and `X-Forwarded-For` to the trusted derived client address. It also
-  checks all 22 Cloudflare ranges pinned on 2026-09-16 and the HTTP/1.1
-  unbuffered Realtime proxy.
+  `Host` and `X-Forwarded-Host` to the project host, set `X-Forwarded-Proto` to
+  `https`, remove the ruled Cloudflare headers, and leave `X-Forwarded-For` to
+  Caddy's default chain. It also checks all 22 Cloudflare ranges pinned on
+  2026-09-16 and the HTTP/1.1 unbuffered Realtime proxy.
 
 ## Fix round 3 controls
 
@@ -186,3 +194,26 @@ Every Supabase-origin route now deletes `CF-Connecting-IP`, `CF-Ray`,
 `X-Forwarded-Host` and `X-Forwarded-Proto` but leaves `X-Forwarded-For` to
 Caddy's default chain. The local `/functions/v1` route deletes none of those
 headers and continues to set its visitor-derived `X-Forwarded-For`.
+
+## Fix round 5 controls
+
+- The Strategist ruling dated 2026-09-16 21:07Z replaces the earlier cutover
+  order. DNS moves to the proxied box first. The H0 document is the first public
+  control because only the box serves it. Custom-domain deactivation through
+  the Management API is the last one-way step, after all other controls pass
+  and the project-host Google redirect URI is present. GitHub and GoTrue need no
+  setting change.
+- Rollback before deactivation restores only the DNS-only project-host CNAME.
+  Rollback after deactivation must re-add and verify the Supabase custom domain,
+  wait for its TLS state, then restore that CNAME. The runbook budgets minutes
+  to 48 hours for that non-immediate path.
+- Main-service JSON responses and both gateway 404 forms carry
+  `Access-Control-Allow-Origin: *`. User-worker responses remain unchanged.
+- `/realtime/v1`, `/realtime/v1/`, and deeper Realtime paths use the same
+  HTTP/1.1 unbuffered upstream in the adapted Caddy configuration.
+- Boot accepts only the production value `SWARM_SELF_SERVE=1`. The stable error
+  says workspace creation requires self-serve mode without reflecting the
+  supplied value.
+- HezLead measured the 22-range trusted-proxy block in the box main Caddyfile.
+  The runbook now verifies its adapted form instead of telling the operator to
+  paste a second copy.

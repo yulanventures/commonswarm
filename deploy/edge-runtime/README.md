@@ -11,10 +11,12 @@ gateway preflight before a worker starts. Other requests still use each
 function's CORS policy. Query strings, methods, headers, and bodies are kept.
 
 Boot requires `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
-`SUPABASE_SERVICE_ROLE_KEY`, and `SWARM_SELF_SERVE`, plus one supported database
-URL name. A retired worker creation is retried once, before any request body has
-reached a worker. A full worker pool or an idle worker timeout returns the hosted
-HTTP 504 status with the runtime's `WORKER_LIMIT` body.
+`SUPABASE_SERVICE_ROLE_KEY`, and one supported database URL name.
+`SWARM_SELF_SERVE` must equal `1`; another non-empty value would let the service
+start while production workspace creation remains disabled. A retired worker
+creation is retried once, before any request body has reached a worker. A full
+worker pool or an idle worker timeout returns the hosted HTTP 504 status with
+the runtime's `WORKER_LIMIT` body.
 
 Each worker has a 96 MiB memory limit and a 150-second wall-clock limit. Four
 workers can use at most 384 MiB, leaving 128 MiB of the container's 512 MiB hard
@@ -67,7 +69,7 @@ Supabase client calls in those files.
 | `/auth/v1/authorize`, `/auth/v1/token`, `/auth/v1/user`, `/auth/v1/logout`, `/auth/v1/otp`, `/auth/v1/settings` | CLI and site through supabase-js, plus the site build provider check | Supabase project origin |
 | `/rest/v1/memberships`, `/workspaces`, `/member_profiles`, `/agent_principals`, `/tasks`, `/channels`, `/signals`, `/files`, `/my_devices`, `/pending_invitations` | CLI and site, directly or through supabase-js | Supabase project origin |
 | `/storage/v1/object/upload/sign/...`, `/object/info/authenticated/...`, `/object/sign/...`, `/object/...` | command function and site file upload/download | Supabase project origin |
-| `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Supabase project origin; Caddy keeps the websocket upgrade |
+| `/realtime/v1`, `/realtime/v1/`, `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Supabase project origin; Caddy uses the unbuffered HTTP/1.1 upstream |
 | every other path | compatibility fallback | Supabase project origin |
 
 The reverse proxy sends the project origin as HTTP `Host`,

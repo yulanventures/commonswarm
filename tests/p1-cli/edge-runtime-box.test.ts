@@ -15,10 +15,13 @@ import {
   KONG_FUNCTION_NOT_FOUND_BODY,
   KONG_NO_ROUTE_BODY,
   KONG_PREFLIGHT_METHODS,
+  mainEnvironmentProblems,
+  mainJsonResponse,
   REQUIRED_MAIN_ENV,
   resolveFunctionRoute,
   resolveGatewayRequest,
   rewriteFunctionRequest,
+  SELF_SERVE_ENV_REASON,
   WORKER_LIMIT_BODY,
   WORKER_LIMIT_STATUS,
 } from "../../deploy/edge-runtime/main/router.js";
@@ -198,6 +201,7 @@ test("edge runtime matches Kong preflight and unknown-function responses", async
 
   const directUnknown = functionNotFoundResponse();
   assert.equal(directUnknown.status, 404);
+  assert.equal(directUnknown.headers.get("access-control-allow-origin"), "*");
 
   const bare = resolveGatewayRequest(
     new Request("https://edge.test/functions/v1"),
@@ -205,7 +209,20 @@ test("edge runtime matches Kong preflight and unknown-function responses", async
   assert.equal(bare.route, null);
   assert.ok(bare.response);
   assert.equal(bare.response.status, 404);
+  assert.equal(bare.response.headers.get("access-control-allow-origin"), "*");
   assert.deepEqual(await bare.response.json(), KONG_NO_ROUTE_BODY);
+
+  for (
+    const [status, body] of [
+      [WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY],
+      [500, { error: "internal_error" }],
+    ] as const
+  ) {
+    const response = mainJsonResponse(status, body);
+    assert.equal(response.status, status);
+    assert.equal(response.headers.get("access-control-allow-origin"), "*");
+    assert.deepEqual(await response.json(), body);
+  }
 });
 
 test("edge runtime requires the production feature gate at boot", () => {
@@ -215,6 +232,24 @@ test("edge runtime requires the production feature gate at boot", () => {
     "SUPABASE_SERVICE_ROLE_KEY",
     "SWARM_SELF_SERVE",
   ]);
+
+  const environment = new Map<string, string>([
+    ["SUPABASE_URL", "local-test-url"],
+    ["SUPABASE_ANON_KEY", "local-test-anon"],
+    ["SUPABASE_SERVICE_ROLE_KEY", "local-test-service-role"],
+    ["SUPABASE_DB_URL", "local-test-database"],
+    ["SWARM_SELF_SERVE", "1"],
+  ]);
+  const get = (name: string) => environment.get(name);
+  assert.deepEqual(mainEnvironmentProblems(get), []);
+
+  for (const invalid of ["", "0", "true", " 1"]) {
+    environment.set("SWARM_SELF_SERVE", invalid);
+    assert.deepEqual(mainEnvironmentProblems(get), [SELF_SERVE_ENV_REASON]);
+  }
+
+  environment.delete("SWARM_SELF_SERVE");
+  assert.deepEqual(mainEnvironmentProblems(get), [SELF_SERVE_ENV_REASON]);
 });
 
 test("edge runtime retries retired creation once and maps pool limits", async () => {
@@ -341,7 +376,7 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
   assert.match(caddy, /\(supabase_realtime_origin\)[\s\S]*?versions 1\.1/);
   assert.match(
     caddy,
-    /handle \/realtime\/v1\/\* \{\s*import supabase_realtime_origin\s*\}/,
+    /@supabase_realtime path \/realtime\/v1 \/realtime\/v1\/\*[\s\S]*?handle @supabase_realtime \{\s*import supabase_realtime_origin\s*\}/,
   );
   assert.match(
     globalServers,
@@ -404,7 +439,7 @@ test("Caddy site import cannot contain a global options block", async () => {
   assert.doesNotMatch(site, /^\s*\{\s*$/m);
   assert.match(
     globalServers,
-    /^# Paste these lines INSIDE the box main Caddyfile's existing global options/m,
+    /^# Reference for the lines INSIDE the box main Caddyfile's global options/m,
   );
   assert.match(globalServers, /^servers \{/m);
   assert.doesNotMatch(globalServers, /^\s*\{\s*$/m);

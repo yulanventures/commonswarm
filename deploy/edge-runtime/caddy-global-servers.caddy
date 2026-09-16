@@ -1,5 +1,5 @@
-# Paste these lines INSIDE the box main Caddyfile's existing global options
-# block. Do not put this file under sites/ and do not import it as a site file.
+# Reference for the lines INSIDE the box main Caddyfile's global options block.
+# Do not put this file under sites/ and do not import it as a site file.
 servers {
 	# Cloudflare published proxy ranges, pinned 2026-09-16. Trust only these
 	# peers when deriving client_ip from CF-Connecting-IP/X-Forwarded-For.

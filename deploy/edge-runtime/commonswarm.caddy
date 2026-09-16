@@ -78,7 +78,8 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 
 	# supabase-js uses this websocket route for wake, feed, and activity channels.
 	# Use HTTP/1.1 upstream and disable response buffering for the upgrade.
-	handle /realtime/v1/* {
+	@supabase_realtime path /realtime/v1 /realtime/v1/*
+	handle @supabase_realtime {
 		import supabase_realtime_origin
 	}
 
