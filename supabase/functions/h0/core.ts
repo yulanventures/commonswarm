@@ -3,6 +3,19 @@ export const H0_ROBOTS_TAG = "noindex, nofollow, noarchive";
 
 type JsonSchema = Record<string, unknown>;
 
+/*
+ * THIS MODULE MUST STAY A LEAF — no relative imports — because it is imported by the Deno edge
+ * (index.ts) AND by Node tests through tsc. Deno needs `./x.ts`; tsc rejects it (TS5097). Importing
+ * the recipient constants here broke `npm run check:tests` for exactly that reason, so the
+ * enforcement's constants are passed IN by the caller instead. The argument is REQUIRED: a default
+ * would be a typed copy of the rule, which is the defect this whole item exists to prevent.
+ * index.ts passes SIGNAL_RECIPIENT_KINDS and SIGNAL_RECIPIENT_MAX, and a test pins that by AST.
+ */
+export interface RecipientRule {
+  readonly kinds: readonly string[];
+  readonly max: number;
+}
+
 interface DocumentField {
   readonly name: string;
   readonly presence: "required" | "omittable";
@@ -27,10 +40,42 @@ interface DocumentVerb {
  * this branch rebases onto it, the mapping is at least EXPLICIT and a test asserts it covers every
  * field the table declares, so a new field cannot silently default to "string".
  */
-const FIELD_JSON_TYPES: Record<string, JsonSchema> = {
-  wait: { type: "integer", minimum: 0, maximum: 50 },
-  surfaced: { type: "boolean" },
-};
+function fieldJsonTypes(recipients: RecipientRule): Record<string, JsonSchema> {
+  return {
+    wait: { type: "integer", minimum: 0, maximum: 50 },
+    surfaced: { type: "boolean" },
+    /*
+     * `to` IS AN ARRAY OF RECIPIENT OBJECTS, and every earlier version of this document said it was a
+     * string. Both review arms passed that. The wire is `to?: SignalRecipient[]`
+     * (supabase/functions/command/index.ts:236), each entry exactly `{ kind, id }`, and
+     * `parseSignalRecipients` (supabase/functions/_shared/channels.ts:359) returns null for anything
+     * that is not that array — so an agent following the document would send a value the server
+     * refuses. The field had been put in STRING_FIELDS, and the partition test was green, because
+     * the partition proves every field is CLASSIFIED, not that the classification is RIGHT.
+     * I found it by reading the golden before pinning it: a snapshot pins whatever the document says
+     * now, errors included. The kind enum is imported from the enforcement, never typed here.
+     */
+    to: {
+      type: "array",
+      /* Each bound read from the parser, never typed: an empty list is refused
+       * (signalRecipientListProblem), so is more than SIGNAL_RECIPIENT_MAX, and so is the same
+       * recipient twice. The server also folds `id` case before that duplicate check, which
+       * `uniqueItems` cannot express — the schema is a guide to a valid body, the parser the law. */
+      minItems: 1,
+      maxItems: recipients.max,
+      uniqueItems: true,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["kind", "id"],
+        properties: {
+          kind: { type: "string", enum: [...recipients.kinds] },
+          id: { type: "string", format: "uuid" },
+        },
+      },
+    },
+  };
+}
 
 /*
  * THE PARTITION IS THE CONTROL, and the first version did not have one.
@@ -48,19 +93,19 @@ const FIELD_JSON_TYPES: Record<string, JsonSchema> = {
 const STRING_FIELDS: readonly string[] = [
   "joinCredential", "attemptId", "name", "icon", "ackBatch",
   "signal_id", "lease_id", "listener_instance_id", "outcome", "last_error_code",
-  "body", "to", "requestId",
+  "body", "requestId",
 ];
 
 export function fieldJsonTypeNames(): readonly string[] {
-  return Object.keys(FIELD_JSON_TYPES);
+  return Object.keys(fieldJsonTypes({ kinds: [], max: 0 }));
 }
 
 export function stringFieldNames(): readonly string[] {
   return STRING_FIELDS;
 }
 
-function fieldSchema(field: DocumentField): JsonSchema {
-  const declared = FIELD_JSON_TYPES[field.name];
+function fieldSchema(field: DocumentField, recipients: RecipientRule): JsonSchema {
+  const declared = fieldJsonTypes(recipients)[field.name];
   if (declared === undefined && !STRING_FIELDS.includes(field.name)) {
     /* NOT A DEFAULT. An arm noted that STRING_FIELDS was exported for the test and never read
      * here, so the partition was a test gate while the RUNTIME still fell through to "string" for
@@ -84,9 +129,9 @@ function fieldSchema(field: DocumentField): JsonSchema {
   return base;
 }
 
-function requestSchema(verb: DocumentVerb): JsonSchema {
+function requestSchema(verb: DocumentVerb, recipients: RecipientRule): JsonSchema {
   const properties = Object.fromEntries(
-    verb.fields.map((field) => [field.name, fieldSchema(field)]),
+    verb.fields.map((field) => [field.name, fieldSchema(field, recipients)]),
   );
   const required = verb.fields
     .filter((field) => field.presence === "required")
@@ -100,7 +145,7 @@ function requestSchema(verb: DocumentVerb): JsonSchema {
   };
 }
 
-function verbPath(verb: DocumentVerb): Record<string, unknown> {
+function verbPath(verb: DocumentVerb, recipients: RecipientRule): Record<string, unknown> {
   return {
     post: {
       operationId: verb.name,
@@ -110,7 +155,7 @@ function verbPath(verb: DocumentVerb): Record<string, unknown> {
         required: true,
         content: {
           "application/json": {
-            schema: requestSchema(verb),
+            schema: requestSchema(verb, recipients),
           },
         },
       },
@@ -125,6 +170,7 @@ function verbPath(verb: DocumentVerb): Record<string, unknown> {
 export function buildH0AgentDocument(
   verbs: readonly DocumentVerb[],
   description: string,
+  recipients: RecipientRule,
 ): Record<string, unknown> {
   return {
     openapi: "3.1.0",
@@ -135,7 +181,7 @@ export function buildH0AgentDocument(
     },
     servers: [{ url: "/functions/v1/h0" }],
     paths: Object.fromEntries(
-      verbs.map((verb) => [`/${verb.name}`, verbPath(verb)]),
+      verbs.map((verb) => [`/${verb.name}`, verbPath(verb, recipients)]),
     ),
     components: {
       securitySchemes: {

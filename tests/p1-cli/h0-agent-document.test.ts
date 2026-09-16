@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import {
   H0_VERBS,
   h0AgentDocumentDescription,
@@ -12,9 +15,16 @@ import {
   fieldJsonTypeNames,
   stringFieldNames,
 } from "../../supabase/functions/h0/core.js";
+import {
+  SIGNAL_RECIPIENT_KINDS,
+  SIGNAL_RECIPIENT_MAX,
+} from "../../supabase/functions/_shared/channels.js";
+
+/* The enforcement's own constants — the same two index.ts passes. */
+const RECIPIENTS = { kinds: SIGNAL_RECIPIENT_KINDS, max: SIGNAL_RECIPIENT_MAX };
 
 function agentDocument(): Record<string, unknown> {
-  return buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription());
+  return buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
 }
 
 function documentPaths(document: Record<string, unknown>): string[] {
@@ -43,13 +53,13 @@ test("agent document paths are generated from the H0 verb table", () => {
   const mutatedTable = [...H0_VERBS, addedVerb];
   assert.deepEqual(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription()),
+      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), RECIPIENTS),
     ),
     mutatedTable.map((verb) => `/${verb.name}`).sort(),
   );
   assert.ok(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription()),
+      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), RECIPIENTS),
     ).includes(
       `/${addedVerb.name}`,
     ),
@@ -140,7 +150,7 @@ test("the document is served on BOTH the public path and the gateway-stripped pa
    *
    * NOT ESTABLISHED: no live `functions deploy` or `functions serve` request was made. This is
    * established from the CLI's Kong template and the serve worker, not from production. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription());
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
   const paths = [
     "https://api.commonswarm.com/functions/v1/h0/agent-doc/abc123",
     "https://api.commonswarm.com/h0/agent-doc/abc123",
@@ -182,7 +192,7 @@ test("every table field is EITHER typed OR declared string — an exact partitio
 
 test("error responses carry the no-store and robots headers too", () => {
   /* Test 3 only ever checked a 200. An arm noted the 500 path was never exercised. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription());
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
   const cases = [
     handleH0Request(new Request("https://api.commonswarm.com/h0/nope"), document),
     handleH0Request(
@@ -207,7 +217,7 @@ test("HEAD and OPTIONS work, because the link must be safe to UNFURL", () => {
    * requirement, which nothing previously tested.
    *
    * HEAD returns the GET's status and headers with a NULL body, per the HTTP spec. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription());
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
   const url = "https://api.commonswarm.com/h0/agent-doc/abc";
 
   const head = handleH0Request(new Request(url, { method: "HEAD" }), document);
@@ -227,15 +237,187 @@ test("HEAD and OPTIONS work, because the link must be safe to UNFURL", () => {
   }
 });
 
-test("the public document is readable cross-origin, and nothing else borrows that", () => {
+test("the agent document GET is readable cross-origin", () => {
   /* A wildcard origin is safe ONLY because this document authorises nothing, carries no secret,
    * and reads no cookie or Authorization header. Without it a browser agent or OpenAPI viewer is
    * blocked from a document that is already public. Pinned here so that if a future lane adds an
    * endpoint that DOES carry a credential, copying this header is a visible, deliberate act. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription());
+  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), RECIPIENTS);
   const response = handleH0Request(
     new Request("https://api.commonswarm.com/h0/agent-doc/abc"),
     document,
   );
   assert.equal(response.headers.get("access-control-allow-origin"), "*");
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * Wire type extraction, by AST. Comments and formatting are inert.
+ * ------------------------------------------------------------------------------------------- */
+type WireKind = "string" | "number" | "boolean" | "array";
+interface WireMember { optional: boolean; nullable: boolean; kind: WireKind }
+
+function wireMembers(rel: string, interfaceName: string): Map<string, WireMember> {
+  const path = fileURLToPath(new URL(`../../${rel}`, import.meta.url));
+  const file = ts.createSourceFile(rel, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
+  let found: ts.InterfaceDeclaration | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isInterfaceDeclaration(node) && node.name.text === interfaceName) found = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(found, `interface ${interfaceName} not found in ${rel} — the enforcement moved`);
+  const members = new Map<string, WireMember>();
+  for (const member of found.members) {
+    if (!ts.isPropertySignature(member) || !member.type || !ts.isIdentifier(member.name)) continue;
+    let node = member.type;
+    let nullable = false;
+    if (ts.isUnionTypeNode(node)) {
+      const rest = node.types.filter((part) =>
+        !(ts.isLiteralTypeNode(part) && part.literal.kind === ts.SyntaxKind.NullKeyword)
+      );
+      nullable = rest.length !== node.types.length;
+      if (rest.length === 1) node = rest[0]!;
+    }
+    const kind: WireKind = ts.isArrayTypeNode(node)
+      ? "array"
+      : node.kind === ts.SyntaxKind.BooleanKeyword
+      ? "boolean"
+      : node.kind === ts.SyntaxKind.NumberKeyword
+      ? "number"
+      : "string";
+    members.set(member.name.text, { optional: member.questionToken !== undefined, nullable, kind });
+  }
+  assert.ok(members.size >= 5, `extracted only ${members.size} members of ${interfaceName}`);
+  return members;
+}
+
+test("every field's JSON TYPE matches the wire member it maps to", () => {
+  /* THE CONTROL THAT WAS MISSING, and its absence shipped a lie past two review arms.
+   *
+   * Every earlier version typed `to` as a string. The wire is `to?: SignalRecipient[]`, and
+   * parseSignalRecipients returns null for anything but that array, so an agent following the
+   * document would send a value the server refuses. The partition test was green throughout: it
+   * proves every field is CLASSIFIED, not that the classification is RIGHT. A golden would have
+   * been green too — it pins whatever the document says now, errors included, and I only caught
+   * this by reading the golden before pinning it.
+   *
+   * So the JSON type is compared to the wire member's TypeScript type, read by AST. Known limit,
+   * stated: a type REFERENCE (e.g. `DeliveryAckOutcome`, `SignalKind`) is read as "string", which
+   * holds for every reference these verbs reach today and would misread an object type. */
+  const document = agentDocument() as { paths: Record<string, any> };
+  const wires: Record<string, Map<string, WireMember>> = {
+    ack: wireMembers("supabase/functions/command/durable-delivery.ts", "AckAgentDeliveryCommand"),
+    signal: wireMembers("supabase/functions/command/index.ts", "SignalCommand"),
+  };
+  const verbWire: Record<string, "ack" | "signal"> = {
+    ack: "ack", ask: "signal", note: "signal", reply: "signal", "working-on": "signal",
+  };
+  let compared = 0;
+  for (const verb of H0_VERBS) {
+    const wire = verbWire[verb.name];
+    if (!wire) continue; /* register and poll have no enforcement yet */
+    const properties = document.paths[`/${verb.name}`].post.requestBody
+      .content["application/json"].schema.properties;
+    for (const field of verb.fields) {
+      if (field.wire?.target === "command-envelope") continue;
+      const wireName = field.wire?.target === "signal" ? field.wire.name : field.name;
+      const member = wires[wire]!.get(wireName);
+      assert.ok(member, `${verb.name}.${field.name}: no wire member ${wireName}`);
+      const declared = properties[field.name].type;
+      const base = Array.isArray(declared) ? declared.filter((t: string) => t !== "null")[0] : declared;
+      const jsonKind = base === "integer" ? "number" : base;
+      assert.equal(
+        jsonKind,
+        member.kind,
+        `${verb.name}.${field.name}: document says ${base}, wire ${wireName} is ${member.kind}`,
+      );
+      compared++;
+    }
+  }
+  assert.ok(compared >= 12, `compared only ${compared} fields — the mapping lost fields`);
+});
+
+test("an unclassified field THROWS where the schema is built, independent of the partition test", () => {
+  /* An arm deleted the runtime throw in fieldSchema and every test stayed green, because every
+   * current field is classified. The throw needs its own control: build from a table that carries
+   * a field neither typed nor declared string. */
+  const register = H0_VERBS.find((verb) => verb.name === "register")!;
+  const mutated = [{
+    ...register,
+    fields: [...register.fields, { name: "unclassified_probe", presence: "omittable", nullable: false }],
+  }] as unknown as typeof H0_VERBS;
+  assert.throws(
+    () => buildH0AgentDocument(mutated, h0AgentDocumentDescription(), RECIPIENTS),
+    /unclassified_probe.*neither typed nor declared a string field/,
+  );
+});
+
+test("the OPTIONS preflight carries the no-store, robots and CORS headers", () => {
+  /* An arm stripped these from OPTIONS only and every test stayed green. */
+  const response = handleH0Request(
+    new Request("https://api.commonswarm.com/h0/agent-doc/abc", { method: "OPTIONS" }),
+    agentDocument(),
+  );
+  assert.equal(response.status, 204);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow, noarchive");
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
+});
+
+test("the whole served OpenAPI document equals its REVIEWED golden", () => {
+  /* Pins every schema, summary, security block and required list, which the path-key test does
+   * not. READ THIS BEFORE UPDATING THE FIXTURE: a golden pins whatever the document says, errors
+   * included. The first attempt at this fixture would have pinned `to` as a string. When it fails,
+   * read the diff against the wire, not just against your intent. */
+  const golden = JSON.parse(readFileSync(
+    fileURLToPath(new URL("./fixtures/h0-agent-document.golden.json", import.meta.url)),
+    "utf8",
+  ));
+  assert.deepEqual(agentDocument(), golden);
+});
+
+test("index.ts passes the ENFORCEMENT's recipient constants, not a copy", () => {
+  /* core.ts takes the recipient rule as an argument so it can stay a leaf. That moves the risk to
+   * the call site: index.ts could pass a typed `{ kinds: ["user", "agent"], max: 8 }` and every
+   * other test would stay green, because the tests pass the real constants themselves. So the
+   * wiring is pinned by AST: the third argument's `kinds` and `max` must be the identifiers
+   * SIGNAL_RECIPIENT_KINDS and SIGNAL_RECIPIENT_MAX, imported from ../_shared/channels.ts. */
+  const rel = "supabase/functions/h0/index.ts";
+  const file = ts.createSourceFile(
+    rel,
+    readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)), "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  const imported = new Set<string>();
+  let passed: Record<string, string> | undefined;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text === "../_shared/channels.ts" &&
+      node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const element of node.importClause.namedBindings.elements) imported.add(element.name.text);
+    }
+    if (
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === "buildH0AgentDocument"
+    ) {
+      const rule = node.arguments[2];
+      assert.ok(rule && ts.isObjectLiteralExpression(rule), "third argument must be an object literal");
+      passed = {};
+      for (const property of rule.properties) {
+        if (ts.isPropertyAssignment(property) && ts.isIdentifier(property.name)) {
+          passed[property.name.text] = ts.isIdentifier(property.initializer)
+            ? property.initializer.text
+            : `<${ts.SyntaxKind[property.initializer.kind]}>`;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.deepEqual(passed, { kinds: "SIGNAL_RECIPIENT_KINDS", max: "SIGNAL_RECIPIENT_MAX" });
+  assert.ok(imported.has("SIGNAL_RECIPIENT_KINDS") && imported.has("SIGNAL_RECIPIENT_MAX"),
+    "both constants must be imported from ../_shared/channels.ts");
 });
