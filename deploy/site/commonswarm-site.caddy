@@ -1,4 +1,6 @@
-https://commonswarm.com, https://www.commonswarm.com {
+# site-staging.commonswarm.com follows the zone rule <service>-staging and lets the full path through Cloudflare
+# be checked with parity-check.mjs before commonswarm.com and www move (HezLead approved the naming rule).
+https://commonswarm.com, https://www.commonswarm.com, https://site-staging.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 	root * /srv/commonswarm/site/current
 
