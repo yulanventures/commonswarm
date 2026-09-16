@@ -363,7 +363,7 @@ test("every edge function folds its transaction setup (activity has a 5 s client
     assert.equal([...source.matchAll(/db\.begin\("isolation level read committed", async \(tx\) =>/g)].length, 1, `${name}: BEGIN carries the isolation level`);
     assert.throws(
       () => assertNoUnfoldedSetup(name, source.replace(/SELECT\s+set_config\('role', '(\w+)', true\),/, (_m, role) => `SELECT 1;\`; await tx.unsafe("SET LOCAL ROLE ${role}"); await tx\`SELECT`)),
-      undefined,
+      assert.AssertionError,
       `${name}: mutation (role back to its own SET LOCAL ROLE) must fail`,
     );
   }
@@ -420,7 +420,7 @@ test("round-trip fold controls reject each latency regression", () => {
   for (const mutation of mutations) {
     assert.throws(
       () => assertRoundTripFold(mutation.read, mutation.command),
-      undefined,
+      assert.AssertionError,
       mutation.name,
     );
   }
