@@ -316,6 +316,15 @@ function parseProfile(raw: string): CredentialProfile {
  * CLI invocations renewing the same lineage concurrently is exactly the read-rotate-write
  * race that once produced two live credentials.
  */
+export class FileLockTimeoutError extends Error {
+  readonly name = "FileLockTimeoutError";
+  readonly code = "file_lock_timeout";
+
+  constructor(readonly lockName: string) {
+    super("timed out waiting for the credential refresh lock");
+  }
+}
+
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
@@ -346,7 +355,7 @@ export async function withFileLock<T>(
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error("timed out waiting for the credential refresh lock");
+        throw new FileLockTimeoutError(lockName);
       }
       await delay(25 + randomBytes(1)[0]! % 75);
     }

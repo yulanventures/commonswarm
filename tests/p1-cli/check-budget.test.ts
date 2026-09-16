@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
   AGENT_CHECK_STARTUP_ALLOWANCE_MS,
@@ -12,13 +14,20 @@ import {
 } from "../../src/cloud/agent-check-budget.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages } from "../../src/cloud/agent-check.js";
-import { mergeReceiveHooks } from "../../src/cloud/agent-receive.js";
+import { mergeReceiveHooks, receiveBindingPath } from "../../src/cloud/agent-receive.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
+import { usage } from "../../src/cli.js";
+import { HOOK_CHECK_TIMEOUT_MS } from "../../src/listener/hook.js";
 
 const WORKSPACE_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const OWNER_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
+/** Independent host contract: Claude Code documents hook timeout in whole seconds. */
+const DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS = 5;
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const cliPath = join(repoRoot, "src", "cli.ts");
+const tsxImport = import.meta.resolve("tsx");
 let root: string;
 
 before(async () => {
@@ -95,9 +104,10 @@ function fetcher(rows: SignalRecord[], waitMs: number): typeof fetch {
 }
 
 test("check budget plus measured allowances equals the host-hook ceiling", () => {
+  assert.equal(HOST_HOOK_TIMEOUT_SECONDS, DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS);
   assert.equal(
     AGENT_CHECK_TIMEOUT_MS + AGENT_CHECK_STARTUP_ALLOWANCE_MS + AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
-    HOST_HOOK_TIMEOUT_SECONDS * 1_000,
+    DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000,
   );
 });
 
@@ -105,7 +115,11 @@ test("receive hook settings use the exported host-hook ceiling", () => {
   const settings = mergeReceiveHooks({}, "cswarm check", null, false);
   const hooks = settings.hooks as Record<string, unknown>;
   const groups = hooks.UserPromptSubmit as Array<{ hooks: Array<{ timeout: number }> }>;
-  assert.equal(groups[0]?.hooks[0]?.timeout, HOST_HOOK_TIMEOUT_SECONDS);
+  assert.equal(groups[0]?.hooks[0]?.timeout, DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS);
+});
+
+test("usage states the listener hook budget generated from its constant", () => {
+  assert.match(usage(), new RegExp(`hook check has its own ${HOOK_CHECK_TIMEOUT_MS / 1_000}s ceiling`));
 });
 
 test("check succeeds below its budget and times out without moving the cursor above it", { timeout: 20_000 }, async () => {
@@ -136,4 +150,124 @@ test("check succeeds below its budget and times out without moving the cursor ab
     present: async () => {},
   });
   assert.deepEqual(after.messages.map(row => row.id), [second.id]);
+});
+
+test("lock contention from another process becomes check_timeout without moving the cursor", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const first = signal(1);
+  await checkAgentMessages({
+    profilePath,
+    fetcher: fetcher([first], 0),
+    present: async () => {},
+  });
+
+  const lockPath = join(dirname(profilePath), "check.lock");
+  const holder = spawn(process.execPath, [join(repoRoot, "tests/fixtures/hold-file-lock.mjs"), lockPath], {
+    cwd: repoRoot,
+    env: { ...process.env, HOME: await mkdtemp(join(root, "lock-home-")) },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let holderError = "";
+  holder.stderr.setEncoding("utf8");
+  holder.stderr.on("data", chunk => holderError += chunk);
+  await new Promise<void>((resolveReady, rejectReady) => {
+    holder.once("error", rejectReady);
+    holder.stdout.once("data", chunk => {
+      if (String(chunk) !== "ready\n") rejectReady(new Error(`lock holder was not ready: ${String(chunk)}`));
+      else resolveReady();
+    });
+  });
+
+  try {
+    const started = Date.now();
+    await assert.rejects(checkAgentMessages({
+      profilePath,
+      fetcher: fetcher([first, signal(2)], 0),
+      present: async () => {},
+    }), { code: "check_timeout" });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < AGENT_CHECK_TIMEOUT_MS + 250, `lock timeout took ${elapsed}ms`);
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.equal(state.cursor.id, first.id);
+  } finally {
+    holder.stdin.end();
+    const status = await new Promise<number | null>(resolveStatus => holder.once("close", resolveStatus));
+    assert.equal(status, 0, holderError);
+  }
+});
+
+async function writeReceiveBinding(profilePath: string, host: string, cwd: string): Promise<void> {
+  const canonicalCwd = await realpath(cwd);
+  await writeFile(receiveBindingPath(profilePath, host), JSON.stringify({
+    version: 1,
+    profile: profilePath,
+    host_session_id: host,
+    provider: "codex",
+    requested_mode: "turn",
+    cwd: canonicalCwd,
+    hook_file: null,
+    hook_command: null,
+    turn_verified_at: null,
+    last_turn_started_at: null,
+    last_turn_ended_at: null,
+    idle: false,
+    channel_config: null,
+    channel_instance_id: null,
+    channel_pid: null,
+    channel_heartbeat_at: null,
+    wake_verified_at: null,
+    canary: null,
+  }), { mode: 0o600 });
+}
+
+async function runReceiveHook(profilePath: string, host: string, cwd: string, preloadDelayMs: number) {
+  const home = await mkdtemp(join(root, "hook-home-"));
+  const canonicalCwd = await realpath(cwd);
+  const started = Date.now();
+  const child = spawn(process.execPath, [
+    "--import", tsxImport, cliPath,
+    "check", "--profile", profilePath, "--hook", "--host-session-id", host,
+  ], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, "config"),
+      SWARM_AGENT_STATE_DIR: join(home, "agent-state"),
+      CSWARM_TEST_PRELOAD_DELAY_MS: String(preloadDelayMs),
+      NODE_OPTIONS: `--max-old-space-size=4096 --import=${join(repoRoot, "tests/fixtures/receive-hanging-fetch.mjs")}`,
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "", stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", chunk => stdout += chunk);
+  child.stderr.on("data", chunk => stderr += chunk);
+  child.stdin.end(JSON.stringify({ session_id: host, cwd: canonicalCwd, hook_event_name: "UserPromptSubmit" }));
+  const safety = setTimeout(() => child.kill("SIGKILL"), 6_000);
+  const status = await new Promise<number | null>((resolveStatus, rejectStatus) => {
+    child.once("error", rejectStatus);
+    child.once("close", resolveStatus);
+  });
+  clearTimeout(safety);
+  return { status, stdout, stderr, elapsed: Date.now() - started };
+}
+
+test("receive hook exits after timeout output even when transport keeps the process alive", { timeout: 15_000 }, async () => {
+  const profilePath = await profile();
+  const host = "check-budget-session";
+  const cwd = await mkdtemp(join(root, "hook-project-"));
+  await writeReceiveBinding(profilePath, host, cwd);
+  const expected = `CommonSwarm check failed (check_timeout); the inbox was not proved empty. Run cswarm check --profile '${profilePath}' to see the error.\n`;
+
+  for (const preloadDelayMs of [0, 1_200]) {
+    const result = await runReceiveHook(profilePath, host, cwd, preloadDelayMs);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, expected);
+    assert.ok(
+      result.elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000,
+      `receive hook took ${result.elapsed}ms with ${preloadDelayMs}ms preload`,
+    );
+  }
 });

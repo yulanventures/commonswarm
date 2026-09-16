@@ -23,3 +23,15 @@ export const AGENT_CHECK_TIMEOUT_MS =
   HOST_HOOK_TIMEOUT_SECONDS * 1_000 -
   AGENT_CHECK_STARTUP_ALLOWANCE_MS -
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
+
+/** Absolute process-age deadline for a host hook, leaving time to collect stdout. */
+export const HOST_HOOK_PROCESS_DEADLINE_MS =
+  HOST_HOOK_TIMEOUT_SECONDS * 1_000 - AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
+
+/** Delay until an absolute deadline measured from process start, never handler start. */
+export function processDeadlineDelayMs(
+  deadlineMs: number,
+  processAgeMs = process.uptime() * 1_000,
+): number {
+  return Math.max(0, Math.ceil(deadlineMs - processAgeMs));
+}

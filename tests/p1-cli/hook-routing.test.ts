@@ -54,6 +54,8 @@ const TOKEN = `swm_agt_${"A".repeat(43)}`;
 const SECOND_TOKEN = `swm_agt_${"B".repeat(43)}`;
 const TOKEN_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
+/** Independent host contract: Claude Code kills a hook at the written five-second timeout. */
+const DOCUMENTED_HOST_HOOK_TIMEOUT_MS = 5_000;
 const MULTI_PRINCIPAL_GUIDANCE =
   "This host runs multiple agents. The CommonSwarm hook needs --principal-id. " +
   "Reinstall it for this agent: cswarm hook install claude --principal-id <uuid> --write";
@@ -1610,7 +1612,7 @@ test("hook hard deadline exits 0 inside the derived check bound against a blackh
       assert.equal(result.stdout, "");
       assert.equal(result.stderr, "");
       assert.ok(
-        elapsed < HOOK_CHECK_TIMEOUT_MS + 1_000,
+        elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_MS,
         `hard deadline took ${elapsed}ms`,
       );
     } finally {

@@ -6,6 +6,10 @@ import { setupAgent } from "./cloud/agent-setup.js";
 import {
   cachedAgentMessage, checkAgentMessages, renderAgentCheck, shellQuote,
 } from "./cloud/agent-check.js";
+import {
+  HOST_HOOK_PROCESS_DEADLINE_MS,
+  processDeadlineDelayMs,
+} from "./cloud/agent-check-budget.js";
 import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile } from "./cloud/agent-profile.js";
 import {
   checkedHostSessionId, configureAgentReceive, readReceiveBinding,
@@ -61,6 +65,15 @@ async function output(value: unknown): Promise<void> {
   await writeOnboardingOutput(`${JSON.stringify(value)}\n`);
 }
 
+function turnHookFailureText(profile: string, code: string): string {
+  return `CommonSwarm check failed (${code}); the inbox was not proved empty. Run cswarm check --profile ${shellQuote(profile)} to see the error.\n`;
+}
+
+async function exitTurnHookProcess(text?: string): Promise<never> {
+  if (text) await writeOnboardingOutput(text).catch(() => undefined);
+  process.exit(0);
+}
+
 async function hookInput(): Promise<unknown> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -83,6 +96,12 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   const profile = privatePath(args.required("profile"));
   const host = checkedHostSessionId(args.required("host-session-id"));
   const diagnostic = join(dirname(profile), `check-error-${profileScopeKey(host)}.json`);
+  let hardExitStarted = false;
+  let failureText: string | undefined;
+  const hardExit = setTimeout(() => {
+    hardExitStarted = true;
+    void exitTurnHookProcess(turnHookFailureText(profile, "check_timeout"));
+  }, processDeadlineDelayMs(HOST_HOOK_PROCESS_DEADLINE_MS));
   try {
     const event = await hookInput();
     const result = await receiveHookEvent(profile, host, event);
@@ -101,8 +120,11 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
       changed = await readSecureJsonFileIfPresent(diagnostic, 4096) !== JSON.stringify(code);
       if (changed) await writeSecureJsonFile(diagnostic, JSON.stringify(code));
     } catch { /* A broken state directory cannot hold a diagnostic. */ }
-    if (changed) await writeOnboardingOutput(`CommonSwarm check failed (${code}); the inbox was not proved empty. Run cswarm check --profile ${shellQuote(profile)} to see the error.\n`).catch(() => undefined);
+    if (changed) failureText = turnHookFailureText(profile, code);
     // A coordination outage must not block the user's host turn.
+  } finally {
+    clearTimeout(hardExit);
+    if (!hardExitStarted) await exitTurnHookProcess(failureText);
   }
 }
 

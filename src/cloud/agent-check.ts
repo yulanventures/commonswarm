@@ -2,9 +2,14 @@ import { dirname, join } from "node:path";
 import type { SignalRecord } from "./command-client.js";
 import {
   compareSignalCursor, parseSignalRecord, readAgentSignalDirectory, readAgentSignalPage,
-  signalAddressesAgent, type SignalCursor, type SignalDirectory,
+  SignalReadTimeoutError, signalAddressesAgent, type SignalCursor, type SignalDirectory,
 } from "./signals.js";
-import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
+import {
+  FileLockTimeoutError,
+  readSecureJsonFileIfPresent,
+  withFileLock,
+  writeSecureJsonFile,
+} from "./storage.js";
 import {
   AgentSetupError, ONBOARDING_UUID, openProfileCredential, privatePath,
   profileTarget, profileSessionContext, readAgentProfile, type AgentProfile,
@@ -61,6 +66,13 @@ interface CheckState {
   messages: SignalRecord[];
 }
 
+function checkTimeoutError(): AgentSetupError {
+  return new AgentSetupError(
+    "check_timeout",
+    "The message check timed out. Try cswarm check again; the inbox was not proved empty.",
+  );
+}
+
 export async function withAgentDeadline<T>(
   timeoutMs: number,
   run: (fetcher: typeof fetch, signal: AbortSignal) => Promise<T>,
@@ -71,7 +83,7 @@ export async function withAgentDeadline<T>(
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new AgentSetupError("check_timeout", "The message check timed out. Try cswarm check again; the inbox was not proved empty."));
+      reject(checkTimeoutError());
     }, timeoutMs);
   });
   const bounded = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -85,10 +97,10 @@ export async function withAgentDeadline<T>(
   }) as typeof fetch;
   try {
     const result = await Promise.race([run(bounded, controller.signal), timeout]);
-    if (controller.signal.aborted) throw new AgentSetupError("check_timeout", "The message check timed out. Try cswarm check again; the inbox was not proved empty.");
+    if (controller.signal.aborted) throw checkTimeoutError();
     return result;
   } catch (error) {
-    if (controller.signal.aborted) throw new AgentSetupError("check_timeout", "The message check timed out. Try cswarm check again; the inbox was not proved empty.");
+    if (controller.signal.aborted) throw checkTimeoutError();
     throw error;
   } finally { clearTimeout(timer!); }
 }
@@ -137,78 +149,86 @@ export async function checkAgentMessages(options: {
   const profile = await readAgentProfile(profilePath);
   const path = checkStatePath(profilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
-  return withFileLock(dirname(path), "check", async () => {
-    const state = await readCheckState(path);
-    return withAgentDeadline(Math.max(1, timeoutMs - (Date.now() - startedAt)), async (bounded, signal) => {
-      const managed = await profileSessionContext(profile, options.hostSessionId);
-      const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
-      const credential = await openProfileCredential(profile, fetcher);
-      const token = await credential.bearer();
-      const target = profileTarget(profile);
-      const [directory, page] = await Promise.all([
-        readAgentSignalDirectory(target, token, profile.workspace_id, { fetcher, signal, deadlineMs: Date.now() + timeoutMs }),
-        readAgentSignalPage(target, { kind: "agent", token }, {
-          workspaceId: profile.workspace_id, inbox: true, ascending: true,
-          limit: AGENT_CHECK_PAGE_SIZE,
-          ...(state.cursor === null ? {} : { after: state.cursor }),
-        }, { fetcher, signal, deadlineMs: Date.now() + timeoutMs }),
-      ]);
-      assertProfileIdentity(profile, directory);
-      if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
-        throw new AgentSetupError("check_paging_unsupported", "This deployment cannot page the inbox without gaps. Update the service; use cswarm inbox to read it in the meantime.");
-      }
-      const messages: AgentCheckMessage[] = [];
-      const presented: SignalRecord[] = [];
-      let budget = AGENT_CHECK_BODY_BUDGET;
-      let cursor = state.cursor;
-      let consumed = 0;
-      for (const row of page.signals) {
-        if (row.workspace_id !== profile.workspace_id || !signalAddressesAgent(row, profile.principal_id)) {
-          throw new AgentSetupError("check_recipient_mismatch", "The service returned a message for another recipient. The cursor was not changed.");
+  const deadlineMs = startedAt + timeoutMs;
+  try {
+    return await withFileLock(dirname(path), "check", async () => {
+      const state = await readCheckState(path);
+      return withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
+        const managed = await profileSessionContext(profile, options.hostSessionId);
+        const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
+        const credential = await openProfileCredential(profile, fetcher);
+        const token = await credential.bearer();
+        const target = profileTarget(profile);
+        const [directory, page] = await Promise.all([
+          readAgentSignalDirectory(target, token, profile.workspace_id, { fetcher, signal, deadlineMs }),
+          readAgentSignalPage(target, { kind: "agent", token }, {
+            workspaceId: profile.workspace_id, inbox: true, ascending: true,
+            limit: AGENT_CHECK_PAGE_SIZE,
+            ...(state.cursor === null ? {} : { after: state.cursor }),
+          }, { fetcher, signal, deadlineMs }),
+        ]);
+        assertProfileIdentity(profile, directory);
+        if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
+          throw new AgentSetupError("check_paging_unsupported", "This deployment cannot page the inbox without gaps. Update the service; use cswarm inbox to read it in the meantime.");
         }
-        const next = { id: row.id, created_at: row.created_at };
-        if (cursor && compareSignalCursor(next, cursor) <= 0) {
-          throw new AgentSetupError("check_page_order_invalid", "The inbox page is out of order. The cursor was not changed.");
+        const messages: AgentCheckMessage[] = [];
+        const presented: SignalRecord[] = [];
+        let budget = AGENT_CHECK_BODY_BUDGET;
+        let cursor = state.cursor;
+        let consumed = 0;
+        for (const row of page.signals) {
+          if (row.workspace_id !== profile.workspace_id || !signalAddressesAgent(row, profile.principal_id)) {
+            throw new AgentSetupError("check_recipient_mismatch", "The service returned a message for another recipient. The cursor was not changed.");
+          }
+          const next = { id: row.id, created_at: row.created_at };
+          if (cursor && compareSignalCursor(next, cursor) <= 0) {
+            throw new AgentSetupError("check_page_order_invalid", "The inbox page is out of order. The cursor was not changed.");
+          }
+          const body = options.full ? row.body : row.body.slice(0, AGENT_CHECK_PREVIEW_CHARS);
+          if (messages.length > 0 && body.length > budget) break;
+          messages.push({
+            id: row.id, from: row.from, from_kind: row.from_kind,
+            sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind,
+            body, truncated: body.length < row.body.length,
+            attachment_count: row.attachments?.length ?? 0, created_at: row.created_at,
+            ...(body.length < row.body.length ? {
+              full_text_command: `cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} --message-id ${row.id}`,
+            } : {}),
+          });
+          presented.push(row);
+          budget -= body.length;
+          cursor = next;
+          consumed += 1;
         }
-        const body = options.full ? row.body : row.body.slice(0, AGENT_CHECK_PREVIEW_CHARS);
-        if (messages.length > 0 && body.length > budget) break;
-        messages.push({
-          id: row.id, from: row.from, from_kind: row.from_kind,
-          sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind,
-          body, truncated: body.length < row.body.length,
-          attachment_count: row.attachments?.length ?? 0, created_at: row.created_at,
-          ...(body.length < row.body.length ? {
-            full_text_command: `cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} --message-id ${row.id}`,
-          } : {}),
-        });
-        presented.push(row);
-        budget -= body.length;
-        cursor = next;
-        consumed += 1;
-      }
-      const hasMore = consumed < page.signals.length || page.rawCount >= AGENT_CHECK_PAGE_SIZE;
-      /* Blank is UNKNOWN, not a manufactured label — the same rule workspaceLabel() applies
-       * in the CLI. Null renders as the id alone, which is always true. */
-      const rawName = directory.identity?.workspace_name;
-      const result: AgentCheckResult = {
-        checked: true, cached: false, messages, has_more: hasMore,
-        workspace_id: profile.workspace_id,
-        workspace_name: rawName == null || rawName.trim() === "" ? null : rawName,
-        next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
-      };
-      if (signal.aborted) throw new AgentSetupError("check_timeout", "The message check timed out. Try again.");
-      // Save the full bodies before showing a preview with its retrieval command. Failure
-      // to present can replay messages, but cannot lose them or advance delivery state.
-      const cached: CheckState = {
-        ...state, messages: [...state.messages.filter(old => !presented.some(row => row.id === old.id)), ...presented].slice(-AGENT_CHECK_CACHE_LIMIT),
-      };
-      if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached));
-      signal.throwIfAborted();
-      await options.present(result);
-      if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
-      return result;
-    }, options.fetcher);
-  }, { timeoutMs: Math.min(timeoutMs, 30_000) });
+        const hasMore = consumed < page.signals.length || page.rawCount >= AGENT_CHECK_PAGE_SIZE;
+        /* Blank is UNKNOWN, not a manufactured label — the same rule workspaceLabel() applies
+         * in the CLI. Null renders as the id alone, which is always true. */
+        const rawName = directory.identity?.workspace_name;
+        const result: AgentCheckResult = {
+          checked: true, cached: false, messages, has_more: hasMore,
+          workspace_id: profile.workspace_id,
+          workspace_name: rawName == null || rawName.trim() === "" ? null : rawName,
+          next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
+        };
+        if (signal.aborted) throw new AgentSetupError("check_timeout", "The message check timed out. Try again.");
+        // Save the full bodies before showing a preview with its retrieval command. Failure
+        // to present can replay messages, but cannot lose them or advance delivery state.
+        const cached: CheckState = {
+          ...state, messages: [...state.messages.filter(old => !presented.some(row => row.id === old.id)), ...presented].slice(-AGENT_CHECK_CACHE_LIMIT),
+        };
+        if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached));
+        signal.throwIfAborted();
+        await options.present(result);
+        if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+        return result;
+      }, options.fetcher);
+    }, { timeoutMs: Math.min(Math.max(0, deadlineMs - Date.now()), 30_000) });
+  } catch (error) {
+    if (error instanceof FileLockTimeoutError || error instanceof SignalReadTimeoutError) {
+      throw checkTimeoutError();
+    }
+    throw error;
+  }
 }
 
 export async function cachedAgentMessage(profilePath: string, signalId: string, hostSessionId?: string): Promise<SignalRecord> {
