@@ -1,21 +1,22 @@
 # Preparation verification — 2026-09-16
 
-No production host, project, custom domain, DNS service, or deployment API was
-contacted. No deployment was performed.
+The original preparation lane contacted no production service and deployed
+nothing. The lead later deployed `76487b81` to the box. Before fix round 1, the
+lead measured a healthy container, both Caddy names through Cloudflare, 36 MiB
+idle and 155 MiB after 50 requests, 2–56 ms service time for sequential and
+mixed requests, and a healthy `docker restart` with zero restarts.
 
 ## NOT ESTABLISHED
 
-1. **Whether Supabase auth callbacks and custom-domain TLS keep working when
-   `api.commonswarm.com` terminates at Caddy and non-function paths proxy to the
-   Supabase project origin.** This must be checked live before DNS moves: OAuth
-   start and callback, OTP, refresh, logout, REST, Storage, Realtime websocket,
-   and the Supabase custom-domain verification state.
-2. The Hetzner box, Caddy configuration, certificate files, 1Password items,
-   firewall, DNS, and rollback were not inspected or changed.
+1. **The production cutover.** Staging proxying works. Custom-domain
+   deactivation, OAuth and GoTrue changes, production DNS, production controls,
+   and rollback have not run.
+2. Fix round 1 did not inspect box certificate files, 1Password items, firewall,
+   DNS, or operator access.
 3. Production function behavior, production database access, and hosted edge
    invocation counts were not measured.
-4. Caddy syntax was not checked with the Caddy binary because it is not installed
-   in this worktree environment. The runbook requires `caddy validate` on the box.
+4. The repository Caddy fragment validates with `caddy:2.11` and dummy
+   certificates. The box's full Caddyfile was not read or validated by this lane.
 
 ## Image and environment
 
@@ -37,6 +38,28 @@ listed nonzero exit, and was restored with a patch.
 | environment inventory | removed `SUPABASE_URL` from `env.example` | 1 |
 | router | changed the fifth function name from `h0` to `h0-mutated` | 1 |
 | Compose boundary | changed the published address to `0.0.0.0:9000` | 1 |
+| H0 environment closure | added one unpassed `Deno.env.get` to H0 | 1 |
+| box memory budget | changed `mem_limit` from 512 MiB to 513 MiB | 1 |
+| request body window | changed 60 seconds back to 15 seconds | 1 |
+| function proxy window | changed 165 seconds to 164 seconds | 1 |
+| bare function path | removed `/functions/v1` from the Caddy matcher | 1 |
+| Realtime upgrade | changed its upstream from HTTP/1.1 to HTTP/2 | 1 |
+
+## Fix round 1 controls
+
+- Local Kong 2.8.1 answered bare `/functions/v1` with HTTP 404 and
+  `{"message":"no Route matched with those values"}`. The local Compose service
+  now returns the same status and body.
+- `caddy:2.11` validated `commonswarm.caddy` with dummy certificate files and no
+  network, exit 0.
+- Four 96 MiB workers total 384 MiB. The container hard limit is 512 MiB, leaving
+  128 MiB for the main runtime and overhead.
+- One local six-request parity smoke under those new caps passed all five
+  functions plus the unknown-function control, exit 0.
+- The largest function body is 128 KiB. File bytes go directly to Storage. The
+  function request read timeout is 60 seconds.
+- End-to-end box latency remains slower than production. The measured p50/p95
+  pairs are recorded in `README.md`; the remedy is N-db.
 
 ## Local parity
 

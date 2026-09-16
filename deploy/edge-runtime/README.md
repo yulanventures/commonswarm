@@ -8,11 +8,21 @@ The main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`
 the path Supabase Kong gives it: `/<name>/...`. An unknown name returns 404 before
 a worker starts.
 
-Each worker has a 256 MiB memory limit and a 150-second wall-clock limit. These
-match the Supabase hosted reference limits. The wall-clock limit also leaves 100
-seconds of margin above the planned 50-second H0 long poll. The runtime request
-idle timeout is 65 seconds, so it does not end that poll first. Compose limits the
-container to 2 GiB and six workers at once to bound the box-wide cost.
+Each worker has a 96 MiB memory limit and a 150-second wall-clock limit. Four
+workers can use at most 384 MiB, leaving 128 MiB of the container's 512 MiB hard
+limit for the main runtime, module cache, and process overhead. The hosted
+256 MiB per-worker reference does not fit this box budget, so the box uses the
+measured lower cap while keeping the hosted wall-clock reference. Caddy waits 165
+seconds for response headers: the hosted 150-second worker limit plus 15 seconds
+of proxy margin. Function request bodies are capped at 128 KiB; the 60-second
+read timeout permits that body at about 2.2 KiB/s. File bytes up to 25 MiB go
+straight to Storage and do not pass through a function request body.
+
+The later H0 poll may hold a worker for 50 seconds. The poll lane must not enable
+that path until it prevents H0 polls from occupying all four slots and starving
+`command`, `read`, `activity`, or `capability`. This lane does not choose the
+isolation or admission design. The poll lane must also add every environment name
+H0 starts reading to `FUNCTION_ENV_NAMES.h0`.
 
 `h0-deno.json` supplies the bare `postgres` import mapping that H0 reaches through
 shared command types. `bootstrap.sh` copies the read-only mounted functions to an
@@ -52,3 +62,22 @@ Supabase client calls in those files.
 
 The reverse proxy sends the project origin as both HTTP `Host` and TLS SNI. This
 avoids sending the custom-domain host back to itself.
+
+## Known box state
+
+The lead measured the deployed `76487b81` staging build on 2026-09-16. The
+container was healthy at 36 MiB idle and 155 MiB after 50 requests across all
+five functions. Twelve sequential and twelve mixed requests returned in 2–56 ms.
+A `docker restart` returned healthy with zero restarts.
+
+End-to-end latency is still slower than production:
+
+| Operation | Box p50 / p95 | Production p50 / p95 |
+|---|---:|---:|
+| read members | 2.77 / 3.32 s | 0.85 / 1.16 s |
+| read feed | 2.07 / 2.93 s | 0.73 / 1.09 s |
+| command receipt | 1.68 / 2.11 s | 0.70 / 0.90 s |
+
+The evidence is `docs/evidence/2026-09-16-n-edge/LATENCY-2026-09-16.md`
+on main. The named remedy is **N-db**. A production timeout after cutover means
+DNS rollback, not timeout tuning.

@@ -7,6 +7,19 @@
 	}
 }
 
+(supabase_realtime_origin) {
+	reverse_proxy https://ukezjcnxjvkpkeezxaew.supabase.co {
+		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
+		# Realtime needs an HTTP/1.1 upstream for websocket Upgrade. Auth, REST,
+		# and Storage do not upgrade and can keep the default HTTP/2 transport.
+		flush_interval -1
+		transport http {
+			versions 1.1
+			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
+		}
+	}
+}
+
 # edge-staging.commonswarm.com is the approved staging name (HezLead, zone rule <service>-staging). It serves the
 # same routes so the cutover can be rehearsed before api.commonswarm.com moves; this block gets no api traffic until
 # the api DNS record points at the box.
@@ -14,11 +27,13 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 
 	# The CLI, site, listener activity publisher, and H0 client call these functions.
-	handle /functions/v1/* {
+	# Include bare /functions/v1 so the local runtime can return Kong's matching 404.
+	@edge_functions path /functions/v1 /functions/v1/*
+	handle @edge_functions {
 		reverse_proxy 127.0.0.1:9000 {
 			transport http {
-				# A later H0 poll can wait 50 seconds. Keep 15 seconds of margin.
-				response_header_timeout 65s
+				# Workers may use the hosted 150 s wall clock. Keep 15 s of proxy margin.
+				response_header_timeout 165s
 			}
 		}
 	}
@@ -39,9 +54,9 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 	}
 
 	# supabase-js uses this websocket route for wake, feed, and activity channels.
-	# Caddy forwards websocket upgrades automatically through reverse_proxy.
+	# Use HTTP/1.1 upstream and disable response buffering for the upgrade.
 	handle /realtime/v1/* {
-		import supabase_origin
+		import supabase_realtime_origin
 	}
 
 	# Keep every other Supabase project path available during and after cutover.

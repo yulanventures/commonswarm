@@ -14,7 +14,15 @@ export interface FunctionRoute {
 }
 
 const FUNCTION_PREFIX = "/functions/v1/";
+export const FUNCTIONS_BASE_PATH = "/functions/v1";
+export const KONG_NO_ROUTE_BODY = {
+  message: "no Route matched with those values",
+} as const;
 const FUNCTION_NAME_SET = new Set<string>(FUNCTION_NAMES);
+
+export function isFunctionsBasePath(pathname: string): boolean {
+  return pathname === FUNCTIONS_BASE_PATH;
+}
 
 /**
  * Match the public Supabase Functions path and produce the path that Kong gives
@@ -65,6 +73,8 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SWARM_CAPABILITY_ALLOWED_ORIGINS",
   ],
   activity: DATABASE_ENV,
+  // H0 is document-only today and reads no environment. The poll lane must add
+  // every variable it starts reading here; the source-closure test enforces it.
   h0: [],
 };
 

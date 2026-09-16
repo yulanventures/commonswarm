@@ -12,10 +12,14 @@ services:
       - "9000"
       - --policy
       - per_worker
+      # 4 workers × 96 MiB = 384 MiB. The last 128 MiB of the 512 MiB
+      # container budget remains for the main runtime and overhead.
       - --max-parallelism
-      - "6"
+      - "4"
+      # Function bodies are capped at 128 KiB. File bytes up to 25 MiB go to
+      # Storage, not a function. 60 s permits the max body at about 2.2 KiB/s.
       - --request-read-timeout
-      - "15000"
+      - "60000"
       - --request-wait-timeout
       - "10000"
       - --user-worker-request-idle-timeout
@@ -36,7 +40,7 @@ services:
       - ../../supabase/functions:/home/deno/functions-source:ro
       - ../../src:/var/src:ro
       - edge-runtime-cache:/root/.cache/deno
-    mem_limit: 2g
+    mem_limit: 512m
     init: true
     restart: unless-stopped
     healthcheck:

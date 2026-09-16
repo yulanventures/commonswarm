@@ -1,6 +1,8 @@
 import {
   COMMAND_TEST_HOOKS,
   FUNCTION_ENV_NAMES,
+  KONG_NO_ROUTE_BODY,
+  isFunctionsBasePath,
   resolveFunctionRoute,
   type FunctionName,
 } from "./router.ts";
@@ -20,9 +22,9 @@ declare const EdgeRuntime: {
 
 const FUNCTIONS_ROOT = "/var/tmp/commonswarm-functions";
 
-// Supabase's hosted limit is the reference. It also prevents one function from
-// consuming the box. Each user worker gets at most 256 MiB.
-const USER_WORKER_MEMORY_MB = 256;
+// Four workers at 96 MiB use at most 384 MiB. The 512 MiB container limit keeps
+// 128 MiB for the main runtime, module cache, and process overhead.
+const USER_WORKER_MEMORY_MB = 96;
 
 // The hosted free-plan wall-clock limit is 150 seconds. This is long enough for
 // the planned 50-second H0 poll while still ending stuck work.
@@ -73,6 +75,13 @@ async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health") {
     return json(200, { status: "ok" });
+  }
+  if (isFunctionsBasePath(url.pathname)) {
+    // Match the local Kong 2.8.1 status and body for GET /functions/v1.
+    return new Response(JSON.stringify(KONG_NO_ROUTE_BODY), {
+      status: 404,
+      headers: { "content-type": "application/json; charset=utf-8" },
+    });
   }
 
   const route = resolveFunctionRoute(url.pathname);

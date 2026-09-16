@@ -1,21 +1,20 @@
 # Edge-runtime box runbook
 
-Every action in this file is **NOT RUN**. This preparation lane deployed nothing.
+Every action below is **NOT RUN by this fix lane**. The lead deployed `76487b81`
+to the box before this round. The container is healthy and Caddy serves both
+`api.commonswarm.com` and `edge-staging.commonswarm.com`; staging was measured
+through Cloudflare.
 
 ## NOT ESTABLISHED
 
-1. **NOT ESTABLISHED — whether Supabase auth callbacks and custom-domain TLS keep
-   working when `api.commonswarm.com` terminates at Caddy and non-function paths
-   proxy to the Supabase project origin.** Before DNS moves, test OAuth start and
-   callback, OTP, refresh, logout, REST, Storage, and a Realtime websocket through
-   the box with the public host name. Confirm in the Supabase dashboard that the
-   custom domain stays verified. Do not cut over if any check fails.
+1. **NOT ESTABLISHED — the production cutover.** Staging proxying works, but the
+   deliberate custom-domain deactivation, OAuth and GoTrue changes, production
+   DNS move, production controls, and rollback have not run.
 2. **NOT ESTABLISHED — the three 1Password items named below exist or contain the
    current material.** An operator must confirm them without printing values.
-3. **NOT ESTABLISHED — the target box has the required capacity, firewall rules,
-   Docker 28, Caddy, repository revision, or outbound package access.**
-4. **NOT ESTABLISHED — any production request, deployment, DNS change, Caddy
-   reload, function invocation decrease, or rollback.**
+3. **NOT ESTABLISHED — this lane did not inspect the box firewall, certificate
+   files, secret source, or current operator access.**
+4. **NOT ESTABLISHED — production DNS, hosted invocation decrease, and rollback.**
 
 ## 1. Install and stage
 
@@ -111,7 +110,7 @@ repository. The examples below call that file `/run/commonswarm-smoke.curl`.
 
 Remove `/run/commonswarm-smoke.curl` after the checks.
 
-## 5. Check Caddy before DNS moves
+## 5. Rehearse on staging before the production window
 
 - [ ] **NOT RUN** — validate the full Caddy configuration:
 
@@ -119,27 +118,45 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
   caddy validate --config /etc/caddy/Caddyfile
   ```
 
-- [ ] **NOT RUN** — reload Caddy, then use `curl --resolve` from a permitted test
-  host to send `api.commonswarm.com` to the box IP. Trust the installed Origin CA
-  certificate only for this pre-cutover check.
-- [ ] **NOT RUN** — repeat all five function smokes through that resolved host.
-- [ ] **NOT RUN** — check `/auth/v1/settings`, one membership REST read, one signed
-  Storage request, and one Realtime websocket through the resolved host.
-- [ ] **NOT RUN** — finish an OAuth login and callback, OTP login, token refresh,
-  and logout through the resolved host. Check the custom-domain status in the
-  Supabase dashboard. This closes NOT ESTABLISHED item 1.
+- [ ] **NOT RUN** — reload Caddy, then confirm
+  `edge-staging.commonswarm.com` reaches the box through Cloudflare.
+- [ ] **NOT RUN** — through `edge-staging.commonswarm.com`, repeat all five
+  function smokes and the bare `/functions/v1` 404 control.
+- [ ] **NOT RUN** — through staging, check `/auth/v1/settings`, one membership
+  REST read, one signed Storage request, and a Realtime subscription. Confirm
+  Auth, REST, Storage, and Realtime reach the project URL with the upstream Host
+  rewritten to `ukezjcnxjvkpkeezxaew.supabase.co`.
+- [ ] **NOT RUN** — do not open the production window until every staging check
+  passes. Record failures; do not compensate by raising timeouts.
 
-## 6. DNS cutover with a 48-hour fallback
+## 6. Production cutover with a 48-hour project-URL fallback
 
-- [ ] **NOT RUN** — record the current DNS record type, target, proxy state, TTL,
-  and Supabase custom-domain status. Save this outside the repository as the
-  rollback record.
-- [ ] **NOT RUN** — lower TTL only after the existing record's old TTL has elapsed.
-- [ ] **NOT RUN** — change only `api.commonswarm.com` to the box path approved by
-  the DNS operator. Keep the old record data and the Supabase custom domain for at
-  least 48 hours. Do not remove the fallback during that window.
-- [ ] **NOT RUN** — repeat auth, REST, Storage, Realtime, and all function smokes
-  through normal DNS from two networks.
+The order in this section is binding.
+
+- [ ] **NOT RUN — (a)** — confirm Caddy on the box routes `/functions/v1` to the
+  local runtime and proxies `/auth/v1/*`, `/rest/v1/*`, `/storage/v1/*`, and
+  `/realtime/v1/*` to the project URL with its Host header rewritten. Confirm the
+  complete rehearsal on `edge-staging.commonswarm.com` is recorded as passing.
+- [ ] **NOT RUN — (b)** — inside the approved window, deliberately deactivate
+  the Supabase custom domain in the Supabase dashboard. Do not wait for it to
+  lapse or fail on its own. Record the dashboard state and time.
+- [ ] **NOT RUN — (c)** — change the GitHub OAuth app callback to
+  `https://ukezjcnxjvkpkeezxaew.supabase.co/auth/v1/callback`. Set GoTrue's Site
+  URL to `https://commonswarm.com/app`. Set its redirect allow-list to the app's
+  real return URLs, including `https://commonswarm.com/app` and
+  `https://coswarm-site.vercel.app/app`; preserve the CLI loopback callback.
+- [ ] **NOT RUN — (d)** — complete one GitHub sign-in end to end through the
+  project URL. Do not lift, remove, or change anything else until it succeeds.
+- [ ] **NOT RUN** — record the current DNS type, target, proxy state, and TTL as
+  the rollback record. Change only `api.commonswarm.com` to the approved box
+  target. Keep `https://ukezjcnxjvkpkeezxaew.supabase.co` and its hosted
+  functions available as the fallback for at least 48 hours.
+- [ ] **NOT RUN** — run these production controls through normal DNS from two
+  networks: a GitHub sign-in callback, a Realtime subscribe, one file upload,
+  one seat's wake round trip, `https://commonswarm.com/acceptable-use`, and
+  `https://commonswarm.com/install.sh`. Repeat all five function smokes.
+- [ ] **NOT RUN** — treat any production client timeout after cutover as a DNS
+  rollback signal. Do not tune Caddy, worker, queue, or client timeouts in place.
 
 ## 7. Measure the hosted edge decrease
 
@@ -152,14 +169,27 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 - [ ] **NOT RUN** — investigate any hosted function invocation before declaring the
   move complete. A nonzero count means a client bypasses the custom host or DNS has
   not drained.
+- [ ] **NOT RUN** — compare end-to-end latency with the recorded 2026-09-16
+  baseline: box p50/p95 read members 2.77/3.32 s, read feed 2.07/2.93 s, command
+  receipt 1.68/2.11 s; production 0.85/1.16 s, 0.73/1.09 s, and 0.70/0.90 s.
+  The remedy is N-db, not timeout tuning.
 
 ## 8. Roll back
 
-- [ ] **NOT RUN** — restore the exact DNS record from the rollback record.
-- [ ] **NOT RUN** — wait for the saved TTL, then verify all five Supabase-hosted
-  functions plus Auth, REST, Storage, and Realtime through the public host.
-- [ ] **NOT RUN** — stop the box service only after the public host is back on the
-  Supabase custom domain:
+- [ ] **NOT RUN** — on any production client timeout, restore the exact DNS
+  record from the rollback record immediately. Do not change timeouts.
+- [ ] **NOT RUN** — keep GitHub OAuth and GoTrue on the project URL while the DNS
+  rollback propagates. Verify the project-URL GitHub sign-in still works.
+- [ ] **NOT RUN** — after DNS points at the prior Supabase target, deliberately
+  reactivate the Supabase custom domain in the dashboard. Wait until its domain
+  and TLS state are verified; do not treat a pending state as restored.
+- [ ] **NOT RUN** — restore the GitHub OAuth callback and every GoTrue Site URL
+  and redirect allow-list value from the pre-cutover record. Complete one GitHub
+  sign-in through `api.commonswarm.com`.
+- [ ] **NOT RUN** — verify the Realtime subscribe, file upload, seat wake round
+  trip, acceptable-use page, install page, and all five Supabase-hosted functions.
+- [ ] **NOT RUN** — stop the box service only after the public host, custom
+  domain, GitHub callback, and GoTrue settings are all restored:
 
   ```sh
   cd /opt/commonswarm/current
