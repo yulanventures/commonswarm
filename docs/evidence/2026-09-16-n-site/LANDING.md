@@ -35,7 +35,7 @@ differences. Per the pacing rule the fold lands without another pair; its eviden
 - Live parity through Cloudflare on site-staging.commonswarm.com, STRICT (no `--allow-cloudflare-browser-ttl`), after
   HezLead set the zone's Browser Cache TTL to Respect Existing Headers and SSL to Full (strict) at 22:36Z:
   **111 routes passed** (83 fixed, 14 discovered assets / 28 asset routes).
-  Log: parity-live-site-staging-8cd2ba3c-strict.log.
+  Log: parity-live-site-staging-8cd2ba3c-strict.txt.
 
 ## Not established
 

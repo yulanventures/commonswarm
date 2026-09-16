@@ -1,0 +1,20 @@
+controls at 23:02:09Z
+PASS  public DNS commonswarm.com -> 104.21.79.89 172.67.169.109 
+PASS  public DNS www.commonswarm.com -> 104.21.79.89 172.67.169.109 
+PASS  commonswarm.com / via Cloudflare: HTTP/2 200 , x-vercel-id=0, cf-ray=1 (box path)
+PASS  www.commonswarm.com / via Cloudflare: HTTP/2 200 , x-vercel-id=0, cf-ray=1 (box path)
+PASS  /install.sh sha256 edbc1f0244a3dea9 equals Vercel pre-switch edbc1f0244a3dea9
+PASS  /llms.txt sha256 4dbb9b4076f31420 equals Vercel pre-switch 4dbb9b4076f31420
+PASS  /skills/cswarm/SKILL.md sha256 5a359b5d0fa8075b equals Vercel pre-switch 5a359b5d0fa8075b
+PASS  /start sha256 d1f305094ddbbf53 equals Vercel pre-switch d1f305094ddbbf53
+PASS  / 200
+PASS  /install.sh 200
+PASS  /nope.sh 404
+PASS  /app 200
+PASS  /start commonswarm:url" content="https://api.commonswarm.com"
+PASS  /start service_role JWT count 0
+PASS  /acceptable-use names 600 (1)
+PASS  parity strict https://commonswarm.com: Parity passed for 111 routes (83 fixed, 14 discovered assets / 28 asset routes) against https://commonswarm.com.
+PASS  parity strict https://www.commonswarm.com: Parity passed for 111 routes (83 fixed, 14 discovered assets / 28 asset routes) against https://www.commonswarm.com.
+PASS  cswarm check x3 (api path, unchanged): [site-cut-check] network span per run (first request start to last response): n=3 p50 1.00s p95 1.06s max 1.06s
+SITE CONTROLS: 18 passed, 0 failed
