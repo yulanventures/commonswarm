@@ -38,17 +38,17 @@ node deploy/site/parity-check.mjs https://BOX_ADDRESS --host commonswarm.com
 
 The result must say that all routes passed. Do not move DNS if it reports a difference.
 
-Run the production controls against the box in the same way. Replace `BOX_ADDRESS` only. Keep the `Host` header:
+Run the production controls against the box in the same way. Replace `BOX_ADDRESS` with its IP address. `--resolve` sends the production Host header and TLS server name while it connects to that IP:
 
 ```sh
-U=https://BOX_ADDRESS
-curl -sS -H 'Host: commonswarm.com' -o /dev/null -w '%{http_code}\n' "$U"
-curl -sS -H 'Host: commonswarm.com' "$U" | grep -c '<some string that MUST be there>'
-curl -sS -H 'Host: commonswarm.com' "$U" | grep -c '<the thing that must be GONE>'
-curl -sS -H 'Host: commonswarm.com' -o /dev/null -w '%{http_code}\n' "$U/install.sh"
-curl -sS -H 'Host: commonswarm.com' -o /dev/null -w '%{http_code}\n' "$U/nope.sh"
-curl -sS -H 'Host: commonswarm.com' "$U/start" | grep -o 'commonswarm:url" content="[^"]*"'
-curl -sS -H 'Host: commonswarm.com' "$U/start" | grep -c 'InNlcnZpY2Vfcm9sZSI'
+U=https://commonswarm.com
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS -o /dev/null -w '%{http_code}\n' "$U"
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS "$U" | grep -c '<some string that MUST be there>'
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS "$U" | grep -c '<the thing that must be GONE>'
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS -o /dev/null -w '%{http_code}\n' "$U/install.sh"
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS -o /dev/null -w '%{http_code}\n' "$U/nope.sh"
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS "$U/start" | grep -o 'commonswarm:url" content="[^"]*"'
+curl -sS --resolve commonswarm.com:443:BOX_ADDRESS "$U/start" | grep -c 'InNlcnZpY2Vfcm9sZSI'
 ```
 
 Expected status codes are 200 for `/` and `/install.sh`, and 404 for `/nope.sh`. The backend URL output is non-empty. The service-role marker count is 0.
@@ -58,7 +58,7 @@ Expected status codes are 200 for `/` and `/install.sh`, and 404 for `/nope.sh`.
 1. Lower the TTL for the `commonswarm.com` and `www.commonswarm.com` records before the move.
 2. Change both records to the Hetzner address. Keep the Cloudflare proxy and TLS settings unchanged.
 3. Run `node deploy/site/parity-check.mjs https://commonswarm.com`.
-4. Repeat every production control above with `U=https://commonswarm.com` and no `Host` option.
+4. Repeat every production control above without `--resolve`.
 
 ## Roll back
 
