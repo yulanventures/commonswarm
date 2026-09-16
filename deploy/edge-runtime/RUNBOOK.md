@@ -145,8 +145,11 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
   REST read, one signed Storage request, and a Realtime subscription. Confirm
   Auth, REST, Storage, and Realtime reach the project URL with the upstream Host
   and `X-Forwarded-Host` rewritten to `ukezjcnxjvkpkeezxaew.supabase.co`, and
-  `X-Forwarded-Proto` set to `https`. Confirm the capability function sees the
-  visitor address, not the Cloudflare edge address.
+  `X-Forwarded-Proto` set to `https`. Confirm Supabase-origin requests do not
+  carry `CF-Connecting-IP`, `CF-Ray`, `CF-Visitor`, `CF-IPCountry`, `CDN-Loop`,
+  or `True-Client-IP`, and return no Supabase Cloudflare 403. Confirm the
+  capability function still sees the visitor address, not the Cloudflare edge
+  address.
 - [ ] **NOT RUN** — do not open the production window until every staging check
   passes. Record failures; do not compensate by raising timeouts.
 
@@ -157,8 +160,9 @@ The order in this section is binding.
 - [ ] **NOT RUN — (a)** — confirm Caddy on the box routes `/functions/v1` to the
   local runtime and proxies `/auth/v1/*`, `/rest/v1/*`, `/storage/v1/*`, and
   `/realtime/v1/*` to the project URL with its Host and `X-Forwarded-Host`
-  rewritten and its forwarded scheme set to `https`. Confirm the complete
-  rehearsal on `edge-staging.commonswarm.com` is recorded as passing.
+  rewritten, its forwarded scheme set to `https`, and incoming Cloudflare
+  identity headers removed. Confirm the complete rehearsal on
+  `edge-staging.commonswarm.com` is recorded as passing.
 - [ ] **NOT RUN — (b)** — inside the approved window, deliberately deactivate
   the Supabase custom domain in the Supabase dashboard. Do not wait for it to
   lapse or fail on its own. Record the dashboard state and time.

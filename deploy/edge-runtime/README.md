@@ -75,10 +75,12 @@ The reverse proxy sends the project origin as HTTP `Host`,
 GoTrue cannot derive its callback origin from the public proxy name. The Caddy
 global options must include the `servers { ... }` fragment from
 `caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on
-2026-09-16, then replaces `X-Forwarded-For` with Caddy's derived visitor
-address. This lets capability rate limiting use the visitor instead of a
-Cloudflare edge or spoofed header. `commonswarm.caddy` is only an imported site
-file and deliberately contains no global options block.
+2026-09-16. The local functions route replaces `X-Forwarded-For` with Caddy's
+derived visitor address, so capability rate limiting does not use a Cloudflare
+edge or spoofed header. Supabase-origin routes keep Caddy's default forwarded
+chain and remove incoming Cloudflare identity headers before the request reaches
+Supabase's separate Cloudflare edge. `commonswarm.caddy` is only an imported
+site file and deliberately contains no global options block.
 
 ## Caddy validation shape
 

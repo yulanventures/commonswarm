@@ -73,6 +73,13 @@ Fix round 3 added this applied-and-restored mutation:
 |---|---|---:|---:|
 | imported site boundary | put the global options block back in `commonswarm.caddy` | 1 | 1 |
 
+Fix round 4 added these applied-and-restored mutations:
+
+| Control | Applied mutation | Adapted-JSON proof exit |
+|---|---|---:|
+| Supabase Cloudflare header removal | removed the `CF-Connecting-IP` delete | 1 |
+| Supabase forwarded chain | restored the project-route `X-Forwarded-For` override | 1 |
+
 ## Fix round 1 controls
 
 - Local Kong 2.8.1 answered bare `/functions/v1` with HTTP 404 and
@@ -153,3 +160,29 @@ removed after every run.
 - A box-shaped main Caddyfile with those settings and `import sites/*.caddy`
   validates. The same shape without the settings also validates. In the second
   state only visitor-IP derivation and capability rate-limit keying are wrong.
+
+## Fix round 4 controls
+
+The lead measured this production-path defect on the box at 2026-09-16 20:41Z.
+The box was restored after the measurement.
+
+| Throwaway Caddy form | Plain request | Cloudflare-shaped request |
+|---|---:|---:|
+| `76487b81`, Host rewrite only | Storage 200 | Storage 403 with `CF-Connecting-IP` |
+| `8f38a55e`, Host/XFH/XFP plus derived XFF override | Storage 403 | Storage 403 |
+| `8f38a55e` without the XFF override | Storage 200 | Storage 403 with `CF-Connecting-IP` |
+| delete `CF-Connecting-IP` and XFF | Storage 200 | Storage 200 |
+| delete `CF-Connecting-IP`, `CF-Ray`, `CF-Visitor`, `CF-IPCountry`, and `CDN-Loop`; keep default XFF and rewritten XFH/XFP | — | Storage 200; Auth health 401 without an API key, as expected |
+| same deletion set, but set XFF from `CF-Connecting-IP` | — | Storage 200; Auth health 401 without an API key, as expected |
+
+Direct box requests to the Supabase project Storage status were HTTP 200 with
+no added header and with each tested forwarding or Cloudflare header alone,
+except `CF-Connecting-IP`, which produced the Supabase Cloudflare HTTP 403.
+Through staging, Auth health, Auth settings, and Storage status had returned
+that 403 page, while Realtime still subscribed.
+
+Every Supabase-origin route now deletes `CF-Connecting-IP`, `CF-Ray`,
+`CF-Visitor`, `CF-IPCountry`, `CDN-Loop`, and `True-Client-IP`. It rewrites
+`X-Forwarded-Host` and `X-Forwarded-Proto` but leaves `X-Forwarded-For` to
+Caddy's default chain. The local `/functions/v1` route deletes none of those
+headers and continues to set its visitor-derived `X-Forwarded-For`.

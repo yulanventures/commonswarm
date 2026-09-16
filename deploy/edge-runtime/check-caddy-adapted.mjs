@@ -75,12 +75,22 @@ const localProxies = proxies.filter(
 assert.equal(projectProxies.length, 5);
 assert.equal(localProxies.length, 1);
 
+const supabaseDeletedHeaders = [
+  "CF-Connecting-IP",
+  "CF-Ray",
+  "CF-Visitor",
+  "CF-IPCountry",
+  "CDN-Loop",
+  "True-Client-IP",
+];
+
 for (const proxy of projectProxies) {
-  const headers = proxy.headers?.request?.set;
-  assert.deepEqual(headers?.Host, [projectHost]);
-  assert.deepEqual(headers?.["X-Forwarded-Host"], [projectHost]);
-  assert.deepEqual(headers?.["X-Forwarded-Proto"], ["https"]);
-  assert.deepEqual(headers?.["X-Forwarded-For"], ["{http.request.client_ip}"]);
+  const requestHeaders = proxy.headers?.request;
+  assert.deepEqual(requestHeaders?.delete, supabaseDeletedHeaders);
+  assert.deepEqual(requestHeaders?.set?.Host, [projectHost]);
+  assert.deepEqual(requestHeaders?.set?.["X-Forwarded-Host"], [projectHost]);
+  assert.deepEqual(requestHeaders?.set?.["X-Forwarded-Proto"], ["https"]);
+  assert.equal(requestHeaders?.set?.["X-Forwarded-For"], undefined);
 }
 
 const realtime = projectProxies.filter(
@@ -91,6 +101,7 @@ assert.deepEqual(realtime[0].transport.versions, ["1.1"]);
 assert.equal(realtime[0].flush_interval, -1);
 
 const local = localProxies[0];
+assert.equal(local.headers?.request?.delete, undefined);
 assert.deepEqual(local.headers?.request?.set?.["X-Forwarded-For"], [
   "{http.request.client_ip}",
 ]);

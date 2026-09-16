@@ -3,7 +3,15 @@
 		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
 		header_up X-Forwarded-Host ukezjcnxjvkpkeezxaew.supabase.co
 		header_up X-Forwarded-Proto https
-		header_up X-Forwarded-For {http.request.client_ip}
+		# Supabase is also behind Cloudflare. Forwarding the incoming Cloudflare
+		# identity headers makes its edge reject the request. Caddy keeps its
+		# normal X-Forwarded-For chain; do not replace it here.
+		header_up -CF-Connecting-IP
+		header_up -CF-Ray
+		header_up -CF-Visitor
+		header_up -CF-IPCountry
+		header_up -CDN-Loop
+		header_up -True-Client-IP
 		transport http {
 			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
 		}
@@ -15,7 +23,14 @@
 		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
 		header_up X-Forwarded-Host ukezjcnxjvkpkeezxaew.supabase.co
 		header_up X-Forwarded-Proto https
-		header_up X-Forwarded-For {http.request.client_ip}
+		# Realtime reaches the same Supabase Cloudflare edge, so it needs the
+		# same removal set and Caddy's normal X-Forwarded-For chain.
+		header_up -CF-Connecting-IP
+		header_up -CF-Ray
+		header_up -CF-Visitor
+		header_up -CF-IPCountry
+		header_up -CDN-Loop
+		header_up -True-Client-IP
 		# Realtime needs an HTTP/1.1 upstream for websocket Upgrade. Auth, REST,
 		# and Storage do not upgrade and can keep the default HTTP/2 transport.
 		flush_interval -1

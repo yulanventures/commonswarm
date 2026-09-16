@@ -372,8 +372,23 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
   assert.equal(
     (caddy.match(/header_up X-Forwarded-For \{http\.request\.client_ip\}/g) ??
       []).length,
-    3,
+    1,
   );
+  for (
+    const header of [
+      "CF-Connecting-IP",
+      "CF-Ray",
+      "CF-Visitor",
+      "CF-IPCountry",
+      "CDN-Loop",
+      "True-Client-IP",
+    ]
+  ) {
+    assert.equal(
+      (caddy.match(new RegExp(`header_up -${header}`, "g")) ?? []).length,
+      2,
+    );
+  }
 });
 
 test("Caddy site import cannot contain a global options block", async () => {
