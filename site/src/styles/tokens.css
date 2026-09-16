@@ -223,7 +223,7 @@
   --info-ink: #ffffff; /* on --info: 5.93:1 */
 
   /* Aliases for components that predate the semantic names. Do not remove:
-     hero.css and the feed components consume these directly. Aliases follow the
+     the feed components consume these directly. Aliases follow the
      active branch automatically and are never remapped in section 10. */
   --verified: var(--success);
   --verified-dim: var(--success-dim);
@@ -291,7 +291,7 @@
   --lh-3xl: 1.16;
   --lh-display: 1.04;
 
-  /* Legacy line-height names, still consumed by hero.css. */
+  /* Legacy line-height names, still consumed by the dashboard and seo surfaces. */
   --lh-tight: var(--lh-display);
   --lh-snug: var(--lh-2xl);
   --lh-body: var(--lh-base);
@@ -401,7 +401,7 @@
 
      --shadow-glow keeps its name too and stops glowing: it is now a hairline
      indigo ring plus a lifted shadow, which is what its two call sites
-     (global.css .btn--primary-ish, hero.css:135) actually want — "this is the
+     (global.css .btn--primary-ish) actually want — "this is the
      accent surface, and it is raised".
      ====================================================================== */
   --ring-top: 0 1px 2px rgba(16, 22, 48, 0.07), 0 1px 1px rgba(16, 22, 48, 0.04);
@@ -422,7 +422,7 @@
   --ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
   --ease-spring: cubic-bezier(0.22, 1.2, 0.36, 1);
 
-  /* Legacy motion names — hero.css and global.css transitions use these. */
+  /* Legacy motion names. No live stylesheet names these. */
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --dur: 200ms;
 
