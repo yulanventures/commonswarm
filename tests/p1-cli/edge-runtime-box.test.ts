@@ -3,7 +3,6 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
-  createWorkerWithRetiredRetry,
   FUNCTION_ENV_NAMES,
   FUNCTION_NAMES,
   functionNotFoundResponse,
@@ -24,6 +23,7 @@ import {
   SELF_SERVE_ENV_REASON,
   WORKER_LIMIT_BODY,
   WORKER_LIMIT_STATUS,
+  withWorkerRetiredRetry,
 } from "../../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
@@ -252,9 +252,9 @@ test("edge runtime requires the production feature gate at boot", () => {
   assert.deepEqual(mainEnvironmentProblems(get), [SELF_SERVE_ENV_REASON]);
 });
 
-test("edge runtime retries retired creation once and maps pool limits", async () => {
+test("edge runtime retries retired create or fetch once and maps pool limits", async () => {
   let attempts = 0;
-  const worker = await createWorkerWithRetiredRetry(async () => {
+  const worker = await withWorkerRetiredRetry(async () => {
     attempts += 1;
     if (attempts === 1) {
       const error = new Error("presentation text is irrelevant");
@@ -268,7 +268,7 @@ test("edge runtime retries retired creation once and maps pool limits", async ()
 
   attempts = 0;
   await assert.rejects(
-    createWorkerWithRetiredRetry(async () => {
+    withWorkerRetiredRetry(async () => {
       attempts += 1;
       const error = new Error("presentation text is irrelevant");
       error.name = "WorkerAlreadyRetired";
@@ -278,7 +278,32 @@ test("edge runtime retries retired creation once and maps pool limits", async ()
   );
   assert.equal(attempts, 2);
 
-  for (const name of ["WorkerRequestIdleTimeout", "WorkerRequestCancelled"]) {
+  const original = new Request("https://edge.test/functions/v1/command", {
+    method: "POST",
+    body: '{"retry":"body"}',
+  });
+  const retryRequests = [original, original.clone()] as const;
+  let fetchAttempts = 0;
+  const response = await withWorkerRetiredRetry(async (attemptNumber) => {
+    const body = await retryRequests[attemptNumber].text();
+    fetchAttempts += 1;
+    if (fetchAttempts === 1) {
+      const error = new Error("presentation text is irrelevant");
+      error.name = "WorkerAlreadyRetired";
+      throw error;
+    }
+    return new Response(body);
+  });
+  assert.equal(fetchAttempts, 2);
+  assert.equal(await response.text(), '{"retry":"body"}');
+
+  for (
+    const name of [
+      "InvalidWorkerCreation",
+      "WorkerRequestIdleTimeout",
+      "WorkerRequestCancelled",
+    ]
+  ) {
     const error = new Error("presentation text is irrelevant");
     error.name = name;
     assert.equal(isWorkerLimitError(error), true);
@@ -343,6 +368,12 @@ test("edge runtime memory and request limits fit the box budget", async () => {
   const workerIdleTimeout = Number(
     compose.match(/- --user-worker-request-idle-timeout\s*\n\s*- "(\d+)"/)?.[1],
   );
+  const gracefulExitTimeout = Number(
+    compose.match(/- --graceful-exit-timeout\s*\n\s*- "(\d+)"/)?.[1],
+  );
+  const stopGracePeriod = Number(
+    compose.match(/stop_grace_period:\s*(\d+)s/)?.[1],
+  );
   const containerMemory = Number(compose.match(/mem_limit:\s*(\d+)m/)?.[1]);
   const workerMemory = Number(
     main.match(/USER_WORKER_MEMORY_MB\s*=\s*(\d+)/)?.[1],
@@ -355,7 +386,36 @@ test("edge runtime memory and request limits fit the box budget", async () => {
   assert.ok(parallelism * workerMemory <= containerMemory);
   assert.equal(readTimeout, 60_000);
   assert.equal(workerIdleTimeout, 150_000);
+  assert.equal(gracefulExitTimeout, 70);
+  assert.equal(stopGracePeriod, 80);
+  assert.ok(stopGracePeriod > gracefulExitTimeout);
   assert.match(command, /const MAX_BODY_BYTES = 128 \* 1024;/);
+});
+
+test("main service retries WorkerAlreadyRetired around create and fetch", async () => {
+  const main = await readFile(
+    resolve(repoRoot, "deploy/edge-runtime/main/index.ts"),
+    "utf8",
+  );
+  assert.match(main, /const attemptRequests = \[request, request\.clone\(\)\]/);
+  const retryStart = main.indexOf(
+    "return await withWorkerRetiredRetry(async (attemptNumber) => {",
+  );
+  assert.notEqual(retryStart, -1);
+  const fetchInsideRetry = main.indexOf(
+    "return await worker.fetch(forwarded);",
+    retryStart,
+  );
+  assert.ok(fetchInsideRetry > retryStart);
+  assert.ok(
+    main.indexOf("EdgeRuntime.userWorkers.create", retryStart) <
+      fetchInsideRetry,
+  );
+  assert.ok(
+    main.slice(fetchInsideRetry).startsWith(
+      "return await worker.fetch(forwarded);\n  });",
+    ),
+  );
 });
 
 test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async () => {
@@ -372,6 +432,10 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     /@edge_functions path \/functions\/v1 \/functions\/v1\/\*/,
   );
   assert.match(caddy, /response_header_timeout 165s/);
+  assert.match(
+    caddy,
+    /handle_errors \{[\s\S]*?@edge_function_error path \/functions\/v1 \/functions\/v1\/\*[\s\S]*?header Access-Control-Allow-Origin "\*"/,
+  );
   assert.match(caddy, /\(supabase_realtime_origin\)[\s\S]*?flush_interval -1/);
   assert.match(caddy, /\(supabase_realtime_origin\)[\s\S]*?versions 1\.1/);
   assert.match(

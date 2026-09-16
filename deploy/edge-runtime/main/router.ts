@@ -41,6 +41,7 @@ export const SELF_SERVE_ENV_REASON =
   "SWARM_SELF_SERVE must equal 1 because production workspace creation requires self-serve mode";
 const FUNCTION_NAME_SET = new Set<string>(FUNCTION_NAMES);
 const WORKER_LIMIT_ERROR_NAMES = new Set([
+  "InvalidWorkerCreation",
   "WorkerRequestIdleTimeout",
   "WorkerRequestCancelled",
 ]);
@@ -145,15 +146,15 @@ export function isWorkerAlreadyRetired(error: unknown): boolean {
   return error instanceof Error && error.name === "WorkerAlreadyRetired";
 }
 
-/** Retry only creation, once. A request body has not reached a worker yet. */
-export async function createWorkerWithRetiredRetry<T>(
-  create: () => Promise<T>,
+/** Retry one create-and-fetch attempt when the selected worker retired. */
+export async function withWorkerRetiredRetry<T>(
+  attempt: (attemptNumber: 0 | 1) => Promise<T>,
 ): Promise<T> {
   try {
-    return await create();
+    return await attempt(0);
   } catch (error) {
     if (!isWorkerAlreadyRetired(error)) throw error;
-    return await create();
+    return await attempt(1);
   }
 }
 

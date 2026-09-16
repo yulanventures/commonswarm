@@ -132,6 +132,47 @@ assert.deepEqual(local.headers?.request?.set?.["X-Forwarded-For"], [
 ]);
 assert.equal(local.transport?.response_header_timeout, 165_000_000_000);
 
+const functionErrorPaths = [];
+const errorCorsHandlers = [];
+function collectFunctionErrorConfig(value) {
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value.match)) {
+    for (const matcher of value.match) {
+      if (Array.isArray(matcher.path)) {
+        functionErrorPaths.push(...matcher.path);
+      }
+    }
+  }
+  if (
+    value.handler === "headers" &&
+    value.response?.set?.["Access-Control-Allow-Origin"]
+  ) {
+    errorCorsHandlers.push(value);
+  }
+  for (const child of Object.values(value)) collectFunctionErrorConfig(child);
+}
+collectFunctionErrorConfig(server.errors);
+assert.deepEqual(functionErrorPaths, ["/functions/v1", "/functions/v1/*"]);
+assert.equal(errorCorsHandlers.length, 1);
+assert.deepEqual(
+  errorCorsHandlers[0].response.set["Access-Control-Allow-Origin"],
+  ["*"],
+);
+
+const successCorsHandlers = [];
+function collectSuccessCorsHandlers(value) {
+  if (value === null || typeof value !== "object") return;
+  if (
+    value.handler === "headers" &&
+    value.response?.set?.["Access-Control-Allow-Origin"]
+  ) {
+    successCorsHandlers.push(value);
+  }
+  for (const child of Object.values(value)) collectSuccessCorsHandlers(child);
+}
+collectSuccessCorsHandlers(server.routes);
+assert.equal(successCorsHandlers.length, 0);
+
 process.stdout.write(
   `adapted Caddy JSON (${trustMode}): ` +
     `${projectProxies.length} Supabase routes and ` +

@@ -44,6 +44,9 @@ services:
       - edge-runtime-cache:/root/.cache/deno
     mem_limit: 512m
     init: true
+    # The runtime can spend 70 s draining workers after SIGTERM. Give Compose
+    # another 10 s before SIGKILL so that configured graceful exit can finish.
+    stop_grace_period: 80s
     restart: unless-stopped
     healthcheck:
       test:
