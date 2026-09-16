@@ -15,11 +15,12 @@ import {
   DELIVERY_ACK_OUTCOMES,
   DELIVERY_CLIENT_ERROR_CODES,
 } from "../command/durable-delivery.ts";
+import { H0_SEAT_TOKEN_TTL_MS } from "../_shared/protocol.js";
 /* The wire rule is the ENFORCEMENT's own constants, passed in because core.ts must stay a leaf. A
  * test pins by AST that exactly these imported identifiers are what is passed. */
 const agentDocument = buildH0AgentDocument(
   H0_VERBS,
-  h0AgentDocumentDescription(),
+  h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS),
   {
     recipientKinds: SIGNAL_RECIPIENT_KINDS,
     recipientMax: SIGNAL_RECIPIENT_MAX,

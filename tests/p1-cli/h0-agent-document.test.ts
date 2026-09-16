@@ -23,6 +23,7 @@ import {
   DELIVERY_ACK_OUTCOMES,
   DELIVERY_CLIENT_ERROR_CODES,
 } from "../../supabase/functions/command/durable-delivery.js";
+import { H0_SEAT_TOKEN_TTL_MS } from "../../src/protocol/index.js";
 
 /* The enforcement's own constants — the same four index.ts passes. */
 const WIRE = {
@@ -32,8 +33,12 @@ const WIRE = {
   ackErrorCodes: DELIVERY_CLIENT_ERROR_CODES,
 };
 
+function agentDescription(): string {
+  return h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS);
+}
+
 function agentDocument(): Record<string, unknown> {
-  return buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
+  return buildH0AgentDocument(H0_VERBS, agentDescription(), WIRE);
 }
 
 function documentPaths(document: Record<string, unknown>): string[] {
@@ -48,7 +53,7 @@ test("agent document paths are generated from the H0 verb table", () => {
   );
   assert.equal(
     (document.info as Record<string, unknown>).description,
-    h0AgentDocumentDescription(),
+    agentDescription(),
   );
 
   // This mutation control proves a new table entry reaches the document without
@@ -62,13 +67,13 @@ test("agent document paths are generated from the H0 verb table", () => {
   const mutatedTable = [...H0_VERBS, addedVerb];
   assert.deepEqual(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), WIRE),
+      buildH0AgentDocument(mutatedTable, agentDescription(), WIRE),
     ),
     mutatedTable.map((verb) => `/${verb.name}`).sort(),
   );
   assert.ok(
     documentPaths(
-      buildH0AgentDocument(mutatedTable, h0AgentDocumentDescription(), WIRE),
+      buildH0AgentDocument(mutatedTable, agentDescription(), WIRE),
     ).includes(
       `/${addedVerb.name}`,
     ),
@@ -159,7 +164,7 @@ test("the document is served on BOTH the public path and the gateway-stripped pa
    *
    * NOT ESTABLISHED: no live `functions deploy` or `functions serve` request was made. This is
    * established from the CLI's Kong template and the serve worker, not from production. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
+  const document = buildH0AgentDocument(H0_VERBS, agentDescription(), WIRE);
   const paths = [
     "https://api.commonswarm.com/functions/v1/h0/agent-doc/abc123",
     "https://api.commonswarm.com/h0/agent-doc/abc123",
@@ -201,7 +206,7 @@ test("every table field is EITHER typed OR declared string — an exact partitio
 
 test("error responses carry the no-store and robots headers too", () => {
   /* Test 3 only ever checked a 200. An arm noted the 500 path was never exercised. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
+  const document = buildH0AgentDocument(H0_VERBS, agentDescription(), WIRE);
   const cases = [
     handleH0Request(new Request("https://api.commonswarm.com/h0/nope"), document),
     handleH0Request(
@@ -226,7 +231,7 @@ test("HEAD and OPTIONS work, because the link must be safe to UNFURL", () => {
    * requirement, which nothing previously tested.
    *
    * HEAD returns the GET's status and headers with a NULL body, per the HTTP spec. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
+  const document = buildH0AgentDocument(H0_VERBS, agentDescription(), WIRE);
   const url = "https://api.commonswarm.com/h0/agent-doc/abc";
 
   const head = handleH0Request(new Request(url, { method: "HEAD" }), document);
@@ -251,7 +256,7 @@ test("the agent document GET is readable cross-origin", () => {
    * and reads no cookie or Authorization header. Without it a browser agent or OpenAPI viewer is
    * blocked from a document that is already public. Pinned here so that if a future lane adds an
    * endpoint that DOES carry a credential, copying this header is a visible, deliberate act. */
-  const document = buildH0AgentDocument(H0_VERBS, h0AgentDocumentDescription(), WIRE);
+  const document = buildH0AgentDocument(H0_VERBS, agentDescription(), WIRE);
   const response = handleH0Request(
     new Request("https://api.commonswarm.com/h0/agent-doc/abc"),
     document,
@@ -364,7 +369,7 @@ test("an unclassified field THROWS where the schema is built, independent of the
     fields: [...register.fields, { name: "unclassified_probe", presence: "omittable", nullable: false }],
   }] as unknown as typeof H0_VERBS;
   assert.throws(
-    () => buildH0AgentDocument(mutated, h0AgentDocumentDescription(), WIRE),
+    () => buildH0AgentDocument(mutated, agentDescription(), WIRE),
     /unclassified_probe.*neither typed nor declared a string field/,
   );
 });

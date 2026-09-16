@@ -24,6 +24,7 @@ import {
   H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, h0Verb, h0AgentDocumentDescription,
   type H0Verb,
 } from "../../src/h0/verbs.js";
+import { H0_SEAT_TOKEN_TTL_MS } from "../../src/protocol/index.js";
 
 const repoFile = (rel: string) =>
   readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)), "utf8");
@@ -200,7 +201,7 @@ test("signal verb fields name a SignalCommand member or declare their envelope m
 });
 
 function parseDocumentFields(): Map<string, ContractField[]> {
-  const doc = h0AgentDocumentDescription();
+  const doc = h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS);
   const parsed = new Map<string, ContractField[]>();
   let currentVerb: string | null = null;
 
@@ -233,7 +234,9 @@ test("the document's strictly parsed field contracts equal the table", () => {
   }
 });
 
-test("h0AgentDocumentDescription has zero parameters", () => {
+test("h0AgentDocumentDescription accepts exactly one number and no secret-shaped input", () => {
+  /* One required number is the whole runtime input surface. A credential or other string cannot
+   * type-check as document input, while the non-leaf caller can still supply the shared TTL. */
   const file = sourceFile("src/h0/verbs.ts");
   const declarations: ts.FunctionDeclaration[] = [];
   const visit = (node: ts.Node): void => {
@@ -247,7 +250,69 @@ test("h0AgentDocumentDescription has zero parameters", () => {
   };
   visit(file);
   assert.equal(declarations.length, 1, "expected one function declaration named h0AgentDocumentDescription");
-  assert.equal(declarations[0]!.parameters.length, 0, "the document function must accept no runtime input");
+  const parameters = declarations[0]!.parameters;
+  assert.equal(parameters.length, 1, "the document function must accept only the seat lifetime");
+  assert.equal(parameters[0]!.type?.kind, ts.SyntaxKind.NumberKeyword, "the only input must be typed number");
+  assert.equal(parameters[0]!.questionToken, undefined, "the lifetime must be required");
+  assert.equal(parameters[0]!.initializer, undefined, "the lifetime must not have a copied default");
+  assert.equal(parameters[0]!.dotDotDotToken, undefined, "the function must not accept extra runtime values");
+});
+
+test("the document derives its whole-day seat lifetime from H0_SEAT_TOKEN_TTL_MS", () => {
+  const dayMs = 24 * 60 * 60 * 1_000;
+  assert.equal(H0_SEAT_TOKEN_TTL_MS % dayMs, 0, "the ruled seat lifetime must be whole days");
+  const days = H0_SEAT_TOKEN_TTL_MS / dayMs;
+  const sentence = `A seat lasts ${days} days; after it ends, ask the human who invited you for a new invite.`;
+  assert.match(h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS), new RegExp(`^${sentence.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "m"));
+  assert.match(
+    h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS - dayMs),
+    new RegExp(`^A seat lasts ${days - 1} days;`, "m"),
+    "the sentence must compute the number from its parameter",
+  );
+  assert.throws(
+    () => h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS - 1),
+    /positive whole number of days/,
+  );
+});
+
+test("the H0 edge passes the imported H0 seat lifetime without a literal or shadow", () => {
+  const file = sourceFile("supabase/functions/h0/index.ts");
+  const imports = new Map<string, string>();
+  const localDeclarations: string[] = [];
+  let passedLifetime: ts.Expression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node)
+      && ts.isStringLiteral(node.moduleSpecifier)
+      && node.importClause?.namedBindings
+      && ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const element of node.importClause.namedBindings.elements) {
+        imports.set(element.name.text, node.moduleSpecifier.text);
+      }
+    }
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+      localDeclarations.push(node.name.text);
+    }
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === "h0AgentDocumentDescription"
+    ) {
+      assert.equal(passedLifetime, undefined, "expected one description call");
+      assert.equal(node.arguments.length, 1, "the description call must pass one value");
+      passedLifetime = node.arguments[0];
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(passedLifetime && ts.isIdentifier(passedLifetime), "the lifetime argument must be an identifier");
+  assert.equal(passedLifetime.text, "H0_SEAT_TOKEN_TTL_MS");
+  assert.equal(imports.get("H0_SEAT_TOKEN_TTL_MS"), "../_shared/protocol.js");
+  assert.ok(
+    !localDeclarations.includes("H0_SEAT_TOKEN_TTL_MS"),
+    "a local lifetime would shadow the protocol import",
+  );
 });
 
 test("the SERVED DOCUMENT equals its golden, line for line", () => {
@@ -271,9 +336,10 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
    *
    * Known limit, stated rather than implied: this cannot stop a secret read from an ambient
    * global inside the renderer, because such a value never appears in the source. The
-   * zero-parameter rule blocks caller-supplied input; nothing here blocks ambient state. */
+   * number-only parameter rule blocks caller-supplied strings; nothing here blocks ambient state. */
   const GOLDEN = [
     "CommonSwarm: post short signals of intent so collaborators do not step on each other.",
+    `A seat lasts ${H0_SEAT_TOKEN_TTL_MS / (24 * 60 * 60 * 1_000)} days; after it ends, ask the human who invited you for a new invite.`,
     "A signal never claims, blocks, or closes a task.",
     "",
     "Take the join credential from the message that gave you this URL. It is not in this document.",
@@ -312,16 +378,16 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
     "    body (required)",
     "    requestId (may be omitted)",
   ].join("\n");
-  assert.equal(h0AgentDocumentDescription(), GOLDEN);
+  assert.equal(h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS), GOLDEN);
 });
 
 test("the document contains none of the known join-credential assignment spellings", () => {
   /* This prose check is intentionally finite: it catches the known `:`, `=`, `is`, and
    * `Use VALUE as your join credential` spellings. It does not claim to recognize every way
-   * prose could reveal a secret. The structural control is the zero-parameter assertion above,
-   * which prevents a caller from supplying a credential for the document to interpolate. It
+   * prose could reveal a secret. The structural control is the number-only parameter assertion
+   * above, which prevents a caller from supplying a credential for the document to interpolate. It
    * does not control reads from ambient globals. */
-  const doc = h0AgentDocumentDescription();
+  const doc = h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS);
   assert.doesNotMatch(
     doc,
     /join[\s_-]*credential\s*(?::|=|\bis\b)|\buse\s+\S+\s+as\s+(?:your\s+)?join[\s_-]*credential\b/i,

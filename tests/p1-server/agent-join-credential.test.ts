@@ -12,6 +12,10 @@ import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
+import {
+  AGENT_TOKEN_DEFAULT_TTL_MS,
+  H0_SEAT_TOKEN_TTL_MS,
+} from "../../src/protocol/index.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 
 interface LocalEnvironment {
@@ -241,6 +245,75 @@ async function command(
     status: response.status,
     body: await response.json() as Record<string, unknown>,
   };
+}
+
+async function registrationCommand(
+  bearer: string | null,
+  attemptId: string,
+  name = "Joined agent",
+  commandId = randomUUID(),
+): Promise<CommandResult> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
+  if (bearer !== null) headers.authorization = `Bearer ${bearer}`;
+  const response = await fetch(`${local.API_URL}/functions/v1/command`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      command_id: commandId,
+      client_version: "0.1.0",
+      /* Deliberately false routing input: registration must derive both from
+       * the locked credential row rather than trusting this envelope. */
+      workspace_id: randomUUID(),
+      stream: { kind: "repo", repo_mapping_id: randomUUID() },
+      command: {
+        kind: "register_agent_seat",
+        attempt_id: attemptId,
+        name,
+      },
+    }),
+  });
+  return {
+    status: response.status,
+    body: await response.json() as Record<string, unknown>,
+  };
+}
+
+async function mintJoinCredential(
+  g: Fixture,
+  seatCap: number,
+): Promise<{ id: string; secret: string }> {
+  const minted = await command(
+    g.ownerJwt,
+    { kind: "mint_agent_join_credential", seat_cap: seatCap, ttl_hours: 4 },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(minted.status, 200, JSON.stringify(minted.body));
+  return {
+    id: String(minted.body.join_credential_id),
+    secret: String(minted.body.join_credential),
+  };
+}
+
+async function useSeatToken(
+  g: Fixture,
+  token: string,
+  suffix: string = randomUUID(),
+): Promise<CommandResult> {
+  return await command(
+    token,
+    {
+      kind: "post_signal",
+      signal_kind: "note",
+      body: `registered-token-${suffix}`,
+      to_user_id: null,
+      about: null,
+    },
+    randomUUID(),
+    g.workspace,
+  );
 }
 
 async function roster(): Promise<CommandResult> {
@@ -591,6 +664,46 @@ async function addRegistrar(g: Fixture, state: "live" | "expired"): Promise<stri
   return credential;
 }
 
+async function addRegistrationCredential(
+  g: Fixture,
+  options: { expired?: boolean; seatCap?: number; seatsUsed?: number } = {},
+): Promise<{ id: string; secret: string }> {
+  const principal = randomUUID();
+  const device = randomUUID();
+  const run = randomUUID();
+  const id = randomUUID();
+  const secret = `swm_join_${randomBytes(32).toString("base64url")}`;
+  const seatCap = options.seatCap ?? 2;
+  const seatsUsed = options.seatsUsed ?? 0;
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.devices (device_id, user_id, label)
+      VALUES (${device}::uuid, ${g.ownerId}::uuid, ${`Join registrar ${id}`})`;
+    await tx`INSERT INTO swarm.agent_principals (principal_id, workspace_id, owner_user_id, name)
+      VALUES (${principal}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${`join-registrar-${id}`})`;
+    await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
+      VALUES (${run}::uuid, ${principal}::uuid, ${device}::uuid)`;
+    if (options.expired) {
+      await tx`INSERT INTO swarm.agent_join_credentials (
+          id, workspace_id, owner_user_id, registrar_principal_id, registrar_run_id,
+          credential_hash, locator, seat_cap, seats_used, created_at, expires_at, mint_command_id)
+        VALUES (${id}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${principal}::uuid,
+          ${run}::uuid, ${createHash("sha256").update(secret).digest()},
+          ${randomBytes(16).toString("base64url")}, ${seatCap}, ${seatsUsed},
+          statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour',
+          ${randomUUID()})`;
+    } else {
+      await tx`INSERT INTO swarm.agent_join_credentials (
+          id, workspace_id, owner_user_id, registrar_principal_id, registrar_run_id,
+          credential_hash, locator, seat_cap, seats_used, expires_at, mint_command_id)
+        VALUES (${id}::uuid, ${g.workspace}::uuid, ${g.ownerId}::uuid, ${principal}::uuid,
+          ${run}::uuid, ${createHash("sha256").update(secret).digest()},
+          ${randomBytes(16).toString("base64url")}, ${seatCap}, ${seatsUsed},
+          statement_timestamp() + interval '4 hours', ${randomUUID()})`;
+    }
+  });
+  return { id, secret };
+}
+
 async function memberOf(g: Fixture, role: "member" | "admin" = "member") {
   const user = await createUser();
   await sql.begin(async (tx) => {
@@ -729,4 +842,699 @@ test("agent-join credential quotas", async (t) => {
     assert.deepEqual(notFound.body, notPermitted.body, "the caller cannot tell the two apart");
     assert.equal(await reasonFor(), "agent_join_credential_not_found");
   });
+});
+
+async function workspacePrincipalCount(g: Fixture): Promise<number> {
+  const rows = await sql<{ n: string }[]>`
+    SELECT count(*)::text AS n
+    FROM swarm.agent_principals
+    WHERE workspace_id = ${g.workspace}::uuid
+  `;
+  return Number(rows[0]?.n ?? "0");
+}
+
+async function attemptCount(credentialId: string): Promise<number> {
+  const rows = await sql<{ n: string }[]>`
+    SELECT count(*)::text AS n
+    FROM swarm.agent_join_attempts
+    WHERE join_credential_id = ${credentialId}::uuid
+  `;
+  return Number(rows[0]?.n ?? "0");
+}
+
+async function registrationProjectionCounts(
+  g: Fixture,
+  ownerId: string,
+  credentialId: string,
+): Promise<Record<string, number>> {
+  const rows = await sql<{
+    devices: number;
+    principals: number;
+    runs: number;
+    grants: number;
+    tokens: number;
+    attempts: number;
+    seats_used: number;
+  }[]>`
+    SELECT
+      (SELECT count(*)::int FROM swarm.devices AS d
+        WHERE d.user_id = ${ownerId}::uuid) AS devices,
+      (SELECT count(*)::int FROM swarm.agent_principals AS p
+        WHERE p.workspace_id = ${g.workspace}::uuid
+          AND p.owner_user_id = ${ownerId}::uuid) AS principals,
+      (SELECT count(*)::int
+        FROM swarm.agent_runs AS r
+        JOIN swarm.agent_principals AS p ON p.principal_id = r.principal_id
+        WHERE p.workspace_id = ${g.workspace}::uuid
+          AND p.owner_user_id = ${ownerId}::uuid) AS runs,
+      (SELECT count(*)::int
+        FROM swarm.renewal_grants AS rg
+        JOIN swarm.agent_principals AS p ON p.principal_id = rg.principal_id
+        WHERE p.workspace_id = ${g.workspace}::uuid
+          AND p.owner_user_id = ${ownerId}::uuid) AS grants,
+      (SELECT count(*)::int
+        FROM swarm.agent_tokens AS t
+        JOIN swarm.agent_principals AS p ON p.principal_id = t.principal_id
+        WHERE p.workspace_id = ${g.workspace}::uuid
+          AND p.owner_user_id = ${ownerId}::uuid) AS tokens,
+      (SELECT count(*)::int FROM swarm.agent_join_attempts AS a
+        WHERE a.join_credential_id = ${credentialId}::uuid) AS attempts,
+      c.seats_used
+    FROM swarm.agent_join_credentials AS c
+    WHERE c.id = ${credentialId}::uuid
+  `;
+  assert.ok(rows[0], "join credential disappeared");
+  return rows[0];
+}
+
+test("registration credential owner must remain a live workspace member", async () => {
+  const g = await createFixture();
+
+  const assertUniformRefusalWithoutWrites = async (
+    ownerId: string,
+    credentialId: string,
+    credentialSecret: string,
+    label: string,
+  ) => {
+    const before = await registrationProjectionCounts(g, ownerId, credentialId);
+    const refused = await registrationCommand(
+      credentialSecret,
+      randomUUID(),
+      label,
+    );
+    assert.equal(refused.status, 403, JSON.stringify(refused.body));
+    assert.deepEqual(refused.body, { error: "forbidden" });
+    const after = await registrationProjectionCounts(g, ownerId, credentialId);
+    assert.deepEqual(after, before, `${label} registration wrote seat projection rows`);
+  };
+
+  const liveOwner = await memberOf(g);
+  const liveMint = await mintIn(g, liveOwner.jwt);
+  assert.equal(liveMint.status, 200, JSON.stringify(liveMint.body));
+  const liveRegistration = await registrationCommand(
+    String(liveMint.body.join_credential),
+    randomUUID(),
+    "live member seat",
+  );
+  assert.equal(liveRegistration.status, 200, JSON.stringify(liveRegistration.body));
+
+  const removedOwner = await memberOf(g);
+  const removedMint = await mintIn(g, removedOwner.jwt);
+  assert.equal(removedMint.status, 200, JSON.stringify(removedMint.body));
+  const removedCredentialId = String(removedMint.body.join_credential_id);
+  const removal = await command(
+    g.ownerJwt,
+    { kind: "remove_member", user_id: removedOwner.id },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(removal.status, 200, JSON.stringify(removal.body));
+  await assertUniformRefusalWithoutWrites(
+    removedOwner.id,
+    removedCredentialId,
+    String(removedMint.body.join_credential),
+    "removed member seat",
+  );
+
+  const missingOwner = await memberOf(g);
+  const missingMint = await mintIn(g, missingOwner.jwt);
+  assert.equal(missingMint.status, 200, JSON.stringify(missingMint.body));
+  const missingCredentialId = String(missingMint.body.join_credential_id);
+  await sql`
+    DELETE FROM swarm.memberships
+    WHERE workspace_id = ${g.workspace}::uuid
+      AND user_id = ${missingOwner.id}::uuid
+  `;
+  await assertUniformRefusalWithoutWrites(
+    missingOwner.id,
+    missingCredentialId,
+    String(missingMint.body.join_credential),
+    "missing member seat",
+  );
+});
+
+test("register_agent_seat authentication and exact-kind gate", async (t) => {
+  const g = await createFixture();
+  const attempt = randomUUID();
+  const beforePrincipals = await workspacePrincipalCount(g);
+
+  await t.test("missing, malformed, and unknown join credentials share one 403", async () => {
+    const unknown = `swm_join_${randomBytes(32).toString("base64url")}`;
+    const results = await Promise.all([
+      registrationCommand(null, attempt),
+      registrationCommand("swm_join_bad", attempt),
+      registrationCommand(unknown, attempt),
+    ]);
+    for (const result of results) {
+      assert.equal(result.status, 403, JSON.stringify(result.body));
+      assert.deepEqual(result.body, { error: "forbidden" });
+    }
+    assert.equal(await workspacePrincipalCount(g), beforePrincipals);
+  });
+
+  await t.test("human and agent credentials cannot register", async () => {
+    const [human, agent] = await Promise.all([
+      registrationCommand(g.ownerJwt, randomUUID()),
+      registrationCommand(g.agentToken, randomUUID()),
+    ]);
+    for (const result of [human, agent]) {
+      assert.equal(result.status, 403, JSON.stringify(result.body));
+      assert.deepEqual(result.body, { error: "forbidden" });
+    }
+    assert.equal(await workspacePrincipalCount(g), beforePrincipals);
+  });
+
+  await t.test("a join credential cannot perform any other command class", async () => {
+    const minted = await mintJoinCredential(g, 2);
+    const otherKinds = [
+      "post_signal",
+      "create_agent_principal",
+      "mint_agent_join_credential",
+      "claim_agent_inbox",
+      "not_a_command",
+    ];
+    for (const kind of otherKinds) {
+      const result = await command(
+        minted.secret,
+        { kind },
+        randomUUID(),
+        g.workspace,
+      );
+      assert.equal(result.status, 403, `${kind}: ${JSON.stringify(result.body)}`);
+      assert.deepEqual(result.body, { error: "forbidden" });
+    }
+    assert.equal(await attemptCount(minted.id), 0);
+  });
+
+  await t.test("revoked and expired credentials use the same authn refusal", async () => {
+    const revoked = await mintJoinCredential(g, 1);
+    const revoke = await command(
+      g.ownerJwt,
+      { kind: "revoke_agent_join_credential", join_credential_id: revoked.id },
+      randomUUID(),
+      g.workspace,
+    );
+    assert.equal(revoke.status, 200, JSON.stringify(revoke.body));
+    const expired = await addRegistrationCredential(g, { expired: true });
+    for (const item of [revoked, expired]) {
+      const principals = await workspacePrincipalCount(g);
+      const result = await registrationCommand(item.secret, randomUUID());
+      assert.equal(result.status, 403, JSON.stringify(result.body));
+      assert.deepEqual(result.body, { error: "forbidden" });
+      assert.equal(await attemptCount(item.id), 0);
+      assert.equal(await workspacePrincipalCount(g), principals);
+    }
+  });
+
+  await t.test("a full credential is a named domain refusal and writes no seat", async () => {
+    const full = await addRegistrationCredential(g, {
+      seatCap: 1,
+      seatsUsed: 1,
+    });
+    const principals = await workspacePrincipalCount(g);
+    const result = await registrationCommand(full.secret, randomUUID());
+    assert.equal(result.status, 409, JSON.stringify(result.body));
+    assert.equal(result.body.error, "join_credential_seat_cap_reached");
+    assert.equal(await attemptCount(full.id), 0);
+    assert.equal(await workspacePrincipalCount(g), principals);
+  });
+});
+
+test("register_agent_seat consumes seats atomically and carries G3 attribution", async (t) => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 2);
+  const credentialRows = await sql<{
+    owner_user_id: string;
+    registrar_principal_id: string;
+    registrar_run_id: string;
+  }[]>`
+    SELECT owner_user_id, registrar_principal_id, registrar_run_id
+    FROM swarm.agent_join_credentials
+    WHERE id = ${credential.id}::uuid
+  `;
+  const registrar = credentialRows[0]!;
+  const acceptedCommandIds = [randomUUID(), randomUUID()];
+  const attempts = [randomUUID(), randomUUID()];
+  const first = await registrationCommand(
+    credential.secret,
+    attempts[0],
+    "same display label",
+    acceptedCommandIds[0],
+  );
+  const second = await registrationCommand(
+    credential.secret,
+    attempts[1],
+    "same display label",
+    acceptedCommandIds[1],
+  );
+  for (const result of [first, second]) {
+    assert.equal(result.status, 200, JSON.stringify(result.body));
+    assert.equal(result.body.status, "accepted");
+    assert.match(String(result.body.agent_token), /^swm_agt_[A-Za-z0-9_-]{43}$/);
+    assert.equal(result.body.workspace_id, g.workspace, "request routing fields are ignored");
+  }
+  assert.notEqual(first.body.principal_id, second.body.principal_id);
+  assert.notEqual(first.body.run_id, second.body.run_id);
+  assert.notEqual(first.body.token_id, second.body.token_id);
+
+  const beforeThird = await workspacePrincipalCount(g);
+  const refusedCommandId = randomUUID();
+  const refusedAttempt = randomUUID();
+  const third = await registrationCommand(
+    credential.secret,
+    refusedAttempt,
+    "third",
+    refusedCommandId,
+  );
+  assert.equal(third.status, 409, JSON.stringify(third.body));
+  assert.equal(third.body.error, "join_credential_seat_cap_reached");
+  assert.equal(await workspacePrincipalCount(g), beforeThird);
+
+  await t.test("seat count, marker rows, bindings, TTL, and renewal grant agree", async () => {
+    const rows = await sql<{
+      seats_used: number;
+      attempts: string;
+      principals: string;
+      bindings: string;
+      ttl_ms: number;
+      grants: string;
+    }[]>`
+      SELECT
+        c.seats_used,
+        count(DISTINCT a.attempt_id)::text AS attempts,
+        count(DISTINCT a.principal_id)::text AS principals,
+        count(DISTINCT (a.principal_id, a.run_id, a.token_id))::text AS bindings,
+        min(extract(epoch FROM (t.expires_at - t.issued_at)) * 1000)::float8 AS ttl_ms,
+        count(DISTINCT g.renewal_grant_id)::text AS grants
+      FROM swarm.agent_join_credentials AS c
+      LEFT JOIN swarm.agent_join_attempts AS a
+        ON a.join_credential_id = c.id
+      LEFT JOIN swarm.agent_tokens AS t
+        ON t.token_id = a.token_id
+       AND t.principal_id = a.principal_id
+       AND t.run_id = a.run_id
+      LEFT JOIN swarm.renewal_grants AS g
+        ON g.renewal_grant_id = t.renewal_grant_id
+      WHERE c.id = ${credential.id}::uuid
+      GROUP BY c.seats_used
+    `;
+    assert.deepEqual(
+      {
+        seats: rows[0]?.seats_used,
+        attempts: rows[0]?.attempts,
+        principals: rows[0]?.principals,
+        bindings: rows[0]?.bindings,
+        grants: rows[0]?.grants,
+      },
+      { seats: 2, attempts: "2", principals: "2", bindings: "2", grants: "2" },
+    );
+    assert.equal(
+      rows[0]?.ttl_ms,
+      H0_SEAT_TOKEN_TTL_MS,
+      "a registered seat must expire exactly one ruled lifetime after issue",
+    );
+    assert.equal(await attemptCount(credential.id), 2);
+    assert.equal(
+      (await sql<{ n: string }[]>`
+        SELECT count(*)::text AS n
+        FROM swarm.agent_join_attempts
+        WHERE principal_id IN (${g.agentPrincipal}::uuid, ${registrar.registrar_principal_id}::uuid)
+      `)[0]?.n,
+      "0",
+      "neither a human-minted principal nor the registrar is an H0 seat",
+    );
+  });
+
+  await t.test("the registered token authenticates for a real agent command", async () => {
+    const used = await useSeatToken(g, String(first.body.agent_token));
+    assert.equal(used.status, 200, JSON.stringify(used.body));
+    assert.equal(used.body.status, "accepted");
+  });
+
+  await t.test("accepted and domain-refused audit and events use the registrar actor", async () => {
+    const audits = await sql<{
+      command_id: string;
+      actor_user: string;
+      actor_agent_principal: string;
+      actor_run: string;
+      outcome: string;
+    }[]>`
+      SELECT
+        i.command_id,
+        a.actor_user,
+        a.actor_agent_principal,
+        a.actor_run,
+        a.outcome
+      FROM swarm.idempotency_keys AS i
+      JOIN LATERAL (
+        SELECT actor_user, actor_agent_principal, actor_run, outcome
+        FROM swarm.audit_log
+        WHERE credential_kind = 'join'
+          AND credential_id = ${credential.id}::uuid
+          AND command_kind = 'register_agent_seat'
+          AND request_hash = i.request_hash
+        ORDER BY audit_id DESC
+        LIMIT 1
+      ) AS a ON true
+      WHERE i.principal_kind = 'join'
+        AND i.principal_id = ${credential.id}
+        AND i.command_id IN (${acceptedCommandIds[0]}, ${refusedCommandId})
+      ORDER BY i.command_id
+    `;
+    assert.equal(audits.length, 2);
+    assert.deepEqual(new Set(audits.map((row) => row.outcome)), new Set(["accepted", "domain"]));
+    for (const row of audits) {
+      assert.equal(row.actor_user, registrar.owner_user_id);
+      assert.equal(row.actor_agent_principal, registrar.registrar_principal_id);
+      assert.equal(row.actor_run, registrar.registrar_run_id);
+    }
+
+    const events = await sql<{
+      command_id: string;
+      actor_user: string;
+      actor_agent_principal: string;
+      actor_run: string;
+      payload: Record<string, unknown>;
+    }[]>`
+      SELECT command_id, actor_user, actor_agent_principal, actor_run, payload
+      FROM swarm.events
+      WHERE command_id IN (${acceptedCommandIds[0]}, ${refusedCommandId})
+      ORDER BY seq
+    `;
+    assert.equal(events.length, 3, "accepted emits principal+token; refusal emits CommandRejected");
+    for (const event of events) {
+      assert.equal(event.actor_user, registrar.owner_user_id);
+      assert.equal(event.actor_agent_principal, registrar.registrar_principal_id);
+      assert.equal(event.actor_run, registrar.registrar_run_id);
+    }
+    assert.ok(
+      events.some((event) => event.payload.principal_id === first.body.principal_id),
+      "the created seat is the event subject",
+    );
+    assert.equal(
+      events.some((event) => event.payload.principal_id === registrar.registrar_principal_id),
+      false,
+      "the registrar is the actor, never the subject",
+    );
+  });
+
+  await t.test("the attempt marker cannot be erased or repointed", async () => {
+    await assert.rejects(
+      sql`DELETE FROM swarm.agent_join_attempts
+          WHERE join_credential_id = ${credential.id}::uuid
+            AND attempt_id = ${attempts[0]}::uuid`,
+      /SWARM_AGENT_JOIN_ATTEMPT_IMMUTABLE/,
+    );
+    await assert.rejects(
+      sql`UPDATE swarm.agent_join_attempts
+          SET principal_id = ${randomUUID()}::uuid
+          WHERE join_credential_id = ${credential.id}::uuid
+            AND attempt_id = ${attempts[0]}::uuid`,
+      /SWARM_AGENT_JOIN_ATTEMPT_IMMUTABLE/,
+    );
+  });
+});
+
+test("registration refuses at the shared principal ceiling without a seat row", async () => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 1);
+  /* fixture visible principal + live credential registrar + 48 fillers = 50 */
+  await addPlainPrincipals(g, 48);
+  assert.equal(await workspacePrincipalCount(g), 50);
+  const result = await registrationCommand(credential.secret, randomUUID());
+  assert.equal(result.status, 403, JSON.stringify(result.body));
+  assert.equal(result.body.error, "principal_limit_reached");
+  assert.equal(result.body.limit, 50);
+  assert.equal(await workspacePrincipalCount(g), 50);
+  assert.equal(await attemptCount(credential.id), 0);
+  const rows = await sql<{ seats_used: number }[]>`
+    SELECT seats_used FROM swarm.agent_join_credentials
+    WHERE id = ${credential.id}::uuid
+  `;
+  assert.equal(rows[0]?.seats_used, 0);
+});
+
+test("a revoked unused seat cannot be revived by retrying its attempt", async (t) => {
+  const expectedMessage = "This seat was revoked. Register again with a new attempt.";
+
+  await t.test("revoked token", async () => {
+    const g = await createFixture();
+    const credential = await mintJoinCredential(g, 2);
+    const attempt = randomUUID();
+    const first = await registrationCommand(credential.secret, attempt, "revoked token seat");
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const revoked = await command(
+      g.ownerJwt,
+      { kind: "revoke_agent_token", token_id: String(first.body.token_id) },
+      randomUUID(),
+      g.workspace,
+    );
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    const retry = await registrationCommand(credential.secret, attempt, "revoked token seat");
+    assert.equal(retry.status, 409, JSON.stringify(retry.body));
+    assert.equal(retry.body.error, "registration_seat_revoked");
+    assert.equal(retry.body.message, expectedMessage);
+    assert.equal(retry.body.agent_token, undefined);
+    const fresh = await registrationCommand(credential.secret, randomUUID(), "new token seat");
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+    assert.equal((await useSeatToken(g, String(fresh.body.agent_token))).status, 200);
+  });
+
+  await t.test("revoked principal", async () => {
+    const g = await createFixture();
+    const credential = await mintJoinCredential(g, 2);
+    const attempt = randomUUID();
+    const first = await registrationCommand(credential.secret, attempt, "revoked principal seat");
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const revoked = await command(
+      g.ownerJwt,
+      { kind: "revoke_agent_principal", principal_id: String(first.body.principal_id) },
+      randomUUID(),
+      g.workspace,
+    );
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+    const retry = await registrationCommand(credential.secret, attempt, "revoked principal seat");
+    assert.equal(retry.status, 409, JSON.stringify(retry.body));
+    assert.equal(retry.body.error, "registration_seat_revoked");
+    assert.equal(retry.body.message, expectedMessage);
+    assert.equal(retry.body.agent_token, undefined);
+    const fresh = await registrationCommand(credential.secret, randomUUID(), "new principal seat");
+    assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+    assert.equal((await useSeatToken(g, String(fresh.body.agent_token))).status, 200);
+  });
+});
+
+test("a registered seat renews with a short successor inside its seat horizon", async () => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 1);
+  const registered = await registrationCommand(credential.secret, randomUUID(), "renewing seat");
+  assert.equal(registered.status, 200, JSON.stringify(registered.body));
+  const tokenId = String(registered.body.token_id);
+  const token = String(registered.body.agent_token);
+  const before = await sql<{
+    issued_at: Date;
+    expires_at: Date;
+    horizon_expires_at: Date;
+  }[]>`
+    SELECT t.issued_at, t.expires_at, g.horizon_expires_at
+    FROM swarm.agent_tokens AS t
+    JOIN swarm.renewal_grants AS g ON g.renewal_grant_id = t.renewal_grant_id
+    WHERE t.token_id = ${tokenId}::uuid
+  `;
+  assert.ok(before[0]);
+  assert.equal(
+    before[0].expires_at.getTime() - before[0].issued_at.getTime(),
+    H0_SEAT_TOKEN_TTL_MS,
+  );
+  assert.equal(before[0].horizon_expires_at.getTime(), before[0].expires_at.getTime());
+
+  const used = await useSeatToken(g, token, "before-renewal");
+  assert.equal(used.status, 200, JSON.stringify(used.body));
+  const renewed = await command(
+    token,
+    { kind: "renew_agent_token" },
+    randomUUID(),
+    g.workspace,
+  );
+  assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+  const successor = await sql<{ issued_at: Date; expires_at: Date }[]>`
+    SELECT issued_at, expires_at
+    FROM swarm.agent_tokens
+    WHERE token_id = ${String(renewed.body.token_id)}::uuid
+  `;
+  assert.ok(successor[0]);
+  const successorTtl = successor[0].expires_at.getTime() - successor[0].issued_at.getTime();
+  assert.ok(Math.abs(successorTtl - AGENT_TOKEN_DEFAULT_TTL_MS) < 10_000);
+  assert.ok(successor[0].expires_at.getTime() <= before[0].horizon_expires_at.getTime());
+});
+
+test("same registration POST deliberately remints only while its token is unused", async () => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 1);
+  const attempt = randomUUID();
+  const commandId = randomUUID();
+  const name = "same POST seat";
+  const first = await registrationCommand(credential.secret, attempt, name, commandId);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+
+  const conflict = await registrationCommand(
+    credential.secret,
+    attempt,
+    "different body",
+    commandId,
+  );
+  assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
+  assert.deepEqual(conflict.body, { error: "command_id_conflict" });
+
+  const reminted = await registrationCommand(credential.secret, attempt, name, commandId);
+  assert.equal(reminted.status, 200, JSON.stringify(reminted.body));
+  assert.notEqual(reminted.body.token_id, first.body.token_id);
+  assert.equal(reminted.body.principal_id, first.body.principal_id);
+  assert.equal(reminted.body.run_id, first.body.run_id);
+  const used = await useSeatToken(g, String(reminted.body.agent_token), "same-post");
+  assert.equal(used.status, 200, JSON.stringify(used.body));
+
+  const afterUse = await registrationCommand(credential.secret, attempt, name, commandId);
+  assert.equal(afterUse.status, 409, JSON.stringify(afterUse.body));
+  assert.equal(afterUse.body.error, "registration_token_already_used");
+  assert.equal(afterUse.body.message, "Revoke that seat and register again.");
+  assert.equal(afterUse.body.agent_token, undefined);
+});
+
+test("registration retry recovers only an unused token and never stores a secret", async () => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 3);
+  const attempt = randomUUID();
+  const firstCommandId = randomUUID();
+  const first = await registrationCommand(
+    credential.secret,
+    attempt,
+    "retry seat",
+    firstCommandId,
+  );
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const firstSecret = String(first.body.agent_token);
+  const firstTokenId = String(first.body.token_id);
+  const principalId = String(first.body.principal_id);
+  const runId = String(first.body.run_id);
+
+  const replacementCommandId = randomUUID();
+  const replacement = await registrationCommand(
+    credential.secret,
+    attempt,
+    "retry seat",
+    replacementCommandId,
+  );
+  assert.equal(replacement.status, 200, JSON.stringify(replacement.body));
+  const replacementSecret = String(replacement.body.agent_token);
+  assert.notEqual(replacementSecret, firstSecret);
+  assert.notEqual(replacement.body.token_id, firstTokenId);
+  assert.equal(replacement.body.principal_id, principalId);
+  assert.equal(replacement.body.run_id, runId);
+  assert.equal(replacement.body.seats_used, 1);
+  const replacementLifetime = await sql<{ expires_at: Date; horizon_expires_at: Date }[]>`
+    SELECT t.expires_at, g.horizon_expires_at
+    FROM swarm.agent_tokens AS t
+    JOIN swarm.renewal_grants AS g ON g.renewal_grant_id = t.renewal_grant_id
+    WHERE t.token_id = ${String(replacement.body.token_id)}::uuid
+  `;
+  assert.ok(replacementLifetime[0]);
+  assert.ok(
+    replacementLifetime[0].expires_at.getTime() <=
+      replacementLifetime[0].horizon_expires_at.getTime(),
+    "a replacement token must not outlive its seat horizon",
+  );
+
+  const oldUse = await useSeatToken(g, firstSecret, "old");
+  assert.notEqual(oldUse.status, 200, "the replaced token must not authenticate");
+  const replacementUse = await useSeatToken(g, replacementSecret, "replacement");
+  assert.equal(replacementUse.status, 200, JSON.stringify(replacementUse.body));
+
+  const usedRetryCommandId = randomUUID();
+  const usedRetry = await registrationCommand(
+    credential.secret,
+    attempt,
+    "retry seat",
+    usedRetryCommandId,
+  );
+  assert.equal(usedRetry.status, 409, JSON.stringify(usedRetry.body));
+  assert.equal(usedRetry.body.error, "registration_token_already_used");
+  assert.equal(usedRetry.body.message, "Revoke that seat and register again.");
+  assert.equal(usedRetry.body.seats_used, undefined);
+
+  const secondAttempt = randomUUID();
+  const second = await registrationCommand(
+    credential.secret,
+    secondAttempt,
+    "second host",
+  );
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(second.body.seats_used, 2);
+  assert.notEqual(second.body.principal_id, principalId);
+  const firstStillWorks = await useSeatToken(g, replacementSecret, "after-second-host");
+  assert.equal(firstStillWorks.status, 200, JSON.stringify(firstStillWorks.body));
+  assert.equal(await attemptCount(credential.id), 2);
+
+  const tokenRows = await sql<{
+    old_revoked_at: Date | null;
+    old_first_used_at: Date | null;
+    current_token_id: string;
+    seats_used: number;
+  }[]>`
+    SELECT
+      old.revoked_at AS old_revoked_at,
+      old.first_used_at AS old_first_used_at,
+      a.token_id AS current_token_id,
+      c.seats_used
+    FROM swarm.agent_tokens AS old
+    JOIN swarm.agent_join_attempts AS a
+      ON a.join_credential_id = ${credential.id}::uuid
+     AND a.attempt_id = ${attempt}::uuid
+    JOIN swarm.agent_join_credentials AS c ON c.id = a.join_credential_id
+    WHERE old.token_id = ${firstTokenId}::uuid
+  `;
+  assert.ok(tokenRows[0]?.old_revoked_at instanceof Date);
+  assert.equal(tokenRows[0]?.old_first_used_at, null);
+  assert.equal(tokenRows[0]?.current_token_id, replacement.body.token_id);
+  assert.equal(tokenRows[0]?.seats_used, 2);
+
+  const stored = await sql<{
+    ledger: string;
+    audits: string;
+    events: string;
+    attempts: string;
+  }[]>`
+    SELECT
+      coalesce((SELECT string_agg(response::text, E'\n')
+        FROM swarm.idempotency_keys
+        WHERE principal_kind = 'join' AND principal_id = ${credential.id}), '') AS ledger,
+      coalesce((SELECT string_agg(coalesce(detail, ''), E'\n')
+        FROM swarm.audit_log
+        WHERE credential_kind = 'join' AND credential_id = ${credential.id}::uuid), '') AS audits,
+      coalesce((SELECT string_agg(payload::text, E'\n')
+        FROM swarm.events
+        WHERE actor_agent_principal = (
+          SELECT registrar_principal_id FROM swarm.agent_join_credentials
+          WHERE id = ${credential.id}::uuid
+        )), '') AS events,
+      coalesce((SELECT string_agg(a::text, E'\n')
+        FROM swarm.agent_join_attempts AS a
+        WHERE join_credential_id = ${credential.id}::uuid), '') AS attempts
+  `;
+  const atRest = Object.values(stored[0] ?? {}).join("\n");
+  for (const secret of [firstSecret, replacementSecret, String(second.body.agent_token)]) {
+    assert.equal(atRest.includes(secret), false, "a raw seat secret reached stored state");
+  }
+  const replayRows = await sql<{ response: Record<string, unknown> }[]>`
+    SELECT response FROM swarm.idempotency_keys
+    WHERE principal_kind = 'join'
+      AND principal_id = ${credential.id}
+      AND command_id IN (${firstCommandId}, ${replacementCommandId}, ${usedRetryCommandId})
+  `;
+  assert.equal(replayRows.length, 3);
+  assert.equal(
+    replayRows.some((row) => Object.hasOwn(row.response, "agent_token")),
+    false,
+    "no stored response may contain the fresh-only key",
+  );
 });
