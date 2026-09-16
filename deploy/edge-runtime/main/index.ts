@@ -6,6 +6,7 @@ import {
 } from "./router.ts";
 
 declare const EdgeRuntime: {
+  applySupabaseTag(original: Request, cloned: Request): void;
   userWorkers: {
     create(options: {
       servicePath: string;
@@ -17,7 +18,7 @@ declare const EdgeRuntime: {
   };
 };
 
-const WORKERS_ROOT = "/home/deno/workers";
+const FUNCTIONS_ROOT = "/var/tmp/commonswarm-functions";
 
 // Supabase's hosted limit is the reference. It also prevents one function from
 // consuming the box. Each user worker gets at most 256 MiB.
@@ -80,9 +81,7 @@ async function handle(request: Request): Promise<Response> {
   }
 
   const worker = await EdgeRuntime.userWorkers.create({
-    // Each small wrapper supplies the import map that the Supabase CLI gives
-    // these unchanged functions. The wrapper then imports the mounted source.
-    servicePath: `${WORKERS_ROOT}/${route.functionName}`,
+    servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
     memoryLimitMb: USER_WORKER_MEMORY_MB,
     workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
     noModuleCache: false,
@@ -92,7 +91,9 @@ async function handle(request: Request): Promise<Response> {
   // Supabase's Kong removes only /functions/v1. Preserve the function name,
   // the remaining path, the query, method, headers, body, and signal.
   url.pathname = route.pathname;
-  return await worker.fetch(new Request(url, request));
+  const forwarded = new Request(url, request);
+  EdgeRuntime.applySupabaseTag(request, forwarded);
+  return await worker.fetch(forwarded);
 }
 
 Deno.serve((request) =>

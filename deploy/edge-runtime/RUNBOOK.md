@@ -102,7 +102,7 @@ repository. The examples below call that file `/run/commonswarm-smoke.curl`.
   200 and JSON. This is the required database and agent-auth control.
 - [ ] **NOT RUN** — activity: POST `{}` to `/functions/v1/activity` without an
   Authorization header. Expect the stable 401 body `{"error":"unauthenticated"}`.
-- [ ] **NOT RUN** — capability: send a non-GET request to
+- [ ] **NOT RUN** — capability: send a GET request to
   `/functions/v1/capability/smoke`. Expect 405 when capability URLs are enabled,
   or the configured feature-off response when they are disabled. Confirm the
   container log names no boot or module error.

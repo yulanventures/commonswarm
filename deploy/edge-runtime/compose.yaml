@@ -1,6 +1,9 @@
 services:
   edge-runtime:
     image: public.ecr.aws/supabase/edge-runtime:v1.73.13
+    entrypoint:
+      - /bin/bash
+      - /home/deno/deploy/bootstrap.sh
     command:
       - start
       - --main-service
@@ -28,16 +31,19 @@ services:
         required: false
     volumes:
       - ./main:/home/deno/main:ro
-      - ./workers:/home/deno/workers:ro
-      - ../../supabase/functions:/home/deno/functions:ro
-      - ../../src:/home/src:ro
+      - ./bootstrap.sh:/home/deno/deploy/bootstrap.sh:ro
+      - ./h0-deno.json:/home/deno/deploy/h0-deno.json:ro
+      - ../../supabase/functions:/home/deno/functions-source:ro
+      - ../../src:/var/src:ro
       - edge-runtime-cache:/root/.cache/deno
     mem_limit: 2g
     init: true
     restart: unless-stopped
     healthcheck:
       test:
-        - CMD-SHELL
+        - CMD
+        - /usr/bin/bash
+        - -c
         - >-
           exec 3<>/dev/tcp/127.0.0.1/9000 &&
           printf 'GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&

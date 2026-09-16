@@ -14,9 +14,11 @@ seconds of margin above the planned 50-second H0 long poll. The runtime request
 idle timeout is 65 seconds, so it does not end that poll first. Compose limits the
 container to 2 GiB and six workers at once to bound the box-wide cost.
 
-The wrappers in `workers/` supply the bare `postgres` import mapping that the
-Supabase CLI gets from `command/deno.json`. They import the mounted function files
-without editing them.
+`h0-deno.json` supplies the bare `postgres` import mapping that H0 reaches through
+shared command types. `bootstrap.sh` copies the read-only mounted functions to an
+ephemeral container directory, adds that map, and makes the staged tree read-only
+before the runtime starts. The repository function source stays unchanged and its
+mount is read-only.
 
 ## Image check
 
