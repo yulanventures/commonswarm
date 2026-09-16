@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
-import { dirname, extname, relative, resolve, sep } from "node:path";
+import { dirname, extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 function usage() {
-  console.error("Usage: node deploy/site/parity-check.mjs <base-url> [--host <host>] [--ca <file>] [--dist <directory>] [--reference <file>]");
+  console.error("Usage: node deploy/site/parity-check.mjs <base-url> [--host <host>] [--ca <file>] [--reference <file>] [--allow-cloudflare-browser-ttl]");
   process.exitCode = 2;
 }
 
@@ -17,16 +17,19 @@ const args = process.argv.slice(2);
 const baseUrl = args.shift();
 let host;
 let caPath;
-let distPath = resolve(here, "../../site/dist");
 let referencePath = resolve(here, "vercel-reference.json");
+let allowCloudflareBrowserTtl = false;
 
 while (args.length > 0) {
   const flag = args.shift();
+  if (flag === "--allow-cloudflare-browser-ttl") {
+    allowCloudflareBrowserTtl = true;
+    continue;
+  }
   const value = args.shift();
-  if ((flag === "--host" || flag === "--ca" || flag === "--dist" || flag === "--reference") && value) {
+  if ((flag === "--host" || flag === "--ca" || flag === "--reference") && value) {
     if (flag === "--host") host = value;
     else if (flag === "--ca") caPath = resolve(value);
-    else if (flag === "--dist") distPath = resolve(value);
     else referencePath = resolve(value);
   } else {
     usage();
@@ -41,37 +44,15 @@ if (!baseUrl) {
 
 const reference = JSON.parse(await readFile(referencePath, "utf8"));
 const differences = [];
+const allowedDifferences = [];
 const ca = caPath ? await readFile(caPath) : undefined;
-
-async function filesBelow(directory) {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const nested = await Promise.all(entries.map(async (entry) => {
-    const path = resolve(directory, entry.name);
-    return entry.isDirectory() ? filesBelow(path) : [path];
-  }));
-  return nested.flat();
-}
 
 const policyByExtension = new Map(
   (reference.fingerprintedAssetPolicies ?? []).map((policy) => [policy.extension, policy]),
 );
-const fingerprintedFiles = (await filesBelow(resolve(distPath, "_astro")))
-  .map((path) => relative(distPath, path).split(sep).join("/"))
-  .sort();
-const fingerprintedRoutes = fingerprintedFiles.map((file) => {
-  const extension = extname(file);
-  const policy = policyByExtension.get(extension);
-  if (!policy) {
-    throw new Error(`No recorded Vercel policy for fingerprinted asset extension ${extension || "(none)"}: ${file}`);
-  }
-  return {
-    path: `/${file}`,
-    status: policy.status,
-    contentType: policy.contentType,
-    headers: policy.headers,
-  };
-});
-const routes = [...reference.routes, ...fingerprintedRoutes];
+const cloudflareStaticExtensions = new Set([".css", ".js", ".png", ".svg", ".woff2"]);
+const vercelCacheControl = "public, max-age=0, must-revalidate";
+const cloudflareBrowserCacheControl = "public, max-age=14400";
 
 function get(url, hostOverride) {
   return new Promise((resolveRequest, rejectRequest) => {
@@ -82,23 +63,28 @@ function get(url, hostOverride) {
       servername: hostOverride?.split(":", 1)[0],
       ca,
     }, (response) => {
-      response.resume();
-      response.on("end", () => resolveRequest(response));
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolveRequest({
+        statusCode: response.statusCode,
+        headers: response.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
     });
     request.on("error", rejectRequest);
     request.end();
   });
 }
 
-for (const expected of routes) {
-  let response;
-  try {
-    response = await get(new URL(expected.path, baseUrl), host);
-  } catch (error) {
-    differences.push(`${expected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
-    continue;
-  }
+function allowsCloudflareCacheRewrite(path, name, expected, actual) {
+  return allowCloudflareBrowserTtl &&
+    name === "cache-control" &&
+    expected === vercelCacheControl &&
+    actual === cloudflareBrowserCacheControl &&
+    cloudflareStaticExtensions.has(extname(new URL(path, baseUrl).pathname));
+}
 
+function compare(expected, response) {
   const actual = {
     status: response.statusCode,
     contentType: response.headers["content-type"] ?? null,
@@ -114,16 +100,74 @@ for (const expected of routes) {
     differences.push(`${expected.path}: content-type expected ${JSON.stringify(expected.contentType)}, got ${JSON.stringify(actual.contentType)}`);
   }
   for (const name of reference.recordedHeaders) {
-    if (actual.headers[name] !== expected.headers[name]) {
-      differences.push(`${expected.path}: ${name} expected ${JSON.stringify(expected.headers[name])}, got ${JSON.stringify(actual.headers[name])}`);
+    if (actual.headers[name] === expected.headers[name]) continue;
+    if (allowsCloudflareCacheRewrite(expected.path, name, expected.headers[name], actual.headers[name])) {
+      allowedDifferences.push(`${expected.path}: ${name} ${JSON.stringify(actual.headers[name])}`);
+      continue;
     }
+    differences.push(`${expected.path}: ${name} expected ${JSON.stringify(expected.headers[name])}, got ${JSON.stringify(actual.headers[name])}`);
   }
 }
 
+function collectFingerprintedAssets(html, paths) {
+  const attribute = /(?:src|href)=["']([^"'<>]+)["']/gi;
+  for (const match of html.matchAll(attribute)) {
+    const url = new URL(match[1], baseUrl);
+    if (url.pathname.startsWith("/_astro/")) paths.add(url.pathname);
+  }
+}
+
+const fingerprintedPaths = new Set();
+for (const expected of reference.routes) {
+  let response;
+  try {
+    response = await get(new URL(expected.path, baseUrl), host);
+  } catch (error) {
+    differences.push(`${expected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+    continue;
+  }
+  compare(expected, response);
+  if (expected.status === 200 && expected.contentType?.startsWith("text/html")) {
+    collectFingerprintedAssets(response.body, fingerprintedPaths);
+  }
+}
+
+if (policyByExtension.size > 0 && fingerprintedPaths.size === 0) {
+  differences.push("HTML routes exposed no /_astro assets; hashed-asset parity was not reached");
+}
+
+const fingerprintedRoutes = [...fingerprintedPaths].sort().map((path) => {
+  const extension = extname(path);
+  const policy = policyByExtension.get(extension);
+  if (!policy) {
+    differences.push(`${path}: no recorded Vercel policy for extension ${extension || "(none)"}`);
+    return undefined;
+  }
+  return { path, status: policy.status, contentType: policy.contentType, headers: policy.headers };
+}).filter(Boolean);
+
+for (const expected of fingerprintedRoutes) {
+  try {
+    compare(expected, await get(new URL(expected.path, baseUrl), host));
+  } catch (error) {
+    differences.push(`${expected.path}: request failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+if (allowedDifferences.length > 0) {
+  console.log(
+    `Allowed ${allowedDifferences.length} Cloudflare browser-TTL rewrite(s) on static-extension files.`,
+  );
+}
+
+const routeCount = reference.routes.length + fingerprintedRoutes.length;
 if (differences.length > 0) {
   console.error(`Parity failed with ${differences.length} difference(s):`);
   for (const difference of differences) console.error(`- ${difference}`);
   process.exitCode = 1;
 } else {
-  console.log(`Parity passed for ${routes.length} routes (${reference.routes.length} fixed, ${fingerprintedRoutes.length} build assets) against ${baseUrl}.`);
+  console.log(
+    `Parity passed for ${routeCount} routes ` +
+    `(${reference.routes.length} fixed, ${fingerprintedRoutes.length} discovered assets) against ${baseUrl}.`,
+  );
 }

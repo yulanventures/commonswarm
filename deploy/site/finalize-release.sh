@@ -50,6 +50,20 @@ else
   mv -f "$site_root/current.next" "$site_root/current"
 fi
 
+# Interrupted uploads never become current. Remove their temporary directories
+# after one hour. The active temporary release has already moved above, but keep
+# the explicit exclusion so a future reorder cannot delete it.
+for stale_temp in "$releases"/*.tmp; do
+  [ -d "$stale_temp" ] || continue
+  [ -L "$stale_temp" ] && continue
+  [ "$stale_temp" = "$temporary_release" ] && continue
+  [ -n "$(find "$stale_temp" -prune -type d -mmin +60 -print)" ] || continue
+  case "$stale_temp" in
+    "$releases"/*) rm -rf -- "$stale_temp" ;;
+    *) printf 'Refusing temporary prune outside releases directory: %s\n' "$stale_temp" >&2; exit 1 ;;
+  esac
+done
+
 # Release names contain no whitespace. Keep the five newest successful releases.
 kept=0
 for old_release in $(ls -1dt "$releases"/20* 2>/dev/null); do
