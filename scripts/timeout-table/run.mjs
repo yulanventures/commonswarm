@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync, rmSync } from "node:fs";
+import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -42,19 +43,60 @@ function git(repo, values) {
   return execFileSync("git", ["-C", repo, ...values], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-async function sourceRootForRef(repo, ref, tempRoot) {
-  if (ref === null) return { root: repo, remove: async () => {} };
+// 'exit' listeners must be synchronous: async work is dropped. Default SIGTERM
+// ends the process without emitting 'exit' (measured Node v26), so the signal
+// handlers call process.exit and this function runs from 'exit'. Git stores the
+// realpath of a worktree; after the directory is gone, remove only accepts that
+// realpath, so we record it while the tree still exists.
+export function cleanupRunResourcesSync(resources) {
+  try {
+    const repo = resources?.repo;
+    const worktreePath = resources?.worktreePath;
+    if (typeof repo === "string" && repo && typeof worktreePath === "string" && worktreePath) {
+      try {
+        execFileSync("git", ["-C", repo, "worktree", "remove", "--force", worktreePath], {
+          stdio: ["ignore", "ignore", "ignore"],
+          timeout: 10_000,
+        });
+      } catch {
+        // already gone, never added, or git failed; still drop the temp root
+      }
+      resources.worktreePath = null;
+    }
+    const tempRoot = resources?.tempRoot;
+    if (typeof tempRoot === "string" && tempRoot) {
+      try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* never throw from 'exit' */ }
+      resources.tempRoot = null;
+    }
+  } catch {
+    // must not throw: 'exit' and signal paths have nowhere to send the error
+  }
+}
+
+export function installRunResourceCleanup(resources) {
+  const onExit = () => cleanupRunResourcesSync(resources);
+  const onSigint = () => process.exit(130);
+  const onSigterm = () => process.exit(143);
+  process.on("exit", onExit);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
+  return () => {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  };
+}
+
+export async function sourceRootForRef(repo, ref, tempRoot, resources) {
+  if (ref === null) return { root: repo };
   git(repo, ["rev-parse", "--verify", `${ref}^{commit}`]);
   const root = join(tempRoot, "source-ref");
   execFileSync("git", ["-C", repo, "worktree", "add", "--detach", root, ref], { stdio: ["ignore", "ignore", "ignore"] });
-  try { await symlink(join(repo, "node_modules"), join(root, "node_modules"), "dir"); }
-  catch (error) {
-    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", root], { stdio: ["ignore", "ignore", "ignore"] });
-    throw error;
+  if (resources) {
+    try { resources.worktreePath = realpathSync(root); }
+    catch { resources.worktreePath = root; }
   }
-  return { root, remove: async () => {
-    execFileSync("git", ["-C", repo, "worktree", "remove", "--force", root], { stdio: ["ignore", "ignore", "ignore"] });
-  } };
+  await symlink(join(repo, "node_modules"), join(root, "node_modules"), "dir");
+  return { root };
 }
 
 function cliArgs(operation, copy) {
@@ -138,21 +180,18 @@ export async function runTable(options) {
   const mapping = JSON.parse(await readFile(options.mapping, "utf8"));
   const inventory = enumerateRepository({ repo, ref: options.ref });
   validateMapping(inventory, mapping);
+  const resources = { repo, tempRoot: null, worktreePath: null };
+  const uninstallSignals = installRunResourceCleanup(resources);
   const tempRoot = await mkdtemp(join(tmpdir(), "cswarm-timeout-run-"));
+  resources.tempRoot = tempRoot;
   await chmod(tempRoot, 0o700);
   const log = join(tempRoot, "fetch.jsonl");
   await writeFile(log, "", { mode: 0o600 });
   let copy;
   let source;
-  const onSignal = () => {
-    void Promise.allSettled([
-      source?.remove?.(), copy?.remove?.(), rm(tempRoot, { recursive: true, force: true }),
-    ]).finally(() => process.exit(130));
-  };
-  process.once("SIGINT", onSignal);
   try {
     copy = await makePrivateProfileCopy(options.profile, { tempParent: tempRoot });
-    source = await sourceRootForRef(repo, options.ref, tempRoot);
+    source = await sourceRootForRef(repo, options.ref, tempRoot, resources);
     const measurements = new Map();
     const operations = new Map();
     for (const row of inventory) {
@@ -213,10 +252,8 @@ export async function runTable(options) {
     else process.stdout.write(report);
     return { report, inventory, measurements, startup };
   } finally {
-    process.removeListener("SIGINT", onSignal);
-    if (source) await source.remove();
-    if (copy) await copy.remove();
-    await rm(tempRoot, { recursive: true, force: true });
+    uninstallSignals();
+    cleanupRunResourcesSync(resources);
   }
 }
 

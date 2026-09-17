@@ -16,7 +16,7 @@ Enumerate the shipped `v0.1.71` sources without checking out the tag:
 node scripts/timeout-table/enumerate.mjs --ref v0.1.71
 ```
 
-Measure the shipped client against one base URL. Use absolute paths. The temporary ref worktree and profile copy are removed after success, failure, or SIGINT.
+Measure the shipped client against one base URL. Use absolute paths. The temporary ref worktree and profile copy are removed after success, failure, SIGINT, SIGTERM, or an unexpected process exit.
 
 ```sh
 node scripts/timeout-table/run.mjs \
@@ -86,6 +86,7 @@ Postgres and Claude hook seconds are converted to milliseconds. Non-time byte, c
 | Origin rewrite | Remove the rewrite; the original fake server receives the request and the target receives none. |
 | Log privacy | Add request headers, body, query, or the secret-shaped value to a log row. |
 | Profile cleanup | Remove either the success cleanup or the `finally` cleanup after an injected failure. |
+| Exit-path cleanup | Empty `cleanupRunResourcesSync`; an exit-13 or SIGTERM child leaves a temp root, credential copy, and git worktree. |
 
 Run the controls with:
 
