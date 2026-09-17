@@ -483,6 +483,10 @@ function migrationErrors(values: {
   if (/process\.env\.(?:SOURCE|TARGET)_SERVICE_ROLE_KEY/.test(values.copy)) {
     errors.push("storage key in process env");
   }
+  // The box Storage API on 127.0.0.1:18004 serves /object at its root; a /storage/v1 prefix there is a 404.
+  if (values.copy.includes("/storage/v1/") || (values.copy.match(/\/object\//g) ?? []).length < 3) {
+    errors.push("storage base url paths");
+  }
   if (!values.copy.includes('if (direction !== "forward")')) {
     errors.push("storage reverse direction");
   }
@@ -582,6 +586,7 @@ test("migration safety controls reject their named mutations", () => {
     ["target identity cron", { ...original, restoreCron: restoreCronJobs.replace("assert_target_identity", "true") }, /target identity guard restoreCron/],
     ["storage key environment", { ...original, copy: `${copyStorage}\nprocess.env.SOURCE_SERVICE_ROLE_KEY` }, /storage key in process env/],
     ["storage reverse direction", { ...original, copy: copyStorage.replace('direction !== "forward"', 'direction !== "forward" && direction !== "reverse"') }, /storage reverse direction/],
+    ["storage base url paths", { ...original, copy: copyStorage.replace("/object/", "/storage/v1/object/") }, /storage base url paths/],
     ["source extensions", { ...original, prepare: prepareTarget.replace("CREATE EXTENSION IF NOT EXISTS pg_net", "SELECT") }, /required source extensions/],
     ["source standby", { ...original, lib: migrationLib.replace("AND NOT pg_is_in_recovery()", "") }, /source standby guard/],
     ["cron snapshot", { ...original, dump: (() => {

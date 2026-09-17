@@ -4,6 +4,10 @@
 
 | Named mutation | Required failure line |
 |---|---|
+| Put `exit 1` back into the `wait_healthy` helper in `RUNBOOK.md` | `bounded health helper calls exit` |
+| Put `exit 1` back into a pasted one-line check in `RUNBOOK.md` | `runbook command calls exit` |
+| Remove `-p commonswarm-edge` from an edge `docker compose` command in `RUNBOOK.md` | `edge compose command missing -p commonswarm-edge` |
+| Remove the first PostgreSQL health wait before `restore-target.sh` in `RUNBOOK.md` | `PostgreSQL start 1 missing bounded health wait before restore-target.sh` |
 | Disable Google sign-in | `auth provider GOOGLE not enabled` |
 | Remove the Google client secret name | `auth provider GOOGLE SECRET name missing` |
 | Change the GitHub callback to the hosted project | `auth provider GITHUB callback` |
@@ -32,6 +36,7 @@
 | Remove the cron restore target identity check | `target identity guard restoreCron` |
 | Read a Storage service key from `process.env` | `storage key in process env` |
 | Allow reverse Storage copy | `storage reverse direction` |
+| Put `/storage/v1` back in front of `/object/` in `copy-storage.mjs` | `storage base url paths` |
 | Remove target `pg_net` creation | `required source extensions` |
 | Remove the source standby refusal | `source standby guard` |
 | Remove only the cron export block's `SET TRANSACTION SNAPSHOT` line | `cron snapshot export` |

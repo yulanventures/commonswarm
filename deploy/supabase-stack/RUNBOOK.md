@@ -94,7 +94,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
 
-4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. For both the rehearsal and window, set `SOURCE_STORAGE_URL=https://ukezjcnxjvkpkeezxaew.supabase.co` and `TARGET_STORAGE_URL=http://127.0.0.1:18004`. `copy-storage.mjs` appends `/storage/v1/object/...`; the target is the box Storage API on loopback and does not use the public host whose POST requests return 503 during the window.
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. For both the rehearsal and window, set `SOURCE_STORAGE_URL=https://ukezjcnxjvkpkeezxaew.supabase.co/storage/v1` and `TARGET_STORAGE_URL=http://127.0.0.1:18004`. Both are Storage API base URLs and `copy-storage.mjs` appends `/object/...`: hosted Supabase serves the Storage API under `/storage/v1`, and the box Storage API on loopback serves it at the root (Caddy strips `/storage/v1` in front of it). The target and does not use the public host whose POST requests return 503 during the window.
 
    Compare the SHA-256 digests of the five JWT secret names without printing a value or digest. This command must print `JWT secret digests match: 1 distinct digest` and exit 0:
 

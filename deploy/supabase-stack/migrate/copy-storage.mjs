@@ -43,6 +43,8 @@ const required = [
 for (const name of required) {
   if (!environment[name]) throw new Error(`required environment variable is empty: ${name}`);
 }
+// Both URLs are Storage API base URLs: hosted Supabase serves the Storage API under /storage/v1, and the box Storage API
+// on 127.0.0.1:18004 serves it at the root (Caddy strips /storage/v1 in front of it). The copy appends /object/... only.
 const endpoints = {
   sourceUrl: environment.SOURCE_STORAGE_URL,
   sourceKey: environment.SOURCE_SERVICE_ROLE_KEY,
@@ -85,13 +87,13 @@ const workers = Array.from({ length: Math.min(2, Math.max(1, objects.length)) },
     }
     const path = objectPath(object.bucket, object.name);
     const source = await fetch(
-      `${endpoints.sourceUrl.replace(/\/$/, "")}/storage/v1/object/authenticated/${path}`,
+      `${endpoints.sourceUrl.replace(/\/$/, "")}/object/authenticated/${path}`,
       { headers: headers(endpoints.sourceKey) },
     );
     if (!source.ok) throw new Error(`source object read failed at row ${index + 1}: HTTP ${source.status}`);
     const bytes = Buffer.from(await source.arrayBuffer());
     const uploaded = await fetch(
-      `${endpoints.targetUrl.replace(/\/$/, "")}/storage/v1/object/${path}`,
+      `${endpoints.targetUrl.replace(/\/$/, "")}/object/${path}`,
       {
         method: "POST",
         headers: {
@@ -106,7 +108,7 @@ const workers = Array.from({ length: Math.min(2, Math.max(1, objects.length)) },
       throw new Error(`target object write failed at row ${index + 1}: HTTP ${uploaded.status}; ${detail}`);
     }
     const target = await fetch(
-      `${endpoints.targetUrl.replace(/\/$/, "")}/storage/v1/object/authenticated/${path}`,
+      `${endpoints.targetUrl.replace(/\/$/, "")}/object/authenticated/${path}`,
       { headers: headers(endpoints.targetKey) },
     );
     if (!target.ok) throw new Error(`target object read failed at row ${index + 1}: HTTP ${target.status}`);
