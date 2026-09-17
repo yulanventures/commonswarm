@@ -39,6 +39,8 @@ export const AGENT_CHECK_WRITE_BACK_MARGIN_MS = 150;
 /**
  * Absolute wall-clock deadline for the check inside a host hook: process start + process deadline - write-back margin.
  * The check aborts itself (cursor unchanged, check_timeout) before the process hard exit, which stays a last resort.
+ * Only for a short-lived host hook process: process.uptime() is the hook's own age, so in a long-lived process the
+ * result is already in the past and every check would time out at once.
  */
 export function hostHookCheckDeadlineAt(
   nowMs = Date.now(),

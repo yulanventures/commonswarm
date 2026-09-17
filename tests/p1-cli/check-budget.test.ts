@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, test } from "node:test";
@@ -153,12 +153,25 @@ test("a lock left by a dead process is taken at once, not after the stale window
   const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
   const deadPid = dead.pid!;
   await new Promise<void>(resolveExit => dead.once("close", () => resolveExit()));
-  await writeFile(join(dirname(profilePath), "check.lock"), JSON.stringify({ pid: deadPid, createdAt: Date.now() }), { mode: 0o600 });
+  await writeFile(join(dirname(profilePath), "check.lock"), JSON.stringify({ pid: deadPid, host: hostname(), createdAt: Date.now() }), { mode: 0o600 });
   const started = Date.now();
   const result = await checkAgentMessages({ profilePath, fetcher: fetcher([signal(1)], 0), present: async () => {} });
   const elapsed = Date.now() - started;
   assert.deepEqual(result.messages.map(row => row.id), [signal(1).id]);
   assert.ok(elapsed < 1_000, `a dead owner's lock was waited on for ${elapsed}ms`);
+});
+
+test("a lock naming a dead pid on another host is not taken early", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const deadPid = dead.pid!;
+  await new Promise<void>(resolveExit => dead.once("close", () => resolveExit()));
+  await writeFile(join(dirname(profilePath), "check.lock"), JSON.stringify({ pid: deadPid, host: `not-${hostname()}`, createdAt: Date.now() }), { mode: 0o600 });
+  const started = Date.now();
+  await assert.rejects(checkAgentMessages({
+    profilePath, fetcher: fetcher([signal(1)], 0), present: async () => {}, deadlineAtMs: Date.now() + 600,
+  }), { code: "check_timeout" });
+  assert.ok(Date.now() - started >= 500, "a foreign host's lock was treated as dead");
 });
 
 test("process.exit while holding a file lock removes that lock", { timeout: 10_000 }, async () => {

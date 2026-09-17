@@ -10,7 +10,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -346,22 +346,29 @@ function releaseHeldFileLocksSync(): void {
   heldFileLocks.clear();
 }
 
-/** True only when the lock names a pid on this host that no longer exists. Unknown owners are not dead. */
-async function lockOwnerIsDead(lockPath: string): Promise<boolean> {
-  let owner: { pid?: unknown };
+/**
+ * The lock's raw content when it names a pid that no longer exists on THIS host, else null. Unknown owners are not dead:
+ * a record still being written, one without a host (written before this rule), or one from another host or container
+ * (a pid there means nothing here) falls back to the mtime rule. A reused pid or EPERM reads as alive.
+ */
+async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
+  let raw: string;
+  let owner: { pid?: unknown; host?: unknown };
   try {
-    owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+    raw = await readFile(lockPath, "utf8");
+    owner = JSON.parse(raw) as { pid?: unknown; host?: unknown };
   } catch {
-    return false; // Still being written, or not ours to judge: the mtime rule decides.
+    return null;
   }
+  if (owner.host !== hostname()) return null;
   if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid === process.pid) {
-    return false;
+    return null;
   }
   try {
     process.kill(owner.pid, 0);
-    return false;
+    return null;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH";
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null;
   }
 }
 
@@ -386,14 +393,22 @@ export async function withFileLock<T>(
       handle = await open(lockPath, "wx", 0o600);
       createdAt = Date.now();
       await handle.writeFile(
-        JSON.stringify({ pid: process.pid, createdAt }),
+        JSON.stringify({ pid: process.pid, host: hostname(), createdAt }),
         "utf8",
       );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const lockInfo = await stat(lockPath).catch(() => null);
-      if (lockInfo && (Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS || await lockOwnerIsDead(lockPath))) {
+      if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
         await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
+      const deadRecord = lockInfo ? await deadLockOwnerRecord(lockPath) : null;
+      if (deadRecord !== null) {
+        // Re-read immediately before removing: another waiter may already have replaced the dead owner's lock with its
+        // own, and that live lock must not be unlinked. The window left is the gap between this read and the unlink.
+        const current = await readFile(lockPath, "utf8").catch(() => null);
+        if (current === deadRecord) await unlink(lockPath).catch(() => undefined);
         continue;
       }
       if (Date.now() >= deadline) {
