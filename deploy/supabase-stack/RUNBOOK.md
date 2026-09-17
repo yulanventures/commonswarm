@@ -59,16 +59,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
 
-4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. Rehearse freeze and unfreeze on the restored box with the confirmation set inline:
-
-   ```sh
-   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable target
-   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen target
-   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable target
-   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable target
-   ```
-
-   Run this after step 7 on the restored box. A second `enable target` while frozen is safe. It must exit 0, add no trigger, and leave the freeze in force.
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file.
 
 5. Start PostgreSQL. Choose a new artifact directory. Take the source dump.
 
@@ -104,6 +95,8 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    ```
 
+   Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
+
 8. Start the stack. Copy Storage forward. Restore Storage metadata. Verify counts again. Keep or remove the saved rehearsal directory only after all controls pass.
 
    ```sh
@@ -114,7 +107,26 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    ```
 
-9. Start the 512 MB edge runtime on the box database. Run all local health checks.
+9. Start the 512 MB edge runtime on the box database. Before it starts, confirm in a protected editor that `/home/commonswarm/.env` has all of these box values:
+
+   - `SWARM_DATABASE_URL` and `SUPABASE_DB_URL` name `db.commonswarm.internal` and use `sslmode=verify-full`.
+   - Neither database URL has `sslrootcert`; the edge client receives the CA separately.
+   - `SWARM_DATABASE_TLS_CA_B64` is set.
+
+   Start the runtime with both Compose inputs set inline. Wait for the container to be healthy, then run the runtime's H0 health request on loopback:
+
+   ```sh
+   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml up -d
+   edge_container="$(COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml ps -q edge-runtime)"
+   until [ "$(docker inspect --format '{{.State.Health.Status}}' "$edge_container")" = healthy ]; do sleep 2; done
+   curl --fail --silent --show-error http://127.0.0.1:9000/health
+   ```
+
+   Run all other local health checks.
 
 10. Through the staging host, prove a migrated CLI refresh, an authenticated REST read, a Realtime wake, Storage upload and download, one edge command, one edge read, table counts, cron jobs, and object digests. GitHub and Google sign-in cannot be proved here: both callbacks are `https://api.commonswarm.com/auth/v1/callback`, which still points at Supabase; window step 7 proves them.
 
@@ -126,7 +138,19 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" preflight source
    ```
 
-13. Complete the step-4 freeze drill on the restored box. The hosted-shape Docker test is a separate control.
+13. Complete the freeze drill on the restored box. The hosted-shape Docker test is a separate control.
+
+   ```sh
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
+     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable target
+   FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
+     "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen target
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
+     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable target
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable target
+   ```
+
+   A second `enable target` while frozen is safe. It must exit 0, add no trigger, and leave the freeze in force.
 
 A failed control means repeat the rehearsal from a fresh dump.
 
@@ -136,7 +160,12 @@ Ruling 9084e3e1 applies. Rollback exists only before the box accepts writes. Aft
 
 Use the protected environment files for every call. Their values are unquoted. `CUTOVER_CONFIRM=` stays empty in the migration file. Set `CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW` inline only on freeze and unfreeze commands.
 
-0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, and decision checklist.
+0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, and decision checklist. Set the final artifact directory for the whole window:
+
+   ```sh
+   ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-window
+   export ARTIFACT_DIR
+   ```
 
 1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
 
@@ -157,13 +186,19 @@ Use the protected environment files for every call. Their values are unquoted. `
 
    ABORT-A (path proof fails): restore the Supabase CNAME (not proxied) and the `.prev` Caddy file.
 
-3. Freeze the source with the confirmation inline, then run the frozen probe. If `enable` has to run again (for example after the probe failed for a reason you fixed), a second run while frozen is safe: it exits 0, adds no trigger, and the freeze stays.
+3. Compute both acknowledgements during this window, freeze the source, and prove it. Run these commands in order. Copy each list from this run's output, never from the rehearsal. The first frozen probe intentionally omits `FREEZE_UNPROBED_ROLES`; it must exit 65 after printing the roles this connection cannot assume. If `enable` has to run again after a later failure is fixed, a second run while frozen is safe: it exits 0, adds no trigger, and the freeze stays.
 
    ```sh
-   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
+   unset FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES
+   "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" preflight source
+   FREEZE_UNGUARDED_TABLES='<copy the exact list printed by preflight; use an empty value when it prints none>'
+   export FREEZE_UNGUARDED_TABLES
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
-   FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
-     "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
+   FREEZE_UNPROBED_ROLES='<copy the exact list printed by the exit-65 probe; use an empty value when it prints none>'
+   export FREEZE_UNPROBED_ROLES
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
    ```
 
    What the freeze cannot stop: writes to the tables the source role cannot trigger (the preflight list) by a session that overrides the database default, and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com`. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
@@ -176,11 +211,9 @@ Use the protected environment files for every call. Their values are unquoted. `
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source
    ```
 
-4. Create a new artifact directory and take the final source dump. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Then restore in the shown order.
+4. Take the final source dump in the directory set in step 0. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Restore in the shown order. After the stack is up and before copying Storage, confirm in a protected editor that `/home/commonswarm/.env` has `SWARM_DATABASE_URL` and `SUPABASE_DB_URL` naming `db.commonswarm.internal` with `sslmode=verify-full` and no `sslrootcert`, and that `SWARM_DATABASE_TLS_CA_B64` is set. Then start the edge runtime, wait for `healthy`, and run its `/health` request on `127.0.0.1:9000`.
 
    ```sh
-   ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-window
-   export ARTIFACT_DIR
    "$MIGRATE/run-db-tool.sh" dump-source.sh "$ARTIFACT_DIR" source
    docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml down
    cd /home/commonswarm/current/deploy/supabase-stack
@@ -196,11 +229,21 @@ Use the protected environment files for every call. Their values are unquoted. `
    "$MIGRATE/run-db-tool.sh" setup-realtime.sh "$ARTIFACT_DIR"
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    docker compose -p commonswarm-supabase-stack up -d
+   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml up -d
+   edge_container="$(COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml ps -q edge-runtime)"
+   until [ "$(docker inspect --format '{{.State.Health.Status}}' "$edge_container")" = healthy ]; do sleep 2; done
+   curl --fail --silent --show-error http://127.0.0.1:9000/health
    COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
      MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
    "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    ```
+
+   Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
 
    ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database.
 
@@ -235,6 +278,8 @@ MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.s
 "$MIGRATE/run-db-tool.sh" verify-counts.sh "$RECOVERY_ARTIFACT_DIR" target
 ```
 
+Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
+
 Rehearse this drill on a second local database before the window.
 
 ## Human sessions
@@ -256,7 +301,7 @@ Each nightly set contains globals without role passwords, a custom dump of `post
 - Browser CORS and the `apikey` header without Kong need the box rehearsal.
 - GitHub and Google OAuth through the box: first proved at window step 7, because their callback host is in maintenance until then.
 - The roles and tables that the source role cannot probe or trigger must be measured again at the window.
-- Cron export sees only jobs visible to the dump role. Production's five measured jobs are owned by that role.
+- `postgres` has BYPASSRLS on hosted and on the box image, so the cron export sees every job regardless of owner.
 - `prepare-target.sh` creates `pg_net` and `pg_graphql`; production does not have them.
 - Bare `/rest/v1`, `/auth/v1`, and `/storage/v1` paths answer 404 on the box.
 - A plain nightly `pg_dump -Fc` has no role SQL, counts, Storage manifest, or cron manifest and is not restorable by these scripts.

@@ -163,9 +163,8 @@ assert_dump_origin() {
 
 # One row per pg_cron job, as JSON, in a fixed order. dump-source.sh writes it from the source snapshot to
 # cron-jobs.ndjson; restore-cron-jobs.sh and verify-counts.sh run the same query on the target and require the same
-# bytes. The schedules live in the cron schema, which the selected-schema dump does not carry. On hosted Supabase
-# cron.job has row security by username, so the export holds the jobs of the dump role (`postgres` owns all five
-# CommonSwarm jobs, measured read-only 2026-09-17); the target query runs as the supabase_admin superuser and sees all.
+# bytes. The schedules live in the cron schema, which the selected-schema dump does not carry. `postgres` has BYPASSRLS
+# on hosted Supabase and on the box image, so the source export and target query see every job regardless of owner.
 cron_jobs_json_sql() {
   cat <<'SQL'
 SELECT json_build_object(

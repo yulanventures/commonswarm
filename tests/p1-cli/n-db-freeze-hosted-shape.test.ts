@@ -185,6 +185,19 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.match(result.stdout, /8 service roles were frozen/);
 
+    // 5b. When every role can be assumed, the computed list is empty. An unset variable is still not an
+    // acknowledgement. Grant the four memberships for this step, then remove them.
+    const previouslyUnassumable = ["postgres", "supabase_admin", "supabase_auth_admin", "supabase_storage_admin"];
+    assert.equal(superSql(`SET default_transaction_read_only = off; GRANT ${previouslyUnassumable.join(", ")} TO ${OWNER};`).status, 0);
+    result = tool("probe-database-freeze.sh", ["frozen", "source"], identity);
+    assert.equal(result.status, 65, `an unset empty acknowledgement was accepted: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /NOT probed: none/);
+    result = tool("probe-database-freeze.sh", ["frozen", "source"], { ...identity, FREEZE_UNPROBED_ROLES: "" });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /12 service roles were frozen/);
+
+    assert.equal(superSql(`SET default_transaction_read_only = off; REVOKE ${previouslyUnassumable.join(", ")} FROM ${OWNER};`).status, 0);
+
     // 6. An error that is not the freeze fails the probe instead of counting as frozen.
     assert.equal(superSql("SET default_transaction_read_only = off; REVOKE INSERT ON commonswarm_cutover_probe.entries FROM anon;").status, 0);
     result = tool("probe-database-freeze.sh", ["frozen", "source"], unprobed);

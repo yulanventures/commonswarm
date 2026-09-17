@@ -9,14 +9,19 @@ require_var() {
     exit 1
   fi
 }
+: "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"
+: "${COMMONSWARM_MIGRATION_ENV_FILE:=/home/commonswarm/migration.env}"
+export COMMONSWARM_ENV_FILE COMMONSWARM_MIGRATION_ENV_FILE
 require_var MIGRATION_ARTIFACT_DIR
-require_var COMMONSWARM_ENV_FILE
-require_var COMMONSWARM_MIGRATION_ENV_FILE
-if [[ "$MIGRATION_ARTIFACT_DIR" != /* || "$COMMONSWARM_ENV_FILE" != /* ]]; then
+if [[ "$MIGRATION_ARTIFACT_DIR" != /* || "$COMMONSWARM_ENV_FILE" != /* || "$COMMONSWARM_MIGRATION_ENV_FILE" != /* ]]; then
   echo "artifact and environment paths must be absolute" >&2
   exit 1
 fi
-if [[ ! -f "$COMMONSWARM_ENV_FILE" ]]; then
+if [[ ! -d "$MIGRATION_ARTIFACT_DIR" ]]; then
+  echo "artifact directory does not exist" >&2
+  exit 1
+fi
+if [[ ! -f "$COMMONSWARM_ENV_FILE" || ! -f "$COMMONSWARM_MIGRATION_ENV_FILE" ]]; then
   echo "environment file does not exist" >&2
   exit 1
 fi

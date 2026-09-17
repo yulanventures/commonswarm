@@ -34,13 +34,22 @@
 | Allow reverse Storage copy | `storage reverse direction` |
 | Remove target `pg_net` creation | `required source extensions` |
 | Remove the source standby refusal | `source standby guard` |
-| Replace the cron snapshot query | `cron snapshot export` |
+| Remove only the cron export block's `SET TRANSACTION SNAPSHOT` line | `cron snapshot export` |
 | Replace the cron verification query | `cron verify query` |
 | Replace the cron restore listing query | `cron restore query` |
+| Remove the seed script's default service environment path | `seed environment path defaults` |
+| Stop checking that the seed migration environment path is absolute | `seed absolute paths` |
+| Stop checking that the seed migration environment file exists | `seed existing paths` |
 | Remove `pg_read_all_data` from `backup_ro` | `backup read grant` |
 | Widen the `backup_ro` HBA address | `backup hba address` |
 | Remove the quoted database environment check | `quoted database env value` |
 
 The same test passes a quoted `TARGET_DATABASE_URL` to `make-pg-service.mjs`. It requires a nonzero exit. Standard error must name `TARGET_DATABASE_URL` and must not contain the value.
 
-Both `npm test` and `npm run test:p1-cli` name or glob this test file.
+`tests/p1-cli/n-db-freeze-hosted-shape.test.ts` also detects this mutation against its empty-list step:
+
+| Named mutation | Required failure line |
+|---|---|
+| Replace the set check for `FREEZE_UNPROBED_ROLES` with `${FREEZE_UNPROBED_ROLES:-}` | `an unset empty acknowledgement was accepted` |
+
+`npm test` names `supabase-stack.test.ts`, and `npm run test:p1-cli` globs both test files.

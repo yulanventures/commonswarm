@@ -27,6 +27,7 @@ const [
   restoreStorageMetadata,
   verifyCounts,
   restoreCronJobs,
+  seedRealtimeTenant,
   makePgService,
   pgHba,
 ] = await Promise.all([
@@ -48,6 +49,7 @@ const [
   readFile(join(stackDir, "migrate", "restore-storage-metadata.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "verify-counts.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "restore-cron-jobs.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "seed-realtime-tenant.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "make-pg-service.mjs"), "utf8"),
   readFile(join(stackDir, "postgres", "pg_hba.conf"), "utf8"),
 ]);
@@ -369,6 +371,7 @@ function migrationErrors(values: {
   restoreStorage: string;
   verify: string;
   restoreCron: string;
+  seedRealtime: string;
   hba: string;
   makeService: string;
 }): string[] {
@@ -405,11 +408,28 @@ function migrationErrors(values: {
     errors.push("required source extensions");
   }
   if (!values.lib.includes("AND NOT pg_is_in_recovery()")) errors.push("source standby guard");
-  if (!/SET TRANSACTION SNAPSHOT[\s\S]*cron_jobs_json_sql[\s\S]*cron-jobs\.ndjson/.test(values.dump)) {
+  const cronExportStart = values.dump.indexOf("# The pg_cron schedules live in the cron schema");
+  const cronExportEnd = values.dump.indexOf('chmod 0600 "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson"', cronExportStart);
+  const cronExportBlock = cronExportStart >= 0 && cronExportEnd > cronExportStart
+    ? values.dump.slice(cronExportStart, cronExportEnd)
+    : "";
+  if (!/SET TRANSACTION SNAPSHOT[^\n]*\n[\s\S]*cron_jobs_json_sql/.test(cronExportBlock)) {
     errors.push("cron snapshot export");
   }
   if (!values.verify.includes("cron_jobs_json_sql")) errors.push("cron verify query");
   if (!values.restoreCron.includes("cron_jobs_json_sql")) errors.push("cron restore query");
+  if (!values.seedRealtime.includes(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"') ||
+      !values.seedRealtime.includes(': "${COMMONSWARM_MIGRATION_ENV_FILE:=/home/commonswarm/migration.env}"')) {
+    errors.push("seed environment path defaults");
+  }
+  if (!/MIGRATION_ARTIFACT_DIR[^\n]*!= \/\*[\s\S]*COMMONSWARM_ENV_FILE[^\n]*!= \/\*[\s\S]*COMMONSWARM_MIGRATION_ENV_FILE[^\n]*!= \/\*/.test(values.seedRealtime)) {
+    errors.push("seed absolute paths");
+  }
+  if (!values.seedRealtime.includes('! -d "$MIGRATION_ARTIFACT_DIR"') ||
+      !values.seedRealtime.includes('! -f "$COMMONSWARM_ENV_FILE"') ||
+      !values.seedRealtime.includes('! -f "$COMMONSWARM_MIGRATION_ENV_FILE"')) {
+    errors.push("seed existing paths");
+  }
   if (!/GRANT pg_read_all_data TO backup_ro;/.test(values.prepare)) errors.push("backup read grant");
   if (!/^hostssl\s+all\s+backup_ro\s+172\.31\.0\.1\/32\s+scram-sha-256$/m.test(values.hba) ||
       !/^hostssl\s+all\s+backup_ro\s+0\.0\.0\.0\/0\s+reject$/m.test(values.hba) ||
@@ -433,6 +453,7 @@ test("migration safety contracts are present", () => {
     restoreStorage: restoreStorageMetadata,
     verify: verifyCounts,
     restoreCron: restoreCronJobs,
+    seedRealtime: seedRealtimeTenant,
     hba: pgHba,
     makeService: makePgService,
   }), []);
@@ -451,6 +472,7 @@ test("migration safety controls reject their named mutations", () => {
     restoreStorage: restoreStorageMetadata,
     verify: verifyCounts,
     restoreCron: restoreCronJobs,
+    seedRealtime: seedRealtimeTenant,
     hba: pgHba,
     makeService: makePgService,
   };
@@ -469,9 +491,18 @@ test("migration safety controls reject their named mutations", () => {
     ["storage reverse direction", { ...original, copy: copyStorage.replace('direction !== "forward"', 'direction !== "forward" && direction !== "reverse"') }, /storage reverse direction/],
     ["source extensions", { ...original, prepare: prepareTarget.replace("CREATE EXTENSION IF NOT EXISTS pg_net", "SELECT") }, /required source extensions/],
     ["source standby", { ...original, lib: migrationLib.replace("AND NOT pg_is_in_recovery()", "") }, /source standby guard/],
-    ["cron snapshot", { ...original, dump: dumpSource.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron snapshot export/],
+    ["cron snapshot", { ...original, dump: (() => {
+      const marker = "# The pg_cron schedules live in the cron schema";
+      const at = dumpSource.indexOf(marker);
+      const before = dumpSource.slice(0, at);
+      const block = dumpSource.slice(at);
+      return before + block.replace('  printf \'%s\\n\' "SET TRANSACTION SNAPSHOT :\'snapshot_id\';"\n', "");
+    })() }, /cron snapshot export/],
     ["cron verify", { ...original, verify: verifyCounts.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron verify query/],
     ["cron restore", { ...original, restoreCron: restoreCronJobs.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron restore query/],
+    ["seed defaults", { ...original, seedRealtime: seedRealtimeTenant.replace(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"', "") }, /seed environment path defaults/],
+    ["seed absolute paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || "$COMMONSWARM_MIGRATION_ENV_FILE" != /*', "") }, /seed absolute paths/],
+    ["seed existing paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || ! -f "$COMMONSWARM_MIGRATION_ENV_FILE"', "") }, /seed existing paths/],
     ["backup read grant", { ...original, prepare: prepareTarget.replace("GRANT pg_read_all_data TO backup_ro;", "") }, /backup read grant/],
     ["backup hba", { ...original, hba: pgHba.replace("172.31.0.1/32", "172.31.0.0/24") }, /backup hba address/],
     ["quoted database env", { ...original, makeService: makePgService.replace('/^["\']/.test(value)', "false") }, /quoted database env value/],

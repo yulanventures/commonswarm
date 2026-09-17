@@ -6,8 +6,8 @@ This inventory comes from `src/cloud/*`, `src/listener/wake.ts`, `site/src/lib/*
 
 | Caller | Paths and operations |
 |---|---|
-| CLI | `GET /auth/v1/authorize?provider=github` for PKCE; Auth JS exchanges the code and refresh token at `/auth/v1/token`; reads `/auth/v1/user`; revokes refresh tokens at `/auth/v1/logout`. The CLI refreshes its saved token before every human operation. |
-| Site | `GET /auth/v1/settings`; GitHub OAuth through `/auth/v1/authorize`; email OTP through `/auth/v1/otp`; Auth JS session, user, token refresh, and logout endpoints. |
+| CLI | `GET /auth/v1/authorize?provider=github` or `GET /auth/v1/authorize?provider=google` for PKCE; Auth JS exchanges the code and refresh token at `/auth/v1/token`; reads `/auth/v1/user`; revokes refresh tokens at `/auth/v1/logout`. The CLI refreshes its saved token before every human operation. |
+| Site | `GET /auth/v1/settings`; GitHub and Google OAuth through `/auth/v1/authorize?provider=github` and `/auth/v1/authorize?provider=google`; email OTP through `/auth/v1/otp`; Auth JS session, user, token refresh, and logout endpoints. |
 | Edge | `command` calls Auth JS `getUser` and `getClaims`; `read` calls `getUser`. Agent credentials are checked in PostgreSQL and do not go through GoTrue. |
 
 ## REST

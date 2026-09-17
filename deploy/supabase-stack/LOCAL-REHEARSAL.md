@@ -38,7 +38,7 @@ The service results did not change after the production pin update. Every Auth, 
 9. Edge Runtime workers do not inherit arbitrary main-service variables. The router must pass the database CA variable.
 10. `postgres` 3.4.9 ignored a CA file URL parameter and the process CA settings in this Edge Runtime. The successful temporary function copy passed the decoded public CA as `ssl.ca` with certificate verification enabled and kept `sslmode=verify-full`. Its URL omitted `sslrootcert`, which this client otherwise sent to PostgreSQL as an invalid startup parameter.
 11. The edge database URL uses the dedicated `commonswarm_edge` password, not the shared service password.
-12. The original PostgreSQL health check used its Unix socket. It could pass before a separate migration container could connect on the bridge. The committed health check now connects to `172.31.0.10` with `sslmode=verify-full` and the internal CA.
+12. The original PostgreSQL health check used its Unix socket. It could pass before a separate migration container could connect on the bridge. The committed health check runs `pg_isready` against `172.31.0.10` without TLS options; it proves bridge TCP reachability, while the service connection controls prove TLS separately.
 13. A fresh Realtime tenant reports `SUBSCRIBED` while it can still be creating its Broadcast publication and replication slot. The final control allowed that initialization to finish and then received the database wake.
 
 ## Signed-in human after cutover
@@ -137,3 +137,28 @@ pg_stat_statements, supabase_vault; zero vault secrets; no `supabase_functions.h
 role settings equal to the box image except database-level `app.settings.jwt_exp=3600` (no CommonSwarm code reads it),
 `supabase_realtime_admin` search_path (a NOLOGIN role, so a role setting never applies) and `swarm_command` search_path
 (carried by `roles.sql`).
+
+## Review round 3 (2026-09-17): rulings
+
+Pair on `0e3ecc1d`: grok FAIL; antigravity PASS on parts P1, P2, P4, P5a and P5b, FAIL on P3 and P6. The lead checked each
+claim on the tree or with Docker before ruling. Both arms found that the window, as written, could not finish; that is
+ruled PRODUCTION and buys round 4.
+
+| # | Claim (arm) | Ruling | Evidence and fix |
+|---|---|---|---|
+| 29 | Window step 4 stops the edge runtime and nothing starts it again (grok, antigravity P6) | CONFIRMED, PRODUCTION | `RUNBOOK.md` had `docker compose ... edge-runtime ... down` and no `up`; step 5 edge checks and step 7 `/functions/v1` would hit a dead port. The rehearsal and the window now start it on the box database with `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net` and the box URLs, and check its health. |
+| 30 | Window step 3 has no preflight and no `ARTIFACT_DIR` (antigravity P6) | CONFIRMED, PRODUCTION | `ARTIFACT_DIR` was first set in step 4, and nothing produced `FREEZE_UNGUARDED_TABLES` or `FREEZE_UNPROBED_ROLES` at window time, so the freeze would stop. Step 0 sets the window directories; step 3 runs `preflight`, sets the list, runs the frozen probe once to print the unprobed roles, then again with them. |
+| 31 | `seed-realtime-tenant.sh` needs `COMMONSWARM_ENV_FILE` and `COMMONSWARM_MIGRATION_ENV_FILE`, which the documented commands do not pass (grok) | CONFIRMED, PRODUCTION | The script now uses the same defaults as `run-db-tool.sh` and requires every path to be absolute (antigravity P3). |
+| 32 | `prepare-target.sh` grants `swarm_*` roles before they exist (antigravity P3) | REFUTED (second time) | Rehearsal, window and drill all run `restore-target.sh` (which applies `roles.sql`) before `prepare-target.sh`. |
+| 33 | `prepare-target.sh` requires `MIGRATION_ARTIFACT_DIR` and never uses it (antigravity P3) | REFUTED | `start_log` writes the protected log under it. |
+| 34 | The cron export does not hide other owners' jobs: `postgres` has BYPASSRLS (grok) | CONFIRMED, RIGOUR | Measured on the box image; hosted `postgres` has BYPASSRLS too (2026-09-17). The comment and the runbook no longer say row security limits the export. The cron test now adds a job owned by `supabase_admin` and proves it is exported and restored under that owner. |
+| 35 | The "cron snapshot" contract matched the counts query's snapshot line (grok) | CONFIRMED, RIGOUR | The check now reads only the cron export block; a mutation removes only that block's snapshot line. |
+| 36 | An unset `FREEZE_UNPROBED_ROLES` acknowledges an empty list (grok) | CONFIRMED, RIGOUR | The probe now requires the acknowledgement SET, as `enable` does; the hosted-shape test proves it with an empty list. |
+| 37 | `LOCAL-REHEARSAL.md` says the health check uses verify-full and the CA (grok) | CONFIRMED, RIGOUR | It is `pg_isready` to 172.31.0.10 without TLS options; corrected. |
+| 38 | Rehearsal step 4 lists the freeze drill before the box database exists (antigravity P6) | CONFIRMED, RIGOUR | The commands moved to step 13. |
+| 39 | The seed command appears twice with no reason (antigravity P6) | CONFIRMED, RIGOUR | The note is back: the second run must also exit 0 (idempotency). |
+| 40 | `ENDPOINTS.md` omits Google sign-in (antigravity P6) | CONFIRMED, RIGOUR | Added. |
+| 41 | `postgres:17.11` does not exist (antigravity P5b) | REFUTED | `docker image inspect postgres:17.11`: created 2026-08-25. |
+| 42 | The foreign cron entry sorts first, so the test does not prove rollback after earlier jobs were scheduled (antigravity P5b) | CONFIRMED, RIGOUR | The foreign entry now sorts last. |
+| 43 | Unused `readFile` import in the cron test (antigravity P5b) | CONFIRMED, RIGOUR | Removed. |
+| 44 | The edge Compose network mode comes from shell interpolation and defaults to bridge (antigravity P1, grok) | CONFIRMED, RIGOUR | Every documented edge start passes `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`. |

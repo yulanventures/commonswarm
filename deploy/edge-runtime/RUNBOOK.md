@@ -106,7 +106,9 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
 - [ ] **NOT RUN** — start only the edge runtime:
 
   ```sh
-  docker compose -f deploy/edge-runtime/compose.yaml up -d edge-runtime
+  COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+    COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+    docker compose -f deploy/edge-runtime/compose.yaml up -d edge-runtime
   ```
 
 - [ ] **NOT RUN** — wait for `healthy`. Confirm the published socket is only

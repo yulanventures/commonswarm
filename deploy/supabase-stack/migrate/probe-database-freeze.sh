@@ -101,7 +101,7 @@ fi
 unprobed_csv="$(IFS=','; echo "${unprobed[*]:-}")"
 log "$probed service roles were $expected after SET default_transaction_read_only=off and BEGIN READ WRITE"
 log "roles this connection cannot assume, so NOT probed: ${unprobed_csv:-none}"
-if [[ "${FREEZE_UNPROBED_ROLES:-}" != "$unprobed_csv" ]]; then
+if [[ "${FREEZE_UNPROBED_ROLES+set}" != set || "$FREEZE_UNPROBED_ROLES" != "$unprobed_csv" ]]; then
   log "refusing: set FREEZE_UNPROBED_ROLES to exactly '${unprobed_csv}' to acknowledge the roles this probe cannot prove"
   exit 65
 fi

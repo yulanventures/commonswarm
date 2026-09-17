@@ -2,13 +2,14 @@
  * The N-db pg_cron schedules reach the box (review round 2, 2026-09-17).
  *
  * WHY THIS EXISTS. The selected-schema dump carries the swarm purge functions but not the cron schema, so a restored box
- * ran none of the five CommonSwarm purge jobs and verify-counts.sh could not see it. Production has exactly five jobs,
- * all owned by `postgres` in database `postgres` (measured read-only 2026-09-17).
+ * ran none of the five CommonSwarm purge jobs and verify-counts.sh could not see it. `postgres` has BYPASSRLS on hosted
+ * and on the box image, so the export must include jobs owned by other roles too.
  *
  * This test uses the box image itself. It schedules jobs as `postgres` (one inactive, one whose command holds a quote,
- * a backslash, a tab and a newline), exports them with the SQL dump-source.sh uses while connected as `postgres`,
+ * a backslash, a tab and a newline), plus one job as `supabase_admin`; exports them with the SQL dump-source.sh uses
+ * while connected as `postgres`,
  * drops pg_cron, and runs the real restore-cron-jobs.sh in a tool container against the marked database: the jobs come
- * back byte-identical and owned by `postgres`; a second run changes nothing; an entry for another database fails the
+ * back byte-identical and under their source owners; a second run changes nothing; an entry for another database fails the
  * whole transaction; a job the artifact does not name fails verification; the source is refused.
  *
  * Reached by `npm run test:p1-cli` (glob). Skips, with the reason, when Docker is absent.
@@ -16,7 +17,7 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -68,6 +69,7 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
       SELECT cron.schedule('escaped-command', '*/5 * * * *', ${"$q$"}${commandWithEscapes}${"$q$"});
       SELECT cron.alter_job(job_id := cron.schedule('inactive-job', '0 0 * * *', 'SELECT 3'), active := false);
       RESET ROLE;
+      SELECT cron.schedule('supabase-admin-job', '17 3 * * *', 'SELECT 6');
     `);
     assert.equal(scheduled.status, 0, scheduled.stderr);
 
@@ -89,17 +91,18 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
       "-v", `${serviceFile}:/run/pg_service.conf:ro`, "-v", `${passFile}:/run/pgpass:ro`,
       "--entrypoint", "/bin/bash", IMAGE, ...args,
     ]);
-    // The same query and flags dump-source.sh uses, connected as `postgres` (row security limits it to that role's jobs).
+    // The same query and flags dump-source.sh uses, connected as `postgres`, whose BYPASSRLS sees every owner's jobs.
     const listing = (service: "source" | "target") => tool(["-c",
       `source /work/migrate/lib.sh; cron_jobs_json_sql > /tmp/cron.sql; database_psql ${service} --quiet --tuples-only --no-align --file /tmp/cron.sql`]);
 
     const exported = listing("source");
     assert.equal(exported.status, 0, exported.stderr);
     const lines = exported.stdout.split("\n").filter(Boolean);
-    assert.equal(lines.length, 3, exported.stdout);
+    assert.equal(lines.length, 4, exported.stdout);
     const jobs = lines.map(line => JSON.parse(line) as { jobname: string; command: string; username: string; database: string; active: boolean });
-    assert.deepEqual(jobs.map(job => job.jobname), ["escaped-command", "inactive-job", "swarm-purge-rate-buckets"]);
-    assert.ok(jobs.every(job => job.username === "postgres" && job.database === "postgres"));
+    assert.deepEqual(jobs.map(job => job.jobname), ["escaped-command", "inactive-job", "supabase-admin-job", "swarm-purge-rate-buckets"]);
+    assert.ok(jobs.every(job => job.database === "postgres"));
+    assert.equal(jobs.find(job => job.jobname === "supabase-admin-job")!.username, "supabase_admin");
     assert.equal(jobs.find(job => job.jobname === "escaped-command")!.command, commandWithEscapes);
     assert.equal(jobs.find(job => job.jobname === "inactive-job")!.active, false);
     await writeFile(join(artifacts, "cron-jobs.ndjson"), exported.stdout, { mode: 0o600 });
@@ -115,8 +118,12 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
     // 1. Restore recreates every job, owned by its source role, byte-identical to the artifact.
     let result = tool(["/work/migrate/restore-cron-jobs.sh", "target"]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.match(result.stdout, /3 cron jobs match cron-jobs\.ndjson/);
+    assert.match(result.stdout, /4 cron jobs match cron-jobs\.ndjson/);
     assert.equal(listing("target").stdout, exported.stdout);
+    const restoredAdminJob = listing("target").stdout.split("\n").filter(Boolean)
+      .map(line => JSON.parse(line) as { jobname: string; username: string })
+      .find(job => job.jobname === "supabase-admin-job");
+    assert.equal(restoredAdminJob?.username, "supabase_admin", "the supabase_admin job was restored under another owner");
 
     // 2. A second run changes nothing.
     result = tool(["/work/migrate/restore-cron-jobs.sh", "target"]);
@@ -124,8 +131,8 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
     assert.equal(listing("target").stdout, exported.stdout);
 
     // 3. One transaction: an entry for another database fails the run and leaves the jobs as they were.
-    const foreign = JSON.stringify({ jobname: "aaa-foreign", schedule: "0 2 * * *", command: "SELECT 5", database: "other", username: "postgres", active: true });
-    await writeFile(join(otherArtifacts, "cron-jobs.ndjson"), `${foreign}\n${exported.stdout}`, { mode: 0o600 });
+    const foreign = JSON.stringify({ jobname: "zzz-foreign", schedule: "0 2 * * *", command: "SELECT 5", database: "other", username: "postgres", active: true });
+    await writeFile(join(otherArtifacts, "cron-jobs.ndjson"), `${exported.stdout}${foreign}\n`, { mode: 0o600 });
     result = tool(["/work/migrate/restore-cron-jobs.sh", "target"], otherArtifacts);
     assert.notEqual(result.status, 0, "a job for another database was accepted");
     assert.equal(listing("target").stdout, exported.stdout, "a failed restore changed the jobs");
