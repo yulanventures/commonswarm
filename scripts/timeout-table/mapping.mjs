@@ -31,6 +31,7 @@ export function validateMapping(inventory, mapping, ref) {
   if (missing.length || stale.length) {
     throw new Error(`timeout mapping mismatch; missing=[${missing.join(", ")}]; stale=[${stale.join(", ")}]`);
   }
+  const scopesByOperation = new Map();
   for (const row of inventory) {
     const entry = section.rows[row.id];
     if (!new Set(["network-api", "local", "external"]).has(entry.class)) {
@@ -42,6 +43,14 @@ export function validateMapping(inventory, mapping, ref) {
     if (!entry.citation || !entry.operation ||
         !new Set(["safe-read", "bounded-write", "not-run"]).has(entry.operation.class)) {
       throw new Error(`${row.id} has incomplete operation metadata`);
+    }
+    if (entry.operation.class === "safe-read") {
+      const name = entry.operation.name;
+      const previous = scopesByOperation.get(name);
+      if (previous && previous !== entry.scope) {
+        throw new Error(`operation ${name} has mixed scopes ${previous} and ${entry.scope}`);
+      }
+      scopesByOperation.set(name, entry.scope);
     }
   }
   return true;

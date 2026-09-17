@@ -51,8 +51,14 @@ if (typeof originalFetch === "function") {
     try {
       url = rewritten(input);
     } catch (error) {
-      const failed = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-      record({ method, path: failed.pathname, status: "BLOCKED", duration_ms: 0 });
+      let path = "/";
+      try {
+        const failed = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
+        path = failed.pathname;
+      } catch {
+        path = typeof input === "string" && input.startsWith("/") ? input : "/";
+      }
+      record({ method, path, status: "BLOCKED", duration_ms: 0 });
       throw error;
     }
     const writeKind = originWriteKind(method, url.pathname);

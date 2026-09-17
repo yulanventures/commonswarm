@@ -137,7 +137,7 @@ function environment(base, copy, log) {
 async function oneOperation(name, options, copy, log, sourceRoot) {
   const env = environment(options.baseUrl, copy, log);
   if (name === "auth-settings") {
-    return await runChild(process.execPath, [join(here, "probe.mjs"), name, copy.profilePath], { env });
+    return await runChild(process.execPath, [join(here, "probe.mjs"), name, copy.profilePath], { env, capture: true });
   }
   if (name === "check-uncapped") {
     return await runChild(process.execPath,
@@ -151,7 +151,12 @@ async function oneOperation(name, options, copy, log, sourceRoot) {
   }
   if (!options.client) throw new Error(`--client is required for ${name}`);
   const invocation = clientInvocation(options.client, cliArgs(name, copy));
-  return await runChild(invocation.command, invocation.args, { env, capture: options.capture });
+  return await runChild(invocation.command, invocation.args, { env, capture: true });
+}
+
+function measurementChildError(name, result) {
+  const detail = [result.stdout, result.stderr].filter(Boolean).join("\n").slice(0, 2_000);
+  return new Error(`${name} measurement child exited ${result.code}${detail ? `: ${detail}` : ""}`);
 }
 
 function operationEndpointRows(rows, endpoints) {
@@ -167,11 +172,15 @@ function measurementFor(map, measurements) {
 }
 
 export function rowSummary(row, map, measured) {
-  return summarize(measured?.durations ?? [], row.value_ms, {
+  const durations = measured?.durations ?? [];
+  const attempted = measured?.attempted === true;
+  const incompletePath = map.operation.measures_guarded_path === false && durations.length > 0;
+  const attemptedWithoutSample = attempted && durations.length === 0;
+  return summarize(durations, row.value_ms, {
     notNetwork: map.class !== "network-api",
     notRun: map.operation.class === "not-run",
     notMeasured: map.class === "network-api" && map.operation.class === "safe-read" &&
-      map.operation.measures_guarded_path === false && (measured?.durations?.length ?? 0) > 0,
+      (incompletePath || attemptedWithoutSample),
     realTimeouts: measured?.realTimeouts ?? 0,
   });
 }
@@ -252,7 +261,16 @@ export async function runTable(options) {
       const map = mapping.rows[row.id];
       if (!map) throw new Error(`mapping lacks ${row.id}`);
       if (map.operation.class === "safe-read") {
-        operations.set(map.operation.name, { endpoints: map.endpoints, scope: map.scope });
+        const previous = operations.get(map.operation.name);
+        if (previous && previous.scope !== map.scope) {
+          throw new Error(
+            `operation ${map.operation.name} has mixed scopes ${previous.scope} and ${map.scope}`,
+          );
+        }
+        operations.set(map.operation.name, {
+          endpoints: [...new Set([...(previous?.endpoints ?? []), ...map.endpoints])],
+          scope: map.scope,
+        });
       }
     }
     const startupValues = [];
@@ -269,21 +287,26 @@ export async function runTable(options) {
       let realTimeouts = 0;
       const realExitCodes = {};
       if (!options.client && name !== "auth-settings" && name !== "check" && name !== "signal-read") {
-        measurements.set(name, { durations, realTimeouts, realExitCodes: null });
+        measurements.set(name, { durations, realTimeouts, realExitCodes: null, attempted: false });
         continue;
       }
       for (let index = 0; index < options.runs; index += 1) {
         const before = (await readJsonLines(log)).length;
         let result;
         if (name === "check") {
+          // Uncapped source check first so the p95 sample is not the request
+          // that the real client just warmed on this iteration.
+          result = await oneOperation("check-uncapped", options, copy, log, source.root);
+          if (result.code !== 0) throw measurementChildError(name, result);
           if (options.client) {
             const real = await oneOperation("check", { ...options, capture: true }, copy, log, source.root);
             realExitCodes[real.code] = (realExitCodes[real.code] ?? 0) + 1;
             if (`${real.stdout}\n${real.stderr}`.includes("check_timeout")) realTimeouts += 1;
           }
-          result = await oneOperation("check-uncapped", options, copy, log, source.root);
-        } else result = await oneOperation(name, options, copy, log, source.root);
-        if (result.code !== 0) throw new Error(`${name} measurement child exited ${result.code}`);
+        } else {
+          result = await oneOperation(name, options, copy, log, source.root);
+          if (result.code !== 0) throw measurementChildError(name, result);
+        }
         const fresh = (await readJsonLines(log)).slice(before);
         assertNoOriginWrites(fresh, name);
         const requests = operationEndpointRows(fresh, operation.endpoints);
@@ -297,12 +320,14 @@ export async function runTable(options) {
           durations.push(result.durationMs);
         } else if (requests.length > 0) {
           durations.push(Math.max(...requests.map(row => row.duration_ms)));
-        } else {
-          durations.push(result.durationMs);
         }
         if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs);
       }
-      measurements.set(name, { durations, realTimeouts, realExitCodes: name === "check" && options.client ? realExitCodes : null });
+      measurements.set(name, {
+        durations, realTimeouts,
+        realExitCodes: name === "check" && options.client ? realExitCodes : null,
+        attempted: true,
+      });
     }
     const startup = startupValues.length === 0 ? null : {
       p50: percentile(startupValues, .5), p95: percentile(startupValues, .95), max: Math.max(...startupValues),
@@ -327,8 +352,8 @@ export async function runTable(options) {
     }
     return { report, inventory, measurements, startup, status };
   } finally {
-    uninstallSignals();
     cleanupRunResourcesSync(resources);
+    uninstallSignals();
   }
 }
 

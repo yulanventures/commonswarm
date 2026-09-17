@@ -15,14 +15,14 @@ export function assertNoOriginWrites(
 export function runStatus(
   inventory: TimeoutInventoryRow[],
   mapping: any,
-  measurements: Map<string, { durations: number[]; realTimeouts: number; realExitCodes?: Record<string, number> | null }>,
+  measurements: Map<string, { durations: number[]; realTimeouts: number; realExitCodes?: Record<string, number> | null; attempted?: boolean }>,
   acknowledged?: string[],
 ): { fails: string[]; notMeasured: string[]; missing: string[]; extra: string[] };
 export function markdownReport(options: {
   baseUrl: string;
   inventory: TimeoutInventoryRow[];
   mapping: any;
-  measurements: Map<string, { durations: number[]; realTimeouts: number; realExitCodes?: Record<string, number> | null }>;
+  measurements: Map<string, { durations: number[]; realTimeouts: number; realExitCodes?: Record<string, number> | null; attempted?: boolean }>;
   startup: { p50: number; p95: number; max: number } | null;
   ref?: string | null;
   client?: string | null;

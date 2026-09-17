@@ -105,10 +105,21 @@ test("timeout inventory and mapping are exact in both directions for each measur
     "signal-read",
   );
   assert.equal(
+    mappingForRef(mapping, "HEAD").rows["src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS"]
+      ?.operation.measures_guarded_path,
+    false,
+  );
+  assert.equal(
     mappingForRef(mapping, "HEAD").rows["src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS"]
       ?.operation.measures_guarded_path,
     false,
   );
+  assert.equal(
+    mappingForRef(mapping, "HEAD").rows["site/src/lib/auth-providers.ts:AbortSignal.timeout"]
+      ?.operation.class,
+    "not-run",
+  );
+  assert.equal(headRows.get("src/host/claude.ts:requestTimeoutMs")?.value_ms, 120_000);
 });
 
 test("a pure line shift does not change inventory ids", () => {
@@ -129,7 +140,7 @@ test("a pure line shift does not change inventory ids", () => {
   assert.ok(before.every((row, index) => row.line < after[index]!.line));
 });
 
-test("enumerator records timeoutMs defaults, ?? literals, as const, identifier AbortSignal, and import aliases", () => {
+test("enumerator records timeoutMs defaults, ?? literals, as const, identifier AbortSignal, and import aliases", async () => {
   const defaults = enumerateText("fixture.ts", "function f(timeoutMs = 30_000) { return timeoutMs; }");
   assert.equal(defaults.some(row => row.name === "timeoutMs" && row.value_ms === 30_000), true);
 
@@ -153,6 +164,43 @@ test("enumerator records timeoutMs defaults, ?? literals, as const, identifier A
     { importedValues: new Map([["AGENT_CHECK_TIMEOUT_MS", 3_900]]) },
   );
   assert.equal(alias.some(row => row.name === "HOOK_CHECK_TIMEOUT_MS" && row.value_ms === 3_900), true);
+
+  const namespace = enumerateText(
+    "ns.ts",
+    "AbortSignal.timeout(T.AGENT_CHECK);",
+    { importedValues: new Map([["T.AGENT_CHECK", 3_900]]) },
+  );
+  assert.equal(namespace.some(row => row.name === "AbortSignal.timeout" && row.value_ms === 3_900), true);
+
+  const requestProperty = enumerateText("req.ts", "const x = { requestTimeoutMs: 12_000 };");
+  assert.equal(requestProperty.some(row => row.name === "requestTimeoutMs" && row.value_ms === 12_000), true);
+
+  const shadow = enumerateText(
+    "shadow.ts",
+    "const TIMEOUT_MS = 5_000;\nfunction f() { const TIMEOUT_MS = 100; return TIMEOUT_MS; }\nAbortSignal.timeout(TIMEOUT_MS);",
+  );
+  assert.equal(shadow.find(row => row.name === "AbortSignal.timeout")?.value_ms, 5_000);
+
+  const exportDir = await mkdtemp(join(tmpdir(), "timeout-table-reexport-"));
+  try {
+    await mkdir(join(exportDir, "src"), { recursive: true });
+    await writeFile(join(exportDir, "src/a.ts"), "export const TIMEOUT_MS = 9_000;\nexport default 4_000;\n");
+    await writeFile(join(exportDir, "src/b.ts"), 'export { TIMEOUT_MS } from "./a.ts";\n');
+    await writeFile(
+      join(exportDir, "src/c.ts"),
+      'import { TIMEOUT_MS } from "./b.ts";\nimport * as T from "./a.ts";\nimport fallback from "./a.ts";\nAbortSignal.timeout(TIMEOUT_MS);\nAbortSignal.timeout(T.TIMEOUT_MS);\nAbortSignal.timeout(fallback);\n',
+    );
+    execFileSync("git", ["init"], { cwd: exportDir, stdio: "ignore" });
+    execFileSync("git", ["add", "src"], { cwd: exportDir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--no-gpg-sign", "-m", "t"], {
+      cwd: exportDir, stdio: "ignore",
+    });
+    const exported = enumerateRepository({ repo: exportDir, inputs: ["src"] });
+    const cRows = exported.filter(row => row.file === "src/c.ts" && row.name === "AbortSignal.timeout");
+    assert.deepEqual(cRows.map(row => row.value_ms).sort((a, b) => a - b), [4_000, 9_000, 9_000]);
+  } finally {
+    await rm(exportDir, { recursive: true, force: true });
+  }
 });
 
 test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED", () => {
@@ -173,6 +221,37 @@ test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEA
   const extra = runStatus(inventory, mapping, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]), [id]);
   assert.deepEqual(extra.extra, [id]);
   assert.equal(rowSummary(inventory[0]!, mapping.rows[id], { durations: [10], realTimeouts: 1 }).gate, "FAIL");
+  assert.equal(
+    rowSummary(inventory[0]!, incomplete.rows[id], { durations: [10], realTimeouts: 1 }).gate,
+    "FAIL",
+  );
+  const proxyNotRun = {
+    class: "network-api", scope: "whole-operation", endpoints: ["/functions/v1/read"],
+    operation: { name: "hook-check", class: "not-run", proxy_operation: "fixture" },
+  };
+  assert.equal(
+    rowSummary(inventory[0]!, proxyNotRun, { durations: [10], realTimeouts: 1 }).gate,
+    "NOT RUN",
+  );
+  assert.equal(
+    rowSummary(inventory[0]!, mapping.rows[id], { durations: [], realTimeouts: 0, attempted: true }).gate,
+    "NOT MEASURED",
+  );
+  const mixedInventory = [
+    inventory[0]!,
+    { id: "fixture.ts:OTHER_MS", file: "fixture.ts", name: "OTHER_MS", line: 2, value_ms: 100, unit_note: "milliseconds" },
+  ];
+  assert.throws(
+    () => validateMapping(mixedInventory, {
+      version: 2, refs: { HEAD: { rows: {
+        [id]: { class: "network-api", scope: "per-request", endpoints: ["/a"], citation: "f:1",
+          operation: { name: "same", class: "safe-read" } },
+        "fixture.ts:OTHER_MS": { class: "network-api", scope: "whole-operation", endpoints: ["/a"], citation: "f:2",
+          operation: { name: "same", class: "safe-read" } },
+      } } },
+    }, "HEAD"),
+    /mixed scopes/,
+  );
   assert.match(describeOriginWriteRules(), /POST \/functions\/v1\/command/);
   assert.equal(originWriteKind("POST", "/functions/v1/command"), "command");
   assert.equal(originWriteKind("POST", "/functions/v1/read"), null);
@@ -204,6 +283,9 @@ test("delayed local endpoint makes the rendered row pass below half-budget and f
     slow.push(performance.now() - started);
   }
   assert.equal(summarize(slow, 100).gate, "FAIL");
+  const nonUniform = [...Array(18).fill(10), 80, 80];
+  assert.equal(summarize(nonUniform, 100).gate, "FAIL");
+  assert.equal(summarize(nonUniform, 100).p95, 80);
 
   const id = "fixture.ts:TIMEOUT_MS";
   const mapping = { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } };
@@ -305,6 +387,12 @@ test("preload duration includes the response body and does not forward writes or
     `fetch(${JSON.stringify(`${otherUrl}/storage/v1/object`)}).then(()=>process.exit(0),()=>process.exit(1))`], { env });
   assert.notEqual(leaked.code, 0);
   assert.equal(otherHits, 0);
+
+  const relative = await runChild(process.execPath, ["-e",
+    "fetch('/functions/v1/read').then(()=>process.exit(0),()=>process.exit(1))"], { env });
+  assert.notEqual(relative.code, 0);
+  const relativeRows = await readJsonLines(log);
+  assert.equal(relativeRows.some(row => row.path === "/functions/v1/read" && row.status === "BLOCKED"), true);
 });
 
 test("private profile copy is removed after success and injected failure", async () => {
@@ -365,7 +453,7 @@ type ExitPaths = {
   credentialFile: string;
 };
 
-async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "exit13" | "sigterm" | "sighup") {
+async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "exit13" | "sigterm" | "sighup" | "sigint") {
   const home = await mkdtemp(join(tmpdir(), "timeout-table-home-"));
   t.after(() => { rmSync(home, { recursive: true, force: true }); });
   const profileDir = join(home, "profile-src");
@@ -479,6 +567,19 @@ test("SIGHUP removes the profile copy and the git worktree", async t => {
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 
+test("SIGINT removes the profile copy and the git worktree", async t => {
+  const session = await spawnExitFixture(t, "sigint");
+  await waitForFile(session.marker);
+  session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
+  await assertArtifactsPresent(session.paths);
+  session.child.kill("SIGINT");
+  const [code, signal] = await session.closed;
+  assert.equal(signal, null, session.stderr);
+  assert.equal(code, 130, session.stderr);
+  await assertArtifactsGone(session.paths);
+  assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
+});
+
 test("runTable does not write to the origin and will not PASS unacknowledged NOT MEASURED rows", async t => {
   const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -559,19 +660,71 @@ test("runTable does not write to the origin and will not PASS unacknowledged NOT
     credential_file: credential,
   }), { mode: 0o600 });
   const checkId = "src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS";
+  const signalId = "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS";
+  const channelId = "src/cloud/channels.ts:timeoutMs";
+  const incomplete = [checkId, signalId];
   await assert.rejects(runTable({
     baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: null,
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: [],
   }), /NOT MEASURED without --acknowledge-not-measured/);
   const result = await runTable({
-    baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: null, runs: 2, pauseMs: 0, ref: null,
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
-    output: null, acknowledgeNotMeasured: [checkId],
+    output: null, acknowledgeNotMeasured: incomplete,
   });
   assert.equal(writes.length, 0);
   assert.match(result.report, /\| NOT MEASURED \|/);
   assert.match(result.report, /signal-read/);
   assert.equal(result.status.fails.length, 0);
-  assert.deepEqual(result.status.notMeasured, [checkId]);
+  assert.deepEqual([...result.status.notMeasured].sort(), [...incomplete].sort());
+  assert.equal((result.measurements.get("auth-settings") as { durations: number[] }).durations.length, 2);
+
+  const silentClient = join(home, "silent-client.mjs");
+  await writeFile(silentClient, `process.argv.includes("--version") && process.exit(0);\nprocess.exit(0);\n`, { mode: 0o700 });
+  await assert.rejects(runTable({
+    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: incomplete,
+  }), /NOT MEASURED without --acknowledge-not-measured/);
+  const silent = await runTable({
+    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: [...incomplete, channelId, "src/cloud/files.ts:REQUEST_TIMEOUT_MS"],
+  });
+  assert.match(silent.report, /src\/cloud\/channels.ts:timeoutMs.*NOT MEASURED/);
+  assert.equal(silent.status.fails.length, 0);
+  assert.ok(silent.status.notMeasured.includes(channelId));
+
+  const timeoutClient = join(home, "timeout-client.mjs");
+  await writeFile(timeoutClient, `
+if (process.argv.includes("--version")) process.exit(0);
+if (process.argv[2] === "check" || process.argv[1] && process.argv.includes("check")) {
+  process.stdout.write(JSON.stringify({ error: { code: "check_timeout" } }) + "\\n");
+  process.exit(1);
+}
+process.exit(0);
+`, { mode: 0o700 });
+  await assert.rejects(runTable({
+    baseUrl: url, profile, client: timeoutClient, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: [...incomplete, channelId, "src/cloud/files.ts:REQUEST_TIMEOUT_MS"],
+  }), (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    assert.match(message, /FAIL rows: .*AGENT_CHECK_TIMEOUT_MS/);
+    assert.doesNotMatch(message, /HOOK_CHECK_TIMEOUT_MS/);
+    return true;
+  });
+
+  const noisyClient = join(home, "noisy-client.mjs");
+  await writeFile(noisyClient, `
+if (process.argv.includes("--version")) process.exit(0);
+process.stderr.write("channel boom\\n");
+process.exit(7);
+`, { mode: 0o700 });
+  await assert.rejects(runTable({
+    baseUrl: url, profile, client: noisyClient, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: incomplete,
+  }), /channel boom/);
 });

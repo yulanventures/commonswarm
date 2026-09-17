@@ -52,11 +52,12 @@
           "citation": "site/src/lib/auth-providers.ts:199",
           "detail": "AbortSignal.timeout wrapping the GoTrue settings GET, including the response body.",
           "operation": {
-            "name": "auth-settings",
-            "class": "safe-read",
+            "name": "auth-settings-site",
+            "class": "not-run",
             "writes": [],
             "removes": [],
-            "reason": "GET /auth/v1/settings is the request this abort covers. Duration is measured through the end of the body."
+            "reason": "Use of AUTH_SETTINGS_TIMEOUT_MS.",
+            "proxy_operation": "auth-settings"
           }
         },
         "site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS": {
@@ -159,6 +160,24 @@
             "reason": "Not a network request timeout."
           }
         },
+        "src/cloud/agent-channel.ts:deadlineMs": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-channel.ts:142",
+          "detail": "DeliveryCommandClient deadline on the receive-channel loop.",
+          "operation": {
+            "name": "channel-delivery-deadline",
+            "class": "not-run",
+            "writes": [
+              "delivery lease and receipt state"
+            ],
+            "removes": [],
+            "reason": "Receive-channel delivery writes workspace state."
+          }
+        },
         "src/cloud/agent-channel.ts:setInterval": {
           "class": "local",
           "scope": "per-request",
@@ -171,6 +190,24 @@
             "writes": [],
             "removes": [],
             "reason": "Local heartbeat, not a network request timeout."
+          }
+        },
+        "src/cloud/agent-channel.ts:signalRequestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-channel.ts:143",
+          "detail": "ThinCommandClient signal request timeout on the receive-channel loop.",
+          "operation": {
+            "name": "channel-signal-timeout",
+            "class": "not-run",
+            "writes": [
+              "channel or signal command state"
+            ],
+            "removes": [],
+            "reason": "Receive-channel commands write workspace state."
           }
         },
         "src/cloud/agent-check.ts:AGENT_CHECK_BODY_BUDGET": {
@@ -789,13 +826,14 @@
             "/rest/v1/..."
           ],
           "citation": "src/cloud/signals.ts:37,881-928",
-          "detail": "Signal directory and page read, including response body.",
+          "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
             "class": "safe-read",
             "writes": [],
             "removes": [],
-            "reason": "Imports readAgentSignalPage from the selected ref. That function applies SIGNAL_READ_TIMEOUT_MS through the end of the body. It does not post signals_seen."
+            "reason": "readAgentSignalPage is one of several SIGNAL_READ_TIMEOUT_MS paths. Members directory, human PostgREST, retries, and delivery-receipt reads are not exercised. Gate is NOT MEASURED until acknowledged.",
+            "measures_guarded_path": false
           }
         },
         "src/cloud/signals.ts:timeoutMs": {
@@ -904,6 +942,20 @@
             "reason": "External child process."
           }
         },
+        "src/host/claude.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/claude.ts:638",
+          "detail": "Claude ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
         "src/host/claude.ts:setTimeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -944,6 +996,20 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
+          }
+        },
+        "src/host/codex.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/codex.ts:413",
+          "detail": "Codex ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
         "src/host/codex.ts:setTimeout": {
@@ -988,6 +1054,34 @@
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
+        "src/host/grok.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/grok.ts:267",
+          "detail": "Grok ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
+        "src/host/grok.ts:requestTimeoutMs#2": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/grok.ts:328",
+          "detail": "Grok ACP resume requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
         "src/host/grok.ts:setTimeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -1028,6 +1122,20 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
+          }
+        },
+        "src/host/opencode.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/opencode.ts:836",
+          "detail": "OpenCode ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
         "src/host/opencode.ts:setTimeout": {
@@ -1546,11 +1654,12 @@
           "citation": "site/src/lib/auth-providers.ts:199",
           "detail": "AbortSignal.timeout wrapping the GoTrue settings GET, including the response body.",
           "operation": {
-            "name": "auth-settings",
-            "class": "safe-read",
+            "name": "auth-settings-site",
+            "class": "not-run",
             "writes": [],
             "removes": [],
-            "reason": "GET /auth/v1/settings is the request this abort covers. Duration is measured through the end of the body."
+            "reason": "Use of AUTH_SETTINGS_TIMEOUT_MS.",
+            "proxy_operation": "auth-settings"
           }
         },
         "site/src/lib/auth-providers.ts:AUTH_SETTINGS_TIMEOUT_MS": {
@@ -1638,6 +1747,24 @@
             "reason": "Not a network request timeout."
           }
         },
+        "src/cloud/agent-channel.ts:deadlineMs": {
+          "class": "network-api",
+          "scope": "whole-operation",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-channel.ts:142",
+          "detail": "DeliveryCommandClient deadline on the receive-channel loop.",
+          "operation": {
+            "name": "channel-delivery-deadline",
+            "class": "not-run",
+            "writes": [
+              "delivery lease and receipt state"
+            ],
+            "removes": [],
+            "reason": "Receive-channel delivery writes workspace state."
+          }
+        },
         "src/cloud/agent-channel.ts:setInterval": {
           "class": "local",
           "scope": "per-request",
@@ -1650,6 +1777,24 @@
             "writes": [],
             "removes": [],
             "reason": "Local heartbeat, not a network request timeout."
+          }
+        },
+        "src/cloud/agent-channel.ts:signalRequestTimeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "src/cloud/agent-channel.ts:143",
+          "detail": "ThinCommandClient signal request timeout on the receive-channel loop.",
+          "operation": {
+            "name": "channel-signal-timeout",
+            "class": "not-run",
+            "writes": [
+              "channel or signal command state"
+            ],
+            "removes": [],
+            "reason": "Receive-channel commands write workspace state."
           }
         },
         "src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS": {
@@ -2297,13 +2442,14 @@
             "/rest/v1/..."
           ],
           "citation": "src/cloud/signals.ts:37,881-928",
-          "detail": "Signal directory and page read, including response body.",
+          "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
             "class": "safe-read",
             "writes": [],
             "removes": [],
-            "reason": "Imports readAgentSignalPage from the selected ref. That function applies SIGNAL_READ_TIMEOUT_MS through the end of the body. It does not post signals_seen."
+            "reason": "readAgentSignalPage is one of several SIGNAL_READ_TIMEOUT_MS paths. Members directory, human PostgREST, retries, and delivery-receipt reads are not exercised. Gate is NOT MEASURED until acknowledged.",
+            "measures_guarded_path": false
           }
         },
         "src/cloud/signals.ts:timeoutMs": {
@@ -2412,6 +2558,20 @@
             "reason": "External child process."
           }
         },
+        "src/host/claude.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/claude.ts:638",
+          "detail": "Claude ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
         "src/host/claude.ts:setTimeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -2452,6 +2612,20 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
+          }
+        },
+        "src/host/codex.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/codex.ts:413",
+          "detail": "Codex ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
         "src/host/codex.ts:setTimeout": {
@@ -2496,6 +2670,34 @@
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
+        "src/host/grok.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/grok.ts:267",
+          "detail": "Grok ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
+        "src/host/grok.ts:requestTimeoutMs#2": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/grok.ts:328",
+          "detail": "Grok ACP resume requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
+          }
+        },
         "src/host/grok.ts:setTimeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -2536,6 +2738,20 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
+          }
+        },
+        "src/host/opencode.ts:requestTimeoutMs": {
+          "class": "external",
+          "scope": "per-request",
+          "endpoints": [],
+          "citation": "src/host/opencode.ts:836",
+          "detail": "OpenCode ACP session requestTimeoutMs ?? ACP_DEFAULT_REQUEST_TIMEOUT_MS.",
+          "operation": {
+            "name": "acp-request-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
         "src/host/opencode.ts:setTimeout": {

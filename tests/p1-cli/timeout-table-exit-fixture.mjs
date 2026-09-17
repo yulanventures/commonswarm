@@ -5,8 +5,8 @@ import { makePrivateProfileCopy } from "../../scripts/timeout-table/core.mjs";
 import { installRunResourceCleanup, sourceRootForRef } from "../../scripts/timeout-table/run.mjs";
 
 const [mode, marker, profile, gitRepo] = process.argv.slice(2);
-if ((mode !== "exit13" && mode !== "sigterm" && mode !== "sighup") || !marker || !profile || !gitRepo) {
-  process.stderr.write("usage: timeout-table-exit-fixture.mjs exit13|sigterm|sighup MARKER PROFILE REPO\n");
+if ((mode !== "exit13" && mode !== "sigterm" && mode !== "sighup" && mode !== "sigint") || !marker || !profile || !gitRepo) {
+  process.stderr.write("usage: timeout-table-exit-fixture.mjs exit13|sigterm|sighup|sigint MARKER PROFILE REPO\n");
   process.exit(2);
 }
 
@@ -25,7 +25,7 @@ await writeFile(marker, JSON.stringify({
   sourceRoot: source.root,
 }), { mode: 0o600 });
 
-if (mode === "sigterm" || mode === "sighup") {
+if (mode === "sigterm" || mode === "sighup" || mode === "sigint") {
   setInterval(() => {}, 1 << 30);
   await new Promise(() => {});
 }

@@ -17,9 +17,13 @@ export function summarize(values, budgetMs, options = {}) {
   const headroom = p95 === null || p95 === 0 ? null : budgetMs / p95;
   let gate;
   if (options.notNetwork) gate = "NOT NETWORK";
-  else if (options.notMeasured) gate = "NOT MEASURED";
-  else if (options.notRun || headroom === null) gate = "NOT RUN";
+  else if (options.notRun) gate = "NOT RUN";
+  // A real client timeout fails the measured row even when the sample did not
+  // cover every guarded path. Acknowledgement cannot hide check_timeout.
+  // Proxy not-run rows must not inherit that FAIL.
   else if ((options.realTimeouts ?? 0) > 0) gate = "FAIL";
+  else if (options.notMeasured) gate = "NOT MEASURED";
+  else if (headroom === null) gate = "NOT RUN";
   else gate = headroom >= 2 ? "PASS" : "FAIL";
   return { runs: values.length, p50, p95, max, headroom, gate };
 }

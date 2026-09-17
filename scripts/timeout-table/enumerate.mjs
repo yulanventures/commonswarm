@@ -74,6 +74,10 @@ function numericValue(node, constants, importedValues = new Map(), seen = new Se
     if (node.operator === ts.SyntaxKind.PlusToken) return value;
     return null;
   }
+  if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+    const key = `${node.expression.text}.${node.name.text}`;
+    if (importedValues.has(key) && !seen.has(key)) return importedValues.get(key);
+  }
   if (ts.isIdentifier(node) && !seen.has(node.text)) {
     if (importedValues.has(node.text)) return importedValues.get(node.text);
     if (constants.has(node.text)) {
@@ -157,15 +161,33 @@ function parseSource(file, text) {
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
 }
 
-function localConstantInitializers(sourceFile) {
-  const constants = new Map();
-  const visitConstants = node => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+function addVariableDeclarations(statement, constants) {
+  if (!ts.isVariableStatement(statement)) return;
+  for (const node of statement.declarationList.declarations) {
+    if (ts.isIdentifier(node.name) && node.initializer && !constants.has(node.name.text)) {
       constants.set(node.name.text, node.initializer);
     }
-    ts.forEachChild(node, visitConstants);
+  }
+}
+
+function localConstantInitializers(sourceFile) {
+  const constants = new Map();
+  // Module-level bindings first so a later function-local of the same name
+  // cannot overwrite a timeout constant used at the top level.
+  for (const stmt of sourceFile.statements) {
+    addVariableDeclarations(stmt, constants);
+    if (ts.isModuleDeclaration(stmt) && stmt.body && ts.isModuleBlock(stmt.body)) {
+      for (const inner of stmt.body.statements) addVariableDeclarations(inner, constants);
+    }
+  }
+  const visitNested = node => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+        !constants.has(node.name.text)) {
+      constants.set(node.name.text, node.initializer);
+    }
+    ts.forEachChild(node, visitNested);
   };
-  visitConstants(sourceFile);
+  visitNested(sourceFile);
   return constants;
 }
 
@@ -192,19 +214,32 @@ function resolveImportedFile(fromFile, specifier, fileSet) {
 
 function importedValuesForFile(sourceFile, fromFile, exportValues, fileSet) {
   const out = new Map();
+  const takeExport = (target, exportedName, localName) => {
+    const value = exportValues.get(`${target}:${exportedName}`);
+    if (typeof value === "number") out.set(localName, value);
+  };
   for (const stmt of sourceFile.statements) {
     if (!ts.isImportDeclaration(stmt) || !stmt.importClause || stmt.importClause.isTypeOnly) continue;
     if (!ts.isStringLiteral(stmt.moduleSpecifier)) continue;
     const target = resolveImportedFile(fromFile, stmt.moduleSpecifier.text, fileSet);
     if (!target) continue;
+    if (stmt.importClause.name) takeExport(target, "default", stmt.importClause.name.text);
     const named = stmt.importClause.namedBindings;
-    if (!named || !ts.isNamedImports(named)) continue;
+    if (!named) continue;
+    if (ts.isNamespaceImport(named)) {
+      const ns = named.name.text;
+      const prefix = `${target}:`;
+      for (const [key, value] of exportValues) {
+        if (typeof value === "number" && key.startsWith(prefix)) {
+          out.set(`${ns}.${key.slice(prefix.length)}`, value);
+        }
+      }
+      continue;
+    }
+    if (!ts.isNamedImports(named)) continue;
     for (const element of named.elements) {
       if (element.isTypeOnly) continue;
-      const importedName = (element.propertyName ?? element.name).text;
-      const localName = element.name.text;
-      const value = exportValues.get(`${target}:${importedName}`);
-      if (typeof value === "number") out.set(localName, value);
+      takeExport(target, (element.propertyName ?? element.name).text, element.name.text);
     }
   }
   return out;
@@ -263,7 +298,7 @@ export function enumerateText(file, text, options = {}) {
     }
     if (ts.isPropertyAssignment(node)) {
       const name = timeoutBindingName(node.name);
-      if (name && ["timeoutMs", "timeout", "connect_timeout"].includes(name)) {
+      if (isTimeoutBindingName(name)) {
         const value = valueOf(node.initializer);
         if (value !== null) add(node.name, name, value);
       }
@@ -293,6 +328,25 @@ export function enumerateRepository({ repo, ref = null, inputs = DEFAULT_INPUTS 
       nextImported.set(file.path, imported);
       for (const [name, value] of localNumericConsts(file.sourceFile, imported)) {
         nextExports.set(`${file.path}:${name}`, value);
+      }
+      for (const stmt of file.sourceFile.statements) {
+        if (ts.isExportAssignment(stmt) && !stmt.isExportEquals) {
+          const value = numericValue(stmt.expression, localConstantInitializers(file.sourceFile), imported);
+          if (value !== null) nextExports.set(`${file.path}:default`, value);
+        }
+        if (!ts.isExportDeclaration(stmt) || !stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
+        const fromFile = stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)
+          ? resolveImportedFile(file.path, stmt.moduleSpecifier.text, fileSet)
+          : null;
+        for (const element of stmt.exportClause.elements) {
+          if (element.isTypeOnly) continue;
+          const exportedName = element.name.text;
+          const sourceName = (element.propertyName ?? element.name).text;
+          const value = fromFile
+            ? exportValues.get(`${fromFile}:${sourceName}`)
+            : (imported.get(sourceName) ?? nextExports.get(`${file.path}:${sourceName}`));
+          if (typeof value === "number") nextExports.set(`${file.path}:${exportedName}`, value);
+        }
       }
     }
     exportValues = nextExports;
