@@ -59,10 +59,8 @@ services:
       test:
         - CMD-SHELL
         - >-
-          PGPASSWORD="$${POSTGRES_PASSWORD}" PGSSLMODE=verify-full
-          PGSSLROOTCERT=/etc/ssl/yulan-internal-ca.pem
-          psql -U "$${POSTGRES_USER}" -h 172.31.0.10
-          -d "$${POSTGRES_DB}" -Atqc 'select 1' >/dev/null
+          pg_isready -h 172.31.0.10 -p 5432
+          -d "$${POSTGRES_DB}" -t 3 >/dev/null
       interval: 10s
       timeout: 3s
       retries: 12
@@ -193,7 +191,8 @@ services:
         AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,FILE_SIZE_LIMIT,
         UPLOAD_FILE_SIZE_LIMIT,UPLOAD_FILE_SIZE_LIMIT_STANDARD,
         SIGNED_UPLOAD_URL_EXPIRATION_TIME,S3_PROTOCOL_ENABLED,
-        ENABLE_IMAGE_TRANSFORMATION,SERVER_PORT,SERVER_ADMIN_PORT
+        ENABLE_IMAGE_TRANSFORMATION,SERVER_PORT,SERVER_ADMIN_PORT,
+        NODE_EXTRA_CA_CERTS
     ports:
       - "127.0.0.1:18004:5000"
     extra_hosts: *db-host

@@ -11,6 +11,7 @@ require_var() {
 }
 require_var MIGRATION_ARTIFACT_DIR
 require_var COMMONSWARM_ENV_FILE
+require_var COMMONSWARM_MIGRATION_ENV_FILE
 if [[ "$MIGRATION_ARTIFACT_DIR" != /* || "$COMMONSWARM_ENV_FILE" != /* ]]; then
   echo "artifact and environment paths must be absolute" >&2
   exit 1
@@ -19,6 +20,9 @@ if [[ ! -f "$COMMONSWARM_ENV_FILE" ]]; then
   echo "environment file does not exist" >&2
   exit 1
 fi
+
+"$STACK_DIR/migrate/run-db-tool.sh" assert-database-identity.sh \
+  "$MIGRATION_ARTIFACT_DIR" target
 mkdir -p "$MIGRATION_ARTIFACT_DIR/logs"
 chmod 0700 "$MIGRATION_ARTIFACT_DIR" "$MIGRATION_ARTIFACT_DIR/logs"
 log_file="$MIGRATION_ARTIFACT_DIR/logs/seed-realtime-tenant.log"
@@ -31,7 +35,7 @@ log() {
 }
 
 project="${COMMONSWARM_COMPOSE_PROJECT:-commonswarm-supabase-stack}"
-compose=(-p "$project" -f "$STACK_DIR/compose.yaml")
+compose=(--env-file "$COMMONSWARM_ENV_FILE" -p "$project" -f "$STACK_DIR/compose.yaml")
 if [[ -n "${COMMONSWARM_COMPOSE_OVERRIDE:-}" ]]; then
   compose+=(-f "$COMMONSWARM_COMPOSE_OVERRIDE")
 fi

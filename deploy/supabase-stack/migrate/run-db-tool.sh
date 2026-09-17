@@ -2,19 +2,41 @@
 set -euo pipefail
 exec </dev/null
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: run-db-tool.sh <script-name> <absolute-artifact-directory>" >&2
-  exit 1
+usage="usage: run-db-tool.sh <script-name> <absolute-artifact-directory> [validated arguments]"
+if [[ $# -lt 2 ]]; then
+  echo "$usage" >&2
+  exit 64
 fi
 script_name="$1"
 artifact_dir="$2"
+shift 2
+
 case "$script_name" in
-  dump-source.sh|restore-target.sh|prepare-target.sh|verify-counts.sh|setup-realtime.sh|source-read-only.sh) ;;
-  *) echo "unsupported database tool: $script_name" >&2; exit 1 ;;
+  dump-source.sh)
+    [[ $# -le 1 && ( $# -eq 0 || "$1" == source || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  restore-target.sh|verify-counts.sh|restore-storage-metadata.sh)
+    # Target only: the hosted project is never a restore destination (ruling 9084e3e1); the script refuses too.
+    [[ $# -le 1 && ( $# -eq 0 || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  prepare-target.sh|setup-realtime.sh)
+    [[ $# -eq 0 ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  source-read-only.sh)
+    [[ $# -ge 1 && $# -le 2 && ( "$1" == enable || "$1" == disable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  probe-database-freeze.sh)
+    [[ $# -ge 1 && $# -le 2 && ( "$1" == frozen || "$1" == writable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  assert-database-identity.sh)
+    [[ $# -eq 1 && ( "$1" == source || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    ;;
+  *) echo "unsupported database tool: $script_name" >&2; exit 64 ;;
 esac
+
 if [[ "$artifact_dir" != /* ]]; then
   echo "artifact directory must be absolute" >&2
-  exit 1
+  exit 64
 fi
 mkdir -p "$artifact_dir"
 chmod 0700 "$artifact_dir"
@@ -24,36 +46,60 @@ if ! command -v node >/dev/null 2>&1; then
   echo "required command is missing: node" >&2
   exit 1
 fi
+
+service_env="${COMMONSWARM_ENV_FILE:-/home/commonswarm/.env}"
+migration_env="${COMMONSWARM_MIGRATION_ENV_FILE:-/home/commonswarm/migration.env}"
+for env_file in "$service_env" "$migration_env"; do
+  if [[ "$env_file" != /* || ! -f "$env_file" ]]; then
+    echo "required 0600 environment file is missing: $env_file" >&2
+    exit 1
+  fi
+  if ! ENV_FILE_TO_CHECK="$env_file" node -e '
+    const { statSync } = require("node:fs");
+    if ((statSync(process.env.ENV_FILE_TO_CHECK).mode & 0o077) !== 0) process.exit(1);
+  ' </dev/null; then
+    echo "environment file must have mode 0600: $env_file" >&2
+    exit 1
+  fi
+done
+
 service_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-pg-service.XXXXXX")"
-trap 'rm -f "$service_file"' EXIT
-chmod 0600 "$service_file"
-PG_SERVICE_OUTPUT="$service_file" node "$stack_dir/migrate/make-pg-service.mjs" </dev/null
+pass_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-pg-pass.XXXXXX")"
+trap 'rm -f "$service_file" "$pass_file"' EXIT
+chmod 0600 "$service_file" "$pass_file"
+PG_SERVICE_OUTPUT="$service_file" \
+  PG_PASS_OUTPUT="$pass_file" \
+  COMMONSWARM_ENV_FILE="$service_env" \
+  COMMONSWARM_MIGRATION_ENV_FILE="$migration_env" \
+  node "$stack_dir/migrate/make-pg-service.mjs" </dev/null
+
 ca_file="${COMMONSWARM_CA_FILE:-/etc/ssl/yulan-internal-ca.pem}"
 ca_mount=()
 if [[ -f "$ca_file" ]]; then
   ca_mount=(--volume "$ca_file:/etc/ssl/yulan-internal-ca.pem:ro")
 fi
-env_names=(
-  SOURCE_DATABASE_URL TARGET_DATABASE_URL POSTGRES_PASSWORD BACKUP_RO_PASSWORD
-  COMMONSWARM_EDGE_DB_PASSWORD JWT_SECRET JWT_EXP CUTOVER_CONFIRM
-  SELF_HOST_TENANT_NAME API_JWT_SECRET API_JWT_JWKS DB_HOST DB_PORT DB_USER
-  DB_PASSWORD DB_NAME
-)
-docker_env=()
-for name in "${env_names[@]}"; do
-  if [[ -n "${!name:-}" ]]; then docker_env+=(--env "$name"); fi
+
+# Window acknowledgements are decided at run time from the preflight output, so they come from the caller's
+# environment by NAME (docker reads the value itself; nothing reaches argv).
+ack_env=()
+for name in FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES; do
+  if [[ -n "${!name+x}" ]]; then ack_env+=(--env "$name"); fi
 done
 
 docker run --rm \
-  --network commonswarm-net \
+  --network "${COMMONSWARM_MIGRATION_NETWORK:-commonswarm-net}" \
   --add-host db.commonswarm.internal:172.31.0.10 \
-  "${docker_env[@]}" \
+  --env-file "$service_env" \
+  --env-file "$migration_env" \
   --env MIGRATION_ARTIFACT_DIR=/artifacts \
   --env PGSERVICEFILE=/run/commonswarm-pg-service.conf \
+  --env PGPASSFILE=/run/commonswarm-pg-pass \
   --volume "$stack_dir:/work:ro" \
   --volume "$artifact_dir:/artifacts" \
   --volume "$service_file:/run/commonswarm-pg-service.conf:ro" \
-  "${ca_mount[@]}" \
+  --volume "$pass_file:/run/commonswarm-pg-pass:ro" \
+  ${ack_env[@]+"${ack_env[@]}"} \
+  ${ca_mount[@]+"${ca_mount[@]}"} \
   --entrypoint /bin/bash \
   public.ecr.aws/supabase/postgres:17.6.1.147 \
-  "/work/migrate/$script_name"
+  "/work/migrate/$script_name" "$@"
