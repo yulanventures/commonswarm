@@ -26,7 +26,9 @@ EDGE_DIR=/home/commonswarm/edge/current/deploy/edge-runtime
 MIGRATE="$STACK_DIR/migrate"
 ```
 
-All container health waits use this one bounded pattern. `N` is 180 seconds for PostgreSQL and the edge. The helper checks for a non-empty container ID before inspection. On timeout it prints the container status and returns 1 (it never calls `exit`, so an operator's SSH shell stays open); read that exit code, stop, and apply the step's ABORT.
+Run the rehearsal, the cutover window, and the recovery drill from one root shell started with `sudo -i`. `run-db-tool.sh` runs its tool container as root and writes protected artifacts with root ownership and mode `0600`; changing between an unprivileged shell and `sudo` can make a later command unable to read an earlier log or artifact.
+
+All container health waits use this one bounded pattern. `N` is 180 seconds for PostgreSQL, Storage API, and the edge. The helper checks for a non-empty container ID before inspection. On timeout it prints the container status and returns 1 (it never calls `exit`, so an operator's SSH shell stays open); read that exit code, stop, and apply the step's ABORT.
 
 ```sh
 wait_healthy() {
@@ -143,7 +145,9 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
      docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
-   mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-before-restore
+   saved_rehearsal_data_dir="/var/lib/commonswarm/postgres.rehearsal-before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+   if [ -e "$saved_rehearsal_data_dir" ]; then printf '%s\n' "rehearsal directory already exists: $saved_rehearsal_data_dir" >&2; false; fi
+   mv /var/lib/commonswarm/postgres "$saved_rehearsal_data_dir"
    install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
    postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
@@ -169,6 +173,8 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    ```sh
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
+   storage_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q storage-api)"
+   wait_healthy "$storage_container" storage-api 180
    COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
      MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
    "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
@@ -304,7 +310,7 @@ Run every window block one command at a time and read each exit code. Never run 
      "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source
    ```
 
-4. Take the final source dump in the directory set in step 0. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Restore in the shown order. After the stack is up and before copying Storage, confirm in a protected editor that `/home/commonswarm/.env` has `SWARM_DATABASE_URL` and `SUPABASE_DB_URL` naming `db.commonswarm.internal` with `sslmode=verify-full` and no `sslrootcert`, and that `SWARM_DATABASE_TLS_CA_B64` is set. Then start the edge runtime, wait for `healthy`, and run its `/health` request on `127.0.0.1:9000`.
+4. Take the final source dump in the directory set in step 0. If this dump of the frozen source through the hosted pooler fails, run ABORT-B; do not continue with an older dump. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside under a unique timestamped name and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Restore in the shown order. After the stack is up and before copying Storage, confirm in a protected editor that `/home/commonswarm/.env` has `SWARM_DATABASE_URL` and `SUPABASE_DB_URL` naming `db.commonswarm.internal` with `sslmode=verify-full` and no `sslrootcert`, and that `SWARM_DATABASE_TLS_CA_B64` is set. Then start the edge runtime, wait for `healthy`, and run its `/health` request on `127.0.0.1:9000`.
 
    ```sh
    "$MIGRATE/run-db-tool.sh" dump-source.sh "$ARTIFACT_DIR" source
@@ -312,7 +318,9 @@ Run every window block one command at a time and read each exit code. Never run 
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
      docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
-   mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-kept-through-step-8
+   saved_window_data_dir="/var/lib/commonswarm/postgres.window-before-restore-$(date -u +%Y%m%dT%H%M%SZ)"
+   if [ -e "$saved_window_data_dir" ]; then printf '%s\n' "window directory already exists: $saved_window_data_dir" >&2; false; fi
+   mv /var/lib/commonswarm/postgres "$saved_window_data_dir"
    install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
    postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
@@ -326,6 +334,8 @@ Run every window block one command at a time and read each exit code. Never run 
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
+   storage_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q storage-api)"
+   wait_healthy "$storage_container" storage-api 180
    COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
      docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
@@ -363,7 +373,7 @@ Run every window block one command at a time and read each exit code. Never run 
 
 Use the artifact directory created by `dump-source.sh` in window step 6. A plain nightly `pg_dump -Fc` is not accepted by these restore scripts.
 
-Stop every service and the edge runtime. Move the broken data directory to a unique timestamped name, create a fresh box data directory, and start only PostgreSQL. Wait at most 180 seconds for PostgreSQL before any restore. Restore in this order behind the maintenance Caddy file. Then start the full stack, restart Realtime, start the edge with both inline variables, and wait at most 180 seconds for the edge:
+Stop every service and the edge runtime. Move the broken data directory to a unique timestamped name, create a fresh box data directory, and start only PostgreSQL. Wait at most 180 seconds for PostgreSQL before any restore. Restore in this order behind the maintenance Caddy file. Then start the full stack, restart Realtime, wait for Storage API, copy Storage, restore its metadata, start the edge with both inline variables, and wait at most 180 seconds for the edge:
 
 ```sh
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
@@ -388,6 +398,12 @@ docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up
 postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
 wait_healthy "$postgres_container" postgres 180
 docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
+storage_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q storage-api)"
+wait_healthy "$storage_container" storage-api 180
+COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
+  MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
+"$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$RECOVERY_ARTIFACT_DIR" target
+"$MIGRATE/run-db-tool.sh" verify-counts.sh "$RECOVERY_ARTIFACT_DIR" target
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
   COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
   docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
@@ -426,3 +442,4 @@ Each nightly set contains globals without role passwords, a custom dump of `post
 - Bare `/rest/v1`, `/auth/v1`, and `/storage/v1` paths answer 404 on the box.
 - A plain nightly `pg_dump -Fc` has no role SQL, counts, Storage manifest, or cron manifest and is not restorable by these scripts.
 - The hook form of the CLI maintenance failure was not measured.
+- A dump of the frozen source through the hosted pooler has only been proved against local PostgreSQL. A failure at window step 4 fails closed into ABORT-B.

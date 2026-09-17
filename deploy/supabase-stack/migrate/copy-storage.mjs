@@ -35,6 +35,7 @@ function parseEnv(source) {
 
 const environment = parseEnv(await readFile(migrationEnvPath, "utf8"));
 const required = [
+  "TARGET_DATABASE_URL",
   "SOURCE_STORAGE_URL",
   "SOURCE_SERVICE_ROLE_KEY",
   "TARGET_STORAGE_URL",
@@ -42,6 +43,17 @@ const required = [
 ];
 for (const name of required) {
   if (!environment[name]) throw new Error(`required environment variable is empty: ${name}`);
+}
+const targetStorageUrl = new URL(environment.TARGET_STORAGE_URL);
+const targetDatabaseUrl = new URL(environment.TARGET_DATABASE_URL);
+const targetStorageHasRootPath = targetStorageUrl.pathname === "/" && !targetStorageUrl.search && !targetStorageUrl.hash;
+const targetStorageHasNoCredentials = !targetStorageUrl.username && !targetStorageUrl.password;
+const isBoxTarget = targetStorageUrl.origin === "http://127.0.0.1:18004";
+const isLocalRehearsalTarget = environment.COMMONSWARM_LOCAL_REHEARSAL === "1" &&
+  targetStorageUrl.protocol === "http:" && targetStorageUrl.port === "18004" &&
+  targetStorageUrl.hostname === targetDatabaseUrl.hostname;
+if (!targetStorageHasRootPath || !targetStorageHasNoCredentials || (!isBoxTarget && !isLocalRehearsalTarget)) {
+  throw new Error("TARGET_STORAGE_URL must be http://127.0.0.1:18004 or, for a local rehearsal, use the TARGET_DATABASE_URL host on port 18004");
 }
 // Both URLs are Storage API base URLs: hosted Supabase serves the Storage API under /storage/v1, and the box Storage API
 // on 127.0.0.1:18004 serves it at the root (Caddy strips /storage/v1 in front of it). The copy appends /object/... only.

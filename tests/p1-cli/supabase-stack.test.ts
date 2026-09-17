@@ -361,6 +361,18 @@ function runbookErrors(source: string): string[] {
     }
   }
   if (starts.length === 0) errors.push("runbook has no PostgreSQL starts");
+  const storageCopies = commands
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => command.includes("copy-storage.sh") && command.includes("forward"));
+  for (const [ordinal, copy] of storageCopies.entries()) {
+    const previousCopyIndex = ordinal === 0 ? 0 : storageCopies[ordinal - 1]!.index + 1;
+    const beforeCopy = commands.slice(previousCopyIndex, copy.index).join("\n");
+    if (!beforeCopy.includes("ps -q storage-api") ||
+        !beforeCopy.includes('wait_healthy "$storage_container" storage-api 180')) {
+      errors.push(`Storage copy ${ordinal + 1} missing bounded storage-api health wait`);
+    }
+  }
+  if (storageCopies.length !== 3) errors.push(`runbook has ${storageCopies.length} Storage copies, expected 3`);
   return errors;
 }
 
@@ -368,7 +380,7 @@ test("runbook pins the edge Compose project and waits for PostgreSQL before rest
   assert.deepEqual(runbookErrors(runbook), []);
 });
 
-test("runbook contracts reject edge-project and PostgreSQL-wait mutations", () => {
+test("runbook contracts reject edge-project and service-wait mutations", () => {
   const edgeMutation = runbook.replace(
     'docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down',
     'docker compose --project-directory "$EDGE_DIR" down',
@@ -386,6 +398,12 @@ test("runbook contracts reject edge-project and PostgreSQL-wait mutations", () =
     runbookErrors(waitMutation).join("\n"),
     /PostgreSQL start 1 missing bounded health wait before restore-target\.sh/,
     "PostgreSQL bounded wait mutation was not rejected",
+  );
+  const storageWaitMutation = runbook.replace('wait_healthy "$storage_container" storage-api 180', ":");
+  assert.match(
+    runbookErrors(storageWaitMutation).join("\n"),
+    /Storage copy 1 missing bounded storage-api health wait/,
+    "Storage API bounded wait mutation was not rejected",
   );
 });
 
@@ -490,6 +508,12 @@ function migrationErrors(values: {
   if (!values.copy.includes('if (direction !== "forward")')) {
     errors.push("storage reverse direction");
   }
+  if (!values.copy.includes('targetStorageUrl.origin === "http://127.0.0.1:18004"') ||
+      !values.copy.includes('environment.COMMONSWARM_LOCAL_REHEARSAL === "1"') ||
+      !values.copy.includes("targetStorageUrl.hostname === targetDatabaseUrl.hostname") ||
+      !values.copy.includes("(!isBoxTarget && !isLocalRehearsalTarget)")) {
+    errors.push("storage target allow-list");
+  }
   for (const [name, script] of Object.entries({
     prepare: values.prepare,
     setup: values.setup,
@@ -587,6 +611,7 @@ test("migration safety controls reject their named mutations", () => {
     ["storage key environment", { ...original, copy: `${copyStorage}\nprocess.env.SOURCE_SERVICE_ROLE_KEY` }, /storage key in process env/],
     ["storage reverse direction", { ...original, copy: copyStorage.replace('direction !== "forward"', 'direction !== "forward" && direction !== "reverse"') }, /storage reverse direction/],
     ["storage base url paths", { ...original, copy: copyStorage.replace("/object/", "/storage/v1/object/") }, /storage base url paths/],
+    ["storage target allow-list", { ...original, copy: copyStorage.replace('http://127.0.0.1:18004', 'http://127.0.0.2:18004') }, /storage target allow-list/],
     ["source extensions", { ...original, prepare: prepareTarget.replace("CREATE EXTENSION IF NOT EXISTS pg_net", "SELECT") }, /required source extensions/],
     ["source standby", { ...original, lib: migrationLib.replace("AND NOT pg_is_in_recovery()", "") }, /source standby guard/],
     ["cron snapshot", { ...original, dump: (() => {

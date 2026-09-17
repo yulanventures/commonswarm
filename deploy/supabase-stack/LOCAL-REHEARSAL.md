@@ -185,3 +185,19 @@ ruling 14); grok FAIL. The lead checked grok's claims against the live-box recor
 | 56 | The first frozen probe exits 65 by design, so a pasted block under `set -e` stops (grok) | CONFIRMED, RIGOUR | The runbook says to run each command and read its exit code, and marks the expected 65. |
 | 57 | The stack directory `/home/commonswarm/current` has no defined layout on the box (lead) | CONFIRMED, RIGOUR | `STACK_DIR` and `EDGE_DIR` are defined once next to `MIGRATE`, following the edge release layout; HezLead confirms them in rehearsal step 1. |
 | 58 | Fallback routes are not commented in the live file (antigravity P4) | Already ruled (14) | No change. |
+
+## Review round 5 (2026-09-17): rulings
+
+Pair on `d8418ee2`: antigravity PASS on all eight parts; grok PASS with seven RIGOUR notes. The round is clean. RIGOUR
+notes fold without another pair (pacing rule). Strategist ruling A: N-db lands when this round is clean AND the box
+rehearsal passes end to end, including the recovery drill.
+
+| # | Note (arm) | Ruling | Fix |
+|---|---|---|---|
+| 59 | `copy-storage.mjs` does not allow-list `TARGET_STORAGE_URL`, so a wrong value could upsert into hosted Storage (grok) | CONFIRMED, RIGOUR | The target must be `http://127.0.0.1:18004` (or a local-rehearsal host named the same way as `TARGET_DATABASE_URL`), otherwise the copy refuses before any request; contract check with a mutation. |
+| 60 | Rehearsal step 8 copies Storage without waiting for `storage-api` (grok) | CONFIRMED, RIGOUR | Bounded `wait_healthy` for storage-api before the copy in the rehearsal, the window and the drill. |
+| 61 | The window moves the rehearsal data directory to a fixed name, so a second attempt nests it (grok) | CONFIRMED, RIGOUR | Unique timestamped name, as in the drill (ruling 53). |
+| 62 | `deploy/edge-runtime/RUNBOOK.md` starts Compose without `-p commonswarm-edge` (grok) | CONFIRMED, RIGOUR | Project name added there too. |
+| 63 | No Kong CORS on auth, rest and storage (grok) | Already recorded | Under Not established; first browser proof at window step 7. |
+| 64 | A dump of a FROZEN source through the hosted pooler is proven only on local PostgreSQL (grok) | CONFIRMED, RIGOUR | Named under Not established; a failure there fails closed into ABORT-B. |
+| 65 | `run-db-tool.sh` runs the tool container as root, so artifacts are root-owned 0600; a mixed user and sudo session cannot read the enable log (grok) | CONFIRMED, RIGOUR | The runbook says to run the rehearsal, the window and the drill from one root shell (`sudo -i`), and says why. |
