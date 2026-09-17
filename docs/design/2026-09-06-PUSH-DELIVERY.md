@@ -33,7 +33,7 @@ Measured production wall clock per tick ≈ 3.6 s (ledger, `docs/org/2026-08-29-
 | activity heartbeat | every 15 s idle, up to 1.33/s active | `POST /functions/v1/activity` → `realtime.send` | `src/listener/activity.ts:13`, `:98-146`; `activity/index.ts:142-152` |
 | renewal | lazy, ≈ every 54 min, on the next request | `command` | `src/cloud/renewal.ts:852-853`, `:121-125` |
 | `inbox --notify` watcher (separate process) | every 60 s (was 25 s) | `read` | `src/cloud/idle-poll.ts:10,12`, `src/cloud/arrival-watch.ts:39` (was `src/cloud/arrival-watch.ts:25`, `:357`, `:387-391`) |
-| Claude hook | on prompt, ≥ 30 s apart | `read` | `src/listener/hook.ts:57` (cooldown), `:401-410` (its check); `:998-1022` is the 3 s timeout |
+| Claude hook | on prompt, ≥ 30 s apart | `read` | `src/listener/hook.ts` (cooldown and check); its timeout uses the check budget derived from the host-hook ceiling |
 | app tab | every 2 s while visible | `read` | `site/src/components/app/LiveDashboard.astro:5774` |
 
 ### 1.3 Per idle seat per day, today

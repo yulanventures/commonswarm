@@ -34,6 +34,11 @@ import {
   withFileLock,
   writeSecureJsonFile,
 } from "../cloud/storage.js";
+import {
+  AGENT_CHECK_TIMEOUT_MS,
+  HOST_HOOK_PROCESS_DEADLINE_MS,
+  processDeadlineDelayMs,
+} from "../cloud/agent-check-budget.js";
 import { defaultListenerStateDirectory } from "./file-store.js";
 import { FileBrainDigestStore } from "./brain-digest.js";
 import {
@@ -64,7 +69,14 @@ const HOOK_SURFACE_LOCK = "hook-surface";
 const GLOBAL_STATE_LOCK = "hook-check";
 const HOOK_LOCK_TIMEOUT_MS = 250;
 
-export const HOOK_CHECK_TIMEOUT_MS = 3_000;
+/* `cswarm hook install claude` does not write a host timeout. Keep this check on
+ * the receive-hook budget so both turn-check paths have the same internal bound. */
+export const HOOK_CHECK_TIMEOUT_MS = AGENT_CHECK_TIMEOUT_MS;
+/** Absolute process age at which the listener hook must stop. */
+export const HOOK_PROCESS_DEADLINE_MS = HOST_HOOK_PROCESS_DEADLINE_MS;
+export function hookProcessDeadlineDelayMs(): number {
+  return processDeadlineDelayMs(HOOK_PROCESS_DEADLINE_MS);
+}
 export const HOOK_DEFAULT_COOLDOWN_SECONDS = 30;
 export const HOOK_SURFACED_IDS_MAX = 1_024;
 /* The hook injects previews into the model's context at prompt time. Operator
@@ -1076,7 +1088,7 @@ export async function checkListenerHooks(
       /* The digest is DEFERRED, not computed here. Two defects the exact-review
        * arm measured on ea3cac4: it listed files even on a cooldown tick that
        * had skipped the network (inbox 1, files 2), and it ran BEFORE the write
-       * — so a stalled brain list could spend the hook's 3s ceiling and kill
+       * — so a stalled brain list could spend the hook's derived ceiling and kill
        * the process before pending asks reached stdout. Messages are the hook's
        * job; the digest is the optional extra and must never precede them. */
       if (checks.length === 1 && networkAllowed) digestCandidate = check;
@@ -1152,7 +1164,7 @@ export async function checkListenerHooks(
   }
 }
 
-/** Own the three-second ceiling and always resolve to safe stdout text. */
+/** Own the derived check ceiling and always resolve to safe stdout text. */
 export async function runListenerHookCheck(options: HookCheckOptions = {}): Promise<string> {
   const controller = new AbortController();
   const deadlineMs = Date.now() + HOOK_CHECK_TIMEOUT_MS;

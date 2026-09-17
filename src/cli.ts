@@ -286,7 +286,7 @@ import {
   ListenerRenewalUnavailableError,
   listenerRestartCommand,
   readListenerCredentialState,
-  runListenerHookCheck,
+  runListenerHookCheck, HOOK_CHECK_TIMEOUT_MS, hookProcessDeadlineDelayMs,
   renderListenerAttendanceCanary,
   runListenerAttendanceCanary,
   writeListenerCredentialState,
@@ -929,7 +929,7 @@ principal is present on this host. --allow-unattended accepts a queue that may n
 wake a session. --route worker, --route split, and --defer-over are refused. Run
 cswarm hook check
 --principal-id <uuid> to surface that agent's queued messages. A bare check works only
-when the state directory holds one principal. hook check has its own 3s ceiling, exits 0
+when the state directory holds one principal. hook check has its own ${HOOK_CHECK_TIMEOUT_MS / 1_000}s ceiling, exits 0
 on every outcome, and skips network checks made within --cooldown seconds (default 30).
 listen canary posts one self-addressed note, waits at most --wait seconds (default 10),
 and reports accepted, claimed, queued, surfaced, and observed as separate hops.
@@ -7867,7 +7867,7 @@ async function runHook(args: Arguments): Promise<void> {
     // called their callback before the hook advances its high-water.
     const hardExit = setTimeout(() => {
       process.exit(0);
-    }, 3_000);
+    }, hookProcessDeadlineDelayMs());
     hardExit.unref();
     const httpClient = new ListenerHttpClient();
     const hostSessionId = await hookHostSessionIdFromStdin();

@@ -10,6 +10,7 @@ import {
 } from "./agent-onboarding-contract.js";
 import { AgentSetupError, ONBOARDING_UUID, privatePath, profileScopeKey, readAgentProfile } from "./agent-profile.js";
 import { shellQuote } from "./agent-check.js";
+import { HOST_HOOK_TIMEOUT_SECONDS } from "./agent-check-budget.js";
 import { readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
 
 import { findGrokBotGateway } from "./agent-grok-bot-gateway.js";
@@ -143,7 +144,9 @@ export function mergeReceiveHooks(settings: Record<string, unknown>, command: st
       const remaining = g.hooks.filter(h => !h || typeof h !== "object" || ![command, previous].includes((h as Record<string, unknown>).command as string));
       return remaining.length > 0 ? [{ ...g, hooks: remaining }] : [];
     });
-    if (event !== "Stop" || wake) groups.push({ hooks: [{ type: "command", command, timeout: 5 }] });
+    if (event !== "Stop" || wake) groups.push({ hooks: [{
+      type: "command", command, timeout: HOST_HOOK_TIMEOUT_SECONDS,
+    }] });
     if (groups.length > 0) hooks[event] = groups;
     else delete hooks[event];
   }

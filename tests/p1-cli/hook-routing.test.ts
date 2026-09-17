@@ -22,6 +22,7 @@ import {
   renderHookSignal,
   renderHookSignals,
   hookPreviewSuffix,
+  HOOK_CHECK_TIMEOUT_MS,
   HOOK_BODY_PREVIEW_CHARS,
   HOOK_BODY_PREVIEW_CHARS_MIN,
   HOOK_BODY_PREVIEW_CHARS_NONE,
@@ -53,6 +54,8 @@ const TOKEN = `swm_agt_${"A".repeat(43)}`;
 const SECOND_TOKEN = `swm_agt_${"B".repeat(43)}`;
 const TOKEN_ID = "33333333-3333-4333-8333-333333333333";
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
+/** Independent host contract: Claude Code kills a hook at the written five-second timeout. */
+const DOCUMENTED_HOST_HOOK_TIMEOUT_MS = 5_000;
 const MULTI_PRINCIPAL_GUIDANCE =
   "This host runs multiple agents. The CommonSwarm hook needs --principal-id. " +
   "Reinstall it for this agent: cswarm hook install claude --principal-id <uuid> --write";
@@ -812,7 +815,7 @@ test("a scoped hook surfaces and observes only the selected principal", async ()
   }
 });
 
-test("a hung observation write-back stays inside the hook ceiling and emits no error", { timeout: 5_000 }, async () => {
+test("a hung observation write-back stays inside the hook ceiling and emits no error", { timeout: HOOK_CHECK_TIMEOUT_MS + 1_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-hook-observed-ceiling-"));
   try {
     const paths = await installCredential(root);
@@ -844,7 +847,10 @@ test("a hung observation write-back stays inside the hook ceiling and emits no e
       },
     });
     const elapsed = Date.now() - started;
-    assert.ok(elapsed < 3_500, `hook exceeded its hard ceiling: ${elapsed}ms`);
+    assert.ok(
+      elapsed < HOOK_CHECK_TIMEOUT_MS + 250,
+      `hook exceeded its hard ceiling: ${elapsed}ms`,
+    );
     assert.equal(result, "");
     assert.equal(writes.length, 1, "the message reaches stdout before write-back starts");
     assert.match(writes[0]!, /printed before the bounded update/);
@@ -1546,7 +1552,7 @@ test("hook surfaces the overflow drop count with the inbox recovery path", async
   }
 });
 
-test("hook hard deadline exits 0 under four seconds against a blackholed address", async () => {
+test("hook hard deadline exits 0 inside the derived check bound against a blackholed address", async () => {
   const xdg = await mkdtemp(join(tmpdir(), "cswarm-hook-blackhole-"));
   try {
     const root = join(xdg, "cswarm", "listeners");
@@ -1605,7 +1611,10 @@ test("hook hard deadline exits 0 under four seconds against a blackholed address
       assert.equal(result.status, 0, result.stderr);
       assert.equal(result.stdout, "");
       assert.equal(result.stderr, "");
-      assert.ok(elapsed < 4_000, `hard deadline took ${elapsed}ms`);
+      assert.ok(
+        elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_MS,
+        `hard deadline took ${elapsed}ms`,
+      );
     } finally {
       await control.close();
     }

@@ -1,4 +1,4 @@
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readFileSync, unlinkSync } from "node:fs";
 import {
   access,
   chmod,
@@ -10,7 +10,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -316,6 +316,62 @@ function parseProfile(raw: string): CredentialProfile {
  * CLI invocations renewing the same lineage concurrently is exactly the read-rotate-write
  * race that once produced two live credentials.
  */
+export class FileLockTimeoutError extends Error {
+  readonly name = "FileLockTimeoutError";
+  readonly code = "file_lock_timeout";
+
+  constructor(readonly lockName: string) {
+    super("timed out waiting for the credential refresh lock");
+  }
+}
+
+/** Locks this process holds right now: path -> the createdAt it wrote. */
+const heldFileLocks = new Map<string, number>();
+let heldFileLockExitHookInstalled = false;
+
+/**
+ * process.exit() skips every pending finally, so a hook's hard exit would leave its lock for LOCK_STALE_MS and the
+ * next turns would spend their budget waiting. On exit, remove each lock this process still owns, checking the
+ * recorded pid and createdAt so a lock another process took after ours is never removed.
+ */
+function releaseHeldFileLocksSync(): void {
+  for (const [lockPath, createdAt] of heldFileLocks) {
+    try {
+      const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; createdAt?: unknown };
+      if (owner.pid === process.pid && owner.createdAt === createdAt) unlinkSync(lockPath);
+    } catch {
+      // Missing or unreadable: nothing of ours to remove.
+    }
+  }
+  heldFileLocks.clear();
+}
+
+/**
+ * The lock's raw content when it names a pid that no longer exists on THIS host, else null. Unknown owners are not dead:
+ * a record still being written, one without a host (written before this rule), or one from another host or container
+ * (a pid there means nothing here) falls back to the mtime rule. A reused pid or EPERM reads as alive.
+ */
+async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
+  let raw: string;
+  let owner: { pid?: unknown; host?: unknown };
+  try {
+    raw = await readFile(lockPath, "utf8");
+    owner = JSON.parse(raw) as { pid?: unknown; host?: unknown };
+  } catch {
+    return null;
+  }
+  if (owner.host !== hostname()) return null;
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid === process.pid) {
+    return null;
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null;
+  }
+}
+
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
@@ -331,11 +387,13 @@ export async function withFileLock<T>(
   const deadline = Date.now() + timeoutMs;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
 
+  let createdAt = 0;
   while (handle === null) {
     try {
       handle = await open(lockPath, "wx", 0o600);
+      createdAt = Date.now();
       await handle.writeFile(
-        JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+        JSON.stringify({ pid: process.pid, host: hostname(), createdAt }),
         "utf8",
       );
     } catch (error) {
@@ -345,18 +403,42 @@ export async function withFileLock<T>(
         await unlink(lockPath).catch(() => undefined);
         continue;
       }
+      const deadRecord = lockInfo ? await deadLockOwnerRecord(lockPath) : null;
+      if (deadRecord !== null) {
+        // Re-read immediately before removing: another waiter may already have replaced the dead owner's lock with its
+        // own, and that live lock must not be unlinked. The window left is the gap between this read and the unlink.
+        const current = await readFile(lockPath, "utf8").catch(() => null);
+        if (current === deadRecord) await unlink(lockPath).catch(() => undefined);
+        continue;
+      }
       if (Date.now() >= deadline) {
-        throw new Error("timed out waiting for the credential refresh lock");
+        throw new FileLockTimeoutError(lockName);
       }
       await delay(25 + randomBytes(1)[0]! % 75);
     }
   }
 
+  heldFileLocks.set(lockPath, createdAt);
+  if (!heldFileLockExitHookInstalled) {
+    heldFileLockExitHookInstalled = true;
+    process.on("exit", releaseHeldFileLocksSync);
+  }
   try {
     return await work();
   } finally {
+    heldFileLocks.delete(lockPath);
     await handle.close();
-    await unlink(lockPath).catch(() => undefined);
+    // Remove only our own record: if another process took the path over (a stale rule fired while we ran), its lock stays.
+    const current = await readFile(lockPath, "utf8").catch(() => null);
+    const ours = current === null ? false : (() => {
+      try {
+        const owner = JSON.parse(current) as { pid?: unknown; createdAt?: unknown };
+        return owner.pid === process.pid && owner.createdAt === createdAt;
+      } catch {
+        return false;
+      }
+    })();
+    if (ours) await unlink(lockPath).catch(() => undefined);
   }
 }
 

@@ -1369,6 +1369,7 @@ export async function readAgentSignalDirectory(
     }, perReadTimeoutMs(options));
   } catch (error) {
     if (error instanceof SignalReadTimeoutError) {
+      if (options.deadlineMs !== undefined) throw error;
       throw new Error("member read could not reach the cloud service");
     }
     throw error;
