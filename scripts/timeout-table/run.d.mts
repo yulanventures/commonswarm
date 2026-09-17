@@ -40,6 +40,7 @@ export interface TimeoutRunResources {
   worktreePath: string | null;
 }
 export function cleanupRunResourcesSync(resources: TimeoutRunResources): void;
+export function finalizeRunResources(resources: TimeoutRunResources, uninstall: () => void): void;
 export function installRunResourceCleanup(resources: TimeoutRunResources): () => void;
 export function sourceRootForRef(
   repo: string,

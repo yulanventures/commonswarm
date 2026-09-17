@@ -246,26 +246,6 @@
             "measures_guarded_path": false
           }
         },
-        "src/cloud/agent-check.ts:setTimeout": {
-          "class": "network-api",
-          "scope": "whole-operation",
-          "endpoints": [
-            "/functions/v1/read",
-            "/functions/v1/command"
-          ],
-          "citation": "src/cloud/agent-check.ts:66",
-          "detail": "withAgentDeadline timer for the check budget.",
-          "operation": {
-            "name": "check-site",
-            "class": "not-run",
-            "writes": [
-              "private-copy check.json cursor/cache only"
-            ],
-            "removes": [],
-            "reason": "Use of AGENT_CHECK_TIMEOUT_MS.",
-            "proxy_operation": "check"
-          }
-        },
         "src/cloud/agent-check.ts:timeoutMs": {
           "class": "network-api",
           "scope": "whole-operation",
@@ -956,20 +936,6 @@
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
-        "src/host/claude.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/claude.ts:441",
-          "detail": "Claude ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
-          }
-        },
         "src/host/claude.ts:timeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -1010,20 +976,6 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
-          }
-        },
-        "src/host/codex.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/codex.ts:296",
-          "detail": "Codex ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
         "src/host/codex.ts:timeout": {
@@ -1082,20 +1034,6 @@
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
-        "src/host/grok.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/grok.ts:194",
-          "detail": "Grok ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
-          }
-        },
         "src/host/grok.ts:timeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -1136,20 +1074,6 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
-          }
-        },
-        "src/host/opencode.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/opencode.ts:721",
-          "detail": "OpenCode ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
         "src/host/opencode.ts:timeout": {
@@ -1603,6 +1527,34 @@
             "removes": [],
             "reason": "Local stdin wait."
           }
+        },
+        "src/cli.ts:turnBudgetMs": {
+          "class": "external",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:6496",
+          "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
+          "operation": {
+            "name": "listener-prompt-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
+          }
+        },
+        "src/cli.ts:deliveryHoldBudgetMs": {
+          "class": "external",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:6693",
+          "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
+          "operation": {
+            "name": "listener-prompt-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
+          }
         }
       }
     },
@@ -1860,26 +1812,6 @@
             "writes": [],
             "removes": [],
             "reason": "Size bound, not a wait."
-          }
-        },
-        "src/cloud/agent-check.ts:setTimeout": {
-          "class": "network-api",
-          "scope": "whole-operation",
-          "endpoints": [
-            "/functions/v1/read",
-            "/functions/v1/command"
-          ],
-          "citation": "src/cloud/agent-check.ts:84",
-          "detail": "withAgentDeadline timer for the check budget.",
-          "operation": {
-            "name": "check-site",
-            "class": "not-run",
-            "writes": [
-              "private-copy check.json cursor/cache only"
-            ],
-            "removes": [],
-            "reason": "Use of AGENT_CHECK_TIMEOUT_MS.",
-            "proxy_operation": "check"
           }
         },
         "src/cloud/agent-check.ts:timeoutMs": {
@@ -2572,20 +2504,6 @@
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
-        "src/host/claude.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/claude.ts:441",
-          "detail": "Claude ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS. External child process."
-          }
-        },
         "src/host/claude.ts:timeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -2626,20 +2544,6 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
-          }
-        },
-        "src/host/codex.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/codex.ts:296",
-          "detail": "Codex ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
         "src/host/codex.ts:timeout": {
@@ -2698,20 +2602,6 @@
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
           }
         },
-        "src/host/grok.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/grok.ts:194",
-          "detail": "Grok ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
-          }
-        },
         "src/host/grok.ts:timeout": {
           "class": "external",
           "scope": "whole-operation",
@@ -2752,20 +2642,6 @@
             "writes": [],
             "removes": [],
             "reason": "Use of ACP_DEFAULT_REQUEST_TIMEOUT_MS."
-          }
-        },
-        "src/host/opencode.ts:setTimeout": {
-          "class": "external",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/host/opencode.ts:721",
-          "detail": "OpenCode ACP child timer.",
-          "operation": {
-            "name": "provider-version-site",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Use of ACP_VERSION_CHECK_TIMEOUT_MS."
           }
         },
         "src/host/opencode.ts:timeout": {
@@ -3234,6 +3110,34 @@
             "writes": [],
             "removes": [],
             "reason": "Local stdin wait."
+          }
+        },
+        "src/cli.ts:turnBudgetMs": {
+          "class": "external",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:6517",
+          "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
+          "operation": {
+            "name": "listener-prompt-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
+          }
+        },
+        "src/cli.ts:deliveryHoldBudgetMs": {
+          "class": "external",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:6714",
+          "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
+          "operation": {
+            "name": "listener-prompt-site",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
           }
         }
       }

@@ -78,6 +78,14 @@ export function cleanupRunResourcesSync(resources) {
   }
 }
 
+export function finalizeRunResources(resources, uninstall) {
+  try {
+    cleanupRunResourcesSync(resources);
+  } finally {
+    uninstall();
+  }
+}
+
 export function installRunResourceCleanup(resources) {
   const onExit = () => cleanupRunResourcesSync(resources);
   const onSigint = () => process.exit(130);
@@ -165,6 +173,11 @@ function operationEndpointRows(rows, endpoints) {
 }
 
 function formatMs(value) { return value === null ? "—" : value.toFixed(1); }
+function formatHeadroom(value) {
+  if (value === null) return "—";
+  if (value === Infinity) return "∞";
+  return value.toFixed(2);
+}
 function escapeCell(value) { return String(value).replaceAll("|", "\\|").replaceAll("\n", " "); }
 
 function measurementFor(map, measurements) {
@@ -196,7 +209,9 @@ export function runStatus(inventory, mapping, measurements, acknowledged = []) {
     if (stats.gate === "NOT MEASURED") notMeasured.push(row.id);
   }
   const missing = notMeasured.filter(id => !ack.has(id));
-  const extra = [...ack].filter(id => !notMeasured.includes(id));
+  // An acknowledgement on a FAIL row is not extra: the lower bound already
+  // failed, and acknowledgement cannot hide that.
+  const extra = [...ack].filter(id => !notMeasured.includes(id) && !fails.includes(id));
   return { fails, notMeasured, missing, extra };
 }
 
@@ -234,7 +249,7 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
       ? `${map.operation.name} (proxy: ${map.operation.proxy_operation})`
       : map.operation.name;
     const shownClass = map.class === "network-api" ? map.operation.class : map.class;
-    lines.push(`| ${escapeCell(row.id)} | ${row.line ?? "—"} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${escapeCell(shownClass)} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${stats.headroom === null ? "—" : stats.headroom.toFixed(2)} | ${stats.gate} | ${escapeCell(exits)} |`);
+    lines.push(`| ${escapeCell(row.id)} | ${row.line ?? "—"} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${escapeCell(shownClass)} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${formatHeadroom(stats.headroom)} | ${stats.gate} | ${escapeCell(exits)} |`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -352,8 +367,7 @@ export async function runTable(options) {
     }
     return { report, inventory, measurements, startup, status };
   } finally {
-    cleanupRunResourcesSync(resources);
-    uninstallSignals();
+    finalizeRunResources(resources, uninstallSignals);
   }
 }
 

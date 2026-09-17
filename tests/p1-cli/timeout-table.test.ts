@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -11,7 +11,7 @@ import { enumerateRepository, enumerateText } from "../../scripts/timeout-table/
 import { mappingForRef, validateMapping } from "../../scripts/timeout-table/mapping.mjs";
 import { createRequire } from "node:module";
 import {
-  argsOf, assertNoOriginWrites, markdownReport, rowSummary, runStatus, runTable,
+  argsOf, assertNoOriginWrites, finalizeRunResources, markdownReport, rowSummary, runStatus, runTable,
 } from "../../scripts/timeout-table/run.mjs";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { readJsonLines, runChild, summarize, withPrivateProfile } from "../../scripts/timeout-table/core.mjs";
@@ -24,6 +24,7 @@ import {
   HOST_HOOK_PROCESS_DEADLINE_MS,
   HOST_HOOK_TIMEOUT_SECONDS,
 } from "../../src/cloud/agent-check-budget.js";
+import { LISTENER_PROMPT_TIMEOUT_MS } from "../../src/listener/types.js";
 
 const repo = resolve(import.meta.dirname, "../..");
 
@@ -120,6 +121,8 @@ test("timeout inventory and mapping are exact in both directions for each measur
     "not-run",
   );
   assert.equal(headRows.get("src/host/claude.ts:requestTimeoutMs")?.value_ms, 120_000);
+  assert.equal(headRows.get("src/cli.ts:turnBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
+  assert.equal(headRows.get("src/cli.ts:deliveryHoldBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
 });
 
 test("a pure line shift does not change inventory ids", () => {
@@ -201,9 +204,39 @@ test("enumerator records timeoutMs defaults, ?? literals, as const, identifier A
   } finally {
     await rm(exportDir, { recursive: true, force: true });
   }
+
+  const nested = enumerateText(
+    "two.ts",
+    "function a() { const TIMEOUT_MS = 1000; AbortSignal.timeout(TIMEOUT_MS); }\nfunction b() { const TIMEOUT_MS = 2000; AbortSignal.timeout(TIMEOUT_MS); }\n",
+  );
+  assert.deepEqual(
+    nested.filter(row => row.name === "AbortSignal.timeout").map(row => row.value_ms),
+    [1_000, 2_000],
+  );
+
+  const indexDir = await mkdtemp(join(tmpdir(), "timeout-table-index-"));
+  try {
+    await mkdir(join(indexDir, "src/config"), { recursive: true });
+    await writeFile(join(indexDir, "src/config/index.ts"), "export const DEFAULT_TIMEOUT_MS = 7_000;\nexport const OTHER_TIMEOUT_MS = 8_000;\n");
+    await writeFile(join(indexDir, "src/barrel.ts"), 'export * from "./config";\n');
+    await writeFile(
+      join(indexDir, "src/use.ts"),
+      'import { DEFAULT_TIMEOUT_MS } from "./config";\nimport { OTHER_TIMEOUT_MS } from "./barrel";\nAbortSignal.timeout(DEFAULT_TIMEOUT_MS);\nAbortSignal.timeout(OTHER_TIMEOUT_MS);\n',
+    );
+    execFileSync("git", ["init"], { cwd: indexDir, stdio: "ignore" });
+    execFileSync("git", ["add", "src"], { cwd: indexDir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--no-gpg-sign", "-m", "t"], {
+      cwd: indexDir, stdio: "ignore",
+    });
+    const indexed = enumerateRepository({ repo: indexDir, inputs: ["src"] });
+    const useRows = indexed.filter(row => row.file === "src/use.ts" && row.name === "AbortSignal.timeout");
+    assert.deepEqual(useRows.map(row => row.value_ms).sort((a, b) => a - b), [7_000, 8_000]);
+  } finally {
+    await rm(indexDir, { recursive: true, force: true });
+  }
 });
 
-test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED", () => {
+test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED", async () => {
   assert.equal(argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x"]).runs, 20);
   const id = "fixture.ts:TIMEOUT_MS";
   const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }];
@@ -218,6 +251,31 @@ test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEA
   assert.deepEqual(notMeasured.missing, [id]);
   const acked = runStatus(inventory, incomplete, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]), [id]);
   assert.deepEqual(acked.missing, []);
+  const tooSlowIncomplete = runStatus(
+    inventory,
+    incomplete,
+    new Map([["fixture", { durations: [70], realTimeouts: 0 }]]),
+    [id],
+  );
+  assert.deepEqual(tooSlowIncomplete.fails, [id]);
+  assert.deepEqual(tooSlowIncomplete.notMeasured, []);
+  assert.deepEqual(tooSlowIncomplete.extra, []);
+  assert.equal(rowSummary(inventory[0]!, incomplete.rows[id], { durations: [70], realTimeouts: 0 }).gate, "FAIL");
+  const zero = summarize([0, 0, 0, 0, 0], 100);
+  assert.equal(zero.gate, "PASS");
+  assert.equal(zero.headroom, Infinity);
+  const captured = await runChild(process.execPath, ["-e", "process.stdout.write('hello-stdout'); process.stderr.write('hello-stderr');"]);
+  assert.equal(captured.stdout, "hello-stdout");
+  assert.equal(captured.stderr, "hello-stderr");
+  assert.throws(
+    () => validateMapping(inventory, {
+      version: 2, refs: { HEAD: { rows: {
+        [id]: { class: "network-api", scope: "per-request", endpoints: ["/a"], citation: "f:1",
+          operation: { class: "safe-read" } },
+      } } },
+    }, "HEAD"),
+    /incomplete operation metadata/,
+  );
   const extra = runStatus(inventory, mapping, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]), [id]);
   assert.deepEqual(extra.extra, [id]);
   assert.equal(rowSummary(inventory[0]!, mapping.rows[id], { durations: [10], realTimeouts: 1 }).gate, "FAIL");
@@ -393,6 +451,24 @@ test("preload duration includes the response body and does not forward writes or
   assert.notEqual(relative.code, 0);
   const relativeRows = await readJsonLines(log);
   assert.equal(relativeRows.some(row => row.path === "/functions/v1/read" && row.status === "BLOCKED"), true);
+
+  const relativeQuery = await runChild(process.execPath, ["-e",
+    "fetch('/api/query?token=secret123').then(()=>process.exit(0),()=>process.exit(1))"], { env });
+  assert.notEqual(relativeQuery.code, 0);
+  const queryLog = await readFile(log, "utf8");
+  assert.doesNotMatch(queryLog, /secret123|token=/);
+  const queryRows = await readJsonLines(log);
+  assert.equal(queryRows.some(row => row.path === "/api/query" && row.status === "BLOCKED"), true);
+
+  const relativeWs = await runChild(process.execPath, ["-e", `
+    try { new WebSocket("/realtime/v1/websocket?token=ws-secret"); process.exit(0); }
+    catch { process.exit(2); }
+  `], { env });
+  assert.equal(relativeWs.code, 2);
+  const wsLog = await readFile(log, "utf8");
+  assert.doesNotMatch(wsLog, /ws-secret|token=/);
+  const wsRows = await readJsonLines(log);
+  assert.equal(wsRows.some(row => row.method === "CONNECT" && row.path === "/realtime/v1/websocket" && row.status === "BLOCKED"), true);
 });
 
 test("private profile copy is removed after success and injected failure", async () => {
@@ -422,6 +498,21 @@ test("private profile copy is removed after success and injected failure", async
     }), /injected failure/);
     await assert.rejects(stat(failureRoot), { code: "ENOENT" });
     assert.equal(await readFile(credential, "utf8"), '{"token":"secret-shaped-value","expires_at":"2099-01-01T00:00:00Z"}');
+
+    const namedCredential = join(directory, "named-credential.json");
+    const profileNamedCredential = join(directory, "credential.json");
+    await writeFile(namedCredential, '{"token":"secret-shaped-value"}', { mode: 0o600 });
+    await writeFile(profileNamedCredential, JSON.stringify({
+      version: 1, url: "http://127.0.0.1:1", anon_key: "public",
+      workspace_id: "00000000-0000-4000-8000-000000000001",
+      principal_id: "00000000-0000-4000-8000-000000000002",
+      credential_file: namedCredential,
+    }), { mode: 0o600 });
+    await withPrivateProfile(profileNamedCredential, async copy => {
+      assert.notEqual(copy.profilePath, copy.profile.credential_file);
+      assert.equal((await stat(copy.profilePath)).isFile(), true);
+      assert.equal((await stat(copy.profile.credential_file)).isFile(), true);
+    });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -565,6 +656,18 @@ test("SIGHUP removes the profile copy and the git worktree", async t => {
   assert.equal(code, 129, session.stderr);
   await assertArtifactsGone(session.paths);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
+});
+
+test("finalizeRunResources deletes the temp root before uninstalling signals", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "timeout-table-finalize-"));
+  const resources = { repo, tempRoot, worktreePath: null };
+  let uninstalled = false;
+  finalizeRunResources(resources, () => {
+    assert.equal(existsSync(tempRoot), false, "temp root still present at uninstall");
+    uninstalled = true;
+  });
+  assert.equal(uninstalled, true);
+  await assert.rejects(stat(tempRoot), { code: "ENOENT" });
 });
 
 test("SIGINT removes the profile copy and the git worktree", async t => {

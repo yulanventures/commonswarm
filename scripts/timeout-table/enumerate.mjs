@@ -161,33 +161,31 @@ function parseSource(file, text) {
     file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
 }
 
-function addVariableDeclarations(statement, constants) {
+function addVariableDeclarations(statement, constants, shadow = false) {
   if (!ts.isVariableStatement(statement)) return;
   for (const node of statement.declarationList.declarations) {
-    if (ts.isIdentifier(node.name) && node.initializer && !constants.has(node.name.text)) {
+    if (ts.isIdentifier(node.name) && node.initializer && (shadow || !constants.has(node.name.text))) {
       constants.set(node.name.text, node.initializer);
     }
   }
 }
 
+function bindingsFromStatements(statements, parent) {
+  const constants = new Map(parent);
+  for (const stmt of statements) addVariableDeclarations(stmt, constants, true);
+  return constants;
+}
+
 function localConstantInitializers(sourceFile) {
   const constants = new Map();
-  // Module-level bindings first so a later function-local of the same name
-  // cannot overwrite a timeout constant used at the top level.
+  // Module-level bindings only. Nested function locals are resolved per-scope
+  // in enumerateText so two functions can each have TIMEOUT_MS.
   for (const stmt of sourceFile.statements) {
     addVariableDeclarations(stmt, constants);
     if (ts.isModuleDeclaration(stmt) && stmt.body && ts.isModuleBlock(stmt.body)) {
       for (const inner of stmt.body.statements) addVariableDeclarations(inner, constants);
     }
   }
-  const visitNested = node => {
-    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
-        !constants.has(node.name.text)) {
-      constants.set(node.name.text, node.initializer);
-    }
-    ts.forEachChild(node, visitNested);
-  };
-  visitNested(sourceFile);
   return constants;
 }
 
@@ -205,7 +203,15 @@ function resolveImportedFile(fromFile, specifier, fileSet) {
   if (typeof specifier !== "string" || !specifier.startsWith(".")) return null;
   const joined = posix.normalize(posix.join(posix.dirname(fromFile), specifier));
   const withoutExt = joined.replace(/\.(?:js|mjs|cjs|ts|tsx|astro)$/, "");
-  const candidates = [joined, `${withoutExt}.ts`, `${withoutExt}.tsx`, `${withoutExt}.astro`];
+  const candidates = [
+    joined,
+    `${withoutExt}.ts`,
+    `${withoutExt}.tsx`,
+    `${withoutExt}.astro`,
+    `${withoutExt}/index.ts`,
+    `${withoutExt}/index.tsx`,
+    `${withoutExt}/index.astro`,
+  ];
   for (const candidate of candidates) {
     if (fileSet.has(candidate)) return candidate;
   }
@@ -248,7 +254,6 @@ function importedValuesForFile(sourceFile, fromFile, exportValues, fileSet) {
 export function enumerateText(file, text, options = {}) {
   const sourceFile = parseSource(file, text);
   const importedValues = options.importedValues instanceof Map ? options.importedValues : new Map();
-  const constants = localConstantInitializers(sourceFile);
   const rows = [];
   const seen = new Map();
   const add = (node, name, raw) => {
@@ -261,8 +266,8 @@ export function enumerateText(file, text, options = {}) {
     const id = occurrence === 1 ? key : `${key}#${occurrence}`;
     rows.push({ id, file, name, line, ...normalizedValue(raw, name, file, node) });
   };
-  const valueOf = node => numericValue(node, constants, importedValues);
-  const visit = node => {
+  const visit = (node, constants) => {
+    const valueOf = valueNode => numericValue(valueNode, constants, importedValues);
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
         NAME_PATTERN.test(node.name.text)) {
       const isConst = ts.isVariableDeclarationList(node.parent) &&
@@ -303,9 +308,15 @@ export function enumerateText(file, text, options = {}) {
         if (value !== null) add(node.name, name, value);
       }
     }
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, child => {
+      if (ts.isBlock(child) || ts.isModuleBlock(child) || ts.isSourceFile(child)) {
+        visit(child, bindingsFromStatements(child.statements, constants));
+        return;
+      }
+      visit(child, constants);
+    });
   };
-  visit(sourceFile);
+  visit(sourceFile, bindingsFromStatements(sourceFile.statements, new Map()));
   return rows;
 }
 
@@ -334,10 +345,21 @@ export function enumerateRepository({ repo, ref = null, inputs = DEFAULT_INPUTS 
           const value = numericValue(stmt.expression, localConstantInitializers(file.sourceFile), imported);
           if (value !== null) nextExports.set(`${file.path}:default`, value);
         }
-        if (!ts.isExportDeclaration(stmt) || !stmt.exportClause || !ts.isNamedExports(stmt.exportClause)) continue;
+        if (!ts.isExportDeclaration(stmt)) continue;
         const fromFile = stmt.moduleSpecifier && ts.isStringLiteral(stmt.moduleSpecifier)
           ? resolveImportedFile(file.path, stmt.moduleSpecifier.text, fileSet)
           : null;
+        if (!stmt.exportClause) {
+          if (!fromFile) continue;
+          const prefix = `${fromFile}:`;
+          for (const [key, value] of exportValues) {
+            if (typeof value === "number" && key.startsWith(prefix)) {
+              nextExports.set(`${file.path}:${key.slice(prefix.length)}`, value);
+            }
+          }
+          continue;
+        }
+        if (!ts.isNamedExports(stmt.exportClause)) continue;
         for (const element of stmt.exportClause.elements) {
           if (element.isTypeOnly) continue;
           const exportedName = element.name.text;

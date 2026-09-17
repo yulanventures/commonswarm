@@ -14,7 +14,8 @@ export function summarize(values, budgetMs, options = {}) {
   const p50 = percentile(values, 0.50);
   const p95 = percentile(values, 0.95);
   const max = values.length === 0 ? null : Math.max(...values);
-  const headroom = p95 === null || p95 === 0 ? null : budgetMs / p95;
+  // p95 of 0 is a completed measurement (infinite headroom), not "not run".
+  const headroom = p95 === null ? null : p95 === 0 ? Infinity : budgetMs / p95;
   let gate;
   if (options.notNetwork) gate = "NOT NETWORK";
   else if (options.notRun) gate = "NOT RUN";
@@ -22,9 +23,13 @@ export function summarize(values, budgetMs, options = {}) {
   // cover every guarded path. Acknowledgement cannot hide check_timeout.
   // Proxy not-run rows must not inherit that FAIL.
   else if ((options.realTimeouts ?? 0) > 0) gate = "FAIL";
+  // A lower bound that already fails is conclusive. An incomplete path whose
+  // measured part is already slower than half the budget cannot be PASS, and
+  // acknowledgement cannot hide that FAIL.
+  else if (headroom !== null && headroom < 2) gate = "FAIL";
   else if (options.notMeasured) gate = "NOT MEASURED";
   else if (headroom === null) gate = "NOT RUN";
-  else gate = headroom >= 2 ? "PASS" : "FAIL";
+  else gate = "PASS";
   return { runs: values.length, p50, p95, max, headroom, gate };
 }
 
@@ -49,7 +54,11 @@ export async function makePrivateProfileCopy(profilePath, options = {}) {
   try {
     await mkdir(copyDirectory, { recursive: true, mode: 0o700 });
     await chmod(copyDirectory, 0o700);
-    const copyProfile = join(copyDirectory, basename(sourceProfile));
+    const profileBase = basename(sourceProfile);
+    const copyProfile = join(
+      copyDirectory,
+      profileBase === "credential.json" ? "profile.json" : profileBase,
+    );
     const copyCredential = join(copyDirectory, "credential.json");
     await copyPrivateFile(sourceProfile, copyProfile);
     await copyPrivateFile(credentialSource, copyCredential);
@@ -97,7 +106,7 @@ export async function runChild(command, args, options = {}) {
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", options.capture ? "pipe" : "ignore", options.capture ? "pipe" : "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");

@@ -2,7 +2,7 @@
 
 This tool inventories shipped client wait bounds, classifies each call site, and measures safe reads. It writes no secret to its report or request log. It never writes to the origin.
 
-A PASS row means the measured operation exercised the path that timeout guards, and `budget / p95 >= 2`. If the tool cannot measure that path safely, the row is `NOT MEASURED` and the process exits non-zero unless every such id is listed on `--acknowledge-not-measured`.
+A PASS row means the measured operation exercised the path that timeout guards, and `budget / p95 >= 2`. If the tool cannot measure that path safely, the row is `NOT MEASURED` and the process exits non-zero unless every such id is listed on `--acknowledge-not-measured`. A lower bound that already fails is conclusive: when the row is incomplete (`measures_guarded_path: false`) but the part it did measure already has p95 above half the budget, or the real client timed out, the row is `FAIL` and the process exits non-zero, acknowledgement or not.
 
 ## Commands
 
@@ -34,18 +34,18 @@ node scripts/timeout-table/run.mjs \
 
 `--client` has no default. Without it, client operations are `NOT RUN`; `auth-settings`, `signal-read`, and the uncapped source check can still run. A production-window gate must pass `--client`. `--runs` defaults to 20. `--pause-ms` defaults to 500. Percentiles use the nearest-rank method. The report names the `--ref` and the `--client` path; inventory comes from the ref, timings come from the given client and the source helpers.
 
-`--acknowledge-not-measured` is an exact list of inventory ids whose gate is `NOT MEASURED`. Extra ids fail. Missing ids fail. `FAIL` rows always fail the process.
+`--acknowledge-not-measured` is an exact list of inventory ids whose gate is `NOT MEASURED`. Extra ids fail. Missing ids fail. `FAIL` rows always fail the process. An acknowledgement on a `FAIL` row is not extra.
 
-The preload rewrites requests whose origin equals the profile URL onto `--base-url`. It records only method, path without query, status, and duration, measured through the end of the cloned response body. A WebSocket uses method `CONNECT`. A request to any other origin is not forwarded. A write (`POST /functions/v1/command`, `POST /functions/v1/activity`, `POST` or `PUT` under `/storage/v1/`) is not forwarded. The operations above do not open Realtime, so Realtime needs a separate measurement.
+The preload rewrites requests whose origin equals the profile URL onto `--base-url`. It records only method, path without query, status, and duration, measured through the end of the cloned response body. A WebSocket uses method `CONNECT`. A request to any other origin is not forwarded. A relative URL is blocked; the log stores the pathname only, never the query or fragment. A write (`POST /functions/v1/command`, `POST /functions/v1/activity`, `POST` or `PUT` under `/storage/v1/`) is not forwarded. The operations above do not open Realtime, so Realtime needs a separate measurement. Child stdout and stderr are always captured.
 
 ## Operations
 
 | Operation | Class | What it writes | What it removes | What is measured |
 |---|---|---|---|---|
-| `check` | safe-read, `measures_guarded_path: false` | `check.json` only inside the private profile copy | the complete private copy and isolated home | Whole-operation wall time of `checkAgentMessages` with a 120 s cap (directory + inbox reads, including bodies). Renewal is not exercised because `expires_at` is stripped. Gate is `NOT MEASURED`. |
-| `signal-read` | safe-read, `measures_guarded_path: false` | nothing | nothing | One `readAgentSignalPage` call from the selected ref, including the response body. Limit 1. Does not post `signals_seen`. The timeout is per-request and covers the body. The helper wall time is that one request. The same constant also bounds the members directory, human PostgREST `/rest/v1/signals`, retries, and delivery-receipt reads, which are not run. Gate is `NOT MEASURED`. |
+| `check` | safe-read, `measures_guarded_path: false` | `check.json` only inside the private profile copy | the complete private copy and isolated home | Whole-operation wall time of `checkAgentMessages` with a 120 s cap (directory + inbox reads, including bodies). Renewal is not exercised because `expires_at` is stripped. Gate is `NOT MEASURED` unless that sample's p95 is already above half the budget, in which case `FAIL`. |
+| `signal-read` | safe-read, `measures_guarded_path: false` | nothing | nothing | One `readAgentSignalPage` call from the selected ref, including the response body. Limit 1. Does not post `signals_seen`. The timeout is per-request and covers the body. The helper wall time is that one request. The same constant also bounds the members directory, human PostgREST `/rest/v1/signals`, retries, and delivery-receipt reads, which are not run. Gate is `NOT MEASURED` unless that sample's p95 is already above half the budget, in which case `FAIL`. |
 | `channel-ls` | safe-read | nothing | nothing | One `cswarm channel ls --json` agent read (`POST /functions/v1/read`, resource `channels`), including the body. |
-| `file-ls` | safe-read, `measures_guarded_path: false` | nothing | nothing | One `cswarm file ls` metadata read. `REQUEST_TIMEOUT_MS` also guards file commands and storage downloads, which are not run. Gate is `NOT MEASURED`. |
+| `file-ls` | safe-read, `measures_guarded_path: false` | nothing | nothing | One `cswarm file ls` metadata read. `REQUEST_TIMEOUT_MS` also guards file commands and storage downloads, which are not run. Gate is `NOT MEASURED` unless that sample's p95 is already above half the budget, in which case `FAIL`. |
 | `auth-settings` | safe-read | nothing | nothing | One `GET /auth/v1/settings`, duration through the end of the body. Per-request. |
 
 `cswarm inbox` is not a measured operation. It POSTs `signals_seen` for rendered broadcasts, with or without `--json`.
@@ -57,7 +57,7 @@ Before a check, the runner copies only the profile file and the credential file 
 For the whole-operation check budget, each sample has two parts:
 
 1. The released client runs with its real cap when `--client` is given, after the uncapped source sample on that iteration. The report counts every exit code and each output containing the stable `check_timeout` code. Any such timeout makes the row `FAIL`, including when the path is otherwise `NOT MEASURED`.
-2. `checkAgentMessages` is imported from the selected source ref through `tsx` with a 120-second timeout. This uncapped wall time supplies p50, p95, max, and headroom. Because renewal is skipped, the gate is `NOT MEASURED` even when headroom is `>= 2`, unless step 1 recorded `check_timeout`.
+2. `checkAgentMessages` is imported from the selected source ref through `tsx` with a 120-second timeout. This uncapped wall time supplies p50, p95, max, and headroom. Because renewal is skipped, the gate is `NOT MEASURED` when headroom is `>= 2`, unless step 1 recorded `check_timeout`. If this sample already has p95 above half the budget, the gate is `FAIL`.
 
 Client `--version` is run the same number of times. Its p50, p95, and max show the start-up cost inside Claude Code's five-second hook ceiling.
 
@@ -77,7 +77,8 @@ The TypeScript compiler API reads tracked `.ts`, `.tsx`, and `.astro` client sou
 - numeric const declarations containing `TIMEOUT`, `DEADLINE`, or `BUDGET`, including `as const` and imported aliases (`HOOK_CHECK_TIMEOUT_MS = AGENT_CHECK_TIMEOUT_MS`);
 - `AbortSignal.timeout(...)` calls, including identifiers and `??` numeric fallbacks;
 - `timeoutMs`, `timeout`, `connect_timeout`, and other `TIMEOUT`/`DEADLINE`/`BUDGET` properties, parameter defaults, and `??` literals;
-- namespace imports (`import * as T from "./x"` then `T.TIMEOUT_MS`), default imports, and `export { TIMEOUT_MS } from "./x"` re-exports;
+- namespace imports (`import * as T from "./x"` then `T.TIMEOUT_MS`), default imports, `export { TIMEOUT_MS } from "./x"` re-exports, `export * from "./x"`, and directory-index specifiers (`from "./config"` → `config/index.ts`);
+- function-local timeout constants, each in its own scope so two functions can both declare `TIMEOUT_MS`;
 - `setTimeout` and `setInterval` waits, including identifiers and `??` fallbacks.
 
 Postgres and Claude hook seconds are converted to milliseconds. Non-time byte, character, and count budgets keep their raw value and are marked as non-time rows.
@@ -92,21 +93,22 @@ Inventory ids are `file:name`, with `#N` for the second and later same name in o
 |---|---|
 | Mapping completeness | For each measured ref, delete one live mapping row, or add a stale ID. |
 | Line-independent ids | Insert lines above a fixture timeout site; ids must stay the same. |
-| Enumerator forms | Remove handling of a `timeoutMs` default, a `??` literal, `as const`, `AbortSignal.timeout(IDENTIFIER)`, an import alias, a namespace property `T.TIMEOUT_MS`, a `requestTimeoutMs` property, or a module-level const shadowed by a later local. |
-| Headroom gate | Replace the slow fake-server delay with the fast delay, or reverse the `>= 2` comparison. |
+| Enumerator forms | Remove handling of a `timeoutMs` default, a `??` literal, `as const`, `AbortSignal.timeout(IDENTIFIER)`, an import alias, a namespace property `T.TIMEOUT_MS`, a `requestTimeoutMs` property, a module-level const shadowed by a later local, a directory-index import, `export * from`, or two function-local `TIMEOUT_MS` values. |
+| Headroom gate | Replace the slow fake-server delay with the fast delay, or reverse the `>= 2` comparison. An incomplete row with p95 already over half the budget must `FAIL` even when acknowledged. Zero-duration samples must `PASS` with infinite headroom, not `NOT RUN`. |
 | Markdown PASS/FAIL | Feed `markdownReport` the fast durations and require `FAIL`, or the slow durations and require `PASS`. |
 | Origin rewrite | Remove the rewrite; the original fake server receives the request and the target receives none. |
 | Other-origin block | Allow a second origin through; that server receives a request. |
 | Body duration | Record duration at headers; a delayed body then logs under 100 ms. |
 | Write detector | Classify `POST /functions/v1/command` as a non-write, or skip `assertNoOriginWrites`. |
-| Log privacy | Add request headers, body, query, or the secret-shaped value to a log row. |
+| Log privacy | Add request headers, body, query, or the secret-shaped value to a log row. A blocked relative URL with `?token=` must log the pathname only. |
 | Profile cleanup | Remove either the success cleanup or the `finally` cleanup after an injected failure. |
-| Profile copy set | Restore a recursive parent-directory copy; `sibling-secret.txt` appears in the copy. |
-| Exit-path cleanup | Empty `cleanupRunResourcesSync`; an exit-13, SIGTERM, SIGHUP, or SIGINT child leaves a temp root, credential copy, and git worktree. |
+| Profile copy set | Restore a recursive parent-directory copy; `sibling-secret.txt` appears in the copy. A source profile named `credential.json` must still copy. |
+| Exit-path cleanup | Empty `cleanupRunResourcesSync`; an exit-13, SIGTERM, SIGHUP, or SIGINT child leaves a temp root, credential copy, and git worktree. Reverse `finalizeRunResources` to uninstall then delete; the uninstall callback sees the temp root. |
 | FAIL / NOT MEASURED exit | Return from `runTable` while a row is `FAIL`, or while a `NOT MEASURED` id is missing from `--acknowledge-not-measured`. |
 | `check_timeout` vs incomplete path | Set `measures_guarded_path: false` and `realTimeouts: 1`; the row must still be `FAIL`. |
 | Per-request path | Record child wall time when the fetch log has no matching endpoint; `channel-ls` must not `PASS`. |
-| Mixed operation scopes | Map two `safe-read` rows to one operation name with different scopes; `validateMapping` must throw. |
+| Mixed operation scopes | Map two `safe-read` rows to one operation name with different scopes; `validateMapping` must throw. Omit `operation.name`; `validateMapping` must throw. |
+| Child capture | Spawn `runChild` without `{ capture: true }`; stdout must still be in the result. |
 
 Run the controls with:
 
@@ -123,7 +125,8 @@ env -u FORCE_COLOR node --import tsx --test tests/p1-cli/timeout-table.test.ts
 - It does not measure Realtime because no safe operation in this table opens a WebSocket.
 - Twenty sequential samples describe that test window. They do not prove future availability, cold-start, or tail latency beyond p95.
 - A PASS proves `budget / p95 >= 2` for the measured operation on the guarded path. It does not prove the response data is correct.
-- `check`, `file-ls`, and `signal-read` numbers can still be read while the gate is `NOT MEASURED`. They do not prove renewal, storage download, members-directory, human PostgREST, or delivery-receipt headroom.
+- `check`, `file-ls`, and `signal-read` numbers can still be read while the gate is `NOT MEASURED`. They do not prove renewal, storage download, members-directory, human PostgREST, or delivery-receipt headroom. They do fail the process when the measured part is already slower than half the budget.
+- A `setTimeout` whose delay is only a function parameter, with no numeric default in that scope, is not a row. The caller site that supplies the number is.
 
 ## Review round 1 (2026-09-17): rulings
 
@@ -181,3 +184,23 @@ env -u FORCE_COLOR node --import tsx --test tests/p1-cli/timeout-table.test.ts
 | Redundant `oneOperation` dispatch branches (agyTT2T5b RIGOUR 1) | REFUTED | Current `run.mjs` runs real check then `check-uncapped`; not three identical branches. |
 | `realTimeouts` unused because `runTable` throws on first non-zero (agyTT2T5b RIGOUR 2) | REFUTED | Real check exit 1 does not throw; throw is the measurement child. Overlap with grokTT2 PRODUCTION 1. |
 | Relative `fetch` in preload catch throws before `record()` (agyTT2T5b RIGOUR 3) | CONFIRMED | `fetch("/functions/v1/read")` exited 1 with empty log. Catch now records BLOCKED without requiring an absolute URL. |
+
+## Review round 3 (2026-09-17): rulings
+
+| Claim (arm) | Ruling | Evidence and fix |
+|---|---|---|
+| Incomplete path with p95 already over half the budget stays `NOT MEASURED`; acked window exits 0 (grokTT3 PRODUCTION 1; grokTT3 RIGOUR 1) | CONFIRMED | Loopback HEAD, 2200 ms delay on `/functions/v1/read`: check p95 2221 ms vs 3900 ms, headroom 1.76, gate `NOT MEASURED`, process would exit 0 with ack. `rowSummary` 2226 vs 3900 same. `summarize` now FAILs when `headroom < 2` before `notMeasured`. Ack on a FAIL row is not extra. Test: incomplete `[70]` vs 100 ms is `FAIL` even when acked. |
+| `file-ls` uses the same incomplete-path skip (grokTT3 PRODUCTION 1) | CONFIRMED as the same gate | Same `notMeasured` short-circuit. The 2216 ms file-ls vs 30 s budget would still be `NOT MEASURED` (headroom > 2). The new lower-bound rule FAILs that row only when its own p95 is already over half its budget. |
+| Credentials and writes: 0700/0600 copy, `expires_at` stripped, no origin writes (grokTT3 PRODUCTION 2) | CONFIRMED holding (no defect) | Copy modes 0700/0600; `credential_file` is the copy path; sibling secret absent; command/activity/storage hits 0. SIGHUP/SIGINT/SIGTERM/exit-13 cleanup already present. |
+| `runTable` finally order is untested (grokTT3 RIGOUR 2) | CONFIRMED | Source already cleaned up then uninstalled. Fixtures never uninstall. Added `finalizeRunResources`; test asserts the temp root is gone inside the uninstall callback. |
+| Omitting `--client` marks CLI ops `NOT RUN` and can exit 0 (grokTT3 RIGOUR 3) | CONFIRMED as documented | Loopback `client: null`: `channel-ls` / `file-ls` `NOT RUN`. README: a window gate must pass `--client`. `NOT RUN` is not `PASS`. |
+| Blocked relative `fetch` logs the raw query string (agyTT3T1a PRODUCTION query leak) | CONFIRMED | `fetch("/api/query?token=secret123")` log path `/api/query?token=secret123`. `pathOnly()` now stores pathname only. |
+| Enumerator drops directory-index imports and `export *` (agyTT3T1a PRODUCTION; live `cli.ts:turnBudgetMs`) | CONFIRMED | Fixture `from "./config"` and `export * from "./config"`: `use.ts` rows `[]`. Live HEAD `src/cli.ts:turnBudgetMs` absent (import through `listener/index.js` `export *`). Enumerator now follows both. Mapped `turnBudgetMs` and `deliveryHoldBudgetMs` as `not-run` / `listener-prompt-site`. Scoped lookup dropped five `setTimeout` rows whose delay was only a parameter (wrongly bound to a sibling `timeoutMs` before); mapping no longer lists them. |
+| Relative `WebSocket` throws before `record()` (agyTT3T1a PRODUCTION) | CONFIRMED | `new WebSocket("/realtime/v1/websocket")` exit 2, empty log, `TypeError: Invalid URL`. Catch now records `CONNECT` `BLOCKED` with pathname only. |
+| Profile named `credential.json` collides with the credential copy (agyTT3T1a RIGOUR) | CONFIRMED | `EEXIST` on `profile/credential.json`. Profile copy is now `profile.json` when the source basename is `credential.json`. |
+| Zero-duration samples report `NOT RUN` (agyTT3T1a RIGOUR) | CONFIRMED | `summarize([0,0,0,0,0], 100)` → `headroom null`, gate `NOT RUN`. p95 0 is now infinite headroom / `PASS`. |
+| `runChild` still drops stdio unless `capture: true`; `--version` omits capture (agyTT3T1a RIGOUR; agyTT3T1b RIGOUR) | CONFIRMED | Default `runChild` stdout/stderr empty. Always pipe. |
+| `validateMapping` accepts a safe-read with no `operation.name` (agyTT3T1a RIGOUR) | CONFIRMED | Unnamed entry validated. Name is now required. |
+| `check-uncapped` omits `capture` / uses `probe.mjs` (agyTT3T5 RIGOUR 1) | REFUTED | Cut mismatch. Real tree: `source-check.ts` with `{ capture: true }`. |
+| Nested locals share a flat Map (agyTT3T5 RIGOUR 2) | CONFIRMED | Two functions `TIMEOUT_MS = 1000` and `2000`: both `AbortSignal.timeout` rows were 1000. Enumerator now uses per-block scopes. |
+| README / mapping chunks / tests in T2 T3 T4 T1b remainder (agyTT3T2, T3a–d, T4a–b, T1b PASS slices) | CONFIRMED holding (no defect) | Read against the real tree. Antigravity parts were cut at line boundaries; missing-file claims were checked on disk. |

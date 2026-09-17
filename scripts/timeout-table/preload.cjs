@@ -32,6 +32,20 @@ function rewritten(raw) {
   throw new Error("timeout-table blocked a request whose origin is not the profile origin");
 }
 
+function pathOnly(raw) {
+  try {
+    const url = new URL(
+      typeof raw === "string" || raw instanceof URL ? raw : raw?.url,
+      "http://timeout-table.invalid",
+    );
+    return url.pathname;
+  } catch {
+    const text = typeof raw === "string" ? raw : "/";
+    const cut = text.split("?")[0].split("#")[0];
+    return cut.startsWith("/") ? cut : "/";
+  }
+}
+
 function record(row) {
   // This allowlist is the privacy boundary. Do not add headers, bodies, query,
   // fragments, credentials, or the original URL.
@@ -51,14 +65,7 @@ if (typeof originalFetch === "function") {
     try {
       url = rewritten(input);
     } catch (error) {
-      let path = "/";
-      try {
-        const failed = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
-        path = failed.pathname;
-      } catch {
-        path = typeof input === "string" && input.startsWith("/") ? input : "/";
-      }
-      record({ method, path, status: "BLOCKED", duration_ms: 0 });
+      record({ method, path: pathOnly(input), status: "BLOCKED", duration_ms: 0 });
       throw error;
     }
     const writeKind = originWriteKind(method, url.pathname);
@@ -96,8 +103,7 @@ if (typeof OriginalWebSocket === "function") {
       try {
         target = rewritten(url);
       } catch (error) {
-        const failed = new URL(url);
-        record({ method: "CONNECT", path: failed.pathname, status: "BLOCKED", duration_ms: 0 });
+        record({ method: "CONNECT", path: pathOnly(url), status: "BLOCKED", duration_ms: 0 });
         throw error;
       }
       const started = performance.now();

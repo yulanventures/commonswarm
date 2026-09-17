@@ -41,7 +41,8 @@ export function validateMapping(inventory, mapping, ref) {
       throw new Error(`${row.id} has invalid scope`);
     }
     if (!entry.citation || !entry.operation ||
-        !new Set(["safe-read", "bounded-write", "not-run"]).has(entry.operation.class)) {
+        !new Set(["safe-read", "bounded-write", "not-run"]).has(entry.operation.class) ||
+        typeof entry.operation.name !== "string" || entry.operation.name.length === 0) {
       throw new Error(`${row.id} has incomplete operation metadata`);
     }
     if (entry.operation.class === "safe-read") {
