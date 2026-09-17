@@ -1,5 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -1058,7 +1059,7 @@ if (
   throw new Error("command test hooks refuse to run unless SWARM_ENV=test");
 }
 
-const db = postgres(databaseUrl, {
+const db = postgres(databaseUrl, withDatabaseTls({
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
@@ -1067,7 +1068,7 @@ const db = postgres(databaseUrl, {
   prepare: false,
   idle_timeout: 3,
   connect_timeout: 10,
-});
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
 /**
  * Storage adapter for file artifacts (§7). Raw REST with the service role key:
  * the bucket is service-role-only (★R12), so every signed URL is minted here
@@ -7672,7 +7673,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3661 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3662 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is

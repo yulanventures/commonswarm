@@ -22,7 +22,7 @@ export const FILE_MAX_VERSION_BYTES = 25 * 1024 * 1024;
 
 /* Warning printed by the CLI for human file ls and included in file ls --json.
  * Differs from FILE_CONTENT_WARNING in supabase/functions/command/file-artifacts.ts:107
- * and read/index.ts:33 (which the edge returns on file_download_url and agent read):
+ * and read/index.ts:34 (which the edge returns on file_download_url and agent read):
  * the edge warns that declarations are unverified and to bound extraction; the CLI
  * supplies this sentence for the REST-backed list path (which carries rows only) to
  * warn human users before opening files. */

@@ -5,6 +5,7 @@ import {
 } from "../command/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   extractSafeDiagnostics,
   formatReadFailureLog,
@@ -46,7 +47,7 @@ const authClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const db = postgres(databaseUrl, {
+const db = postgres(databaseUrl, withDatabaseTls({
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
@@ -55,7 +56,7 @@ const db = postgres(databaseUrl, {
   prepare: false,
   idle_timeout: 3,
   connect_timeout: 10,
-});
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
