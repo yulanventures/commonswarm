@@ -162,3 +162,26 @@ ruled PRODUCTION and buys round 4.
 | 42 | The foreign cron entry sorts first, so the test does not prove rollback after earlier jobs were scheduled (antigravity P5b) | CONFIRMED, RIGOUR | The foreign entry now sorts last. |
 | 43 | Unused `readFile` import in the cron test (antigravity P5b) | CONFIRMED, RIGOUR | Removed. |
 | 44 | The edge Compose network mode comes from shell interpolation and defaults to bridge (antigravity P1, grok) | CONFIRMED, RIGOUR | Every documented edge start passes `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`. |
+
+## Review round 4 (2026-09-17): rulings
+
+Pair on `c8e1396f`: antigravity PASS on all eight parts (P3 and P4 re-run after a network error; one RIGOUR note repeats
+ruling 14); grok FAIL. The lead checked grok's claims against the live-box record in
+`docs/org/2026-09-16-N-EDGE-RESUME-HERE.md` and the tree.
+
+| # | Claim (arm) | Ruling | Evidence and fix |
+|---|---|---|---|
+| 45 | The runbook stops and starts Compose project `edge-runtime` from `/home/commonswarm/current`, but the live edge runtime is project `commonswarm-edge` under `/home/commonswarm/edge/current`; `up -d` then fails on port 9000 and the `until healthy` loop on an empty container id never ends, with production frozen (grok) | CONFIRMED, PRODUCTION | Resume record lines 177-181: release directory `/home/commonswarm/edge/releases/<sha>`, `current` symlink, project `commonswarm-edge`, container `commonswarm-edge-edge-runtime-1`. Every edge command now uses that directory and `-p commonswarm-edge`; the rehearsal installs this lane's edge release (with the TLS helper) the same way; every wait loop is bounded and exits non-zero with a message. |
+| 46 | PostgreSQL is restored right after `up -d postgres`, before it accepts connections (grok) | CONFIRMED, PRODUCTION | The health check has a 60 s start period and a fresh directory runs the image init. Rehearsal, window and drill now wait, bounded, for the container to be healthy before the restore. |
+| 47 | Rehearsal step 13 reuses the source acknowledgement for the target (grok) | CONFIRMED, RIGOUR | Step 13 runs `preflight target` and sets the list from that output. |
+| 48 | The ABORT-B writable probe does not pass `FREEZE_UNPROBED_ROLES` and exits 65 (grok) | CONFIRMED, RIGOUR | ABORT-B computes or reuses the list and passes it. |
+| 49 | A session whose termination was refused keeps the old default and can write unguarded tables without `BEGIN READ WRITE` (grok) | CONFIRMED, RIGOUR | The runbook names it; step 3 reads the refused count in the enable log and lists such sessions read-only before continuing. |
+| 50 | After ABORT-C, staging uploads leave object bytes in R2 with no rows (grok) | CONFIRMED, RIGOUR | Named in the runbook as orphans to remove; no hosted bytes are lost. |
+| 51 | Nothing checks that the five JWT secret names hold the same value (grok) | CONFIRMED, RIGOUR | The rehearsal compares SHA-256 digests of the five values without printing them; one distinct digest is required. |
+| 52 | Realtime is not restarted after `setup-realtime.sh` in the window and the drill (grok) | CONFIRMED, RIGOUR | Restart added where the rehearsal already has it. |
+| 53 | The recovery drill's `mv` target already exists after the window, and the drill never starts the stack or the edge (grok) | CONFIRMED, RIGOUR | Unique timestamped directory name; the drill starts the stack and the edge with the same bounded waits. |
+| 54 | Nothing checks that `commonswarm-net` exists (grok) | CONFIRMED, RIGOUR | Rehearsal step 1 and window step 0 run `docker network inspect commonswarm-net`. |
+| 55 | `TARGET_STORAGE_URL` is not specified; `api.commonswarm.com` would answer 503 during the window (grok) | CONFIRMED, RIGOUR | `migration.env.example` and the runbook name the value the copy uses during the window, derived from `copy-storage.mjs`. |
+| 56 | The first frozen probe exits 65 by design, so a pasted block under `set -e` stops (grok) | CONFIRMED, RIGOUR | The runbook says to run each command and read its exit code, and marks the expected 65. |
+| 57 | The stack directory `/home/commonswarm/current` has no defined layout on the box (lead) | CONFIRMED, RIGOUR | `STACK_DIR` and `EDGE_DIR` are defined once next to `MIGRATE`, following the edge release layout; HezLead confirms them in rehearsal step 1. |
+| 58 | Fallback routes are not commented in the live file (antigravity P4) | Already ruled (14) | No change. |

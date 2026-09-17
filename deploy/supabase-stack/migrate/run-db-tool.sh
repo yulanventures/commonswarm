@@ -28,6 +28,9 @@ case "$script_name" in
   probe-database-freeze.sh)
     [[ $# -ge 1 && $# -le 2 && ( "$1" == frozen || "$1" == writable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
+  list-client-sessions.sh)
+    [[ $# -eq 1 && "$1" == source ]] || { echo "$usage" >&2; exit 64; }
+    ;;
   assert-database-identity.sh)
     [[ $# -eq 1 && ( "$1" == source || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;

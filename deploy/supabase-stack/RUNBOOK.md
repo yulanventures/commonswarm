@@ -16,10 +16,39 @@ This lane deployed nothing. HezLead runs every command in this file.
 - TLS files: `/etc/commonswarm/pg-tls/server.crt`, `/etc/commonswarm/pg-tls/server.key`, and `/etc/commonswarm/pg-tls/ca.crt`. The CA is also `/etc/ssl/yulan-internal-ca.pem`.
 - Source identity: `SOURCE_SYSTEM_IDENTIFIER` is read before the window with `SELECT system_identifier FROM pg_control_system()`.
 
-Use this absolute path for every migration script call below. Define it once in the operator shell:
+The landed stack release is unpacked at `/home/commonswarm/stack/releases/<sha>` and `current` is a symlink to it. This lane's edge release, which carries the TLS helper, is unpacked at `/home/commonswarm/edge/releases/<sha>` and its `current` symlink is switched to it. This is the live edge release layout.
+
+Define the release paths once in the operator shell. Use them for every command below:
 
 ```sh
-MIGRATE=/home/commonswarm/current/deploy/supabase-stack/migrate
+STACK_DIR=/home/commonswarm/stack/current/deploy/supabase-stack
+EDGE_DIR=/home/commonswarm/edge/current/deploy/edge-runtime
+MIGRATE="$STACK_DIR/migrate"
+```
+
+All container health waits use this one bounded pattern. `N` is 180 seconds for PostgreSQL and the edge. The helper checks for a non-empty container ID before inspection. On timeout it prints the container status and exits 1; then the step's ABORT applies.
+
+```sh
+wait_healthy() {
+  container_id="$1"
+  label="$2"
+  timeout_seconds="$3"
+  if [ -z "$container_id" ]; then
+    printf '%s\n' "$label container id is empty" >&2
+    exit 1
+  fi
+  deadline=$(( $(date +%s) + timeout_seconds ))
+  while :; do
+    health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+    [ "$health" = healthy ] && break
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      printf '%s\n' "$label did not become healthy within $timeout_seconds seconds" >&2
+      docker inspect --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" >&2 || true
+      exit 1
+    fi
+    sleep 2
+  done
+}
 ```
 
 Every database URL names `db.commonswarm.internal` and uses `sslmode=verify-full`. GoTrue, PostgREST, and Storage API also use `sslrootcert=/etc/ssl/yulan-internal-ca.pem`. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. The edge URLs omit `sslrootcert`; the edge functions pass the CA as `ssl.ca` with certificate checks enabled.
@@ -40,7 +69,13 @@ Object bytes move forward through the Storage APIs. The copy is idempotent. The 
 
 Use a new protected artifact directory for each attempt. Never reuse a dump after the source changes.
 
-1. Confirm that the source URL is the production pooler and the target is `commonswarm-postgres` at `172.31.0.10`. Confirm PostgreSQL 17.6. Do not use the host cluster's `commonswarm` database.
+1. HezLead confirms that the landed stack release is unpacked under `/home/commonswarm/stack/releases/<sha>` with `/home/commonswarm/stack/current` pointing to it, and that this lane's edge release is unpacked under `/home/commonswarm/edge/releases/<sha>` with `/home/commonswarm/edge/current` switched to it. The edge release must be installed before the edge starts on the box database because it carries the TLS helper. Confirm that the source URL is the production pooler and the target is `commonswarm-postgres` at `172.31.0.10`. Confirm PostgreSQL 17.6. Do not use the host cluster's `commonswarm` database. Require the shared network inspection to exit 0.
+
+   ```sh
+   readlink -f /home/commonswarm/stack/current
+   readlink -f /home/commonswarm/edge/current
+   docker network inspect commonswarm-net
+   ```
 
 2. Read production versions from the public health endpoints. Record them. Update a changed image pin before this rehearsal.
 
@@ -59,13 +94,41 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
 
-4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file.
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. For both the rehearsal and window, set `SOURCE_STORAGE_URL=https://ukezjcnxjvkpkeezxaew.supabase.co` and `TARGET_STORAGE_URL=http://127.0.0.1:18004`. `copy-storage.mjs` appends `/storage/v1/object/...`; the target is the box Storage API on loopback and does not use the public host whose POST requests return 503 during the window.
+
+   Compare the SHA-256 digests of the five JWT secret names without printing a value or digest. This command must print `JWT secret digests match: 1 distinct digest` and exit 0:
+
+   ```sh
+   python3 - <<'PY'
+   import hashlib
+   from pathlib import Path
+
+   names = ["JWT_SECRET", "GOTRUE_JWT_SECRET", "PGRST_JWT_SECRET", "API_JWT_SECRET", "AUTH_JWT_SECRET"]
+   values = {}
+   for raw_line in Path("/home/commonswarm/.env").read_text().splitlines():
+       if not raw_line or raw_line.startswith("#") or "=" not in raw_line:
+           continue
+       name, value = raw_line.split("=", 1)
+       if name in names:
+           if name in values:
+               raise SystemExit(f"duplicate JWT secret name: {name}")
+           values[name] = value
+   missing = [name for name in names if not values.get(name)]
+   if missing:
+       raise SystemExit("missing JWT secret names: " + ", ".join(missing))
+   digest_count = len({hashlib.sha256(values[name].encode()).digest() for name in names})
+   if digest_count != 1:
+       raise SystemExit(f"JWT secret digests differ: {digest_count} distinct digests")
+   print("JWT secret digests match: 1 distinct digest")
+   PY
+   ```
 
 5. Start PostgreSQL. Choose a new artifact directory. Take the source dump.
 
    ```sh
-   cd /home/commonswarm/current/deploy/supabase-stack
-   docker compose -p commonswarm-supabase-stack up -d postgres
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
+   postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
+   wait_healthy "$postgres_container" postgres 180
    ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
    export ARTIFACT_DIR
    COMMONSWARM_ENV_FILE=/home/commonswarm/.env \
@@ -76,11 +139,15 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 6. Practice the fresh database procedure. Stop every stack service and the edge runtime. Move the rehearsal data directory aside. Keep it until step 8. Create an empty data directory with mode `0700` and owner `100:101`. Start only PostgreSQL.
 
    ```sh
-   docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml down
-   docker compose -p commonswarm-supabase-stack down
+   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
    mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-before-restore
    install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
-   docker compose -p commonswarm-supabase-stack up -d postgres
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
+   postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
+   wait_healthy "$postgres_container" postgres 180
    ```
 
 7. Restore and prepare in this order. Restore cron jobs immediately after target preparation.
@@ -100,7 +167,8 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 8. Start the stack. Copy Storage forward. Restore Storage metadata. Verify counts again. Keep or remove the saved rehearsal directory only after all controls pass.
 
    ```sh
-   docker compose -p commonswarm-supabase-stack up -d
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
    COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
      MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
    "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
@@ -118,11 +186,11 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    ```sh
    COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml up -d
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
    edge_container="$(COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml ps -q edge-runtime)"
-   until [ "$(docker inspect --format '{{.State.Health.Status}}' "$edge_container")" = healthy ]; do sleep 2; done
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" ps -q edge-runtime)"
+   wait_healthy "$edge_container" edge-runtime 180
    curl --fail --silent --show-error http://127.0.0.1:9000/health
    ```
 
@@ -138,16 +206,25 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
    "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" preflight source
    ```
 
-13. Complete the freeze drill on the restored box. The hosted-shape Docker test is a separate control.
+13. Complete the freeze drill on the restored box. The hosted-shape Docker test is a separate control. Run `preflight target` now and copy `FREEZE_UNGUARDED_TABLES` from this target output. Run the first frozen target probe without `FREEZE_UNPROBED_ROLES`; it must print the target list and exit 65. Copy that list, set it, and rerun the probe.
 
    ```sh
+   unset FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES
+   "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" preflight target
+   FREEZE_UNGUARDED_TABLES='<copy the exact target list printed by preflight; use an empty value when it prints none>'
+   export FREEZE_UNGUARDED_TABLES
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable target
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen target
+   # Expected exit code: 65. Read it before the next command.
+   FREEZE_UNPROBED_ROLES='<copy the exact target list printed by the exit-65 probe; use an empty value when it prints none>'
+   export FREEZE_UNPROBED_ROLES
    FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
      "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen target
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable target
-   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable target
+   FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
+     "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable target
    ```
 
    A second `enable target` while frozen is safe. It must exit 0, add no trigger, and leave the freeze in force.
@@ -160,9 +237,14 @@ Ruling 9084e3e1 applies. Rollback exists only before the box accepts writes. Aft
 
 Use the protected environment files for every call. Their values are unquoted. `CUTOVER_CONFIRM=` stays empty in the migration file. Set `CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW` inline only on freeze and unfreeze commands.
 
-0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, and decision checklist. Set the final artifact directory for the whole window:
+Run every window block one command at a time and read each exit code. Never run a block under `set -e`: the first frozen probe in step 3 and a discovery probe in ABORT-B intentionally exit 65.
+
+0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, release symlinks, and decision checklist. Require the shared network inspection to exit 0. Set the final artifact directory for the whole window:
 
    ```sh
+   readlink -f /home/commonswarm/stack/current
+   readlink -f /home/commonswarm/edge/current
+   docker network inspect commonswarm-net
    ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-window
    export ARTIFACT_DIR
    ```
@@ -195,32 +277,46 @@ Use the protected environment files for every call. Their values are unquoted. `
    export FREEZE_UNGUARDED_TABLES
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
+   enable_summary="$(awk 'match($0, /older sessions ended: [0-9]+, refused: [0-9]+/) { value = substr($0, RSTART, RLENGTH) } END { print value }' "$ARTIFACT_DIR/logs/read-only-source-enable.log")"
+   printf '%s\n' "$enable_summary"
+   refused_sessions="${enable_summary##*refused: }"
+   if [ -z "$enable_summary" ] || [ -z "$refused_sessions" ]; then printf '%s\n' 'enable session count is missing' >&2; exit 1; fi
+   if [ "$refused_sessions" -gt 0 ]; then "$MIGRATE/run-db-tool.sh" list-client-sessions.sh "$ARTIFACT_DIR" source; fi
+   # If refused_sessions is greater than zero, read pid, usename, application_name, backend_start, and state, then decide whether to continue before step 4.
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
+   # Expected exit code: 65. Read it before the next command.
    FREEZE_UNPROBED_ROLES='<copy the exact list printed by the exit-65 probe; use an empty value when it prints none>'
    export FREEZE_UNPROBED_ROLES
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
    ```
 
-   What the freeze cannot stop: writes to the tables the source role cannot trigger (the preflight list) by a session that overrides the database default, and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com`. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
+   What the freeze cannot stop: a session that refused termination keeps its older writable default and can write an unguarded table without `BEGIN READ WRITE`; other sessions can write to the tables the source role cannot trigger (the preflight list) if they override the database default; and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com` bypasses maintenance. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
 
    ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then restore DNS and Caddy.
 
    ```sh
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable source
-   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source
+   if [ "${FREEZE_UNPROBED_ROLES+x}" != x ]; then "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source; fi
+   # The discovery probe above must exit 65 after printing the exact list. Read the exit code, set the list, then continue.
+   if [ "${FREEZE_UNPROBED_ROLES+x}" != x ]; then FREEZE_UNPROBED_ROLES='<copy the exact list printed by the exit-65 writable probe; use an empty value when it prints none>'; export FREEZE_UNPROBED_ROLES; fi
+   FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
+     "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source
    ```
 
 4. Take the final source dump in the directory set in step 0. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Restore in the shown order. After the stack is up and before copying Storage, confirm in a protected editor that `/home/commonswarm/.env` has `SWARM_DATABASE_URL` and `SUPABASE_DB_URL` naming `db.commonswarm.internal` with `sslmode=verify-full` and no `sslrootcert`, and that `SWARM_DATABASE_TLS_CA_B64` is set. Then start the edge runtime, wait for `healthy`, and run its `/health` request on `127.0.0.1:9000`.
 
    ```sh
    "$MIGRATE/run-db-tool.sh" dump-source.sh "$ARTIFACT_DIR" source
-   docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml down
-   cd /home/commonswarm/current/deploy/supabase-stack
-   docker compose -p commonswarm-supabase-stack down
+   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
    mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-kept-through-step-8
    install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
-   docker compose -p commonswarm-supabase-stack up -d postgres
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
+   postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
+   wait_healthy "$postgres_container" postgres 180
    "$MIGRATE/run-db-tool.sh" restore-target.sh "$ARTIFACT_DIR" target
    "$MIGRATE/run-db-tool.sh" prepare-target.sh "$ARTIFACT_DIR"
    "$MIGRATE/run-db-tool.sh" restore-cron-jobs.sh "$ARTIFACT_DIR" target
@@ -228,14 +324,15 @@ Use the protected environment files for every call. Their values are unquoted. `
    MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
    "$MIGRATE/run-db-tool.sh" setup-realtime.sh "$ARTIFACT_DIR"
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
-   docker compose -p commonswarm-supabase-stack up -d
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
+   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
    COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml up -d
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
    edge_container="$(COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-     docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml ps -q edge-runtime)"
-   until [ "$(docker inspect --format '{{.State.Health.Status}}' "$edge_container")" = healthy ]; do sleep 2; done
+     docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" ps -q edge-runtime)"
+   wait_healthy "$edge_container" edge-runtime 180
    curl --fail --silent --show-error http://127.0.0.1:9000/health
    COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
      MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
@@ -245,9 +342,9 @@ Use the protected environment files for every call. Their values are unquoted. `
 
    Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
 
-   ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database.
+   ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database. Any step-5 staging upload can leave R2 bytes with no restored `storage.objects` row. The orphan names are `swarm-files/<the upload names recorded in step 5>`. Find them from the recorded step-5 upload names, check those exact bucket/name pairs against `storage.objects`, and remove the orphan bytes before another attempt. No hosted bytes are removed.
 
-5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson`. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. If one control fails, run ABORT-C.
+5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson`. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. Record the exact bucket and object name for every staging upload so ABORT-C can find any R2 orphan. If one control fails, run ABORT-C.
 
    ABORT-D (not all green within 30 minutes): ABORT-C.
 
@@ -266,9 +363,20 @@ Use the protected environment files for every call. Their values are unquoted. `
 
 Use the artifact directory created by `dump-source.sh` in window step 6. A plain nightly `pg_dump -Fc` is not accepted by these restore scripts.
 
-Stop every service and the edge runtime. Create a fresh box data directory as in window step 4. Restore in this order behind the maintenance Caddy file:
+Stop every service and the edge runtime. Move the broken data directory to a unique timestamped name, create a fresh box data directory, and start only PostgreSQL. Wait at most 180 seconds for PostgreSQL before any restore. Restore in this order behind the maintenance Caddy file. Then start the full stack, restart Realtime, start the edge with both inline variables, and wait at most 180 seconds for the edge:
 
 ```sh
+COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+  COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+  docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
+docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
+broken_data_dir="/var/lib/commonswarm/postgres.recovery-broken-$(date -u +%Y%m%dT%H%M%SZ)"
+if [ -e "$broken_data_dir" ]; then printf '%s\n' "recovery directory already exists: $broken_data_dir" >&2; exit 1; fi
+mv /var/lib/commonswarm/postgres "$broken_data_dir"
+install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
+docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
+postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
+wait_healthy "$postgres_container" postgres 180
 "$MIGRATE/run-db-tool.sh" restore-target.sh "$RECOVERY_ARTIFACT_DIR" target
 "$MIGRATE/run-db-tool.sh" prepare-target.sh "$RECOVERY_ARTIFACT_DIR"
 "$MIGRATE/run-db-tool.sh" restore-cron-jobs.sh "$RECOVERY_ARTIFACT_DIR" target
@@ -276,6 +384,18 @@ MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.s
 MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
 "$MIGRATE/run-db-tool.sh" setup-realtime.sh "$RECOVERY_ARTIFACT_DIR"
 "$MIGRATE/run-db-tool.sh" verify-counts.sh "$RECOVERY_ARTIFACT_DIR" target
+docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
+postgres_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q postgres)"
+wait_healthy "$postgres_container" postgres 180
+docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
+COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+  COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+  docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
+edge_container="$(COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+  COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+  docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" ps -q edge-runtime)"
+wait_healthy "$edge_container" edge-runtime 180
+curl --fail --silent --show-error http://127.0.0.1:9000/health
 ```
 
 Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.

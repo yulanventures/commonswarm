@@ -30,6 +30,7 @@ const [
   seedRealtimeTenant,
   makePgService,
   pgHba,
+  runbook,
 ] = await Promise.all([
   readFile(join(stackDir, "compose.yaml"), "utf8"),
   readFile(join(stackDir, "env.example"), "utf8"),
@@ -52,6 +53,7 @@ const [
   readFile(join(stackDir, "migrate", "seed-realtime-tenant.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "make-pg-service.mjs"), "utf8"),
   readFile(join(stackDir, "postgres", "pg_hba.conf"), "utf8"),
+  readFile(join(stackDir, "RUNBOOK.md"), "utf8"),
 ]);
 
 const memory = {
@@ -294,6 +296,87 @@ test("stack controls reject their named mutations", () => {
     const errors = validateStack(mutatedCompose, mutatedEnv, mutatedCaddy).join("\n");
     assert.match(errors, expected, `${name} mutation was not rejected`);
   }
+});
+
+function logicalShellLines(source: string): string[] {
+  const commands: string[] = [];
+  let pending = "";
+  for (const rawLine of source.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("```")) continue;
+    pending = pending ? `${pending} ${line}` : line;
+    if (line.endsWith("\\")) {
+      pending = pending.slice(0, -1).trimEnd();
+      continue;
+    }
+    commands.push(pending);
+    pending = "";
+  }
+  if (pending) commands.push(pending);
+  return commands;
+}
+
+function runbookErrors(source: string): string[] {
+  const errors: string[] = [];
+  const commands = logicalShellLines(source);
+  for (const command of commands) {
+    if (!command.includes("docker compose")) continue;
+    if (!/(?:commonswarm-edge|\$EDGE_DIR|edge-runtime)/.test(command)) continue;
+    if (!command.includes("-p commonswarm-edge")) {
+      errors.push(`edge compose command missing -p commonswarm-edge: ${command}`);
+    }
+  }
+
+  const helperStart = source.indexOf("wait_healthy() {");
+  const helperEnd = source.indexOf("\n}\n```", helperStart);
+  const helper = helperStart >= 0 && helperEnd > helperStart ? source.slice(helperStart, helperEnd) : "";
+  if (!helper.includes('if [ -z "$container_id" ]') ||
+      !helper.includes("deadline=") || !helper.includes("docker inspect --format 'status=") ||
+      !helper.includes("exit 1")) {
+    errors.push("bounded health helper is incomplete");
+  }
+
+  const starts = commands
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => /docker compose\b.*\bup -d postgres\b/.test(command));
+  for (const [ordinal, start] of starts.entries()) {
+    let boundary = commands.length;
+    for (let index = start.index + 1; index < commands.length; index += 1) {
+      if (/docker compose\b.*\bup -d postgres\b/.test(commands[index]!) || commands[index]!.includes("restore-target.sh")) {
+        boundary = index;
+        break;
+      }
+    }
+    const beforeBoundary = commands.slice(start.index + 1, boundary).join("\n");
+    if (!beforeBoundary.includes("ps -q postgres") || !beforeBoundary.includes('wait_healthy "$postgres_container" postgres 180')) {
+      errors.push(`PostgreSQL start ${ordinal + 1} missing bounded health wait before restore-target.sh`);
+    }
+  }
+  if (starts.length === 0) errors.push("runbook has no PostgreSQL starts");
+  return errors;
+}
+
+test("runbook pins the edge Compose project and waits for PostgreSQL before restore", () => {
+  assert.deepEqual(runbookErrors(runbook), []);
+});
+
+test("runbook contracts reject edge-project and PostgreSQL-wait mutations", () => {
+  const edgeMutation = runbook.replace(
+    'docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down',
+    'docker compose --project-directory "$EDGE_DIR" down',
+  );
+  assert.match(
+    runbookErrors(edgeMutation).join("\n"),
+    /edge compose command missing -p commonswarm-edge:/,
+    "edge Compose project mutation was not rejected",
+  );
+
+  const waitMutation = runbook.replace('wait_healthy "$postgres_container" postgres 180', ":");
+  assert.match(
+    runbookErrors(waitMutation).join("\n"),
+    /PostgreSQL start 1 missing bounded health wait before restore-target\.sh/,
+    "PostgreSQL bounded wait mutation was not rejected",
+  );
 });
 
 function sharedCaddyDirectives(source: string): string[] {
