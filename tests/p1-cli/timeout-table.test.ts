@@ -11,7 +11,8 @@ import { enumerateRepository, enumerateText } from "../../scripts/timeout-table/
 import { mappingForRef, validateMapping } from "../../scripts/timeout-table/mapping.mjs";
 import { createRequire } from "node:module";
 import {
-  argsOf, assertNoOriginWrites, finalizeRunResources, markdownReport, rowSummary, runStatus, runTable,
+  argsOf, assertNoOriginWrites, environment, finalizeRunResources, ISOLATED_STATE_ENV,
+  isolatedStateEnv, markdownReport, rowSummary, runStatus, runTable, sourceRefForRun,
 } from "../../scripts/timeout-table/run.mjs";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { readJsonLines, runChild, summarize, withPrivateProfile } from "../../scripts/timeout-table/core.mjs";
@@ -234,10 +235,52 @@ test("enumerator records timeoutMs defaults, ?? literals, as const, identifier A
   } finally {
     await rm(indexDir, { recursive: true, force: true });
   }
+
+  const starDefaultDir = await mkdtemp(join(tmpdir(), "timeout-table-star-default-"));
+  try {
+    await mkdir(join(starDefaultDir, "src"), { recursive: true });
+    await writeFile(join(starDefaultDir, "src/mod.ts"), "export const TIMEOUT_MS = 9_000;\nexport default 4_000;\n");
+    await writeFile(join(starDefaultDir, "src/barrel.ts"), 'export * from "./mod.ts";\n');
+    await writeFile(
+      join(starDefaultDir, "src/use.ts"),
+      'import fallback from "./barrel.ts";\nimport { TIMEOUT_MS } from "./barrel.ts";\nAbortSignal.timeout(fallback);\nAbortSignal.timeout(TIMEOUT_MS);\n',
+    );
+    execFileSync("git", ["init"], { cwd: starDefaultDir, stdio: "ignore" });
+    execFileSync("git", ["add", "src"], { cwd: starDefaultDir, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--no-gpg-sign", "-m", "t"], {
+      cwd: starDefaultDir, stdio: "ignore",
+    });
+    const starred = enumerateRepository({ repo: starDefaultDir, inputs: ["src"] });
+    const useStar = starred.filter(row => row.file === "src/use.ts" && row.name === "AbortSignal.timeout");
+    assert.deepEqual(useStar.map(row => row.value_ms), [9_000]);
+  } finally {
+    await rm(starDefaultDir, { recursive: true, force: true });
+  }
+
+  const timeoutProperty = enumerateText("fixture.ts", "const x = { timeout: 1500 };");
+  assert.equal(timeoutProperty.length, 1);
+  assert.equal(timeoutProperty[0]!.value_ms, 1_500);
+  assert.equal(
+    timeoutProperty[0]!.unit_note,
+    "numeric timeout property; milliseconds unless the cited API defines another unit",
+  );
 });
 
 test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED", async () => {
-  assert.equal(argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x"]).runs, 20);
+  assert.throws(
+    () => argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x"]),
+    /--ref is required/,
+  );
+  assert.throws(
+    () => argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x", "--ref", ""]),
+    /--ref is required/,
+  );
+  const parsed = argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x", "--ref", "HEAD"]);
+  assert.equal(parsed.runs, 20);
+  assert.equal(parsed.ref, "HEAD");
+  assert.equal(sourceRefForRun("HEAD"), null);
+  assert.equal(sourceRefForRun("main"), null);
+  assert.equal(sourceRefForRun("v0.1.71"), "v0.1.71");
   const id = "fixture.ts:TIMEOUT_MS";
   const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }];
   const mapping = { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } };
@@ -683,6 +726,71 @@ test("SIGINT removes the profile copy and the git worktree", async t => {
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
 });
 
+test("measurement children do not create or change parent state directories", async t => {
+  const sentinel = await mkdtemp(join(tmpdir(), "timeout-table-sentinel-"));
+  t.after(() => rm(sentinel, { recursive: true, force: true }));
+  const previous: Record<string, string | undefined> = {};
+  for (const key of Object.keys(ISOLATED_STATE_ENV)) {
+    previous[key] = process.env[key];
+    process.env[key] = join(sentinel, key);
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  await writeFile(join(sentinel, "MARKER"), "keep", { mode: 0o600 });
+  const copyRoot = await mkdtemp(join(tmpdir(), "timeout-table-isolated-"));
+  t.after(() => rm(copyRoot, { recursive: true, force: true }));
+  const log = join(copyRoot, "fetch.jsonl");
+  await writeFile(log, "", { mode: 0o600 });
+  const env = environment("http://127.0.0.1:1", {
+    root: copyRoot,
+    profile: { url: "http://127.0.0.1:9", anon_key: "public" },
+  }, log);
+  assert.deepEqual(Object.keys(ISOLATED_STATE_ENV).sort(), [
+    "CLAUDE_CONFIG_DIR", "GROK_HOME", "HOME", "SWARM_AGENT_STATE_DIR",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME",
+  ].sort());
+  const isolated = isolatedStateEnv(copyRoot);
+  for (const key of Object.keys(ISOLATED_STATE_ENV)) {
+    assert.equal(env[key], isolated[key], key);
+    assert.equal(env[key]!.startsWith(copyRoot), true, key);
+    assert.notEqual(env[key], process.env[key], key);
+  }
+  const script = `
+    import { cloudTarget } from ${JSON.stringify(join(repo, "src/cloud/config.ts"))};
+    import { agentCredentialStore, defaultAgentCredentialDirectory } from ${JSON.stringify(join(repo, "src/cloud/agent-credential.ts"))};
+    import { defaultListenerStateDirectory } from ${JSON.stringify(join(repo, "src/listener/file-store.ts"))};
+    import { ensureSecureStateDirectory } from ${JSON.stringify(join(repo, "src/cloud/storage.ts"))};
+    const cred = defaultAgentCredentialDirectory();
+    const listener = defaultListenerStateDirectory();
+    await ensureSecureStateDirectory(listener);
+    const store = await agentCredentialStore({
+      target: cloudTarget("http://127.0.0.1:1", "public"),
+      lineageKey: ${JSON.stringify("a".repeat(32))},
+    });
+    await store.withLock(async () => {});
+    process.stdout.write(JSON.stringify({
+      cred, listener,
+      swarm: process.env.SWARM_AGENT_STATE_DIR,
+      xdg: process.env.XDG_STATE_HOME,
+      home: process.env.HOME,
+    }));
+  `;
+  const result = await runChild(process.execPath, ["--import", "tsx", "-e", script], { env });
+  assert.equal(result.code, 0, result.stderr);
+  const reported = JSON.parse(result.stdout) as { cred: string; listener: string; swarm: string; xdg: string; home: string };
+  assert.equal(reported.home, copyRoot);
+  assert.equal(reported.swarm.startsWith(copyRoot), true);
+  assert.equal(reported.xdg.startsWith(copyRoot), true);
+  assert.equal(reported.cred.startsWith(copyRoot), true);
+  assert.equal(reported.listener.startsWith(copyRoot), true);
+  const listed = execFileSync("find", [sentinel, "-print"], { encoding: "utf8" }).trim().split("\n").sort();
+  assert.deepEqual(listed, [sentinel, join(sentinel, "MARKER")].sort());
+});
+
 test("runTable does not write to the origin and will not PASS unacknowledged NOT MEASURED rows", async t => {
   const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -744,6 +852,20 @@ test("runTable does not write to the origin and will not PASS unacknowledged NOT
   const url = `http://127.0.0.1:${address.port}`;
   const home = await mkdtemp(join(tmpdir(), "timeout-table-run-"));
   t.after(() => rm(home, { recursive: true, force: true }));
+  const sentinel = await mkdtemp(join(tmpdir(), "timeout-table-run-sentinel-"));
+  t.after(() => rm(sentinel, { recursive: true, force: true }));
+  const previous: Record<string, string | undefined> = {};
+  for (const key of Object.keys(ISOLATED_STATE_ENV)) {
+    previous[key] = process.env[key];
+    process.env[key] = join(sentinel, key);
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  await writeFile(join(sentinel, "MARKER"), "keep", { mode: 0o600 });
   const profileDir = join(home, "profile-src");
   await mkdir(profileDir, { recursive: true, mode: 0o700 });
   await chmod(profileDir, 0o700);
@@ -767,12 +889,12 @@ test("runTable does not write to the origin and will not PASS unacknowledged NOT
   const channelId = "src/cloud/channels.ts:timeoutMs";
   const incomplete = [checkId, signalId];
   await assert.rejects(runTable({
-    baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: [],
   }), /NOT MEASURED without --acknowledge-not-measured/);
   const result = await runTable({
-    baseUrl: url, profile, client: null, runs: 2, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: null, runs: 2, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: incomplete,
   });
@@ -786,12 +908,12 @@ test("runTable does not write to the origin and will not PASS unacknowledged NOT
   const silentClient = join(home, "silent-client.mjs");
   await writeFile(silentClient, `process.argv.includes("--version") && process.exit(0);\nprocess.exit(0);\n`, { mode: 0o700 });
   await assert.rejects(runTable({
-    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: incomplete,
   }), /NOT MEASURED without --acknowledge-not-measured/);
   const silent = await runTable({
-    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: silentClient, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: [...incomplete, channelId, "src/cloud/files.ts:REQUEST_TIMEOUT_MS"],
   });
@@ -809,7 +931,7 @@ if (process.argv[2] === "check" || process.argv[1] && process.argv.includes("che
 process.exit(0);
 `, { mode: 0o700 });
   await assert.rejects(runTable({
-    baseUrl: url, profile, client: timeoutClient, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: timeoutClient, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: [...incomplete, channelId, "src/cloud/files.ts:REQUEST_TIMEOUT_MS"],
   }), (error: unknown) => {
@@ -826,8 +948,10 @@ process.stderr.write("channel boom\\n");
 process.exit(7);
 `, { mode: 0o700 });
   await assert.rejects(runTable({
-    baseUrl: url, profile, client: noisyClient, runs: 1, pauseMs: 0, ref: null,
+    baseUrl: url, profile, client: noisyClient, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: incomplete,
   }), /channel boom/);
+  const listed = execFileSync("find", [sentinel, "-print"], { encoding: "utf8" }).trim().split("\n").sort();
+  assert.deepEqual(listed, [sentinel, join(sentinel, "MARKER")].sort());
 });

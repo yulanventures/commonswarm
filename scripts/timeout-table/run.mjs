@@ -38,9 +38,39 @@ export function argsOf(argv) {
     } else throw new Error(`unknown argument: ${arg}`);
   }
   if (!out.baseUrl || !out.profile) throw new Error("--base-url and --profile are required");
+  if (typeof out.ref !== "string" || !out.ref || out.ref.startsWith("-")) {
+    throw new Error("--ref is required");
+  }
   if (!Number.isSafeInteger(out.runs) || out.runs < 1) throw new Error("--runs must be a positive integer");
   if (!Number.isSafeInteger(out.pauseMs) || out.pauseMs < 0) throw new Error("--pause-ms must be a non-negative integer");
   new URL(out.baseUrl);
+  return out;
+}
+
+// HEAD and main are the working tree plus the HEAD mapping section. Any other
+// --ref is a git revision and is measured from a detached worktree of that commit.
+export function sourceRefForRun(ref) {
+  if (ref == null || ref === "HEAD" || ref === "main") return null;
+  return ref;
+}
+
+// Directory variables the CLI reads for agent credentials, listener state,
+// sessions, and host homes. Each child value is under the private copy root.
+export const ISOLATED_STATE_ENV = {
+  HOME: root => root,
+  XDG_CONFIG_HOME: root => join(root, "xdg-config"),
+  XDG_STATE_HOME: root => join(root, "xdg-state"),
+  XDG_DATA_HOME: root => join(root, "xdg-data"),
+  XDG_CACHE_HOME: root => join(root, "xdg-cache"),
+  XDG_RUNTIME_DIR: root => join(root, "xdg-runtime"),
+  SWARM_AGENT_STATE_DIR: root => join(root, "agent-state"),
+  CLAUDE_CONFIG_DIR: root => join(root, "claude-config"),
+  GROK_HOME: root => join(root, "grok-home"),
+};
+
+export function isolatedStateEnv(root) {
+  const out = {};
+  for (const [key, locate] of Object.entries(ISOLATED_STATE_ENV)) out[key] = locate(root);
   return out;
 }
 
@@ -126,19 +156,18 @@ function cliArgs(operation, copy) {
   throw new Error(`operation has no client arguments: ${operation}`);
 }
 
-function environment(base, copy, log) {
+export function environment(base, copy, log) {
   const preload = join(here, "preload.cjs");
   const existing = process.env.NODE_OPTIONS ?? "";
   return {
     ...process.env,
+    ...isolatedStateEnv(copy.root),
     NODE_OPTIONS: `${existing}${existing ? " " : ""}--require=${preload}`,
     TIMEOUT_TABLE_BASE_URL: base,
     TIMEOUT_TABLE_PROFILE_ORIGIN: copy.profile.url,
     TIMEOUT_TABLE_FETCH_LOG: log,
     SWARM_CLOUD_URL: copy.profile.url,
     SWARM_CLOUD_ANON_KEY: copy.profile.anon_key,
-    HOME: copy.root,
-    XDG_CONFIG_HOME: join(copy.root, "xdg"),
   };
 }
 
@@ -257,7 +286,8 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
 export async function runTable(options) {
   const repo = resolve(join(here, "../.."));
   const mappingFile = JSON.parse(await readFile(options.mapping, "utf8"));
-  const inventory = enumerateRepository({ repo, ref: options.ref });
+  const sourceRef = sourceRefForRun(options.ref);
+  const inventory = enumerateRepository({ repo, ref: sourceRef });
   validateMapping(inventory, mappingFile, options.ref);
   const mapping = mappingForRef(mappingFile, options.ref);
   const resources = { repo, tempRoot: null, worktreePath: null };
@@ -269,7 +299,7 @@ export async function runTable(options) {
     const log = join(tempRoot, "fetch.jsonl");
     await writeFile(log, "", { mode: 0o600 });
     const copy = await makePrivateProfileCopy(options.profile, { tempParent: tempRoot });
-    const source = await sourceRootForRef(repo, options.ref, tempRoot, resources);
+    const source = await sourceRootForRef(repo, sourceRef, tempRoot, resources);
     const measurements = new Map();
     const operations = new Map();
     for (const row of inventory) {

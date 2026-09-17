@@ -18,7 +18,7 @@ Enumerate the shipped `v0.1.71` sources without checking out the tag:
 node scripts/timeout-table/enumerate.mjs --ref v0.1.71
 ```
 
-Measure the shipped client against one base URL. Use absolute paths. The temporary ref worktree and profile copy are removed after success, failure, SIGINT, SIGTERM, SIGHUP, or an unexpected process exit.
+Measure a named client against one base URL. `--ref` is required so a window run cannot apply HEAD budgets to a shipped client by accident. `--ref HEAD` and `--ref main` inventory the working tree against the HEAD mapping section. `--ref v0.1.71` inventories that tag from a detached worktree. Use absolute paths. The temporary ref worktree and profile copy are removed after success, failure, SIGINT, SIGTERM, SIGHUP, or an unexpected process exit.
 
 ```sh
 node scripts/timeout-table/run.mjs \
@@ -32,7 +32,7 @@ node scripts/timeout-table/run.mjs \
   --output /absolute/path/to/loopback-timeout-table.md
 ```
 
-`--client` has no default. Without it, client operations are `NOT RUN`; `auth-settings`, `signal-read`, and the uncapped source check can still run. A production-window gate must pass `--client`. `--runs` defaults to 20. `--pause-ms` defaults to 500. Percentiles use the nearest-rank method. The report names the `--ref` and the `--client` path; inventory comes from the ref, timings come from the given client and the source helpers.
+`--ref` has no default. `--client` has no default. Without `--client`, client operations are `NOT RUN`; `auth-settings`, `signal-read`, and the uncapped source check can still run. A production-window gate must pass `--client` and the ref it is measuring. `--runs` defaults to 20. `--pause-ms` defaults to 500. Percentiles use the nearest-rank method. The report names the `--ref` and the `--client` path; inventory comes from the ref, timings come from the given client and the source helpers.
 
 `--acknowledge-not-measured` is an exact list of inventory ids whose gate is `NOT MEASURED`. Extra ids fail. Missing ids fail. `FAIL` rows always fail the process. An acknowledgement on a `FAIL` row is not extra.
 
@@ -52,7 +52,7 @@ The preload rewrites requests whose origin equals the profile URL onto `--base-u
 
 There are no bounded-write measurements. Signal, feedback, receipt, activity, delivery, channel mutation, capability, workspace, membership, file mutation, session, and credential operations are `not-run`. The reason and any proxy are in `mapping.json` for each source ID. A proxy fills p50/p95 columns only; the gate stays `NOT RUN`.
 
-Before a check, the runner copies only the profile file and the credential file it names, into a new directory at mode `0700` with files at mode `0600`. It does not copy the parent directory. It rewrites the copied profile to use the copied credential named `credential.json`. It removes optional `expires_at` from the copied credential and gives the child an isolated `HOME`; this prevents automatic credential renewal and prevents reads from the running seat's state. The original profile and cursor are not opened by the child.
+Before a check, the runner copies only the profile file and the credential file it names, into a new directory at mode `0700` with files at mode `0600`. It does not copy the parent directory. It rewrites the copied profile to use the copied credential named `credential.json`. It removes optional `expires_at` from the copied credential. Every measurement child gets directory variables pointed inside that private copy: `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`, `SWARM_AGENT_STATE_DIR`, `CLAUDE_CONFIG_DIR`, and `GROK_HOME`. The child cannot create, read, or change the operator's agent credential store or listener state. The original profile and cursor are not opened by the child.
 
 For the whole-operation check budget, each sample has two parts:
 
@@ -85,7 +85,7 @@ Postgres and Claude hook seconds are converted to milliseconds. Non-time byte, c
 
 Inventory ids are `file:name`, with `#N` for the second and later same name in one file (`src/cli.ts:setTimeout#2`). The source line is report data only. A pure line shift does not change an id.
 
-`mapping.json` is version 2. It holds one `refs.<ref>.rows` section per measured client. The window gate measures the released CLI (`v0.1.71`) and the next release (`HEAD`; `main` is an alias of that section). Omit `--ref` to use the `HEAD` section against the working tree. `run.mjs --ref <ref>` uses that section and refuses a ref with no section. The exact-set test fails for an unmapped inventory ID and for a stale mapped ID, for each measured ref.
+`mapping.json` is version 2. It holds one `refs.<ref>.rows` section per measured client. The window gate measures the released CLI (`v0.1.71`) and the next release (`HEAD`; `main` is an alias of that section). `run.mjs` refuses a run without `--ref`. `--ref HEAD` and `--ref main` use the HEAD section against the working tree. `--ref v0.1.71` uses that section from a detached worktree. A ref with no section is refused. The exact-set test fails for an unmapped inventory ID and for a stale mapped ID, for each measured ref.
 
 ## Mutation controls
 
@@ -93,7 +93,7 @@ Inventory ids are `file:name`, with `#N` for the second and later same name in o
 |---|---|
 | Mapping completeness | For each measured ref, delete one live mapping row, or add a stale ID. |
 | Line-independent ids | Insert lines above a fixture timeout site; ids must stay the same. |
-| Enumerator forms | Remove handling of a `timeoutMs` default, a `??` literal, `as const`, `AbortSignal.timeout(IDENTIFIER)`, an import alias, a namespace property `T.TIMEOUT_MS`, a `requestTimeoutMs` property, a module-level const shadowed by a later local, a directory-index import, `export * from`, or two function-local `TIMEOUT_MS` values. |
+| Enumerator forms | Remove handling of a `timeoutMs` default, a `??` literal, `as const`, `AbortSignal.timeout(IDENTIFIER)`, an import alias, a namespace property `T.TIMEOUT_MS`, a `requestTimeoutMs` property, a module-level const shadowed by a later local, a directory-index import, `export * from`, two function-local `TIMEOUT_MS` values, or pass a property-assignment identifier into `normalizedValue` so `{ timeout: N }` loses its unit note. Re-export `default` through `export * from`. |
 | Headroom gate | Replace the slow fake-server delay with the fast delay, or reverse the `>= 2` comparison. An incomplete row with p95 already over half the budget must `FAIL` even when acknowledged. Zero-duration samples must `PASS` with infinite headroom, not `NOT RUN`. |
 | Markdown PASS/FAIL | Feed `markdownReport` the fast durations and require `FAIL`, or the slow durations and require `PASS`. |
 | Origin rewrite | Remove the rewrite; the original fake server receives the request and the target receives none. |
@@ -109,6 +109,8 @@ Inventory ids are `file:name`, with `#N` for the second and later same name in o
 | Per-request path | Record child wall time when the fetch log has no matching endpoint; `channel-ls` must not `PASS`. |
 | Mixed operation scopes | Map two `safe-read` rows to one operation name with different scopes; `validateMapping` must throw. Omit `operation.name`; `validateMapping` must throw. |
 | Child capture | Spawn `runChild` without `{ capture: true }`; stdout must still be in the result. |
+| Isolated state directories | Drop `XDG_STATE_HOME` or `SWARM_AGENT_STATE_DIR` from the child env override; a parent sentinel directory is created or changed. |
+| Required `--ref` | Restore the default `ref: null`; `argsOf` without `--ref` must throw. |
 
 Run the controls with:
 
@@ -204,3 +206,14 @@ env -u FORCE_COLOR node --import tsx --test tests/p1-cli/timeout-table.test.ts
 | `check-uncapped` omits `capture` / uses `probe.mjs` (agyTT3T5 RIGOUR 1) | REFUTED | Cut mismatch. Real tree: `source-check.ts` with `{ capture: true }`. |
 | Nested locals share a flat Map (agyTT3T5 RIGOUR 2) | CONFIRMED | Two functions `TIMEOUT_MS = 1000` and `2000`: both `AbortSignal.timeout` rows were 1000. Enumerator now uses per-block scopes. |
 | README / mapping chunks / tests in T2 T3 T4 T1b remainder (agyTT3T2, T3a–d, T4a–b, T1b PASS slices) | CONFIRMED holding (no defect) | Read against the real tree. Antigravity parts were cut at line boundaries; missing-file claims were checked on disk. |
+
+## Review round 4 (2026-09-17): rulings
+
+| Claim (arm) | Ruling | Evidence and fix |
+|---|---|---|
+| `run.mjs` `environment()` copies parent `XDG_STATE_HOME` and `SWARM_AGENT_STATE_DIR`; check creates those stores (grokTT4 PRODUCTION) | CONFIRMED | Loopback `runTable` with parent `XDG_STATE_HOME` at a sentinel created `SENTINEL/cswarm/agent-credentials`. Parent `SWARM_AGENT_STATE_DIR=SENTINEL/does-not-exist-yet` created that directory. `openProfileCredential` → `withFileLock` → `secureDirectory`. Child env now points `HOME`, `XDG_*`, `SWARM_AGENT_STATE_DIR`, `CLAUDE_CONFIG_DIR`, and `GROK_HOME` inside the private copy. Sentinel test plus mutation. |
+| `--ref` defaults to HEAD; a window can measure HEAD 3900 ms budgets against a shipped 3000 ms client (grokTT4 RIGOUR) | CONFIRMED | `argsOf` without `--ref` returned `ref: null`. Required `--ref`. `--ref HEAD` / `--ref main` still inventory the working tree. README examples keep `--ref v0.1.71`. Test plus mutation. |
+| `export * from` re-exports `default` (agyTT4T5 RIGOUR) | CONFIRMED | Fixture `export default 4000` plus `export * from "./mod.ts"` plus `import fallback from "./barrel.ts"` enumerated `AbortSignal.timeout` = 4000. ES modules do not re-export default through `export *`. Enumerator now skips `default`. Named `TIMEOUT_MS` through the same barrel still resolves. Test plus mutation. |
+| Blocked WebSocket `ReferenceError: method is not defined` (agyTT4T1a PRODUCTION) | REFUTED | Lead: `pathOnly` is a top-level function; the round-3 BLOCKED WebSocket test passes on 9860904b and its mutation fails. Loopback: relative `new WebSocket("/realtime/v1/websocket?token=ws-secret")` exit 2, `TypeError: Invalid URL`, log `CONNECT /realtime/v1/websocket BLOCKED`. Catch uses `method: "CONNECT"`, not `{ method }`. |
+| `ts.isPropertyAssignment` is checked on `node.name`, so `{ timeout: N }` gets the generic unit note (agyTT4T1a RIGOUR) | CONFIRMED | `enumerateText("fixture.ts", "const x = { timeout: 1500 };")` → `unit_note: "milliseconds"`. `add` now receives the `PropertyAssignment` node. Fixture expects `"numeric timeout property; milliseconds unless the cited API defines another unit"`. Mutation: pass `node.name` again. |
+| `session-client` `setTimeout#2` `proxy_operation: "signal-read"` can PASS an unmeasured session read (agyTT4T3a PRODUCTION) | REFUTED | Lead: `rowSummary` on the HEAD row with 20 × 120 ms proxy samples returns gate `NOT RUN`. Direct: `class: "not-run"` is applied before headroom; stats `gate: "NOT RUN"`, `headroom: 250`. Proxy fills p50/p95 only. |

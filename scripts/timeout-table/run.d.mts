@@ -1,9 +1,17 @@
 import type { TimeoutInventoryRow } from "./enumerate.mjs";
 export function argsOf(argv: string[]): {
-  client: string | null; runs: number; pauseMs: number; ref: string | null;
+  client: string | null; runs: number; pauseMs: number; ref: string;
   sourceTimeoutMs: number; mapping: string; output: string | null;
   acknowledgeNotMeasured: string[]; baseUrl?: string; profile?: string;
 };
+export function sourceRefForRun(ref: string | null | undefined): string | null;
+export const ISOLATED_STATE_ENV: Record<string, (root: string) => string>;
+export function isolatedStateEnv(root: string): Record<string, string>;
+export function environment(
+  base: string,
+  copy: { root: string; profile: { url: string; anon_key: string } },
+  log: string,
+): NodeJS.ProcessEnv;
 export function rowSummary(row: TimeoutInventoryRow, map: any, measured: any): {
   runs: number; p50: number | null; p95: number | null; max: number | null;
   headroom: number | null; gate: string;

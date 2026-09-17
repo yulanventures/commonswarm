@@ -305,7 +305,7 @@ export function enumerateText(file, text, options = {}) {
       const name = timeoutBindingName(node.name);
       if (isTimeoutBindingName(name)) {
         const value = valueOf(node.initializer);
-        if (value !== null) add(node.name, name, value);
+        if (value !== null) add(node, name, value);
       }
     }
     ts.forEachChild(node, child => {
@@ -353,9 +353,11 @@ export function enumerateRepository({ repo, ref = null, inputs = DEFAULT_INPUTS 
           if (!fromFile) continue;
           const prefix = `${fromFile}:`;
           for (const [key, value] of exportValues) {
-            if (typeof value === "number" && key.startsWith(prefix)) {
-              nextExports.set(`${file.path}:${key.slice(prefix.length)}`, value);
-            }
+            if (typeof value !== "number" || !key.startsWith(prefix)) continue;
+            const exportedName = key.slice(prefix.length);
+            // `export * from` does not re-export default.
+            if (exportedName === "default") continue;
+            nextExports.set(`${file.path}:${exportedName}`, value);
           }
           continue;
         }
