@@ -4,6 +4,9 @@
 
 | Named mutation | Required failure line |
 |---|---|
+| Disable Google sign-in | `auth provider GOOGLE not enabled` |
+| Remove the Google client secret name | `auth provider GOOGLE SECRET name missing` |
+| Change the GitHub callback to the hosted project | `auth provider GITHUB callback` |
 | Remove `POSTGRES_PASSWORD` from `env.example` | `env missing POSTGRES_PASSWORD` |
 | Publish PostgreSQL on loopback | `postgres port published` |
 | Change GoTrue memory from 300 MB to 700 MB | `memory gotrue` |

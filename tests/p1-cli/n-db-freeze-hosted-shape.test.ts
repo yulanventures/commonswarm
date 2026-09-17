@@ -130,6 +130,22 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
     assert.match(result.stdout, /tables this role cannot guard with a trigger: auth\.schema_migrations/);
     nothingChanged();
 
+    // 2b. preflight only reads: exit 0, the same list, nothing changed.
+    result = tool("source-read-only.sh", ["preflight", "source"], identity);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /tables this role cannot guard with a trigger: auth\.schema_migrations/);
+    assert.match(result.stdout, /preflight changed nothing/);
+    nothingChanged();
+
+    // 2c. When every table can be guarded the list is empty, and an UNSET acknowledgement still refuses: only an
+    // explicitly set empty value acknowledges an empty list. (Checked with the grant, then the grant is removed.)
+    assert.equal(superSql(`GRANT TRIGGER ON auth.schema_migrations TO ${OWNER};`).status, 0);
+    result = tool("source-read-only.sh", ["enable", "source"], identity);
+    assert.equal(result.status, 65, `enable froze with an unset acknowledgement: ${result.stdout}${result.stderr}`);
+    assert.match(result.stdout, /tables this role cannot guard with a trigger: none/);
+    nothingChanged();
+    assert.equal(superSql(`REVOKE TRIGGER ON auth.schema_migrations FROM ${OWNER};`).status, 0);
+
     // 3. A failure inside enable leaves nothing behind: a guard function owned by another role cannot be replaced.
     assert.equal(superSql(`CREATE FUNCTION public.commonswarm_cutover_write_guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NULL; END$$;
       ALTER FUNCTION public.commonswarm_cutover_write_guard() OWNER TO supabase_admin;`).status, 0);

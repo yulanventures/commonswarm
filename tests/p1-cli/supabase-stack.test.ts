@@ -196,6 +196,40 @@ test("self-hosted stack contract is complete", () => {
   assert.deepEqual(validateStack(compose, envExample, caddy), []);
 });
 
+// Production enables GitHub, Google and email sign-in (read-only /auth/v1/settings, 2026-09-17). The box GoTrue must
+// enable the same providers, and each OAuth callback must be the box's public auth URL.
+const PRODUCTION_AUTH_PROVIDERS = ["GITHUB", "GOOGLE", "EMAIL"] as const;
+const OAUTH_PROVIDERS = ["GITHUB", "GOOGLE"] as const;
+
+function authProviderErrors(envSource: string): string[] {
+  const values = new Map([...envSource.matchAll(/^([A-Z][A-Z0-9_]*)=(.*)$/gm)].map((match) => [match[1]!, match[2]!]));
+  const errors: string[] = [];
+  for (const provider of PRODUCTION_AUTH_PROVIDERS) {
+    if (values.get(`GOTRUE_EXTERNAL_${provider}_ENABLED`) !== "true") errors.push(`auth provider ${provider} not enabled`);
+  }
+  for (const provider of OAUTH_PROVIDERS) {
+    for (const suffix of ["CLIENT_ID", "SECRET"]) {
+      if (!values.has(`GOTRUE_EXTERNAL_${provider}_${suffix}`)) errors.push(`auth provider ${provider} ${suffix} name missing`);
+    }
+    if (values.get(`GOTRUE_EXTERNAL_${provider}_REDIRECT_URI`) !== "https://api.commonswarm.com/auth/v1/callback") {
+      errors.push(`auth provider ${provider} callback`);
+    }
+  }
+  return errors;
+}
+
+test("the box enables the sign-in providers production enables", () => {
+  assert.deepEqual(authProviderErrors(envExample), []);
+  const mutations: Array<[string, string, RegExp]> = [
+    ["google disabled", envExample.replace("GOTRUE_EXTERNAL_GOOGLE_ENABLED=true", "GOTRUE_EXTERNAL_GOOGLE_ENABLED=false"), /auth provider GOOGLE not enabled/],
+    ["google secret name", envExample.replace(/^GOTRUE_EXTERNAL_GOOGLE_SECRET=.*\n/m, ""), /auth provider GOOGLE SECRET name missing/],
+    ["github callback host", envExample.replace("GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI=https://api.commonswarm.com/auth/v1/callback", "GOTRUE_EXTERNAL_GITHUB_REDIRECT_URI=https://ukezjcnxjvkpkeezxaew.supabase.co/auth/v1/callback"), /auth provider GITHUB callback/],
+  ];
+  for (const [name, mutated, expected] of mutations) {
+    assert.match(authProviderErrors(mutated).join("\n"), expected, `${name} mutation was not rejected`);
+  }
+});
+
 test("stack controls reject their named mutations", () => {
   const mutations: Array<[string, string, string, string, RegExp]> = [
     ["missing env", compose, envExample.replace(/^POSTGRES_PASSWORD=\n/m, ""), caddy, /env missing POSTGRES_PASSWORD/],

@@ -124,6 +124,14 @@ claim, test, or operator-text defect.
 | 24 | Bare `/rest/v1`, `/auth/v1`, `/storage/v1` answer 404 (antigravity P4) | DECLINED | No CommonSwarm client calls a bare path (`ENDPOINTS.md`); recorded under Not established. |
 | 25 | Temporary SQL files lack a trap (antigravity P2) | DECLINED | They hold no secret and live in a `--rm` container. |
 
+Found by the lead while checking the fold (not raised by either arm):
+
+| # | Finding | Ruling | Evidence and fix |
+|---|---|---|---|
+| 26 | The box GoTrue had no Google settings, but production enables Google sign-in | CONFIRMED, PRODUCTION | Read-only `GET /auth/v1/settings` 2026-09-17: github, google and email enabled. Added the four `GOTRUE_EXTERNAL_GOOGLE_*` names to `env.example` and the GoTrue required-env list; `supabase-stack.test.ts` requires every production provider and the box callback, with mutations. The Google client needs the box callback added before the window (operator); GitHub gets a yulanventures-owned app with that callback (HezLead). |
+| 27 | The production "preflight" in the rehearsal was `enable` without the acknowledgement; with an empty unguarded list it would have frozen production | CONFIRMED, PRODUCTION hazard | `"${FREEZE_UNGUARDED_TABLES:-}" != ""` was false for an empty list. Added a read-only `preflight` mode (exit 0, no confirmation needed), and `enable` now refuses unless the acknowledgement is SET. The hosted-shape test proves both, with an empty list. |
+| 28 | The Maker's runbook rewrite dropped ABORT-A, ABORT-D, the 1.1.1.1 DNS judgement, the write-pause announcement, the `.prev` file, what the freeze cannot stop, and the step-7 production controls; it also made a second production `enable` routine | CONFIRMED, RIGOUR | Restored by the lead; the second `enable` is only a safe retry. |
+
 Production state outside the dump, read-only 2026-09-17: extensions pg_cron 1.6.4, plpgsql, pgcrypto, uuid-ossp,
 pg_stat_statements, supabase_vault; zero vault secrets; no `supabase_functions.hooks` table; five cron jobs (above);
 role settings equal to the box image except database-level `app.settings.jwt_exp=3600` (no CommonSwarm code reads it),

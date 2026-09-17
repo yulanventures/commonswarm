@@ -116,11 +116,15 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
 9. Start the 512 MB edge runtime on the box database. Run all local health checks.
 
-10. Through the staging host, prove GitHub sign-in, a migrated CLI refresh, an authenticated REST read, a Realtime wake, Storage upload and download, one edge command, one edge read, table counts, cron jobs, and object digests.
+10. Through the staging host, prove a migrated CLI refresh, an authenticated REST read, a Realtime wake, Storage upload and download, one edge command, one edge read, table counts, cron jobs, and object digests. GitHub and Google sign-in cannot be proved here: both callbacks are `https://api.commonswarm.com/auth/v1/callback`, which still points at Supabase; window step 7 proves them.
 
 11. Run `cswarm check`, a listener wake, and the client timeout table. Each client timeout must be at least twice its p95 over 20 runs.
 
-12. Run the source freeze preflight without `FREEZE_UNGUARDED_TABLES`. It must exit 65 before a change. Record the tables and roles that it prints. Recompute them at window time.
+12. Run the source freeze preflight on production. `preflight` only reads and needs no confirmation: it checks the source identity, prints the tables the source role cannot trigger, and exits 0 without changing anything. Record the list. Recompute it, and the probe's unprobed roles, at window time; never copy them from this file. `enable` refuses with exit 65 unless `FREEZE_UNGUARDED_TABLES` is SET to exactly that list (set to empty when the list is empty; unset never acknowledges).
+
+   ```sh
+   "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" preflight source
+   ```
 
 13. Complete the step-4 freeze drill on the restored box. The hosted-shape Docker test is a separate control.
 
@@ -134,9 +138,9 @@ Use the protected environment files for every call. Their values are unquoted. `
 
 0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, and decision checklist.
 
-1. Install `commonswarm-api-maintenance.caddy`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
+1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
 
-2. Move `api.commonswarm.com` to the box. Measure the maintenance behavior:
+2. Move `api.commonswarm.com` to the box (A 178.105.29.28, proxied) through the DNS holder. Judge DNS through `1.1.1.1` or a flushed resolver, never a local cache. From here the maintenance behaviour is:
 
    - Every `POST`, `PUT`, `PATCH`, and `DELETE` returns 503. This includes the POST-only edge functions.
    - Every `/auth/v1` call returns 503.
@@ -147,18 +151,22 @@ Use the protected environment files for every call. Their values are unquoted. `
    - `cswarm note` exits 1 in about 6.2 seconds with the maintenance sentence.
    - The hook form was not measured.
 
-   A POST to `/functions/v1/read` must show the box's 503 body. If this path proof fails, restore the Supabase CNAME and the previous Caddy file.
+   - `capability` counts a GET in its rate buckets before its 405. Before the step-3 freeze those rows are in the final dump; after it the write fails with SQLSTATE 25006.
 
-3. Freeze the source with the confirmation inline. Run `enable` a second time while frozen. It is safe and must leave the same freeze objects. Then run the frozen probe.
+   Path proof: a POST to `https://api.commonswarm.com/functions/v1/read` answers 503 with `{"error":"maintenance"}` (only the box sends that body) and `Retry-After: 300`. Then announce the write pause.
+
+   ABORT-A (path proof fails): restore the Supabase CNAME (not proxied) and the `.prev` Caddy file.
+
+3. Freeze the source with the confirmation inline, then run the frozen probe. If `enable` has to run again (for example after the probe failed for a reason you fixed), a second run while frozen is safe: it exits 0, adds no trigger, and the freeze stays.
 
    ```sh
-   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
-     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
      "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
    FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
      "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
    ```
+
+   What the freeze cannot stop: writes to the tables the source role cannot trigger (the preflight list) by a session that overrides the database default, and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com`. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
 
    ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then restore DNS and Caddy.
 
@@ -196,7 +204,9 @@ Use the protected environment files for every call. Their values are unquoted. `
 
    ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database.
 
-5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson`. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check`, a listener wake, an edge command and read, Realtime, Storage, and the timeout table. If one control fails, run ABORT-C.
+5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson`. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. If one control fails, run ABORT-C.
+
+   ABORT-D (not all green within 30 minutes): ABORT-C.
 
 6. Take a full migration artifact set from the box. Store it with the nightly backup. This is the recovery artifact before the box accepts writes.
 
@@ -205,7 +215,7 @@ Use the protected environment files for every call. Their values are unquoted. `
    "$MIGRATE/run-db-tool.sh" dump-source.sh "$RECOVERY_ARTIFACT_DIR" target
    ```
 
-7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. Never install the fallback Caddy file after this point. Fix later failures forward.
+7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. Never install the fallback Caddy file after this point. Fix later failures forward. Production controls on `api.commonswarm.com`: GitHub sign-in and Google sign-in end to end in the operator's browser (both callbacks are `https://api.commonswarm.com/auth/v1/callback`, so this is their first proof on the box), `cswarm check` and a listener wake, one command, one upload, the install page, and the site.
 
 8. Tell humans to sign in once. Keep the hosted project frozen for 48 hours. Keep the moved rehearsal data directory through this step. Do not unfreeze the hosted project.
 
@@ -229,7 +239,9 @@ Rehearse this drill on a second local database before the window.
 
 ## Human sessions
 
-An old asymmetric browser access token can fail against the HS256 box. The site clears it and shows sign-in. The human signs in with GitHub once.
+An old asymmetric browser access token can fail against the HS256 box. The site clears it and shows sign-in. The human signs in once, with GitHub, Google, or email (production enables all three: read-only `/auth/v1/settings`, 2026-09-17).
+
+Before the window: a GitHub OAuth app owned by the yulanventures organization with callback `https://api.commonswarm.com/auth/v1/callback` (HezLead creates it; the client secret goes to the vault), and that same URI added to the authorized redirect URIs of the existing Google client in project `commonswarm` (the operator; the console needs the operator's password). Adding a redirect URI does not change hosted auth.
 
 The migrated Auth rows preserve refresh tokens. The CLI refresh path can exchange a valid migrated token for a new HS256 session. The rehearsal must prove this.
 
@@ -242,7 +254,7 @@ Each nightly set contains globals without role passwords, a custom dump of `post
 ## Not established
 
 - Browser CORS and the `apikey` header without Kong need the box rehearsal.
-- GitHub OAuth through the box needs the box rehearsal.
+- GitHub and Google OAuth through the box: first proved at window step 7, because their callback host is in maintenance until then.
 - The roles and tables that the source role cannot probe or trigger must be measured again at the window.
 - Cron export sees only jobs visible to the dump role. Production's five measured jobs are owned by that role.
 - `prepare-target.sh` creates `pg_net` and `pg_graphql`; production does not have them.

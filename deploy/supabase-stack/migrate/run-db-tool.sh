@@ -23,7 +23,7 @@ case "$script_name" in
     [[ $# -eq 0 ]] || { echo "$usage" >&2; exit 64; }
     ;;
   source-read-only.sh)
-    [[ $# -ge 1 && $# -le 2 && ( "$1" == enable || "$1" == disable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }
+    [[ $# -ge 1 && $# -le 2 && ( "$1" == preflight || "$1" == enable || "$1" == disable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
   probe-database-freeze.sh)
     [[ $# -ge 1 && $# -le 2 && ( "$1" == frozen || "$1" == writable ) && ( $# -eq 1 || "$2" == source || "$2" == target ) ]] || { echo "$usage" >&2; exit 64; }

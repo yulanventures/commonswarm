@@ -11,16 +11,20 @@ exec </dev/null
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 require_commands psql
-require_vars MIGRATION_ARTIFACT_DIR CUTOVER_CONFIRM
-if [[ "$CUTOVER_CONFIRM" != "COMMONSWARM_N_DB_WINDOW" ]]; then
-  echo "CUTOVER_CONFIRM must be COMMONSWARM_N_DB_WINDOW" >&2
-  exit 1
-fi
 mode="${1:-}"
 database="${2:-source}"
-if [[ ( "$mode" != enable && "$mode" != disable ) || ( "$database" != source && "$database" != target ) ]]; then
-  echo "usage: source-read-only.sh enable|disable [source|target]" >&2
+if [[ ( "$mode" != preflight && "$mode" != enable && "$mode" != disable ) || ( "$database" != source && "$database" != target ) ]]; then
+  echo "usage: source-read-only.sh preflight|enable|disable [source|target]" >&2
   exit 64
+fi
+require_vars MIGRATION_ARTIFACT_DIR
+# preflight only reads. enable and disable change the database, so they need the typed confirmation.
+if [[ "$mode" != preflight ]]; then
+  require_vars CUTOVER_CONFIRM
+  if [[ "$CUTOVER_CONFIRM" != "COMMONSWARM_N_DB_WINDOW" ]]; then
+    echo "CUTOVER_CONFIRM must be COMMONSWARM_N_DB_WINDOW" >&2
+    exit 1
+  fi
 fi
 [[ "$database" == source ]] && require_vars SOURCE_DATABASE_URL || require_vars TARGET_DATABASE_URL
 start_log "read-only-$database-$mode"
@@ -30,9 +34,9 @@ sql_file="$(make_temp_sql)"
 trap 'rm -f "$sql_file"' EXIT
 schemas="$(selected_schema_csv)"
 
-if [[ "$mode" == enable ]]; then
-  # Preflight, read-only: the tables this role cannot put a trigger on. They stay guarded only by the front door and the
-  # database default, so the operator must acknowledge that exact list before anything changes.
+if [[ "$mode" == preflight || "$mode" == enable ]]; then
+  # Read-only: the tables this role cannot put a trigger on. They stay guarded only by the front door and the database
+  # default, so the operator must acknowledge that exact list before anything changes.
   unguarded="$(database_psql "$database" --quiet --tuples-only --no-align --command "
     SELECT coalesce(string_agg(format('%s.%s', n.nspname, c.relname), ',' ORDER BY n.nspname, c.relname), '')
     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -41,7 +45,13 @@ if [[ "$mode" == enable ]]; then
       AND NOT (has_table_privilege(current_user, c.oid, 'TRIGGER') OR pg_has_role(current_user, c.relowner, 'USAGE'))
   " 2>>"$LOG_FILE")"
   log "tables this role cannot guard with a trigger: ${unguarded:-none}"
-  if [[ "${FREEZE_UNGUARDED_TABLES:-}" != "$unguarded" ]]; then
+  if [[ "$mode" == preflight ]]; then
+    log "preflight changed nothing; for enable set FREEZE_UNGUARDED_TABLES to exactly '${unguarded}'"
+    log "complete read-only-$database-preflight"
+    exit 0
+  fi
+  # The acknowledgement must be SET, even when the list is empty, so an unset variable can never mean "acknowledged".
+  if [[ -z "${FREEZE_UNGUARDED_TABLES+set}" || "$FREEZE_UNGUARDED_TABLES" != "$unguarded" ]]; then
     log "refusing: set FREEZE_UNGUARDED_TABLES to exactly '${unguarded}' to acknowledge that these tables rely on the front door and the database default"
     exit 65
   fi
