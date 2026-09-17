@@ -57,3 +57,34 @@ The imported Auth rows preserve refresh tokens. The local migrated refresh retur
 - The edge owned repository files still need the explicit `ssl.ca` change before the box rehearsal. This lane was prohibited from editing `supabase/functions/**` and `deploy/edge-runtime/**`.
 - A production asymmetric access token and production refresh token were not read. Human behavior above combines the locally measured key-change control with the site and CLI code paths.
 - The production Caddy block was adapted for syntax but was not installed or reloaded.
+
+## Round 2 (2026-09-17): hosted permission shape
+
+The round-1 rehearsal connected to the local Supabase stack as a superuser. Read-only queries on production (lead, project
+ref confirmed first, timestamps and booleans only) showed a different permission shape:
+
+| production fact (2026-09-17) | effect on the round-1 scripts |
+|---|---|
+| `postgres` is not a superuser; it owns the database; `pg_monitor` and `pg_signal_backend` member; `BYPASSRLS` | identity by `pg_control_system().system_identifier` is readable; ending other sessions is allowed but counted per session |
+| `app.settings.jwt_secret` is not set | the source identity check could never pass |
+| no TRIGGER right on `auth.schema_migrations`, `storage.migrations`, `storage.buckets_vectors`, `storage.vector_indexes` | the freeze stopped partway |
+| not a member of `supabase_admin`, `supabase_auth_admin`, `supabase_storage_admin` | the probe counted SET ROLE refusals as "frozen" |
+
+Measured on a throwaway PostgreSQL 17.11 with a non-superuser database owner: `ALTER DATABASE ... SET` of a custom
+`commonswarm.*` parameter is refused; `default_transaction_read_only` is allowed; a trigger on another role's table without
+TRIGGER is refused; `DROP TRIGGER` on a table the role does not own is refused, while `DROP FUNCTION ... CASCADE` of the
+guard function it owns removes those triggers. Also found: psql's `\quit` takes no exit status, so the round-1 source
+identity check exited 0 on a mismatch.
+
+`tests/p1-cli/n-db-freeze-hosted-shape.test.ts` builds that shape and runs the real `source-read-only.sh` and
+`probe-database-freeze.sh` in a tool container. It passes, and each of these mutations fails it: enable without one
+transaction (a failure left the probe schema behind); the probe counting any error as frozen; the identity check using
+`\quit 1`; enable without the acknowledgement preflight. The test proves: a wrong system identifier and a missing
+acknowledgement change nothing; a failure inside enable leaves nothing; both session bypasses are refused with 25006 on an
+owned and on a granted service table; the probe refuses unacknowledged unprobed roles and fails on a non-freeze error;
+disable removes every freeze object and writes work again.
+
+NOT re-run by the lead: the Maker's round-2 forward and reverse local rehearsal (it reported forward restore, reverse
+restore, metadata repair, wrong-CA refusal for GoTrue, Storage API and Realtime, and backups passing before its credit ran
+out; its output was not saved). The reverse direction was then removed by ruling 9084e3e1. The box rehearsal from a fresh
+production dump is the gate for the full forward path.
