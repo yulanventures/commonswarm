@@ -12,4 +12,4 @@ Evidence for this choice:
 
 The database dump includes the `storage` schema and bucket metadata. It does not contain object bytes. Run the object copy after restore and before Caddy switches.
 
-For a rollback, freeze box writes first. Run the same copy script with the box as source and the Supabase project as target, restore the final box database state to the fallback project, verify counts, and only then enable the commented Caddy fallback. Writes made on the box are otherwise absent from the old project.
+Ruling 9084e3e1 makes the copy forward only. The scripts refuse the hosted project as a destination. Rollback is available only before the box accepts writes. After that decision point, fix forward on the box.

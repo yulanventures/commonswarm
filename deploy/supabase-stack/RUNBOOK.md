@@ -11,187 +11,241 @@ This lane deployed nothing. HezLead runs every command in this file.
 - Edge functions: the existing edge lane on `127.0.0.1:9000`.
 - Database: `postgres`. The host cluster's `commonswarm` database stays empty.
 - Object bytes: R2 bucket `commonswarm-files` through Storage API.
-- Service secrets: vault item `CommonSwarm self-hosted Supabase env` rendered to `/home/commonswarm/.env`, mode `0600`.
-- Migration-only secrets: a separate vault item rendered to `/home/commonswarm/migration.env`, mode `0600`. Compose never mounts it.
-- TLS: the internal CA at `/etc/ssl/yulan-internal-ca.pem`; database certificate SANs are `db.commonswarm.internal` and `172.31.0.10`; key and data directory owned by uid 100, gid 101 (the `postgres` user in `supabase/postgres:17.6.1.147`).
-- Source identity: `SOURCE_SYSTEM_IDENTIFIER` in the migration env file, read once by the lead with `SELECT system_identifier FROM pg_control_system()`. Every source-side script refuses a database whose identifier differs. Hosted Supabase does not set `app.settings.jwt_secret` and does not let its non-superuser `postgres` set custom database parameters (measured 2026-09-17), so neither can identify the source.
+- Service secrets: `/home/commonswarm/.env`, mode `0600`.
+- Migration secrets: `/home/commonswarm/migration.env`, mode `0600`. Compose never mounts this file.
+- TLS files: `/etc/commonswarm/pg-tls/server.crt`, `/etc/commonswarm/pg-tls/server.key`, and `/etc/commonswarm/pg-tls/ca.crt`. The CA is also `/etc/ssl/yulan-internal-ca.pem`.
+- Source identity: `SOURCE_SYSTEM_IDENTIFIER` is read before the window with `SELECT system_identifier FROM pg_control_system()`.
 
-The edge runtime stays at 512 MB and loopback port `9000`. Set `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net` so its Compose file reaches the unpublished database through `db.commonswarm.internal`. The router passes `SWARM_DATABASE_TLS_CA_B64` (base64 of the public internal CA certificate) to `command`, `read`, `capability`, and `activity`; `supabase/functions/_shared/database-options.ts` adds `ssl.ca` with `rejectUnauthorized: true` when it is set, and returns the original options object unchanged when it is not (the hosted functions and today's pooler path). Keep `sslmode=verify-full` in the box edge database URL and omit `sslrootcert` there: `postgres` 3.4.9 would send that query key to PostgreSQL as a startup parameter. The memory total is PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB reserved headroom: 4060 MB.
+Use this absolute path for every migration script call below. Define it once in the operator shell:
 
-Every database URL used by GoTrue, PostgREST, Storage API, and edge-runtime must name `db.commonswarm.internal` and include `sslmode=verify-full`. GoTrue, PostgREST, and Storage API use `sslrootcert=/etc/ssl/yulan-internal-ca.pem`. The edge runtime's `postgres` 3.4.9 URLs omit `sslrootcert`; that client sends an unrecognized `sslrootcert` query key to PostgreSQL as a startup parameter. The edge function supplies the CA in the `ssl.ca` option described below. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. Never use the IP in a service database URL.
+```sh
+MIGRATE=/home/commonswarm/current/deploy/supabase-stack/migrate
+```
 
-The edge URLs authenticate as `commonswarm_edge` with `COMMONSWARM_EDGE_DB_PASSWORD`. They do not use the shared PostgreSQL service password. GoTrue uses `supabase_auth_admin`, PostgREST uses `authenticator`, Storage API uses `supabase_storage_admin`, and Realtime uses `supabase_admin`.
+Every database URL names `db.commonswarm.internal` and uses `sslmode=verify-full`. GoTrue, PostgREST, and Storage API also use `sslrootcert=/etc/ssl/yulan-internal-ca.pem`. Realtime uses `DB_SSL=true` and `DB_SSL_CA_CERT=/etc/ssl/yulan-internal-ca.pem`. The edge URLs omit `sslrootcert`; the edge functions pass the CA as `ssl.ca` with certificate checks enabled.
 
-## What moves in the dump
+The edge URLs use `commonswarm_edge`. GoTrue uses `supabase_auth_admin`. PostgREST uses `authenticator`. Storage API uses `supabase_storage_admin`. Realtime uses `supabase_admin`.
 
-`dump-source.sh` selects these schemas:
+The memory total is 4060 MB. It includes PostgreSQL 1536 MB, Realtime 512 MB, GoTrue 300 MB, PostgREST 300 MB, Storage API 300 MB, edge runtime 512 MB, and 600 MB of headroom.
 
-- `auth`: users, identities, sessions, refresh tokens, MFA, and OAuth state.
-- `storage`: the `swarm-files` bucket and object metadata. Object bytes are copied separately.
-- `swarm`: all CommonSwarm durable data, including hashed `swm_agt_` rows.
-- `swarm_read`: PostgREST views and functions.
-- `public`: source public objects and grants.
-- `supabase_migrations`: applied migration history.
-- `realtime`: the broadcast table functions and CommonSwarm RLS policies. Ephemeral `realtime.messages` rows are excluded.
+## What moves
 
-The target image creates `_realtime`, `extensions`, `graphql`, `graphql_public`, `net`, `pgbouncer`, `supabase_functions`, and `vault`. It installs `pg_cron`, `pg_graphql`, `pg_net`, `pg_stat_statements`, `pgcrypto`, `supabase_vault`, `uuid-ossp`, and `plpgsql`. A local dependency query found one selected-schema dependency on that set: `swarm.agent_principals.wake_id` and `swarm.rotate_wake_id` use `pgcrypto` through `extensions.gen_random_bytes`. No selected object depended on `uuid-ossp`, `pg_net`, `vault`, `graphql`, or `pg_stat_statements`. These image-owned schemas stay outside the dump. `prepare-target.sh` checks the image extensions, and `seed-realtime-tenant.sh` uses the pinned application to create the encrypted self-host tenant.
+`dump-source.sh` moves `auth`, `public`, `realtime`, `storage`, `supabase_migrations`, `swarm`, and `swarm_read`. It excludes transient `realtime.messages` data. It writes one snapshot-consistent custom dump, role SQL without passwords, table counts, a Storage object manifest, and `cron-jobs.ndjson`.
 
-The pinned service code does not issue `BEGIN READ WRITE`, `SET TRANSACTION READ WRITE`, or turn `default_transaction_read_only` off. GoTrue and Storage API use ordinary write transactions. Realtime uses ordinary Postgrex transactions. PostgREST adds `target_session_attrs=read-write` only to its listener connection, so the database default rejects that connection during the freeze. Each edge function sets its role and search path in every transaction; the one command failure insert is an autocommit statement with a fully qualified `swarm.command_failures` target.
+The target image owns `_realtime`, `extensions`, `graphql`, `graphql_public`, `net`, `pgbouncer`, `supabase_functions`, and `vault`. `prepare-target.sh` creates `pg_net` and `pg_graphql` even though production does not have them. `restore-cron-jobs.sh` creates `pg_cron` in `pg_catalog` and restores each visible source job as its source role.
 
-The role artifact contains `swarm_*` and `commonswarm_*` role definitions and memberships. It also carries the no-login `supabase_realtime_admin` owner because the PostgreSQL image does not create that role. It excludes image-created roles such as `anon`, `authenticated`, `service_role`, `authenticator`, `supabase_admin`, `supabase_auth_admin`, and `supabase_storage_admin`. It contains no password verifier. `prepare-target.sh` assigns fresh SCRAM verifiers from the vault.
+Object bytes move forward through the Storage APIs. The copy is idempotent. The hosted project is never a destination.
 
 ## Box rehearsal from a fresh production dump
 
 Use a new protected artifact directory for each attempt. Never reuse a dump after the source changes.
 
-1. Confirm the target is the container and the source is the us-east-1 project. Confirm the PostgreSQL source reports 17.6. Do not use the host cluster's `commonswarm` database.
-2. Read production versions from the public health endpoints. Record them. Update the named `image:` line in `compose.yaml` if needed. A changed pin requires a new rehearsal from step 1.
-3. Install the internal CA and server certificate. Check certificate SANs and mode `0600` on the private key.
-4. Render `/home/commonswarm/.env` from the service vault item and `/home/commonswarm/migration.env` from the migration vault item. Check mode `0600` on both. The migration file contains the source and target database URLs, source and target Storage URLs and service keys, and `CUTOVER_CONFIRM`; no long-running service receives it. Use the legacy HS256 JWT secret for `JWT_SECRET`, `GOTRUE_JWT_SECRET`, `PGRST_JWT_SECRET`, `API_JWT_SECRET`, and `AUTH_JWT_SECRET`. Use the existing anon and service-role JWTs. `DB_ENC_KEY` is exactly 16 high-entropy ASCII characters. `API_JWT_JWKS` is valid production JWKS JSON. Keep `SEED_SELF_HOST=false`; the seed script turns it on only for its one-shot process.
-5. Start PostgreSQL only:
+1. Confirm that the source URL is the production pooler and the target is `commonswarm-postgres` at `172.31.0.10`. Confirm PostgreSQL 17.6. Do not use the host cluster's `commonswarm` database.
+
+2. Read production versions from the public health endpoints. Record them. Update a changed image pin before this rehearsal.
+
+3. Check the certificates already installed by HezLead. Do not install or replace them in this rehearsal.
+
+   ```sh
+   stat -c '%u:%g %a %n' /etc/commonswarm/pg-tls \
+     /etc/commonswarm/pg-tls/server.crt \
+     /etc/commonswarm/pg-tls/server.key \
+     /etc/commonswarm/pg-tls/ca.crt \
+     /etc/ssl/yulan-internal-ca.pem
+   openssl x509 -in /etc/commonswarm/pg-tls/server.crt -noout -checkhost db.commonswarm.internal
+   openssl x509 -in /etc/commonswarm/pg-tls/server.crt -noout -checkip 172.31.0.10
+   cmp /etc/commonswarm/pg-tls/ca.crt /etc/ssl/yulan-internal-ca.pem
+   ```
+
+   The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
+
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. Rehearse freeze and unfreeze on the restored box with the confirmation set inline:
+
+   ```sh
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable target
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen target
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable target
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable target
+   ```
+
+   Run this after step 7 on the restored box. A second `enable target` while frozen is safe. It must exit 0, add no trigger, and leave the freeze in force.
+
+5. Start PostgreSQL. Choose a new artifact directory. Take the source dump.
 
    ```sh
    cd /home/commonswarm/current/deploy/supabase-stack
    docker compose -p commonswarm-supabase-stack up -d postgres
-   docker compose -p commonswarm-supabase-stack ps
-   ```
-
-6. Choose a new absolute artifact directory. With the production source URL present only in the environment, run the dump. This creates a custom dump, password-free role SQL, per-table source counts, and the Storage object manifest. Logs and artifacts are mode `0600` under the protected directory.
-
-   ```sh
-   export ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
+   ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
+   export ARTIFACT_DIR
    COMMONSWARM_ENV_FILE=/home/commonswarm/.env \
      COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     deploy/supabase-stack/migrate/run-db-tool.sh dump-source.sh "$ARTIFACT_DIR" source
+     "$MIGRATE/run-db-tool.sh" dump-source.sh "$ARTIFACT_DIR" source
    ```
 
-7. Stop every target service except PostgreSQL. Run, in order:
+6. Practice the fresh database procedure. Stop every stack service and the edge runtime. Move the rehearsal data directory aside. Keep it until step 8. Create an empty data directory with mode `0700` and owner `100:101`. Start only PostgreSQL.
 
    ```sh
-   export ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-rehearsal
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     deploy/supabase-stack/migrate/run-db-tool.sh restore-target.sh "$ARTIFACT_DIR" target
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     deploy/supabase-stack/migrate/run-db-tool.sh prepare-target.sh "$ARTIFACT_DIR"
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env \
-     COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" \
-     deploy/supabase-stack/migrate/seed-realtime-tenant.sh
-   # Run the seed command a second time; it must also exit 0.
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" deploy/supabase-stack/migrate/seed-realtime-tenant.sh
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     deploy/supabase-stack/migrate/run-db-tool.sh setup-realtime.sh "$ARTIFACT_DIR"
-   docker compose -p commonswarm-supabase-stack restart realtime
-   COMMONSWARM_ENV_FILE=/home/commonswarm/.env COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     deploy/supabase-stack/migrate/run-db-tool.sh verify-counts.sh "$ARTIFACT_DIR" target
+   docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml down
+   docker compose -p commonswarm-supabase-stack down
+   mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-before-restore
+   install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
+   docker compose -p commonswarm-supabase-stack up -d postgres
    ```
 
-8. Start GoTrue, PostgREST, and Storage API. Run `COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" migrate/copy-storage.sh forward`. Then run `run-db-tool.sh restore-storage-metadata.sh "$ARTIFACT_DIR" target`. The first command verifies bytes; the second restores ownership, timestamps, metadata, and user metadata while keeping the target backend's object ID and version. Both refuse the hosted project as a destination.
-9. Start the 512 MB edge runtime with its database URLs changed to the container. Run the five local health checks.
-10. On a staging hostname, prove all of these through Caddy:
-    - GitHub sign-in reaches `/auth/v1/callback`, returns to `https://commonswarm.com/app`, and loads a workspace.
-    - A CLI refresh or fresh login succeeds with the unchanged legacy anon key.
-    - An authenticated `swarm_read` REST query returns the expected workspace.
-    - An agent subscribes to its private wake Broadcast and receives a directed-signal wake.
-    - A file upload, commit, signed download, and digest comparison succeed through Storage API and R2.
-    - One command and one read succeed through the edge runtime.
-    - Source and target table counts still match, including `auth.users`, `storage.objects`, and `swarm.agent_tokens`.
-11. Run the full production control suite against staging, including `cswarm check` and a listener wake round trip, and the client timeout table (scripts/timeout-table) through `edge-staging.commonswarm.com` with the gate the Strategist set: every client timeout constant at least 2x its p95 over 20 runs. Record status codes, versions, row counts, object totals, and Caddy validation. Do not record tokens, object names, emails, or URLs containing credentials.
-12. Freeze preflight on production, read-only: run `run-db-tool.sh source-read-only.sh "$ARTIFACT_DIR" enable source` WITHOUT `FREEZE_UNGUARDED_TABLES`. It checks the source identity, prints the tables the source role cannot guard with a trigger, and exits 65 before any change. Record the list. Measured 2026-09-17: `auth.schema_migrations,storage.buckets_vectors,storage.migrations,storage.vector_indexes`. The roles the probe cannot assume on hosted Supabase were measured the same day as `postgres` is not a member of `supabase_admin`, `supabase_auth_admin`, `supabase_storage_admin`; the probe also lists `postgres` itself only if it cannot assume it. Recompute both at window time; never copy them from this file.
-13. Rehearse the freeze on the restored BOX database (target), never on production: `enable target`, `probe-database-freeze.sh frozen target`, `disable target`, `probe-database-freeze.sh writable target`, each with the acknowledgement variables the scripts print. `tests/p1-cli/n-db-freeze-hosted-shape.test.ts` proves the same scripts against the hosted permission shape on every test run.
+7. Restore and prepare in this order. Restore cron jobs immediately after target preparation.
 
-The box rehearsal is a gate. A failed control means fix the preparation and repeat from a fresh dump.
+   ```sh
+   "$MIGRATE/run-db-tool.sh" restore-target.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" prepare-target.sh "$ARTIFACT_DIR"
+   "$MIGRATE/run-db-tool.sh" restore-cron-jobs.sh "$ARTIFACT_DIR" target
+   MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+   MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+   "$MIGRATE/run-db-tool.sh" setup-realtime.sh "$ARTIFACT_DIR"
+   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   ```
+
+8. Start the stack. Copy Storage forward. Restore Storage metadata. Verify counts again. Keep or remove the saved rehearsal directory only after all controls pass.
+
+   ```sh
+   docker compose -p commonswarm-supabase-stack up -d
+   COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
+     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
+   "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   ```
+
+9. Start the 512 MB edge runtime on the box database. Run all local health checks.
+
+10. Through the staging host, prove GitHub sign-in, a migrated CLI refresh, an authenticated REST read, a Realtime wake, Storage upload and download, one edge command, one edge read, table counts, cron jobs, and object digests.
+
+11. Run `cswarm check`, a listener wake, and the client timeout table. Each client timeout must be at least twice its p95 over 20 runs.
+
+12. Run the source freeze preflight without `FREEZE_UNGUARDED_TABLES`. It must exit 65 before a change. Record the tables and roles that it prints. Recompute them at window time.
+
+13. Complete the step-4 freeze drill on the restored box. The hosted-shape Docker test is a separate control.
+
+A failed control means repeat the rehearsal from a fresh dump.
 
 ## Cutover window
 
-Ruling 9084e3e1: data rollback exists only at the decision point, while public writes are still behind the maintenance
-block. After the box accepts writes it is the system of record and failures are fixed forward. The hosted project stays
-read-only for 48 hours as a reference copy; nothing is restored into it.
+Ruling 9084e3e1 applies. Rollback exists only before the box accepts writes. After step 7, fix forward on the box. Never install `commonswarm-api-fallback.caddy` after step 7.
 
-Every `run-db-tool.sh` call below uses the protected `ARTIFACT_DIR` of this window, `COMMONSWARM_ENV_FILE` and
-`COMMONSWARM_MIGRATION_ENV_FILE` as in the rehearsal, and `CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW` in the migration env file.
+Use the protected environment files for every call. Their values are unquoted. `CUTOVER_CONFIRM=` stays empty in the migration file. Set `CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW` inline only on freeze and unfreeze commands.
 
-0. Before the window: the box rehearsal passed from a fresh dump within 24 hours; the stack images are pulled; the edge
-   runtime is healthy on the pooler path; `SOURCE_SYSTEM_IDENTIFIER` is in the migration env file; the R2 backup prefix for
-   the final dumps exists; the decision-point checklist below is printed with an owner for each row.
-1. Install `commonswarm-api-maintenance.caddy` as the api site file: copy it over `/etc/caddy/sites/10-commonswarm-api.caddy`
-   (keep the previous file as `.prev`), run `caddy validate` and read its exit code, then reload. Nothing public changes
-   yet: `api.commonswarm.com` still points at Supabase.
-2. Move `api.commonswarm.com` to the box (A 178.105.29.28, proxied) through the DNS holder. Path proof: a POST to
-   `https://api.commonswarm.com/functions/v1/read` answers 503 with `{"error":"maintenance"}` (only the box sends that
-   body), judged through `1.1.1.1` or a flushed resolver. From here every public write and every `/auth/v1` call is 503
-   with `Retry-After: 300`; reads come from the Supabase origin. Announce the write pause.
-   - ABORT-A (path proof fails): restore the Supabase CNAME (not proxied) and the previous site file.
-3. Freeze the source. Export the list the preflight prints as `FREEZE_UNGUARDED_TABLES`, then run
-   `run-db-tool.sh source-read-only.sh "$ARTIFACT_DIR" enable source`. It checks the source identity, refuses unless the
-   acknowledgement matches, and applies the triggers and the read-only default in ONE transaction. Then export the role list
-   it prints as `FREEZE_UNPROBED_ROLES` and run `run-db-tool.sh probe-database-freeze.sh "$ARTIFACT_DIR" frozen source`. It
-   proves each role it can assume refused under `SET default_transaction_read_only = off` and `BEGIN READ WRITE`, by
-   SQLSTATE 25006 only; any other error fails the probe.
-   - What the freeze cannot stop: writes to the four tables the source role cannot trigger (service migration and vector
-     tables) by a session that overrides the default, and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co`
-     directly instead of `api.commonswarm.com`. Before the window, read the Supabase API logs for requests whose host is the
-     supabase.co name; if any product client still uses it, fix that client first.
-   - ABORT-B (enable or probe fails): if enable failed, nothing changed. If the probe failed after enable, run
-     `run-db-tool.sh source-read-only.sh "$ARTIFACT_DIR" disable source` and `probe-database-freeze.sh writable source`.
-     Then ABORT-A.
-4. Take the final dump into a NEW artifact directory with `dump-source.sh ... source`. Restore it to the box
-   (`restore-target.sh`, `prepare-target.sh`, `seed-realtime-tenant.sh` twice, `setup-realtime.sh`, `verify-counts.sh`), start
-   the stack and the edge runtime on the box database, then `copy-storage.sh forward` and `restore-storage-metadata.sh`.
-   - ABORT-C (any step fails): disable the source freeze and probe writable as in ABORT-B, then ABORT-A. The box database is
-     discarded.
-5. Decision point, at most 30 minutes, through `edge-staging.commonswarm.com` only (the maintenance file routes it to the
-   box). Every row must be green to leave:
-   - `verify-counts.sh target` exact; object totals and digests match the manifest.
-   - A migrated CLI human session refreshes; an authenticated REST read returns the expected workspace.
-   - `cswarm check` on the shipped client succeeds within its budget; a listener wake round trip arrives.
-   - One command and one read through the box edge runtime; one Realtime private Broadcast wake.
-   - One file upload, commit, signed download, digest match through Storage API and R2.
-   - The client timeout table through the staging name meets the 2x gate.
-   - ABORT-D (not all green in 30 minutes): ABORT-C.
-6. Take a dump of the BOX database (`dump-source.sh ... target`) and store it in R2 next to the nightly job. This is the
-   recovery point before the box accepts writes.
-7. Open writes: install `commonswarm-api.caddy` as the api site file (validate, read the exit code, reload). The box is now
-   the system of record. Production controls on `api.commonswarm.com`: GitHub sign-in end to end (run in the operator's
-   browser), `cswarm check` and a listener wake, one command, one upload, the install page, and the site. A failure now is
-   fixed forward on the box.
-8. Tell humans to sign in once more. Leave the hosted project frozen for 48 hours as a read-only reference copy; do not run
-   `disable source`. Removing it is the separate retirement item.
+0. Confirm that the rehearsal passed from a fresh dump within 24 hours. Confirm the images, source identifier, R2 backup prefix, and decision checklist.
 
-## After the decision point: fix forward, and the recovery drill
+1. Install `commonswarm-api-maintenance.caddy`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
 
-There is no reverse restore to Supabase: hosted `postgres` cannot drop or recreate the service-owned `auth` and `storage`
-tables, and the scripts refuse the hosted project as a destination. If the box database is lost or corrupted, restore the
-latest dump (the step-6 dump, or a nightly `pg_dump -Fc`) onto a FRESH box database with `restore-target.sh`,
-`prepare-target.sh`, `seed-realtime-tenant.sh`, `setup-realtime.sh`, and `verify-counts.sh`, behind the maintenance file.
-Rehearse that drill once on a second local database before the window and record the result in LOCAL-REHEARSAL.md.
+2. Move `api.commonswarm.com` to the box. Measure the maintenance behavior:
+
+   - Every `POST`, `PUT`, `PATCH`, and `DELETE` returns 503. This includes the POST-only edge functions.
+   - Every `/auth/v1` call returns 503.
+   - `GET` and `HEAD` reads go to the Supabase origin.
+   - The Realtime websocket goes to the Supabase origin. Its frames are wake hints and are not migrated data.
+   - `cswarm check` exits 1 in about 3.2 seconds.
+   - `cswarm inbox` exits 1.
+   - `cswarm note` exits 1 in about 6.2 seconds with the maintenance sentence.
+   - The hook form was not measured.
+
+   A POST to `/functions/v1/read` must show the box's 503 body. If this path proof fails, restore the Supabase CNAME and the previous Caddy file.
+
+3. Freeze the source with the confirmation inline. Run `enable` a second time while frozen. It is safe and must leave the same freeze objects. Then run the frozen probe.
+
+   ```sh
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
+     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW FREEZE_UNGUARDED_TABLES="$FREEZE_UNGUARDED_TABLES" \
+     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" enable source
+   FREEZE_UNPROBED_ROLES="$FREEZE_UNPROBED_ROLES" \
+     "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
+   ```
+
+   ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then restore DNS and Caddy.
+
+   ```sh
+   CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
+     "$MIGRATE/run-db-tool.sh" source-read-only.sh "$ARTIFACT_DIR" disable source
+   "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" writable source
+   ```
+
+4. Create a new artifact directory and take the final source dump. Restore onto a fresh box database. Stop every stack service and the edge runtime. Move the rehearsal data directory aside and keep it through step 8. Create an empty `0700` directory owned by `100:101`. Start only PostgreSQL. Then restore in the shown order.
+
+   ```sh
+   ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-window
+   export ARTIFACT_DIR
+   "$MIGRATE/run-db-tool.sh" dump-source.sh "$ARTIFACT_DIR" source
+   docker compose -f /home/commonswarm/current/deploy/edge-runtime/compose.yaml down
+   cd /home/commonswarm/current/deploy/supabase-stack
+   docker compose -p commonswarm-supabase-stack down
+   mv /var/lib/commonswarm/postgres /var/lib/commonswarm/postgres.rehearsal-kept-through-step-8
+   install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
+   docker compose -p commonswarm-supabase-stack up -d postgres
+   "$MIGRATE/run-db-tool.sh" restore-target.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" prepare-target.sh "$ARTIFACT_DIR"
+   "$MIGRATE/run-db-tool.sh" restore-cron-jobs.sh "$ARTIFACT_DIR" target
+   MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+   MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+   "$MIGRATE/run-db-tool.sh" setup-realtime.sh "$ARTIFACT_DIR"
+   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   docker compose -p commonswarm-supabase-stack up -d
+   COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
+     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
+   "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   ```
+
+   ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database.
+
+5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson`. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check`, a listener wake, an edge command and read, Realtime, Storage, and the timeout table. If one control fails, run ABORT-C.
+
+6. Take a full migration artifact set from the box. Store it with the nightly backup. This is the recovery artifact before the box accepts writes.
+
+   ```sh
+   RECOVERY_ARTIFACT_DIR=/home/commonswarm/migration-artifacts/n-db-step-6
+   "$MIGRATE/run-db-tool.sh" dump-source.sh "$RECOVERY_ARTIFACT_DIR" target
+   ```
+
+7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. Never install the fallback Caddy file after this point. Fix later failures forward.
+
+8. Tell humans to sign in once. Keep the hosted project frozen for 48 hours. Keep the moved rehearsal data directory through this step. Do not unfreeze the hosted project.
+
+## Recovery drill after the decision point
+
+Use the artifact directory created by `dump-source.sh` in window step 6. A plain nightly `pg_dump -Fc` is not accepted by these restore scripts.
+
+Stop every service and the edge runtime. Create a fresh box data directory as in window step 4. Restore in this order behind the maintenance Caddy file:
+
+```sh
+"$MIGRATE/run-db-tool.sh" restore-target.sh "$RECOVERY_ARTIFACT_DIR" target
+"$MIGRATE/run-db-tool.sh" prepare-target.sh "$RECOVERY_ARTIFACT_DIR"
+"$MIGRATE/run-db-tool.sh" restore-cron-jobs.sh "$RECOVERY_ARTIFACT_DIR" target
+MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/seed-realtime-tenant.sh"
+"$MIGRATE/run-db-tool.sh" setup-realtime.sh "$RECOVERY_ARTIFACT_DIR"
+"$MIGRATE/run-db-tool.sh" verify-counts.sh "$RECOVERY_ARTIFACT_DIR" target
+```
+
+Rehearse this drill on a second local database before the window.
 
 ## Human sessions
 
-The browser calls `getSession()` and then `getUser()` with its current access token. Production may have issued that token with an asymmetric key whose private half cannot be exported. This stack issues HS256 tokens with the measured legacy secret. An old asymmetric access token therefore fails `getUser`; the site clears its local session and shows the sign-in flow. A human signs in with GitHub once and then continues normally.
+An old asymmetric browser access token can fail against the HS256 box. The site clears it and shows sign-in. The human signs in with GitHub once.
 
-The CLI stores a refresh token and calls `refreshSession()` before each human operation. The restored `auth` schema carries that refresh token, so a CLI refresh is expected to exchange it for a new HS256 access token. The box rehearsal must prove this with a migrated session. The public release instruction still says to sign in once because browser sessions cannot depend on that path.
+The migrated Auth rows preserve refresh tokens. The CLI refresh path can exchange a valid migrated token for a new HS256 session. The rehearsal must prove this.
 
 ## Backups for HezLead
 
-The backup target is container `commonswarm-postgres`, fixed IP `172.31.0.10`, database list `postgres` only. The database has no host-published port. Run the existing host backup process from bridge address `172.31.0.1` with role `backup_ro`, `PGSSLMODE=verify-full`, `PGSSLROOTCERT=/etc/ssl/yulan-internal-ca.pem`, and the password supplied through `PGPASSWORD` in the process environment.
+The backup target is container `commonswarm-postgres` at `172.31.0.10`. The database is `postgres`. There is no host-published port. Connect from `172.31.0.1` as `backup_ro` with `PGSSLMODE=verify-full` and `PGSSLROOTCERT=/etc/ssl/yulan-internal-ca.pem`.
 
-Each nightly set contains:
-
-- `pg_dumpall --globals-only --no-role-passwords`
-- `pg_dump --format=custom --dbname postgres`
-- the R2 bucket's independent retention or versioning evidence
-
-`backup_ro` has `pg_read_all_data` and `BYPASSRLS` (without it, `pg_dump` cannot read tables with row-level security) and no write grant. `pg_dumpall --globals-only --no-role-passwords` reads `pg_roles`, not `pg_authid`, so it runs as this role. `pg_hba.conf` rejects this role from every address except `172.31.0.1`.
+Each nightly set contains globals without role passwords, a custom dump of `postgres`, and R2 retention evidence. `backup_ro` has `pg_read_all_data` and `BYPASSRLS`. `pg_hba.conf` allows it only from `172.31.0.1/32`.
 
 ## Not established
 
-- Browser CORS and the `apikey` header without Kong: only the CLI and curl paths were rehearsed. The box rehearsal's GitHub
-  sign-in and app load are the control.
-- GitHub OAuth through the box: the callback is `api.commonswarm.com`, which is in maintenance until step 7, so sign-in is
-  first proved after writes open (fix forward if it fails), unless the operator adds the staging callback to the OAuth app.
-- The three hosted service roles the probe cannot assume, and the four tables the source role cannot trigger: covered by the
-  front door and the database default only.
-- Round-2 local forward and reverse rehearsal: run by the Maker before its credit ran out; its output was not saved and the
-  lead did not re-run it. The reverse path is removed by ruling 9084e3e1. The box rehearsal is the gate.
+- Browser CORS and the `apikey` header without Kong need the box rehearsal.
+- GitHub OAuth through the box needs the box rehearsal.
+- The roles and tables that the source role cannot probe or trigger must be measured again at the window.
+- Cron export sees only jobs visible to the dump role. Production's five measured jobs are owned by that role.
+- `prepare-target.sh` creates `pg_net` and `pg_graphql`; production does not have them.
+- Bare `/rest/v1`, `/auth/v1`, and `/storage/v1` paths answer 404 on the box.
+- A plain nightly `pg_dump -Fc` has no role SQL, counts, Storage manifest, or cron manifest and is not restorable by these scripts.
+- The hook form of the CLI maintenance failure was not measured.

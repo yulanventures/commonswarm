@@ -56,5 +56,5 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 	}
 }
 
-# For rollback, swap the installed file with commonswarm-api-fallback.caddy.
-# That complete alternative is kept byte-identical to the landed N-edge file.
+# commonswarm-api-fallback.caddy is for an ABORT path before cutover step 7 only.
+# Never install it after step 7. Fix forward after the box accepts writes.

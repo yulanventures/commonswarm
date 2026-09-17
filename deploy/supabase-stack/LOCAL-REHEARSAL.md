@@ -54,7 +54,7 @@ The imported Auth rows preserve refresh tokens. The local migrated refresh retur
 - GitHub OAuth was not run because this lane did not read the production client secret.
 - R2 was not contacted. The local Storage API used its file backend; the same API copy path is configured for R2 in production.
 - This lane did not independently read production service versions. It used the lead's 2026-09-16 21:20Z results. Production PostgREST and Realtime versions remain unknown because their endpoints publish no version; those two pins come from the local Supabase CLI stack.
-- The edge owned repository files still need the explicit `ssl.ca` change before the box rehearsal. This lane was prohibited from editing `supabase/functions/**` and `deploy/edge-runtime/**`.
+- The edge owned repository files gained the explicit `ssl.ca` change in `41dd7ef8`. The box rehearsal still must prove it with the installed CA.
 - A production asymmetric access token and production refresh token were not read. Human behavior above combines the locally measured key-change control with the site and CLI code paths.
 - The production Caddy block was adapted for syntax but was not installed or reloaded.
 
@@ -88,3 +88,44 @@ NOT re-run by the lead: the Maker's round-2 forward and reverse local rehearsal 
 restore, metadata repair, wrong-CA refusal for GoTrue, Storage API and Realtime, and backups passing before its credit ran
 out; its output was not saved). The reverse direction was then removed by ruling 9084e3e1. The box rehearsal from a fresh
 production dump is the gate for the full forward path.
+
+## Review round 2 (2026-09-17): rulings
+
+Pair on `5ba69436`: grok (worktree, FAIL) and antigravity (six inline parts; part 2 was blocked by a Gemini content filter
+and re-run with the word "attack" replaced; P1 PASS, P2-P6 FAIL). The lead checked every claim on the tree, in Docker, or
+with a read-only query on production before ruling. PRODUCTION = changes what production or the window does; RIGOUR =
+claim, test, or operator-text defect.
+
+| # | Claim (arm) | Ruling | Evidence |
+|---|---|---|---|
+| 1 | pg_cron schedules never reach the box; five purge jobs stop (grok) | CONFIRMED, PRODUCTION | `cron` is outside `selected_schema_csv`; no script called `cron.schedule`; production has five jobs, all `postgres` in `postgres` (read-only query 2026-09-17); the box image preloads pg_cron but has no extension or jobs. Fixed: `dump-source.sh` exports `cron-jobs.ndjson` in the snapshot, `restore-cron-jobs.sh` recreates them, `verify-counts.sh` compares, `tests/p1-cli/n-db-cron-jobs.test.ts` proves it on the box image. |
+| 2 | `STORAGE-BACKEND.md` describes a reverse restore into the hosted project; `copy-storage.mjs` still copies in reverse (grok, antigravity P6) | CONFIRMED, PRODUCTION (text and a reachable reverse path) | Line 15 contradicted ruling 9084e3e1; `node copy-storage.mjs reverse` wrote to the source Storage API although `copy-storage.sh` refused. Fixed: forward only in both; paragraph rewritten. |
+| 3 | `run-db-tool.sh` does not pass `CUTOVER_CONFIRM`, so the logged UNDO command fails (antigravity P2) | PARTLY CONFIRMED, RIGOUR | The runbook put the value in the migration env file, which the container receives, so the runbook path worked; the inline form printed in the NEXT/UNDO log lines did not reach the container. Fixed: forwarded by name; the env file keeps it empty. |
+| 4 | Postgres `-D /etc/postgresql` crashes the container (antigravity P4) | REFUTED | `docker image inspect` of `supabase/postgres:17.6.1.147`: CMD is `postgres -D /etc/postgresql`; its `postgresql.conf` sets `data_directory = '/var/lib/postgresql/data'`. |
+| 5 | `prepare-target.sh` grants `swarm_*` roles before they exist (antigravity P3) | REFUTED | The runbook runs `restore-target.sh` (which applies `roles.sql`) before `prepare-target.sh`, in the rehearsal, the window, and the drill. |
+| 6 | `10-runtime-roles.sh` never creates `commonswarm_edge` (antigravity P4) | REFUTED | `prepare-target.sh` creates it, sets its password, and grants exactly the three `swarm_*` roles. |
+| 7 | Maintenance lets `GET /functions/v1/*` reach hosted functions that write (antigravity P4) | REFUTED as a data-loss path | `command`, `read` and `activity` answer 405 to any method but POST before any database call. `capability` counts a GET in its rate buckets (and may write an alert or audit row) before its 405: before the step-3 freeze those rows are in the final dump; after it the write fails with 25006. The runbook names this. |
+| 8 | Realtime websocket frames bypass maintenance (antigravity P5, grok) | CONFIRMED as text, not a data path | Frames reach hosted Realtime until step 7; they are wake hints and `realtime.messages` is not migrated. The runbook claim "every public write is 503" is corrected. |
+| 9 | Step 2 says reads come from the Supabase origin, but edge reads are POST and get 503 (antigravity P6) | CONFIRMED, RIGOUR | Measured on `4cb8c5fe` against a loopback 503 server: `cswarm check` exits 1 in about 3.2 s, `inbox` exits 1, `note` exits 1 in about 6.2 s with the maintenance sentence. The hook form was not measured. Runbook corrected. |
+| 10 | `system_identifier` accepts a standby (antigravity P2, P6; grok) | CONFIRMED, RIGOUR | A standby shares the identifier. The window order freezes before it dumps, and enable fails on a standby, so no dump from a standby was reachable. Fixed: `NOT pg_is_in_recovery()`; a promoted clone on another host stays out of reach of this check (named in `lib.sh`). |
+| 11 | Step 4 restores onto the rehearsal database (antigravity P6) | CONFIRMED, RIGOUR | `pg_restore --clean --single-transaction` would fail safe into ABORT-C, but running services and box-only objects make that likely. Runbook: restore onto a fresh data directory, rehearsed once. |
+| 12 | Re-running enable while frozen fails (grok) | CONFIRMED, RIGOUR (fails closed) | Fixed: enable starts with `SET TRANSACTION READ WRITE`; the hosted-shape test proves a second enable succeeds and changes nothing. |
+| 13 | The writable probe runs DDL on the source during ABORT-B (grok) | CONFIRMED, RIGOUR | Needed to prove writes work; the runbook names it. |
+| 14 | Fallback routes are a separate file, not commented in the live file (grok, antigravity P4) | CONFIRMED as text, RIGOUR | The separate file is byte-identical to the landed N-edge file and adapts; after step 7 it must never be installed (ruling 9084e3e1). Comment and runbook say so. `MUTATION-EVIDENCE.md` listed an "uncomment the fallback" mutation the test never ran; corrected. |
+| 15 | `nothingChanged()` does not check the guard function (antigravity P5) | CONFIRMED, RIGOUR | Added `to_regprocedure(...) IS NULL`; step 3 drops the planted function (no CASCADE) before the check. |
+| 16 | The artifacts mount is created by the Docker daemon (antigravity P5) | CONFIRMED, RIGOUR | Created by the test with mode 0700. |
+| 17 | Target identity is not gated for `restore-target.sh` (antigravity P5) | CONFIRMED as a test gap, RIGOUR | The script calls `assert_target_identity`; the contract test now requires it in every target writer. |
+| 18 | Secret scan misses `- NAME=value` (antigravity P5) | CONFIRMED, RIGOUR | Pattern extended, with a mutation. |
+| 19 | shm, shared_buffers, data mount, backup_ro read grant and pg_hba address are not asserted (antigravity P5) | CONFIRMED, RIGOUR | Assertions and mutations added. |
+| 20 | Quoted env values differ between Node and `docker --env-file` (antigravity P2) | CONFIRMED, RIGOUR | A quoted `POSTGRES_PASSWORD` would have set a password with quotes. Both Node readers now refuse a quoted value and name only the variable. |
+| 21 | `database_psql` and `pg_dump` in `dump-source.sh` do not require the service file (antigravity P2, P3) | CONFIRMED, RIGOUR | Guards added. |
+| 22 | Runbook script paths do not resolve from the documented directory (antigravity P6) | CONFIRMED, RIGOUR | One absolute `MIGRATE` path. |
+| 23 | `LOCAL-REHEARSAL.md` says the edge `ssl.ca` change is still owed (antigravity P6) | CONFIRMED, RIGOUR | Stale since `41dd7ef8`; corrected in place. |
+| 24 | Bare `/rest/v1`, `/auth/v1`, `/storage/v1` answer 404 (antigravity P4) | DECLINED | No CommonSwarm client calls a bare path (`ENDPOINTS.md`); recorded under Not established. |
+| 25 | Temporary SQL files lack a trap (antigravity P2) | DECLINED | They hold no secret and live in a `--rm` container. |
+
+Production state outside the dump, read-only 2026-09-17: extensions pg_cron 1.6.4, plpgsql, pgcrypto, uuid-ossp,
+pg_stat_statements, supabase_vault; zero vault secrets; no `supabase_functions.hooks` table; five cron jobs (above);
+role settings equal to the box image except database-level `app.settings.jwt_exp=3600` (no CommonSwarm code reads it),
+`supabase_realtime_admin` search_path (a NOLOGIN role, so a role setting never applies) and `swarm_command` search_path
+(carried by `roles.sql`).
