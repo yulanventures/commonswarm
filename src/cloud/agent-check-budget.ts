@@ -29,10 +29,11 @@ export const HOST_HOOK_PROCESS_DEADLINE_MS =
   HOST_HOOK_TIMEOUT_SECONDS * 1_000 - AGENT_CHECK_OUTPUT_ALLOWANCE_MS;
 
 /**
- * Time a hook check keeps, inside the process deadline, for present() and the cursor write-back after the network
- * work ends. Both are local: one stdout write of at most the check body budget and one 0600 file replace. Without it,
- * a check that starts late (slow start-up or stdin) can still be presenting when the process deadline fires, so the
- * host sees messages followed by check_timeout and the same messages replay on the next turn.
+ * How far before the process deadline a hook check's own deadline falls. It shortens the WHOLE check, so it is grace for
+ * the check's catch path (diagnostic write and one stdout line) to finish before the hard exit; it is not reserved time
+ * after a successful network phase. Without it, a check that starts late (slow start-up or stdin) is cut by the hard exit
+ * with no catch path, and presented messages can replay on the next turn. A check whose network work ends right at the
+ * deadline can still race the hard exit in present() or the cursor write; that window is this margin wide.
  */
 export const AGENT_CHECK_WRITE_BACK_MARGIN_MS = 150;
 

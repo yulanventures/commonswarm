@@ -16,6 +16,7 @@ import {
 } from "../../src/cloud/agent-check-budget.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages } from "../../src/cloud/agent-check.js";
+import { withFileLock } from "../../src/cloud/storage.js";
 import { profileScopeKey } from "../../src/cloud/agent-profile.js";
 import { mergeReceiveHooks, receiveBindingPath } from "../../src/cloud/agent-receive.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -172,6 +173,16 @@ test("a lock naming a dead pid on another host is not taken early", { timeout: 1
     profilePath, fetcher: fetcher([signal(1)], 0), present: async () => {}, deadlineAtMs: Date.now() + 600,
   }), { code: "check_timeout" });
   assert.ok(Date.now() - started >= 500, "a foreign host's lock was treated as dead");
+});
+
+test("releasing a lock leaves a lock another process took over", async () => {
+  const directory = await mkdtemp(join(root, "takeover-lock-"));
+  const lockPath = join(directory, "check.lock");
+  await withFileLock(directory, "check", async () => {
+    // Simulate a stale rule firing elsewhere while this holder still runs: another owner now holds the path.
+    await writeFile(lockPath, JSON.stringify({ pid: 1, host: "other", createdAt: 1 }), { mode: 0o600 });
+  });
+  assert.equal(JSON.parse(await readFile(lockPath, "utf8")).pid, 1);
 });
 
 test("process.exit while holding a file lock removes that lock", { timeout: 10_000 }, async () => {
@@ -346,7 +357,8 @@ test("receive hook exits after timeout output even when transport keeps the proc
       `receive hook took ${result.elapsed}ms with ${preloadDelayMs}ms preload`,
     );
     if (preloadDelayMs === 0) {
-      // Lower bound: the check used its derived budget, so a revert to a shorter typed budget fails here.
+      // Lower bound tied to the constant: it catches a hook path that hard-codes a shorter wait while the constant stays
+      // derived. A revert of the constant itself is caught by the ceiling-arithmetic test, not here.
       assert.ok(result.elapsed >= AGENT_CHECK_TIMEOUT_MS - 300, `receive hook gave up after ${result.elapsed}ms`);
     }
     // The CHECK aborted itself (its catch path records the diagnostic); the process hard exit writes none.

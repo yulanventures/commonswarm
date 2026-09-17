@@ -428,7 +428,17 @@ export async function withFileLock<T>(
   } finally {
     heldFileLocks.delete(lockPath);
     await handle.close();
-    await unlink(lockPath).catch(() => undefined);
+    // Remove only our own record: if another process took the path over (a stale rule fired while we ran), its lock stays.
+    const current = await readFile(lockPath, "utf8").catch(() => null);
+    const ours = current === null ? false : (() => {
+      try {
+        const owner = JSON.parse(current) as { pid?: unknown; createdAt?: unknown };
+        return owner.pid === process.pid && owner.createdAt === createdAt;
+      } catch {
+        return false;
+      }
+    })();
+    if (ours) await unlink(lockPath).catch(() => undefined);
   }
 }
 
