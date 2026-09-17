@@ -118,6 +118,9 @@ services:
     init: true
     mem_limit: 300m
     env_file: *stack-env
+    environment:
+      # Native --ready cannot resolve the default !4 host selector.
+      PGRST_SERVER_HOST: "0.0.0.0"
     labels:
       commonswarm.required-env: >-
         PGRST_DB_URI,PGRST_DB_SCHEMAS,PGRST_DB_EXTRA_SEARCH_PATH,
@@ -131,14 +134,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test:
-        - CMD
-        - /usr/bin/bash
-        - -c
-        - >-
-          exec 3<>/dev/tcp/127.0.0.1/3001 &&
-          printf 'GET /live HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
-          IFS= read -r status <&3 && [[ "$${status}" == *' 200 '* ]]
+      test: ["CMD", "/bin/postgrest", "--ready"]
       interval: 10s
       timeout: 3s
       retries: 12

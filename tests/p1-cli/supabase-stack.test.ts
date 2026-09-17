@@ -148,6 +148,13 @@ function validateStack(
   if (!/NODE_EXTRA_CA_CERTS/.test(serviceBlock(composeSource, "storage-api"))) {
     errors.push("storage CA trust");
   }
+  const postgrest = serviceBlock(composeSource, "postgrest");
+  if (!/test:\s*\["CMD",\s*"\/bin\/postgrest",\s*"--ready"\]/.test(postgrest)) {
+    errors.push("postgrest native readiness");
+  }
+  if (!/PGRST_SERVER_HOST:\s*"0\.0\.0\.0"/.test(postgrest)) {
+    errors.push("postgrest readiness host");
+  }
   for (const forbidden of [
     "SOURCE_DATABASE_URL",
     "SOURCE_SERVICE_ROLE_KEY",
@@ -289,6 +296,8 @@ test("stack controls reject their named mutations", () => {
       caddy,
       /storage CA trust/,
     ],
+    ["postgrest readiness", compose.replace('"--ready"', '"--live"'), envExample, caddy, /postgrest native readiness/],
+    ["postgrest host", compose.replace('PGRST_SERVER_HOST: "0.0.0.0"', 'PGRST_SERVER_HOST: "!4"'), envExample, caddy, /postgrest readiness host/],
     ["realtime buffering", compose, envExample, caddy.replace("\t\t\t\tversions 1.1", "\t\t\t\tversions 2"), /realtime no-buffer http1/],
   ];
 
