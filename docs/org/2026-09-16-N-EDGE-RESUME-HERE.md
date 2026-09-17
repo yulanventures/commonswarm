@@ -3,7 +3,21 @@
 Written for a cold successor. The H0 lanes have their own file:
 `docs/org/2026-09-16-H0-LINK-JOIN-RESUME-HERE.md`.
 
-## STATE AT 23:15Z — read this first
+## STATE AT 01:10Z (2026-09-17) — read this first
+
+- **Operator ruled B (HezLead 6b26d9ef, 01:09Z): no droplet.** The edge functions move together with Postgres in the N-db
+  window; edge-staging stays as it is. Path C and the separate edge re-cut are cancelled. The Falkenstein-box timeout table
+  stays as the record of why (check p95 3.02 s against 3 s).
+- LANDED since 23:15Z: check budget (merge 8eb658d3, NOT released: `AGENT_CHECK_TIMEOUT_MS` 3,900 ms derived from the 5 s
+  hook ceiling, hook hard exit from process start, dead-owner lock takeover).
+- Codex hit its usage limit (until 2026-09-19 03:50 local). Strategist cc69e6aa: gpt-5.6-sol through opencode on the
+  OpenRouter key for N-db fix round 2 and H lane 1 only, cap 75 USD, spend reported per round; baseline usage 214.53 USD
+  at 00:05Z; guard log in the lead scratchpad `wip/openrouter-spend.log`.
+- IN FLIGHT: `lane/n-db-stack` fix round 2 (opencode, both arms' PRODUCTION findings; WIP not yet committed); H lane 1
+  fix round 4 (opencode; grok round 4 found `cswarm toString` and other Object.prototype names crash on the lane — main
+  prints unknown command; the lead's round-3 "refuted" was wrong because the baseline harness rewrote that argv).
+
+## STATE AT 23:15Z (history)
 
 - **N-site LIVE (production):** commonswarm.com and www are A 178.105.29.28 proxied since 23:01:38Z (HezLead holds the
   zone rights; rollback A 76.76.21.21 DNS-only). Merge dc585c9c of 8cd2ba3c; controls 18/18; GitHub sign-in through the
