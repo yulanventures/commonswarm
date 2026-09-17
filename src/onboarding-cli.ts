@@ -8,6 +8,7 @@ import {
 } from "./cloud/agent-check.js";
 import {
   HOST_HOOK_PROCESS_DEADLINE_MS,
+  hostHookCheckDeadlineAt,
   processDeadlineDelayMs,
 } from "./cloud/agent-check-budget.js";
 import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile } from "./cloud/agent-profile.js";
@@ -106,7 +107,7 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
     const event = await hookInput();
     const result = await receiveHookEvent(profile, host, event);
     if (!result.check) return;
-    await checkAgentMessages({ profilePath: profile, hostSessionId: host, present: async result => {
+    await checkAgentMessages({ profilePath: profile, hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
       const text = renderAgentCheck(result);
       if (text) await writeOnboardingOutput(text);
     } });

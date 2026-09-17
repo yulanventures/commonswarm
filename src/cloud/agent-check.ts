@@ -141,6 +141,8 @@ export async function checkAgentMessages(options: {
   full?: boolean;
   fetcher?: typeof fetch;
   timeoutMs?: number;
+  /** Absolute wall-clock deadline (epoch ms) that can only shorten the budget, e.g. a host hook's process deadline. */
+  deadlineAtMs?: number;
   /** Cursor advances only after the consumer has accepted the output. */
   present: (result: AgentCheckResult) => Promise<void>;
 }): Promise<AgentCheckResult> {
@@ -149,7 +151,7 @@ export async function checkAgentMessages(options: {
   const profile = await readAgentProfile(profilePath);
   const path = checkStatePath(profilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
-  const deadlineMs = startedAt + timeoutMs;
+  const deadlineMs = Math.min(startedAt + timeoutMs, options.deadlineAtMs ?? Number.POSITIVE_INFINITY);
   try {
     return await withFileLock(dirname(path), "check", async () => {
       const state = await readCheckState(path);
@@ -210,7 +212,7 @@ export async function checkAgentMessages(options: {
           workspace_name: rawName == null || rawName.trim() === "" ? null : rawName,
           next_action: hasMore ? `More messages may remain. Run cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} again.` : null,
         };
-        if (signal.aborted) throw new AgentSetupError("check_timeout", "The message check timed out. Try again.");
+        if (signal.aborted) throw checkTimeoutError();
         // Save the full bodies before showing a preview with its retrieval command. Failure
         // to present can replay messages, but cannot lose them or advance delivery state.
         const cached: CheckState = {
@@ -222,7 +224,7 @@ export async function checkAgentMessages(options: {
         if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
         return result;
       }, options.fetcher);
-    }, { timeoutMs: Math.min(Math.max(0, deadlineMs - Date.now()), 30_000) });
+    }, { timeoutMs: Math.min(Math.max(0, Math.floor(deadlineMs - Date.now())), 30_000) });
   } catch (error) {
     if (error instanceof FileLockTimeoutError || error instanceof SignalReadTimeoutError) {
       throw checkTimeoutError();

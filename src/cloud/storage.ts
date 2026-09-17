@@ -1,4 +1,4 @@
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readFileSync, unlinkSync } from "node:fs";
 import {
   access,
   chmod,
@@ -325,6 +325,46 @@ export class FileLockTimeoutError extends Error {
   }
 }
 
+/** Locks this process holds right now: path -> the createdAt it wrote. */
+const heldFileLocks = new Map<string, number>();
+let heldFileLockExitHookInstalled = false;
+
+/**
+ * process.exit() skips every pending finally, so a hook's hard exit would leave its lock for LOCK_STALE_MS and the
+ * next turns would spend their budget waiting. On exit, remove each lock this process still owns, checking the
+ * recorded pid and createdAt so a lock another process took after ours is never removed.
+ */
+function releaseHeldFileLocksSync(): void {
+  for (const [lockPath, createdAt] of heldFileLocks) {
+    try {
+      const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; createdAt?: unknown };
+      if (owner.pid === process.pid && owner.createdAt === createdAt) unlinkSync(lockPath);
+    } catch {
+      // Missing or unreadable: nothing of ours to remove.
+    }
+  }
+  heldFileLocks.clear();
+}
+
+/** True only when the lock names a pid on this host that no longer exists. Unknown owners are not dead. */
+async function lockOwnerIsDead(lockPath: string): Promise<boolean> {
+  let owner: { pid?: unknown };
+  try {
+    owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+  } catch {
+    return false; // Still being written, or not ours to judge: the mtime rule decides.
+  }
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid === process.pid) {
+    return false;
+  }
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH";
+  }
+}
+
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
@@ -340,17 +380,19 @@ export async function withFileLock<T>(
   const deadline = Date.now() + timeoutMs;
   let handle: Awaited<ReturnType<typeof open>> | null = null;
 
+  let createdAt = 0;
   while (handle === null) {
     try {
       handle = await open(lockPath, "wx", 0o600);
+      createdAt = Date.now();
       await handle.writeFile(
-        JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+        JSON.stringify({ pid: process.pid, createdAt }),
         "utf8",
       );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const lockInfo = await stat(lockPath).catch(() => null);
-      if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
+      if (lockInfo && (Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS || await lockOwnerIsDead(lockPath))) {
         await unlink(lockPath).catch(() => undefined);
         continue;
       }
@@ -361,9 +403,15 @@ export async function withFileLock<T>(
     }
   }
 
+  heldFileLocks.set(lockPath, createdAt);
+  if (!heldFileLockExitHookInstalled) {
+    heldFileLockExitHookInstalled = true;
+    process.on("exit", releaseHeldFileLocksSync);
+  }
   try {
     return await work();
   } finally {
+    heldFileLocks.delete(lockPath);
     await handle.close();
     await unlink(lockPath).catch(() => undefined);
   }

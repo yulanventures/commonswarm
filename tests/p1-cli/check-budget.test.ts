@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,10 +10,13 @@ import {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
   AGENT_CHECK_STARTUP_ALLOWANCE_MS,
   AGENT_CHECK_TIMEOUT_MS,
+  AGENT_CHECK_WRITE_BACK_MARGIN_MS,
   HOST_HOOK_TIMEOUT_SECONDS,
+  hostHookCheckDeadlineAt,
 } from "../../src/cloud/agent-check-budget.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages } from "../../src/cloud/agent-check.js";
+import { profileScopeKey } from "../../src/cloud/agent-profile.js";
 import { mergeReceiveHooks, receiveBindingPath } from "../../src/cloud/agent-receive.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import { usage } from "../../src/cli.js";
@@ -116,6 +119,63 @@ test("receive hook settings use the exported host-hook ceiling", () => {
   const hooks = settings.hooks as Record<string, unknown>;
   const groups = hooks.UserPromptSubmit as Array<{ hooks: Array<{ timeout: number }> }>;
   assert.equal(groups[0]?.hooks[0]?.timeout, DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS);
+});
+
+test("a hook check deadline counts from process start and ends before the process deadline", () => {
+  // Process started 1,200 ms before "now": the check must end at start + ceiling - output - write-back margin.
+  assert.equal(
+    hostHookCheckDeadlineAt(10_000, 1_200),
+    10_000 - 1_200 + DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000 - AGENT_CHECK_OUTPUT_ALLOWANCE_MS - AGENT_CHECK_WRITE_BACK_MARGIN_MS,
+  );
+});
+
+test("an absolute deadline shortens the check budget and leaves the cursor unchanged", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const first = signal(1);
+  await checkAgentMessages({ profilePath, fetcher: fetcher([first], 0), present: async () => {} });
+  const started = Date.now();
+  let presented = false;
+  await assert.rejects(checkAgentMessages({
+    profilePath,
+    fetcher: fetcher([first, signal(2)], 1_000),
+    deadlineAtMs: Date.now() + 300,
+    present: async () => { presented = true; },
+  }), { code: "check_timeout" });
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 900, `the absolute deadline did not bound the check: ${elapsed}ms`);
+  assert.equal(presented, false);
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  assert.equal(state.cursor.id, first.id);
+});
+
+test("a lock left by a dead process is taken at once, not after the stale window", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const dead = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+  const deadPid = dead.pid!;
+  await new Promise<void>(resolveExit => dead.once("close", () => resolveExit()));
+  await writeFile(join(dirname(profilePath), "check.lock"), JSON.stringify({ pid: deadPid, createdAt: Date.now() }), { mode: 0o600 });
+  const started = Date.now();
+  const result = await checkAgentMessages({ profilePath, fetcher: fetcher([signal(1)], 0), present: async () => {} });
+  const elapsed = Date.now() - started;
+  assert.deepEqual(result.messages.map(row => row.id), [signal(1).id]);
+  assert.ok(elapsed < 1_000, `a dead owner's lock was waited on for ${elapsed}ms`);
+});
+
+test("process.exit while holding a file lock removes that lock", { timeout: 10_000 }, async () => {
+  const directory = await mkdtemp(join(root, "exit-lock-"));
+  const storage = join(repoRoot, "src", "cloud", "storage.ts");
+  const child = spawn(process.execPath, [
+    "--import", tsxImport, "--input-type=module", "-e",
+    `import { withFileLock } from ${JSON.stringify(storage)};
+     await withFileLock(${JSON.stringify(directory)}, "check", async () => { process.stdout.write("held"); process.exit(0); });`,
+  ], { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", chunk => stdout += String(chunk));
+  child.stderr.on("data", chunk => stderr += String(chunk));
+  const status = await new Promise<number | null>(resolveStatus => child.once("close", resolveStatus));
+  assert.equal(status, 0, stderr);
+  assert.equal(stdout, "held");
+  await assert.rejects(access(join(directory, "check.lock")), { code: "ENOENT" });
 });
 
 test("usage states the listener hook budget generated from its constant", () => {
@@ -262,6 +322,9 @@ test("receive hook exits after timeout output even when transport keeps the proc
   const expected = `CommonSwarm check failed (check_timeout); the inbox was not proved empty. Run cswarm check --profile '${profilePath}' to see the error.\n`;
 
   for (const preloadDelayMs of [0, 1_200]) {
+    // A failure is printed only when it changed, so each run starts without the previous diagnostic.
+    const diagnostic = join(dirname(profilePath), `check-error-${profileScopeKey(host)}.json`);
+    await rm(diagnostic, { force: true });
     const result = await runReceiveHook(profilePath, host, cwd, preloadDelayMs);
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, expected);
@@ -269,5 +332,12 @@ test("receive hook exits after timeout output even when transport keeps the proc
       result.elapsed < DOCUMENTED_HOST_HOOK_TIMEOUT_SECONDS * 1_000,
       `receive hook took ${result.elapsed}ms with ${preloadDelayMs}ms preload`,
     );
+    if (preloadDelayMs === 0) {
+      // Lower bound: the check used its derived budget, so a revert to a shorter typed budget fails here.
+      assert.ok(result.elapsed >= AGENT_CHECK_TIMEOUT_MS - 300, `receive hook gave up after ${result.elapsed}ms`);
+    }
+    // The CHECK aborted itself (its catch path records the diagnostic); the process hard exit writes none.
+    assert.equal(JSON.parse(await readFile(diagnostic, "utf8")), "check_timeout");
+    await assert.rejects(access(join(dirname(profilePath), "check.lock")), { code: "ENOENT" });
   }
 });
