@@ -3,7 +3,26 @@
 Written for a cold successor. The H0 lanes have their own file:
 `docs/org/2026-09-16-H0-LINK-JOIN-RESUME-HERE.md`.
 
-## STATE AT 01:10Z (2026-09-17) — read this first
+## STATE AT 10:25Z (2026-09-17) — read this first
+
+- LANDED on main (pushed): H lane 1, the command table dispatches the CLI (merge 7cdd6ec3, record a6103088); the timeout
+  table (merge 59862612, record 16ce5498). Not released: both ship with the next npm release.
+- N-db (edges move with Postgres, ruling B): lane/n-db-stack at **6d13314c** (pushed, based on a6103088). Review round 5
+  was clean (grok PASS, antigravity 8/8 PASS); 65 rulings are in deploy/supabase-stack/LOCAL-REHEARSAL.md. Strategist ruling A:
+  N-db lands only when round 5 is clean AND the box rehearsal passes end to end, including the recovery drill; the
+  rehearsal is recorded as a transcript under docs/evidence.
+- Rehearsal: HezLead runs it on yulan-vps-1 from 6d13314c in one root shell, from 2026-09-17 11:00Z, steps before the
+  production dump first. OPEN GATE: the production database password in the vault is stale; a dashboard reset needs the
+  operator's yes (HezLead asked). Production stays read-only in the rehearsal: the pooler dump (session mode, port 5432) and
+  `source-read-only.sh preflight source` only. SOURCE_SYSTEM_IDENTIFIER=7662742571317219726 (read-only, 2026-09-17).
+- Prerequisites done by HezLead: cert /etc/commonswarm/pg-tls (100:101), data dir, network, DOCKER-USER egress fix for
+  5432, vault items (legacy JWT secret and keys, Resend SMTP key, second Google secret, yulanventures GitHub app with
+  callback https://api.commonswarm.com/auth/v1/callback, R2, generated service passwords, backup_ro).
+- Worktrees and branches stay as they are: the operator stopped the post-landing cleanup and has not answered yet.
+- Next: fold every rehearsal failure into the lane, finish the rehearsal and the drill, commit the transcript, land N-db
+  (merge onto current main), send HezLead the landed env list, then schedule the window with its date.
+
+## STATE AT 01:10Z (2026-09-17) (history)
 
 - **Operator ruled B (HezLead 6b26d9ef, 01:09Z): no droplet.** The edge functions move together with Postgres in the N-db
   window; edge-staging stays as it is. Path C and the separate edge re-cut are cancelled. The Falkenstein-box timeout table
