@@ -9,8 +9,16 @@ import test from "node:test";
 import { once } from "node:events";
 import { enumerateRepository, enumerateText } from "../../scripts/timeout-table/enumerate.mjs";
 import { mappingForRef, validateMapping } from "../../scripts/timeout-table/mapping.mjs";
-import { markdownReport } from "../../scripts/timeout-table/run.mjs";
+import { createRequire } from "node:module";
+import {
+  argsOf, assertNoOriginWrites, markdownReport, rowSummary, runStatus, runTable,
+} from "../../scripts/timeout-table/run.mjs";
+import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { readJsonLines, runChild, summarize, withPrivateProfile } from "../../scripts/timeout-table/core.mjs";
+
+const { originWriteKind, describeOriginWriteRules } = createRequire(import.meta.url)(
+  "../../scripts/timeout-table/writes.cjs",
+) as { originWriteKind: (method: string, path: string) => string | null; describeOriginWriteRules: () => string };
 import {
   AGENT_CHECK_TIMEOUT_MS,
   HOST_HOOK_PROCESS_DEADLINE_MS,
@@ -87,6 +95,20 @@ test("timeout inventory and mapping are exact in both directions for each measur
   );
   const hostHook = headRows.get("src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS");
   assert.equal(hostHook && hostHook.value_ms / 1_000, HOST_HOOK_TIMEOUT_SECONDS);
+  assert.equal(
+    headRows.get("src/listener/hook.ts:HOOK_CHECK_TIMEOUT_MS")?.value_ms,
+    AGENT_CHECK_TIMEOUT_MS,
+  );
+  assert.equal(headRows.get("src/cloud/channels.ts:timeoutMs")?.value_ms, 30_000);
+  assert.equal(
+    mappingForRef(mapping, "HEAD").rows["src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS"]?.operation.name,
+    "signal-read",
+  );
+  assert.equal(
+    mappingForRef(mapping, "HEAD").rows["src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS"]
+      ?.operation.measures_guarded_path,
+    false,
+  );
 });
 
 test("a pure line shift does not change inventory ids", () => {
@@ -105,6 +127,59 @@ test("a pure line shift does not change inventory ids", () => {
   ]);
   assert.deepEqual(after.map(row => row.id), before.map(row => row.id));
   assert.ok(before.every((row, index) => row.line < after[index]!.line));
+});
+
+test("enumerator records timeoutMs defaults, ?? literals, as const, identifier AbortSignal, and import aliases", () => {
+  const defaults = enumerateText("fixture.ts", "function f(timeoutMs = 30_000) { return timeoutMs; }");
+  assert.equal(defaults.some(row => row.name === "timeoutMs" && row.value_ms === 30_000), true);
+
+  const coalescing = enumerateText("fixture.ts", "setTimeout(() => {}, options.timeoutMs ?? 15_000);");
+  assert.equal(coalescing.some(row => row.name === "setTimeout" && row.value_ms === 15_000), true);
+
+  const asConst = enumerateText("fixture.ts", "const TIMEOUT_MS = 5_000 as const;");
+  assert.deepEqual(asConst.map(row => ({ id: row.id, value_ms: row.value_ms })), [
+    { id: "fixture.ts:TIMEOUT_MS", value_ms: 5_000 },
+  ]);
+
+  const ident = enumerateText(
+    "fixture.ts",
+    "const DEFAULT_TIMEOUT_MS = 4_000;\nAbortSignal.timeout(DEFAULT_TIMEOUT_MS);",
+  );
+  assert.equal(ident.some(row => row.name === "AbortSignal.timeout" && row.value_ms === 4_000), true);
+
+  const alias = enumerateText(
+    "hook.ts",
+    'import { AGENT_CHECK_TIMEOUT_MS } from "./budget.js";\nexport const HOOK_CHECK_TIMEOUT_MS = AGENT_CHECK_TIMEOUT_MS;',
+    { importedValues: new Map([["AGENT_CHECK_TIMEOUT_MS", 3_900]]) },
+  );
+  assert.equal(alias.some(row => row.name === "HOOK_CHECK_TIMEOUT_MS" && row.value_ms === 3_900), true);
+});
+
+test("args default to 20 runs and runStatus fails FAIL or unacknowledged NOT MEASURED", () => {
+  assert.equal(argsOf(["--base-url", "http://127.0.0.1:1", "--profile", "/tmp/x"]).runs, 20);
+  const id = "fixture.ts:TIMEOUT_MS";
+  const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }];
+  const mapping = { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } };
+  const fail = runStatus(inventory, mapping, new Map([["fixture", { durations: [70], realTimeouts: 0 }]]));
+  assert.deepEqual(fail.fails, [id]);
+  const incomplete = {
+    rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read", measures_guarded_path: false } } },
+  };
+  const notMeasured = runStatus(inventory, incomplete, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]));
+  assert.deepEqual(notMeasured.notMeasured, [id]);
+  assert.deepEqual(notMeasured.missing, [id]);
+  const acked = runStatus(inventory, incomplete, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]), [id]);
+  assert.deepEqual(acked.missing, []);
+  const extra = runStatus(inventory, mapping, new Map([["fixture", { durations: [10], realTimeouts: 0 }]]), [id]);
+  assert.deepEqual(extra.extra, [id]);
+  assert.equal(rowSummary(inventory[0]!, mapping.rows[id], { durations: [10], realTimeouts: 1 }).gate, "FAIL");
+  assert.match(describeOriginWriteRules(), /POST \/functions\/v1\/command/);
+  assert.equal(originWriteKind("POST", "/functions/v1/command"), "command");
+  assert.equal(originWriteKind("POST", "/functions/v1/read"), null);
+  assert.throws(
+    () => assertNoOriginWrites([{ method: "POST", path: "/functions/v1/command", status: 200, duration_ms: 1 }], "inbox"),
+    /sent a write to the origin/,
+  );
 });
 
 test("delayed local endpoint makes the rendered row pass below half-budget and fail above it", async (t) => {
@@ -131,13 +206,18 @@ test("delayed local endpoint makes the rendered row pass below half-budget and f
   assert.equal(summarize(slow, 100).gate, "FAIL");
 
   const id = "fixture.ts:TIMEOUT_MS";
-  const report = markdownReport({
-    baseUrl: target.url,
-    inventory: [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }],
-    mapping: { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } },
+  const mapping = { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } };
+  const inventory = [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }];
+  const failReport = markdownReport({
+    baseUrl: target.url, inventory, mapping,
     measurements: new Map([["fixture", { durations: slow, realTimeouts: 0 }]]), startup: null,
   });
-  assert.match(report, /\| FAIL \|/);
+  assert.match(failReport, /\| FAIL \|/);
+  const passReport = markdownReport({
+    baseUrl: target.url, inventory, mapping,
+    measurements: new Map([["fixture", { durations, realTimeouts: 0 }]]), startup: null,
+  });
+  assert.match(passReport, /\| PASS \|/);
 });
 
 test("preload rewrites only the origin and logs no header, body, query, or secret", async (t) => {
@@ -167,12 +247,73 @@ test("preload rewrites only the origin and logs no header, body, query, or secre
     [{ method: "POST", path: "/functions/v1/read", status: 200 }]);
 });
 
+test("preload duration includes the response body and does not forward writes or other origins", async (t) => {
+  const original = await listen(() => 0);
+  let commandHits = 0;
+  let otherHits = 0;
+  const bodyTarget = createServer((request, response) => {
+    if ((request.url ?? "").startsWith("/functions/v1/command")) {
+      commandHits += 1;
+      response.writeHead(200); response.end("{}");
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/octet-stream" });
+    response.write("head");
+    setTimeout(() => { response.end("x".repeat(32)); }, 120);
+  });
+  bodyTarget.listen(0, "127.0.0.1");
+  await once(bodyTarget, "listening");
+  const other = createServer((_request, response) => {
+    otherHits += 1;
+    response.writeHead(200); response.end("{}");
+  });
+  other.listen(0, "127.0.0.1");
+  await once(other, "listening");
+  t.after(() => original.server.close());
+  t.after(() => bodyTarget.close());
+  t.after(() => other.close());
+  const bodyAddress = bodyTarget.address();
+  const otherAddress = other.address();
+  assert.ok(bodyAddress && typeof bodyAddress === "object");
+  assert.ok(otherAddress && typeof otherAddress === "object");
+  const bodyUrl = `http://127.0.0.1:${bodyAddress.port}`;
+  const otherUrl = `http://127.0.0.1:${otherAddress.port}`;
+  const directory = await mkdtemp(join(tmpdir(), "timeout-preload-body-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const log = join(directory, "fetch.jsonl");
+  await writeFile(log, "", { mode: 0o600 });
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: `--require=${join(repo, "scripts/timeout-table/preload.cjs")}`,
+    TIMEOUT_TABLE_BASE_URL: bodyUrl,
+    TIMEOUT_TABLE_PROFILE_ORIGIN: original.url,
+    TIMEOUT_TABLE_FETCH_LOG: log,
+  };
+  const body = await runChild(process.execPath, ["-e",
+    `fetch(${JSON.stringify(`${original.url}/functions/v1/read`)}).then(r=>r.arrayBuffer()).then(()=>process.exit(0),()=>process.exit(1))`], { env });
+  assert.equal(body.code, 0);
+  const bodyRow = (await readJsonLines(log)).at(-1);
+  assert.ok((bodyRow?.duration_ms ?? 0) >= 100, `body duration ${bodyRow?.duration_ms}`);
+
+  const write = await runChild(process.execPath, ["-e",
+    `fetch(${JSON.stringify(`${original.url}/functions/v1/command`)},{method:'POST',body:'{}'}).then(()=>process.exit(0),()=>process.exit(1))`], { env });
+  assert.notEqual(write.code, 0);
+  assert.equal(commandHits, 0);
+  assert.equal(originWriteKind("POST", "/functions/v1/command"), "command");
+
+  const leaked = await runChild(process.execPath, ["-e",
+    `fetch(${JSON.stringify(`${otherUrl}/storage/v1/object`)}).then(()=>process.exit(0),()=>process.exit(1))`], { env });
+  assert.notEqual(leaked.code, 0);
+  assert.equal(otherHits, 0);
+});
+
 test("private profile copy is removed after success and injected failure", async () => {
   const directory = await mkdtemp(join(tmpdir(), "timeout-profile-test-"));
   await chmod(directory, 0o700);
   const credential = join(directory, "credential.json");
   const profile = join(directory, "profile.json");
   await writeFile(credential, '{"token":"secret-shaped-value","expires_at":"2099-01-01T00:00:00Z"}', { mode: 0o600 });
+  await writeFile(join(directory, "sibling-secret.txt"), "other-secret", { mode: 0o600 });
   await writeFile(profile, JSON.stringify({ version: 1, url: "http://127.0.0.1:1", anon_key: "public", workspace_id: "00000000-0000-4000-8000-000000000001", principal_id: "00000000-0000-4000-8000-000000000002", credential_file: credential }), { mode: 0o600 });
   try {
     let successRoot = "";
@@ -182,6 +323,7 @@ test("private profile copy is removed after success and injected failure", async
       assert.equal((await stat(copy.profilePath)).mode & 0o777, 0o600);
       assert.notEqual(copy.profile.credential_file, credential);
       assert.doesNotMatch(await readFile(copy.profile.credential_file, "utf8"), /expires_at/);
+      await assert.rejects(stat(join(copy.root, "profile", "sibling-secret.txt")), { code: "ENOENT" });
     });
     await assert.rejects(stat(successRoot), { code: "ENOENT" });
 
@@ -223,7 +365,7 @@ type ExitPaths = {
   credentialFile: string;
 };
 
-async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "exit13" | "sigterm") {
+async function spawnExitFixture(t: { after: (fn: () => void) => void }, mode: "exit13" | "sigterm" | "sighup") {
   const home = await mkdtemp(join(tmpdir(), "timeout-table-home-"));
   t.after(() => { rmSync(home, { recursive: true, force: true }); });
   const profileDir = join(home, "profile-src");
@@ -322,4 +464,114 @@ test("SIGTERM removes the profile copy and the git worktree", async t => {
   assert.equal(code, 143, session.stderr);
   await assertArtifactsGone(session.paths);
   assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
+});
+
+test("SIGHUP removes the profile copy and the git worktree", async t => {
+  const session = await spawnExitFixture(t, "sighup");
+  await waitForFile(session.marker);
+  session.paths = JSON.parse(await readFile(session.marker, "utf8")) as ExitPaths;
+  await assertArtifactsPresent(session.paths);
+  session.child.kill("SIGHUP");
+  const [code, signal] = await session.closed;
+  assert.equal(signal, null, session.stderr);
+  assert.equal(code, 129, session.stderr);
+  await assertArtifactsGone(session.paths);
+  assert.equal(await readFile(session.credential, "utf8"), session.credentialBody);
+});
+
+test("runTable does not write to the origin and will not PASS unacknowledged NOT MEASURED rows", async t => {
+  const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const writes: string[] = [];
+  const server = createServer((request, response) => {
+    const url = request.url ?? "";
+    if (request.method === "POST" && (url === "/functions/v1/command" || url === "/functions/v1/activity")) {
+      writes.push(`${request.method} ${url}`);
+    }
+    let raw = "";
+    request.setEncoding("utf8");
+    request.on("data", chunk => { raw += chunk; });
+    request.on("end", () => {
+      let body: Record<string, unknown> = {};
+      try { body = raw ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { body = {}; }
+      if (url.startsWith("/auth/v1/settings")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"external":{}}');
+        return;
+      }
+      if (url === "/functions/v1/read" && body.resource === "members") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          members: [],
+          agents: [{ principal_id: principal, name: "Agent", owner_user_id: principal }],
+          identity: {
+            credential_valid: true, principal_id: principal, workspace_id: workspace, owner_user_id: principal,
+          },
+        }));
+        return;
+      }
+      if (url === "/functions/v1/read" && body.resource === "signals") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({
+          signals: [],
+          capabilities: { sender_owner_relation: 1, cursor_after: 1 },
+        }));
+        return;
+      }
+      if (url === "/functions/v1/read" && body.resource === "channels") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ channels: [] }));
+        return;
+      }
+      if (url === "/functions/v1/read" && body.resource === "files") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ files: [] }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const home = await mkdtemp(join(tmpdir(), "timeout-table-run-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const profileDir = join(home, "profile-src");
+  await mkdir(profileDir, { recursive: true, mode: 0o700 });
+  await chmod(profileDir, 0o700);
+  const credential = join(profileDir, "credential.json");
+  const profile = join(profileDir, "profile.json");
+  await writeFile(credential, JSON.stringify({
+    message: AGENT_CREDENTIAL_MESSAGE_D088,
+    status: "accepted",
+    principal_id: principal,
+    token_id: "11111111-1111-4111-8111-111111111111",
+    run_id: "22222222-2222-4222-8222-222222222222",
+    agent_token: `swm_agt_${"A".repeat(43)}`,
+    expires_at: "2099-01-01T00:00:00.000Z",
+  }), { mode: 0o600 });
+  await writeFile(profile, JSON.stringify({
+    version: 1, url, anon_key: "public", workspace_id: workspace, principal_id: principal,
+    credential_file: credential,
+  }), { mode: 0o600 });
+  const checkId = "src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS";
+  await assert.rejects(runTable({
+    baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: [],
+  }), /NOT MEASURED without --acknowledge-not-measured/);
+  const result = await runTable({
+    baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: null,
+    sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
+    output: null, acknowledgeNotMeasured: [checkId],
+  });
+  assert.equal(writes.length, 0);
+  assert.match(result.report, /\| NOT MEASURED \|/);
+  assert.match(result.report, /signal-read/);
+  assert.equal(result.status.fails.length, 0);
+  assert.deepEqual(result.status.notMeasured, [checkId]);
 });

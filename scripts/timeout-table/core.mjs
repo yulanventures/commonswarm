@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,57 +10,57 @@ export function percentile(values, quantile) {
   return sorted[Math.ceil(quantile * sorted.length) - 1];
 }
 
-export function summarize(values, budgetMs) {
+export function summarize(values, budgetMs, options = {}) {
   const p50 = percentile(values, 0.50);
   const p95 = percentile(values, 0.95);
   const max = values.length === 0 ? null : Math.max(...values);
   const headroom = p95 === null || p95 === 0 ? null : budgetMs / p95;
-  return { runs: values.length, p50, p95, max, headroom,
-    gate: headroom === null ? "NOT RUN" : headroom >= 2 ? "PASS" : "FAIL" };
+  let gate;
+  if (options.notNetwork) gate = "NOT NETWORK";
+  else if (options.notMeasured) gate = "NOT MEASURED";
+  else if (options.notRun || headroom === null) gate = "NOT RUN";
+  else if ((options.realTimeouts ?? 0) > 0) gate = "FAIL";
+  else gate = headroom >= 2 ? "PASS" : "FAIL";
+  return { runs: values.length, p50, p95, max, headroom, gate };
 }
 
-async function copyPrivateDirectory(source, destination) {
-  await mkdir(destination, { recursive: true, mode: 0o700 });
-  await chmod(destination, 0o700);
-  for (const entry of await readdir(source, { withFileTypes: true })) {
-    const from = join(source, entry.name);
-    const to = join(destination, entry.name);
-    if (entry.isSymbolicLink()) throw new Error("profile directory contains a symbolic link");
-    if (entry.isDirectory()) await copyPrivateDirectory(from, to);
-    else if (entry.isFile()) {
-      await writeFile(to, await readFile(from), { mode: 0o600, flag: "wx" });
-      await chmod(to, 0o600);
-    }
-  }
+async function copyPrivateFile(source, destination) {
+  const info = await lstat(source);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error("profile files must be regular files, not symbolic links");
+  await writeFile(destination, await readFile(source), { mode: 0o600, flag: "wx" });
+  await chmod(destination, 0o600);
 }
 
 export async function makePrivateProfileCopy(profilePath, options = {}) {
   const sourceProfile = resolve(profilePath);
-  const sourceDirectory = dirname(sourceProfile);
   const info = await lstat(sourceProfile);
   if (!info.isFile() || info.isSymbolicLink()) throw new Error("profile must be a regular file");
+  const parsed = JSON.parse(await readFile(sourceProfile, "utf8"));
+  if (!parsed || typeof parsed !== "object" || typeof parsed.url !== "string" ||
+      typeof parsed.credential_file !== "string") throw new Error("profile has no URL or credential file");
+  const credentialSource = resolve(dirname(sourceProfile), parsed.credential_file);
   const root = await mkdtemp(join(options.tempParent ?? tmpdir(), "cswarm-timeout-table-"));
   await chmod(root, 0o700);
   const copyDirectory = join(root, "profile");
   try {
-    await copyPrivateDirectory(sourceDirectory, copyDirectory);
+    await mkdir(copyDirectory, { recursive: true, mode: 0o700 });
+    await chmod(copyDirectory, 0o700);
     const copyProfile = join(copyDirectory, basename(sourceProfile));
-    const parsed = JSON.parse(await readFile(copyProfile, "utf8"));
-    if (!parsed || typeof parsed !== "object" || typeof parsed.url !== "string" ||
-        typeof parsed.credential_file !== "string") throw new Error("profile has no URL or credential file");
-    const credentialName = basename(parsed.credential_file);
-    parsed.credential_file = join(copyDirectory, credentialName);
+    const copyCredential = join(copyDirectory, "credential.json");
+    await copyPrivateFile(sourceProfile, copyProfile);
+    await copyPrivateFile(credentialSource, copyCredential);
+    parsed.credential_file = copyCredential;
     // A copied durable artifact must not renew. Renewal supersedes the original
     // credential on the server, and the successor would be deleted with this copy.
     // expires_at is optional in the artifact grammar; without it, bearer() uses the
     // presented token and never enters renewal.
-    const credentialRaw = await readFile(parsed.credential_file, "utf8");
+    const credentialRaw = await readFile(copyCredential, "utf8");
     try {
       const artifact = JSON.parse(credentialRaw);
       if (artifact && typeof artifact === "object" && !Array.isArray(artifact) &&
           Object.hasOwn(artifact, "expires_at")) {
         delete artifact.expires_at;
-        await writeFile(parsed.credential_file, JSON.stringify(artifact), { mode: 0o600 });
+        await writeFile(copyCredential, JSON.stringify(artifact), { mode: 0o600 });
       }
     } catch {
       // Legacy bare tokens are deliberately not JSON and already cannot auto-renew.

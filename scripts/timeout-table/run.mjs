@@ -3,6 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync, rmSync } from "node:fs";
 import { chmod, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
@@ -14,11 +15,13 @@ import {
   clientInvocation, makePrivateProfileCopy, percentile, readJsonLines, runChild, summarize,
 } from "./core.mjs";
 
+const { originWriteKind, describeOriginWriteRules } = createRequire(import.meta.url)("./writes.cjs");
+
 const here = dirname(fileURLToPath(import.meta.url));
 
-function argsOf(argv) {
+export function argsOf(argv) {
   const out = { client: null, runs: 20, pauseMs: 500, ref: null, sourceTimeoutMs: 120_000,
-    mapping: join(here, "mapping.json"), output: null };
+    mapping: join(here, "mapping.json"), output: null, acknowledgeNotMeasured: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--base-url") out.baseUrl = argv[++i];
@@ -30,7 +33,9 @@ function argsOf(argv) {
     else if (arg === "--mapping") out.mapping = resolve(argv[++i]);
     else if (arg === "--output") out.output = resolve(argv[++i]);
     else if (arg === "--source-timeout-ms") out.sourceTimeoutMs = Number(argv[++i]);
-    else throw new Error(`unknown argument: ${arg}`);
+    else if (arg === "--acknowledge-not-measured") {
+      out.acknowledgeNotMeasured = String(argv[++i] ?? "").split(",").map(id => id.trim()).filter(Boolean);
+    } else throw new Error(`unknown argument: ${arg}`);
   }
   if (!out.baseUrl || !out.profile) throw new Error("--base-url and --profile are required");
   if (!Number.isSafeInteger(out.runs) || out.runs < 1) throw new Error("--runs must be a positive integer");
@@ -77,19 +82,24 @@ export function installRunResourceCleanup(resources) {
   const onExit = () => cleanupRunResourcesSync(resources);
   const onSigint = () => process.exit(130);
   const onSigterm = () => process.exit(143);
+  const onSighup = () => process.exit(129);
   process.on("exit", onExit);
   process.on("SIGINT", onSigint);
   process.on("SIGTERM", onSigterm);
+  process.on("SIGHUP", onSighup);
   return () => {
+    process.removeListener("exit", onExit);
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
+    process.removeListener("SIGHUP", onSighup);
   };
 }
 
 export async function sourceRootForRef(repo, ref, tempRoot, resources) {
-  if (ref === null) return { root: repo };
+  if (ref == null) return { root: repo };
   git(repo, ["rev-parse", "--verify", `${ref}^{commit}`]);
   const root = join(tempRoot, "source-ref");
+  if (resources) resources.worktreePath = root;
   execFileSync("git", ["-C", repo, "worktree", "add", "--detach", root, ref], { stdio: ["ignore", "ignore", "ignore"] });
   if (resources) {
     try { resources.worktreePath = realpathSync(root); }
@@ -103,10 +113,8 @@ function cliArgs(operation, copy) {
   const credential = copy.profile.credential_file;
   const common = ["--workspace-id", copy.profile.workspace_id, "--agent-token-file", credential, "--json"];
   if (operation === "check") return ["check", "--profile", copy.profilePath, "--json"];
-  if (operation === "members") return ["members", ...common];
-  if (operation === "feed") return ["feed", "--limit", "1", ...common];
-  if (operation === "inbox") return ["inbox", "--limit", "1", ...common];
   if (operation === "file-ls") return ["file", "ls", ...common];
+  if (operation === "channel-ls") return ["channel", "ls", ...common];
   throw new Error(`operation has no client arguments: ${operation}`);
 }
 
@@ -136,6 +144,11 @@ async function oneOperation(name, options, copy, log, sourceRoot) {
       ["--import", "tsx", join(here, "source-check.ts"), sourceRoot, copy.profilePath, String(options.sourceTimeoutMs)],
       { env, cwd: sourceRoot, capture: true });
   }
+  if (name === "signal-read") {
+    return await runChild(process.execPath,
+      ["--import", "tsx", join(here, "source-signal-read.ts"), sourceRoot, copy.profilePath],
+      { env, cwd: sourceRoot, capture: true });
+  }
   if (!options.client) throw new Error(`--client is required for ${name}`);
   const invocation = clientInvocation(options.client, cliArgs(name, copy));
   return await runChild(invocation.command, invocation.args, { env, capture: options.capture });
@@ -149,9 +162,51 @@ function operationEndpointRows(rows, endpoints) {
 function formatMs(value) { return value === null ? "—" : value.toFixed(1); }
 function escapeCell(value) { return String(value).replaceAll("|", "\\|").replaceAll("\n", " "); }
 
-export function markdownReport({ baseUrl, inventory, mapping, measurements, startup }) {
+function measurementFor(map, measurements) {
+  return measurements.get(map.operation.name) ?? measurements.get(map.operation.proxy_operation);
+}
+
+export function rowSummary(row, map, measured) {
+  return summarize(measured?.durations ?? [], row.value_ms, {
+    notNetwork: map.class !== "network-api",
+    notRun: map.operation.class === "not-run",
+    notMeasured: map.class === "network-api" && map.operation.class === "safe-read" &&
+      map.operation.measures_guarded_path === false && (measured?.durations?.length ?? 0) > 0,
+    realTimeouts: measured?.realTimeouts ?? 0,
+  });
+}
+
+export function runStatus(inventory, mapping, measurements, acknowledged = []) {
+  const ack = new Set(acknowledged);
+  const fails = [];
+  const notMeasured = [];
+  for (const row of inventory) {
+    const map = mapping.rows[row.id];
+    const stats = rowSummary(row, map, measurementFor(map, measurements));
+    if (stats.gate === "FAIL") fails.push(row.id);
+    if (stats.gate === "NOT MEASURED") notMeasured.push(row.id);
+  }
+  const missing = notMeasured.filter(id => !ack.has(id));
+  const extra = [...ack].filter(id => !notMeasured.includes(id));
+  return { fails, notMeasured, missing, extra };
+}
+
+export function assertNoOriginWrites(rows, name) {
+  for (const row of rows) {
+    const kind = originWriteKind(row.method, row.path);
+    if (kind || row.status === "BLOCKED") {
+      throw new Error(
+        `measured operation ${name} sent a write to the origin (${row.method} ${row.path}); blocked writes are ${describeOriginWriteRules()}`,
+      );
+    }
+  }
+}
+
+export function markdownReport({ baseUrl, inventory, mapping, measurements, startup, ref = null, client = null }) {
   const lines = [
     `# Client timeout table — ${new URL(baseUrl).origin}`,
+    "",
+    `Ref \`${ref ?? "working-tree"}\`; client \`${client ?? "not given"}\`. Inventory comes from the ref; timings come from the client binary and source helpers.`,
     "",
     `Client start-up (\`--version\`): ${startup ? `p50 ${formatMs(startup.p50)} ms; p95 ${formatMs(startup.p95)} ms; max ${formatMs(startup.max)} ms` : "not run"}.`,
     "",
@@ -160,9 +215,8 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
   ];
   for (const row of inventory) {
     const map = mapping.rows[row.id];
-    const measured = measurements.get(map.operation.name) ?? measurements.get(map.operation.proxy_operation);
-    const stats = summarize(measured?.durations ?? [], row.value_ms);
-    const nonNetwork = map.class === "network-api" ? null : "not network";
+    const measured = measurementFor(map, measurements);
+    const stats = rowSummary(row, map, measured);
     const budget = row.unit_note.startsWith("non-time") ? `${row.value_ms} raw` : `${row.value_ms} ms`;
     const exits = measured?.realExitCodes
       ? `${JSON.stringify(measured.realExitCodes)} / ${measured.realTimeouts}`
@@ -170,7 +224,8 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
     const operation = map.operation.proxy_operation
       ? `${map.operation.name} (proxy: ${map.operation.proxy_operation})`
       : map.operation.name;
-    lines.push(`| ${escapeCell(row.id)} | ${row.line ?? "—"} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${nonNetwork ?? map.operation.class} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${stats.headroom === null ? "—" : stats.headroom.toFixed(2)} | ${nonNetwork ? "NOT NETWORK" : stats.gate} | ${escapeCell(exits)} |`);
+    const shownClass = map.class === "network-api" ? map.operation.class : map.class;
+    lines.push(`| ${escapeCell(row.id)} | ${row.line ?? "—"} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${escapeCell(shownClass)} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${stats.headroom === null ? "—" : stats.headroom.toFixed(2)} | ${stats.gate} | ${escapeCell(exits)} |`);
   }
   return `${lines.join("\n")}\n`;
 }
@@ -183,23 +238,22 @@ export async function runTable(options) {
   const mapping = mappingForRef(mappingFile, options.ref);
   const resources = { repo, tempRoot: null, worktreePath: null };
   const uninstallSignals = installRunResourceCleanup(resources);
-  const tempRoot = await mkdtemp(join(tmpdir(), "cswarm-timeout-run-"));
-  resources.tempRoot = tempRoot;
-  await chmod(tempRoot, 0o700);
-  const log = join(tempRoot, "fetch.jsonl");
-  await writeFile(log, "", { mode: 0o600 });
-  let copy;
-  let source;
   try {
-    copy = await makePrivateProfileCopy(options.profile, { tempParent: tempRoot });
-    source = await sourceRootForRef(repo, options.ref, tempRoot, resources);
+    const tempRoot = await mkdtemp(join(tmpdir(), "cswarm-timeout-run-"));
+    resources.tempRoot = tempRoot;
+    await chmod(tempRoot, 0o700);
+    const log = join(tempRoot, "fetch.jsonl");
+    await writeFile(log, "", { mode: 0o600 });
+    const copy = await makePrivateProfileCopy(options.profile, { tempParent: tempRoot });
+    const source = await sourceRootForRef(repo, options.ref, tempRoot, resources);
     const measurements = new Map();
     const operations = new Map();
     for (const row of inventory) {
       const map = mapping.rows[row.id];
       if (!map) throw new Error(`mapping lacks ${row.id}`);
-      const name = map.operation.class === "safe-read" ? map.operation.name : map.operation.proxy_operation;
-      if (name) operations.set(name, { endpoints: map.endpoints, budget: row.value_ms });
+      if (map.operation.class === "safe-read") {
+        operations.set(map.operation.name, { endpoints: map.endpoints, scope: map.scope });
+      }
     }
     const startupValues = [];
     if (options.client) {
@@ -214,7 +268,7 @@ export async function runTable(options) {
       const durations = [];
       let realTimeouts = 0;
       const realExitCodes = {};
-      if (!options.client && name !== "auth-settings" && name !== "check") {
+      if (!options.client && name !== "auth-settings" && name !== "check" && name !== "signal-read") {
         measurements.set(name, { durations, realTimeouts, realExitCodes: null });
         continue;
       }
@@ -231,16 +285,21 @@ export async function runTable(options) {
         } else result = await oneOperation(name, options, copy, log, source.root);
         if (result.code !== 0) throw new Error(`${name} measurement child exited ${result.code}`);
         const fresh = (await readJsonLines(log)).slice(before);
+        assertNoOriginWrites(fresh, name);
         const requests = operationEndpointRows(fresh, operation.endpoints);
-        if (name === "check") {
-          let uncapped;
-          try { uncapped = JSON.parse(result.stdout); }
-          catch { throw new Error("uncapped check did not report its wall time"); }
-          if (!Number.isFinite(uncapped.duration_ms)) throw new Error("uncapped check wall time is invalid");
-          durations.push(uncapped.duration_ms);
+        if (name === "check" || name === "signal-read") {
+          let reported;
+          try { reported = JSON.parse(result.stdout); }
+          catch { throw new Error(`${name} did not report its wall time`); }
+          if (!Number.isFinite(reported.duration_ms)) throw new Error(`${name} wall time is invalid`);
+          durations.push(reported.duration_ms);
+        } else if (operation.scope === "whole-operation") {
+          durations.push(result.durationMs);
+        } else if (requests.length > 0) {
+          durations.push(Math.max(...requests.map(row => row.duration_ms)));
+        } else {
+          durations.push(result.durationMs);
         }
-        else if (requests.length > 0) durations.push(Math.max(...requests.map(row => row.duration_ms)));
-        else durations.push(result.durationMs);
         if (index + 1 < options.runs && options.pauseMs) await pause(options.pauseMs);
       }
       measurements.set(name, { durations, realTimeouts, realExitCodes: name === "check" && options.client ? realExitCodes : null });
@@ -248,10 +307,25 @@ export async function runTable(options) {
     const startup = startupValues.length === 0 ? null : {
       p50: percentile(startupValues, .5), p95: percentile(startupValues, .95), max: Math.max(...startupValues),
     };
-    const report = markdownReport({ baseUrl: options.baseUrl, inventory, mapping, measurements, startup });
+    const report = markdownReport({
+      baseUrl: options.baseUrl, inventory, mapping, measurements, startup,
+      ref: options.ref, client: options.client,
+    });
     if (options.output) await writeFile(options.output, report, { mode: 0o600 });
     else process.stdout.write(report);
-    return { report, inventory, measurements, startup };
+    const status = runStatus(inventory, mapping, measurements, options.acknowledgeNotMeasured ?? []);
+    if (status.fails.length || status.missing.length || status.extra.length) {
+      const parts = [];
+      if (status.fails.length) parts.push(`FAIL rows: ${status.fails.join(", ")}`);
+      if (status.missing.length) {
+        parts.push(`NOT MEASURED without --acknowledge-not-measured: ${status.missing.join(", ")}`);
+      }
+      if (status.extra.length) {
+        parts.push(`acknowledgement is not a NOT MEASURED row: ${status.extra.join(", ")}`);
+      }
+      throw new Error(parts.join("; "));
+    }
+    return { report, inventory, measurements, startup, status };
   } finally {
     uninstallSignals();
     cleanupRunResourcesSync(resources);

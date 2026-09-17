@@ -6,7 +6,11 @@ export interface TimeoutInventoryRow {
   value_ms: number;
   unit_note: string;
 }
-export function enumerateText(file: string, text: string): TimeoutInventoryRow[];
+export function enumerateText(
+  file: string,
+  text: string,
+  options?: { importedValues?: Map<string, number> },
+): TimeoutInventoryRow[];
 export function enumerateRepository(options: {
   repo: string;
   ref?: string | null;
