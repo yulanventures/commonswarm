@@ -17,8 +17,11 @@ async function envFile(path) {
     const name = line.slice(0, separator).trim();
     let value = line.slice(separator + 1);
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new Error("environment file contains an invalid name");
-    if (value.startsWith('"') && value.endsWith('"')) value = JSON.parse(value);
-    else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
+    // docker run --env-file passes quotes through literally, so a quoted value would reach the database tools with its
+    // quotes while this file would read it without them. Refuse it; the name is printed, never the value.
+    if (/^["']/.test(value)) {
+      throw new Error(`environment file value for ${name} starts with a quote; write it unquoted, because docker --env-file keeps quotes`);
+    }
     result[name] = value;
   }
   return result;

@@ -19,15 +19,20 @@ start_log "verify-counts-$destination"
 assert_target_identity >>"$LOG_FILE" 2>&1
 
 source_counts="$MIGRATION_ARTIFACT_DIR/source-counts.tsv"
-if [[ ! -f "$source_counts" ]]; then
-  log "source-counts.tsv is missing"
-  exit 1
-fi
+source_cron_jobs="$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson"
+for file in "$source_counts" "$source_cron_jobs"; do
+  if [[ ! -f "$file" ]]; then
+    log "$(basename "$file") is missing"
+    exit 1
+  fi
+done
 
 query_file="$(make_temp_sql)"
+cron_query="$(make_temp_sql)"
 target_counts="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-counts.XXXXXX")"
-trap 'rm -f "$query_file" "$target_counts"' EXIT
-chmod 0600 "$target_counts"
+target_cron_jobs="$(mktemp "${TMPDIR:-/tmp}/commonswarm-target-cron.XXXXXX")"
+trap 'rm -f "$query_file" "$cron_query" "$target_counts" "$target_cron_jobs"' EXIT
+chmod 0600 "$target_counts" "$target_cron_jobs"
 cat >"$query_file" <<'SQL'
 SELECT format(
   'SELECT %L, count(*)::bigint FROM %I.%I;',
@@ -50,9 +55,17 @@ if ! diff -u "$source_counts" "$target_counts" >>"$LOG_FILE" 2>&1; then
   exit 1
 fi
 
+cron_jobs_json_sql >"$cron_query"
+database_psql "$destination" --quiet --tuples-only --no-align --file "$cron_query" >"$target_cron_jobs" 2>>"$LOG_FILE"
+if ! diff -u "$source_cron_jobs" "$target_cron_jobs" >>"$LOG_FILE" 2>&1; then
+  log "cron job verification failed; run restore-cron-jobs.sh and see the protected log"
+  exit 1
+fi
+
 table_count="$(wc -l <"$target_counts" | tr -d ' ')"
 agent_tokens="$(awk -F'|' '$1 == "swarm.agent_tokens" { print $2 }' "$target_counts")"
 auth_users="$(awk -F'|' '$1 == "auth.users" { print $2 }' "$target_counts")"
 storage_objects="$(awk -F'|' '$1 == "storage.objects" { print $2 }' "$target_counts")"
-log "all $table_count table counts match; auth users=$auth_users, agent token rows=$agent_tokens, storage objects=$storage_objects"
+cron_count="$(grep -c . "$target_cron_jobs" || true)"
+log "all $table_count table counts match; auth users=$auth_users, agent token rows=$agent_tokens, storage objects=$storage_objects; $cron_count cron jobs match"
 log "complete verify-counts-$destination"

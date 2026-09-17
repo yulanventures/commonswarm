@@ -19,7 +19,7 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -50,6 +50,8 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
   const db = `ndb-freeze-db-${id}`;
   const work = await mkdtemp(join(tmpdir(), "ndb-freeze-"));
   const artifacts = join(work, "artifacts");
+  // Created here, owned by the test user: a rootful Linux daemon would otherwise create the mount point as root.
+  await mkdir(artifacts, { mode: 0o700 });
   const serviceFile = join(work, "pg_service.conf");
   const passFile = join(work, "pgpass");
   try {
@@ -110,9 +112,10 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
       "-h", "127.0.0.1", "-U", OWNER, "-d", "appdb", "-q", "-t", "-A", "-v", "VERBOSITY=sqlstate"], sql);
     const nothingChanged = () => {
       const state = ownerSql(`SELECT to_regnamespace('commonswarm_cutover_probe') IS NULL, to_regclass('public.commonswarm_cutover_state') IS NULL,
+        to_regprocedure('public.commonswarm_cutover_write_guard()') IS NULL,
         (SELECT count(*) FROM pg_trigger WHERE tgname = 'commonswarm_cutover_write_freeze'), current_setting('default_transaction_read_only')`);
       assert.equal(state.status, 0, state.stderr);
-      assert.equal(state.stdout.trim(), "t|t|0|off", `the database was changed: ${state.stdout}`);
+      assert.equal(state.stdout.trim(), "t|t|t|0|off", `the database was changed: ${state.stdout}`);
     };
     const identity = { SOURCE_SYSTEM_IDENTIFIER: systemIdentifier };
 
@@ -132,8 +135,9 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
       ALTER FUNCTION public.commonswarm_cutover_write_guard() OWNER TO supabase_admin;`).status, 0);
     result = tool("source-read-only.sh", ["enable", "source"], { ...identity, FREEZE_UNGUARDED_TABLES: "auth.schema_migrations" });
     assert.notEqual(result.status, 0, "enable succeeded although the guard function could not be replaced");
-    nothingChanged();
+    // Without CASCADE: this DROP fails if the failed enable left any trigger that depends on the planted function.
     assert.equal(superSql("DROP FUNCTION public.commonswarm_cutover_write_guard();").status, 0);
+    nothingChanged();
 
     // 4. Enable with the acknowledgement: both session bypasses are refused with 25006, for an owned and a granted table.
     result = tool("source-read-only.sh", ["enable", "source"], { ...identity, FREEZE_UNGUARDED_TABLES: "auth.schema_migrations" });
@@ -145,6 +149,16 @@ test("the N-db freeze works under the hosted permission shape and fails closed",
       const refused = ownerSql(attempt);
       assert.match(refused.stderr, /ERROR:\s+25006/, `a frozen write was not refused with 25006: ${attempt}\n${refused.stderr}`);
     }
+
+    // 4b. Enable again while frozen: it succeeds, adds no second trigger, and the freeze still holds.
+    const frozenShape = () => ownerSql(`SELECT (SELECT count(*) FROM pg_trigger WHERE tgname = 'commonswarm_cutover_write_freeze'),
+      (SELECT frozen FROM public.commonswarm_cutover_state WHERE singleton)`).stdout.trim();
+    const shapeBefore = frozenShape();
+    result = tool("source-read-only.sh", ["enable", "source"], { ...identity, FREEZE_UNGUARDED_TABLES: "auth.schema_migrations" });
+    assert.equal(result.status, 0, `a second enable while frozen failed: ${result.stdout}${result.stderr}`);
+    assert.equal(frozenShape(), shapeBefore, "a second enable changed the freeze objects");
+    assert.match(ownerSql("SET default_transaction_read_only = off; BEGIN; SET LOCAL ROLE swarm_command; INSERT INTO swarm.signals (body) VALUES ('x'); COMMIT;").stderr,
+      /ERROR:\s+25006/, "the freeze did not hold after a second enable");
 
     // 5. The probe refuses to prove roles it cannot assume unless acknowledged, then proves the rest frozen.
     result = tool("probe-database-freeze.sh", ["frozen", "source"], identity);

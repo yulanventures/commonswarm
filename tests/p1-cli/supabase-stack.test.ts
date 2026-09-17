@@ -22,6 +22,13 @@ const [
   setupRealtime,
   readOnlyScript,
   copyStorage,
+  migrationLib,
+  restoreTarget,
+  restoreStorageMetadata,
+  verifyCounts,
+  restoreCronJobs,
+  makePgService,
+  pgHba,
 ] = await Promise.all([
   readFile(join(stackDir, "compose.yaml"), "utf8"),
   readFile(join(stackDir, "env.example"), "utf8"),
@@ -36,6 +43,13 @@ const [
   readFile(join(stackDir, "migrate", "setup-realtime.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "source-read-only.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "copy-storage.mjs"), "utf8"),
+  readFile(join(stackDir, "migrate", "lib.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "restore-target.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "restore-storage-metadata.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "verify-counts.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "restore-cron-jobs.sh"), "utf8"),
+  readFile(join(stackDir, "migrate", "make-pg-service.mjs"), "utf8"),
+  readFile(join(stackDir, "postgres", "pg_hba.conf"), "utf8"),
 ]);
 
 const memory = {
@@ -110,6 +124,15 @@ function validateStack(
     errors.push("postgres bridge health path");
   }
   if (/PGPASSWORD/.test(postgres)) errors.push("postgres health password");
+  if (!/shm_size:\s*256m/.test(postgres)) errors.push("postgres shm size");
+  if (!/shared_buffers=512MB/.test(postgres)) errors.push("postgres shared buffers");
+  if (!/\$\{COMMONSWARM_POSTGRES_DATA_DIR:-\/var\/lib\/commonswarm\/postgres\}:\/var\/lib\/postgresql\/data/.test(postgres)) {
+    errors.push("postgres data mount");
+  }
+  if (!/^\s*- ssl=on$/m.test(postgres)) errors.push("postgres TLS");
+  if (!/^\s*- password_encryption=scram-sha-256$/m.test(postgres)) errors.push("postgres password encryption");
+  if (!/\$\{COMMONSWARM_DB_CERT_FILE:-\/etc\/commonswarm\/pg-tls\/server\.crt\}/.test(postgres)) errors.push("postgres certificate path");
+  if (!/\$\{COMMONSWARM_DB_KEY_FILE:-\/etc\/commonswarm\/pg-tls\/server\.key\}/.test(postgres)) errors.push("postgres key path");
   if (!/name:\s*commonswarm-net\n\s+external:\s*true/.test(composeSource)) {
     errors.push("external network");
   }
@@ -138,7 +161,7 @@ function validateStack(
     errors.push("JWT-shaped compose value");
   }
   if (/swm_agt_[A-Za-z0-9_-]+/.test(composeSource)) errors.push("agent token in compose");
-  if (/^\s+(?:JWT_SECRET|POSTGRES_PASSWORD|API_JWT_SECRET|SERVICE_KEY|AWS_SECRET_ACCESS_KEY):\s*\S+/m.test(composeSource)) {
+  if (/^\s+(?:(?:JWT_SECRET|POSTGRES_PASSWORD|API_JWT_SECRET|SERVICE_KEY|AWS_SECRET_ACCESS_KEY):\s*\S+|-\s*(?:JWT_SECRET|POSTGRES_PASSWORD|API_JWT_SECRET|SERVICE_KEY|AWS_SECRET_ACCESS_KEY)=\S+)/m.test(composeSource)) {
     errors.push("secret-like compose value");
   }
 
@@ -205,6 +228,15 @@ test("stack controls reject their named mutations", () => {
       caddy,
       /secret-like compose value/,
     ],
+    [
+      "compose list secret",
+      compose.replace("    mem_limit: 300m\n    env_file: *stack-env", "    mem_limit: 300m\n    environment:\n      - SERVICE_KEY=hardcoded-value\n    env_file: *stack-env"),
+      envExample,
+      caddy,
+      /secret-like compose value/,
+    ],
+    ["postgres shm", compose.replace("    shm_size: 256m", "    shm_size: 128m"), envExample, caddy, /postgres shm size/],
+    ["postgres shared buffers", compose.replace("shared_buffers=512MB", "shared_buffers=256MB"), envExample, caddy, /postgres shared buffers/],
     ["auth upstream", compose, envExample, caddy.replace("127.0.0.1:18001", "127.0.0.1:18999"), /route handle \/auth/],
     [
       "function timeout",
@@ -298,6 +330,13 @@ function migrationErrors(values: {
   setup: string;
   freeze: string;
   copy: string;
+  lib: string;
+  restore: string;
+  restoreStorage: string;
+  verify: string;
+  restoreCron: string;
+  hba: string;
+  makeService: string;
 }): string[] {
   const errors: string[] = [];
   if (!/CREATE ROLE backup_ro[\s\S]*\sBYPASSRLS(?:;|\s)/.test(values.roles) ||
@@ -314,13 +353,36 @@ function migrationErrors(values: {
   if (/process\.env\.(?:SOURCE|TARGET)_SERVICE_ROLE_KEY/.test(values.copy)) {
     errors.push("storage key in process env");
   }
-  if (!values.prepare.includes("assert_target_identity") || !values.setup.includes("assert_target_identity")) {
-    errors.push("target identity guard");
+  if (!values.copy.includes('if (direction !== "forward")')) {
+    errors.push("storage reverse direction");
+  }
+  for (const [name, script] of Object.entries({
+    prepare: values.prepare,
+    setup: values.setup,
+    restore: values.restore,
+    restoreStorage: values.restoreStorage,
+    verify: values.verify,
+    restoreCron: values.restoreCron,
+  })) {
+    if (!script.includes("assert_target_identity")) errors.push(`target identity guard ${name}`);
   }
   if (!values.prepare.includes("CREATE EXTENSION IF NOT EXISTS pg_net") ||
       !values.prepare.includes("CREATE EXTENSION IF NOT EXISTS pg_graphql")) {
     errors.push("required source extensions");
   }
+  if (!values.lib.includes("AND NOT pg_is_in_recovery()")) errors.push("source standby guard");
+  if (!/SET TRANSACTION SNAPSHOT[\s\S]*cron_jobs_json_sql[\s\S]*cron-jobs\.ndjson/.test(values.dump)) {
+    errors.push("cron snapshot export");
+  }
+  if (!values.verify.includes("cron_jobs_json_sql")) errors.push("cron verify query");
+  if (!values.restoreCron.includes("cron_jobs_json_sql")) errors.push("cron restore query");
+  if (!/GRANT pg_read_all_data TO backup_ro;/.test(values.prepare)) errors.push("backup read grant");
+  if (!/^hostssl\s+all\s+backup_ro\s+172\.31\.0\.1\/32\s+scram-sha-256$/m.test(values.hba) ||
+      !/^hostssl\s+all\s+backup_ro\s+0\.0\.0\.0\/0\s+reject$/m.test(values.hba) ||
+      !/^hostssl\s+all\s+backup_ro\s+::\/0\s+reject$/m.test(values.hba)) {
+    errors.push("backup hba address");
+  }
+  if (!values.makeService.includes('/^["\']/.test(value)')) errors.push("quoted database env value");
   return errors;
 }
 
@@ -332,6 +394,13 @@ test("migration safety contracts are present", () => {
     setup: setupRealtime,
     freeze: readOnlyScript,
     copy: copyStorage,
+    lib: migrationLib,
+    restore: restoreTarget,
+    restoreStorage: restoreStorageMetadata,
+    verify: verifyCounts,
+    restoreCron: restoreCronJobs,
+    hba: pgHba,
+    makeService: makePgService,
   }), []);
 });
 
@@ -343,15 +412,35 @@ test("migration safety controls reject their named mutations", () => {
     setup: setupRealtime,
     freeze: readOnlyScript,
     copy: copyStorage,
+    lib: migrationLib,
+    restore: restoreTarget,
+    restoreStorage: restoreStorageMetadata,
+    verify: verifyCounts,
+    restoreCron: restoreCronJobs,
+    hba: pgHba,
+    makeService: makePgService,
   };
   const mutations: Array<[string, typeof original, RegExp]> = [
     ["backup RLS", { ...original, roles: runtimeRoles.replaceAll("BYPASSRLS", "NOBYPASSRLS") }, /backup BYPASSRLS/],
     ["snapshot", { ...original, dump: dumpSource.replace("--snapshot \"$snapshot\"", "") }, /one dump snapshot/],
     ["Realtime update", { ...original, setup: setupRealtime.replace("affected <> 1", "affected < 0") }, /Realtime update count/],
     ["freeze trigger", { ...original, freeze: readOnlyScript.replaceAll("commonswarm_cutover_write_freeze", "removed_freeze") }, /freeze trigger or undo/],
-    ["target identity", { ...original, prepare: prepareTarget.replace("assert_target_identity", "true") }, /target identity guard/],
+    ["target identity prepare", { ...original, prepare: prepareTarget.replace("assert_target_identity", "true") }, /target identity guard prepare/],
+    ["target identity setup", { ...original, setup: setupRealtime.replace("assert_target_identity", "true") }, /target identity guard setup/],
+    ["target identity restore", { ...original, restore: restoreTarget.replace("assert_target_identity", "true") }, /target identity guard restore/],
+    ["target identity storage", { ...original, restoreStorage: restoreStorageMetadata.replace("assert_target_identity", "true") }, /target identity guard restoreStorage/],
+    ["target identity verify", { ...original, verify: verifyCounts.replace("assert_target_identity", "true") }, /target identity guard verify/],
+    ["target identity cron", { ...original, restoreCron: restoreCronJobs.replace("assert_target_identity", "true") }, /target identity guard restoreCron/],
     ["storage key environment", { ...original, copy: `${copyStorage}\nprocess.env.SOURCE_SERVICE_ROLE_KEY` }, /storage key in process env/],
+    ["storage reverse direction", { ...original, copy: copyStorage.replace('direction !== "forward"', 'direction !== "forward" && direction !== "reverse"') }, /storage reverse direction/],
     ["source extensions", { ...original, prepare: prepareTarget.replace("CREATE EXTENSION IF NOT EXISTS pg_net", "SELECT") }, /required source extensions/],
+    ["source standby", { ...original, lib: migrationLib.replace("AND NOT pg_is_in_recovery()", "") }, /source standby guard/],
+    ["cron snapshot", { ...original, dump: dumpSource.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron snapshot export/],
+    ["cron verify", { ...original, verify: verifyCounts.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron verify query/],
+    ["cron restore", { ...original, restoreCron: restoreCronJobs.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron restore query/],
+    ["backup read grant", { ...original, prepare: prepareTarget.replace("GRANT pg_read_all_data TO backup_ro;", "") }, /backup read grant/],
+    ["backup hba", { ...original, hba: pgHba.replace("172.31.0.1/32", "172.31.0.0/24") }, /backup hba address/],
+    ["quoted database env", { ...original, makeService: makePgService.replace('/^["\']/.test(value)', "false") }, /quoted database env value/],
   ];
   for (const [name, mutation, expected] of mutations) {
     assert.match(migrationErrors(mutation).join("\n"), expected, `${name} mutation was not rejected`);
@@ -370,7 +459,7 @@ test("run-db-tool passes only validated trailing arguments", async () => {
     await writeFile(migrationEnv, [
       `SOURCE_DATABASE_URL=postgresql://postgres:${encodeURIComponent(password)}@host.docker.internal:54322/postgres`,
       `TARGET_DATABASE_URL=postgresql://supabase_admin:${encodeURIComponent(password)}@db.commonswarm.internal/postgres`,
-      "CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW",
+      "CUTOVER_CONFIRM=",
       "",
     ].join("\n"), { mode: 0o600 });
     const fakeDocker = join(bin, "docker");
@@ -382,6 +471,7 @@ test("run-db-tool passes only validated trailing arguments", async () => {
       PATH: `${bin}:${process.env.PATH}`,
       COMMONSWARM_ENV_FILE: serviceEnv,
       COMMONSWARM_MIGRATION_ENV_FILE: migrationEnv,
+      CUTOVER_CONFIRM: "caller-only-confirm-value",
     };
     const valid = spawnSync(script, ["source-read-only.sh", directory, "enable", "source"], {
       env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
@@ -389,10 +479,46 @@ test("run-db-tool passes only validated trailing arguments", async () => {
     assert.equal(valid.status, 0, valid.stderr);
     const args = valid.stdout.trim().split("\n");
     assert.deepEqual(args.slice(-3), ["/work/migrate/source-read-only.sh", "enable", "source"]);
+    const confirmationAt = args.indexOf("CUTOVER_CONFIRM");
+    assert.ok(confirmationAt > 0 && args[confirmationAt - 1] === "--env", "CUTOVER_CONFIRM was not forwarded by name");
+    assert.doesNotMatch(valid.stdout, /caller-only-confirm-value/, "CUTOVER_CONFIRM value reached docker argv");
     const invalid = spawnSync(script, ["prepare-target.sh", directory, "extra"], {
       env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
     });
     assert.equal(invalid.status, 64);
+    const cronSource = spawnSync(script, ["restore-cron-jobs.sh", directory, "source"], {
+      env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.equal(cronSource.status, 64, cronSource.stderr);
+    const cronTarget = spawnSync(script, ["restore-cron-jobs.sh", directory, "target"], {
+      env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.equal(cronTarget.status, 0, cronTarget.stderr);
+    assert.deepEqual(cronTarget.stdout.trim().split("\n").slice(-2), ["/work/migrate/restore-cron-jobs.sh", "target"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("make-pg-service refuses quoted values without printing the value", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-quoted-env-"));
+  const secretValue = "quoted-value-must-stay-hidden";
+  try {
+    const migrationEnv = join(directory, "migration.env");
+    await writeFile(migrationEnv, `TARGET_DATABASE_URL="${secretValue}"\n`, { mode: 0o600 });
+    const result = spawnSync(process.execPath, [join(stackDir, "migrate", "make-pg-service.mjs")], {
+      env: {
+        ...process.env,
+        COMMONSWARM_MIGRATION_ENV_FILE: migrationEnv,
+        PG_SERVICE_OUTPUT: join(directory, "pg_service.conf"),
+        PG_PASS_OUTPUT: join(directory, "pgpass"),
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.notEqual(result.status, 0, "quoted environment value was accepted");
+    assert.match(result.stderr, /TARGET_DATABASE_URL/);
+    assert.doesNotMatch(result.stderr, new RegExp(secretValue));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

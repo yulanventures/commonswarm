@@ -10,6 +10,8 @@ if [[ "$origin" != source && "$origin" != target ]]; then
 fi
 require_commands psql pg_dump
 require_vars MIGRATION_ARTIFACT_DIR
+# pg_dump below reads the service file directly, not through database_psql.
+: "${PGSERVICEFILE:?run through run-db-tool.sh so database credentials stay in protected files}"
 [[ "$origin" == source ]] && require_vars SOURCE_DATABASE_URL || require_vars TARGET_DATABASE_URL
 start_log "dump-$origin"
 assert_dump_origin "$origin"
@@ -30,6 +32,7 @@ roles_sql="$MIGRATION_ARTIFACT_DIR/roles.sql"
 roles_query="$(make_temp_sql)"
 counts_query="$(make_temp_sql)"
 objects_query="$(make_temp_sql)"
+cron_query="$(make_temp_sql)"
 holder_query="$(make_temp_sql)"
 snapshot_file="$(mktemp "${TMPDIR:-/tmp}/commonswarm-snapshot.XXXXXX")"
 snapshot_ready="$(mktemp "${TMPDIR:-/tmp}/commonswarm-snapshot-ready.XXXXXX")"
@@ -39,7 +42,7 @@ holder_pid=""
 cleanup() {
   touch "$snapshot_release" 2>/dev/null || true
   if [[ -n "$holder_pid" ]]; then wait "$holder_pid" 2>/dev/null || true; fi
-  rm -f "$roles_query" "$counts_query" "$objects_query" "$holder_query" \
+  rm -f "$roles_query" "$counts_query" "$objects_query" "$cron_query" "$holder_query" \
     "$snapshot_file" "$snapshot_ready" "$snapshot_release"
 }
 trap cleanup EXIT
@@ -166,6 +169,19 @@ COMMONSWARM_EXPORTED_SNAPSHOT="$snapshot" database_psql "$origin" \
   >"$MIGRATION_ARTIFACT_DIR/storage-objects.ndjson" 2>>"$LOG_FILE"
 chmod 0600 "$MIGRATION_ARTIFACT_DIR/storage-objects.ndjson"
 
+# The pg_cron schedules live in the cron schema, outside the selected-schema dump; restore-cron-jobs.sh recreates them.
+{
+  printf '%s\n' '\getenv snapshot_id COMMONSWARM_EXPORTED_SNAPSHOT'
+  printf '%s\n' 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;'
+  printf '%s\n' "SET TRANSACTION SNAPSHOT :'snapshot_id';"
+  cron_jobs_json_sql
+  printf '%s\n' 'COMMIT;'
+} >"$cron_query"
+COMMONSWARM_EXPORTED_SNAPSHOT="$snapshot" database_psql "$origin" \
+  --quiet --tuples-only --no-align --file "$cron_query" \
+  >"$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" 2>>"$LOG_FILE"
+chmod 0600 "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson"
+
 touch "$snapshot_release"
 wait "$holder_pid"
 holder_pid=""
@@ -179,10 +195,12 @@ snapshot_consistency=pg_export_snapshot
 excluded_schema_data=realtime.messages,realtime.messages_*
 excluded_image_owned_schemas=_realtime,extensions,graphql_public,net,pgbouncer,supabase_functions,vault
 storage_bucket=swarm-files
+cron_jobs=cron-jobs.ndjson
 EOF
 chmod 0600 "$MIGRATION_ARTIFACT_DIR/manifest.txt"
 
 table_count="$(wc -l <"$MIGRATION_ARTIFACT_DIR/source-counts.tsv" | tr -d ' ')"
 object_count="$(wc -l <"$MIGRATION_ARTIFACT_DIR/storage-objects.ndjson" | tr -d ' ')"
-log "one exported snapshot produced the dump, $table_count table counts, and $object_count storage rows"
+cron_count="$(grep -c . "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" || true)"
+log "one exported snapshot produced the dump, $table_count table counts, $object_count storage rows, and $cron_count cron jobs visible to the dump role"
 log "complete dump-$origin"

@@ -15,7 +15,7 @@ case "$script_name" in
   dump-source.sh)
     [[ $# -le 1 && ( $# -eq 0 || "$1" == source || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
-  restore-target.sh|verify-counts.sh|restore-storage-metadata.sh)
+  restore-target.sh|verify-counts.sh|restore-storage-metadata.sh|restore-cron-jobs.sh)
     # Target only: the hosted project is never a restore destination (ruling 9084e3e1); the script refuses too.
     [[ $# -le 1 && ( $# -eq 0 || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
@@ -79,10 +79,11 @@ if [[ -f "$ca_file" ]]; then
   ca_mount=(--volume "$ca_file:/etc/ssl/yulan-internal-ca.pem:ro")
 fi
 
-# Window acknowledgements are decided at run time from the preflight output, so they come from the caller's
-# environment by NAME (docker reads the value itself; nothing reaches argv).
+# Window acknowledgements are decided at run time from the preflight output, and CUTOVER_CONFIRM is typed on the command
+# that freezes or unfreezes, so all three come from the caller's environment by NAME (docker reads the value itself;
+# nothing reaches argv). A name passed with --env overrides the same name in an --env-file.
 ack_env=()
-for name in FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES; do
+for name in CUTOVER_CONFIRM FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES; do
   if [[ -n "${!name+x}" ]]; then ack_env+=(--env "$name"); fi
 done
 

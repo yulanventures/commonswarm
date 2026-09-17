@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 
+// Forward only: the hosted project is never a copy destination (Strategist ruling 9084e3e1).
 const direction = process.argv[2];
-if (direction !== "forward" && direction !== "reverse") {
-  throw new Error("copy direction must be forward or reverse");
+if (direction !== "forward") {
+  throw new Error("copy direction must be forward; the hosted project is never a destination");
 }
 const artifactDir = process.env.MIGRATION_ARTIFACT_DIR;
 const migrationEnvPath = process.env.COMMONSWARM_MIGRATION_ENV_FILE;
@@ -24,8 +25,9 @@ function parseEnv(source) {
     const name = line.slice(0, separator).trim();
     let value = line.slice(separator + 1);
     if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new Error("migration environment file contains an invalid name");
-    if (value.startsWith('"') && value.endsWith('"')) value = JSON.parse(value);
-    else if (value.startsWith("'") && value.endsWith("'")) value = value.slice(1, -1);
+    if (/^["']/.test(value)) {
+      throw new Error(`migration environment value for ${name} starts with a quote; write it unquoted, because docker --env-file keeps quotes`);
+    }
     result[name] = value;
   }
   return result;
@@ -41,19 +43,12 @@ const required = [
 for (const name of required) {
   if (!environment[name]) throw new Error(`required environment variable is empty: ${name}`);
 }
-const endpoints = direction === "forward"
-  ? {
-    sourceUrl: environment.SOURCE_STORAGE_URL,
-    sourceKey: environment.SOURCE_SERVICE_ROLE_KEY,
-    targetUrl: environment.TARGET_STORAGE_URL,
-    targetKey: environment.TARGET_SERVICE_ROLE_KEY,
-  }
-  : {
-    sourceUrl: environment.TARGET_STORAGE_URL,
-    sourceKey: environment.TARGET_SERVICE_ROLE_KEY,
-    targetUrl: environment.SOURCE_STORAGE_URL,
-    targetKey: environment.SOURCE_SERVICE_ROLE_KEY,
-  };
+const endpoints = {
+  sourceUrl: environment.SOURCE_STORAGE_URL,
+  sourceKey: environment.SOURCE_SERVICE_ROLE_KEY,
+  targetUrl: environment.TARGET_STORAGE_URL,
+  targetKey: environment.TARGET_SERVICE_ROLE_KEY,
+};
 
 const manifest = await readFile(`${artifactDir}/storage-objects.ndjson`, "utf8");
 const objects = manifest.split("\n").filter(Boolean).map((line) => JSON.parse(line));

@@ -70,6 +70,7 @@ database_psql() {
     echo "database service must be source or target" >&2
     exit 1
   fi
+  : "${PGSERVICEFILE:?run through run-db-tool.sh so the database URL stays out of argv}"
   PGSERVICE="$service" psql -X --set=ON_ERROR_STOP=1 "$@" </dev/null
 }
 
@@ -121,11 +122,15 @@ assert_database_identity() {
 # (pg_monitor member, measured 2026-09-17) but does not set app.settings.jwt_secret and does not let that
 # role set custom database parameters, so neither can identify the source. Reading the identifier writes
 # nothing. A restored box database has a different identifier, and it also carries the target marker.
+# A physical standby or a point-in-time clone of the source has the SAME identifier. A standby is refused because it is
+# in recovery; a clone promoted to a primary on another host is not distinguishable here, so SOURCE_DATABASE_URL must
+# still name the production pooler host (the runbook reads it before the window).
 source_identity_sql() {
   cat <<'SQL'
 \getenv expected_system_identifier SOURCE_SYSTEM_IDENTIFIER
 SELECT (
   (SELECT system_identifier::text FROM pg_control_system()) = :'expected_system_identifier'
+  AND NOT pg_is_in_recovery()
   AND to_regnamespace('swarm') IS NOT NULL
   AND current_setting('commonswarm.stack_identity', true) IS DISTINCT FROM 'n-db-target-v1'
 ) AS source_identity_ok
@@ -154,6 +159,26 @@ assert_dump_origin() {
     return
   fi
   assert_source_identity
+}
+
+# One row per pg_cron job, as JSON, in a fixed order. dump-source.sh writes it from the source snapshot to
+# cron-jobs.ndjson; restore-cron-jobs.sh and verify-counts.sh run the same query on the target and require the same
+# bytes. The schedules live in the cron schema, which the selected-schema dump does not carry. On hosted Supabase
+# cron.job has row security by username, so the export holds the jobs of the dump role (`postgres` owns all five
+# CommonSwarm jobs, measured read-only 2026-09-17); the target query runs as the supabase_admin superuser and sees all.
+cron_jobs_json_sql() {
+  cat <<'SQL'
+SELECT json_build_object(
+  'jobname', jobname,
+  'schedule', schedule,
+  'command', command,
+  'database', database,
+  'username', username,
+  'active', active
+)
+FROM cron.job
+ORDER BY jobname, jobid;
+SQL
 }
 
 make_temp_sql() {

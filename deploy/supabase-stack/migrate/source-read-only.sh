@@ -47,6 +47,9 @@ if [[ "$mode" == enable ]]; then
   fi
 
   cat >"$sql_file" <<'SQL'
+-- Running enable again while frozen must work (an operator retry after a later step failed): the database default is
+-- already read-only, so this transaction declares itself read-write. Every statement below is idempotent.
+SET TRANSACTION READ WRITE;
 CREATE SCHEMA IF NOT EXISTS commonswarm_cutover_probe;
 CREATE TABLE IF NOT EXISTS commonswarm_cutover_probe.entries (
   probe_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
