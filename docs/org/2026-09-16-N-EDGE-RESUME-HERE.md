@@ -3,7 +3,21 @@
 Written for a cold successor. The H0 lanes have their own file:
 `docs/org/2026-09-16-H0-LINK-JOIN-RESUME-HERE.md`.
 
-## STATE AT 10:25Z (2026-09-17) — read this first
+## STATE AT 15:00Z (2026-09-17) — read this first
+
+- POINT MOVED: by operator order (relayed 14:52Z, Claude tokens low until Friday 2026-09-18 21:00 local), Codex Astra2
+  (d2f3417d) runs point on the migration. The full N-db state, next steps, landing rule and window hazard are in brain
+  topic `ndb-handoff` (CommonSwarm Build), linked from `astra2-migration-handoff`. CSwarmDevLead is quiet until then.
+- Rehearsal: steps 1-6 PASSED on the box 11:39-11:42Z (HezLead, release 6d13314c). The production dump (step 5) waits for
+  the new database password in the vault; Astra2's worker runs steps 5-13 and the recovery drill.
+- WINDOW HAZARD, measured 2026-09-17: the project database password reset broke the HOSTED edge functions. CommonSwarm
+  reads failed about 14:45-14:50Z (earlier notes labelled this 12:25-12:40Z without reading a clock; HezLead corrected
+  it), because the hosted function secrets SUPABASE_DB_URL and SWARM_DATABASE_URL carried the postgres login. HezLead
+  repointed both at about 14:51Z to the commonswarm_edge pooler URLs used by edge-staging; the lead measured at 14:52Z:
+  whoami, check, inbox x3, members, brain ls, and a note with its wake all worked. Rule for the window: rotate or reset any
+  credential BEFORE the window, never during it, and first list every hosted secret that embeds that login.
+
+## STATE AT 10:25Z (2026-09-17) (history)
 
 - LANDED on main (pushed): H lane 1, the command table dispatches the CLI (merge 7cdd6ec3, record a6103088); the timeout
   table (merge 59862612, record 16ce5498). Not released: both ship with the next npm release.
