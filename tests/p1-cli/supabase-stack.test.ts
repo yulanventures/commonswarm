@@ -539,6 +539,38 @@ function migrationErrors(values: {
   }
   if (!values.verify.includes("cron_jobs_json_sql")) errors.push("cron verify query");
   if (!values.restoreCron.includes("cron_jobs_json_sql")) errors.push("cron restore query");
+  if (!values.lib.includes("compare_cron_job_listings")) errors.push("cron listing comparator");
+  if (!values.verify.includes('compare_cron_job_listings "$source_cron_jobs" "$target_cron_jobs"')) {
+    errors.push("cron verify comparator");
+  }
+  if (!values.restoreCron.includes('compare_cron_job_listings "$jobs_file" "$target_jobs"')) {
+    errors.push("cron restore comparator");
+  }
+  if (/diff -u "\$source_cron_jobs" "\$target_cron_jobs"/.test(values.verify)) {
+    errors.push("cron verify bytewise diff");
+  }
+  if (/diff -u "\$jobs_file" "\$target_jobs"/.test(values.restoreCron)) {
+    errors.push("cron restore bytewise diff");
+  }
+  if (!values.verify.includes("if ! compare_cron_job_listings") ||
+      !values.restoreCron.includes("if ! compare_cron_job_listings")) {
+    errors.push("cron compare if-not caller");
+  }
+  if (/grep -c \. "\$expected" \|\| true/.test(values.lib) ||
+      /grep -c \. "\$actual" \|\| true/.test(values.lib)) {
+    errors.push("cron compare hides grep failure");
+  }
+  if (!values.lib.includes('if ! LC_ALL=C sort "$expected"') ||
+      !values.lib.includes('if ! LC_ALL=C sort "$actual"')) {
+    errors.push("cron compare ignores sort failure");
+  }
+  if (!values.lib.includes('if ! expected_sorted="$(mktemp') ||
+      !values.lib.includes('if ! actual_sorted="$(mktemp')) {
+    errors.push("cron compare ignores mktemp failure");
+  }
+  if (!values.lib.includes('if ! chmod 0600')) {
+    errors.push("cron compare ignores chmod failure");
+  }
   if (!values.seedRealtime.includes(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"') ||
       !values.seedRealtime.includes(': "${COMMONSWARM_MIGRATION_ENV_FILE:=/home/commonswarm/migration.env}"')) {
     errors.push("seed environment path defaults");
@@ -623,6 +655,31 @@ test("migration safety controls reject their named mutations", () => {
     })() }, /cron snapshot export/],
     ["cron verify", { ...original, verify: verifyCounts.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron verify query/],
     ["cron restore", { ...original, restoreCron: restoreCronJobs.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron restore query/],
+    ["cron listing comparator", { ...original, lib: migrationLib.replaceAll("compare_cron_job_listings", "removed_compare") }, /cron listing comparator/],
+    ["cron verify comparator", { ...original, verify: verifyCounts.replace("compare_cron_job_listings", "diff -u") }, /cron verify comparator/],
+    ["cron restore comparator", { ...original, restoreCron: restoreCronJobs.replace("compare_cron_job_listings", "diff -u") }, /cron restore comparator/],
+    ["cron verify bytewise", { ...original, verify: verifyCounts.replace(
+      'compare_cron_job_listings "$source_cron_jobs" "$target_cron_jobs"',
+      'diff -u "$source_cron_jobs" "$target_cron_jobs"',
+    ) }, /cron verify bytewise diff/],
+    ["cron restore bytewise", { ...original, restoreCron: restoreCronJobs.replace(
+      'compare_cron_job_listings "$jobs_file" "$target_jobs"',
+      'diff -u "$jobs_file" "$target_jobs"',
+    ) }, /cron restore bytewise diff/],
+    ["cron compare if-not caller", { ...original, verify: verifyCounts.replace("if ! compare_cron_job_listings", "compare_cron_job_listings") }, /cron compare if-not caller/],
+    ["cron compare hides grep", { ...original, lib: migrationLib.replace(
+      'expected_count="$(grep -c . "$expected")" && expected_grep_status=0 || expected_grep_status=$?',
+      'expected_count="$(grep -c . "$expected" || true)"',
+    ) }, /cron compare hides grep failure/],
+    ["cron compare ignores sort", { ...original, lib: migrationLib.replace(
+      'if ! LC_ALL=C sort "$expected"',
+      'LC_ALL=C sort "$expected"',
+    ) }, /cron compare ignores sort failure/],
+    ["cron compare ignores mktemp", { ...original, lib: migrationLib.replace(
+      'if ! expected_sorted="$(mktemp',
+      'expected_sorted="$(mktemp',
+    ) }, /cron compare ignores mktemp failure/],
+    ["cron compare ignores chmod", { ...original, lib: migrationLib.replace("if ! chmod 0600", "chmod 0600") }, /cron compare ignores chmod failure/],
     ["seed defaults", { ...original, seedRealtime: seedRealtimeTenant.replace(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"', "") }, /seed environment path defaults/],
     ["seed absolute paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || "$COMMONSWARM_MIGRATION_ENV_FILE" != /*', "") }, /seed absolute paths/],
     ["seed existing paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || ! -f "$COMMONSWARM_MIGRATION_ENV_FILE"', "") }, /seed existing paths/],

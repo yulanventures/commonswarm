@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -129,6 +129,19 @@ test("pg_cron schedules are exported from the source and recreated on the box", 
     result = tool(["/work/migrate/restore-cron-jobs.sh", "target"]);
     assert.equal(result.status, 0, result.stdout + result.stderr);
     assert.equal(listing("target").stdout, exported.stdout);
+
+    // 2b. The same records in the opposite line order still match. Hosted and box collations can
+    // sort '_' and '-' differently; the artifact is not rewritten.
+    const originalArtifact = await readFile(join(artifacts, "cron-jobs.ndjson"), "utf8");
+    const reversedArtifact = `${originalArtifact.split("\n").filter(Boolean).reverse().join("\n")}\n`;
+    assert.notEqual(reversedArtifact, originalArtifact);
+    await writeFile(join(artifacts, "cron-jobs.ndjson"), reversedArtifact, { mode: 0o600 });
+    result = tool(["/work/migrate/restore-cron-jobs.sh", "target"]);
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /4 cron jobs match cron-jobs\.ndjson/);
+    const afterReverse = await readFile(join(artifacts, "cron-jobs.ndjson"), "utf8");
+    assert.equal(afterReverse, reversedArtifact, "restore rewrote cron-jobs.ndjson");
+    await writeFile(join(artifacts, "cron-jobs.ndjson"), originalArtifact, { mode: 0o600 });
 
     // 3. One transaction: an entry for another database fails the run and leaves the jobs as they were.
     const foreign = JSON.stringify({ jobname: "zzz-foreign", schedule: "0 2 * * *", command: "SELECT 5", database: "other", username: "postgres", active: true });

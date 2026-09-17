@@ -57,7 +57,7 @@ fi
 
 cron_jobs_json_sql >"$cron_query"
 database_psql "$destination" --quiet --tuples-only --no-align --file "$cron_query" >"$target_cron_jobs" 2>>"$LOG_FILE"
-if ! diff -u "$source_cron_jobs" "$target_cron_jobs" >>"$LOG_FILE" 2>&1; then
+if ! compare_cron_job_listings "$source_cron_jobs" "$target_cron_jobs" >>"$LOG_FILE" 2>&1; then
   log "cron job verification failed; run restore-cron-jobs.sh and see the protected log"
   exit 1
 fi
