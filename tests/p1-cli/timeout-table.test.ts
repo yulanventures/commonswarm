@@ -7,10 +7,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { once } from "node:events";
-import { enumerateRepository } from "../../scripts/timeout-table/enumerate.mjs";
-import { validateMapping } from "../../scripts/timeout-table/mapping.mjs";
+import { enumerateRepository, enumerateText } from "../../scripts/timeout-table/enumerate.mjs";
+import { mappingForRef, validateMapping } from "../../scripts/timeout-table/mapping.mjs";
 import { markdownReport } from "../../scripts/timeout-table/run.mjs";
 import { readJsonLines, runChild, summarize, withPrivateProfile } from "../../scripts/timeout-table/core.mjs";
+import {
+  AGENT_CHECK_TIMEOUT_MS,
+  HOST_HOOK_PROCESS_DEADLINE_MS,
+  HOST_HOOK_TIMEOUT_SECONDS,
+} from "../../src/cloud/agent-check-budget.js";
 
 const repo = resolve(import.meta.dirname, "../..");
 
@@ -36,20 +41,70 @@ async function listen(delayMs: () => number) {
   };
 }
 
-test("timeout inventory and mapping are exact in both directions", async () => {
-  const inventory = enumerateRepository({ repo });
-  const released = enumerateRepository({ repo, ref: "v0.1.71" });
-  assert.deepEqual(released.map(row => row.id), inventory.map(row => row.id));
+test("timeout inventory and mapping are exact in both directions for each measured ref", async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
-  assert.equal(validateMapping(inventory, mapping), true);
+  const measured: { ref: string; enumerateRef: string | null }[] = [
+    { ref: "v0.1.71", enumerateRef: "v0.1.71" },
+    { ref: "HEAD", enumerateRef: null },
+    { ref: "main", enumerateRef: "main" },
+  ];
+  for (const { ref, enumerateRef } of measured) {
+    const inventory = enumerateRepository({ repo, ref: enumerateRef });
+    assert.equal(validateMapping(inventory, mapping, ref), true);
+    if (ref === "HEAD") assert.equal(validateMapping(inventory, mapping, null), true);
 
-  const missing = structuredClone(mapping);
-  delete missing.rows[inventory[0]!.id];
-  assert.throws(() => validateMapping(inventory, missing), /missing=/);
+    const missing = structuredClone(mapping);
+    const id = inventory[0]!.id;
+    delete mappingForRef(missing, ref).rows[id];
+    assert.throws(() => validateMapping(inventory, missing, ref), /missing=/);
 
-  const stale = structuredClone(mapping);
-  stale.rows["src/not-present.ts:1:TIMEOUT_MS"] = structuredClone(mapping.rows[inventory[0]!.id]);
-  assert.throws(() => validateMapping(inventory, stale), /stale=/);
+    const stale = structuredClone(mapping);
+    mappingForRef(stale, ref).rows["src/not-present.ts:TIMEOUT_MS"] =
+      structuredClone(mappingForRef(mapping, ref).rows[id]);
+    assert.throws(() => validateMapping(inventory, stale, ref), /stale=/);
+  }
+
+  assert.throws(
+    () => validateMapping(enumerateRepository({ repo }), mapping, "not-a-measured-ref"),
+    /no section for ref not-a-measured-ref/,
+  );
+  assert.equal(
+    mappingForRef(mapping, "HEAD").rows["src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS"] != null,
+    true,
+  );
+  assert.equal(
+    mappingForRef(mapping, "v0.1.71").rows["src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS"] == null,
+    true,
+  );
+  const headRows = new Map(enumerateRepository({ repo }).map(row => [row.id, row]));
+  assert.equal(
+    headRows.get("src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS")?.value_ms,
+    AGENT_CHECK_TIMEOUT_MS,
+  );
+  assert.equal(
+    headRows.get("src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS")?.value_ms,
+    HOST_HOOK_PROCESS_DEADLINE_MS,
+  );
+  const hostHook = headRows.get("src/cloud/agent-check-budget.ts:HOST_HOOK_TIMEOUT_SECONDS");
+  assert.equal(hostHook && hostHook.value_ms / 1_000, HOST_HOOK_TIMEOUT_SECONDS);
+});
+
+test("a pure line shift does not change inventory ids", () => {
+  const original = [
+    "const TIMEOUT_MS = 1_000;",
+    "setTimeout(() => {}, 250);",
+    "setTimeout(() => {}, 500);",
+  ].join("\n");
+  const shifted = `${"const pad = 1;\n".repeat(7)}${original}`;
+  const before = enumerateText("fixture.ts", original);
+  const after = enumerateText("fixture.ts", shifted);
+  assert.deepEqual(before.map(row => row.id), [
+    "fixture.ts:TIMEOUT_MS",
+    "fixture.ts:setTimeout",
+    "fixture.ts:setTimeout#2",
+  ]);
+  assert.deepEqual(after.map(row => row.id), before.map(row => row.id));
+  assert.ok(before.every((row, index) => row.line < after[index]!.line));
 });
 
 test("delayed local endpoint makes the rendered row pass below half-budget and fail above it", async (t) => {
@@ -75,10 +130,10 @@ test("delayed local endpoint makes the rendered row pass below half-budget and f
   }
   assert.equal(summarize(slow, 100).gate, "FAIL");
 
-  const id = "fixture.ts:1:TIMEOUT_MS";
+  const id = "fixture.ts:TIMEOUT_MS";
   const report = markdownReport({
     baseUrl: target.url,
-    inventory: [{ id, value_ms: 100, unit_note: "milliseconds" }],
+    inventory: [{ id, file: "fixture.ts", name: "TIMEOUT_MS", line: 1, value_ms: 100, unit_note: "milliseconds" }],
     mapping: { rows: { [id]: { class: "network-api", scope: "per-request", endpoints: ["/functions/v1/read"], operation: { name: "fixture", class: "safe-read" } } } },
     measurements: new Map([["fixture", { durations: slow, realTimeouts: 0 }]]), startup: null,
   });

@@ -1,5 +1,8 @@
 export interface TimeoutInventoryRow {
   id: string;
+  file: string;
+  name: string;
+  line: number;
   value_ms: number;
   unit_note: string;
 }

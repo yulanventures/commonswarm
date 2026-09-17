@@ -151,10 +151,16 @@ export function enumerateText(file, text) {
   visitConstants(sourceFile);
 
   const rows = [];
+  const seen = new Map();
   const add = (node, name, raw) => {
     if (!Number.isFinite(raw) || raw < 0) return;
     const line = location(sourceFile, node);
-    rows.push({ id: `${file}:${line}:${name}`, ...normalizedValue(raw, name, file, node) });
+    const key = `${file}:${name}`;
+    const occurrence = (seen.get(key) ?? 0) + 1;
+    seen.set(key, occurrence);
+    // Line is report data only. A pure line shift must not change the id.
+    const id = occurrence === 1 ? key : `${key}#${occurrence}`;
+    rows.push({ id, file, name, line, ...normalizedValue(raw, name, file, node) });
   };
   const visit = node => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&

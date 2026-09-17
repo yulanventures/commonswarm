@@ -75,13 +75,18 @@ The TypeScript compiler API reads tracked `.ts`, `.tsx`, and `.astro` client sou
 - numeric `timeoutMs`, `timeout`, and `connect_timeout` properties;
 - direct numeric `setTimeout` and `setInterval` waits.
 
-Postgres and Claude hook seconds are converted to milliseconds. Non-time byte, character, and count budgets keep their raw value and are marked as non-time rows. The exact-set test fails for an unmapped inventory ID and for a stale mapped ID.
+Postgres and Claude hook seconds are converted to milliseconds. Non-time byte, character, and count budgets keep their raw value and are marked as non-time rows.
+
+Inventory ids are `file:name`, with `#N` for the second and later same name in one file (`src/cli.ts:setTimeout#2`). The source line is report data only. A pure line shift does not change an id.
+
+`mapping.json` is version 2. It holds one `refs.<ref>.rows` section per measured client. The window gate measures the released CLI (`v0.1.71`) and the next release (`HEAD`; `main` is an alias of that section). Omit `--ref` to use the `HEAD` section against the working tree. `run.mjs --ref <ref>` uses that section and refuses a ref with no section. The exact-set test fails for an unmapped inventory ID and for a stale mapped ID, for each measured ref.
 
 ## Mutation controls
 
 | Control | Mutation proved to fail |
 |---|---|
-| Mapping completeness | Delete one live mapping row, or add a stale ID. |
+| Mapping completeness | For each measured ref, delete one live mapping row, or add a stale ID. |
+| Line-independent ids | Insert lines above a fixture timeout site; ids must stay the same. |
 | Headroom gate | Replace the slow fake-server delay with the fast delay, or reverse the `>= 2` comparison. |
 | Origin rewrite | Remove the rewrite; the original fake server receives the request and the target receives none. |
 | Log privacy | Add request headers, body, query, or the secret-shaped value to a log row. |

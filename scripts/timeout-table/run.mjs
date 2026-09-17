@@ -9,7 +9,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
 import { enumerateRepository } from "./enumerate.mjs";
-import { validateMapping } from "./mapping.mjs";
+import { mappingForRef, validateMapping } from "./mapping.mjs";
 import {
   clientInvocation, makePrivateProfileCopy, percentile, readJsonLines, runChild, summarize,
 } from "./core.mjs";
@@ -155,8 +155,8 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
     "",
     `Client start-up (\`--version\`): ${startup ? `p50 ${formatMs(startup.p50)} ms; p95 ${formatMs(startup.p95)} ms; max ${formatMs(startup.max)} ms` : "not run"}.`,
     "",
-    "| Constant id | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |",
-    "|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|",
+    "| Constant id | Line | Budget | Scope | Endpoint(s) | Operation | Class | Runs | p50 | p95 | Max | Headroom | Gate | Real-client exits / timeouts |",
+    "|---|---|---:|---|---|---|---|---:|---:|---:|---:|---:|---|---:|",
   ];
   for (const row of inventory) {
     const map = mapping.rows[row.id];
@@ -170,16 +170,17 @@ export function markdownReport({ baseUrl, inventory, mapping, measurements, star
     const operation = map.operation.proxy_operation
       ? `${map.operation.name} (proxy: ${map.operation.proxy_operation})`
       : map.operation.name;
-    lines.push(`| ${escapeCell(row.id)} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${nonNetwork ?? map.operation.class} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${stats.headroom === null ? "—" : stats.headroom.toFixed(2)} | ${nonNetwork ? "NOT NETWORK" : stats.gate} | ${escapeCell(exits)} |`);
+    lines.push(`| ${escapeCell(row.id)} | ${row.line ?? "—"} | ${budget} | ${map.scope} | ${escapeCell(map.endpoints.join(", ") || "—")} | ${escapeCell(operation)} | ${nonNetwork ?? map.operation.class} | ${stats.runs} | ${formatMs(stats.p50)} | ${formatMs(stats.p95)} | ${formatMs(stats.max)} | ${stats.headroom === null ? "—" : stats.headroom.toFixed(2)} | ${nonNetwork ? "NOT NETWORK" : stats.gate} | ${escapeCell(exits)} |`);
   }
   return `${lines.join("\n")}\n`;
 }
 
 export async function runTable(options) {
   const repo = resolve(join(here, "../.."));
-  const mapping = JSON.parse(await readFile(options.mapping, "utf8"));
+  const mappingFile = JSON.parse(await readFile(options.mapping, "utf8"));
   const inventory = enumerateRepository({ repo, ref: options.ref });
-  validateMapping(inventory, mapping);
+  validateMapping(inventory, mappingFile, options.ref);
+  const mapping = mappingForRef(mappingFile, options.ref);
   const resources = { repo, tempRoot: null, worktreePath: null };
   const uninstallSignals = installRunResourceCleanup(resources);
   const tempRoot = await mkdtemp(join(tmpdir(), "cswarm-timeout-run-"));
