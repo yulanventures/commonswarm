@@ -188,6 +188,10 @@ SQL
 # record with every field; multiplicity is preserved (sort is not unique). Line order is ignored, so
 # a collation difference cannot fail a match. expected and actual are not rewritten. Needs sort and
 # diff, which the tool container already has; node is not assumed inside the Postgres image.
+#
+# Callers invoke this under `if ! compare_cron_job_listings`, which disables errexit for the whole
+# function and its subshell. Every load-bearing mktemp, chmod, grep, and sort is checked; a failed
+# sort must not leave empty temps for diff to treat as a match.
 compare_cron_job_listings() {
   local expected="$1"
   local actual="$2"
@@ -196,18 +200,58 @@ compare_cron_job_listings() {
     echo "cron job listing is missing" >&2
     return 1
   fi
+  if [[ ! -r "$expected" || ! -r "$actual" ]]; then
+    echo "cron job listing is unreadable" >&2
+    return 1
+  fi
   (
-    expected_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-expected.XXXXXX")"
-    actual_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-actual.XXXXXX")"
-    trap 'rm -f "$expected_sorted" "$actual_sorted"' EXIT
-    chmod 0600 "$expected_sorted" "$actual_sorted"
-    expected_count="$(grep -c . "$expected" || true)"
-    actual_count="$(grep -c . "$actual" || true)"
-    LC_ALL=C sort "$expected" >"$expected_sorted"
-    LC_ALL=C sort "$actual" >"$actual_sorted"
+    expected_sorted=""
+    actual_sorted=""
+    cleanup_sorted() {
+      [[ -n "$expected_sorted" ]] && rm -f -- "$expected_sorted"
+      [[ -n "$actual_sorted" ]] && rm -f -- "$actual_sorted"
+    }
+    trap cleanup_sorted EXIT
+
+    if ! expected_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-expected.XXXXXX")"; then
+      echo "failed to create expected cron sort file" >&2
+      exit 1
+    fi
+    if ! actual_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-actual.XXXXXX")"; then
+      echo "failed to create actual cron sort file" >&2
+      exit 1
+    fi
+    if ! chmod 0600 "$expected_sorted" "$actual_sorted"; then
+      echo "failed to set mode on cron sort files" >&2
+      exit 1
+    fi
+
+    expected_count=""
+    actual_count=""
+    expected_count="$(grep -c . "$expected")" && expected_grep_status=0 || expected_grep_status=$?
+    if [[ "$expected_grep_status" -gt 1 ]]; then
+      echo "failed to read expected cron job listing" >&2
+      exit 1
+    fi
+    actual_count="$(grep -c . "$actual")" && actual_grep_status=0 || actual_grep_status=$?
+    if [[ "$actual_grep_status" -gt 1 ]]; then
+      echo "failed to read actual cron job listing" >&2
+      exit 1
+    fi
+    expected_count="${expected_count:-0}"
+    actual_count="${actual_count:-0}"
+
+    if ! LC_ALL=C sort "$expected" >"$expected_sorted"; then
+      echo "failed to sort expected cron job listing" >&2
+      exit 1
+    fi
+    if ! LC_ALL=C sort "$actual" >"$actual_sorted"; then
+      echo "failed to sort actual cron job listing" >&2
+      exit 1
+    fi
     if [[ "$expected_count" != "$actual_count" ]]; then
       printf 'cron job counts differ: expected %s, actual %s\n' "$expected_count" "$actual_count"
-      diff -u "$expected_sorted" "$actual_sorted" || true
+      diff -u "$expected_sorted" "$actual_sorted"
       exit 1
     fi
     diff -u "$expected_sorted" "$actual_sorted"

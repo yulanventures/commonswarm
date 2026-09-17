@@ -9,9 +9,9 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -19,6 +19,8 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const libPath = join(repoRoot, "deploy", "supabase-stack", "migrate", "lib.sh");
 const restorePath = join(repoRoot, "deploy", "supabase-stack", "migrate", "restore-cron-jobs.sh");
 const verifyPath = join(repoRoot, "deploy", "supabase-stack", "migrate", "verify-counts.sh");
+const callerPath = join(repoRoot, "tests", "p1-cli", "helpers", "compare-cron-job-listings-if.sh");
+const realSort = "/usr/bin/sort";
 
 type CronJob = {
   jobname: string;
@@ -116,16 +118,32 @@ const JOBS: CronJob[] = [
 
 const RECORDS = JOBS.map(line);
 
-function compare(expectedPath: string, actualPath: string): SpawnSyncReturns<string> {
-  return spawnSync("bash", ["-c", 'source "$LIB" && compare_cron_job_listings "$EXPECTED" "$ACTUAL"'], {
+function compare(
+  expectedPath: string,
+  actualPath: string,
+  envExtra: Record<string, string> = {},
+): SpawnSyncReturns<string> {
+  return spawnSync("bash", [callerPath], {
     encoding: "utf8",
-    env: { ...process.env, LIB: libPath, EXPECTED: expectedPath, ACTUAL: actualPath },
+    env: {
+      ...process.env,
+      LIB: libPath,
+      EXPECTED: expectedPath,
+      ACTUAL: actualPath,
+      ...envExtra,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
+async function writeTool(directory: string, name: string, body: string): Promise<void> {
+  const path = join(directory, name);
+  await writeFile(path, body, { mode: 0o700 });
+  await chmod(path, 0o700);
+}
+
 test("cron job listings match as a multiset across collations and reject field and count drift", async () => {
-  const syntax = [libPath, restorePath, verifyPath].map((script) => spawnSync("bash", ["-n", script], {
+  const syntax = [libPath, restorePath, verifyPath, callerPath].map((script) => spawnSync("bash", ["-n", script], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }));
@@ -208,7 +226,98 @@ test("cron job listings match as a multiset across collations and reject field a
     const duplicateSwap = compare(expectedDuplicateFile, actualDuplicateFile);
     assert.notEqual(duplicateSwap.status, 0, "swapped duplicate multiplicity was accepted");
     assert.match(`${duplicateSwap.stdout}${duplicateSwap.stderr}`, /[-+]\{"jobname"/);
+
+    const emptyFile = join(work, "empty.ndjson");
+    const oneJobFile = join(work, "one.ndjson");
+    await writeFile(emptyFile, "", { mode: 0o600 });
+    await writeFile(oneJobFile, ndjson([hyphen[0]!]), { mode: 0o600 });
+    const zeroRow = compare(emptyFile, emptyFile);
+    assert.equal(zeroRow.status, 0, zeroRow.stdout + zeroRow.stderr);
+    assert.notEqual(compare(emptyFile, oneJobFile).status, 0, "a job was accepted against a zero-row listing");
   } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+});
+
+test("if ! caller rejects sort, mktemp, chmod, missing, and unreadable listings", async () => {
+  const hyphen = hyphenFirst(RECORDS);
+  const underscore = underscoreFirst(RECORDS);
+  const work = await mkdtemp(join(tmpdir(), "ndb-cron-compare-io-"));
+  const bin = join(work, "bin");
+  const tmpDir = join(work, "tmp");
+  await mkdir(bin, { mode: 0o700 });
+  await mkdir(tmpDir, { mode: 0o700 });
+  const expectedFile = join(work, "expected.ndjson");
+  const actualFile = join(work, "actual.ndjson");
+  try {
+    await writeFile(expectedFile, ndjson(hyphen), { mode: 0o600 });
+    await writeFile(actualFile, ndjson(underscore), { mode: 0o600 });
+    const sameJobs = compare(expectedFile, actualFile);
+    assert.equal(sameJobs.status, 0, sameJobs.stdout + sameJobs.stderr);
+
+    const missing = compare(join(work, "missing.ndjson"), actualFile);
+    assert.notEqual(missing.status, 0, "a missing listing was accepted");
+    assert.match(`${missing.stdout}${missing.stderr}`, /missing/);
+
+    await chmod(actualFile, 0o000);
+    let unreadable = false;
+    try {
+      await readFile(actualFile);
+    } catch {
+      unreadable = true;
+    }
+    if (unreadable) {
+      const result = compare(expectedFile, actualFile);
+      assert.notEqual(result.status, 0, "an unreadable listing was accepted");
+      assert.match(`${result.stdout}${result.stderr}`, /unreadable/);
+    }
+    await chmod(actualFile, 0o600);
+
+    const pathWith = async (install: () => Promise<void>, reason: string, stderr?: RegExp): Promise<void> => {
+      await install();
+      const result = compare(expectedFile, actualFile, {
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        TMPDIR: tmpDir,
+      });
+      assert.notEqual(result.status, 0, reason);
+      if (stderr) assert.match(`${result.stdout}${result.stderr}`, stderr);
+    };
+
+    await pathWith(
+      () => writeTool(bin, "sort", "#!/bin/sh\nexit 2\n"),
+      "both sorts exiting 2 were accepted",
+      /failed to sort expected cron job listing/,
+    );
+    await pathWith(
+      () => writeTool(bin, "sort", `#!/bin/sh\nif [ "$1" = "${expectedFile}" ]; then exit 2; fi\nexec "${realSort}" "$@"\n`),
+      "one sort exiting 2 was accepted",
+      /failed to sort expected cron job listing/,
+    );
+    await pathWith(
+      () => writeTool(bin, "sort", `#!/bin/sh\nif [ "$1" = "${actualFile}" ]; then exit 2; fi\nexec "${realSort}" "$@"\n`),
+      "the actual listing sort exiting 2 was accepted",
+      /failed to sort actual cron job listing/,
+    );
+    await rm(join(bin, "sort"));
+    await pathWith(
+      () => writeTool(bin, "mktemp", "#!/bin/sh\nexit 1\n"),
+      "mktemp failure was accepted",
+      /failed to create expected cron sort file/,
+    );
+    await rm(join(bin, "mktemp"));
+    await pathWith(
+      () => writeTool(bin, "chmod", "#!/bin/sh\nexit 1\n"),
+      "chmod failure was accepted",
+      /failed to set mode on cron sort files/,
+    );
+
+    const leftover = spawnSync("bash", ["-c", `find "${tmpDir}" -name 'commonswarm-cron-*' -print`], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    assert.equal(leftover.stdout.trim(), "", leftover.stdout);
+  } finally {
+    await chmod(actualFile, 0o600).catch(() => undefined);
     await rm(work, { recursive: true, force: true });
   }
 });
