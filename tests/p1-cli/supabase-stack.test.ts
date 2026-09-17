@@ -539,6 +539,19 @@ function migrationErrors(values: {
   }
   if (!values.verify.includes("cron_jobs_json_sql")) errors.push("cron verify query");
   if (!values.restoreCron.includes("cron_jobs_json_sql")) errors.push("cron restore query");
+  if (!values.lib.includes("compare_cron_job_listings")) errors.push("cron listing comparator");
+  if (!values.verify.includes('compare_cron_job_listings "$source_cron_jobs" "$target_cron_jobs"')) {
+    errors.push("cron verify comparator");
+  }
+  if (!values.restoreCron.includes('compare_cron_job_listings "$jobs_file" "$target_jobs"')) {
+    errors.push("cron restore comparator");
+  }
+  if (/diff -u "\$source_cron_jobs" "\$target_cron_jobs"/.test(values.verify)) {
+    errors.push("cron verify bytewise diff");
+  }
+  if (/diff -u "\$jobs_file" "\$target_jobs"/.test(values.restoreCron)) {
+    errors.push("cron restore bytewise diff");
+  }
   if (!values.seedRealtime.includes(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"') ||
       !values.seedRealtime.includes(': "${COMMONSWARM_MIGRATION_ENV_FILE:=/home/commonswarm/migration.env}"')) {
     errors.push("seed environment path defaults");
@@ -623,6 +636,17 @@ test("migration safety controls reject their named mutations", () => {
     })() }, /cron snapshot export/],
     ["cron verify", { ...original, verify: verifyCounts.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron verify query/],
     ["cron restore", { ...original, restoreCron: restoreCronJobs.replace("cron_jobs_json_sql", "printf '%s\\n' 'SELECT 1'") }, /cron restore query/],
+    ["cron listing comparator", { ...original, lib: migrationLib.replaceAll("compare_cron_job_listings", "removed_compare") }, /cron listing comparator/],
+    ["cron verify comparator", { ...original, verify: verifyCounts.replace("compare_cron_job_listings", "diff -u") }, /cron verify comparator/],
+    ["cron restore comparator", { ...original, restoreCron: restoreCronJobs.replace("compare_cron_job_listings", "diff -u") }, /cron restore comparator/],
+    ["cron verify bytewise", { ...original, verify: verifyCounts.replace(
+      'compare_cron_job_listings "$source_cron_jobs" "$target_cron_jobs"',
+      'diff -u "$source_cron_jobs" "$target_cron_jobs"',
+    ) }, /cron verify bytewise diff/],
+    ["cron restore bytewise", { ...original, restoreCron: restoreCronJobs.replace(
+      'compare_cron_job_listings "$jobs_file" "$target_jobs"',
+      'diff -u "$jobs_file" "$target_jobs"',
+    ) }, /cron restore bytewise diff/],
     ["seed defaults", { ...original, seedRealtime: seedRealtimeTenant.replace(': "${COMMONSWARM_ENV_FILE:=/home/commonswarm/.env}"', "") }, /seed environment path defaults/],
     ["seed absolute paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || "$COMMONSWARM_MIGRATION_ENV_FILE" != /*', "") }, /seed absolute paths/],
     ["seed existing paths", { ...original, seedRealtime: seedRealtimeTenant.replace(' || ! -f "$COMMONSWARM_MIGRATION_ENV_FILE"', "") }, /seed existing paths/],

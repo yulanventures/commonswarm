@@ -44,6 +44,11 @@
 | Remove only the cron export block's `SET TRANSACTION SNAPSHOT` line | `cron snapshot export` |
 | Replace the cron verification query | `cron verify query` |
 | Replace the cron restore listing query | `cron restore query` |
+| Rename the shared cron listing comparator | `cron listing comparator` |
+| Stop calling the comparator from `verify-counts.sh` | `cron verify comparator` |
+| Stop calling the comparator from `restore-cron-jobs.sh` | `cron restore comparator` |
+| Restore a bytewise `diff` of cron listings in `verify-counts.sh` | `cron verify bytewise diff` |
+| Restore a bytewise `diff` of cron listings in `restore-cron-jobs.sh` | `cron restore bytewise diff` |
 | Remove the seed script's default service environment path | `seed environment path defaults` |
 | Stop checking that the seed migration environment path is absolute | `seed absolute paths` |
 | Stop checking that the seed migration environment file exists | `seed existing paths` |

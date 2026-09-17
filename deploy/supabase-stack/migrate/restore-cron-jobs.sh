@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Recreates the source's pg_cron schedules on the box database. The selected-schema dump carries the purge functions
 # but not the cron schema, so without this step the box runs none of the CommonSwarm purge jobs. Each job is scheduled
-# as the role that owned it on the source, in ONE transaction, and the target's job list must then equal
-# cron-jobs.ndjson byte for byte. Running it again changes nothing: pg_cron replaces a job with the same name and owner.
+# as the role that owned it on the source, in ONE transaction, and the target's job list must then match
+# cron-jobs.ndjson as a multiset of records (every field, duplicate rows included). Listing order is not part of the
+# match: hosted and box collations can sort '_' and '-' differently. The artifact is not rewritten. Running it again
+# changes nothing: pg_cron replaces a job with the same name and owner.
 set -euo pipefail
 exec </dev/null
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
@@ -64,7 +66,7 @@ database_psql "$destination" --quiet --file "$transaction_sql" >>"$LOG_FILE" 2>&
 
 cron_jobs_json_sql >"$listing_sql"
 database_psql "$destination" --quiet --tuples-only --no-align --file "$listing_sql" >"$target_jobs" 2>>"$LOG_FILE"
-if ! diff -u "$jobs_file" "$target_jobs" >>"$LOG_FILE" 2>&1; then
+if ! compare_cron_job_listings "$jobs_file" "$target_jobs" >>"$LOG_FILE" 2>&1; then
   log "the target cron jobs differ from cron-jobs.ndjson; see the protected log"
   exit 1
 fi

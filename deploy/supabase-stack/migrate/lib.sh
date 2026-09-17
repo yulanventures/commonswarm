@@ -161,10 +161,14 @@ assert_dump_origin() {
   assert_source_identity
 }
 
-# One row per pg_cron job, as JSON, in a fixed order. dump-source.sh writes it from the source snapshot to
-# cron-jobs.ndjson; restore-cron-jobs.sh and verify-counts.sh run the same query on the target and require the same
-# bytes. The schedules live in the cron schema, which the selected-schema dump does not carry. `postgres` has BYPASSRLS
-# on hosted Supabase and on the box image, so the source export and target query see every job regardless of owner.
+# One row per pg_cron job, as JSON. dump-source.sh writes it from the source snapshot to cron-jobs.ndjson.
+# restore-cron-jobs.sh and verify-counts.sh run the same query on the target. ORDER BY uses the database
+# collation, so hosted Postgres and the box image can emit the same jobs in a different line order
+# ('_' before '-' vs the reverse). Comparison is compare_cron_job_listings, a multiset of whole JSON
+# records: every field counts, duplicate rows must appear as often, and the original artifact is not
+# rewritten. The schedules live in the cron schema, which the selected-schema dump does not carry.
+# `postgres` has BYPASSRLS on hosted Supabase and on the box image, so the source export and target
+# query see every job regardless of owner.
 cron_jobs_json_sql() {
   cat <<'SQL'
 SELECT json_build_object(
@@ -178,6 +182,36 @@ SELECT json_build_object(
 FROM cron.job
 ORDER BY jobname, jobid;
 SQL
+}
+
+# Compare two cron-jobs.ndjson listings as a multiset of JSON records. Each non-empty line is one
+# record with every field; multiplicity is preserved (sort is not unique). Line order is ignored, so
+# a collation difference cannot fail a match. expected and actual are not rewritten. Needs sort and
+# diff, which the tool container already has; node is not assumed inside the Postgres image.
+compare_cron_job_listings() {
+  local expected="$1"
+  local actual="$2"
+  require_commands sort diff
+  if [[ ! -f "$expected" || ! -f "$actual" ]]; then
+    echo "cron job listing is missing" >&2
+    return 1
+  fi
+  (
+    expected_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-expected.XXXXXX")"
+    actual_sorted="$(mktemp "${TMPDIR:-/tmp}/commonswarm-cron-actual.XXXXXX")"
+    trap 'rm -f "$expected_sorted" "$actual_sorted"' EXIT
+    chmod 0600 "$expected_sorted" "$actual_sorted"
+    expected_count="$(grep -c . "$expected" || true)"
+    actual_count="$(grep -c . "$actual" || true)"
+    LC_ALL=C sort "$expected" >"$expected_sorted"
+    LC_ALL=C sort "$actual" >"$actual_sorted"
+    if [[ "$expected_count" != "$actual_count" ]]; then
+      printf 'cron job counts differ: expected %s, actual %s\n' "$expected_count" "$actual_count"
+      diff -u "$expected_sorted" "$actual_sorted" || true
+      exit 1
+    fi
+    diff -u "$expected_sorted" "$actual_sorted"
+  )
 }
 
 make_temp_sql() {
