@@ -319,6 +319,12 @@ function logicalShellLines(source: string): string[] {
 function runbookErrors(source: string): string[] {
   const errors: string[] = [];
   const commands = logicalShellLines(source);
+  // Runbook blocks are pasted into an operator's interactive shell; an `exit` command would close it.
+  for (const command of commands) {
+    if (/(?:^|;|&&|\|\||\bthen\b|\belse\b)\s*exit(?:\s+\d+)?\s*(?:;|$)/.test(command.replace(/#.*$/, ""))) {
+      errors.push(`runbook command calls exit: ${command}`);
+    }
+  }
   for (const command of commands) {
     if (!command.includes("docker compose")) continue;
     if (!/(?:commonswarm-edge|\$EDGE_DIR|edge-runtime)/.test(command)) continue;
@@ -332,9 +338,11 @@ function runbookErrors(source: string): string[] {
   const helper = helperStart >= 0 && helperEnd > helperStart ? source.slice(helperStart, helperEnd) : "";
   if (!helper.includes('if [ -z "$container_id" ]') ||
       !helper.includes("deadline=") || !helper.includes("docker inspect --format 'status=") ||
-      !helper.includes("exit 1")) {
+      !helper.includes("return 1")) {
     errors.push("bounded health helper is incomplete");
   }
+  // The helper is pasted into an operator's interactive shell: `exit` would close that shell.
+  if (/\bexit\b/.test(helper)) errors.push("bounded health helper calls exit");
 
   const starts = commands
     .map((command, index) => ({ command, index }))
@@ -371,6 +379,8 @@ test("runbook contracts reject edge-project and PostgreSQL-wait mutations", () =
     "edge Compose project mutation was not rejected",
   );
 
+  assert.match(runbookErrors(runbook.replace("      return 1\n    fi\n    sleep 2", "      exit 1\n    fi\n    sleep 2")).join("\n"), /bounded health helper calls exit/);
+  assert.match(runbookErrors(runbook.replace(">&2; false; fi", ">&2; exit 1; fi")).join("\n"), /runbook command calls exit/);
   const waitMutation = runbook.replace('wait_healthy "$postgres_container" postgres 180', ":");
   assert.match(
     runbookErrors(waitMutation).join("\n"),

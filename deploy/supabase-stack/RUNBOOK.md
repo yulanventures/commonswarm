@@ -26,7 +26,7 @@ EDGE_DIR=/home/commonswarm/edge/current/deploy/edge-runtime
 MIGRATE="$STACK_DIR/migrate"
 ```
 
-All container health waits use this one bounded pattern. `N` is 180 seconds for PostgreSQL and the edge. The helper checks for a non-empty container ID before inspection. On timeout it prints the container status and exits 1; then the step's ABORT applies.
+All container health waits use this one bounded pattern. `N` is 180 seconds for PostgreSQL and the edge. The helper checks for a non-empty container ID before inspection. On timeout it prints the container status and returns 1 (it never calls `exit`, so an operator's SSH shell stays open); read that exit code, stop, and apply the step's ABORT.
 
 ```sh
 wait_healthy() {
@@ -35,7 +35,7 @@ wait_healthy() {
   timeout_seconds="$3"
   if [ -z "$container_id" ]; then
     printf '%s\n' "$label container id is empty" >&2
-    exit 1
+    return 1
   fi
   deadline=$(( $(date +%s) + timeout_seconds ))
   while :; do
@@ -44,7 +44,7 @@ wait_healthy() {
     if [ "$(date +%s)" -ge "$deadline" ]; then
       printf '%s\n' "$label did not become healthy within $timeout_seconds seconds" >&2
       docker inspect --format 'status={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$container_id" >&2 || true
-      exit 1
+      return 1
     fi
     sleep 2
   done
@@ -280,7 +280,7 @@ Run every window block one command at a time and read each exit code. Never run 
    enable_summary="$(awk 'match($0, /older sessions ended: [0-9]+, refused: [0-9]+/) { value = substr($0, RSTART, RLENGTH) } END { print value }' "$ARTIFACT_DIR/logs/read-only-source-enable.log")"
    printf '%s\n' "$enable_summary"
    refused_sessions="${enable_summary##*refused: }"
-   if [ -z "$enable_summary" ] || [ -z "$refused_sessions" ]; then printf '%s\n' 'enable session count is missing' >&2; exit 1; fi
+   if [ -z "$enable_summary" ] || [ -z "$refused_sessions" ]; then printf '%s\n' 'enable session count is missing' >&2; false; fi
    if [ "$refused_sessions" -gt 0 ]; then "$MIGRATE/run-db-tool.sh" list-client-sessions.sh "$ARTIFACT_DIR" source; fi
    # If refused_sessions is greater than zero, read pid, usename, application_name, backend_start, and state, then decide whether to continue before step 4.
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
@@ -371,7 +371,7 @@ COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
   docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" down
 docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" down
 broken_data_dir="/var/lib/commonswarm/postgres.recovery-broken-$(date -u +%Y%m%dT%H%M%SZ)"
-if [ -e "$broken_data_dir" ]; then printf '%s\n' "recovery directory already exists: $broken_data_dir" >&2; exit 1; fi
+if [ -e "$broken_data_dir" ]; then printf '%s\n' "recovery directory already exists: $broken_data_dir" >&2; false; fi
 mv /var/lib/commonswarm/postgres "$broken_data_dir"
 install -d -m 0700 -o 100 -g 101 /var/lib/commonswarm/postgres
 docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d postgres
