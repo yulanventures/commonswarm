@@ -35,7 +35,9 @@
     "db:status": "supabase status",
     "db:diff": "supabase db diff --local",
     "db:migrate": "supabase migration up --local",
-    "benchmark:onboarding": "node --import tsx scripts/benchmark-onboarding.mjs"
+    "benchmark:onboarding": "node --import tsx scripts/benchmark-onboarding.mjs",
+    "test:h0-upgrade:local": "python3 deploy/supabase-stack/migrate/test-h0-upgrade.py",
+    "test:h0-counts": "python3 deploy/supabase-stack/migrate/test-post-upgrade-counts.py"
   },
   "engines": {
     "node": ">=22"
