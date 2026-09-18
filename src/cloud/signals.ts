@@ -1258,6 +1258,10 @@ export interface SignalMember {
 }
 
 export interface SignalAgent {
+  /** Absent on older read edges; null means the stored model was cleared. */
+  model?: string | null;
+  /** Own visible session only; null when the session view exposes no row. */
+  generation?: number | null;
   principal_id: string;
   name: string;
   /** Added by the current read edge; absent on older compatible deployments. */
@@ -1266,6 +1270,8 @@ export interface SignalAgent {
 
 /** The principal proven by the bearer credential, not by client-held metadata. */
 export interface SignalAgentIdentity {
+  /** Validated bearer run; absent on older compatible read edges. */
+  run_id?: string;
   credential_valid: true;
   owner_user_id: string;
   principal_id: string;
@@ -1298,7 +1304,16 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
   if (typeof row.name !== "string") {
     throw new Error("member read returned a malformed agent name");
   }
+  if (row.model !== undefined && row.model !== null && typeof row.model !== "string") {
+    throw new Error("member read returned a malformed agent model");
+  }
+  if (row.generation !== undefined && row.generation !== null &&
+    (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
+    throw new Error("member read returned a malformed agent generation");
+  }
   return {
+    ...(row.model === undefined ? {} : { model: row.model as string | null }),
+    ...(row.generation === undefined ? {} : { generation: row.generation as number | null }),
     principal_id: checkedUuid(row.principal_id, "agent principal_id"),
     name: row.name,
     ...(row.owner_user_id === undefined
@@ -1338,6 +1353,7 @@ function parseAgentIdentity(value: unknown): SignalAgentIdentity {
   }
   return {
     credential_valid: true,
+    ...(row.run_id === undefined ? {} : { run_id: checkedUuid(row.run_id, "identity run_id") }),
     owner_user_id: checkedUuid(row.owner_user_id, "identity owner_user_id"),
     principal_id: checkedUuid(row.principal_id, "identity principal_id"),
     workspace_id: checkedUuid(row.workspace_id, "identity workspace_id"),

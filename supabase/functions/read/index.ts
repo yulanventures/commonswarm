@@ -641,6 +641,7 @@ async function handle(
         SELECT
           p.principal_id,
           p.name,
+          p.model,
           p.owner_user_id,
           p.managed_at,
           s.lifecycle_state,
@@ -648,6 +649,7 @@ async function handle(
           s.host_label,
           s.host_session_ref,
           s.session_id,
+          s.generation::text AS generation,
           s.started_at,
           s.renewed_at,
           s.expired_at,
@@ -688,7 +690,15 @@ async function handle(
       `;
       return json(200, {
         members,
-        agents,
+        agents: agents.map((row) => {
+          // bigint arrives as text; never round a fencing generation in JSON.
+          const generation = row.generation === null ? null : Number(row.generation);
+          if (generation !== null &&
+            (!Number.isSafeInteger(generation) || generation < 1)) {
+            throw new Error("invalid session generation projection");
+          }
+          return { ...row, generation };
+        }),
         /* Derived from agent_delivery_read_context for the bearer used on THIS request.
          * Client artifact fields are deliberately not involved. A successful response also
          * proves the credential passed current token, principal, run, device and membership
@@ -696,6 +706,7 @@ async function handle(
         identity: {
           credential_valid: true,
           principal_id: agent.principal_id,
+          run_id: agent.run_id,
           owner_user_id: agent.owner_user_id,
           workspace_id: agent.principal_workspace_id,
           workspace_name: workspaceRows[0]?.name ?? null,
