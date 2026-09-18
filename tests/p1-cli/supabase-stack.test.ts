@@ -531,6 +531,16 @@ function migrationErrors(values: {
     verify: values.verify,
     restoreCron: values.restoreCron,
   })) {
+    if (name === "prepare") {
+      // A later assert_target_identity must not hide removal of the guard
+      // that runs before ALTER/CREATE ROLE.
+      const guard = script.search(/\bassert_target_identity\b/);
+      const roleMutation = script.search(/\b(?:ALTER|CREATE) ROLE\b/);
+      if (guard < 0 || roleMutation < 0 || guard > roleMutation) {
+        errors.push("target identity guard prepare");
+      }
+      continue;
+    }
     if (!script.includes("assert_target_identity")) errors.push(`target identity guard ${name}`);
   }
   if (!values.prepare.includes("CREATE EXTENSION IF NOT EXISTS pg_net") ||
