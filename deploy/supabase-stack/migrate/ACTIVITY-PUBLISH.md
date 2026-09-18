@@ -105,10 +105,23 @@ After apply on that backend:
 
 ```sql
 SELECT has_schema_privilege('commonswarm_edge', 'realtime', 'USAGE');
-SELECT has_column_privilege('commonswarm_edge', 'realtime.messages', attname, 'INSERT')
-FROM (VALUES ('id'),('payload'),('event'),('topic'),('private'),('extension')) AS c(attname);
 SELECT has_table_privilege('commonswarm_edge', 'realtime.messages', priv)
-FROM (VALUES ('SELECT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS p(priv);
+FROM (VALUES ('INSERT'),('SELECT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS p(priv);
+SELECT a.attname
+FROM pg_attribute AS a
+WHERE a.attrelid = 'realtime.messages'::regclass
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+  AND has_column_privilege('commonswarm_edge', a.attrelid, a.attname, 'INSERT')
+ORDER BY a.attname;
+SELECT COALESCE(array_agg(a.attname ORDER BY a.attname), '{}'::name[])
+         = ARRAY['event','extension','id','payload','private','topic']::name[]
+       AS insert_columns_are_exactly_the_six
+FROM pg_attribute AS a
+WHERE a.attrelid = 'realtime.messages'::regclass
+  AND a.attnum > 0
+  AND NOT a.attisdropped
+  AND has_column_privilege('commonswarm_edge', a.attrelid, a.attname, 'INSERT');
 SELECT has_schema_privilege('swarm_command', 'realtime', 'USAGE');
 SELECT rolsuper, rolbypassrls FROM pg_roles
 WHERE rolname IN ('commonswarm_edge', 'swarm_command');
@@ -124,13 +137,18 @@ WHERE r.rolname = 'commonswarm_edge'
 ORDER BY 1;
 ```
 
-   Intended baseline: USAGE true, the six INSERT columns true,
-   SELECT/UPDATE/DELETE/TRUNCATE false, `swarm_command` USAGE false,
-   `rolbypassrls` false, policy `commonswarm_edge_activity_insert` present
-   as INSERT, and the three existing SELECT policies unchanged. Memberships
-   must match the restored source role plus the three additive swarm
-   GRANTs; extras versus that baseline are not stripped by prepare-target.
-   Only this fresh comparison supports a least-privilege claim.
+   Intended baseline: USAGE true; table-level INSERT, SELECT, UPDATE, DELETE,
+   and TRUNCATE all false; `insert_columns_are_exactly_the_six` true (the
+   enumerated non-dropped ordinary columns with effective INSERT are exactly
+   `event`, `extension`, `id`, `payload`, `private`, `topic`; six positives
+   without that exact-set check are not enough, including extra
+   `INSERT (inserted_at)`); `swarm_command` USAGE false; `rolsuper` false and
+   `rolbypassrls` false for `commonswarm_edge` and `swarm_command`; policy
+   `commonswarm_edge_activity_insert` present as INSERT; the three existing
+   SELECT policies unchanged. Memberships must match the restored source role
+   plus the three additive swarm GRANTs; extras versus that baseline are not
+   stripped by prepare-target. Only this fresh comparison supports a
+   least-privilege claim.
 2. Native POST to the existing activity function with a valid agent bearer
    for workspace W (and session proof when the principal is managed).
 3. A PRIVATE Realtime subscriber who is a member of W on topic
