@@ -375,7 +375,7 @@ def main():
         return 75
     workdir = Path(WORKDIR_BASE) / secrets.token_hex(16)
     label = 'commonswarm.drill=' + secrets.token_hex(16)
-    result = {'ok': False, 'state': 'running', 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    result = {'ok': False, 'state': 'running', 'invocation_id': os.environ.get('INVOCATION_ID'), 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     old_handlers = {}
     def interrupted(signum, frame):
         raise InterruptedError('restore drill interrupted')

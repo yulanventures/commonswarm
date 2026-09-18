@@ -37,20 +37,23 @@ def notify(kind, phase):
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     start_file = ROOT / (kind + '-ping-start.json')
     if phase == 'start':
-        start_file.write_text(json.dumps({'at': time.time()}))
+        start_file.write_text(json.dumps({'at': time.time(), 'invocation_id': os.environ.get('INVOCATION_ID')}))
         ping(url, '/start')
         return
     if phase != 'finish':
         raise ValueError('invalid phase')
     ok = False
     try:
-        started = json.loads(start_file.read_text())['at']
+        started = json.loads(start_file.read_text())['invocation_id']
+        invocation_id = os.environ.get('INVOCATION_ID')
         status_path = ROOT / status_name
         status = json.loads(status_path.read_text())
         if not isinstance(status, dict):
             raise ValueError('status must be an object')
         ok = (os.environ.get('SERVICE_RESULT') == 'success' and status.get('ok') is True
-              and all(status.get(flag) is True for flag in flags) and status_path.stat().st_mtime >= started)
+              and all(status.get(flag) is True for flag in flags)
+              and isinstance(invocation_id, str) and bool(re.fullmatch(r'[0-9a-f]{32}', invocation_id))
+              and started == invocation_id and status.get('invocation_id') == invocation_id)
     except (OSError, ValueError, KeyError, TypeError):
         ok = False
     ping(url, '' if ok else '/fail')

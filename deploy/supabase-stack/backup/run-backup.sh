@@ -21,10 +21,11 @@ trap fail ERR
 bash "$stack_dir/backup/dump-database.sh" "$artifact"
 python3 "$stack_dir/backup/upload-snapshot.py" "$artifact" "$retention" >"$artifact/upload-result.json"
 python3 - "$artifact/upload-result.json" "$status_temp" <<'PY'
-import json,sys
+import json,sys,os
 from pathlib import Path
 result=json.loads(Path(sys.argv[1]).read_text())
 result['ok']=True
+result['invocation_id']=os.environ.get('INVOCATION_ID')
 Path(sys.argv[2]).write_text(json.dumps(result,indent=2)+'\n')
 PY
 mv "$status_temp" "$root/status.json"

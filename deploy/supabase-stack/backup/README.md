@@ -98,8 +98,9 @@ The existing host PostgreSQL backup and restore timers are separate.
 Install both new restore units and the updated backup service from the reviewed
 release. Store `HC_BACKUP_URL` and `HC_RESTORE_URL` in the root-only mode-0600 file
 `/etc/commonswarm-backup/healthchecks.env`. Both units ping at start and on exit;
-exit pings require a fresh successful status file and a successful systemd
-result. Missing config or failed delivery is an error. A failed start ping does not
+exit pings require a successful status file with the same systemd invocation ID
+as the start hook and finish hook, plus a successful systemd result. File times
+are not used to infer which run wrote a status. Missing config or failed delivery is an error. A failed start ping does not
 prevent the backup or restore from running; a failed finish ping fails the unit. Never print these URLs.
 Run a first full restore service successfully before enabling its weekly timer.
 Confirm a controlled failure and recovery in the alert service's event and
