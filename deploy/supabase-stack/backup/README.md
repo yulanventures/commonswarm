@@ -82,7 +82,8 @@ PostgreSQL container, and runs the existing table-count and cron comparisons.
 Every file is then read through Storage API and compared with the offsite bytes.
 Only temporary read-only credentials scoped to that snapshot reach Storage API.
 
-The test database has no public ports and cron execution is disabled. Each run
+The test database has no public ports and cron execution is disabled. Storage
+uses a separate run-owned network for R2 access, not the shared Docker bridge. Each run
 labels its own containers and network. Success requires their removal, including
 the database volume, and deletion of temporary credential files. A failed check,
 interrupt, deadline, or cleanup returns nonzero and keeps `restore-status.json`
@@ -98,7 +99,8 @@ Install both new restore units and the updated backup service from the reviewed
 release. Store `HC_BACKUP_URL` and `HC_RESTORE_URL` in the root-only mode-0600 file
 `/etc/commonswarm-backup/healthchecks.env`. Both units ping at start and on exit;
 exit pings require a fresh successful status file and a successful systemd
-result. Missing config or failed delivery is an error. Never print these URLs.
+result. Missing config or failed delivery is an error. A failed start ping does not
+prevent the backup or restore from running; a failed finish ping fails the unit. Never print these URLs.
 Run a first full restore service successfully before enabling its weekly timer.
 Confirm a controlled failure and recovery in the alert service's event and
 email delivery records before claiming alert readiness.
@@ -108,3 +110,7 @@ Run `python3 deploy/supabase-stack/backup/test_restore_drill.py` and
 inject failed restore steps, corrupt/missing files, wrong targets, signals,
 cleanup errors, unowned resources, stale snapshots and false-success alert
 conditions. Pure controls do not replace the first live offsite restore.
+
+A hard kill can prevent cleanup. The private run directory retains
+`ownership.json` with its exact random label. Inspect only resources carrying
+that label before manual recovery; never prune other runs or the Docker host.

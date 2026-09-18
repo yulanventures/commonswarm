@@ -47,6 +47,8 @@ def notify(kind, phase):
         started = json.loads(start_file.read_text())['at']
         status_path = ROOT / status_name
         status = json.loads(status_path.read_text())
+        if not isinstance(status, dict):
+            raise ValueError('status must be an object')
         ok = (os.environ.get('SERVICE_RESULT') == 'success' and status.get('ok') is True
               and all(status.get(flag) is True for flag in flags) and status_path.stat().st_mtime >= started)
     except (OSError, ValueError, KeyError, TypeError):

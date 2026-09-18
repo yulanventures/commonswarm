@@ -32,6 +32,9 @@ class NotifyTests(unittest.TestCase):
         n.notify('backup','finish');self.assertEqual(n.ping.call_args.args[-1],'/fail')
     def test_false_status_fails(self):
         self.status(False);n.notify('backup','finish');self.assertEqual(n.ping.call_args.args[-1],'/fail')
+    def test_non_object_status_sends_failure(self):
+        (self.root/'status.json').write_text('null')
+        n.notify('backup','finish');self.assertEqual(n.ping.call_args.args[-1],'/fail')
     def test_unsafe_url_refused(self):
         self.config.write_text('HC_BACKUP_URL=https://example.invalid/secret\n')
         with self.assertRaises(ValueError):n.notify('backup','finish')

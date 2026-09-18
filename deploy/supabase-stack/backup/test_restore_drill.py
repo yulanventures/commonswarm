@@ -72,8 +72,9 @@ class DrillTests(unittest.TestCase):
         elif args[:2]==['rclone','cat']:output=json.dumps(self.marker)
         elif args[:2]==['rclone','copy']:shutil.copytree(self.source,args[3],dirs_exist_ok=True)
         elif args[:3]==['docker','network','create']:
-            self.label=args[args.index('--label')+1];self.network=args[-1]
-            self.resources['network']['net-id']=self.label
+            self.label=args[args.index('--label')+1]
+            if '--internal' in args:self.network=args[-1]
+            self.resources['network'][args[-1]]=self.label
         elif args[:2] in (['docker','run'],['docker','create']):
             if '--name' in args:
                 self.resources['container'][args[args.index('--name')+1]]=self.label

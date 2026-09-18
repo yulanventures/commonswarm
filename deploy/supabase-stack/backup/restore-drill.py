@@ -329,7 +329,9 @@ def run_drill(workdir, unique_label):
     
     storage_name = 'cold-storage-' + secrets.token_hex(4)
     run_cmd(['docker', 'create', '--name', storage_name, '--network', net_name, '--memory', '384m', '--env-file', str(storage_env_file), '--label', unique_label, 'public.ecr.aws/supabase/storage-api:v1.77.5'])
-    run_cmd(['docker', 'network', 'connect', 'bridge', storage_name])
+    egress_name = net_name + '-egress'
+    run_cmd(['docker', 'network', 'create', '--label', unique_label, egress_name])
+    run_cmd(['docker', 'network', 'connect', egress_name, storage_name])
     run_cmd(['docker', 'start', storage_name])
     
     s_ready = False
@@ -380,6 +382,8 @@ def main():
     try:
         atomic_write_status(status_file, result)
         workdir.mkdir(parents=True, mode=0o700)
+        (workdir / 'ownership.json').write_text(json.dumps({'label': label, 'workdir': str(workdir)}))
+        result['label'] = label
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):
             old_handlers[sig] = signal.signal(sig, interrupted)
         DEADLINE = time.monotonic() + 3 * 3600
