@@ -15,7 +15,7 @@ case "$script_name" in
   dump-source.sh)
     [[ $# -le 1 && ( $# -eq 0 || "$1" == source || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
-  restore-target.sh|verify-counts.sh|restore-storage-metadata.sh|restore-cron-jobs.sh)
+  restore-target.sh|verify-counts.sh|verify-post-upgrade-counts.sh|restore-storage-metadata.sh|restore-cron-jobs.sh|apply-h0-upgrade.sh)
     # Target only: the hosted project is never a restore destination (ruling 9084e3e1); the script refuses too.
     [[ $# -le 1 && ( $# -eq 0 || "$1" == target ) ]] || { echo "$usage" >&2; exit 64; }
     ;;
@@ -90,6 +90,18 @@ for name in CUTOVER_CONFIRM FREEZE_UNGUARDED_TABLES FREEZE_UNPROBED_ROLES; do
   if [[ -n "${!name+x}" ]]; then ack_env+=(--env "$name"); fi
 done
 
+migration_mount=()
+if [[ "$script_name" == apply-h0-upgrade.sh ]]; then
+  repo_dir="$(cd "$stack_dir/../.." && pwd)"
+  for migration in 20260916000001_agent_join_credentials.sql 20260916000002_agent_join_attempts.sql; do
+    [[ -f "$repo_dir/supabase/migrations/$migration" ]] || {
+      echo "required pinned H0 migration missing from release: $migration" >&2
+      exit 1
+    }
+  done
+  migration_mount=(--volume "$repo_dir/supabase/migrations:/migrations:ro")
+fi
+
 docker run --rm \
   --network "${COMMONSWARM_MIGRATION_NETWORK:-commonswarm-net}" \
   --add-host db.commonswarm.internal:172.31.0.10 \
@@ -102,6 +114,7 @@ docker run --rm \
   --volume "$artifact_dir:/artifacts" \
   --volume "$service_file:/run/commonswarm-pg-service.conf:ro" \
   --volume "$pass_file:/run/commonswarm-pg-pass:ro" \
+  ${migration_mount[@]+"${migration_mount[@]}"} \
   ${ack_env[@]+"${ack_env[@]}"} \
   ${ca_mount[@]+"${ca_mount[@]}"} \
   --entrypoint /bin/bash \

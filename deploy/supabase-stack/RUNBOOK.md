@@ -67,6 +67,18 @@ The target image owns `_realtime`, `extensions`, `graphql`, `graphql_public`, `n
 
 Object bytes move forward through the Storage APIs. The copy is idempotent. The hosted project is never a destination.
 
+### H0 schema boundary
+
+The stack release must include `supabase/migrations/20260916000001_agent_join_credentials.sql` and `supabase/migrations/20260916000002_agent_join_attempts.sql` at its repository root, beside `deploy/`. A deploy-only archive is insufficient. The wrapper refuses missing files and mounts that migration directory read-only; the helper checks the two pinned hashes before applying SQL.
+
+Local gates: `npm run test:h0-counts` checks artifact transport; `npm run test:h0-upgrade:local` requires Docker and tests the pinned image against synthetic dependencies only. It checks apply, skip, partial state, catalog faults and rollback. Neither command uses production credentials or a source dump.
+
+The hosted source snapshot can predate H0. Keep `source-counts.tsv` and `cron-jobs.ndjson` unchanged. First run the ordinary baseline verifier after restore and Storage metadata repair. Only then run `apply-h0-upgrade.sh target`, followed by `verify-post-upgrade-counts.sh target`, while the edge is stopped. Never apply H0 to `source`.
+
+The upgrade checks the two fixed migration hashes and the target identity. With both H0 tables absent, it applies both migrations and checks their catalog in one transaction. With both present, it checks the full catalog and skips SQL migration replay. A partial or malformed catalog fails; do not retry by deleting tables or editing checksums. The post-upgrade verifier preserves every original table count and cron record. It adds only the two H0 tables at zero when the source baseline lacked both; it retains their original counts when a recovery snapshot already contained both. An extra or missing table fails. There is no fixed total-table count.
+
+Recovery snapshots taken after H0 therefore follow the same sequence: baseline verification, catalog verification/skip, post-upgrade counts, then edge startup. Never run the raw migrations directly against an already-H0 recovery snapshot; their trigger creation is not idempotent. After edge traffic starts, writes can change counts, so these baseline checks belong before that start.
+
 ## Box rehearsal from a fresh production dump
 
 Use a new protected artifact directory for each attempt. Never reuse a dump after the source changes.
@@ -168,7 +180,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
 
-8. Start the stack. Copy Storage forward. Restore Storage metadata. Verify counts again. Keep or remove the saved rehearsal directory only after all controls pass.
+8. Start the database services. Copy Storage forward. Restore Storage metadata. Verify the unmodified source baseline, then apply and verify H0 before starting the edge. Keep or remove the saved rehearsal directory only after all controls pass.
 
    ```sh
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" up -d
@@ -179,6 +191,8 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
      MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
    "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
    "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" apply-h0-upgrade.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" verify-post-upgrade-counts.sh "$ARTIFACT_DIR" target
    ```
 
 9. Start the 512 MB edge runtime on the box database. Before it starts, confirm in a protected editor that `/home/commonswarm/.env` has all of these box values:
@@ -336,6 +350,12 @@ Run every window block one command at a time and read each exit code. Never run 
    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" restart realtime
    storage_container="$(docker compose -p commonswarm-supabase-stack --project-directory "$STACK_DIR" ps -q storage-api)"
    wait_healthy "$storage_container" storage-api 180
+   COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
+     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
+   "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" apply-h0-upgrade.sh "$ARTIFACT_DIR" target
+   "$MIGRATE/run-db-tool.sh" verify-post-upgrade-counts.sh "$ARTIFACT_DIR" target
    COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
      COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
      docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
@@ -344,17 +364,13 @@ Run every window block one command at a time and read each exit code. Never run 
      docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" ps -q edge-runtime)"
    wait_healthy "$edge_container" edge-runtime 180
    curl --fail --silent --show-error http://127.0.0.1:9000/health
-   COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
-     MIGRATION_ARTIFACT_DIR="$ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
-   "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$ARTIFACT_DIR" target
-   "$MIGRATE/run-db-tool.sh" verify-counts.sh "$ARTIFACT_DIR" target
    ```
 
    Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
 
    ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database. Any step-5 staging upload can leave R2 bytes with no restored `storage.objects` row. The orphan names are `swarm-files/<the upload names recorded in step 5>`. Find them from the recorded step-5 upload names, check those exact bucket/name pairs against `storage.objects`, and remove the orphan bytes before another attempt. No hosted bytes are removed.
 
-5. Complete the decision checklist within 30 minutes through the staging host. `verify-counts.sh` compares every selected table count and `cron-jobs.ndjson` as a multiset of jobs (every field, duplicate rows included), so a different database collation cannot fail a match. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. Record the exact bucket and object name for every staging upload so ABORT-C can find any R2 orphan. If one control fails, run ABORT-C.
+5. Complete the decision checklist within 30 minutes through the staging host. Use the recorded pre-start baseline and post-upgrade count gates from step 4. They compare every selected table count and `cron-jobs.ndjson` as a multiset of jobs (every field, duplicate rows included), so a different database collation cannot fail a match. Do not compare a live, writing database to a stale source snapshot with the unmodified baseline verifier. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. Record the exact bucket and object name for every staging upload so ABORT-C can find any R2 orphan. If one control fails, run ABORT-C.
 
    ABORT-D (not all green within 30 minutes): ABORT-C.
 
@@ -404,6 +420,8 @@ COMMONSWARM_MIGRATION_ENV_FILE=/home/commonswarm/migration.env \
   MIGRATION_ARTIFACT_DIR="$RECOVERY_ARTIFACT_DIR" "$MIGRATE/copy-storage.sh" forward
 "$MIGRATE/run-db-tool.sh" restore-storage-metadata.sh "$RECOVERY_ARTIFACT_DIR" target
 "$MIGRATE/run-db-tool.sh" verify-counts.sh "$RECOVERY_ARTIFACT_DIR" target
+"$MIGRATE/run-db-tool.sh" apply-h0-upgrade.sh "$RECOVERY_ARTIFACT_DIR" target
+"$MIGRATE/run-db-tool.sh" verify-post-upgrade-counts.sh "$RECOVERY_ARTIFACT_DIR" target
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
   COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
   docker compose -p commonswarm-edge --project-directory "$EDGE_DIR" up -d
