@@ -1,0 +1,18 @@
+[Unit]
+Description=CommonSwarm offsite database and file restore drill
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStartPre=-/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py restore start
+ExecStopPost=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py restore finish
+ExecStart=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/restore-drill.py
+TimeoutStartSec=4h
+TimeoutStopSec=180
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
