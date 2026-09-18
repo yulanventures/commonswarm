@@ -1,0 +1,118 @@
+# Activity publish grants
+
+`commonswarm_edge` can `EXECUTE realtime.send(jsonb,text,text,boolean)` through
+PUBLIC on both the hosted source and the Hetzner target, but it has no
+`realtime` schema USAGE, no `realtime.messages` INSERT, and every current
+policy on that table is SELECT-only. The function is SECURITY INVOKER, owned
+by `supabase_realtime_admin`, inserts exactly `(id, payload, event, topic,
+private, extension)`, and catches every INSERT exception as
+`WarnSendingBroadcastMessage`. Schema USAGE alone would still yield a 202
+with no broadcast. Direct INSERT RLS is required.
+
+The activity handler is still the authorization boundary: it authenticates
+the agent/workspace/session under `SET LOCAL ROLE swarm_command`, `RESET ROLE`
+back to `commonswarm_edge`, then calls `realtime.send` with event `activity`,
+`private true`, and topic `cswarm-activity:<canonical-workspace-uuid>`.
+This file does not change that handler and does not change `realtime.send`.
+
+Catalogs taken on both backends showed `realtime_usage=false`,
+`messages_insert=false`, `messages_select=false`, `send_execute=true`,
+`bypassrls=false`. There is no existing migrate command that already applied
+this repair.
+
+## Least privilege
+
+Granted to `commonswarm_edge` only:
+
+- `USAGE` on schema `realtime`
+- `INSERT (id, payload, event, topic, private, extension)` on
+  `realtime.messages` (not table-level INSERT)
+- INSERT policy `commonswarm_edge_activity_insert` WITH CHECK:
+  `extension = 'broadcast'`, `private IS TRUE`, `event = 'activity'`,
+  topic matching `^cswarm-activity:(canonical uuid)$` (same UUID regex as
+  the existing member SELECT policy)
+
+Not granted and not changed: SELECT/UPDATE/DELETE/TRUNCATE; PUBLIC, `anon`,
+`authenticated`, or other client roles; `swarm_command` schema USAGE or
+INSERT; role memberships; `realtime.send` body or PUBLIC EXECUTE; the
+existing SELECT policies on `realtime.messages`.
+
+After a fresh restore, `prepare-target.sh` recreates `commonswarm_edge` with
+only `swarm_command`, `swarm_read`, and `swarm_capability`, then applies
+`activity-publish-grants.sql` in a separate `target_psql`. The extra
+privileges cannot accumulate from a previous generation.
+
+## Apply
+
+Identity is asserted by the existing migrate guards, not by this SQL. The
+SQL fail-closes with SQLSTATE `42704` if `commonswarm_edge` does not exist.
+It is one transaction. Do not `\i` it from inside another open transaction.
+
+Source, on an already-verified operator session through the existing
+`run-db-tool.sh` / `PGSERVICEFILE` wrapper (`source_psql` in `lib.sh`):
+
+1. `assert_source_identity` (`SOURCE_SYSTEM_IDENTIFIER`, not in recovery,
+   `swarm` present, not marked `n-db-target-v1`)
+2. `source_psql --file deploy/supabase-stack/migrate/activity-publish-grants.sql`
+
+Target:
+
+1. `prepare-target.sh` runs `assert_target_identity` (`supabase_admin`
+   superuser, `commonswarm.stack_identity=n-db-target-v1`, server
+   `172.31.0.10`), creates `commonswarm_edge` with the strict memberships,
+   then applies the same file with a separate `target_psql`.
+
+Do not run `prepare-target.sh` against the source. Do not apply this SQL
+with a client/anon role.
+
+## Isolated proof (not source/target)
+
+```
+unset TARGET_DATABASE_URL SOURCE_DATABASE_URL PGSERVICEFILE PGSERVICE
+bash deploy/supabase-stack/migrate/activity-publish-grants.test.sh
+```
+
+The script refuses those variables and `PGHOST=172.31.0.10`, starts a local
+unix-socket `initdb` cluster, and requires the real rejection SQLSTATE
+(not merely a nonzero exit): `42704` when the role is missing, `42501` for
+forbidden event/topic/public/non-broadcast rows, SELECT/UPDATE/DELETE/
+TRUNCATE, extra-column INSERT, and every `swarm_command` publish attempt.
+A valid private activity row must be visible to the cluster owner after
+both a direct INSERT and `realtime.send`; a void `send()` return is not
+enough. Isolated SQL refuses a cluster that has schema `swarm`, role
+`supabase_realtime_admin`, or the target identity marker.
+
+## Production completion
+
+HTTP 202 is not proof. Isolated tests are not production completion.
+After apply on that backend:
+
+1. Read-only catalog as the operator:
+
+```sql
+SELECT has_schema_privilege('commonswarm_edge', 'realtime', 'USAGE');
+SELECT has_column_privilege('commonswarm_edge', 'realtime.messages', attname, 'INSERT')
+FROM (VALUES ('id'),('payload'),('event'),('topic'),('private'),('extension')) AS c(attname);
+SELECT has_table_privilege('commonswarm_edge', 'realtime.messages', priv)
+FROM (VALUES ('SELECT'),('UPDATE'),('DELETE'),('TRUNCATE')) AS p(priv);
+SELECT has_schema_privilege('swarm_command', 'realtime', 'USAGE');
+SELECT rolsuper, rolbypassrls FROM pg_roles
+WHERE rolname IN ('commonswarm_edge', 'swarm_command');
+SELECT polname, polcmd, pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid)
+FROM pg_policy
+WHERE polrelid = 'realtime.messages'::regclass
+ORDER BY polname;
+```
+
+   Expect USAGE true, the six INSERT columns true, SELECT/UPDATE/DELETE/
+   TRUNCATE false, `swarm_command` USAGE false, `rolbypassrls` false,
+   policy `commonswarm_edge_activity_insert` present as INSERT, and the
+   three existing SELECT policies unchanged.
+2. Native POST to the existing activity function with a valid agent bearer
+   for workspace W (and session proof when the principal is managed).
+3. A PRIVATE Realtime subscriber who is a member of W on topic
+   `cswarm-activity:<W>` event `activity` must receive the payload. That
+   delivery uses the existing SELECT policy
+   `workspace members receive agent activity`.
+4. Negative: a subscriber on W must not receive a POST authenticated for
+   another workspace, and invalid credentials must not deliver a message.
