@@ -15,10 +15,12 @@ back to `commonswarm_edge`, then calls `realtime.send` with event `activity`,
 `private true`, and topic `cswarm-activity:<canonical-workspace-uuid>`.
 This file does not change that handler and does not change `realtime.send`.
 
-Catalogs taken on both backends showed `realtime_usage=false`,
+Pre-repair catalogs on both backends showed `realtime_usage=false`,
 `messages_insert=false`, `messages_select=false`, `send_execute=true`,
 `bypassrls=false`. There is no existing migrate command that already applied
-this repair.
+this repair. Those snapshots are historical. Take a fresh source catalog and
+a fresh target catalog at the apply gate before any least-privilege claim;
+do not reuse the pre-repair JSON.
 
 ## Least privilege
 
@@ -37,10 +39,17 @@ Not granted and not changed: SELECT/UPDATE/DELETE/TRUNCATE; PUBLIC, `anon`,
 INSERT; role memberships; `realtime.send` body or PUBLIC EXECUTE; the
 existing SELECT policies on `realtime.messages`.
 
-After a fresh restore, `prepare-target.sh` recreates `commonswarm_edge` with
-only `swarm_command`, `swarm_read`, and `swarm_capability`, then applies
-`activity-publish-grants.sql` in a separate `target_psql`. The extra
-privileges cannot accumulate from a previous generation.
+`dump-source.sh` exports source `commonswarm_*` role attributes and
+memberships; `restore-target.sh` restores them. `prepare-target.sh` creates
+`commonswarm_edge` only if that role is absent, sets its password, and
+GRANTs `swarm_command`, `swarm_read`, and `swarm_capability` additively. It
+does not revoke extra memberships, inherited privileges, or table grants.
+`activity-publish-grants.sql` only adds the grants listed above and replaces
+policy `commonswarm_edge_activity_insert`. Restored extra privileges remain.
+
+Least privilege is not implied by restore or by this apply. Claim it only
+after a fresh source catalog and a fresh target catalog each match the
+intended baseline in Production completion.
 
 ## Apply
 
@@ -59,8 +68,10 @@ Target:
 
 1. `prepare-target.sh` runs `assert_target_identity` (`supabase_admin`
    superuser, `commonswarm.stack_identity=n-db-target-v1`, server
-   `172.31.0.10`), creates `commonswarm_edge` with the strict memberships,
-   then applies the same file with a separate `target_psql`.
+   `172.31.0.10`). If `commonswarm_edge` is missing it creates the role; it
+   then sets the password and GRANTs the three swarm memberships additively,
+   without revoking restored memberships or grants, and applies this SQL
+   with a separate `target_psql`.
 
 Do not run `prepare-target.sh` against the source. Do not apply this SQL
 with a client/anon role.
@@ -85,6 +96,9 @@ enough. Isolated SQL refuses a cluster that has schema `swarm`, role
 ## Production completion
 
 HTTP 202 is not proof. Isolated tests are not production completion.
+Do not claim least privilege until a fresh catalog from this source and
+from this target each match the intended baseline below. Do not reuse
+pre-repair snapshots for that comparison.
 After apply on that backend:
 
 1. Read-only catalog as the operator:
@@ -102,12 +116,21 @@ SELECT polname, polcmd, pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck
 FROM pg_policy
 WHERE polrelid = 'realtime.messages'::regclass
 ORDER BY polname;
+SELECT m.rolname AS member_of
+FROM pg_auth_members am
+JOIN pg_roles r ON r.oid = am.member
+JOIN pg_roles m ON m.oid = am.roleid
+WHERE r.rolname = 'commonswarm_edge'
+ORDER BY 1;
 ```
 
-   Expect USAGE true, the six INSERT columns true, SELECT/UPDATE/DELETE/
-   TRUNCATE false, `swarm_command` USAGE false, `rolbypassrls` false,
-   policy `commonswarm_edge_activity_insert` present as INSERT, and the
-   three existing SELECT policies unchanged.
+   Intended baseline: USAGE true, the six INSERT columns true,
+   SELECT/UPDATE/DELETE/TRUNCATE false, `swarm_command` USAGE false,
+   `rolbypassrls` false, policy `commonswarm_edge_activity_insert` present
+   as INSERT, and the three existing SELECT policies unchanged. Memberships
+   must match the restored source role plus the three additive swarm
+   GRANTs; extras versus that baseline are not stripped by prepare-target.
+   Only this fresh comparison supports a least-privilege claim.
 2. Native POST to the existing activity function with a valid agent bearer
    for workspace W (and session proof when the principal is managed).
 3. A PRIVATE Realtime subscriber who is a member of W on topic
