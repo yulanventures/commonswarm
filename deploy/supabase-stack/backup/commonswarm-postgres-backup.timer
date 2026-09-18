@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly CommonSwarm backup
+
+[Timer]
+OnCalendar=*-*-* 03:45:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+Unit=commonswarm-postgres-backup.service
+
+[Install]
+WantedBy=timers.target

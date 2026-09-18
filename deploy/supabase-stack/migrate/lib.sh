@@ -66,8 +66,8 @@ target_psql() {
 database_psql() {
   local service="$1"
   shift
-  if [[ "$service" != source && "$service" != target ]]; then
-    echo "database service must be source or target" >&2
+  if [[ "$service" != source && "$service" != target && "$service" != backup ]]; then
+    echo "database service must be source, target or backup" >&2
     exit 1
   fi
   : "${PGSERVICEFILE:?run through run-db-tool.sh so the database URL stays out of argv}"
@@ -103,6 +103,28 @@ $do$;
 SQL
   target_psql --file "$sql_file"
   rm -f "$sql_file"
+}
+
+# Read-only backup identity is deliberately separate from every admin/write gate.
+assert_backup_ro_identity() {
+  database_psql backup --command "
+DO \$backup\$
+BEGIN
+  IF inet_server_addr() IS DISTINCT FROM inet '172.31.0.10'
+     OR inet_client_addr() IS DISTINCT FROM inet '172.31.0.1'
+     OR current_database() <> 'postgres'
+     OR current_setting('commonswarm.stack_identity', true) IS DISTINCT FROM 'n-db-target-v1'
+     OR pg_is_in_recovery()
+     OR current_setting('transaction_read_only') <> 'on'
+     OR NOT EXISTS (SELECT 1 FROM pg_stat_ssl WHERE pid = pg_backend_pid() AND ssl)
+     OR current_user <> 'backup_ro'
+     OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = current_user AND NOT rolsuper AND rolbypassrls)
+     OR NOT pg_has_role(current_user, 'pg_read_all_data', 'USAGE')
+  THEN
+    RAISE EXCEPTION 'refusing backup: target, transport or read-role identity does not match';
+  END IF;
+END
+\$backup\$;"
 }
 
 assert_database_identity() {
@@ -156,6 +178,10 @@ assert_dump_origin() {
   local service="$1"
   if [[ "$service" == target ]]; then
     assert_target_identity
+    return
+  fi
+  if [[ "$service" == backup ]]; then
+    assert_backup_ro_identity
     return
   fi
   assert_source_identity

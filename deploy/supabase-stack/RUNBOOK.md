@@ -430,7 +430,7 @@ The migrated Auth rows preserve refresh tokens. The CLI refresh path can exchang
 
 The backup target is container `commonswarm-postgres` at `172.31.0.10`. The database is `postgres`. There is no host-published port. Connect from `172.31.0.1` as `backup_ro` with `PGSSLMODE=verify-full` and `PGSSLROOTCERT=/etc/ssl/yulan-internal-ca.pem`.
 
-Each nightly set contains globals without role passwords, a custom dump of `postgres`, and R2 retention evidence. `backup_ro` has `pg_read_all_data` and `BYPASSRLS`. `pg_hba.conf` allows it only from `172.31.0.1/32`.
+Each nightly set contains globals without role passwords, a custom dump of `postgres`, and R2 retention evidence. The complete database-and-file backup workflow is in [backup/README.md](backup/README.md). A database-only export is not a complete backup; require exact object-version copies and offsite byte checks. `backup_ro` has `pg_read_all_data` and `BYPASSRLS`. `pg_hba.conf` allows it only from `172.31.0.1/32`.
 
 ## Not established
 

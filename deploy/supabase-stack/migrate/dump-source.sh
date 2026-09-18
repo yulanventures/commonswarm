@@ -4,15 +4,19 @@ exec </dev/null
 source "$(cd "$(dirname "$0")" && pwd)/lib.sh"
 
 origin="${1:-source}"
-if [[ "$origin" != source && "$origin" != target ]]; then
-  echo "usage: dump-source.sh source|target" >&2
+if [[ "$origin" != source && "$origin" != target && "$origin" != backup ]]; then
+  echo "usage: dump-source.sh source|target|backup" >&2
   exit 64
 fi
 require_commands psql pg_dump
 require_vars MIGRATION_ARTIFACT_DIR
 # pg_dump below reads the service file directly, not through database_psql.
 : "${PGSERVICEFILE:?run through run-db-tool.sh so database credentials stay in protected files}"
-[[ "$origin" == source ]] && require_vars SOURCE_DATABASE_URL || require_vars TARGET_DATABASE_URL
+case "$origin" in
+  source) require_vars SOURCE_DATABASE_URL ;;
+  target) require_vars TARGET_DATABASE_URL ;;
+  backup) : ;; # Protected backup service file carries no admin connection.
+esac
 start_log "dump-$origin"
 assert_dump_origin "$origin"
 
@@ -168,6 +172,23 @@ COMMONSWARM_EXPORTED_SNAPSHOT="$snapshot" database_psql "$origin" \
   --quiet --tuples-only --no-align --file "$objects_query" \
   >"$MIGRATION_ARTIFACT_DIR/storage-objects.ndjson" 2>>"$LOG_FILE"
 chmod 0600 "$MIGRATION_ARTIFACT_DIR/storage-objects.ndjson"
+
+# A nightly recovery set must retain the exact physical object versions from
+# the same exported database snapshot, including every Storage bucket.
+if [[ "$origin" == backup ]]; then
+  cat >"$objects_query" <<'SQL'
+\getenv snapshot_id COMMONSWARM_EXPORTED_SNAPSHOT
+BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET TRANSACTION SNAPSHOT :'snapshot_id';
+SELECT json_build_object('bucket', bucket_id, 'name', name, 'version', version)
+FROM storage.objects ORDER BY bucket_id, name;
+COMMIT;
+SQL
+  COMMONSWARM_EXPORTED_SNAPSHOT="$snapshot" database_psql backup \
+    --quiet --tuples-only --no-align --file "$objects_query" \
+    >"$MIGRATION_ARTIFACT_DIR/storage-backend-objects.ndjson" 2>>"$LOG_FILE"
+  chmod 0600 "$MIGRATION_ARTIFACT_DIR/storage-backend-objects.ndjson"
+fi
 
 # The pg_cron schedules live in the cron schema, outside the selected-schema dump; restore-cron-jobs.sh recreates them.
 {
