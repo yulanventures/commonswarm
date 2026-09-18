@@ -72,3 +72,39 @@ Run `python3 deploy/supabase-stack/backup/test_upload_snapshot.py`, shell syntax
 checks for the backup scripts, the repository tests, and the real isolated
 restore. The Python tests inject missing objects, corrupt bytes, incomplete
 uploads, and a bad completion marker; they do not access any cloud service.
+
+
+## Weekly offsite restore and alerts
+
+`restore-drill.py` selects the newest completed offsite set verified within 36
+hours. It validates the complete checksum inventory, restores a new isolated
+PostgreSQL container, and runs the existing table-count and cron comparisons.
+Every file is then read through Storage API and compared with the offsite bytes.
+Only temporary read-only credentials scoped to that snapshot reach Storage API.
+
+The test database has no public ports and cron execution is disabled. Each run
+labels its own containers and network. Success requires their removal, including
+the database volume, and deletion of temporary credential files. A failed check,
+interrupt, deadline, or cleanup returns nonzero and keeps `restore-status.json`
+false. Logs and downloaded backup evidence remain private on the host; this
+script does not delete retained offsite backups. Inspect disk usage as evidence
+accumulates.
+
+The timer runs Sunday at 04:45 UTC, with up to five minutes of jitter. Work has a
+three-hour deadline; the systemd service allows four hours including cleanup.
+The existing host PostgreSQL backup and restore timers are separate.
+
+Install both new restore units and the updated backup service from the reviewed
+release. Store `HC_BACKUP_URL` and `HC_RESTORE_URL` in the root-only mode-0600 file
+`/etc/commonswarm-backup/healthchecks.env`. Both units ping at start and on exit;
+exit pings require a fresh successful status file and a successful systemd
+result. Missing config or failed delivery is an error. Never print these URLs.
+Run a first full restore service successfully before enabling its weekly timer.
+Confirm a controlled failure and recovery in the alert service's event and
+email delivery records before claiming alert readiness.
+
+Run `python3 deploy/supabase-stack/backup/test_restore_drill.py` and
+`python3 deploy/supabase-stack/backup/test_notify_healthcheck.py`. The controls
+inject failed restore steps, corrupt/missing files, wrong targets, signals,
+cleanup errors, unowned resources, stale snapshots and false-success alert
+conditions. Pure controls do not replace the first live offsite restore.
