@@ -34,7 +34,27 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
    is `coswarm-site.vercel.app` (deleted), in `src/cloud/capability-link.ts:8` and `src/cli.ts:995-998`. The `/see` page
    itself was never built (404 on commonswarm.com on 2026-09-22; design `CAPABILITY-URL-ONRAMP.md` §7 "No page"), so the
    host change alone does not make the link work; building the page is a backlog item.
-5. Then the app backlog from H0's remaining lanes (4b, 5a, 5b) with Grok/Gemini Makers.
+5. H0 (later on 2026-09-22). Lane 4b (the app's "Add an agent" on the link-join) LANDED behind the build flag
+   `PUBLIC_H0_LINK_JOIN`, which is OFF: record `docs/evidence/2026-09-22-h0-lane4b/LANDING.md`. Lane 5a (poll, ack, the
+   listener fence, three migrations 20260922000001-3) is on `lane/h0-poll-ack`, in review fold 3. Lane 5b (the h0
+   function forwards register, ask, note, reply, working-on) has not started. The box release of H0 waits for the
+   written procedure `deploy/RELEASE-TO-BOX.md` (PR #24, HezLead; in review).
+6. Ahead of H0, by the Strategist's ruling: `lane/listener-outage` (a listener no longer stops for good on one
+   transient 403/500; found when no listener on the mini was running), to ship as 0.1.73 with a live control, then
+   restart the stopped listeners one seat at a time. Then the edge memory item below.
+
+## Box facts recorded 2026-09-22 (from HezLead)
+
+- The edge container has a box-only `compose.override.yaml` with `mem_limit: 2g`, and
+  `commonswarm-edge-recycle.timer` restarts it at 03:30, 09:30, 15:30 and 21:30 UTC. Under 512 MiB it was OOM-killed
+  177 times in 24 hours (exit 137) while `docker inspect` looked healthy. Growth measured about 2.3-3.5 MiB per minute
+  and follows wall-clock early terminations of isolates. Queue item: find the cause and remove the timer and the cap.
+  A one-minute series across the 21:30Z-03:30Z window is being recorded on the box (HezLead).
+- The stack release switched to `e38b499f` (the N-db hygiene lane) at about 19:46Z, host units in the order its
+  landing record gives. Backups run nightly at about 03:45 UTC with offsite copies verified; the Sunday restore drill
+  passed (80 tables).
+- The two 2026-09-16 H0 migrations are applied on the box but have no rows in `supabase_migrations.schema_migrations`;
+  the release procedure's "Ledger backfill" step records them.
 
 ## Window hazard kept for later migrations (measured 2026-09-17)
 
