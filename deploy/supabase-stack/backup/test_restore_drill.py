@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fault controls for the real drill orchestration; no Docker or cloud access."""
+import base64
 import datetime
 import hashlib
 import importlib.util
@@ -190,5 +191,82 @@ class DrillTests(unittest.TestCase):
         self.marker['verified_at']='2020-01-01T00:00:00Z'
         self.assertEqual(drill.main(),1)
         self.assertFalse(self.status()['ok'])
+
+    def test_old_drill_directories_stay_inside_the_keep_bound(self):
+        self.assertEqual(drill.DRILL_WORKDIR_KEEP, 2)
+        base = self.root / 'work'
+        base.mkdir()
+        outside = self.root / 'outside-evidence'
+        outside.mkdir()
+        (outside / 'keep-me').write_text('safe')
+        for index, name in enumerate(('a' * 32, 'b' * 32, 'c' * 32)):
+            directory = base / name
+            directory.mkdir()
+            (directory / 'database.dump').write_text('dump')
+            os.utime(directory, (1000 + index, 1000 + index))
+        (base / ('a' * 32) / 'leak').symlink_to(outside / 'keep-me')
+        os.utime(base / ('a' * 32), (1000, 1000))
+        (base / 'notes.txt').write_text('keep')
+        (base / 'not-a-drill').mkdir()
+        (base / 'not-a-drill' / 'keep').write_text('keep')
+        (base / ('d' * 32)).symlink_to(outside, target_is_directory=True)
+        self.assertEqual(drill.main(), 0)
+        remaining = sorted(
+            path.name for path in base.iterdir()
+            if path.is_dir() and not path.is_symlink() and len(path.name) == 32 and all(c in '0123456789abcdef' for c in path.name)
+        )
+        self.assertEqual(len(remaining), drill.DRILL_WORKDIR_KEEP)
+        self.assertIn('c' * 32, remaining)
+        self.assertNotIn('a' * 32, remaining)
+        self.assertNotIn('b' * 32, remaining)
+        self.assertTrue((base / 'notes.txt').is_file())
+        self.assertTrue((base / 'not-a-drill' / 'keep').is_file())
+        self.assertTrue((base / ('d' * 32)).is_symlink())
+        self.assertEqual((outside / 'keep-me').read_text(), 'safe')
+
+
+class TempCredentialTests(unittest.TestCase):
+    def test_minted_scope_is_object_read_only(self):
+        prefix = '000-commonswarm-postgres/abc/objects/commonswarm'
+        payload = json.dumps({'r2': {
+            'access_key_id': 'parent-access-key',
+            'secret_access_key': 'parent-secret-key',
+            'endpoint': 'https://accountid.r2.cloudflarestorage.com',
+        }})
+        def rclone(args, **kwargs):
+            if args[:3] != ['rclone', 'config', 'dump']:
+                raise AssertionError('unexpected command')
+            return subprocess.CompletedProcess(args, 0, payload, '')
+        with patch.object(drill, 'run_cmd', side_effect=rclone):
+            endpoint, access_key, _digest, session = drill.generate_temp_credentials(prefix)
+        self.assertEqual(endpoint, 'https://accountid.r2.cloudflarestorage.com')
+        self.assertEqual(access_key, 'parent-access-key')
+        token = base64.b64decode(session).decode()
+        self.assertTrue(token.startswith('jwt/'))
+        segment = token[len('jwt/'):].split('.')[1]
+        segment += '=' * (-len(segment) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(segment))
+        self.assertEqual(claims['scope'], 'object-read-only')
+        self.assertEqual(claims['paths'], {'prefixPaths': [prefix + '/']})
+        self.assertEqual(claims['bucket'], 'yulan-vps-1-backups')
+
+
+class UnitFileTests(unittest.TestCase):
+    def text(self, name):
+        return Path(__file__).with_name(name).read_text()
+
+    def test_services_depend_on_docker_and_timers_name_their_units(self):
+        for name in ('commonswarm-postgres-backup.service', 'commonswarm-postgres-restore.service'):
+            unit = self.text(name)
+            self.assertIn('After=network-online.target docker.service\n', unit)
+            self.assertIn('Requires=docker.service\n', unit)
+        self.assertIn('Unit=commonswarm-postgres-backup.service\n', self.text('commonswarm-postgres-backup.timer'))
+        self.assertIn('Unit=commonswarm-postgres-restore.service\n', self.text('commonswarm-postgres-restore.timer'))
+
+    def test_backup_and_restore_share_one_lock(self):
+        self.assertEqual(drill.LOCK_PATH, '/var/lock/commonswarm-postgres-maintenance.lock')
+        self.assertIn(drill.LOCK_PATH, self.text('run-backup.sh'))
+        self.assertIn('flock -n 9', self.text('run-backup.sh'))
+        self.assertIn('LOCK_PATH', Path(__file__).with_name('restore-drill.py').read_text())
 
 if __name__=='__main__':unittest.main()

@@ -42,7 +42,9 @@ remain unchanged.
 
 The status file starts each run with `ok: false` and `state: running`. Success is
 published only after offsite verification. A killed run cannot leave the prior
-run's successful status looking current. The lock prevents overlapping copies.
+run's successful status looking current. The backup and the restore drill take
+one lock, `/var/lock/commonswarm-postgres-maintenance.lock`. If either holds
+that lock, the other exits 75 and does not start.
 
 ## Restore verification
 
@@ -87,9 +89,11 @@ uses a separate run-owned network for R2 access, not the shared Docker bridge. E
 labels its own containers and network. Success requires their removal, including
 the database volume, and deletion of temporary credential files. A failed check,
 interrupt, deadline, or cleanup returns nonzero and keeps `restore-status.json`
-false. Logs and downloaded backup evidence remain private on the host; this
-script does not delete retained offsite backups. Inspect disk usage as evidence
-accumulates.
+false. Logs and the newest drill directories remain private on the host. The
+drill keeps the two newest run directories under
+`/var/backups/commonswarm-postgres/restore-drill`. It deletes only older child
+directories whose names are 32 hexadecimal characters. It does not delete other
+names in that directory, and it does not delete offsite backups.
 
 The timer runs Sunday at 04:45 UTC, with up to five minutes of jitter. Work has a
 three-hour deadline; the systemd service allows four hours including cleanup.
@@ -106,6 +110,34 @@ Run a first full restore service successfully before enabling its weekly timer.
 Confirm a controlled failure and recovery in the alert service's event and
 email delivery records before claiming alert readiness.
 
+## Apply unit file changes on a box that already runs them
+
+The unit file names do not change. systemd reads the copies in
+`/etc/systemd/system/`. A new `current` symlink does not reload those copies.
+
+Copy these four files again, over the same names:
+
+- `commonswarm-postgres-backup.service`
+- `commonswarm-postgres-backup.timer`
+- `commonswarm-postgres-restore.service`
+- `commonswarm-postgres-restore.timer`
+
+Then run:
+
+```sh
+systemctl daemon-reload
+systemctl try-restart commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+```
+
+`daemon-reload` makes the next backup and the next drill use the new service
+files. `try-restart` reloads a timer that is already active. It does nothing
+when that timer is not active.
+
+Do not start `commonswarm-postgres-backup.service` or
+`commonswarm-postgres-restore.service` to apply this change. A start runs a
+backup or a drill. If one of those services is running, wait until it exits
+before you restart its timer.
+
 Run `python3 deploy/supabase-stack/backup/test_restore_drill.py` and
 `python3 deploy/supabase-stack/backup/test_notify_healthcheck.py`. The controls
 inject failed restore steps, corrupt/missing files, wrong targets, signals,
@@ -115,3 +147,5 @@ conditions. Pure controls do not replace the first live offsite restore.
 A hard kill can prevent cleanup. The private run directory retains
 `ownership.json` with its exact random label. Inspect only resources carrying
 that label before manual recovery; never prune other runs or the Docker host.
+That manual recovery is separate from the directory bound above. The bound
+deletes only old drill directories under the drill base.

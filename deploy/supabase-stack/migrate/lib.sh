@@ -90,7 +90,15 @@ BEGIN
   THEN
     RAISE EXCEPTION 'refusing write: target server address is not 172.31.0.10';
   END IF;
-  IF current_setting('commonswarm.stack_identity', true) IS DISTINCT FROM 'n-db-target-v1' THEN
+  -- setrole = 0 is the database value. current_setting() also returns a connection option.
+  IF (
+    SELECT count(*)
+    FROM pg_db_role_setting AS setting
+    CROSS JOIN LATERAL unnest(setting.setconfig) AS item
+    WHERE setting.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+      AND setting.setrole = 0
+      AND item = 'commonswarm.stack_identity=n-db-target-v1'
+  ) IS DISTINCT FROM 1 THEN
     RAISE EXCEPTION 'refusing write: database is not a marked CommonSwarm N-db target';
   END IF;
   IF current_user <> 'supabase_admin' OR NOT EXISTS (

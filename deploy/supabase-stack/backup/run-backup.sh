@@ -4,8 +4,8 @@ exec </dev/null
 umask 077
 root=/var/backups/commonswarm-postgres
 install -d -m 0700 "$root"
-exec 9>/var/lock/commonswarm-postgres-backup.lock
-flock -n 9 || { echo 'CommonSwarm backup already running' >&2; exit 75; }
+exec 9>/var/lock/commonswarm-postgres-maintenance.lock
+flock -n 9 || { echo 'CommonSwarm backup or restore drill already running' >&2; exit 75; }
 stack_dir="$(cd "$(dirname "$0")/.." && pwd)"
 retention=/etc/commonswarm-backup/retention-evidence.json
 artifact="$root/$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"

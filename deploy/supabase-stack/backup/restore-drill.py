@@ -20,7 +20,7 @@ import re
 import ipaddress
 
 
-LOCK_PATH = '/var/lock/commonswarm-postgres-restore-drill.lock'
+LOCK_PATH = '/var/lock/commonswarm-postgres-maintenance.lock'
 STATUS_FILE = '/var/backups/commonswarm-postgres/restore-status.json'
 BACKUP_ROOT = 'r2:yulan-vps-1-backups/000-commonswarm-postgres'
 STACK_DIR = str(Path(__file__).resolve().parent.parent)
@@ -29,6 +29,7 @@ REQUIRED_FILES = {'database.dump', 'roles.sql', 'manifest.txt', 'source-counts.t
                   'storage-objects.ndjson', 'storage-backend-objects.ndjson', 'cron-jobs.ndjson',
                   'globals.sql', 'physical-object-keys.txt', 'offsite-binding.json', 'retention-evidence.json'}
 WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
+DRILL_WORKDIR_KEEP = 2
 
 def atomic_write_status(path, status_obj):
     tmp = path.with_suffix(f'.tmp.{os.getpid()}')
@@ -361,6 +362,46 @@ def run_drill(workdir, unique_label):
             'database_verified': True, 'all_files_verified': True}
 
 
+def remove_drill_directory(path):
+    # Unlink a symlink. Do not walk it. A symlink can point outside this directory.
+    if path.is_symlink():
+        raise RuntimeError('refusing to delete a drill symlink')
+    if not path.is_dir():
+        raise RuntimeError('refusing to delete a non-directory')
+    for child in path.iterdir():
+        if child.is_symlink() or not child.is_dir():
+            child.unlink()
+            continue
+        remove_drill_directory(child)
+    path.rmdir()
+
+
+def prune_drill_workdirs(base, keep):
+    if keep < 1:
+        raise RuntimeError('drill directory keep count must be at least 1')
+    base = Path(base)
+    if base.is_symlink() or not base.is_dir():
+        raise RuntimeError('drill work directory base is not a directory')
+    base_abs = Path(os.path.abspath(base))
+    candidates = []
+    for child in base.iterdir():
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if re.fullmatch(r'[0-9a-f]{32}', child.name) is None:
+            continue
+        child_abs = Path(os.path.abspath(child))
+        if child_abs.parent != base_abs:
+            continue
+        candidates.append(child_abs)
+    candidates.sort(key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
+    for old in candidates[keep:]:
+        if old.is_symlink() or not old.is_dir() or old.parent != base_abs:
+            raise RuntimeError('refusing to delete outside the drill directory')
+        if re.fullmatch(r'[0-9a-f]{32}', old.name) is None:
+            raise RuntimeError('refusing to delete outside the drill directory')
+        remove_drill_directory(old)
+
+
 def main():
     import fcntl
     global DEADLINE
@@ -382,6 +423,7 @@ def main():
     try:
         atomic_write_status(status_file, result)
         workdir.mkdir(parents=True, mode=0o700)
+        prune_drill_workdirs(Path(WORKDIR_BASE), DRILL_WORKDIR_KEEP)
         (workdir / 'ownership.json').write_text(json.dumps({'label': label, 'workdir': str(workdir)}))
         result['label'] = label
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGALRM):

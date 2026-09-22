@@ -5,6 +5,7 @@ Description=Weekly CommonSwarm PostgreSQL Restore Drill
 OnCalendar=Sun *-*-* 04:45:00 UTC
 RandomizedDelaySec=300
 Persistent=true
+Unit=commonswarm-postgres-restore.service
 
 [Install]
 WantedBy=timers.target

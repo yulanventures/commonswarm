@@ -450,6 +450,22 @@ The backup target is container `commonswarm-postgres` at `172.31.0.10`. The data
 
 Each nightly set contains globals without role passwords, a custom dump of `postgres`, and R2 retention evidence. The complete database-and-file backup workflow is in [backup/README.md](backup/README.md). A database-only export is not a complete backup; require exact object-version copies and offsite byte checks. `backup_ro` has `pg_read_all_data` and `BYPASSRLS`. `pg_hba.conf` allows it only from `172.31.0.1/32`.
 
+The backup and restore unit files in this release add a `docker.service` dependency, name the restore timer's unit, and the scripts share one lock. On the box, copy these four files from `$STACK_DIR/backup/` to `/etc/systemd/system/` (same file names):
+
+- `commonswarm-postgres-backup.service`
+- `commonswarm-postgres-backup.timer`
+- `commonswarm-postgres-restore.service`
+- `commonswarm-postgres-restore.timer`
+
+Then run:
+
+```sh
+systemctl daemon-reload
+systemctl try-restart commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+```
+
+`daemon-reload` loads the service files for the next run. `try-restart` reloads a timer that is already active. Do not start `commonswarm-postgres-backup.service` or `commonswarm-postgres-restore.service` to apply this change. A start runs a backup or a drill. If one of those services is running, wait until it exits before you restart its timer.
+
 ## Not established
 
 - Browser CORS and the `apikey` header without Kong need the box rehearsal.

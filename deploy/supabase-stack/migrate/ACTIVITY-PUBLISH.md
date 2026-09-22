@@ -55,7 +55,9 @@ intended baseline in Production completion.
 
 Identity is asserted by the existing migrate guards, not by this SQL. The
 SQL fail-closes with SQLSTATE `42704` if `commonswarm_edge` does not exist.
-It is one transaction. Do not `\i` it from inside another open transaction.
+It fail-closes with SQLSTATE `55000` if `realtime.messages` has row security
+off (`relrowsecurity` is false). A policy does not apply while row security is
+off. It is one transaction. Do not `\i` it from inside another open transaction.
 
 Source, on an already-verified operator session through the existing
 `run-db-tool.sh` / `PGSERVICEFILE` wrapper (`source_psql` in `lib.sh`):
@@ -85,7 +87,9 @@ bash deploy/supabase-stack/migrate/activity-publish-grants.test.sh
 
 The script refuses those variables and `PGHOST=172.31.0.10`, starts a local
 unix-socket `initdb` cluster, and requires the real rejection SQLSTATE
-(not merely a nonzero exit): `42704` when the role is missing, `42501` for
+(not merely a nonzero exit): `42704` when the role is missing, `55000` when
+row security is off on `realtime.messages` (that refusal leaves no USAGE
+grant and no insert policy), `42501` for
 forbidden event/topic/public/non-broadcast rows, SELECT/UPDATE/DELETE/
 TRUNCATE, extra-column INSERT, and every `swarm_command` publish attempt.
 A valid private activity row must be visible to the cluster owner after
