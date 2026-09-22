@@ -194,6 +194,7 @@ prepare and verify release inputs, but must not deploy, restart, change Caddy, o
 production symlinks.
 
 Every release input must be an exact reviewed SHA that has landed on `main`.
+The operational procedure is [deploy/RELEASE-TO-BOX.md](deploy/RELEASE-TO-BOX.md).
 
 | Surface | Release input and method | Automatic? |
 |---|---|---|
@@ -212,7 +213,8 @@ tests reject version drift.
 
 `deploy/supabase-stack/RUNBOOK.md` records the completed hosted-to-box cutover. Its source
 migration steps and `/home/commonswarm/migration.env` are historical. Do not reuse them as
-the current release procedure. The cross-repository operations runbook is authoritative.
+the current release procedure. The linked repository procedure governs CommonSwarm releases;
+the cross-repository operations runbook remains authoritative for host operations.
 
 ## CI
 
