@@ -90,10 +90,11 @@ labels its own containers and network. Success requires their removal, including
 the database volume, and deletion of temporary credential files. A failed check,
 interrupt, deadline, or cleanup returns nonzero and keeps `restore-status.json`
 false. Logs and the newest drill directories remain private on the host. The
-drill keeps the two newest run directories under
-`/var/backups/commonswarm-postgres/restore-drill`. It deletes only older child
-directories whose names are 32 hexadecimal characters. It does not delete other
-names in that directory, and it does not delete offsite backups.
+drill keeps the current run's directory plus one earlier run under
+`/var/backups/commonswarm-postgres/restore-drill`. `DRILL_WORKDIR_KEEP = 2`
+counts the current run. It deletes only older child directories whose names
+are 32 hexadecimal characters. It does not delete other names in that
+directory, and it does not delete offsite backups.
 
 The timer runs Sunday at 04:45 UTC, with up to five minutes of jitter. Work has a
 three-hour deadline; the systemd service allows four hours including cleanup.
@@ -115,28 +116,36 @@ email delivery records before claiming alert readiness.
 The unit file names do not change. systemd reads the copies in
 `/etc/systemd/system/`. A new `current` symlink does not reload those copies.
 
-Copy these four files again, over the same names:
-
-- `commonswarm-postgres-backup.service`
-- `commonswarm-postgres-backup.timer`
-- `commonswarm-postgres-restore.service`
-- `commonswarm-postgres-restore.timer`
-
-Then run:
+Stop both timers first. An old backup and a new drill must not run at the
+same time.
 
 ```sh
-systemctl daemon-reload
-systemctl try-restart commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+systemctl is-active commonswarm-postgres-backup.service commonswarm-postgres-restore.service
 ```
 
-`daemon-reload` makes the next backup and the next drill use the new service
-files. `try-restart` reloads a timer that is already active. It does nothing
-when that timer is not active.
+`systemctl is-active` prints one line per service. Wait until both services are
+inactive. Do not proceed while either line is `active` or `activating`. Both
+lines must be `inactive` or `failed`. Exit code 0 from this command means at
+least one service is active.
 
-Do not start `commonswarm-postgres-backup.service` or
-`commonswarm-postgres-restore.service` to apply this change. A start runs a
-backup or a drill. If one of those services is running, wait until it exits
-before you restart its timer.
+Switch the release and copy the four unit files over the same names. Then
+reload systemd, start both timers, and check that both are scheduled:
+
+```sh
+ln -sfn /home/commonswarm/stack/releases/<sha> /home/commonswarm/stack/current
+cp /home/commonswarm/stack/current/deploy/supabase-stack/backup/commonswarm-postgres-backup.service /etc/systemd/system/
+cp /home/commonswarm/stack/current/deploy/supabase-stack/backup/commonswarm-postgres-backup.timer /etc/systemd/system/
+cp /home/commonswarm/stack/current/deploy/supabase-stack/backup/commonswarm-postgres-restore.service /etc/systemd/system/
+cp /home/commonswarm/stack/current/deploy/supabase-stack/backup/commonswarm-postgres-restore.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+systemctl list-timers commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+```
+
+`systemctl list-timers` must show both timers. Do not start
+`commonswarm-postgres-backup.service` or
+`commonswarm-postgres-restore.service`. A start runs a backup or a drill.
 
 Run `python3 deploy/supabase-stack/backup/test_restore_drill.py` and
 `python3 deploy/supabase-stack/backup/test_notify_healthcheck.py`. The controls

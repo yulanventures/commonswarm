@@ -29,6 +29,7 @@ REQUIRED_FILES = {'database.dump', 'roles.sql', 'manifest.txt', 'source-counts.t
                   'storage-objects.ndjson', 'storage-backend-objects.ndjson', 'cron-jobs.ndjson',
                   'globals.sql', 'physical-object-keys.txt', 'offsite-binding.json', 'retention-evidence.json'}
 WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
+# DRILL_WORKDIR_KEEP = 2 counts the current run: that directory plus one earlier run.
 DRILL_WORKDIR_KEEP = 2
 
 def atomic_write_status(path, status_obj):
