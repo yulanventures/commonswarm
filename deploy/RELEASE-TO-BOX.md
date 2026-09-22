@@ -45,6 +45,7 @@ says this window stopped them.
    the archive came from the GitHub remote and create the evidence directory.
 
 ```sh
+rm -f "$HOME/.commonswarm-release-window.env"
 SHA=<sha>
 (
   set -euo pipefail
@@ -80,21 +81,21 @@ SHA=<sha>
   check 'gate evidence SHA' grep -Fx "SHA=$SHA" "$GATE_EVIDENCE"
   check 'command-core gate' grep -Fx 'npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS' "$GATE_EVIDENCE"
   check 'edge check gate' grep -Fx 'npm run check:edge: PASS' "$GATE_EVIDENCE"
+  check 'archive commit id' test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
+
+  # Written only after every check passed, so a failed preflight leaves no file.
+  ( umask 077; printf 'SHA=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
+      "$SHA" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
+  chmod 0600 "$HOME/.commonswarm-release-window.env"
+  printf 'window file written\n'
 )
-SHORT_SHA="$(git rev-parse --short=12 "$SHA")"
-RUN_DAY="$(date -u +%F)"
-EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}"
-RUN_LOG="$EVIDENCE_DIR/run.log"
-ARCHIVE="/tmp/commonswarm-${SHA}.tar"
-# Persist the Mac-side values so a lost shell can recover them:
-#   . "$HOME/.commonswarm-release-window.env"
-( umask 077; printf 'SHA=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
-    "$SHA" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
 ```
 
-Every later Mac block that uses `SHA`, `EVIDENCE_DIR`, `RUN_LOG` or `ARCHIVE`
-starts with `. "$HOME/.commonswarm-release-window.env"`. Delete that file when
-the window closes.
+If the block printed a FAIL, stop: no window file exists, and every later Mac
+block refuses to run. Every later Mac block runs in its own `set -euo pipefail`
+subshell, starts with `. "$HOME/.commonswarm-release-window.env"` and
+`test "$SHA" = <sha>`, and so fails closed after a lost shell. Section 1's
+Mac cleanup deletes the file when the window closes.
 
 Record approvals, affected surfaces, the backup-age agreement, commands, exit
 codes, and safe verification output in `run.log`. Never record an environment
@@ -112,8 +113,11 @@ reviewed diff; a router change checks all five functions:
 ```sh
 (
   set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
-  trap 'rm -rf "$ROUTER_DIR"' EXIT
+  trap 'status=$?; rm -rf "$ROUTER_DIR"; exit "$status"' EXIT
   ROUTER_SOURCE="$ROUTER_DIR/router.ts"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts >"$ROUTER_SOURCE"
   CHANGED_FUNCTIONS='<space-separated changed function names>'
@@ -164,13 +168,19 @@ without adding credentials. For a database release, include the SQL files;
 for an edge release, include the name-only inventory:
 
 ```sh
-PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
-PROOF_LIST="$(mktemp /tmp/commonswarm-proof-list-XXXXXX)"
-(cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
-printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
-(cd "$EVIDENCE_DIR" && tar -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
-rm -f "$PROOF_LIST"
-scp "$PROOF_ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release-proofs.tar
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  test -d "$EVIDENCE_DIR"
+  PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
+  PROOF_LIST="$(mktemp /tmp/commonswarm-proof-list-XXXXXX)"
+  (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
+  printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
+  (cd "$EVIDENCE_DIR" && tar -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
+  rm -f "$PROOF_LIST"
+  scp "$PROOF_ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release-proofs.tar
+)
 ```
 
 ### Apply — Anvil
@@ -211,7 +221,13 @@ mode `0755`. The block records both previous release paths before any switch,
 creates the releases, and writes the durable window state.
 
 ```sh
-scp "$ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release.tar
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  test -s "$ARCHIVE"
+  scp "$ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release.tar
+)
 ssh ops@100.115.66.74
 sudo -n -i
 
@@ -337,6 +353,9 @@ ending in `.log`. Create the list with a protected editor as root and mode
 ```sh
 (
   set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  test -d "$EVIDENCE_DIR"
   ssh ops@100.115.66.74 'sudo -n -i bash -s' <<'BOX' | tar -xf - -C "$EVIDENCE_DIR"
 (
   set -euo pipefail
@@ -361,6 +380,12 @@ BOX
 
 The Mac's `archive.sha256` and the box's `box-archive.sha256` therefore remain
 distinct.
+
+### Mac cleanup — Anvil, when the window closes (success or abort)
+
+```sh
+rm -f "$HOME/.commonswarm-release-window.env"
+```
 
 ### Abort cleanup — Anvil runs this on every stop, refusal, or abort
 
@@ -744,6 +769,7 @@ same check. Do not proceed merely because the service command returned.
 ```
 
 3. List the versions that have no ledger row. Only these need a catalog proof
+   (`<version>-catalog.sql`), a functional check (`<version>-functional.sql`)
    and a decision. Any pending version older than the newest ledger row is a
    stop until CSwarmDevLead explains it (it may need the Ledger backfill).
 
@@ -1616,5 +1642,5 @@ These do not block H0. Fold them together with the findings from the first H0 ru
 
 - The guarded switch accepts a `failed` backup or restore service before it switches, but after the switch it requires `inactive` plus `success`. A drill that failed earlier therefore makes both apply and rollback report failure.
 - The stack runtime-file comparison ignores `deploy/supabase-stack/migrate/`, although the backup and the drill run helpers from it through `stack/current`.
-- The pasted Mac preflight can still end with exit 0 after a failed check, and a second run empties `run.log`. (Mac-side values are now persisted in `~/.commonswarm-release-window.env`.)
+- The pasted Mac preflight can still end with exit 0 after a failed check (the window file is then absent, so later Mac blocks refuse), and a second run empties `run.log`. Not fixed yet.
 - The test-hook environment names are typed by hand, and `SWARM_ENV=test` is accepted.
