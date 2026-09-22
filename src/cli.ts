@@ -5313,8 +5313,10 @@ function listenerAttendanceState(
 } {
   const pending = status.pendingForMainCount ?? 0;
   const connected = status.state === "ready";
+  // A leftover hook-surface file still proves a message was surfaced.
+  // attendingSurfaces does not include that file; it is the hook installed now.
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
-  const hasSurface = attendingSurfaces.length > 0;
+  const hasSurface = evidence.hookSurfaceExists || attendingSurfaces.length > 0;
   const attendanceState = pending > 0
     ? "unattended"
     : hasSurface && evidence.hookSurfaceAdvanced

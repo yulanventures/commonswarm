@@ -40,7 +40,7 @@ While it is waiting, status state stays `starting` (not `failed`) and `nextAttem
 
 A stopped or failed listener does not get the claim-throughput lapse, the port-exhaustion notice, or the "reads are still failing" notice. A recorded run of delivery failures still prints, because that alarm is why the listener is down. The first status line names `stopped` or `failed`.
 
-`ATTENDING: hook` is true only when `listenerSettingsHookInstalled` finds this principal's hook in a Claude settings file now (`src/cli.ts`). A leftover hook-surface file, and the `hookSurfaceExists` flag taken from that file, do not count. `listen start` still treats a hook-surface file as an attendance surface through `listenerHookSurfacePresent`. That start gate was not changed.
+`ATTENDING: hook` is true only when `listenerSettingsHookInstalled` finds this principal's hook in a Claude settings file now (`src/cli.ts`). A leftover hook-surface file, and the `hookSurfaceExists` flag taken from that file, do not count. `ATTENDED` still counts that file: once it has surfaced a message, status says the session hook has surfaced messages. `listen start` still treats a hook-surface file as an attendance surface through `listenerHookSurfacePresent`. That start gate was not changed.
 
 ## Status sentences
 
@@ -52,7 +52,7 @@ Waiting through a transient failure. Before, the state was `starting` and the li
 
 Failed for a non-credential reason. Added: "This listener failed (`code`) and is not reading signals. Read `logPath`, then restart it by piping the same agent credential into: cswarm listen start …".
 
-`ATTENDING: hook` when the hook is gone and only the surface file remains. Before: `ATTENDING: hook.` After: `ATTENDING: none. Signals queue and nothing wakes the session.`
+`ATTENDING: hook` when the hook is gone and only the surface file remains. Before: `ATTENDING: hook.` After: `ATTENDING: none. Signals queue and nothing wakes the session.` `ATTENDED: yes` stays when that same file has surfaced a message.
 
 ## Tests and which script runs them
 
