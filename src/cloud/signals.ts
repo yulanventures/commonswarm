@@ -210,6 +210,14 @@ export class SignalTransportError extends Error {
   }
 }
 
+/** A credential required by this local process is missing from its own store. */
+export class LocalCredentialSecretAbsentError extends Error {
+  constructor(message = "agent credential secret is absent") {
+    super(message);
+    this.name = "LocalCredentialSecretAbsentError";
+  }
+}
+
 /** Malformed body for follow classification tests/helpers. */
 export class SignalMalformedError extends Error {
   constructor(message: string) {
@@ -2434,7 +2442,7 @@ export function isFatalFollowError(error: unknown): boolean {
 /**
  * Credential refusal/horizon/secret-absence stop classifier used by the CLI
  * and pure tests. Matches Renewal* by name to avoid coupling this module to
- * renewal.ts, plus explicit secret-absence wording.
+ * renewal.ts, and uses a named local error for secret absence.
  */
 export function isFollowCredentialFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
@@ -2458,8 +2466,7 @@ export function isFollowCredentialFailure(error: unknown): boolean {
   ) {
     return true;
   }
-  // Locally-thrown secret absence only; these errors never cross the network.
-  return /secret is absent/i.test(error.message);
+  return error instanceof LocalCredentialSecretAbsentError;
 }
 
 function followRetryReason(error: unknown): string {

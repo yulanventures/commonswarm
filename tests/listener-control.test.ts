@@ -53,6 +53,7 @@ import {
   DeliveryHttpError,
   DeliveryProtocolError,
   DeliveryTransportError,
+  H0_SEAT_CLAIM_REFUSED_CODE,
 } from "../src/cloud/delivery.js";
 import {
   CommandHttpError,
@@ -1503,7 +1504,7 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
   assert.equal(credentialStatus.state, "failed");
   assert.equal(credentialStatus.lastErrorCode, "credential_stopped");
 
-  // A 400 refusal will refuse identically forever; restarting cannot help.
+  // A misrouted read endpoint can return 400 during a DNS switch.
   // A bare 403 is not in this set: it has no confirmed credential code.
   const fatalTarget = paths(root);
   let fatalRuns = 0;
@@ -1518,16 +1519,16 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
       return { reason: "fatal", error: new SignalHttpError(400) };
     },
   });
-  assert.equal(fatalRuns, 1);
+  assert.equal(fatalRuns, 4);
 
   const events = await readEvents(fatalTarget);
-  assert.equal(events.some((e) => e.event === "listener_restarting"), false);
+  assert.equal(events.some((e) => e.event === "listener_restarting"), true);
   const failed = events.find((e) => e.event === "listener_failed");
   assert.ok(failed);
   // Down because it was never eligible, NOT because it ran out of attempts.
-  assert.equal(failed.restartable, false);
-  assert.equal(failed.restarts_exhausted, false);
-  assert.equal(failed.restart_attempts, 0);
+  assert.equal(failed.restartable, true);
+  assert.equal(failed.restarts_exhausted, true);
+  assert.equal(failed.restart_attempts, 3);
 });
 
 test("D-051: a listener that recovers on a restart is not reported as failed", async () => {
@@ -1549,6 +1550,29 @@ test("D-051: a listener that recovers on a restart is not reported as failed", a
   assert.equal(runs, 3);
   assert.equal(status.state, "stopped");
   assert.equal(status.lastErrorCode, null);
+});
+
+test("nextAttemptAt clears as the next attempt begins", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-attempt-"));
+  const target = paths(root);
+  let runs = 0;
+  const observed = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-restart",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
+    run: async () => {
+      runs += 1;
+      if (runs === 1) return saturationStop();
+      const live = await queryListenerControl(target, "status");
+      assert.equal(live.state, "starting");
+      assert.equal(live.nextAttemptAt, null);
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, 2);
+  assert.equal(observed.state, "stopped");
 });
 
 test("D-051: the restart classifier separates what can clear from what cannot", () => {
@@ -1576,8 +1600,7 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
     false,
   );
 
-  // Never: the operator's own stop, a credential that will refuse forever,
-  // a 4xx that will refuse identically, and a protocol defect.
+  // Never: the operator's own stop and a confirmed local credential stop.
   assert.equal(isRestartableListenerStop({ reason: "cancelled" }), false);
   assert.equal(
     isRestartableListenerStop({
@@ -1592,8 +1615,8 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
         reason: "fatal",
         error: new SignalHttpError(status),
       }),
-      false,
-      `HTTP ${status} must not restart`,
+      true,
+      `HTTP ${status} can be a foreign backend`,
     );
   }
   assert.equal(
@@ -1619,8 +1642,43 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
       reason: "fatal",
       error: new SignalMalformedError("signal read returned a malformed row"),
     }),
-    false,
+    true,
   );
+});
+
+test("credential and claim status use the answering edge and current retry state", () => {
+  const target = paths(join(tmpdir(), "listener-status-copy"));
+  const stopAt = "2026-09-22T00:10:00.000Z";
+  const command = renderListenerStatus({
+    ...statusFor(target, "credential_check"),
+    credentialStopAt: stopAt,
+    credentialCheckEdge: "command",
+    lastErrorCode: "unauthenticated",
+  });
+  assert.match(command, /credential \(unauthenticated\)/);
+  assert.doesNotMatch(command, /unauthenticated or forbidden/);
+  assert.match(command, /if every check until then confirms the loss/);
+  assert.match(command, /transient answer extends/);
+  const stopped = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: "credential_stopped",
+    credentialCheckEdge: "command",
+  });
+  assert.match(stopped, /server refused this credential \(unauthenticated means/);
+  assert.doesNotMatch(stopped, /unauthenticated or forbidden/);
+  const claim = renderListenerStatus({
+    ...statusFor(target, "claim_retry"),
+    claimRetryCount: 2,
+    lastErrorCode: "delivery_unavailable",
+  });
+  assert.match(claim, /Listener claim_retry/);
+  assert.match(claim, /last claim was refused \(delivery_unavailable\) 2 times/);
+  const h0 = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: H0_SEAT_CLAIM_REFUSED_CODE,
+  });
+  assert.match(h0, /receives messages through the h0 poll/);
+  assert.match(h0, /Stop this listener; nothing else is needed/);
 });
 
 test("D-051: the restart delay is bounded by its own cap, not the read backoff cap", () => {
@@ -1852,7 +1910,7 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
     requestId: "9d1f4b2c-0000-4000-8000-abcdefabcdef",
     retryable: false,
   }), true],
-  ["read 400", new SignalHttpError(400), false],
+  ["read 400", new SignalHttpError(400), true],
   ["read 401", new SignalHttpError(401), true],
   ["read 403", new SignalHttpError(403), true],
   ["read 403 forbidden", new SignalHttpError(403, null, {
@@ -1865,11 +1923,11 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
     requestId: null,
     retryable: null,
   }), false],
-  ["read 404", new SignalHttpError(404), false],
-  ["read 426", new SignalHttpError(426), false],
+  ["read 404", new SignalHttpError(404), true],
+  ["read 426", new SignalHttpError(426), true],
   ["read timeout", new SignalReadTimeoutError(), true],
   ["read transport", new SignalTransportError(), true],
-  ["read malformed", new SignalMalformedError("signal read returned a malformed row"), false],
+  ["read malformed", new SignalMalformedError("signal read returned a malformed row"), true],
   ["secret absent", new Error("agent credential secret is absent"), false],
 
   // --- delivery ------------------------------------------------------------
@@ -1909,6 +1967,9 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["capability missing", new ListenerCapabilityError(
     "cursor_capability_missing",
     "the read service does not support lossless ascending inbox pages",
+  ), true],
+  ["local delivery configuration missing", new ListenerCapabilityError(
+    "delivery_configuration_missing", "local durable delivery configuration is required",
   ), false],
   ["claim did not settle", new Error("delivery claim did not settle"), false],
   ["lease deadline invalid", new Error("delivery lease deadline is invalid"), false],

@@ -214,6 +214,8 @@ import {
   followStopFrame,
   formatFollowFrame,
   CONFIRMED_CREDENTIAL_LOSS_CODES,
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+  LocalCredentialSecretAbsentError,
   isFollowCredentialFailure,
   isRestartableReadError,
   parseWaitSeconds,
@@ -308,6 +310,7 @@ import {
   stopListener,
   waitForListenerReady,
   LISTENER_PROMPT_TIMEOUT_MS,
+  LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   ListenerRenewalUnavailableError,
   listenerRestartCommand,
   readListenerCredentialState,
@@ -5316,7 +5319,8 @@ function listenerAttendanceState(
   handledState: "handled" | "not_handled" | "not_yet_measured";
 } {
   const pending = status.pendingForMainCount ?? 0;
-  const connected = status.state === "ready";
+  const connected = status.state === "ready" || status.state === "claim_retry" ||
+    status.state === "credential_check";
   // A leftover hook-surface file still proves a message was surfaced.
   // attendingSurfaces does not include that file; it is the hook installed now.
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
@@ -5685,16 +5689,20 @@ export function listenerStatusJson(
   };
 }
 
-function credentialStoppedSentence(): string {
-  const codes = CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ");
-  return `the server refused this credential (${codes} means revoked, expired, or unknown) or a local renewal stop fired. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+function credentialStoppedSentence(edge: "read" | "command" = "read"): string {
+  const codes = (edge === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
+    : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  return `the server refused this credential (${codes} means revoked, expired, or unknown), a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
 }
 
 function credentialCheckSentence(status: ListenerStatus): string | null {
   if (status.state !== "credential_check") return null;
   if (typeof status.credentialStopAt !== "string") return null;
-  const codes = CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ");
-  return `The server refused this credential (${codes}). The listener is still running and will stop at ${status.credentialStopAt} unless the credential works again. Run cswarm whoami with this credential to see the grant state.`;
+  const codes = (status.credentialCheckEdge === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
+    : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
@@ -5711,7 +5719,7 @@ function listenerDownSentence(status: ListenerStatus): string | null {
   }
   if (status.state !== "failed") return null;
   if (status.lastErrorCode === "credential_stopped") {
-    return `This listener stopped because ${credentialStoppedSentence()}.`;
+    return `This listener stopped because ${credentialStoppedSentence(status.credentialCheckEdge ?? "read")}.`;
   }
   if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
     return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
@@ -5756,6 +5764,9 @@ export function renderListenerStatus(
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
     ...(credentialCheck === null ? [] : [credentialCheck]),
+    ...(status.state === "claim_retry"
+      ? [`The last claim was refused (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. The listener is running and will read signals to check the credential after ${LISTENER_CLAIM_REFUSALS_BEFORE_READ} consecutive refusals.`]
+      : []),
     ...(retrySentence === null ? [] : [retrySentence]),
     ...(downSentence === null ? [] : [downSentence]),
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
@@ -6140,6 +6151,7 @@ export function listenerFailureMessage(
   detail?: string | null,
   reasonCode?: string | null,
   minimumRequiredVersion?: string | null,
+  credentialEdge: "read" | "command" = "read",
 ): string {
   if (code === "version_below_floor") {
     if (provider === "codex") {
@@ -6213,7 +6225,7 @@ export function listenerFailureMessage(
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
-    return credentialStoppedSentence();
+    return credentialStoppedSentence(credentialEdge);
   }
   if (code === H0_SEAT_CLAIM_REFUSED_CODE) {
     return H0_SEAT_LISTENER_STOP_SENTENCE;
@@ -6502,7 +6514,7 @@ async function runConfiguredListener(options: {
       }
       const stored = await readListenerCredentialState(paths.instanceDirectory);
       if (stored === null || stored.credential !== credential) {
-        throw new Error("listener credential state did not preserve the live credential");
+        throw new LocalCredentialSecretAbsentError("listener credential state did not preserve the live credential");
       }
       return stored.credential;
     },
@@ -6678,6 +6690,7 @@ async function runConfiguredListener(options: {
       profileId: options.cloud.profileId,
       workspaceId: options.workspaceId,
       principalId: options.principalId,
+      projectDirectory: options.cwd,
       provider: options.provider,
       cswarmVersion: CLI_BUILD_VERSION,
       permissionMode: options.permissionMode,
@@ -6875,6 +6888,8 @@ async function runListenStart(args: Arguments): Promise<void> {
     existing &&
     (existing.state === "starting" ||
       existing.state === "ready" ||
+      existing.state === "credential_check" ||
+      existing.state === "claim_retry" ||
       existing.state === "stopping")
   ) {
     throw new Error(
@@ -7026,6 +7041,7 @@ async function runListenStart(args: Arguments): Promise<void> {
           detail,
           reasonCode,
           failedStatus?.providerMinimumRequiredVersion,
+          failedStatus?.credentialCheckEdge ?? "read",
         );
         throw new Error(
           failedStatus === null
@@ -7045,6 +7061,7 @@ async function runListenStart(args: Arguments): Promise<void> {
         status.lastErrorDetail,
         status.lastErrorReasonCode,
         status.providerMinimumRequiredVersion,
+        status.credentialCheckEdge ?? "read",
       )}. ${listenerProviderIdentitySummary(status)}`,
     );
   }
@@ -7081,6 +7098,9 @@ async function runListenStart(args: Arguments): Promise<void> {
     `${
       args.has("foreground")
         ? "Listener stopped."
+        : status.state === "credential_check" || status.state === "claim_retry" ||
+          status.state === "starting"
+        ? "Listener is still starting or checking; use cswarm listen status to follow it."
         : (status.pendingForMainCount ?? 0) > 0
         ? "Listener transport is connected, but queued messages are unattended."
         : "Listener is ready and will keep receiving after this command exits."
@@ -7250,7 +7270,7 @@ async function runListenStatusOrStop(
   };
   const attendanceEvidence = await collectListenerAttendanceEvidence({
     instanceDirectory: paths.instanceDirectory,
-    cwd: process.cwd(),
+    cwd: listenerAttendanceProjectDirectory(status, process.cwd()),
     principalId,
     cloud,
     workspaceId,
@@ -7634,6 +7654,13 @@ async function listenerHasAttendanceSurface(options: {
     options.workspaceId,
     options.principalId,
   );
+}
+
+export function listenerAttendanceProjectDirectory(
+  status: ListenerStatus,
+  callerDirectory: string,
+): string {
+  return status.projectDirectory ?? callerDirectory;
 }
 
 export async function collectListenerAttendanceEvidence(options: {

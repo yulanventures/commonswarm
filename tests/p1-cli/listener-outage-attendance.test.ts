@@ -9,6 +9,7 @@ import { writeSecureJsonFile } from "../../src/cloud/storage.js";
 import {
   claudeUserPromptHookSnippet,
   collectListenerAttendanceEvidence,
+  listenerAttendanceProjectDirectory,
   renderListenerStatus,
 } from "../../src/cli.js";
 import {
@@ -116,6 +117,20 @@ test("ATTENDING: hook is false when no hook is installed", async () => {
       installed,
     );
     assert.match(installedText, /ATTENDING: hook\./);
+    const otherDirectory = join(root, "elsewhere");
+    await mkdir(otherDirectory);
+    const recorded = { ...statusFor(join(instanceDirectory, "events.ndjson")), projectDirectory: cwd };
+    const fromElsewhere = await collectListenerAttendanceEvidence({
+      instanceDirectory,
+      cwd: listenerAttendanceProjectDirectory(recorded, otherDirectory),
+      principalId: PRINCIPAL_ID,
+      cloud,
+      workspaceId: WORKSPACE_ID,
+      pendingForMainOldestAt: null,
+      hookSurfaceExists: false,
+      hookSurfaceAdvanced: false,
+    });
+    assert.deepEqual(fromElsewhere.attendingSurfaces, ["hook"]);
   } finally {
     if (previousClaude === undefined) delete process.env.CLAUDE_CONFIG_DIR;
     else process.env.CLAUDE_CONFIG_DIR = previousClaude;

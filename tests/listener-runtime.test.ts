@@ -47,6 +47,7 @@ import {
   isConfirmedCredentialHttpFailure,
   SIGNAL_READ_TIMEOUT_MS,
   SignalHttpError,
+  LocalCredentialSecretAbsentError,
   SignalTransportError,
 } from "../src/cloud/signals.js";
 import { ACP_DEFAULT_REQUEST_TIMEOUT_MS } from "../src/host/bounds.js";
@@ -56,6 +57,7 @@ import {
   CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
   CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+  LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   ListenerH0SeatError,
   isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
@@ -850,7 +852,7 @@ test("durable markers select durable mode before probe rows can be cursor-proces
   });
 });
 
-test("claim without ACK capability fails before provider work", async () => {
+test("claim without ACK capability retries before provider work", async () => {
   const model = new FakeModel();
   const controller = new AbortController();
   let reads = 0;
@@ -864,7 +866,7 @@ test("claim without ACK capability fails before provider work", async () => {
     store: new MemoryStore(),
     model,
     signal: controller.signal,
-    sleep: async () => undefined,
+    sleep: async () => { controller.abort(); },
     readPage: async () => {
       reads += 1;
       if (reads > 1) controller.abort();
@@ -879,11 +881,8 @@ test("claim without ACK capability fails before provider work", async () => {
       });
     },
   });
-  assert.equal(stop.reason, "fatal");
-  assert.match(
-    stop.reason === "fatal" ? stop.error.message : "",
-    /delivery capability is inconsistent/,
-  );
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 1);
   assert.equal(model.starts, 0);
 });
 
@@ -3115,8 +3114,10 @@ test("MAJOR-4: a mid-run expired lease 403 clears stale state without credential
   assert.equal(journal.record.active, null);
 });
 
-test("runtime refuses old edges before starting or prompting a model", async () => {
+test("runtime retries an old read edge without starting or prompting a model", async () => {
   const model = new FakeModel();
+  const controller = new AbortController();
+  let reads = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3124,21 +3125,22 @@ test("runtime refuses old edges before starting or prompting a model", async () 
     credentialSession: { async bearer() { return "token"; } },
     store: new MemoryStore(),
     model,
-    readPage: async () =>
-      page([], {
+    signal: controller.signal,
+    sleep: async () => { controller.abort(); },
+    readPage: async () => {
+      reads += 1;
+      return page([], {
         capabilities: {
           senderOwnerRelation: false,
           cursorAfter: true,
           deliveryClaim: false,
           deliveryAck: false,
         },
-      }),
+      });
+    },
   });
-  assert.equal(stop.reason, "fatal");
-  assert.match(
-    stop.reason === "fatal" ? stop.error.message : "",
-    /does not prove sender ownership/,
-  );
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 1);
   assert.equal(model.starts, 0);
   assert.equal(model.prompts.length, 0);
   assert.equal(model.closes, 1);
@@ -3289,7 +3291,7 @@ test("HTTP 403 forbidden across the confirmation window stops the listener with 
     assert.match(checking, /^Listener credential check /);
     assert.match(checking, /The server refused this credential/);
     assert.match(checking, /will stop at /);
-    assert.match(checking, /unless the credential works again/);
+    assert.match(checking, /a transient answer extends the check window/);
     assert.match(checking, /Run cswarm whoami with this credential/);
     assert.equal(status.state, "failed");
     assert.equal(status.lastErrorCode, "credential_stopped");
@@ -3470,6 +3472,125 @@ test("command-edge forbidden is not a confirmed credential loss", async () => {
   assert.equal(stop.reason, "cancelled");
   assert.ok(claims >= 4);
   assert.ok(clock.elapsed() < CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+});
+
+test("real signal read HTTP codes enter the listener confirmation window", async () => {
+  for (const [status, code] of [[401, "unauthenticated"], [403, "forbidden"]] as const) {
+    const controller = new AbortController();
+    const events: ListenerRuntimeEvent[] = [];
+    let reads = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(),
+      model: new FakeModel(),
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+      fetcher: (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ error: code }), {
+          status, headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch,
+      sleep: async () => { controller.abort(); },
+    });
+    assert.equal(stop.reason, "cancelled", `${status} must not stop at once`);
+    assert.equal(reads, 1);
+    assert.equal(events.filter((event) => event.type === "credential_check").length, 1);
+  }
+  const controller = new AbortController();
+  let reads = 0;
+  const bare = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    fetcher: (async () => {
+      reads += 1;
+      if (reads === 2) controller.abort();
+      return new Response("{}", { status: 403, headers: { "content-type": "application/json" } });
+    }) as typeof fetch,
+    sleep: async () => {},
+  });
+  assert.equal(bare.reason, "cancelled");
+  assert.equal(reads, 2, "bare 403 retries");
+});
+
+test("claim-only delivery refusals force a read and expose revocation", async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads += 1;
+      if (reads === 1) return durablePage([], 1);
+      throw new SignalHttpError(403, null, { error: "forbidden", requestId: null, retryable: null });
+    },
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        throw new DeliveryHttpError(403, "delivery_unavailable", "delivery unavailable");
+      },
+      async ackAgentDelivery() { throw new Error("ack must not run"); },
+    },
+    sleep: async (_ms, signal) => {
+      if (events.some((event) => event.type === "credential_check")) controller.abort();
+      if (signal?.aborted) return;
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, LISTENER_CLAIM_REFUSALS_BEFORE_READ);
+  assert.equal(reads, 2);
+  assert.equal(events.filter((event) => event.type === "claim_retry").length, claims);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+});
+
+test("foreign read responses retry with bounded sleep instead of a permanent stop", async () => {
+  for (const [status, body] of [
+    [400, "{}"], [404, "{}"], [426, "{}"], [200, "<html>wrong backend</html>"],
+  ] as const) {
+    const controller = new AbortController();
+    let requests = 0;
+    let sleeps = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(),
+      model: new FakeModel(),
+      signal: controller.signal,
+      fetcher: (async () => {
+        requests += 1;
+        return new Response(body, { status, headers: { "content-type": status === 200 ? "text/html" : "application/json" } });
+      }) as typeof fetch,
+      sleep: async (ms) => {
+        assert.ok(ms > 0 && ms <= 30_000);
+        sleeps += 1;
+        controller.abort();
+      },
+    });
+    assert.equal(stop.reason, "cancelled", `HTTP ${status}`);
+    assert.equal(requests, 1);
+    assert.equal(sleeps, 1);
+  }
 });
 
 test("an H0 seat claim stops with its own code and is not retried", async () => {
@@ -3756,7 +3877,7 @@ test("default poster credential failures stop as credential with the identical e
       "renewal reauthorisation required",
     ),
     new RenewalRevoked("forbidden", "credential revoked"),
-    new Error("reply credential secret is absent from the store"),
+    new LocalCredentialSecretAbsentError("reply credential secret is absent from the store"),
   ] as const;
   for (const [index, thrown] of families.entries()) {
     const model = new FakeModel();

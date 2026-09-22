@@ -23,6 +23,7 @@ import {
   classifySignalReadFailure,
   decayFollowAttempt,
   followErrorEnvelope,
+  followHttpDetails,
   isConfirmedCredentialHttpFailure,
   isFollowCredentialFailure,
   isRestartableReadError,
@@ -93,6 +94,8 @@ import {
 } from "./wake.js";
 
 export const LISTENER_PAGE_LIMIT = 100;
+/** Force a read after this many consecutive claim refusals. */
+export const LISTENER_CLAIM_REFUSALS_BEFORE_READ = 3;
 export const LISTENER_IDLE_POLL_MS = IDLE_POLL_DEFAULT_MS;
 export const LISTENER_IDLE_POLL_MAX_MS = IDLE_POLL_MAX_MS;
 /** Server-fixed maximum delivery lease (§ frozen runtime budgets). */
@@ -254,6 +257,8 @@ export type ListenerRuntimeEvent =
     ts: string;
   }
   | { type: "malformed_row"; index: number; ts: string }
+  | { type: "claim_retry"; code: string; attempts: number; ts: string }
+  | { type: "claim_retry_cleared"; ts: string }
   | {
     type: "activity_publish_failure";
     code: ActivityPublishErrorCode;
@@ -322,6 +327,7 @@ export type ListenerRuntimeEvent =
     stopAt: string;
     checks: number;
     code: string;
+    edge: "read" | "command";
     ts: string;
   }
   | {
@@ -478,9 +484,11 @@ function isRestartableRuntimeError(error: unknown): boolean {
   // ACP: only codes we assigned at the boundary, never the peer's words.
   if (error instanceof AcpHostError) return TRANSIENT_ACP_CODES.has(error.code);
 
-  // A capability the read service does not advertise will not appear because
-  // we asked again.
-  if (error instanceof ListenerCapabilityError) return false;
+  // A foreign read service can omit wire capabilities. Local configuration
+  // errors remain fatal.
+  if (error instanceof ListenerCapabilityError) {
+    return error.code !== "delivery_configuration_missing";
+  }
 
   // Credential horizons are a human checkpoint, never a restart.
   if (
@@ -491,7 +499,17 @@ function isRestartableRuntimeError(error: unknown): boolean {
   }
 
   // Read-path failures, themselves closed.
-  return isRestartableReadError(error);
+  return isRestartableReadError(error) || isForeignReadResponseFailure(error);
+}
+
+function isForeignReadResponseFailure(error: unknown): boolean {
+  if (error instanceof ListenerCapabilityError) {
+    return error.code !== "delivery_configuration_missing";
+  }
+  if (classifySignalReadFailure(error).code === "malformed_response") return true;
+  const http = followHttpDetails(error);
+  return http !== null && (http.status === 400 || http.status === 404 ||
+    http.status === 426);
 }
 
 /**
@@ -516,7 +534,7 @@ function isLocalCredentialLoss(error: unknown): boolean {
   ) {
     return true;
   }
-  if (
+  if (followHttpDetails(error) !== null ||
     error instanceof CommandHttpError ||
     error instanceof DeliveryHttpError ||
     error instanceof SignalHttpError
@@ -1079,6 +1097,7 @@ export async function runListenerRuntime(
     checks: number;
     stopAtMs: number;
     code: string;
+    edge: "read" | "command";
   } | null = null;
 
   const confirmedLossCode = (error: unknown): string => {
@@ -1098,6 +1117,7 @@ export async function runListenerRuntime(
       stopAt: new Date(credentialWindow.stopAtMs).toISOString(),
       checks: credentialWindow.checks,
       code: credentialWindow.code,
+      edge: credentialWindow.edge,
       ts: eventTime(now),
     });
   };
@@ -1140,10 +1160,14 @@ export async function runListenerRuntime(
           checks: 1,
           stopAtMs: atMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
           code: confirmedLossCode(error),
+          edge: error instanceof DeliveryHttpError || error instanceof CommandHttpError
+            ? "command" : "read",
         };
       } else {
         credentialWindow.checks += 1;
         credentialWindow.code = confirmedLossCode(error);
+        credentialWindow.edge = error instanceof DeliveryHttpError || error instanceof CommandHttpError
+          ? "command" : "read";
         credentialWindow.stopAtMs = projectCredentialStopAt(atMs);
       }
       const window = credentialWindow;
@@ -1253,6 +1277,8 @@ export async function runListenerRuntime(
     }
   };
   try {
+    let forceRead = false;
+    let claimRefusals = 0;
     while (true) {
       if (abort?.aborted) {
         stop = { reason: "cancelled" };
@@ -1260,7 +1286,7 @@ export async function runListenerRuntime(
       }
       let skipRead = false;
       if (
-        ready &&
+        ready && !forceRead &&
         deliveryMode === "durable_claim" &&
         wakeSubscriber !== null &&
         wakeSubscriber.hasTopic
@@ -1291,6 +1317,7 @@ export async function runListenerRuntime(
         }
       }
       let page: AgentSignalPage | null = null;
+      forceRead = false;
       if (skipRead) {
         /* Wake tick: claim without a read. */
       } else try {
@@ -1312,8 +1339,11 @@ export async function runListenerRuntime(
             });
           },
         });
-        clearCredentialWindow();
         requireCapabilities(page);
+        if (claimRefusals > 0) {
+          claimRefusals = 0;
+          options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
+        }
         applyWakeHint(page.wake);
         emitWake();
         if (ready && readEpisodeStartedAtMs !== null) {
@@ -1329,6 +1359,7 @@ export async function runListenerRuntime(
           readEpisodeAttempts = 0;
         }
         const nextMode = classifyDeliveryMode(page, durableConfigured);
+        clearCredentialWindow();
         if (nextMode !== deliveryMode) {
           deliveryMode = nextMode;
           options.onEvent?.({
@@ -1367,6 +1398,7 @@ export async function runListenerRuntime(
         }
         const failure = classifySignalReadFailure(error);
         const transientRead = isRetryableFollowError(error) ||
+          isForeignReadResponseFailure(error) ||
           failure.code === "aborted" ||
           failure.code === "host_ports_exhausted";
         if (credentialWindow !== null && transientRead) {
@@ -1639,16 +1671,34 @@ export async function runListenerRuntime(
               wakeSubscriber?.markRateLimited(now());
               emitWake();
             }
-            if (credentialWindow !== null && isRetryableDeliveryError(error)) {
+            const retryableClaim = isRetryableDeliveryError(error);
+            if (retryableClaim) {
+              claimRefusals += 1;
+              options.onEvent?.({
+                type: "claim_retry",
+                code: error instanceof DeliveryHttpError ? error.code : "delivery_unreachable",
+                attempts: claimRefusals,
+                ts: eventTime(now),
+              });
+            }
+            if (credentialWindow !== null && retryableClaim) {
               const decided = await holdCredentialWindow("transient", error);
               if (decided !== "continue") {
                 stop = decided;
                 break;
               }
+              if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+                forceRead = true;
+                break;
+              }
               continue;
             }
-            if (!isRetryableDeliveryError(error)) {
+            if (!retryableClaim) {
               stop = { reason: "fatal", error: asError(error) };
+              break;
+            }
+            if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+              forceRead = true;
               break;
             }
             deliveryAttempt += 1;
@@ -1661,9 +1711,14 @@ export async function runListenerRuntime(
           }
         }
         if (stop) break;
+        if (forceRead) continue;
         if (result === null) {
           stop = { reason: "fatal", error: new Error("delivery claim did not settle") };
           break;
+        }
+        if (claimRefusals > 0) {
+          claimRefusals = 0;
+          options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
         }
         clearCredentialWindow();
         applyWakeHint(result.wake);

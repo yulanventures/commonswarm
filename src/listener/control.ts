@@ -64,6 +64,7 @@ export type ListenerStatusState =
   | "starting"
   | "ready"
   | "credential_check"
+  | "claim_retry"
   | "stopping"
   | "stopped"
   | "failed";
@@ -81,6 +82,8 @@ export interface ListenerStatus {
   profileId: string;
   workspaceId: string;
   principalId: string;
+  /** Absolute project directory selected when this listener was started. */
+  projectDirectory?: string;
   pid: number;
   state: ListenerStatusState;
   startedAt: string;
@@ -199,6 +202,8 @@ export interface ListenerStatus {
    * files omit it.
    */
   credentialStopAt?: string | null;
+  credentialCheckEdge?: "read" | "command" | null;
+  claimRetryCount?: number;
   logPath: string;
 }
 
@@ -310,6 +315,9 @@ const STATUS_ALLOWED_KEYS = new Set([
   "wake",
   "nextAttemptAt",
   "credentialStopAt",
+  "credentialCheckEdge",
+  "claimRetryCount",
+  "projectDirectory",
 ]);
 const STATUS_ACTIVITY_ERROR_CODES = new Set<ActivityPublishErrorCode>([
   "activity_credential_failed",
@@ -511,7 +519,7 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !Number.isSafeInteger(row.pid) ||
     (row.pid as number) < 1 ||
     typeof row.state !== "string" ||
-    !["starting", "ready", "credential_check", "stopping", "stopped", "failed"].includes(row.state) ||
+    !["starting", "ready", "credential_check", "claim_retry", "stopping", "stopped", "failed"].includes(row.state) ||
     typeof row.startedAt !== "string" ||
     !Number.isFinite(Date.parse(row.startedAt)) ||
     !(row.readyAt === null ||
@@ -635,7 +643,13 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
       (typeof row.idlePollMs === "number" &&
         Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
     !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt)) ||
-    !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt))
+    !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt)) ||
+    !(row.credentialCheckEdge === undefined || row.credentialCheckEdge === null ||
+      row.credentialCheckEdge === "read" || row.credentialCheckEdge === "command") ||
+    !(row.claimRetryCount === undefined ||
+      (typeof row.claimRetryCount === "number" && Number.isSafeInteger(row.claimRetryCount) && row.claimRetryCount >= 0)) ||
+    !(row.projectDirectory === undefined ||
+      (typeof row.projectDirectory === "string" && isAbsolute(row.projectDirectory)))
   ) {
     throw new Error("stored listener status is malformed");
   }

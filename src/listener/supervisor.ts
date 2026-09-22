@@ -141,6 +141,7 @@ export interface ListenerSupervisorOptions {
   profileId: string;
   workspaceId: string;
   principalId: string;
+  projectDirectory?: string;
   /** Host adapter id recorded in status metadata only. Default: grok. */
   provider?: ListenerProviderId;
   /** Build version this supervisor can report while its control socket is live. */
@@ -327,6 +328,7 @@ export async function runListenerSupervisor(
     profileId: options.profileId,
     workspaceId: options.workspaceId.toLowerCase(),
     principalId: options.principalId.toLowerCase(),
+    ...(options.projectDirectory ? { projectDirectory: options.projectDirectory } : {}),
     pid: process.pid,
     state: "starting",
     startedAt,
@@ -376,6 +378,8 @@ export async function runListenerSupervisor(
     wake: emptyListenerWakeStatus(),
     nextAttemptAt: null,
     credentialStopAt: null,
+    credentialCheckEdge: null,
+    claimRetryCount: 0,
     logPath: options.paths.logPath,
   };
   let writes = Promise.resolve();
@@ -631,6 +635,7 @@ export async function runListenerSupervisor(
     if (event.type === "credential_check") {
       transition("credential_check", {
         credentialStopAt: event.stopAt,
+        credentialCheckEdge: event.edge,
         lastErrorCode: event.code,
         lastErrorDetail: null,
         lastErrorReasonCode: null,
@@ -648,6 +653,7 @@ export async function runListenerSupervisor(
     if (event.type === "credential_check_cleared") {
       transition(status.readyAt === null ? "starting" : "ready", {
         credentialStopAt: null,
+        credentialCheckEdge: null,
         lastErrorCode: null,
         lastErrorDetail: null,
         lastErrorReasonCode: null,
@@ -656,6 +662,24 @@ export async function runListenerSupervisor(
       log({
         ts: event.ts,
         event: "listener_credential_check_cleared",
+      });
+      return;
+    }
+    if (event.type === "claim_retry") {
+      transition(status.credentialStopAt ? "credential_check" : "claim_retry", {
+        claimRetryCount: event.attempts,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        lastErrorDetail: null,
+      });
+      log({ ts: event.ts, event: "listener_claim_retry", failure_code: event.code, attempt: event.attempts });
+      return;
+    }
+    if (event.type === "claim_retry_cleared") {
+      transition(status.credentialStopAt ? "credential_check" :
+        status.readyAt === null ? "starting" : "ready", {
+        claimRetryCount: 0,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : null,
+        lastErrorDetail: null,
       });
       return;
     }
@@ -995,6 +1019,7 @@ export async function runListenerSupervisor(
         stop = { reason: "cancelled" };
         break;
       }
+      transition("starting", { nextAttemptAt: null });
     }
 
     const stoppedAt = iso(now);
@@ -1091,6 +1116,7 @@ export async function effectiveListenerStatus(
       (stored.state === "starting" ||
         stored.state === "ready" ||
         stored.state === "credential_check" ||
+        stored.state === "claim_retry" ||
         stored.state === "stopping")
     ) {
       const failed: ListenerStatus = {
@@ -1161,7 +1187,8 @@ export async function waitForListenerReady(
       ) {
         throw new ListenerAlreadyRunningError();
       }
-      if (last.state === "ready") return last;
+      if (last.state === "ready" || last.state === "credential_check" ||
+        last.state === "claim_retry") return last;
       if (last.state === "failed" || last.state === "stopped") {
         throw new ListenerStartupError(last.lastErrorCode ?? last.state);
       }
@@ -1221,5 +1248,9 @@ export async function waitForListenerReady(
     }
     await sleep(pollMs);
   }
+  if (last !== null &&
+    (options.expectedPid === undefined || last.pid === options.expectedPid) &&
+    (!options.isProcessAlive || options.isProcessAlive()) &&
+    last.state === "starting") return last;
   throw new ListenerStartupError(last?.lastErrorCode ?? "ready_timeout");
 }

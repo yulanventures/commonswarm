@@ -57,6 +57,7 @@ import {
   SIGNAL_READ_TIMEOUT_MS,
   SIGNAL_WAIT_POLL_MS,
   SignalHttpError,
+  LocalCredentialSecretAbsentError,
   SignalMalformedError,
   SignalReadTimeoutError,
   SignalTransportError,
@@ -618,7 +619,7 @@ test("follow removes its abort listener after every completed idle poll", async 
 
 test("follow secret/credential absence never emits ready", async () => {
   const frames: FollowFrame[] = [];
-  const secretMissing = new Error("agent credential secret is absent");
+  const secretMissing = new LocalCredentialSecretAbsentError();
   assert.equal(isFollowCredentialFailure(secretMissing), true);
   const stop = await runInboxFollow({
     workspaceId: WORKSPACE,
@@ -1833,11 +1834,12 @@ test("D-051: a hostile error body cannot forge a credential failure", async () =
   assert.equal(isFollowCredentialFailure(forged), false);
   assert.doesNotMatch(forged.message, /secret is absent/);
 
-  // Positive control: the phrase does classify when it is genuinely ours.
+  // Only the locally owned error type can classify a missing secret.
   assert.equal(
-    isFollowCredentialFailure(new Error("the agent secret is absent")),
+    isFollowCredentialFailure(new LocalCredentialSecretAbsentError()),
     true,
   );
+  assert.equal(isFollowCredentialFailure(new Error("the agent secret is absent")), false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1995,10 +1997,9 @@ test("D-051: only a typed AbortError cancels, and our own abort state outranks i
 });
 
 test("D-051: a credential verdict off the wire is decided by status, not wording", () => {
-  // Locally-thrown secret absence still classifies — the wording check is for
-  // errors that never crossed the network.
+  // Locally-thrown secret absence classifies only by type.
   assert.equal(
-    isFollowCredentialFailure(new Error("the agent secret is absent")),
+    isFollowCredentialFailure(new LocalCredentialSecretAbsentError()),
     true,
   );
   assert.equal(isFollowCredentialFailure(new SignalHttpError(401)), false);

@@ -20,7 +20,7 @@ import {
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
-import { isFollowCredentialFailure } from "../src/cloud/signals.js";
+import { isFollowCredentialFailure, LocalCredentialSecretAbsentError } from "../src/cloud/signals.js";
 import {
   FileBrainDigestStore,
   FileListenerEffectStore,
@@ -942,7 +942,7 @@ test("post credential-classified errors restore exact reply_ready and rethrow by
       "renewal reauthorisation required",
     ),
     new RenewalRevoked("forbidden", "credential revoked"),
-    new Error("reply credential secret is absent from the store"),
+    new LocalCredentialSecretAbsentError("reply credential secret is absent from the store"),
   ] as const;
   for (const [index, thrown] of credentialErrors.entries()) {
     const store = new MemoryStore();
@@ -979,7 +979,7 @@ test("post credential-classified errors restore exact reply_ready and rethrow by
 test("credential errors whose message contains cancelled are escapes, never aborts", async () => {
   const credentialErrors = [
     new RenewalRevoked("forbidden", "credential revoked; operation cancelled"),
-    new Error("secret is absent; operation cancelled"),
+    new LocalCredentialSecretAbsentError("secret is absent; operation cancelled"),
   ] as const;
   for (const [index, thrown] of credentialErrors.entries()) {
     const store = new MemoryStore();
