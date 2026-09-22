@@ -49,7 +49,10 @@ average 8-9); test:p1-cli 830 + the same timeout-table failure; check:tests 0; c
 test:h0-counts 16; test:h0-upgrade:local 0; build-release 0; diff-check 0. Mutation controls: without the slice's
 `FOR UPDATE` the stalled-slice test failed (the stalled poll returned the delivery); the old lock order and the missing
 partial-predicate check each failed their tests (Maker, fold 5); with the old 000001 proof the wrong-column test failed
-(lead, `d8c623a6`). The merged tree is gated again before the push.
+(lead, `d8c623a6`). Merged tree (lead): build 0; npm test 897; test:p1-cli 832; check:tests 0; check:edge 0;
+test:p1-server 234 + 4 gateway 502s in `tests/p1-server/file-artifacts.test.ts` (unchanged by this lane; 21 of 21 alone,
+load average 10); test:h0-counts 16; test:h0-upgrade:local 0; build-release 0; site build 0; site test 566 + 1 (567 of
+567 on a rerun); diff-check 0.
 
 ## Not established
 
