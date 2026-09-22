@@ -172,20 +172,7 @@ function validateStack(
     errors.push("secret-like compose value");
   }
 
-  const routes: Array<[string, string]> = [
-    ["handle /auth/v1/*", "reverse_proxy 127.0.0.1:18001"],
-    ["handle /rest/v1/*", "reverse_proxy 127.0.0.1:18002"],
-    ["handle @supabase_realtime", "reverse_proxy 127.0.0.1:18003"],
-    ["handle /storage/v1/*", "reverse_proxy 127.0.0.1:18004"],
-    ["handle @edge_functions", "reverse_proxy 127.0.0.1:9000"],
-  ];
-  for (const [route, upstream] of routes) {
-    const routeAt = caddySource.indexOf(route);
-    const upstreamAt = caddySource.indexOf(upstream, routeAt);
-    if (routeAt < 0 || upstreamAt < routeAt || upstreamAt > routeAt + 500) {
-      errors.push(`route ${route}`);
-    }
-  }
+  errors.push(...routePortErrors(caddySource));
   const realtimeTransports = caddySource.match(
     /flush_interval -1[\s\S]{0,120}transport http \{[\s\S]{0,80}versions 1\.1/g,
   ) ?? [];
@@ -412,6 +399,38 @@ test("runbook contracts reject edge-project and service-wait mutations", () => {
   );
 });
 
+const ROUTE_UPSTREAMS = [
+  ["handle /auth/v1/*", "127.0.0.1:18001"],
+  ["handle /rest/v1/*", "127.0.0.1:18002"],
+  ["handle @supabase_realtime", "127.0.0.1:18003"],
+  ["handle /storage/v1/*", "127.0.0.1:18004"],
+  ["handle @edge_functions", "127.0.0.1:9000"],
+] as const;
+
+function routeBlock(source: string, route: string): string {
+  const routeAt = source.indexOf(route);
+  if (routeAt < 0) return "";
+  const rest = source.slice(routeAt + route.length);
+  const next = rest.search(/\n\thandle[ {]/);
+  return next < 0 ? source.slice(routeAt) : source.slice(routeAt, routeAt + route.length + next);
+}
+
+function routePortErrors(source: string): string[] {
+  const errors: string[] = [];
+  for (const [route, port] of ROUTE_UPSTREAMS) {
+    const upstream = routeBlock(source, route).match(/reverse_proxy\s+(\S+)/)?.[1];
+    if (upstream !== port) errors.push(`route ${route} port ${port}`);
+  }
+  return errors;
+}
+
+function swapAuthRestPorts(source: string): string {
+  return source
+    .replaceAll("reverse_proxy 127.0.0.1:18001", "reverse_proxy 127.0.0.1:__AUTH__")
+    .replaceAll("reverse_proxy 127.0.0.1:18002", "reverse_proxy 127.0.0.1:18001")
+    .replaceAll("reverse_proxy 127.0.0.1:__AUTH__", "reverse_proxy 127.0.0.1:18002");
+}
+
 function routeFrame(source: string): string[] {
   const patterns = new Set([
     "@edge_functions path /functions/v1 /functions/v1/*",
@@ -464,9 +483,18 @@ function maintenanceProblems(source: string): string[] {
 }
 
 test("live and maintenance Caddy files keep the box route frame", () => {
-  const { publicSite, boxRoutes } = maintenanceSites(maintenanceCaddy);
+  const { boxRoutes } = maintenanceSites(maintenanceCaddy);
   const liveSite = caddy.slice(caddy.indexOf("api.commonswarm.com, edge-staging.commonswarm.com {"));
   assert.deepEqual(routeFrame(liveSite), routeFrame(boxRoutes));
+  assert.deepEqual(routePortErrors(liveSite), [], "live site");
+  assert.deepEqual(routePortErrors(boxRoutes), [], "maintenance staging site");
+  for (const source of [liveSite, boxRoutes]) {
+    const swapped = swapAuthRestPorts(source);
+    assert.notEqual(swapped, source);
+    const swappedErrors = routePortErrors(swapped).join("\n");
+    assert.match(swappedErrors, /route handle \/auth\/v1\/\*/);
+    assert.match(swappedErrors, /route handle \/rest\/v1\/\*/);
+  }
   assert.deepEqual(maintenanceProblems(maintenanceCaddy), []);
   const withUpstream = maintenanceCaddy.replace(
     '\theader Retry-After "300"',
