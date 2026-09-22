@@ -1208,6 +1208,46 @@ test("read edge session status still works for the calling agent", async () => {
   assert.ok(siblingRow, "sibling principal must still appear");
   assert.equal(selfRow.session_id, selfSession);
   assert.equal(selfRow.is_live, true);
+  assert.equal(selfRow.generation, heldSelf.body.generation);
+  assert.equal(Number.isSafeInteger(selfRow.generation), true);
+  assert.equal(siblingRow.generation, null);
   assert.equal(siblingRow.session_id, null);
   assert.equal(siblingRow.is_live, false);
+});
+
+test("members projects the authenticated run and current model without widening reads", async () => {
+  const self = await seedAgent("projection-self");
+  const sibling = await seedAgent("projection-sibling");
+  await sql`UPDATE swarm.agent_principals SET model = 'synthetic' WHERE principal_id = ${self.principalId}::uuid`;
+  const [run] = await sql<{ run_id: string }[]>`SELECT run_id::text FROM swarm.agent_runs WHERE principal_id = ${self.principalId}::uuid`;
+  assert.ok(run);
+  let result = await readMembers(self.token, shared.workspace);
+  assert.equal(result.status, 200);
+  assert.equal((result.body.identity as Record<string, unknown>).run_id, run.run_id);
+  const findSelf = (body: Record<string, unknown>) => (body.agents as Array<Record<string, unknown>>).find(row => row.principal_id === self.principalId)!;
+  assert.equal(findSelf(result.body).model, "synthetic");
+  const cleared = await runCmd(self.token, { kind: "declare_agent_model", model: null });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  result = await readMembers(self.token, shared.workspace);
+  assert.equal(findSelf(result.body).model, null);
+  assert.equal(findSelf(result.body).generation, null);
+  const other = await seedOwnedWorkspace("projection-other");
+  const cross = await readMembers(self.token, other.workspace);
+  assert.equal(cross.status, 200);
+  assert.deepEqual(cross.body, { members: [], agents: [] });
+  assert.equal(Object.hasOwn(cross.body, "identity"), false);
+  const human = await readMembers(shared.ownerJwt, shared.workspace);
+  assert.equal(human.status, 401);
+  const grants = await fetch(`${local.API_URL}/functions/v1/read`, {
+    method: "POST", headers: { authorization: `Bearer ${shared.ownerJwt}`, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "renewal_grants", workspace_id: shared.workspace }),
+  });
+  assert.equal(grants.status, 200);
+  const grantBody = await grants.json() as Record<string, unknown>;
+  assert.ok(Array.isArray(grantBody.grants));
+  assert.equal(Object.hasOwn(grantBody, "agents"), false);
+  await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = ${sibling.principalId}::uuid`;
+  assert.equal((await readMembers(sibling.token, shared.workspace)).status, 403);
+  await sql`UPDATE swarm.agent_tokens SET expires_at = statement_timestamp() - interval '1 second' WHERE principal_id = ${self.principalId}::uuid`;
+  assert.equal((await readMembers(self.token, shared.workspace)).status, 401);
 });

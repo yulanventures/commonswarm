@@ -23,19 +23,19 @@
  *
  * THE NUMBERS ARE READ OUT OF THE CODE, NOT ASSUMED:
  *   10 live workspaces per verified identity -> FREE_TIER_WORKSPACE_LIMIT,
- *                                               supabase/functions/command/index.ts:765
+ *                                               supabase/functions/command/index.ts:766
  *                                              (the query excludes archived_at rows;
  *                                              cswarm workspace close archives one --
  *                                              src/cli.ts, human sessions only)
- *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :642
- *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :643
- *   fixed clock hour, not rolling           -> incrementRateBucket, :5097 uses
+ *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :643
+ *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :644
+ *   fixed clock hour, not rolling           -> incrementRateBucket, :5098 uses
  *                                              date_trunc('hour', ...)
  *   body 1-8000                             -> migrations/20260827000001_expand_signal_body.sql
- *   about <= 500                            -> index.ts:1975-1978
- *   until <= 30d                            -> index.ts:1982-1986 (SIGNAL_MAX_UNTIL_MS)
- *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :627
- *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :632
+ *   about <= 500                            -> index.ts:1976-1979
+ *   until <= 30d                            -> index.ts:1983-1987 (SIGNAL_MAX_UNTIL_MS)
+ *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :628
+ *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :633
  *   (no single default to publish: the protocol default is 1 hour,
  *   AGENT_TOKEN_DEFAULT_TTL_MS in src/protocol/workspace-commands.ts, while the
  *   connect page's picker defaults to 30 days. The prose states the MAXIMUM only.)

@@ -100,13 +100,15 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
 
   ```sh
   cd /opt/commonswarm/current
-  docker compose -f deploy/edge-runtime/compose.yaml config -q
+  docker compose -p commonswarm-edge -f deploy/edge-runtime/compose.yaml config -q
   ```
 
 - [ ] **NOT RUN** — start only the edge runtime:
 
   ```sh
-  docker compose -f deploy/edge-runtime/compose.yaml up -d edge-runtime
+  COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
+    COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
+    docker compose -p commonswarm-edge -f deploy/edge-runtime/compose.yaml up -d edge-runtime
   ```
 
 - [ ] **NOT RUN** — wait for `healthy`. Confirm the published socket is only
@@ -248,7 +250,7 @@ deactivate the custom domain before DNS moves.
 
   ```sh
   cd /opt/commonswarm/current
-  docker compose -f deploy/edge-runtime/compose.yaml down
+  docker compose -p commonswarm-edge -f deploy/edge-runtime/compose.yaml down
   ```
 
 - [ ] **NOT RUN** — keep the box files for 48 hours after rollback. Then remove

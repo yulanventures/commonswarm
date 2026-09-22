@@ -1,0 +1,60 @@
+# Post-N-db site file. Its routing frame stays aligned with
+# deploy/edge-runtime/commonswarm.caddy; only the Supabase upstreams change.
+api.commonswarm.com, edge-staging.commonswarm.com {
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+
+	@edge_functions path /functions/v1 /functions/v1/*
+	handle @edge_functions {
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				response_header_timeout 165s
+			}
+		}
+	}
+
+	handle_errors {
+		@edge_function_error path /functions/v1 /functions/v1/*
+		handle @edge_function_error {
+			header Access-Control-Allow-Origin "*"
+			respond "{http.error.status_code} {http.error.status_text}" {http.error.status_code}
+		}
+	}
+
+	handle /auth/v1/* {
+		uri strip_prefix /auth/v1
+		reverse_proxy 127.0.0.1:18001
+	}
+
+	handle /rest/v1/* {
+		uri strip_prefix /rest/v1
+		reverse_proxy 127.0.0.1:18002
+	}
+
+	handle /storage/v1/* {
+		uri strip_prefix /storage/v1
+		reverse_proxy 127.0.0.1:18004
+	}
+
+	@supabase_realtime path /realtime/v1 /realtime/v1/*
+	handle @supabase_realtime {
+		uri replace /realtime/v1/websocket /socket/websocket
+		uri strip_prefix /realtime/v1
+		reverse_proxy 127.0.0.1:18003 {
+			header_up Host realtime-dev
+			header_up X-Forwarded-Host {host}
+			flush_interval -1
+			transport http {
+				versions 1.1
+			}
+		}
+	}
+
+	handle {
+		header Content-Type application/json
+		respond "{\"error\":\"not_found\"}" 404
+	}
+}
+
+# commonswarm-api-fallback.caddy is for an ABORT path before cutover step 7 only.
+# Never install it after step 7. Fix forward after the box accepts writes.

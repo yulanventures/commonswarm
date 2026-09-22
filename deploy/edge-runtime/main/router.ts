@@ -178,7 +178,11 @@ export function resolveFunctionRoute(pathname: string): FunctionRoute | null {
   };
 }
 
-const DATABASE_ENV = ["SWARM_DATABASE_URL", "SUPABASE_DB_URL"] as const;
+const DATABASE_ENV = [
+  "SWARM_DATABASE_URL",
+  "SUPABASE_DB_URL",
+  "SWARM_DATABASE_TLS_CA_B64",
+] as const;
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   command: [

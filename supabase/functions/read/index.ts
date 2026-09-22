@@ -5,6 +5,7 @@ import {
 } from "../command/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   extractSafeDiagnostics,
   formatReadFailureLog,
@@ -46,7 +47,7 @@ const authClient = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
-const db = postgres(databaseUrl, {
+const db = postgres(databaseUrl, withDatabaseTls({
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
@@ -55,7 +56,7 @@ const db = postgres(databaseUrl, {
   prepare: false,
   idle_timeout: 3,
   connect_timeout: 10,
-});
+}, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
@@ -640,6 +641,7 @@ async function handle(
         SELECT
           p.principal_id,
           p.name,
+          p.model,
           p.owner_user_id,
           p.managed_at,
           s.lifecycle_state,
@@ -647,6 +649,7 @@ async function handle(
           s.host_label,
           s.host_session_ref,
           s.session_id,
+          s.generation::text AS generation,
           s.started_at,
           s.renewed_at,
           s.expired_at,
@@ -687,7 +690,15 @@ async function handle(
       `;
       return json(200, {
         members,
-        agents,
+        agents: agents.map((row) => {
+          // bigint arrives as text; never round a fencing generation in JSON.
+          const generation = row.generation === null ? null : Number(row.generation);
+          if (generation !== null &&
+            (!Number.isSafeInteger(generation) || generation < 1)) {
+            throw new Error("invalid session generation projection");
+          }
+          return { ...row, generation };
+        }),
         /* Derived from agent_delivery_read_context for the bearer used on THIS request.
          * Client artifact fields are deliberately not involved. A successful response also
          * proves the credential passed current token, principal, run, device and membership
@@ -695,6 +706,7 @@ async function handle(
         identity: {
           credential_valid: true,
           principal_id: agent.principal_id,
+          run_id: agent.run_id,
           owner_user_id: agent.owner_user_id,
           workspace_id: agent.principal_workspace_id,
           workspace_name: workspaceRows[0]?.name ?? null,

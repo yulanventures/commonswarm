@@ -30,10 +30,15 @@ services:
       - "70"
     ports:
       - "127.0.0.1:9000:9000"
+    # The current pooler path keeps Docker's bridge. N-db sets this to the
+    # pre-existing commonswarm-net so the unpublished database is reachable.
+    network_mode: ${COMMONSWARM_EDGE_NETWORK_MODE:-bridge}
+    extra_hosts:
+      - "db.commonswarm.internal:${COMMONSWARM_EDGE_DB_ADDRESS:-172.31.0.10}"
     env_file:
       # Compose can validate this file away from the box. The main service
       # still refuses to start when its required variables are missing.
-      - path: /home/commonswarm/.env
+      - path: ${COMMONSWARM_EDGE_ENV_FILE:-/home/commonswarm/.env}
         required: false
     volumes:
       - ./main:/home/deno/main:ro

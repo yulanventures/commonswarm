@@ -76,6 +76,16 @@ test("H0 source reads only environment names passed to its worker", async () => 
   assert.deepEqual(missing, []);
 });
 
+test("every database worker receives the optional private CA", () => {
+  for (const functionName of ["command", "read", "capability", "activity"] as const) {
+    assert.ok(
+      FUNCTION_ENV_NAMES[functionName].includes("SWARM_DATABASE_TLS_CA_B64"),
+      `${functionName} does not receive SWARM_DATABASE_TLS_CA_B64`,
+    );
+  }
+  assert.equal(FUNCTION_ENV_NAMES.h0.includes("SWARM_DATABASE_TLS_CA_B64"), false);
+});
+
 test("edge runtime router strips only /functions/v1 and maps all five functions", () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
@@ -330,9 +340,11 @@ test("edge runtime Compose binds only loopback and contains no secret value", as
     .filter((value) => /:\d+:\d+$/.test(value));
   assert.deepEqual(published, ["127.0.0.1:9000:9000"]);
   assert.doesNotMatch(compose, /(?:0\.0\.0\.0|\[::\]):9000:9000/);
+  assert.match(compose, /COMMONSWARM_EDGE_NETWORK_MODE:-bridge/);
+  assert.match(compose, /COMMONSWARM_EDGE_DB_ADDRESS:-172\.31\.0\.10/);
   assert.match(
     compose,
-    /env_file:[\s\S]*?path: \/home\/commonswarm\/\.env/,
+    /env_file:[\s\S]*?path: \$\{COMMONSWARM_EDGE_ENV_FILE:-\/home\/commonswarm\/\.env\}/,
   );
 
   const secretShapes = [
