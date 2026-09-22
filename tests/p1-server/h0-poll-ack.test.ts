@@ -24,6 +24,10 @@ import {
   H0_POLL_WAIT_REFUSED,
 } from "../../supabase/functions/h0/parse.js";
 import {
+  H0_MAX_CONCURRENT_WAITS,
+  H0_POLL_RETRY_AFTER_SECONDS,
+} from "../../src/h0/verbs.js";
+import {
   H0_SEAT_CLAIM_REFUSED,
   H0_SEAT_CLAIM_REFUSED_MESSAGE,
 } from "../../supabase/functions/command/h0-seat.js";
@@ -119,11 +123,11 @@ async function command(
   };
 }
 
-async function makeSeat(): Promise<Seat> {
+async function makeSeat(secret = joinSecret): Promise<Seat> {
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${joinSecret}`,
+      authorization: `Bearer ${secret}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -143,6 +147,34 @@ async function makeSeat(): Promise<Seat> {
   assert.equal(typeof body.agent_token, "string");
   assert.equal(typeof body.principal_id, "string");
   return { token: String(body.agent_token), principalId: String(body.principal_id) };
+}
+
+async function seatInNewWorkspace(): Promise<Seat> {
+  const user = await createUser();
+  const workspace = randomUUID();
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO swarm.users (user_id, display_name) VALUES (${user.id}::uuid, 'H0 Poll Other')`;
+    await tx`
+      INSERT INTO swarm.workspaces (workspace_id, name, created_by)
+      VALUES (${workspace}::uuid, 'H0 Poll Other', ${user.id}::uuid)
+    `;
+    await tx`
+      INSERT INTO swarm.memberships (workspace_id, user_id, role)
+      VALUES (${workspace}::uuid, ${user.id}::uuid, 'owner')
+    `;
+    await tx`
+      INSERT INTO swarm.streams (stream_id, workspace_id, kind)
+      VALUES (${randomUUID()}::uuid, ${workspace}::uuid, 'workspace')
+    `;
+  });
+  const minted = await command(user.jwt, {
+    kind: "mint_agent_join_credential",
+    seat_cap: 10,
+    ttl_hours: 4,
+  }, workspace);
+  assert.equal(minted.status, 200, JSON.stringify(minted.body));
+  assert.equal(typeof minted.body.join_credential, "string");
+  return await makeSeat(String(minted.body.join_credential));
 }
 
 async function plainAgent(): Promise<Seat> {
@@ -592,5 +624,115 @@ test("h0 ack advances one delivery and keeps the listener id", async () => {
   assertVerbHeaders(acked.headers);
   const stored = await delivery(signalId, seat.principalId);
   assert.equal(stored.ack_outcome, "replied");
+});
+
+test("one waiting poll is admitted for the whole deployment", { timeout: 30_000 }, async () => {
+  const home = await makeSeat();
+  const other = await seatInNewWorkspace();
+  const parked = await makeSeat();
+  const workspaces = await sql<{ principal_id: string; workspace_id: string }[]>`
+    SELECT principal_id::text, workspace_id::text
+    FROM swarm.agent_principals
+    WHERE principal_id IN (${home.principalId}::uuid, ${other.principalId}::uuid)
+  `;
+  assert.equal(workspaces.length, 2);
+  assert.notEqual(workspaces[0]?.workspace_id, workspaces[1]?.workspace_id);
+  await sql`
+    INSERT INTO swarm.h0_poll_locks (
+      workspace_id, principal_id, holder, listener_instance_id,
+      acquired_at, expires_at, waiting
+    )
+    SELECT
+      workspace_id,
+      principal_id,
+      ${randomUUID()}::uuid,
+      ${randomUUID()}::uuid,
+      statement_timestamp() - interval '2 minutes',
+      statement_timestamp() - interval '1 minute',
+      true
+    FROM swarm.agent_principals
+    WHERE principal_id = ${parked.principalId}::uuid
+  `;
+
+  const waitSeconds = 4;
+  const started = Date.now();
+  const homePoll = h0("poll", home.token, { wait: waitSeconds });
+  const otherPoll = h0("poll", other.token, { wait: waitSeconds });
+  const early = await Promise.race([
+    homePoll.then((body) => ({ seat: home, body })),
+    otherPoll.then((body) => ({ seat: other, body })),
+  ]);
+  const earlyMs = Date.now() - started;
+  assert.ok(
+    earlyMs < 2_500,
+    `the poll that could not wait took ${earlyMs}ms (cap ${H0_MAX_CONCURRENT_WAITS})`,
+  );
+  assert.equal(early.body.status, 200, JSON.stringify(early.body.body));
+  assert.equal(early.body.body.batchId, null);
+  assert.equal(typeof early.body.body.listener_instance_id, "string");
+  assert.deepEqual(early.body.body.deliveries, []);
+  assert.equal(early.body.body.retryAfterSeconds, H0_POLL_RETRY_AFTER_SECONDS);
+  assert.equal(early.body.body.error, undefined);
+  assertVerbHeaders(early.body.headers);
+  assert.deepEqual(Object.keys(early.body.body).sort(), [
+    "batchId",
+    "deliveries",
+    "listener_instance_id",
+    "retryAfterSeconds",
+  ]);
+
+  const waiting = await sql<{ principal_id: string }[]>`
+    SELECT principal_id::text
+    FROM swarm.h0_poll_locks
+    WHERE waiting
+      AND expires_at > statement_timestamp()
+  `;
+  const waiter = early.seat === home ? other : home;
+  assert.deepEqual(waiting.map((row) => row.principal_id), [waiter.principalId]);
+
+  const late = await (early.seat === home ? otherPoll : homePoll);
+  assert.ok(Date.now() - started >= 3_000, "the admitted poll did not wait");
+  assert.equal(late.status, 200, JSON.stringify(late.body));
+  assert.equal(late.body.batchId, null);
+  assert.deepEqual(late.body.deliveries, []);
+  assert.equal(late.body.retryAfterSeconds, undefined);
+  assert.deepEqual(Object.keys(late.body).sort(), [
+    "batchId",
+    "deliveries",
+    "listener_instance_id",
+  ]);
+
+  const free = await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n
+    FROM swarm.h0_poll_locks
+    WHERE waiting
+      AND expires_at > statement_timestamp()
+  `;
+  assert.equal(free[0]?.n, 0);
+
+  const againStarted = Date.now();
+  const againPromise = h0("poll", waiter.token, { wait: 3 });
+  let held = false;
+  const observeUntil = Date.now() + 3_000;
+  while (Date.now() < observeUntil) {
+    const rows = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+      FROM swarm.h0_poll_locks
+      WHERE principal_id = ${waiter.principalId}::uuid
+        AND waiting
+        AND expires_at > statement_timestamp()
+    `;
+    if ((rows[0]?.n ?? 0) === 1) {
+      held = true;
+      break;
+    }
+    await delay(50);
+  }
+  assert.equal(held, true, "a poll could not wait after the slot was free");
+  const again = await againPromise;
+  assert.ok(Date.now() - againStarted >= 2_500, "the later poll did not wait");
+  assert.equal(again.status, 200, JSON.stringify(again.body));
+  assert.equal(again.body.retryAfterSeconds, undefined);
+  assert.equal(again.body.batchId, null);
 });
 });

@@ -7,6 +7,8 @@
  *
  * The wait is a timer. It is not a CPU spin, and it is not inside a
  * transaction. The pool connection is back in the pool before the wait starts.
+ * A poll waits only after it claims a deployment-wide waiting slot. That claim
+ * commits before the timer starts. H0_MAX_CONCURRENT_WAITS is the cap.
  * The poll calls claimAgentInbox directly, so the command-edge seat fence does
  * not apply. ack calls ackAgentDelivery and advances delivery state only there.
  * ackBatch closes the batch row and writes no delivery column.
@@ -35,6 +37,10 @@ import {
   type HydratedDelivery,
 } from "../command/durable-delivery.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
+import {
+  H0_MAX_CONCURRENT_WAITS,
+  H0_POLL_RETRY_AFTER_SECONDS,
+} from "../../../src/h0/verbs.ts";
 import {
   H0_ACK_BATCH_MISMATCH,
   H0_ACK_BATCH_MISMATCH_MESSAGE,
@@ -612,20 +618,22 @@ async function acquireLock(
   const rows = await tx<{ holder: string; listener_instance_id: string }[]>`
     INSERT INTO swarm.h0_poll_locks AS poll_lock (
       workspace_id, principal_id, holder, listener_instance_id,
-      acquired_at, expires_at
+      acquired_at, expires_at, waiting
     ) VALUES (
       ${seat.workspaceId}::uuid,
       ${seat.principalId}::uuid,
       ${holder}::uuid,
       gen_random_uuid(),
       statement_timestamp(),
-      statement_timestamp() + (${durationMs} * interval '1 millisecond')
+      statement_timestamp() + (${durationMs} * interval '1 millisecond'),
+      false
     )
     ON CONFLICT (workspace_id, principal_id) DO UPDATE
     SET
       holder = EXCLUDED.holder,
       acquired_at = statement_timestamp(),
-      expires_at = EXCLUDED.expires_at
+      expires_at = EXCLUDED.expires_at,
+      waiting = false
     WHERE poll_lock.expires_at <= statement_timestamp()
     RETURNING holder::text, listener_instance_id::text
   `;
@@ -634,16 +642,62 @@ async function acquireLock(
   return { holder: row.holder, listenerInstanceId: row.listener_instance_id };
 }
 
+async function lockWaitAdmission(tx: Tx): Promise<void> {
+  await tx`
+    SELECT pg_advisory_xact_lock(
+      hashtext('h0-wait-admission'),
+      hashtext('deployment')
+    )
+  `;
+}
+
 async function releaseLock(seat: Seat, holder: string): Promise<void> {
   await h0Database().begin(async (tx) => {
     await setRole(tx);
+    await lockWaitAdmission(tx);
     await tx`
       UPDATE swarm.h0_poll_locks
-      SET expires_at = statement_timestamp()
+      SET
+        waiting = false,
+        expires_at = statement_timestamp()
       WHERE workspace_id = ${seat.workspaceId}::uuid
         AND principal_id = ${seat.principalId}::uuid
         AND holder = ${holder}::uuid
     `;
+  });
+}
+
+type WaitAdmission = "claimed" | "full" | "lost";
+
+async function claimWaitingSlot(seat: Seat, holder: string): Promise<WaitAdmission> {
+  return await h0Database().begin(async (tx) => {
+    await setRole(tx);
+    await lockWaitAdmission(tx);
+    const claimed = await tx<{ holder: string }[]>`
+      UPDATE swarm.h0_poll_locks AS mine
+      SET waiting = true
+      WHERE mine.workspace_id = ${seat.workspaceId}::uuid
+        AND mine.principal_id = ${seat.principalId}::uuid
+        AND mine.holder = ${holder}::uuid
+        AND mine.expires_at > statement_timestamp()
+        AND (
+          SELECT count(*)::int
+          FROM swarm.h0_poll_locks AS other
+          WHERE other.waiting
+            AND other.expires_at > statement_timestamp()
+        ) < ${H0_MAX_CONCURRENT_WAITS}::int
+      RETURNING mine.holder::text
+    `;
+    if (claimed.length > 0) return "claimed";
+    const live = await tx<{ n: number }[]>`
+      SELECT count(*)::int AS n
+      FROM swarm.h0_poll_locks
+      WHERE workspace_id = ${seat.workspaceId}::uuid
+        AND principal_id = ${seat.principalId}::uuid
+        AND holder = ${holder}::uuid
+        AND expires_at > statement_timestamp()
+    `;
+    return (live[0]?.n ?? 0) > 0 ? "full" : "lost";
   });
 }
 
@@ -723,63 +777,81 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
     if (!opened.acquired) return opened.response;
     held = { seat: opened.seat, holder: opened.holder };
     let current = opened.collected;
-    const deadline = Date.now() + parsed.body.wait * 1_000;
-    while (current.kind === "empty" && Date.now() < deadline) {
-      const slice = Math.min(WAIT_SLICE_MS, deadline - Date.now());
-      if (slice > 0) await sleep(slice);
-      current = await h0Database().begin(async (tx) => {
-        await setRole(tx);
-        const auth = await authenticate(tx, tokenHash);
-        if (!auth.ok) {
-          return {
-            kind: "error" as const,
-            status: auth.status,
-            error: auth.error,
-            message: auth.message,
-          };
+    let retryAfterSeconds: number | undefined;
+    if (current.kind === "empty" && parsed.body.wait > 0) {
+      const admission = await claimWaitingSlot(opened.seat, opened.holder);
+      if (admission === "lost") {
+        return json(H0_POLL_IN_PROGRESS_STATUS, {
+          error: H0_POLL_IN_PROGRESS,
+          message: "This poll's lock ended. Poll again.",
+        });
+      }
+      if (admission === "full") {
+        retryAfterSeconds = H0_POLL_RETRY_AFTER_SECONDS;
+      } else {
+        const deadline = Date.now() + parsed.body.wait * 1_000;
+        while (current.kind === "empty" && Date.now() < deadline) {
+          const slice = Math.min(WAIT_SLICE_MS, deadline - Date.now());
+          if (slice > 0) await sleep(slice);
+          current = await h0Database().begin(async (tx) => {
+            await setRole(tx);
+            const auth = await authenticate(tx, tokenHash);
+            if (!auth.ok) {
+              return {
+                kind: "error" as const,
+                status: auth.status,
+                error: auth.error,
+                message: auth.message,
+              };
+            }
+            const session = await sessionOrRefusal(tx, auth.seat, request);
+            if (!session.ok) {
+              return {
+                kind: "error" as const,
+                status: session.status,
+                error: session.error,
+                message: "Send the session proof this managed seat requires.",
+              };
+            }
+            const still = await tx<{ held: number }[]>`
+              SELECT 1 AS held
+              FROM swarm.h0_poll_locks
+              WHERE workspace_id = ${auth.seat.workspaceId}::uuid
+                AND principal_id = ${auth.seat.principalId}::uuid
+                AND holder = ${opened.holder}::uuid
+                AND expires_at > statement_timestamp()
+            `;
+            if (still.length === 0) {
+              return {
+                kind: "error" as const,
+                status: H0_POLL_IN_PROGRESS_STATUS,
+                error: H0_POLL_IN_PROGRESS,
+                message: "This poll's lock ended. Poll again.",
+              };
+            }
+            return await collect(
+              tx,
+              auth.seat,
+              opened.listenerInstanceId,
+              null,
+              session.session,
+            );
+          });
         }
-        const session = await sessionOrRefusal(tx, auth.seat, request);
-        if (!session.ok) {
-          return {
-            kind: "error" as const,
-            status: session.status,
-            error: session.error,
-            message: "Send the session proof this managed seat requires.",
-          };
-        }
-        const still = await tx<{ held: number }[]>`
-          SELECT 1 AS held
-          FROM swarm.h0_poll_locks
-          WHERE workspace_id = ${auth.seat.workspaceId}::uuid
-            AND principal_id = ${auth.seat.principalId}::uuid
-            AND holder = ${opened.holder}::uuid
-            AND expires_at > statement_timestamp()
-        `;
-        if (still.length === 0) {
-          return {
-            kind: "error" as const,
-            status: H0_POLL_IN_PROGRESS_STATUS,
-            error: H0_POLL_IN_PROGRESS,
-            message: "This poll's lock ended. Poll again.",
-          };
-        }
-        return await collect(
-          tx,
-          auth.seat,
-          opened.listenerInstanceId,
-          null,
-          session.session,
-        );
-      });
+      }
     }
     if (current.kind === "error") {
       return json(current.status, { error: current.error, message: current.message });
     }
-    return json(200, {
+    const responseBody: Record<string, unknown> = {
       batchId: current.body.batchId,
       listener_instance_id: current.body.listener_instance_id,
       deliveries: current.body.deliveries,
-    });
+    };
+    if (retryAfterSeconds !== undefined) {
+      responseBody.retryAfterSeconds = retryAfterSeconds;
+    }
+    return json(200, responseBody);
   } finally {
     if (held !== null) {
       try {

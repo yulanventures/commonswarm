@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 import {
+  H0_MAX_CONCURRENT_WAITS,
   H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, h0Verb, h0AgentDocumentDescription,
   type H0Verb,
 } from "../../src/h0/verbs.js";
@@ -354,7 +355,7 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
     "    name (required) — a display label, not an identity -- duplicates are allowed here",
     "    icon (may be omitted)",
     "POST poll — Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused. (seat token in Authorization: Bearer)",
-    "    wait (may be omitted) — seconds, at most 50",
+    `    wait (may be omitted) — seconds, at most 50. At most ${H0_MAX_CONCURRENT_WAITS} poll may wait at a time across the whole deployment. If this poll cannot wait, it returns at once and includes retryAfterSeconds. Poll again after that many seconds`,
     "    ackBatch (may be omitted) — the previous batchId; a TRANSPORT ack that advances no delivery state",
     "POST ack — Acknowledge ONE message after its local effect is persisted. Unacknowledged messages replay. (seat token in Authorization: Bearer)",
     "    signal_id (required)",

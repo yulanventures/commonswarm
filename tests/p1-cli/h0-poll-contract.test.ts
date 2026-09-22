@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
-import { H0_VERBS } from "../../src/h0/verbs.js";
+import { H0_MAX_CONCURRENT_WAITS, H0_POLL_RETRY_AFTER_SECONDS, H0_VERBS } from "../../src/h0/verbs.js";
 import {
   H0_POLL_CLEANUP_MS,
   H0_POLL_MAX_WAIT_SECONDS,
@@ -89,6 +89,25 @@ test("the poll parser accepts the poll row's keys and no others", () => {
   assert.equal(parseH0PollBody({ wait: 50.5 }).ok, false);
   assert.equal(parseH0PollBody({ ackBatch: null }).ok, false);
   assert.equal(parseH0PollBody({ ackBatch: UUID }).ok, true);
+});
+
+test("the waiting-poll cap is one constant, and the document and README read it", () => {
+  const verbs = source("src/h0/verbs.ts");
+  const definitions = verbs.match(/export const H0_MAX_CONCURRENT_WAITS = \d+/g) ?? [];
+  assert.deepEqual(definitions, [`export const H0_MAX_CONCURRENT_WAITS = ${H0_MAX_CONCURRENT_WAITS}`]);
+  const retry = verbs.match(/export const H0_POLL_RETRY_AFTER_SECONDS = \d+/g) ?? [];
+  assert.deepEqual(retry, [`export const H0_POLL_RETRY_AFTER_SECONDS = ${H0_POLL_RETRY_AFTER_SECONDS}`]);
+  const poll = H0_VERBS.find((verb) => verb.name === "poll");
+  const wait = poll?.fields.find((field) => field.name === "wait");
+  assert.match(wait?.note ?? "", new RegExp(`At most ${H0_MAX_CONCURRENT_WAITS} poll may wait`));
+  assert.match(wait?.note ?? "", /retryAfterSeconds/);
+  const readme = source("deploy/edge-runtime/README.md");
+  assert.match(readme, /H0_MAX_CONCURRENT_WAITS/);
+  assert.match(readme, /src\/h0\/verbs\.ts/);
+  const handler = source("supabase/functions/h0/poll-ack.ts");
+  assert.match(handler, /H0_MAX_CONCURRENT_WAITS/);
+  assert.match(handler, /H0_POLL_RETRY_AFTER_SECONDS/);
+  assert.equal(handler.includes("export const H0_MAX_CONCURRENT_WAITS"), false);
 });
 
 test("the poll lock expiry is strictly longer than the maximum wait plus cleanup", () => {

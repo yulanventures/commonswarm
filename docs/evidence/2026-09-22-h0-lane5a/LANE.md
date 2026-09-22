@@ -34,7 +34,8 @@ Owner `swarm_admin`. RLS on. `swarm_command` may select, insert, and update.
 `swarm.h0_poll_locks`
 
 - Primary key `(workspace_id, principal_id)`.
-- Holds `holder`, `listener_instance_id`, `acquired_at`, `expires_at`.
+- Holds `holder`, `listener_instance_id`, `acquired_at`, `expires_at`,
+  and `waiting`. `waiting` is the deployment-wide slot. See Fold 1.
 - Check: `expires_at >= acquired_at`.
 - The writer sets expiry to the wait plus 5 seconds of cleanup plus 1 second.
   At a 50 second wait that is strictly longer than 50 seconds plus cleanup.
@@ -114,11 +115,52 @@ HTTP 403. The condition was restored. `false && refusal` is not in the file.
 
 - The running box does not yet pass these database names into the h0 worker.
   The names are listed in this tree. Deploy was not run.
-- Four polls of 50 seconds can occupy all four edge workers. This lane adds
-  no admission limit.
 - `deploy/supabase-stack/migrate/apply-h0-upgrade.sh` still applies only the
-  two earlier H0 migrations. This migration's path onto the box is not established.
+  two earlier H0 migrations. `20260922000001_h0_poll_lock_and_batch.sql` and
+  `20260922000002_h0_poll_wait_admission.sql` are not on that path. Deploy
+  was not run.
 - H0 poll and ack do not use the command edge's delivery rate buckets.
 - Register, ask, note, reply, and working-on are not forwarded. That is lane 5b.
 - No detached `cswarm listen` was started. The fence was measured through the
   command HTTP claim.
+
+## Fold 1
+
+`H0_MAX_CONCURRENT_WAITS` is 1. It is defined in `src/h0/verbs.ts`. The poll
+note, the tests, and `deploy/edge-runtime/README.md` read that constant.
+`H0_POLL_RETRY_AFTER_SECONDS` is 5, in the same file.
+
+The slot is the column `waiting` on `swarm.h0_poll_locks`. A row counts while
+`waiting` is true and `expires_at` is in the future. The count has no
+workspace filter. Migration
+`supabase/migrations/20260922000002_h0_poll_wait_admission.sql`.
+
+The claim is one transaction in `claimWaitingSlot`. It takes
+`pg_advisory_xact_lock(hashtext('h0-wait-admission'), hashtext('deployment'))`,
+then sets `waiting` on this holder only when that count is below the constant.
+The second worker blocks on the lock until the first transaction commits, so
+it sees the first row. Two workers cannot both pass.
+
+A poll that cannot take a slot does not wait. It returns HTTP 200. The body
+is the empty poll shape plus `retryAfterSeconds`:
+
+- `batchId`: null
+- `listener_instance_id`: the seat's id
+- `deliveries`: []
+- `retryAfterSeconds`: 5
+
+That response is not an error.
+
+`releaseLock` sets `waiting` to false and `expires_at` to now. The poll
+handler calls it from `finally` on every exit after the per-seat lock is
+held. A row whose release does not run stops counting when `expires_at`
+passes. A later poll that takes an expired row sets `waiting` to false.
+
+Mutation: `H0_MAX_CONCURRENT_WAITS` was set to 2. The test "one waiting poll
+is admitted for the whole deployment" failed, exit 1. The first poll returned
+in 4493 ms. The assertion message was `the poll that could not wait took
+4493ms (cap 2)`. The constant was restored to 1. The file then passed, 9
+tests, exit 0.
+
+The local `tests/p1-server/h0-poll-ack.test.ts` run is the measurement. The
+box was not exercised.

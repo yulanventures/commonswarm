@@ -86,6 +86,19 @@ const idempotencyKey: H0Field["wire"] = {
   purpose: "idempotency-key",
 };
 
+/**
+ * Waiting polls admitted at one time, for every workspace together.
+ * A waiting poll holds an edge worker. The document, the tests, and
+ * deploy/edge-runtime/README.md read this constant.
+ */
+export const H0_MAX_CONCURRENT_WAITS = 1;
+
+/**
+ * Seconds a poll reports when it cannot take a waiting slot.
+ * The response is the normal empty body plus `retryAfterSeconds`. It is not an error.
+ */
+export const H0_POLL_RETRY_AFTER_SECONDS = 5;
+
 export const H0_VERBS = [
   {
     name: "register",
@@ -105,7 +118,11 @@ export const H0_VERBS = [
     summary:
       "Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused.",
     fields: [
-      opt("wait", false, "seconds, at most 50"),
+      opt(
+        "wait",
+        false,
+        `seconds, at most 50. At most ${H0_MAX_CONCURRENT_WAITS} poll may wait at a time across the whole deployment. If this poll cannot wait, it returns at once and includes retryAfterSeconds. Poll again after that many seconds`,
+      ),
       opt("ackBatch", false, "the previous batchId; a TRANSPORT ack that advances no delivery state"),
     ],
   },
