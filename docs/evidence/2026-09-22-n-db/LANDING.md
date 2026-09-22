@@ -58,3 +58,14 @@ on trailing spaces in `backup/restore-drill.py`.
   Strategist asked too. They land as a follow-up evidence commit under this directory.
 - How a future schema migration reaches the production database, and how a new edge-function or stack version is
   deployed, beyond the release directories and `current` symlinks that were used. Not written down in the repo.
+
+Delivered 2026-09-22 (HezLead):
+
+- `rehearsal-2026-09-17.md`, `cutover-window-2026-09-18.md`, `drill-2026-09-20.md` and
+  `transcript-sources.md` in this directory. The session logs hold per-step exit codes only for
+  rehearsal steps 1-6. Steps 5-8 finished (their artifact directory is dated 15:15:52Z) but were not
+  captured command by command. No record was found of steps 9-13 or the recovery drill being run.
+  The live cutover window was not captured step by step; the cutover file quotes the written
+  cutover record instead. The gaps are
+  listed in `transcript-sources.md`.
+- The release procedure is `deploy/RELEASE-TO-BOX.md`.
