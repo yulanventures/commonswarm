@@ -93,7 +93,8 @@ target_psql --file "$sql_file" >>"$LOG_FILE" 2>&1
 log "runtime role passwords replaced with SCRAM verifiers"
 log "pg_net and pg_graphql installed from the pinned PostgreSQL image; other required extensions were image-initialized"
 log "backup_ro has pg_read_all_data and BYPASSRLS; pg_hba limits it to 172.31.0.1"
-log "commonswarm_edge has only swarm_command, swarm_read, and swarm_capability"
+# Additive GRANT only. Restored source memberships stay. See ACTIVITY-PUBLISH.md.
+log "GRANT swarm_command, swarm_read, swarm_capability TO commonswarm_edge; other memberships were not revoked"
 if [[ ! -f "$MIGRATE_DIR/activity-publish-grants.sql" ]]; then
   echo "missing activity-publish-grants.sql" >&2
   exit 1

@@ -15,7 +15,9 @@
 -- Source: existing assert_source_identity (SOURCE_SYSTEM_IDENTIFIER).
 -- Target: existing assert_target_identity; prepare-target.sh runs this
 -- file in a separate target_psql after it creates commonswarm_edge.
--- Fail-closed if commonswarm_edge does not exist. One transaction.
+-- Fail-closed if commonswarm_edge does not exist (SQLSTATE 42704).
+-- Fail-closed if realtime.messages row security is off (SQLSTATE 55000).
+-- A policy does not apply while row security is off. One transaction.
 -- Do not include this file inside another open transaction.
 --
 -- Does not replace realtime.send, change PUBLIC EXECUTE, alter other
@@ -54,6 +56,17 @@ BEGIN
       )
   ) <> 6 THEN
     RAISE EXCEPTION 'realtime.messages must have send() columns id uuid, payload jsonb, event text, topic text, private bool, extension text';
+  END IF;
+
+  IF (
+    SELECT c.relrowsecurity
+    FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'realtime'
+      AND c.relname = 'messages'
+  ) IS DISTINCT FROM true THEN
+    RAISE EXCEPTION 'realtime.messages row security is off'
+      USING ERRCODE = '55000';
   END IF;
 END
 $do$;

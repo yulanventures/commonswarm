@@ -51,6 +51,11 @@ function section(name, raw) {
   if (url.protocol !== "postgres:" && url.protocol !== "postgresql:") {
     throw new Error(`${name} database URL must use postgres or postgresql`);
   }
+  for (const parameterName of url.searchParams.keys()) {
+    if (parameterName.toLowerCase() === "options") {
+      throw new Error(`${name} database URL contains the options parameter; connection options are refused`);
+    }
+  }
   const values = {
     host: url.hostname,
     port: url.port || "5432",

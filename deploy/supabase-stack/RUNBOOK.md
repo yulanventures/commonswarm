@@ -450,6 +450,30 @@ The backup target is container `commonswarm-postgres` at `172.31.0.10`. The data
 
 Each nightly set contains globals without role passwords, a custom dump of `postgres`, and R2 retention evidence. The complete database-and-file backup workflow is in [backup/README.md](backup/README.md). A database-only export is not a complete backup; require exact object-version copies and offsite byte checks. `backup_ro` has `pg_read_all_data` and `BYPASSRLS`. `pg_hba.conf` allows it only from `172.31.0.1/32`.
 
+The backup and restore unit files in this release add a `docker.service` dependency, name the restore timer's unit, and the scripts share one lock. On a box that already runs these units, stop both timers first. An old backup and a new drill must not run at the same time.
+
+```sh
+systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+systemctl is-active commonswarm-postgres-backup.service commonswarm-postgres-restore.service
+```
+
+`systemctl is-active` prints one line per service. Wait until both services are inactive. Do not proceed while either line is `active` or `activating`. Both lines must be `inactive` or `failed`. Exit code 0 from this command means at least one service is active.
+
+Switch the release and copy the four unit files from the new `$STACK_DIR/backup/` to `/etc/systemd/system/` (same file names). `$STACK_DIR` is `/home/commonswarm/stack/current/deploy/supabase-stack`, so run the copy after the symlink switch. Then reload systemd, start both timers, and check that both are scheduled:
+
+```sh
+ln -sfn /home/commonswarm/stack/releases/<sha> /home/commonswarm/stack/current
+cp "$STACK_DIR/backup/commonswarm-postgres-backup.service" /etc/systemd/system/
+cp "$STACK_DIR/backup/commonswarm-postgres-backup.timer" /etc/systemd/system/
+cp "$STACK_DIR/backup/commonswarm-postgres-restore.service" /etc/systemd/system/
+cp "$STACK_DIR/backup/commonswarm-postgres-restore.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+systemctl list-timers commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+```
+
+`systemctl list-timers` must show both timers. Do not start `commonswarm-postgres-backup.service` or `commonswarm-postgres-restore.service`. A start runs a backup or a drill.
+
 ## Not established
 
 - Browser CORS and the `apikey` header without Kong need the box rehearsal.

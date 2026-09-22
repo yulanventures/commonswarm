@@ -55,6 +55,14 @@ if ! grep -q 'activity-publish-grants.sql' "$MIGRATE_DIR/prepare-target.sh"; the
   echo "prepare-target.sh must run activity-publish-grants.sql" >&2
   exit 1
 fi
+if ! grep -qx 'GRANT swarm_command, swarm_read, swarm_capability TO commonswarm_edge;' "$MIGRATE_DIR/prepare-target.sh"; then
+  echo "prepare-target GRANT line changed; update the log in the same change" >&2
+  exit 1
+fi
+if ! grep -qx 'log "GRANT swarm_command, swarm_read, swarm_capability TO commonswarm_edge; other memberships were not revoked"' "$MIGRATE_DIR/prepare-target.sh"; then
+  echo "prepare-target log must say the GRANT and that other memberships are not revoked" >&2
+  exit 1
+fi
 
 if grep -Ei \
   -e 'security[[:space:]]+definer' \
@@ -133,7 +141,50 @@ fi
 
 isolated_psql -f "$SETUP_SQL"
 
-isolated_psql <<'SQL'
+isolated_psql -c "ALTER TABLE realtime.messages DISABLE ROW LEVEL SECURITY;"
+
+rls_off_out="$WORKDIR/rls-off.log"
+set +e
+isolated_psql -f "$GRANTS_SQL" >"$rls_off_out" 2>&1
+rls_off_st=$?
+set -e
+if [[ "$rls_off_st" -eq 0 ]]; then
+  echo "expected refusal when realtime.messages row security is off" >&2
+  cat "$rls_off_out" >&2
+  exit 1
+fi
+if ! grep -Eq '55000' "$rls_off_out"; then
+  echo "row security off did not report SQLSTATE 55000" >&2
+  cat "$rls_off_out" >&2
+  exit 1
+fi
+if ! grep -F 'realtime.messages row security is off' "$rls_off_out"; then
+  echo "row security off error text mismatch" >&2
+  cat "$rls_off_out" >&2
+  exit 1
+fi
+
+isolated_psql -f - <<'SQL'
+DO $do$
+BEGIN
+  IF has_schema_privilege('commonswarm_edge', 'realtime', 'USAGE') THEN
+    RAISE EXCEPTION 'row-security refusal left realtime USAGE';
+  END IF;
+  IF has_column_privilege('commonswarm_edge', 'realtime.messages', 'id', 'INSERT') THEN
+    RAISE EXCEPTION 'row-security refusal left INSERT';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_policy WHERE polname = 'commonswarm_edge_activity_insert'
+  ) THEN
+    RAISE EXCEPTION 'row-security refusal left the insert policy';
+  END IF;
+END
+$do$;
+SQL
+
+isolated_psql -c "ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;"
+
+isolated_psql -f - <<'SQL'
 DO $pre$
 BEGIN
   PERFORM set_config('role', 'commonswarm_edge', true);

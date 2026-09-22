@@ -609,6 +609,19 @@ function migrationErrors(values: {
     errors.push("backup hba address");
   }
   if (!values.makeService.includes('/^["\']/.test(value)')) errors.push("quoted database env value");
+  const targetStart = values.lib.indexOf("assert_target_identity() {");
+  const targetEnd = values.lib.indexOf("assert_backup_ro_identity() {");
+  const targetIdentity = targetStart >= 0 && targetEnd > targetStart
+    ? values.lib.slice(targetStart, targetEnd)
+    : "";
+  if (!targetIdentity.includes("pg_db_role_setting") ||
+      !targetIdentity.includes("setrole = 0") ||
+      !targetIdentity.includes("commonswarm.stack_identity=n-db-target-v1")) {
+    errors.push("database-level target marker");
+  }
+  if (/current_setting\('commonswarm\.stack_identity'/.test(targetIdentity)) {
+    errors.push("session target marker");
+  }
   return errors;
 }
 
@@ -705,6 +718,11 @@ test("migration safety controls reject their named mutations", () => {
     ["backup read grant", { ...original, prepare: prepareTarget.replace("GRANT pg_read_all_data TO backup_ro;", "") }, /backup read grant/],
     ["backup hba", { ...original, hba: pgHba.replace("172.31.0.1/32", "172.31.0.0/24") }, /backup hba address/],
     ["quoted database env", { ...original, makeService: makePgService.replace('/^["\']/.test(value)', "false") }, /quoted database env value/],
+    ["database-level target marker", { ...original, lib: migrationLib.replace("pg_db_role_setting AS setting", "pg_settings AS setting") }, /database-level target marker/],
+    ["session target marker", { ...original, lib: migrationLib.replace(
+      "AND item = 'commonswarm.stack_identity=n-db-target-v1'",
+      "AND current_setting('commonswarm.stack_identity', true) = 'n-db-target-v1'",
+    ) }, /session target marker/],
   ];
   for (const [name, mutation, expected] of mutations) {
     assert.match(migrationErrors(mutation).join("\n"), expected, `${name} mutation was not rejected`);
@@ -759,6 +777,42 @@ test("run-db-tool passes only validated trailing arguments", async () => {
     });
     assert.equal(cronTarget.status, 0, cronTarget.stderr);
     assert.deepEqual(cronTarget.stdout.trim().split("\n").slice(-2), ["/work/migrate/restore-cron-jobs.sh", "target"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("make-pg-service refuses an options URL parameter and does not print the URL", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-options-url-"));
+  const secret = "options-url-secret-must-stay-hidden";
+  const optionValue = "-ccommonswarm.stack_identity=n-db-target-v1";
+  const runService = async (url: string) => {
+    const migrationEnv = join(directory, "migration.env");
+    await writeFile(migrationEnv, `TARGET_DATABASE_URL=${url}\n`, { mode: 0o600 });
+    return spawnSync(process.execPath, [join(stackDir, "migrate", "make-pg-service.mjs")], {
+      env: {
+        ...process.env,
+        COMMONSWARM_MIGRATION_ENV_FILE: migrationEnv,
+        PG_SERVICE_OUTPUT: join(directory, "pg_service.conf"),
+        PG_PASS_OUTPUT: join(directory, "pgpass"),
+      },
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  };
+  try {
+    const url = `postgresql://supabase_admin:${encodeURIComponent(secret)}@172.31.0.10/postgres?sslmode=disable&options=${encodeURIComponent(optionValue)}`;
+    const result = await runService(url);
+    assert.notEqual(result.status, 0, "options URL parameter was accepted");
+    assert.match(result.stderr, /\boptions\b/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, new RegExp(secret));
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /postgresql:\/\//);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /172\.31\.0\.10/);
+    assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /n-db-target-v1/);
+    const upper = await runService(url.replace("options=", "Options="));
+    assert.notEqual(upper.status, 0, "Options URL parameter was accepted");
+    assert.match(upper.stderr, /\boptions\b/);
+    assert.doesNotMatch(`${upper.stdout}\n${upper.stderr}`, /n-db-target-v1/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
