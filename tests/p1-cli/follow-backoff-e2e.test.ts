@@ -364,10 +364,11 @@ test("D-056: the exit status separates a refusal from a revoked credential", asy
     await new Promise<void>((closed) => refused.server.close(() => closed()));
   }
 
-  // A revoked credential — refuses identically forever; restarting is a spin.
+  // A revoked or unknown credential. The read edge assigns `unauthenticated`
+  // for that; a 401 whose slug is not in CONFIRMED_CREDENTIAL_LOSS_CODES retries.
   const revoked = await startStub(
     [false],
-    { error: "unauthorized" },
+    { error: "unauthenticated" },
     401,
   );
   let revokedCode: number | null;

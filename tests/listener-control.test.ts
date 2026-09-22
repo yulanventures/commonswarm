@@ -1641,7 +1641,7 @@ test("a 500 past the fast attempts keeps retrying and recovers", async () => {
   const target = paths(root);
   let runs = 0;
   const delays: number[] = [];
-  let duringSustained: ListenerStatus | null = null;
+  const captured: { status: ListenerStatus | null } = { status: null };
   const status = await runListenerSupervisor({
     paths: target,
     profileId: "profile-sustain",
@@ -1651,7 +1651,7 @@ test("a 500 past the fast attempts keeps retrying and recovers", async () => {
       sleep: async (ms) => {
         delays.push(ms);
         if (delays.length === LISTENER_RESTART_MAX_ATTEMPTS + 1) {
-          duringSustained = await queryListenerControl(target, "status");
+          captured.status = await queryListenerControl(target, "status");
         }
       },
       random: () => 0,
@@ -1671,10 +1671,13 @@ test("a 500 past the fast attempts keeps retrying and recovers", async () => {
     delays[LISTENER_RESTART_MAX_ATTEMPTS],
     LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
   );
-  assert.ok(duringSustained);
-  assert.equal(duringSustained.state, "starting");
-  assert.notEqual(duringSustained.state, "failed");
-  const rendered = renderListenerStatus(duringSustained);
+  if (captured.status === null) {
+    assert.fail("status during the sustained wait was not captured");
+  }
+  const waitingStatus = captured.status;
+  assert.equal(waitingStatus.state, "starting");
+  assert.notEqual(waitingStatus.state, "failed");
+  const rendered = renderListenerStatus(waitingStatus);
   assert.match(rendered, /^Listener retrying /);
   assert.match(rendered, /will try again at/);
   assert.match(rendered, /Leave it running/);
