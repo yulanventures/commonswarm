@@ -1,6 +1,6 @@
 # CommonSwarm v0.1.5 release, deployment, and production-verification checklist
 
-This checklist is the record of the v0.1.5 plan. The Supabase project and the Vercel project it names are deleted. Do not run `supabase db push --linked` or `vercel deploy` for CommonSwarm. Not established: there is no written procedure yet for how a schema migration or a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`. The site publish command is `deploy/site/deploy.sh yulan-vps-1`.
+This checklist is the record of the v0.1.5 plan. The Supabase project and the Vercel project it names are deleted. Do not run `supabase db push --linked` or `vercel deploy` for CommonSwarm. The current box release procedure for schema migrations and edge functions is `deploy/RELEASE-TO-BOX.md`. The site publish command is `deploy/site/deploy.sh yulan-vps-1`.
 
 > **Superseded in part by D-044, 2026-08-04:** the cross-owner zero-tool release gate below is
 > retired. Cross-owner listener verification now proves the operator's existing worker/project
@@ -134,15 +134,15 @@ and unestablished.
 Before mutation record the remote migration ledger, function versions/hashes/status, Vercel
 deployment, v0.1.4 tag/assets/checksum, and public/backend controls.
 
-1. The v0.1.5 plan's migration step was a linked dry-run against the hosted project. That project is deleted. Do not run it. Not established: there is no written procedure yet; see `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+1. The v0.1.5 plan's migration step was a linked dry-run against the hosted project. That project is deleted. Do not run it. Use `deploy/RELEASE-TO-BOX.md` for the current box procedure.
 2. Apply the migration.
 3. Run the live-direct-row reconciliation assertion without recording bodies/credentials.
 4. The linked migration ledger was the v0.1.5 check. That project is deleted.
-5. How a new `command` version reaches the box is not established. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+5. Use `deploy/RELEASE-TO-BOX.md` for a new `command` version on the box.
 6. Before read advertises capability, verify anonymous `{}` → 400 `invalid_request`, authenticated
    claim/ACK positive path, wrong workspace/principal/revoked/stale/wrong/unknown indistinguishability,
    and zero body/bearer in ledger/audit.
-7. How a new `read` version reaches the box is not established. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+7. Use `deploy/RELEASE-TO-BOX.md` for a new `read` version on the box.
 8. Eligible authenticated agent sees both `delivery_claim:1` and `delivery_ack:1`.
 9. Verify read `{}` → 401, capability without token → 404, and nonexistent function → 404.
 10. Run an exact v0.1.4 cursor-fallback client before and after capability activation.

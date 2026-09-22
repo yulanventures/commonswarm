@@ -26,8 +26,8 @@ shell, or save its contents as a `bash -euo pipefail` script. A failed command
 stops only that block, not the root shell. Values needed by another block live
 in root-only files, never only in shell memory. On every stop, refusal, or abort,
 run the "Abort cleanup" block at the end of section 1 before closing the
-window; it restarts the edge recycle timer when `window.env` says this window
-stopped it.
+window; it restarts the edge recycle and backup/restore timers when `window.env`
+says this window stopped them.
 
 ## 1. Common release preparation
 
@@ -46,29 +46,46 @@ stopped it.
 
 ```sh
 SHA=<sha>
-test "${#SHA}" -eq 40
-test "$(git remote get-url origin)" = 'https://github.com/yulanventures/commonswarm.git'
-git fetch origin main
-test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
-git merge-base --is-ancestor "$SHA" origin/main
+(
+  set -euo pipefail
+  check() {
+    label="$1"
+    shift
+    if "$@"; then
+      printf '%s: PASS\n' "$label"
+    else
+      printf '%s: FAIL\n' "$label" >&2
+      return 1
+    fi
+  }
+  check 'SHA length' test "${#SHA}" -eq 40
+  check 'origin URL' test "$(git remote get-url origin)" = 'https://github.com/yulanventures/commonswarm.git'
+  check 'origin/main fetch' git fetch origin main
+  check 'exact commit' test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
+  check 'SHA on origin/main' git merge-base --is-ancestor "$SHA" origin/main
 
+  SHORT_SHA="$(git rev-parse --short=12 "$SHA")"
+  RUN_DAY="$(date -u +%F)"
+  EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}"
+  RUN_LOG="$EVIDENCE_DIR/run.log"
+  ARCHIVE="/tmp/commonswarm-${SHA}.tar"
+  GATE_EVIDENCE="$EVIDENCE_DIR/gate-evidence.txt"
+  install -d -m 0700 "$EVIDENCE_DIR"
+  install -m 0600 /dev/null "$RUN_LOG"
+  check 'exact-SHA archive' git archive --format=tar --output "$ARCHIVE" "$SHA"
+  shasum -a 256 "$ARCHIVE" >"$EVIDENCE_DIR/archive.sha256"
+  cat "$EVIDENCE_DIR/archive.sha256"
+
+  check 'gate evidence file' test -f "$GATE_EVIDENCE"
+  check 'gate evidence SHA' grep -Fx "SHA=$SHA" "$GATE_EVIDENCE"
+  check 'command-core gate' grep -Fx 'npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS' "$GATE_EVIDENCE"
+  check 'edge check gate' grep -Fx 'npm run check:edge: PASS' "$GATE_EVIDENCE"
+)
 SHORT_SHA="$(git rev-parse --short=12 "$SHA")"
 RUN_DAY="$(date -u +%F)"
 EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}"
-install -d -m 0700 "$EVIDENCE_DIR"
 RUN_LOG="$EVIDENCE_DIR/run.log"
-install -m 0600 /dev/null "$RUN_LOG"
-
 ARCHIVE="/tmp/commonswarm-${SHA}.tar"
-git archive --format=tar --output "$ARCHIVE" "$SHA"
-shasum -a 256 "$ARCHIVE" >"$EVIDENCE_DIR/archive.sha256"
-cat "$EVIDENCE_DIR/archive.sha256"
-
-GATE_EVIDENCE="$EVIDENCE_DIR/gate-evidence.txt"
-test -f "$GATE_EVIDENCE"
-grep -Fx "SHA=$SHA" "$GATE_EVIDENCE"
-grep -Fx 'npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS' "$GATE_EVIDENCE"
-grep -Fx 'npm run check:edge: PASS' "$GATE_EVIDENCE"
 ```
 
 Record approvals, affected surfaces, the backup-age agreement, commands, exit
@@ -76,18 +93,110 @@ codes, and safe verification output in `run.log`. Never record an environment
 file, credential, curl authorization file, or secret value.
 
 For a database release, CSwarmDevLead places the reviewed catalog and functional
-verification SQL in `EVIDENCE_DIR` before Anvil continues. After creating
-`PROOF_DIR` below, Anvil transfers that directory without adding credentials:
+verification SQL in `EVIDENCE_DIR` before Anvil continues. Derive the
+environment-name inventory from the same exact-SHA archive on the Mac.
+The router's required main names and database alias rule are the base; the lead
+reviews strict checks in each changed function at that SHA and adds any further
+required name. Forwarded names without a strict requirement are optional. This
+inventory records only names, never values. Set `CHANGED_FUNCTIONS` from the
+reviewed diff; a router change checks all five functions:
+
+```sh
+(
+  set -euo pipefail
+  ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
+  trap 'rm -rf "$ROUTER_DIR"' EXIT
+  ROUTER_SOURCE="$ROUTER_DIR/router.ts"
+  tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts >"$ROUTER_SOURCE"
+  CHANGED_FUNCTIONS='<space-separated changed function names>'
+  ROUTER_CHANGED=<yes-or-no>
+  ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
+  if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0'; fi
+  case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
+  cat >"$ROUTER_DIR/inventory.ts" <<'TS'
+const { FUNCTION_ENV_NAMES, REQUIRED_MAIN_ENV, COMMAND_TEST_HOOKS } =
+  await import(`file://${Deno.args[0]}`);
+const selected = Deno.args[1].split(/\s+/).filter(Boolean);
+for (const name of selected) {
+  if (!(name in FUNCTION_ENV_NAMES)) throw new Error(`unknown function: ${name}`);
+}
+const alias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL';
+const extra = Deno.args[2].split(/\s+/).filter(Boolean);
+const forwarded = new Set(selected.flatMap((name) => FUNCTION_ENV_NAMES[name]));
+for (const name of extra) {
+  if (!forwarded.has(name)) throw new Error(`required name is not forwarded: ${name}`);
+}
+const required = [...new Set([...REQUIRED_MAIN_ENV, alias, ...extra])];
+const optional = [...new Set(selected.flatMap((name) => FUNCTION_ENV_NAMES[name]))]
+  .filter((name) => !required.includes(name) && !alias.split('|').includes(name)
+    && !COMMAND_TEST_HOOKS.has(name)).sort();
+console.log(JSON.stringify({ required: required.sort(), optional }, null, 2));
+TS
+  deno run --no-config --allow-read="$ROUTER_DIR" "$ROUTER_DIR/inventory.ts" \
+    "$ROUTER_SOURCE" "$CHANGED_FUNCTIONS" "$ADDITIONAL_REQUIRED_ENV_NAMES" \
+    >"$EVIDENCE_DIR/required-edge-env.json"
+  chmod 0600 "$EVIDENCE_DIR/required-edge-env.json"
+  tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts \
+    | rg -n 'REQUIRED_MAIN_ENV|mainEnvironmentProblems|FUNCTION_ENV_NAMES' \
+    >"$EVIDENCE_DIR/edge-env-source-check.txt"
+  chmod 0600 "$EVIDENCE_DIR/edge-env-source-check.txt"
+)
+```
+
+Anvil records the changed-function list from the reviewed diff in `run.log`.
+CSwarmDevLead checks the archived `supabase/functions/<name>/index.ts` files
+for strict environment failures and confirms `required-edge-env.json` covers
+them before transfer. The current command, read, capability, activity, and H0
+checks add no requirement beyond that base. Optional forwarded names such as
+`SWARM_CAPABILITY_ALLOWED_ORIGINS` and `SWARM_CAPABILITY_URLS` stay off the
+required list.
+
+After creating `PROOF_DIR` below, Anvil transfers the reviewed proof files
+without adding credentials. For a database release, include the SQL files;
+for an edge release, include the name-only inventory:
 
 ```sh
 PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
-(cd "$EVIDENCE_DIR" && tar -cf "$PROOF_ARCHIVE" ./*.sql)
+PROOF_LIST="$(mktemp /tmp/commonswarm-proof-list-XXXXXX)"
+(cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
+printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
+(cd "$EVIDENCE_DIR" && tar -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
+rm -f "$PROOF_LIST"
 scp "$PROOF_ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release-proofs.tar
 ```
 
 ### Apply — Anvil
 
 Upload the archive once. Set `KIND_LIST` to `edge`, `stack`, or `edge stack`.
+Any release with migrations uses `stack` in `KIND_LIST` because sections 2–5
+read migration files and helpers from `NEW_STACK`. H0 therefore uses
+`KIND_LIST='edge stack'`. Building that immutable stack directory does not
+itself switch `stack/current`. The guarded switch is the only switch site and
+runs only if stack runtime files changed. After the apply block below builds
+both release directories, compare them on the box before deciding:
+
+```sh
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  for RUNTIME_PATH in compose.yaml postgres backup; do
+    if diff -qr \
+      "$PREVIOUS_STACK/deploy/supabase-stack/$RUNTIME_PATH" \
+      "$NEW_STACK/deploy/supabase-stack/$RUNTIME_PATH"; then
+      :
+    else
+      test "$?" -eq 1
+      printf 'stack runtime changed: %s\n' "$RUNTIME_PATH"
+    fi
+  done
+)
+```
+
+No output and exit status 0 for every path means no stack runtime switch. Any
+content difference means HezLead reviews the output and schedules the guarded
+switch. A missing path or comparison error is a stop. H0 does not switch
+`stack/current` unless this comparison finds a stack runtime change.
+
 On 2026-09-22 HezLead observed that edge release directories are owned by
 `commonswarm:commonswarm` with mode `0750`, while stack release directories use
 mode `0755`. The block records both previous release paths before any switch,
@@ -151,6 +260,7 @@ sudo -n -i
     printf 'PREVIOUS_EDGE=%q\n' "$PREVIOUS_EDGE"
     printf 'PREVIOUS_STACK=%q\n' "$PREVIOUS_STACK"
     printf 'RECYCLE_TIMER_STOPPED=0\n'
+    printf 'BACKUP_TIMERS_STOPPED=0\n'
   } >"$WINDOW_ENV"
   chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
@@ -159,8 +269,8 @@ sudo -n -i
 )
 ```
 
-For a database release, unpack the transferred verification files only after
-HezLead confirms their list contains no secret:
+Unpack the transferred proof files only after HezLead confirms their list
+contains no secret:
 
 ```sh
 (
@@ -170,8 +280,10 @@ HezLead confirms their list contains no secret:
   tar -xf /tmp/commonswarm-release-proofs.tar -C "$PROOF_DIR"
   chown -R root:root "$PROOF_DIR"
   find "$PROOF_DIR" -type f -exec chmod 0600 {} +
-  (cd "$PROOF_DIR" && sha256sum ./*.sql) >"$PROOF_DIR/verification-sql.sha256"
-  chmod 0600 "$PROOF_DIR/verification-sql.sha256"
+  if compgen -G "$PROOF_DIR/*.sql" >/dev/null; then
+    (cd "$PROOF_DIR" && sha256sum ./*.sql) >"$PROOF_DIR/verification-sql.sha256"
+    chmod 0600 "$PROOF_DIR/verification-sql.sha256"
+  fi
 )
 ```
 
@@ -227,8 +339,9 @@ ending in `.log`. Create the list with a protected editor as root and mode
   grep -Fx 'copy-back.list' "$PROOF_DIR/copy-back.list"
   while IFS= read -r path; do
     test -n "$path"
+    while [[ "$path" == ./* ]]; do path="${path#./}"; done
     case "$path" in
-      /*|../*|*/../*|*.log|database/logs/*|window.env) false ;;
+      ''|/*|../*|*/../*|*.log|database/logs/*|window.env) false ;;
     esac
     test -f "$PROOF_DIR/$path"
   done <"$PROOF_DIR/copy-back.list"
@@ -256,6 +369,12 @@ hide the failing block's evidence.
     systemctl list-timers commonswarm-edge-recycle.timer
     sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=0/' "$PROOF_DIR/window.env"
     printf '%s\n' 'abort cleanup restarted commonswarm-edge-recycle.timer' >>"$PROOF_DIR/box-run.log"
+  fi
+  if [ "$BACKUP_TIMERS_STOPPED" = 1 ]; then
+    systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+    systemctl list-timers --all commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
+    sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=0/' "$PROOF_DIR/window.env"
+    printf '%s\n' 'abort cleanup restarted backup/restore timers' >>"$PROOF_DIR/box-run.log"
   fi
 )
 ```
@@ -547,9 +666,15 @@ For each version with NO ledger row, CSwarmDevLead must supply
 query returning exactly one unaligned value: `t` only when that migration's real
 catalog/data postcondition is complete, otherwise `f`. A generic catalog query
 is **not established**; do not infer object state from the filename. For the
-transactional check, the file must leave one row and one Boolean column named
-`catalog_ok` in psql's query buffer (no terminating semicolon); the wrapper
-executes it with `\gset` and refuses every value other than true.
+transactional check, the file must end with its own `\gset` on the line after
+a query selecting exactly one Boolean column aliased `catalog_ok`. The query
+returns one row, whose unaligned value is `t` or `f`; the wrapper refuses every
+value other than true. For example, a complete proof file is:
+
+```sql
+SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
+\gset
+```
 
 ### Preflight — Anvil; HezLead approves the result
 
@@ -659,7 +784,6 @@ same check. Do not proceed merely because the service command returned.
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '$VERSION';")"
   cat >"$APPLY_SQL" <<SQL
 \i /proof/${VERSION}-catalog.sql
-\gset
 \if :{?catalog_ok}
 SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
 \gset
@@ -700,9 +824,9 @@ Any count other than `0` or `1`, or output other than `t` or `f`, is a stop.
 
 The wrapper verifies that a version-only ledger row is valid on the live ledger,
 runs the migration, inserts its ledger row, and proves the catalog before the
-same transaction commits. `\gset` and `\if` turn zero rows, multiple rows,
-missing variables, false, or malformed output into a psql error or a raised
-exception, so the transaction rolls back.
+same transaction commits. The proof file's own `\gset` turns zero or multiple
+rows into a psql error; the wrapper's `\if` and exception branches reject
+missing, false, or malformed values. Any failure rolls the transaction back.
 
 ```sh
 (
@@ -735,7 +859,6 @@ END
 \i /migrations/$MIGRATION_FILE
 INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('$VERSION');
 \i /proof/${VERSION}-catalog.sql
-\gset
 \if :{?catalog_ok}
 SELECT :'catalog_ok' = 't' AS catalog_is_t
 \gset
@@ -779,7 +902,6 @@ transaction.
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '$VERSION';")"
   cat >"$APPLY_SQL" <<SQL
 \i /proof/${VERSION}-catalog.sql
-\gset
 \if :{?catalog_ok}
 SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
 \gset
@@ -872,33 +994,15 @@ that it must be restarted before closing the window.
   chmod 0600 "$PROOF_DIR/edge-with-override.SHA256SUMS"
   (cd "$NEW_EDGE" && sha256sum --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
 
-  CHANGED_FUNCTIONS='<space-separated changed function names>'
-  if [ '<router changed: yes or no>' = yes ]; then
-    CHANGED_FUNCTIONS='command read capability activity h0'
-  fi
-  REQUIRED_ENV_JSON="/run/commonswarm-release-${SHA}-required-env.json"
-  docker run --rm --entrypoint deno \
-    --env "CHANGED_FUNCTIONS=$CHANGED_FUNCTIONS" \
-    --volume "$NEW_EDGE/deploy/edge-runtime/main:/work:ro" \
-    public.ecr.aws/supabase/edge-runtime:v1.73.13 \
-    eval --no-config '
-      import { FUNCTION_ENV_NAMES, mainEnvironmentProblems } from "file:///work/router.ts";
-      const names = new Set();
-      mainEnvironmentProblems((name) => {
-        names.add(name);
-        return name === "SWARM_SELF_SERVE" ? "1" : "present";
-      });
-      for (const fn of (Deno.env.get("CHANGED_FUNCTIONS") ?? "").split(/\s+/).filter(Boolean)) {
-        if (!(fn in FUNCTION_ENV_NAMES)) throw new Error(`unknown function: ${fn}`);
-        for (const name of FUNCTION_ENV_NAMES[fn]) names.add(name);
-      }
-      console.log(JSON.stringify([...names].sort()));
-    ' >"$REQUIRED_ENV_JSON"
-
-  python3 - "$REQUIRED_ENV_JSON" /home/commonswarm/.env <<'PY'
+  python3 - "$PROOF_DIR/required-edge-env.json" /home/commonswarm/.env <<'PY'
 import json, sys
 
-required = set(json.load(open(sys.argv[1])))
+inventory = json.load(open(sys.argv[1]))
+required = set(inventory['required'])
+optional = set(inventory['optional'])
+database_alias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL'
+assert database_alias in required
+assert not (required & optional)
 values = {}
 for raw in open(sys.argv[2]):
     line = raw.strip()
@@ -917,17 +1021,16 @@ test_hooks = {
     'SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP',
 }
 assert not (test_hooks & values.keys()), 'test-only command hook is present'
-required -= test_hooks
 database_names = {'SWARM_DATABASE_URL', 'SUPABASE_DB_URL'}
-if required & database_names:
-    assert any(values.get(name) for name in database_names), 'one non-empty database URL alias is required'
-    required -= database_names
+assert any(values.get(name) for name in database_names), 'one non-empty database URL alias is required'
+required.remove(database_alias)
 missing = sorted(name for name in required if not values.get(name))
 assert not missing, 'missing or empty required names: ' + ', '.join(missing)
 assert values.get('SWARM_SELF_SERVE') == '1', 'SWARM_SELF_SERVE must equal 1'
 print('required edge environment names are present and non-empty; values not shown')
+for name in sorted(optional):
+    print(f'optional edge environment {name}: {"present" if values.get(name) else "absent"}')
 PY
-  rm -f "$REQUIRED_ENV_JSON"
 
   cd "$NEW_EDGE/deploy/edge-runtime"
   sudo -u commonswarm env \
@@ -937,11 +1040,10 @@ PY
 )
 ```
 
-The changed-function list comes from the reviewed diff. If the router changed,
-check all five functions. The source-owned `FUNCTION_ENV_NAMES` and
-`mainEnvironmentProblems` inventories decide which names are required; test
-hooks remain forbidden, and either non-empty database URL alias satisfies the
-database requirement. The check never prints a value.
+The changed-function list and required-name inventory come from the exact-SHA
+Mac gate. Optional forwarded names are reported as present or absent and never
+stop the release. Test hooks remain forbidden, and either non-empty database
+URL alias satisfies the database requirement. The check never prints a value.
 
 ### Apply — Anvil
 
@@ -1034,6 +1136,11 @@ successful release:
     COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
     COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
     docker compose -p commonswarm-edge up -d edge-runtime
+  deadline=$(( $(date +%s) + 180 ))
+  while [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' commonswarm-edge-edge-runtime-1)" != healthy ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then false; fi
+    sleep 2
+  done
   curl -fsS http://127.0.0.1:9000/health
 )
 ```
@@ -1107,9 +1214,10 @@ PostgreSQL restart after a switch loads those files from the new release. The
 guard compares them and stops for HezLead if either differs. They were verified
 identical between `90e84f0e` and `e38b499f`.
 
-Do not run this switch from 03:30 through 04:30 UTC on any day, or from 04:30
-through 05:30 UTC on Sunday. Both timers are persistent, so crossing a missed
-schedule can start work immediately. For the forward switch substitute
+Do not run the forward switch from 03:30 through 04:30 UTC on any day, or from
+04:30 through 05:30 UTC on Sunday. Rollback is permitted during those hours;
+record its UTC time in `box-run.log`. Both timers are persistent, so crossing a
+missed schedule can start work immediately. For the forward switch substitute
 `apply`; for rollback substitute `rollback`. Rollback reads
 `PREVIOUS_STACK` only from `window.env`, refuses an empty value, and restores
 the installed unit copies saved before the forward switch.
@@ -1126,8 +1234,12 @@ the installed unit copies saved before the forward switch.
   UTC_HM="$(date -u +%H%M)"
   UTC_DOW="$(date -u +%u)"
   UTC_MINUTES=$((10#${UTC_HM%??} * 60 + 10#${UTC_HM#??}))
-  if (( UTC_MINUTES >= 210 && UTC_MINUTES < 270 )); then false; fi
-  if [ "$UTC_DOW" = 7 ] && (( UTC_MINUTES >= 270 && UTC_MINUTES < 330 )); then false; fi
+  printf 'stack switch direction=%s UTC=%s day=%s\n' "$STACK_SWITCH_DIRECTION" "$UTC_HM" "$UTC_DOW" \
+    | tee -a "$PROOF_DIR/box-run.log"
+  if [ "$STACK_SWITCH_DIRECTION" = apply ]; then
+    if (( UTC_MINUTES >= 210 && UTC_MINUTES < 270 )); then false; fi
+    if [ "$UTC_DOW" = 7 ] && (( UTC_MINUTES >= 270 && UTC_MINUTES < 330 )); then false; fi
+  fi
 
   for RELATIVE_PATH in postgres/pg_hba.conf postgres/10-runtime-roles.sh; do
     if ! cmp -s \
@@ -1167,13 +1279,14 @@ the installed unit copies saved before the forward switch.
   test -n "$TARGET_STACK"
   for UNIT in "${UNIT_NAMES[@]}"; do test -f "$UNIT_SOURCE/$UNIT"; done
 
+  sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=1/' "$PROOF_DIR/window.env"
   systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
   while :; do
     BACKUP_STATE="$(systemctl is-active commonswarm-postgres-backup.service || true)"
     RESTORE_STATE="$(systemctl is-active commonswarm-postgres-restore.service || true)"
     case "$BACKUP_STATE:$RESTORE_STATE" in
       inactive:inactive|inactive:failed|failed:inactive|failed:failed) break ;;
-      active:*|activating:*|*:active|*:activating) sleep 5 ;;
+      active:*|activating:*|deactivating:*|reloading:*|*:active|*:activating|*:deactivating|*:reloading) sleep 5 ;;
       *) false ;;
     esac
   done
@@ -1187,9 +1300,9 @@ the installed unit copies saved before the forward switch.
     fi
   done
   systemctl daemon-reload
-  declare -A ACTIVE_ENTER_BEFORE
+  declare -A INACTIVE_EXIT_BEFORE
   for SERVICE in commonswarm-postgres-backup.service commonswarm-postgres-restore.service; do
-    ACTIVE_ENTER_BEFORE["$SERVICE"]="$(systemctl show "$SERVICE" -p ActiveEnterTimestampMonotonic --value)"
+    INACTIVE_EXIT_BEFORE["$SERVICE"]="$(systemctl show "$SERVICE" -p InactiveExitTimestampMonotonic --value)"
   done
   systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
   systemctl list-timers --all commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer \
@@ -1201,24 +1314,22 @@ the installed unit copies saved before the forward switch.
     test -n "$NEXT"
     test "$(date -u -d "$NEXT" +%s)" -gt "$NOW_EPOCH"
   done
+  sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=0/' "$PROOF_DIR/window.env"
   for SERVICE in commonswarm-postgres-backup.service commonswarm-postgres-restore.service; do
-    STATE="$(systemctl is-active "$SERVICE" || true)"
-    ACTIVE_ENTER_AFTER="$(systemctl show "$SERVICE" -p ActiveEnterTimestampMonotonic --value)"
+    while :; do
+      STATE="$(systemctl is-active "$SERVICE" || true)"
+      case "$STATE" in
+        activating|deactivating|reloading) sleep 5 ;;
+        *) break ;;
+      esac
+    done
+    INACTIVE_EXIT_AFTER="$(systemctl show "$SERVICE" -p InactiveExitTimestampMonotonic --value)"
     ACTIVATED=0
-    if [ "$ACTIVE_ENTER_AFTER" != "${ACTIVE_ENTER_BEFORE[$SERVICE]}" ]; then ACTIVATED=1; fi
+    if [ "$INACTIVE_EXIT_AFTER" != "${INACTIVE_EXIT_BEFORE[$SERVICE]}" ]; then ACTIVATED=1; fi
     printf 'after timer start: %s=%s activated=%s\n' "$SERVICE" "$STATE" "$ACTIVATED" \
       | tee -a "$PROOF_DIR/box-run.log"
-    case "$STATE" in
-      active|activating)
-        while systemctl is-active --quiet "$SERVICE"; do sleep 5; done
-        test "$(systemctl show "$SERVICE" -p Result --value)" = success
-        ;;
-      inactive|failed) ;;
-      *) false ;;
-    esac
-    if [ "$ACTIVATED" = 1 ]; then
-      test "$(systemctl show "$SERVICE" -p Result --value)" = success
-    fi
+    test "$STATE" = inactive
+    test "$(systemctl show "$SERVICE" -p Result --value)" = success
   done
   test "$(readlink -f /home/commonswarm/stack/current)" = "$TARGET_STACK"
 )
@@ -1389,14 +1500,35 @@ For a release containing several parts, use this order:
 3. Run required **Ledger backfill** steps.
 4. Apply and verify schema migrations, one file at a time.
 5. Release edge code that depends on that schema.
-6. Run the single guarded stack switch and unit sync when the stack release
-   changes, whether section 7, section 8, or both need it.
+6. Run the single guarded stack switch and unit sync only when the section 1
+   `compose.yaml`, `postgres/`, or `backup/` comparison finds a stack runtime
+   change, whether section 7, section 8, or both need it. A migration-only
+   release uses `NEW_STACK` without changing `stack/current`.
 7. Recreate changed stack images, one service at a time.
 8. Run public and authenticated end-to-end verification; archive evidence.
 
 Migration precedes code that needs it. Backfill precedes later migrations. A
 new edge must remain compatible with the verified database state at the moment
 it is recreated.
+
+**H0 (the first use of this procedure).** `KIND_LIST` is `edge stack`. The
+stack release directory is built for its migration files and helpers, and
+`stack/current` is switched only if the section 7 diff shows changed stack
+runtime files. Order:
+
+1. Ledger backfill for `20260916000001` and `20260916000002` (section 4).
+2. Migrations, one at a time, each with its own lead-supplied catalog proof:
+   `20260922000001` (poll lock and batch tables), `20260922000002` (the
+   waiting-slot column), `20260922000003` (batch retention: the function
+   `swarm.h0_poll_batch_retention_days()` and the pg_cron job
+   `swarm-purge-h0-poll-batches`).
+3. One edge release with `command`, `h0` and the router together (section 6).
+   The h0 poll reads tables that the migrations create.
+
+`20260922000003` changes the box's cron job set. Any cron-set comparison after
+the upgrade must expect exactly one new job, `swarm-purge-h0-poll-batches`, and
+no other change. The migrations are additive, so the old edge keeps working
+between steps 2 and 3, and an edge rollback after step 2 is safe.
 
 ### Apply — Anvil; HezLead authorizes every transition
 
@@ -1431,9 +1563,9 @@ Stop the window immediately on any of these:
 - the requested action is outside the exact surfaces, commands, and transitions
   in the approved release plan.
 
-On every item above, run section 1's abort cleanup so
-`commonswarm-edge-recycle.timer` is restarted when `window.env` says the
-window stopped it.
+On every item above, run section 1's abort cleanup so the edge recycle and
+backup/restore timers are restarted when `window.env` says the window stopped
+them.
 
 ### Rollback — HezLead decides; Anvil executes
 
