@@ -513,7 +513,7 @@ async function readWithDeadline<T>(
  * id once minted a second live credential — so the id is generated ONCE per intent by the
  * caller and reused across retries, never regenerated inside this function.
  */
-async function postCommand(
+export async function postCommand(
   session: Session,
   commandId: string,
   command: Record<string, unknown>,
@@ -549,7 +549,14 @@ async function postCommand(
     }
     if (response.status === 401 && body.error === "unauthenticated") {
       const c = client();
-      if (c) await clearDeadSession(c);
+      if (c) {
+        try {
+          await clearDeadSession(c);
+        } catch {
+          // The body already says unauthenticated. A failed local sign-out
+          // must not turn that answer into an unknown command outcome.
+        }
+      }
       throw new SessionExpired();
     }
     return { status: response.status, body };

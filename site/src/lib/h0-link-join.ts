@@ -9,18 +9,37 @@
 import type { Session } from "@supabase/supabase-js";
 import { h0AgentPaste } from "../../../src/h0/paste";
 import {
+  AGENT_JOIN_LIVE_LIMIT_ERROR,
   AGENT_JOIN_SEAT_CAP_MAX,
   AGENT_JOIN_SEAT_CAP_MIN,
+  joinInviteBeforeDoneSentences,
+  joinInviteLiveLimitMessage,
+  joinInviteLostMintMessage,
   joinInviteResultLead,
   mintAgentJoinCredentialCommand,
   revokeAgentJoinCredentialCommand,
 } from "../../../src/protocol/agent-join-limits";
 import { h0AgentDocumentUrl } from "../../../src/protocol/h0-agent-document-url";
-import { CLIENT_PROTOCOL_VERSION, deployment, uuid } from "./commonswarm";
+import {
+  CommandOutcomeUnknown,
+  NoDeployment,
+  SessionExpired,
+  WorkspaceOutcomeUnknown,
+  deployment,
+  postCommand,
+  uuid,
+} from "./commonswarm";
 
-const COMMAND_TIMEOUT_MS = 30_000;
-const WITHHELD_MESSAGE =
+const WITHHELD_DETAIL =
   "The invite was created, but this page refused to show the message. Revoke it here. The credential was not shown.";
+const MISSING_CREDENTIAL_DETAIL =
+  "The credential was not in the response, so it cannot be shown. Revoke the invite if you do not want it used.";
+const LOST_REVOKE_MESSAGE =
+  "The request did not reach the deployment, or the answer never came back. The invite may still be active.";
+
+function panelLead(detail: string): string {
+  return [detail, ...joinInviteBeforeDoneSentences()].join(" ");
+}
 
 export const JOIN_INVITE_REVOKED_MESSAGE =
   "This invite is revoked. It can no longer be used to join.";
@@ -64,11 +83,6 @@ export interface LinkJoinApi {
   inviteId(): string | null;
 }
 
-interface DeploymentTarget {
-  url: string;
-  anonKey: string;
-}
-
 function shownExpiry(value: unknown): string | null {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) return null;
   return value;
@@ -104,14 +118,14 @@ export function revealFromMintBody(
       paste: null,
       inviteId: id,
       documentUrl: "",
-      lead: "The credential was not in the response, so it cannot be shown. Revoke the invite if you do not want it used.",
+      lead: panelLead(MISSING_CREDENTIAL_DETAIL),
       withheld: true,
     };
   }
   try {
     const documentUrl = h0AgentDocumentUrl(serviceBaseUrl, locator);
     if (documentUrl.toLowerCase().includes(secret.toLowerCase())) {
-      throw new JoinInviteWithheld(id, WITHHELD_MESSAGE);
+      throw new JoinInviteWithheld(id, panelLead(WITHHELD_DETAIL));
     }
     const paste = h0AgentPaste({ documentUrl, joinCredential: secret });
     return {
@@ -123,70 +137,60 @@ export function revealFromMintBody(
     };
   } catch (error) {
     if (error instanceof JoinInviteWithheld) throw error;
-    throw new JoinInviteWithheld(id, WITHHELD_MESSAGE);
+    throw new JoinInviteWithheld(id, panelLead(WITHHELD_DETAIL));
   }
 }
 
+function signInRefused(purpose: "mint" | "revoke"): string {
+  return purpose === "revoke"
+    ? "Your sign-in is no longer valid. The invite was not revoked."
+    : "Your sign-in is no longer valid. Sign in again. No invite was created.";
+}
+
+function lostCommandMessage(purpose: "mint" | "revoke"): string {
+  return purpose === "mint" ? joinInviteLostMintMessage() : LOST_REVOKE_MESSAGE;
+}
+
 async function postAccepted(
-  target: DeploymentTarget,
   session: Session,
   commandId: string,
   workspaceId: string,
   command: Record<string, unknown>,
   purpose: "mint" | "revoke",
 ): Promise<Record<string, unknown>> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
-  let response: Response;
+  let status: number;
+  let body: Record<string, unknown>;
   try {
-    response = await fetch(`${target.url}/functions/v1/command`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${session.access_token}`,
-        apikey: target.anonKey,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        command_id: commandId,
-        client_version: CLIENT_PROTOCOL_VERSION,
-        workspace_id: workspaceId,
-        stream: { kind: "workspace" },
-        command,
-      }),
-      signal: controller.signal,
-    });
-  } catch {
-    throw new JoinInviteError(
-      purpose === "revoke"
-        ? "The request did not reach the deployment, or the answer never came back. The invite may still be active."
-        : "The request did not reach the deployment, or the answer never came back. Reload this page before trying again.",
+    const outcome = await postCommand(
+      session,
+      commandId,
+      command,
+      { workspace_id: workspaceId, stream: { kind: "workspace" } },
+      lostCommandMessage(purpose),
     );
-  } finally {
-    clearTimeout(timer);
+    status = outcome.status;
+    body = outcome.body;
+  } catch (error) {
+    if (error instanceof SessionExpired) throw new JoinInviteError(signInRefused(purpose));
+    if (error instanceof NoDeployment) {
+      throw new JoinInviteError("Open commonswarm.com/app and continue on the live site.");
+    }
+    if (error instanceof CommandOutcomeUnknown || error instanceof WorkspaceOutcomeUnknown) {
+      throw new JoinInviteError(lostCommandMessage(purpose));
+    }
+    throw error;
   }
-
-  const text = await response.text().catch(() => "");
-  let body: Record<string, unknown> = {};
-  try {
-    body = text ? JSON.parse(text) as Record<string, unknown> : {};
-  } catch {
-    body = {};
-  }
-  if (response.status === 409 && body.error === "already_revoked") {
+  if (status === 409 && body.error === "already_revoked") {
     throw new JoinInviteAlreadyRevoked();
   }
-  if (response.status === 401) {
-    throw new JoinInviteError(
-      purpose === "revoke"
-        ? "Your sign-in is no longer valid. The invite was not revoked."
-        : "Your sign-in is no longer valid. Sign in again. No invite was created.",
-    );
+  if (status === 401) {
+    throw new JoinInviteError(signInRefused(purpose));
   }
-  if (response.status === 403) {
-    if (purpose === "mint" && body.error === "join_credential_limit_reached") {
-      throw new JoinInviteError(
-        "You already have as many live invites as this workspace allows. Revoke one, or wait for one to expire. No new invite was created.",
-      );
+  if (status === 403) {
+    if (purpose === "mint" && body.error === AGENT_JOIN_LIVE_LIMIT_ERROR) {
+      const scope = typeof body.scope === "string" ? body.scope : "";
+      const limited = joinInviteLiveLimitMessage(scope);
+      if (limited) throw new JoinInviteError(limited);
     }
     throw new JoinInviteError(
       purpose === "revoke"
@@ -194,18 +198,18 @@ async function postAccepted(
         : "CommonSwarm did not accept this. Nothing new was added.",
     );
   }
-  if (response.status === 400) {
+  if (status === 400) {
     throw new JoinInviteError(
       purpose === "revoke"
         ? "The deployment did not accept the revoke request. The invite may still be active."
         : "The deployment did not accept the request. Nothing was created.",
     );
   }
-  if (response.status !== 200 || body.status !== "accepted") {
+  if (status !== 200 || body.status !== "accepted") {
     throw new JoinInviteError(
       purpose === "revoke"
-        ? `The deployment answered HTTP ${response.status}. The invite may still be active. Try again.`
-        : `The deployment answered HTTP ${response.status}. Reload this page before trying again.`,
+        ? `The deployment answered HTTP ${status}. The invite may still be active. Try again.`
+        : `The deployment answered HTTP ${status}. Reload this page before trying again.`,
     );
   }
   return body;
@@ -221,7 +225,6 @@ export async function mintJoinInvite(input: {
     throw new JoinInviteError("Open commonswarm.com/app and continue on the live site.");
   }
   const body = await postAccepted(
-    target,
     input.session,
     input.commandId,
     input.workspaceId,
@@ -248,7 +251,6 @@ export async function revokeJoinInvite(input: {
     throw new JoinInviteError("This page cannot revoke this invite.");
   }
   await postAccepted(
-    target,
     input.session,
     input.commandId,
     input.workspaceId,

@@ -261,6 +261,7 @@ const {
   } from "../../lib/commonswarm";
   import { dashboardAgentPrompt, dashboardAgentConnection, dashboardAgentFilePrompt, promptCopyPayload } from "./agent-prompt";
   import { h0LinkJoinEnabled, loadLinkJoin } from "../../lib/h0-link-join-flag";
+  import { callLinkJoin } from "../../lib/h0-link-join-load";
   import {
     concealJoinInvite,
     dismissShownJoin,
@@ -437,11 +438,19 @@ const {
           inviteId: () => this.#inviteId,
         };
         const joining = loadLinkJoin();
+        const showJoinLoadError = (message: string): void => {
+          api.formError(message);
+        };
+        callLinkJoin(joining, () => undefined, showJoinLoadError);
         this.querySelector<HTMLButtonElement>('[data-action="mint-join"]')?.addEventListener("click", () => {
-          void joining?.then((module) => module.startJoinMint(api));
+          callLinkJoin(joining, (module) => {
+            void module.startJoinMint(api);
+          }, showJoinLoadError);
         });
         this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]')?.addEventListener("click", () => {
-          void joining?.then((module) => module.startJoinRevoke(api));
+          callLinkJoin(joining, (module) => {
+            void module.startJoinRevoke(api);
+          }, showJoinLoadError);
         });
       }
     }

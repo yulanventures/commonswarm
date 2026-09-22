@@ -11,10 +11,15 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
 import ts from "typescript";
 import {
+  joinInviteBeforeDoneSentences,
   joinInviteLimitSentence,
+  joinInviteLiveLimitMessage,
+  joinInviteLostMintMessage,
   joinInviteResultLead,
+  joinSeatNoun,
 } from "../../../../src/protocol/agent-join-limits";
-import { CLIENT_PROTOCOL_VERSION } from "../../lib/commonswarm";
+import { WEB_CLIENT_VERSION } from "../../lib/commonswarm";
+import { LINK_JOIN_LOAD_ERROR, callLinkJoin } from "../../lib/h0-link-join-load";
 import {
   concealJoinInvite,
   dismissShownJoin,
@@ -58,9 +63,11 @@ const {
   mintJoinInvite,
   revokeJoinInvite,
   revealFromMintBody,
+  startJoinMint,
   startJoinRevoke,
   shownSeatCap,
   JOIN_INVITE_REVOKED_MESSAGE,
+  JoinInviteError,
   JoinInviteWithheld,
   JoinInviteAlreadyRevoked,
 } = await import("../../lib/h0-link-join");
@@ -293,8 +300,9 @@ function revokeApi(state: { inviteId: string | null; wrote: boolean; message: st
     setMintPending: () => {},
     showInvite: () => {},
     formError: () => {},
-    note: () => {
+    note: (message: string) => {
       state.wrote = true;
+      state.message = message;
     },
     markRevoked: (message) => {
       state.wrote = true;
@@ -367,15 +375,26 @@ test("the invite sentence is the current server limits", async () => {
   );
   assert.match(fn, /AGENT_JOIN_SEAT_CAP_MAX/);
   assert.match(fn, /AGENT_JOIN_TTL_MAX_HOURS/);
+  assert.match(fn, /joinSeatNoun\(/);
   assert.doesNotMatch(fn, /\d/);
+  assert.doesNotMatch(fn, /agents/);
   const lead = joinInviteResultLead({
     seatCap: 1,
     expiresAt: EXPIRES,
   });
-  assert.match(lead, /Up to 1 agents can join/);
+  assert.match(lead, /Up to 1 agent can join/);
+  assert.doesNotMatch(lead, /Up to 1 agents/);
+  assert.equal(joinSeatNoun(1), "agent");
+  assert.equal(joinSeatNoun(2), "agents");
   assert.match(lead, new RegExp(EXPIRES));
   assert.match(lead, /This page shows the credential once/);
-  assert.match(lead, /Done leaves the invite active\./);
+  for (const sentence of joinInviteBeforeDoneSentences()) {
+    assert.equal(lead.includes(sentence), true, sentence);
+  }
+  assert.equal(joinInviteBeforeDoneSentences()[0], "Done leaves the invite active.");
+  const show = methodBody(CONNECT, "#showJoinInvite(");
+  assert.match(show, /querySelector\("\.ac__result-lead"\)/);
+  assert.match(show, /lead\.textContent = reveal\.lead/);
   assert.match(CONNECT, /joinInviteLimitSentence\(\)/);
   assert.match(CONNECT, /The joining agent chooses its name/);
 });
@@ -397,7 +416,7 @@ test("mint sends the join credential command and no credential", async () => {
   assert.deepEqual(Object.keys(command).sort(), workspaceCommandKeys("mint_agent_join_credential"));
   assert.equal(envelope.workspace_id, WORKSPACE);
   assert.deepEqual(envelope.stream, { kind: "workspace" });
-  assert.equal(envelope.client_version, CLIENT_PROTOCOL_VERSION);
+  assert.equal(envelope.client_version, WEB_CLIENT_VERSION);
   assert.equal(envelope.command_id, "web_test_command");
   assert.equal(sent[0]!.url, `${DEPLOYMENT_URL}/functions/v1/command`);
   assert.equal(sent[0]!.headers.authorization, "Bearer jwt-test");
@@ -438,7 +457,10 @@ test("the shown seat cap stays inside 1..10", () => {
   assert.equal(low.lead.includes("Up to 10 agents can join."), true);
   assert.equal(low.lead.includes("Up to 0 agents"), false);
   const one = revealFromMintBody({ ...acceptedMint(), seat_cap: 1 }, DEPLOYMENT_URL);
-  assert.equal(one.lead.includes("Up to 1 agents can join."), true);
+  assert.equal(one.lead.includes("Up to 1 agent can join."), true);
+  assert.equal(one.lead.includes("Up to 1 agents"), false);
+  const two = revealFromMintBody({ ...acceptedMint(), seat_cap: 2 }, DEPLOYMENT_URL);
+  assert.equal(two.lead.includes("Up to 2 agents can join."), true);
 });
 
 test("a missing credential is not shown again, and a locator that carries it is refused", () => {
@@ -450,6 +472,9 @@ test("a missing credential is not shown again, and a locator that carries it is 
   assert.equal(missing.paste, null);
   assert.equal(missing.inviteId, JOIN_ID);
   assert.equal(JSON.stringify(missing).includes("swm_join_"), false);
+  for (const sentence of joinInviteBeforeDoneSentences()) {
+    assert.equal(missing.lead.includes(sentence), true, sentence);
+  }
 
   const overlapping = SECRET_BODY.slice(0, 22);
   assert.equal(overlapping.length, 22);
@@ -464,6 +489,9 @@ test("a missing credential is not shown again, and a locator that carries it is 
       assert.equal(error.joinCredentialId, JOIN_ID);
       assert.equal(error.message.includes(SECRET), false);
       assert.equal(error.message.includes(overlapping), false);
+      for (const sentence of joinInviteBeforeDoneSentences()) {
+        assert.equal(error.message.includes(sentence), true, sentence);
+      }
       return true;
     },
   );
@@ -510,7 +538,7 @@ test("revoke sends the revoke command and nothing else", async () => {
   );
   assert.equal(envelope.workspace_id, WORKSPACE);
   assert.deepEqual(envelope.stream, { kind: "workspace" });
-  assert.equal(envelope.client_version, CLIENT_PROTOCOL_VERSION);
+  assert.equal(envelope.client_version, WEB_CLIENT_VERSION);
   assert.equal(envelope.command_id, "web_revoke_command");
   assert.equal(sent[0]!.url, `${DEPLOYMENT_URL}/functions/v1/command`);
   assert.equal(sent[0]!.body.includes(SECRET), false);
@@ -545,7 +573,10 @@ test("a revoke the server already finished is the revoked state, and errors omit
       commandId: "web_mint_again",
     }),
     (error: unknown) => {
-      assert.equal(error instanceof Error && error.message.includes(SECRET), false);
+      assert.ok(error instanceof JoinInviteError);
+      assert.equal(error.message.includes(SECRET), false);
+      assert.match(error.message, /Nothing was created/);
+      assert.equal(error.message.includes("may already exist"), false);
       return true;
     },
   );
@@ -658,4 +689,182 @@ test("a revoke that finishes while the invite is shown replaces the active sente
   const before = joinInviteResultLead({ seatCap: 10, expiresAt: EXPIRES });
   assert.equal(before.includes("Done leaves the invite active."), true);
   assert.equal(before === state.message, false);
+});
+
+function mintFormApi(state: { message: string | null }) {
+  return {
+    workspaceId: () => WORKSPACE,
+    session: async () => SESSION,
+    tryBegin: () => true,
+    end: () => {},
+    setMintPending: () => {},
+    showInvite: () => {
+      throw new Error("invite was shown");
+    },
+    formError: (message: string | null) => {
+      state.message = message;
+    },
+    note: () => {},
+    markRevoked: () => {},
+    inviteId: () => null,
+  };
+}
+
+async function waitUntil(description: string, predicate: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  assert.fail(description);
+}
+
+test("a live-invite refusal uses the wire error and branches on scope", async () => {
+  const identity = joinInviteLiveLimitMessage("identity");
+  const workspace = joinInviteLiveLimitMessage("workspace");
+  assert.ok(identity);
+  assert.ok(workspace);
+
+  status = 403;
+  payload = { error: "join_credential_limit_reached", scope: "identity", limit: 5 };
+  await assert.rejects(
+    () => mintJoinInvite({ session: SESSION, workspaceId: WORKSPACE, commandId: "web_limit_identity" }),
+    (error: unknown) => {
+      assert.ok(error instanceof JoinInviteError);
+      assert.equal(error.message, identity);
+      assert.equal(/revoke/i.test(error.message), false);
+      assert.equal(error.message.includes("workspace"), false);
+      return true;
+    },
+  );
+
+  payload = { error: "join_credential_limit_reached", scope: "workspace", limit: 20 };
+  await assert.rejects(
+    () => mintJoinInvite({ session: SESSION, workspaceId: WORKSPACE, commandId: "web_limit_workspace" }),
+    (error: unknown) => {
+      assert.ok(error instanceof JoinInviteError);
+      assert.equal(error.message, workspace);
+      assert.equal(/revoke/i.test(error.message), false);
+      assert.match(error.message, /this workspace/i);
+      return true;
+    },
+  );
+
+  payload = { error: "agent_join_live_limit_reached", scope: "identity", limit: 5 };
+  await assert.rejects(
+    () => mintJoinInvite({ session: SESSION, workspaceId: WORKSPACE, commandId: "web_limit_audit_reason" }),
+    (error: unknown) => {
+      assert.ok(error instanceof JoinInviteError);
+      assert.notEqual(error.message, identity);
+      assert.match(error.message, /Nothing new was added/);
+      return true;
+    },
+  );
+
+  payload = { error: "join_credential_limit_reached" };
+  await assert.rejects(
+    () => mintJoinInvite({ session: SESSION, workspaceId: WORKSPACE, commandId: "web_limit_no_scope" }),
+    (error: unknown) => {
+      assert.ok(error instanceof JoinInviteError);
+      assert.notEqual(error.message, identity);
+      assert.notEqual(error.message, workspace);
+      assert.equal(/revoke/i.test(error.message), false);
+      return true;
+    },
+  );
+});
+
+test("a lost mint says an invite may already exist", async () => {
+  globalThis.fetch = (async () => {
+    throw new TypeError("network down");
+  }) as typeof fetch;
+  const state = { message: null as string | null };
+  await startJoinMint(mintFormApi(state));
+  assert.equal(state.message, joinInviteLostMintMessage());
+  assert.match(state.message, /may already exist/);
+  assert.match(state.message, /will expire on its own/);
+  assert.equal(state.message.includes("No invite was created"), false);
+  assert.equal(state.message.includes("Nothing was added"), false);
+});
+
+test("a mint body that never ends stops with the lost-mint error when the deadline passes", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let bodyReadStarted = false;
+  let bodySignal: AbortSignal | null = null;
+  globalThis.fetch = (async (_url: string, init?: { signal?: AbortSignal }) => {
+    const signal = init?.signal;
+    assert.ok(signal instanceof AbortSignal);
+    bodySignal = signal;
+    return {
+      status: 200,
+      text: () => {
+        bodyReadStarted = true;
+        return new Promise<string>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("response body timed out");
+            error.name = "AbortError";
+            reject(error);
+          }, { once: true });
+        });
+      },
+    };
+  }) as typeof fetch;
+
+  const state = { message: null as string | null };
+  const pending = startJoinMint(mintFormApi(state));
+  await waitUntil("the mint body read", () => bodyReadStarted);
+  assert.equal(bodySignal?.aborted, false);
+  t.mock.timers.tick(29_999);
+  assert.equal(bodySignal?.aborted, false);
+  t.mock.timers.tick(1);
+  await pending;
+  assert.equal(bodySignal?.aborted, true);
+  assert.equal(state.message, joinInviteLostMintMessage());
+  assert.equal(state.message?.includes("No invite was created"), false);
+});
+
+test("a 401 mint says no invite was created", async () => {
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        status: 401,
+        text: async () => JSON.stringify({ error: "unauthenticated" }),
+      };
+    }
+    return { status: 204, ok: true, text: async () => "", json: async () => ({}) };
+  }) as typeof fetch;
+  const state = { message: null as string | null };
+  await startJoinMint(mintFormApi(state));
+  assert.match(state.message ?? "", /No invite was created/);
+  assert.equal((state.message ?? "").includes("may already exist"), false);
+});
+
+test("a failed invite-module import shows a plain error", async () => {
+  const seen: string[] = [];
+  callLinkJoin(null, () => {
+    seen.push("ran");
+  }, () => {
+    seen.push("error");
+  });
+  assert.deepEqual(seen, []);
+
+  const loaded = Promise.reject(new Error("failed to fetch /private/secret.js"));
+  callLinkJoin(loaded, () => {
+    seen.push("ran");
+  }, (message) => {
+    seen.push(message);
+  });
+  await loaded.catch(() => undefined);
+  await Promise.resolve();
+  assert.deepEqual(seen, [LINK_JOIN_LOAD_ERROR]);
+  assert.equal(LINK_JOIN_LOAD_ERROR.includes("secret"), false);
+  assert.equal(LINK_JOIN_LOAD_ERROR.includes("failed to fetch"), false);
+
+  const wire = methodBody(CONNECT, "#wire()");
+  assert.match(wire, /callLinkJoin\(joining, \(\) => undefined, showJoinLoadError\)/);
+  assert.match(wire, /void module\.startJoinMint\(api\)/);
+  assert.match(wire, /void module\.startJoinRevoke\(api\)/);
+  assert.match(wire, /api\.formError\(message\)/);
+  assert.equal(wire.includes("void joining?.then"), false);
 });
