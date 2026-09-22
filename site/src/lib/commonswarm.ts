@@ -549,14 +549,7 @@ export async function postCommand(
     }
     if (response.status === 401 && body.error === "unauthenticated") {
       const c = client();
-      if (c) {
-        try {
-          await clearDeadSession(c);
-        } catch {
-          // The body already says unauthenticated. A failed local sign-out
-          // must not turn that answer into an unknown command outcome.
-        }
-      }
+      if (c) await clearDeadSession(c);
       throw new SessionExpired();
     }
     return { status: response.status, body };
