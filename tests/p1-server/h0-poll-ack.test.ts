@@ -228,7 +228,10 @@ async function postAsk(principalId: string): Promise<string> {
   assert.equal(posted.status, 200, JSON.stringify(posted.body));
   const signal = posted.body.signal as { id?: string } | undefined;
   assert.equal(typeof signal?.id, "string");
-  return signal.id!;
+  if (signal === undefined || typeof signal.id !== "string") {
+    assert.fail(JSON.stringify(posted.body));
+  }
+  return signal.id;
 }
 
 async function h0(
