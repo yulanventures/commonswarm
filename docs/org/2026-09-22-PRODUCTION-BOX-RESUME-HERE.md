@@ -23,9 +23,9 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
 1. N-db landing: DONE at this commit. OWED: the rehearsal steps 5-13 and recovery drill, the cutover window, and the
    2026-09-20 drill transcripts (Astra2 d2f3417d and HezLead c82b3741; asked 2026-09-22). They land under
    `docs/evidence/2026-09-22-n-db/`. Also owed: how a schema migration and a new stack or edge version reach the box.
-2. Doc lane: every claim the move made false. A read-only Grok pass listed 76 rows (55 operator instructions, 7
-   product/legal, 7 code strings, 4 spec, 3 test pins); list kept by the lead, to be committed with the lane.
-   NEEDS A DECISION first: `site/src/pages/privacy.astro` still names Supabase (US East) and Vercel as processors and says
+2. Doc lane: LANDED (docs/evidence/2026-09-22-doc-lane/LANDING.md; 105 rows, all fixed except the privacy page). Its
+   site files (llms.txt, api.md) go live with the next site deploy; its CORS defaults with the next edge release; its CLI
+   strings with the next npm release. STILL NEEDS A DECISION: `site/src/pages/privacy.astro` still names Supabase (US East) and Vercel as processors and says
    data is processed in the US; the data is now in Germany on the box, files in R2, mail via Resend. The facts can be
    corrected; the data-transfer wording needs the owner.
 3. Cleanup of merged branches and worktrees, and PR #8: BLOCKED. The operator rejected the lead's cleanup on 2026-09-17

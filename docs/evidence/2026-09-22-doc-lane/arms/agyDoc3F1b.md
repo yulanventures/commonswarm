@@ -26,7 +26,7 @@
 2. **`SUCCESSION-PLAN.md` (Round 2 Finding Fix)**
    - **Resolution**: Opens with an unambiguous historical disclaimer:
      > *"This file is a historical log. Production is the box. See the newest `docs/org/*-RESUME-HERE.md`. Never run the Supabase or Vercel steps in this file.*
-     > 
+     >
      > ***Do not follow this file.** It is a record of an earlier lead handoff. A new lead does not adopt the protocol below."*
    - **Assessment**: Neutralizes the hazard identified in Round 2 where a new lead following the document would execute destructive or invalid Supabase/Vercel operations on deleted projects.
 

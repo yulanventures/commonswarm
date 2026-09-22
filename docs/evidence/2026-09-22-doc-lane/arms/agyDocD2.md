@@ -2,7 +2,7 @@
 
 #### 1. [RIGOUR] Broken test assertion in `cli-errors.test.ts` due to unsorted expected array
 - **File & line:** `tests/p1-cli/cli-errors.test.ts:61-68`
-- **Concrete sequence:** 
+- **Concrete sequence:**
   The test executes `cswarm login` without credentials or target, triggering `missingTargetError` in [src/cloud/current-target.ts](file:///src/cloud/current-target.ts). The error message outputs 4 URLs: `https://commonswarm.com`, `https://api.commonswarm.com`, `https://api.commonswarm.com`, and `https://commonswarm.com/start`.
   The test evaluates:
   ```ts
