@@ -1,6 +1,6 @@
 # Edge-runtime box runbook
 
-The API cutover is done. `api.commonswarm.com` is Caddy on `yulan-vps-1`. The steps below are the record of the edge-runtime lane. Do not install `deploy/edge-runtime/commonswarm.caddy` as the live API file. The live routes are `deploy/supabase-stack/commonswarm-api.caddy`.
+The API cutover is done. `api.commonswarm.com` is Caddy on `yulan-vps-1`. The steps below are the record of the edge-runtime lane. The pre-cutover site file was removed. It proxied to a deleted host. The live routes are `deploy/supabase-stack/commonswarm-api.caddy`. There is no fallback to another host. A pause uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`. Its public site answers 503 and has no upstream.
 
 ## NOT ESTABLISHED
 
@@ -85,7 +85,7 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
   `caddy-global-servers.caddy`, pinned 2026-09-16, with Cloudflare's current
   published list. If it changed, ask the box operator to update the main global
   block and repeat the adapted-config check.
-- [ ] Do not copy `commonswarm.caddy` to `/etc/caddy/sites/10-commonswarm-api.caddy`. That file proxies Auth, REST, Storage, and Realtime to the deleted host. The live file is `deploy/supabase-stack/commonswarm-api.caddy`.
+- [ ] Copy `deploy/supabase-stack/commonswarm-api.caddy` to `/etc/caddy/sites/10-commonswarm-api.caddy`. The pre-cutover site file was removed. Do not point this route at a supabase.co host. There is no fallback to another host.
 
 ## 3. Start the edge runtime
 

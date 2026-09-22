@@ -1,5 +1,5 @@
-# Post-N-db site file. Its routing frame stays aligned with
-# deploy/edge-runtime/commonswarm.caddy; only the Supabase upstreams change.
+# Live API site file. Auth, REST, Storage, Realtime, and functions go to the
+# containers on this server. There is no fallback to another host.
 api.commonswarm.com, edge-staging.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 
@@ -56,5 +56,5 @@ api.commonswarm.com, edge-staging.commonswarm.com {
 	}
 }
 
-# commonswarm-api-fallback.caddy is for an ABORT path before cutover step 7 only.
-# Never install it after step 7. Fix forward after the box accepts writes.
+# A later pause uses commonswarm-api-maintenance.caddy. Its public site answers
+# 503 and has no upstream.

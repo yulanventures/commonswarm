@@ -1,5 +1,7 @@
 # Preparation verification — 2026-09-16
 
+The pre-cutover file `commonswarm.caddy` named below was removed. It proxied to a deleted host. The live API file is `deploy/supabase-stack/commonswarm-api.caddy`. Maintenance uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`: the public site answers 503 and has no upstream. There is no fallback to another host. The measurements below are the 2026-09-16 record.
+
 The original preparation lane contacted no production service and deployed
 nothing. The lead later deployed `76487b81` to the box. Before fix round 1, the
 lead measured a healthy container, both Caddy names through Cloudflare, 36 MiB

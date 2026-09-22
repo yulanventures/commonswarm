@@ -23,6 +23,12 @@
 | Change PostgreSQL `shared_buffers` | `postgres shared buffers` |
 | Change the GoTrue Caddy upstream | `route handle /auth/v1/*` |
 | Shorten the edge function timeout | `function timeout` |
+| Append `https://example.supabase.co` to a `deploy/**/*.caddy` source | `supabase.co host` |
+| Put `reverse_proxy` in the public maintenance site | `public maintenance upstream` |
+| Remove `import box_routes` from the staging maintenance site | `staging box routes` |
+| Remove `Retry-After` from the public maintenance site | `maintenance retry` |
+| Change the adapted functions dial to `example.supabase.co:443` | `supabase.co host` |
+| Remove `Retry-After` from the adapted maintenance JSON | `maintenance Retry-After` |
 | Remove Storage API CA trust | `storage CA trust` |
 | Remove Realtime HTTP/1.1 transport | `realtime no-buffer http1` |
 | Remove backup `BYPASSRLS` | `backup BYPASSRLS` |
