@@ -513,7 +513,7 @@ async function readWithDeadline<T>(
  * id once minted a second live credential — so the id is generated ONCE per intent by the
  * caller and reused across retries, never regenerated inside this function.
  */
-async function postCommand(
+export async function postCommand(
   session: Session,
   commandId: string,
   command: Record<string, unknown>,

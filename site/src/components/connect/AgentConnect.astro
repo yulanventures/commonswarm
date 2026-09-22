@@ -41,6 +41,8 @@ interface Props {
    constants that mirror them, so this screen cannot drift from the rule the way
    the retired "renews access automatically for up to 30 days" sentence did. */
 import { STANDING_GRANT_COPY } from "../../lib/standing-grants";
+import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
+import { joinInviteLimitSentence } from "../../../../src/protocol/agent-join-limits";
 
 const {
   workspaceId,
@@ -150,6 +152,16 @@ const {
     <button class="ac__btn ac__btn--primary" type="submit" data-action="mint">
       Generate prompt
     </button>
+    {h0LinkJoinEnabled && (
+      <div class="ac__field" data-h0-link-join>
+        <p class="ac__hint">
+          The joining agent chooses its name. {joinInviteLimitSentence()}
+        </p>
+        <button class="ac__btn ac__btn--quiet" type="button" data-action="mint-join">
+          Create an invite
+        </button>
+      </div>
+    )}
   </form>
 
   <div class="ac__panel" data-panel="working">
@@ -211,6 +223,11 @@ const {
     <p class="ac__status" role="status" aria-live="polite" data-slot="copy-status"></p>
 
     <div class="ac__result-actions">
+      {h0LinkJoinEnabled && (
+        <button class="ac__btn ac__btn--quiet" type="button" data-action="revoke-join" hidden>
+          Revoke this invite
+        </button>
+      )}
       <button class="ac__btn ac__btn--quiet" type="button" data-action="done">
         Done
       </button>
@@ -243,6 +260,13 @@ const {
     uuid,
   } from "../../lib/commonswarm";
   import { dashboardAgentPrompt, dashboardAgentConnection, dashboardAgentFilePrompt, promptCopyPayload } from "./agent-prompt";
+  import { h0LinkJoinEnabled, loadLinkJoin } from "../../lib/h0-link-join-flag";
+  import { callLinkJoin } from "../../lib/h0-link-join-load";
+  import {
+    concealJoinInvite,
+    dismissShownJoin,
+    shownJoinAfterRevoke,
+  } from "../../lib/h0-link-join-flag-meaning";
 
   /*
    * A custom element rather than a page script, so the host page can drop <AgentConnect /> in
@@ -271,6 +295,11 @@ const {
     #retargetPending = false;
     #pendingDuplicateName = "";
     #createAnotherChosen = false;
+    #inviteId: string | null = null;
+    #joinActive = false;
+    #copyLabel = "Copy prompt";
+    #tokenResultTitle = "";
+    #tokenResultLead = "";
     /* Attributes present in the markup fire attributeChangedCallback during upgrade, BEFORE
        connectedCallback — so without this the element would load twice on every page. */
     #ready = false;
@@ -368,6 +397,65 @@ const {
       this.#q<HTMLButtonElement>('[data-action="done"]')?.addEventListener("click", () => {
         this.finishPrompt("done");
       });
+      if (h0LinkJoinEnabled) {
+        window.addEventListener("pagehide", () => {
+          if (this.#joinActive) this.finishPrompt("done");
+        });
+        if (this.#tokenResultTitle === "") {
+          this.#tokenResultTitle = this.querySelector(".ac__result-title")?.textContent ?? "";
+          this.#tokenResultLead = this.querySelector(".ac__result-lead")?.textContent ?? "";
+        }
+        const api = {
+          workspaceId: () => this.#workspaceId,
+          session: () => currentSession(),
+          tryBegin: () => {
+            if (this.#busy) return false;
+            this.#busy = true;
+            this.toggleAttribute("data-mint-busy", true);
+            return true;
+          },
+          end: () => {
+            this.#busy = false;
+            this.toggleAttribute("data-mint-busy", false);
+            if (this.#retargetPending && this.dataset.state !== "done") {
+              this.#retargetPending = false;
+              this.#queueLoad();
+            }
+          },
+          setMintPending: (pending: boolean) => {
+            const button = this.querySelector<HTMLButtonElement>('[data-action="mint-join"]');
+            if (!button) return;
+            button.disabled = pending;
+            button.textContent = pending ? "Creating the invite…" : "Create an invite";
+          },
+          showInvite: (reveal: {
+            paste: string | null;
+            inviteId: string;
+            documentUrl: string;
+            lead: string;
+            withheld: boolean;
+          }) => this.#showJoinInvite(reveal),
+          formError: (message: string | null) => this.#formError(message),
+          note: (message: string) => this.#text("copy-status", message),
+          markRevoked: (message: string, inviteId: string) => this.#markJoinRevoked(message, inviteId),
+          inviteId: () => this.#inviteId,
+        };
+        const joining = loadLinkJoin();
+        const showJoinLoadError = (message: string): void => {
+          api.formError(message);
+        };
+        callLinkJoin(joining, () => undefined, showJoinLoadError);
+        this.querySelector<HTMLButtonElement>('[data-action="mint-join"]')?.addEventListener("click", () => {
+          callLinkJoin(joining, (module) => {
+            void module.startJoinMint(api);
+          }, showJoinLoadError);
+        });
+        this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]')?.addEventListener("click", () => {
+          callLinkJoin(joining, (module) => {
+            void module.startJoinRevoke(api);
+          }, showJoinLoadError);
+        });
+      }
     }
 
     clearPrompt(notify = true) {
@@ -378,7 +466,11 @@ const {
     requestPromptFor(principalId: string) {
       /* The roster remains reachable in the channel header while a prompt is visible. Never
          replace one live secret with another; the reader must copy or close the first one. */
-      if (!principalId || this.#busy || this.#prompt !== null) return;
+      let blocked = !principalId || this.#busy || this.#prompt !== null;
+      if (h0LinkJoinEnabled) {
+        blocked = blocked || this.#joinActive;
+      }
+      if (blocked) return;
       this.#requestedPrincipalId = principalId;
       if (
         this.dataset.state === "ready" &&
@@ -391,7 +483,11 @@ const {
     }
 
     finishPrompt(reason: "done" | "back" | "consumed", notify = true) {
-      if (this.#prompt === null) return;
+      let leave = this.#prompt === null;
+      if (h0LinkJoinEnabled) {
+        leave = this.#prompt === null && !this.#joinActive;
+      }
+      if (leave) return;
       const tokenId = this.#tokenId;
       this.#forget();
       this.#state("ready");
@@ -428,6 +524,24 @@ const {
     }
 
     #forget() {
+      if (h0LinkJoinEnabled) {
+        if (this.#joinActive) {
+          const hidden = concealJoinInvite({
+            paste: this.#prompt,
+            inviteId: this.#inviteId ?? "",
+          });
+          this.#prompt = hidden.paste;
+        }
+        const next = dismissShownJoin({
+          inviteId: this.#inviteId,
+          joinActive: this.#joinActive,
+          prompt: this.#prompt,
+        });
+        this.#inviteId = next.inviteId;
+        this.#joinActive = next.joinActive;
+        this.#prompt = next.prompt;
+        this.#restoreTokenResult();
+      }
       this.#prompt = null;
       this.#connection = null;
       this.#filePrompt = null;
@@ -719,6 +833,9 @@ const {
           anonKey: target.anonKey,
         };
         this.#prompt = dashboardAgentPrompt(promptInput);
+        if (h0LinkJoinEnabled) {
+          this.#restoreTokenResult();
+        }
         this.#connection = dashboardAgentConnection(promptInput);
         this.#filePrompt = dashboardAgentFilePrompt(promptInput);
         this.#connectionName = `cswarm-connection-${credential.principalId}.json`;
@@ -795,8 +912,102 @@ const {
       return "Something went wrong before a key was created. Nothing was added.";
     }
 
+    #showJoinInvite(reveal: {
+      paste: string | null;
+      inviteId: string;
+      documentUrl: string;
+      lead: string;
+      withheld: boolean;
+    }) {
+      this.#joinActive = true;
+      this.#inviteId = reveal.inviteId;
+      this.#connection = null;
+      this.#filePrompt = null;
+      this.#tokenId = null;
+      this.#copyLabel = reveal.withheld ? "Copy prompt" : "Copy invite";
+      const title = this.querySelector(".ac__result-title");
+      if (title) title.textContent = reveal.withheld ? "The invite was created." : "Your invite is ready.";
+      const lead = this.querySelector(".ac__result-lead");
+      if (lead) lead.textContent = reveal.lead;
+      const download = this.querySelector<HTMLButtonElement>('[data-action="download-connection"]');
+      if (download) download.hidden = true;
+      const revoke = this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]');
+      if (revoke) {
+        revoke.hidden = false;
+        revoke.disabled = false;
+      }
+      const copy = this.querySelector<HTMLButtonElement>('[data-action="copy"]');
+      if (reveal.withheld || reveal.paste === null) {
+        this.#prompt = null;
+        this.#text("prompt", "");
+        if (copy) copy.disabled = true;
+        this.#text("copy-status", reveal.lead);
+      } else {
+        this.#prompt = reveal.paste;
+        this.#text("prompt", reveal.paste);
+        if (copy) copy.disabled = false;
+        this.#text("copy-status", "");
+        this.#resetCopyLabel();
+      }
+      this.#state("done");
+      this.dispatchEvent(
+        new CustomEvent("commonswarm:agent-prompt-ready", {
+          bubbles: true,
+          detail: { workspaceId: this.#workspaceId },
+        }),
+      );
+    }
+
+    #markJoinRevoked(message: string, revokedInviteId: string) {
+      const next = shownJoinAfterRevoke(
+        {
+          inviteId: this.#inviteId,
+          joinActive: this.#joinActive,
+          prompt: this.#prompt,
+        },
+        revokedInviteId,
+      );
+      if (next === null) return;
+      const hidden = concealJoinInvite({
+        paste: this.#prompt,
+        inviteId: this.#inviteId ?? "",
+      });
+      this.#prompt = hidden.paste;
+      this.#joinActive = next.joinActive;
+      this.#inviteId = next.inviteId;
+      this.#text("prompt", "");
+      this.#text("copy-status", message);
+      const title = this.querySelector(".ac__result-title");
+      if (title) title.textContent = "This invite is revoked.";
+      const lead = this.querySelector(".ac__result-lead");
+      if (lead) lead.textContent = message;
+      const copy = this.querySelector<HTMLButtonElement>('[data-action="copy"]');
+      if (copy) copy.disabled = true;
+      const revoke = this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]');
+      if (revoke) revoke.disabled = true;
+    }
+
+    #restoreTokenResult() {
+      this.#copyLabel = "Copy prompt";
+      this.#joinActive = false;
+      this.#inviteId = null;
+      const title = this.querySelector(".ac__result-title");
+      if (title && this.#tokenResultTitle) title.textContent = this.#tokenResultTitle;
+      const lead = this.querySelector(".ac__result-lead");
+      if (lead && this.#tokenResultLead) lead.textContent = this.#tokenResultLead;
+      const download = this.querySelector<HTMLButtonElement>('[data-action="download-connection"]');
+      if (download) download.hidden = false;
+      const revoke = this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]');
+      if (revoke) {
+        revoke.hidden = true;
+        revoke.disabled = false;
+      }
+      const copy = this.querySelector<HTMLButtonElement>('[data-action="copy"]');
+      if (copy) copy.disabled = false;
+    }
+
     #resetCopyLabel() {
-      this.#text("copy-label", "Copy prompt");
+      this.#text("copy-label", this.#copyLabel);
       const button = this.#q<HTMLButtonElement>('[data-action="copy"]');
       button?.removeAttribute("data-copied");
     }
