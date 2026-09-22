@@ -164,6 +164,9 @@ def main():
             check(sql('DROP INDEX swarm.h0_poll_batches_one_active', 'h0_fixture'), 'partial proof mutation')
             assert catalog('20260922000001') == 'f', 'partial 000001 proof was true'
             passed += 1; print('PASS partial release proof refused')
+            check(sql("CREATE UNIQUE INDEX h0_poll_batches_one_active ON swarm.h0_poll_batches (batch_id) WHERE status = 'active'", 'h0_fixture'), 'wrong-column proof mutation')
+            assert catalog('20260922000001') == 'f', 'wrong-column 000001 proof was true'
+            passed += 1; print('PASS wrong-column release proof refused')
             # Both verification and apply branches must reject a wrong target marker.
             check(sql("ALTER DATABASE h0_fixture SET commonswarm.stack_identity='wrong-target'"), 'wrong identity')
             rejected('present branch target identity', helper())

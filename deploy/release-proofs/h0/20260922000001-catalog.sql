@@ -53,7 +53,8 @@ SELECT (
       'CHECK (status = ''active''::text AND closed_at IS NULL OR status = ''closed''::text AND closed_at IS NOT NULL)')
   AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('swarm.h0_poll_batches_one_active')
     AND i.indrelid=to_regclass('swarm.h0_poll_batches') AND i.indisunique AND i.indisvalid
-    AND pg_get_expr(i.indpred,i.indrelid) = '(status = ''active''::text)')
+    AND pg_get_indexdef(i.indexrelid)=
+      'CREATE UNIQUE INDEX h0_poll_batches_one_active ON swarm.h0_poll_batches USING btree (workspace_id, principal_id) WHERE (status = ''active''::text)')
   AND EXISTS (SELECT 1 FROM pg_index i WHERE i.indexrelid=to_regclass('swarm.h0_poll_locks_pkey')
     AND i.indrelid=to_regclass('swarm.h0_poll_locks') AND i.indisunique AND i.indisvalid AND i.indisready
     AND pg_get_indexdef(i.indexrelid)=
