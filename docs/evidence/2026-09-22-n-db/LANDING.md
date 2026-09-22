@@ -71,3 +71,7 @@ Delivered 2026-09-22 (HezLead):
   cutover record instead. The gaps are
   listed in `transcript-sources.md`.
 - The release procedure is `deploy/RELEASE-TO-BOX.md`.
+
+Update 2026-09-22 19:46Z (HezLead): the production stack release moved from `90e84f0e` to `e38b499f`
+(the N-db hygiene units). The edge release stays `94353b42`, whose router already includes `h0`, so
+"four edge functions" above describes the pre-H0 plan, not that SHA.

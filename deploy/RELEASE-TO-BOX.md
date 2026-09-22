@@ -86,7 +86,15 @@ RUN_DAY="$(date -u +%F)"
 EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}"
 RUN_LOG="$EVIDENCE_DIR/run.log"
 ARCHIVE="/tmp/commonswarm-${SHA}.tar"
+# Persist the Mac-side values so a lost shell can recover them:
+#   . "$HOME/.commonswarm-release-window.env"
+( umask 077; printf 'SHA=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
+    "$SHA" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
 ```
+
+Every later Mac block that uses `SHA`, `EVIDENCE_DIR`, `RUN_LOG` or `ARCHIVE`
+starts with `. "$HOME/.commonswarm-release-window.env"`. Delete that file when
+the window closes.
 
 Record approvals, affected surfaces, the backup-age agreement, commands, exit
 codes, and safe verification output in `run.log`. Never record an environment
@@ -952,8 +960,12 @@ the exact `/home/commonswarm/edge/releases/<sha>/` directory, not through the
 
 ### Preflight — CSwarmDevLead supplies probes; Anvil runs; HezLead approves
 
-Do not start within ten minutes either side of 03:30, 09:30, 15:30, or 21:30
-UTC. If the window overlaps, stop `commonswarm-edge-recycle.timer` for the
+`commonswarm-edge-recycle.timer` is a box-only unit (not in this repository),
+installed by HezLead on 2026-09-22: `OnCalendar=*-*-* 03,09,15,21:30:00 UTC`,
+`Persistent=false`; its service runs `docker restart --time 30
+commonswarm-edge-edge-runtime-1`. Check it with `systemctl cat
+commonswarm-edge-recycle.timer` before the window. Do not start within ten
+minutes either side of 03:30, 09:30, 15:30, or 21:30 UTC. If the window overlaps, stop `commonswarm-edge-recycle.timer` for the
 release and start it after verification.
 
 ```sh
@@ -1209,8 +1221,10 @@ rescheduled, and the containers remained healthy.
 HezLead observed on 2026-09-22 that every stack container's Compose working
 directory is `/home/commonswarm/stack/current/deploy/supabase-stack`.
 `commonswarm-postgres` bind-mounts `postgres/pg_hba.conf` and
-`postgres/10-runtime-roles.sh` through that symlink. Therefore the next plain
-PostgreSQL restart after a switch loads those files from the new release. The
+`postgres/10-runtime-roles.sh` through that symlink. A restart after a switch
+reloads `pg_hba.conf` from the new release. `10-runtime-roles.sh` is mounted
+into `/docker-entrypoint-initdb.d/` and runs only when the data directory is
+empty, so a restart of the existing database does not run it. The
 guard compares them and stops for HezLead if either differs. They were verified
 identical between `90e84f0e` and `e38b499f`.
 
@@ -1513,8 +1527,14 @@ it is recreated.
 
 **H0 (the first use of this procedure).** `KIND_LIST` is `edge stack`. The
 stack release directory is built for its migration files and helpers, and
-`stack/current` is switched only if the section 7 diff shows changed stack
-runtime files. Order:
+`stack/current` is switched, through the guarded switch in section 7, only if
+the section 1 runtime-file comparison shows changed stack runtime files.
+Before the window, confirm the live stack release with
+`readlink -f /home/commonswarm/stack/current` (it was `e38b499f` on
+2026-09-22 after the unit rollout). The three `20260922*` migrations below come
+from CommonSwarm lane 5a; they must be on `main` at the release SHA, with one
+catalog proof each, before the window opens. If they are not, section 5 stops.
+Order:
 
 1. Ledger backfill for `20260916000001` and `20260916000002` (section 4).
 2. Migrations, one at a time, each with its own lead-supplied catalog proof:
@@ -1596,6 +1616,5 @@ These do not block H0. Fold them together with the findings from the first H0 ru
 
 - The guarded switch accepts a `failed` backup or restore service before it switches, but after the switch it requires `inactive` plus `success`. A drill that failed earlier therefore makes both apply and rollback report failure.
 - The stack runtime-file comparison ignores `deploy/supabase-stack/migrate/`, although the backup and the drill run helpers from it through `stack/current`.
-- The pasted Mac preflight can still end with exit 0 after a failed check, and a second run empties `run.log`.
-- The H0 note says "section 7 diff", but the runtime-file comparison runs in section 1, before `window.env` exists.
+- The pasted Mac preflight can still end with exit 0 after a failed check, and a second run empties `run.log`. (Mac-side values are now persisted in `~/.commonswarm-release-window.env`.)
 - The test-hook environment names are typed by hand, and `SWARM_ENV=test` is accepted.
