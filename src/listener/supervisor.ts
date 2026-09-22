@@ -41,22 +41,39 @@ import {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** Attempts before a repeatedly-failing listener is left down and diagnosable. */
+/**
+ * Fast restarts before the sustained backoff. Not a give-up: after these, the
+ * process keeps trying at `LISTENER_RESTART_SUSTAINED_MAX_MS` until it is stopped.
+ */
 export const LISTENER_RESTART_MAX_ATTEMPTS = 5;
 /** First restart delay. */
 export const LISTENER_RESTART_INITIAL_MS = 1_000;
-/** Ceiling on the restart delay; wider than the read backoff cap on purpose. */
+/** Ceiling on the fast restart delay; wider than the read backoff cap on purpose. */
 export const LISTENER_RESTART_MAX_MS = 60_000;
+/**
+ * Backoff ceiling after the fast attempts, for as long as the process lives.
+ * Five minutes is the maximum this wait is allowed to be.
+ */
+export const LISTENER_RESTART_SUSTAINED_MAX_MS = 5 * 60_000;
+/**
+ * A runtime that reached ready and then kept running this long clears the
+ * fast-attempt count, so the next outage starts at the short delay again.
+ */
+export const LISTENER_RESTART_CLEAN_RUN_MS = 60_000;
 
 /**
- * Bounded restart policy. Bounded is the load-bearing word: an unbounded
- * restart would recreate the amplification D-051 removed, one process at a
- * time instead of one request at a time.
+ * Restart policy. Production leaves `maxAttempts` unset, so a transient stop
+ * keeps retrying for the life of the process. An explicit `maxAttempts` is a
+ * hard ceiling, used by tests to bound a crash loop.
  */
 export interface ListenerRestartPolicy {
   maxAttempts?: number;
   initialMs?: number;
   maxMs?: number;
+  /** Override for `LISTENER_RESTART_SUSTAINED_MAX_MS`. Clamped to five minutes. */
+  sustainedMaxMs?: number;
+  /** Override for `LISTENER_RESTART_CLEAN_RUN_MS`. */
+  cleanRunMs?: number;
   isRestartable?: (stop: ListenerRuntimeStop) => boolean;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
@@ -73,6 +90,34 @@ export function nextListenerRestartMs(
   const safeAttempt = Math.max(1, Math.min(attempt, 16));
   const exp = Math.min(max, initial * (2 ** (safeAttempt - 1)));
   return Math.floor(exp * (0.5 + random() * 0.5));
+}
+
+/** Delay after the fast attempts. Never longer than five minutes. */
+export function sustainedListenerRestartMs(
+  policy: ListenerRestartPolicy = {},
+  random: () => number = Math.random,
+): number {
+  const requested = policy.sustainedMaxMs ?? LISTENER_RESTART_SUSTAINED_MAX_MS;
+  const cap = Math.min(Math.max(0, requested), 5 * 60_000);
+  return Math.floor(cap * (0.5 + random() * 0.5));
+}
+
+/**
+ * Fast exponential delay for the first `LISTENER_RESTART_MAX_ATTEMPTS` when
+ * the caller did not set a hard ceiling; the sustained cap after that.
+ */
+export function listenerRestartDelayMs(
+  attempt: number,
+  policy: ListenerRestartPolicy = {},
+  random: () => number = Math.random,
+): number {
+  if (
+    policy.maxAttempts === undefined &&
+    attempt > LISTENER_RESTART_MAX_ATTEMPTS
+  ) {
+    return sustainedListenerRestartMs(policy, random);
+  }
+  return nextListenerRestartMs(attempt, policy, random);
 }
 
 async function defaultRestartSleep(
@@ -434,6 +479,8 @@ export async function runListenerSupervisor(
   };
 
   let lastWakePersistMs = 0;
+  /** Set when this attempt emits ready; cleared at the start of the next attempt. */
+  let attemptReadyAtMs: number | null = null;
   const onEvent = (event: ListenerRuntimeEvent) => {
     if (event.type === "wake") {
       const previousWake = status.wake;
@@ -503,9 +550,11 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "ready") {
+      attemptReadyAtMs = now();
       const versionNotice = options.getProviderVersionNotice?.() ?? null;
       transition("ready", {
         readyAt: event.ts,
+        nextAttemptAt: null,
         // Deliberately does NOT clear consecutiveAckFailureCount. Reaching
         // `ready` is not provider proof: the permission canary is its own
         // prompt, and a provider can answer it and fail every real one --
@@ -847,10 +896,11 @@ export async function runListenerSupervisor(
   };
 
   const policy = options.restart ?? {};
-  const maxAttempts = policy.maxAttempts ?? LISTENER_RESTART_MAX_ATTEMPTS;
+  const explicitCeiling = policy.maxAttempts;
   const isRestartable = policy.isRestartable ?? isRestartableListenerStop;
   const restartSleep = policy.sleep ?? defaultRestartSleep;
   const restartRandom = policy.random ?? Math.random;
+  const cleanRunMs = policy.cleanRunMs ?? LISTENER_RESTART_CLEAN_RUN_MS;
 
   try {
     let restarts = 0;
@@ -861,8 +911,10 @@ export async function runListenerSupervisor(
     // prepare() ran once, so the delivery journal keeps its identity across a
     // restart. options.run must build its own per-attempt resources — a
     // listener model is single-use, because runListenerRuntime closes it on
-    // every exit.
+    // every exit. A transient stop does not end the process: after the fast
+    // attempts the delay stays at the sustained cap until stop aborts this sleep.
     for (;;) {
+      attemptReadyAtMs = null;
       stop = await options.run(
         controller.signal,
         onEvent,
@@ -871,14 +923,19 @@ export async function runListenerSupervisor(
       if (stop.reason === "cancelled" || controller.signal.aborted) break;
       eligible = isRestartable(stop);
       if (!eligible) break;
-      if (restarts >= maxAttempts) {
+      const cleanForMs = attemptReadyAtMs === null
+        ? 0
+        : Math.max(0, now() - attemptReadyAtMs);
+      if (cleanForMs >= cleanRunMs) restarts = 0;
+      if (explicitCeiling !== undefined && restarts >= explicitCeiling) {
         exhausted = true;
         break;
       }
       restarts += 1;
-      const delayMs = nextListenerRestartMs(restarts, policy, restartRandom);
+      const delayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
       const restartCode = safeErrorCode(stop.error);
       const restartStderrTail = takeTail();
+      const nextAttemptAt = new Date(now() + delayMs).toISOString();
       log({
         ts: iso(now),
         event: "listener_restarting",
@@ -896,6 +953,7 @@ export async function runListenerSupervisor(
         ...providerFailureFields(stop.error),
         lastWorkerStderrTail: restartStderrTail,
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
+        nextAttemptAt,
       });
       await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
@@ -913,6 +971,7 @@ export async function runListenerSupervisor(
         lastErrorReasonCode: null,
         lastWorkerStderrTail: null,
         providerMinimumRequiredVersion: null,
+        nextAttemptAt: null,
       });
       log({ ts: stoppedAt, event: "listener_stopped" });
     } else {
@@ -927,6 +986,7 @@ export async function runListenerSupervisor(
         ...providerFailureFields(stop.error),
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
         lastWorkerStderrTail: failedStderrTail,
+        nextAttemptAt: null,
       });
       // Record why it is down and why it stopped trying — a listener left down
       // after exhausting restarts must be distinguishable from one that was
@@ -960,6 +1020,7 @@ export async function runListenerSupervisor(
       ),
       ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
       lastWorkerStderrTail: failedStderrTail,
+      nextAttemptAt: null,
     });
     log({
       ts: stoppedAt,

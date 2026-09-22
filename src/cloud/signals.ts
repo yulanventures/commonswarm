@@ -813,10 +813,18 @@ export function isRestartableReadError(error: unknown): boolean {
   if (isTransportFollowMessage(error)) return true;
   const http = followHttpDetails(error);
   if (http !== null) {
-    // Status alone. The `retryable: false` veto governs an IMMEDIATE retry of
-    // the same request; it does not assert that a later run cannot work, and a
-    // later run is the judgement a restart needs.
-    return http.status === 429 || http.status >= 500;
+    // A confirmed credential refusal will not succeed later. A 401/403 that
+    // does not carry one of those codes can be a foreign backend or a blip.
+    if (isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    )) {
+      return false;
+    }
+    // Status plus code. The `retryable: false` veto governs an IMMEDIATE retry
+    // of the same request; it does not assert that a later run cannot work.
+    return http.status === 429 || http.status >= 500 ||
+      http.status === 401 || http.status === 403;
   }
   // D-057: CLOSED. An unrecognised failure acquires no decision. This used to
   // exclude three known types and return true for everything else, so a plain
@@ -2313,12 +2321,66 @@ export function resolveRefusalToleranceMs(
   return parsed;
 }
 
+/**
+ * Server `error` slugs that mean this credential is revoked, expired, or unknown.
+ *
+ * The command and read edges assign these; this client does not invent them.
+ * Unknown or expired is `unauthenticated`: the read edge returns 401 when
+ * `agent_delivery_read_context` yields no row, and an expired token yields no
+ * row; the command edge returns 401 when `authenticateAgent` is null, which is
+ * also how `loadAgentCredential` reports a missing or expired token. Revoked is
+ * `forbidden`: the read edge returns 403 when `agent.is_revoked`, and the
+ * command edge returns 403 from `revoked()` on a non-delivery command.
+ *
+ * `delivery_unavailable` is not in this set. The command edge uses that slug
+ * both when a delivery command's credential is revoked and when routing fails,
+ * so the slug does not confirm that the credential itself is dead.
+ */
+export const CONFIRMED_CREDENTIAL_LOSS_CODES: readonly string[] = Object.freeze([
+  "unauthenticated",
+  "forbidden",
+]);
+
+const CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+);
+
+/** True when `code` is one of `CONFIRMED_CREDENTIAL_LOSS_CODES`. */
+export function isConfirmedCredentialLossCode(
+  code: string | null | undefined,
+): boolean {
+  return typeof code === "string" && CONFIRMED_CREDENTIAL_LOSS_CODE_SET.has(code);
+}
+
+/**
+ * A credential stop is HTTP 401 or 403 plus one confirmed code. Status alone
+ * is not enough: a foreign backend can answer 403 with HTML or another body's
+ * JSON during a DNS cut, and that credential is still good.
+ */
+export function isConfirmedCredentialHttpFailure(
+  status: number,
+  code: string | null | undefined,
+): boolean {
+  return (status === 401 || status === 403) &&
+    isConfirmedCredentialLossCode(code);
+}
+
 export function isRetryableFollowError(error: unknown): boolean {
+  const http = followHttpDetails(error);
+  if (
+    http !== null &&
+    (http.status === 401 || http.status === 403) &&
+    !isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    )
+  ) {
+    return true;
+  }
   if (serverRefusedRetry(followErrorEnvelope(error))) return false;
   if (error instanceof SignalHostPortsExhaustedError) return true;
   if (error instanceof SignalReadTimeoutError) return true;
   if (isTransportFollowMessage(error)) return true;
-  const http = followHttpDetails(error);
   if (http) return http.status === 429 || http.status >= 500;
   return false;
 }
@@ -2327,9 +2389,13 @@ export function isFatalFollowError(error: unknown): boolean {
   if (isMalformedFollowMessage(error)) return true;
   const http = followHttpDetails(error);
   if (!http) return false;
+  if (http.status === 401 || http.status === 403) {
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    );
+  }
   return http.status === 400 ||
-    http.status === 401 ||
-    http.status === 403 ||
     http.status === 404 ||
     http.status === 426 ||
     (http.status >= 400 && http.status < 500 && http.status !== 429);
@@ -2344,12 +2410,16 @@ export function isFollowCredentialFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const http = followHttpDetails(error);
   if (http !== null) {
-    // It came off the wire, so the status decides and nothing else does.
+    // It came off the wire, so status plus the server's own error slug decide.
     // Returning here keeps the wording check below out of reach of response
     // text: since D-051 the message can carry server-supplied fields, and an
     // unanchored phrase test over a message that contains external text is
-    // the same defect as the `/aborted/i` one this sweep removed.
-    return http.status === 401 || http.status === 403;
+    // the same defect as the `/aborted/i` one this sweep removed. A 401 or
+    // 403 with no confirmed slug is not this failure.
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    );
   }
   if (
     error.name === "RenewalReauthorisationRequired" ||

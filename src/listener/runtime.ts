@@ -20,6 +20,7 @@ import {
 import {
   classifySignalReadFailure,
   decayFollowAttempt,
+  isConfirmedCredentialHttpFailure,
   isFollowCredentialFailure,
   isRestartableReadError,
   isRetryableFollowError,
@@ -399,18 +400,22 @@ export function isRestartableListenerStop(stop: ListenerRuntimeStop): boolean {
  * operator can see, while a wrong restart is work repeated against a server.
  */
 function isRestartableRuntimeError(error: unknown): boolean {
-  // Delivery: status decides, exactly as on the read path.
+  // Delivery: status plus a confirmed credential code, exactly as on the read path.
   if (error instanceof DeliveryTransportError) return true;
   if (error instanceof DeliveryHttpError) {
-    return error.status === 429 || error.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error.status, error.code)) return false;
+    return error.status === 429 || error.status >= 500 ||
+      error.status === 401 || error.status === 403;
   }
   // A malformed 2xx is a protocol defect; repeating it repeats the defect.
   if (error instanceof DeliveryProtocolError) return false;
 
-  // Command posts: same status rule.
+  // Command posts: same status-plus-code rule.
   if (error instanceof CommandTransportError) return true;
   if (error instanceof CommandHttpError) {
-    return error.status === 429 || error.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error.status, error.code)) return false;
+    return error.status === 429 || error.status >= 500 ||
+      error.status === 401 || error.status === 403;
   }
 
   // ACP: only codes we assigned at the boundary, never the peer's words.
@@ -445,13 +450,14 @@ function isAbort(error: unknown): boolean {
 /**
  * Closed credential-loss predicate shared by the read and engine catches and
  * injected into the engine seam; runtime exposes no override. Typed HTTP is
- * decided by status alone (401/403), renewal errors by their exact classes,
- * and every other non-HTTP value delegates to the established fleet predicate,
- * so typed HTTP 5xx/409 text can never fall through to wording.
+ * decided by status plus a confirmed server error code, renewal errors by
+ * their exact classes, and every other non-HTTP value delegates to the
+ * established fleet predicate, so typed HTTP 5xx/409 text can never fall
+ * through to wording. A 401 or 403 without a confirmed code is transient.
  */
 function isCredentialLoss(error: unknown): boolean {
   if (error instanceof CommandHttpError) {
-    return error.status === 401 || error.status === 403;
+    return isConfirmedCredentialHttpFailure(error.status, error.code);
   }
   if (
     error instanceof RenewalReauthorisationRequired ||
@@ -465,13 +471,15 @@ function isCredentialLoss(error: unknown): boolean {
 function isDeliveryCredentialLoss(error: unknown): boolean {
   return isCredentialLoss(error) ||
     (error instanceof DeliveryHttpError &&
-      (error.status === 401 || error.status === 403));
+      isConfirmedCredentialHttpFailure(error.status, error.code));
 }
 
 function isRetryableDeliveryError(error: unknown): boolean {
-  return error instanceof DeliveryTransportError ||
-    (error instanceof DeliveryHttpError &&
-      (error.status === 429 || error.status >= 500));
+  if (error instanceof DeliveryTransportError) return true;
+  if (!(error instanceof DeliveryHttpError)) return false;
+  if (isConfirmedCredentialHttpFailure(error.status, error.code)) return false;
+  return error.status === 429 || error.status >= 500 ||
+    error.status === 401 || error.status === 403;
 }
 
 function deliveryRetryDelay(

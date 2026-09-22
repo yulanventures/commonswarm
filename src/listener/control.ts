@@ -186,6 +186,12 @@ export interface ListenerStatus {
   idlePollMs?: number | null;
   /** How the listener learns there is work. Optional: older files omit it. */
   wake?: ListenerWakeStatus;
+  /**
+   * When the supervisor will start the next attempt. Present while it is
+   * waiting through a transient failure; cleared once that attempt starts,
+   * the listener is ready, or it has stopped. Optional: older files omit it.
+   */
+  nextAttemptAt?: string | null;
   logPath: string;
 }
 
@@ -295,6 +301,7 @@ const STATUS_ALLOWED_KEYS = new Set([
   "activityLastErrorCode",
   "idlePollMs",
   "wake",
+  "nextAttemptAt",
 ]);
 const STATUS_ACTIVITY_ERROR_CODES = new Set<ActivityPublishErrorCode>([
   "activity_credential_failed",
@@ -618,7 +625,8 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !(row.idlePollMs === undefined ||
       row.idlePollMs === null ||
       (typeof row.idlePollMs === "number" &&
-        Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0))
+        Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
+    !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt))
   ) {
     throw new Error("stored listener status is malformed");
   }

@@ -213,6 +213,7 @@ import {
   askWaitJsonPayload,
   followStopFrame,
   formatFollowFrame,
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
   isFollowCredentialFailure,
   isRestartableReadError,
   parseWaitSeconds,
@@ -5392,9 +5393,13 @@ function listenerLapseNotices(
   status: ListenerStatus,
   summary: ListenerReadHealthSummary,
 ): ListenerLapseNotice[] {
+  // A stopped or failed listener is not in a live read or claim lapse. Those
+  // notices speak about what it is doing now. The stop is the status. A recorded
+  // run of delivery failures still prints, because that alarm is why it is down.
+  const down = status.state === "stopped" || status.state === "failed";
   const health = status.readHealth ?? emptyListenerReadHealth();
   const notices: ListenerLapseNotice[] = [];
-  if (health.currentReasonCode === "host_ports_exhausted") {
+  if (!down && health.currentReasonCode === "host_ports_exhausted") {
     notices.push({
       code: "listener_host_ports_exhausted",
       message: "This host has run out of outbound ports. The listener is probing only once per minute so it does not amplify the outage.",
@@ -5402,6 +5407,7 @@ function listenerLapseNotices(
         "Find the consumer: lsof -nP -iTCP | awk '{print $1}' | sort | uniq -c | sort -rn",
     });
   } else if (
+    !down &&
     // Reuse arrival-watch.ts's 60s loud-lapse transition. The listener keeps
     // the episode in durable status instead of the monitor's process-local machine.
     summary.currentEpisodeDurationMs !== null &&
@@ -5414,7 +5420,7 @@ function listenerLapseNotices(
         "Check cswarm status and the CommonSwarm service. If both are healthy, restart the listener.",
     });
   }
-  if (summary.throughputLapseHours.length > 0) {
+  if (!down && summary.throughputLapseHours.length > 0) {
     const latest = summary.throughputLapseHours.at(-1)!;
     /* What is pending belongs on the warning line, not several lines below it: a lapse with an
      * empty queue reads completely differently from one with work waiting, and a reader triaging
@@ -5673,6 +5679,31 @@ export function listenerStatusJson(
   };
 }
 
+function credentialStoppedSentence(): string {
+  const codes = CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ");
+  return `the server refused this credential (${codes} means revoked, expired, or unknown) or a local renewal stop fired. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+}
+
+function listenerRetrySentence(status: ListenerStatus): string | null {
+  if (status.state !== "starting" || typeof status.nextAttemptAt !== "string") {
+    return null;
+  }
+  const code = status.lastErrorCode ?? "no code recorded";
+  return `The last attempt failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
+}
+
+function listenerDownSentence(status: ListenerStatus): string | null {
+  if (status.state === "stopped") {
+    return `This listener is stopped and is not reading signals. Start it again by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+  }
+  if (status.state !== "failed") return null;
+  if (status.lastErrorCode === "credential_stopped") {
+    return `This listener stopped because ${credentialStoppedSentence()}.`;
+  }
+  const code = status.lastErrorCode ?? "no code recorded";
+  return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+}
+
 export function renderListenerStatus(
   status: ListenerStatus,
   evidence: ListenerAttendanceEvidence = emptyAttendanceEvidence(),
@@ -5690,12 +5721,23 @@ export function renderListenerStatus(
   const readHealth = status.readHealth ?? emptyListenerReadHealth();
   const readSummary = listenerReadHealthSummary(status, nowMs);
   const lapseNotices = listenerLapseNotices(status, readSummary);
+  const down = status.state === "stopped" || status.state === "failed";
+  const retrying = status.state === "starting" &&
+    typeof status.nextAttemptAt === "string";
+  const retrySentence = listenerRetrySentence(status);
+  const downSentence = listenerDownSentence(status);
   const lines = [
-    lapseNotices.length > 0
+    down
+      ? `Listener ${status.state} for agent ${status.principalId}.`
+      : retrying
+      ? `Listener retrying for agent ${status.principalId}.`
+      : lapseNotices.length > 0
       ? `Listener LAPSE for agent ${status.principalId}: ${lapseNotices.map((notice) => notice.code).join(", ")}.`
       : pendingForMainCount > 0
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
+    ...(retrySentence === null ? [] : [retrySentence]),
+    ...(downSentence === null ? [] : [downSentence]),
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
     listenerAttendingSentence(evidence.attendingSurfaces ?? []),
     `ATTENDED: ${
@@ -6151,7 +6193,7 @@ export function listenerFailureMessage(
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
-    return "the agent credential expired, was revoked, reached its renewal horizon, or its grant was suspended; run cswarm whoami with this credential to see the grant state, then follow its next step";
+    return credentialStoppedSentence();
   }
   if (code === "permission_canary_failed") {
     if (provider === "claude") {
@@ -7509,6 +7551,28 @@ function settingsHaveScopedClaudeHook(
   });
 }
 
+/**
+ * True only when a Claude settings file currently contains this principal's hook.
+ * A leftover hook-surface file is not an installed hook.
+ */
+export async function listenerSettingsHookInstalled(
+  cwd: string,
+  principalId: string,
+): Promise<boolean> {
+  const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
+  const settingsPaths = [
+    join(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
+    join(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
+    userClaudeSettingsTarget().path,
+  ];
+  for (const path of settingsPaths) {
+    if (settingsHaveScopedClaudeHook(readClaudeSettings(path), principalId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function listenerHookSurfacePresent(
   instanceDirectory: string,
   cwd: string,
@@ -7516,18 +7580,7 @@ async function listenerHookSurfacePresent(
 ): Promise<boolean> {
   const surface = await new FileHookSurfaceStore(instanceDirectory).evidence();
   if (surface.exists) return true;
-  const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
-  const settingsPaths = new Set([
-    join(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
-    join(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
-    userClaudeSettingsTarget().path,
-  ]);
-  for (const path of settingsPaths) {
-    if (settingsHaveScopedClaudeHook(readClaudeSettings(path), principalId)) {
-      return true;
-    }
-  }
-  return false;
+  return await listenerSettingsHookInstalled(cwd, principalId);
 }
 
 async function listenerWatcherSurfacePresent(
@@ -7560,7 +7613,7 @@ async function listenerHasAttendanceSurface(options: {
   );
 }
 
-async function collectListenerAttendanceEvidence(options: {
+export async function collectListenerAttendanceEvidence(options: {
   instanceDirectory: string;
   cwd: string;
   principalId: string;
@@ -7570,12 +7623,12 @@ async function collectListenerAttendanceEvidence(options: {
   hookSurfaceExists: boolean;
   hookSurfaceAdvanced: boolean;
 }): Promise<ListenerAttendanceEvidence> {
-  const hook = options.hookSurfaceExists ||
-    await listenerHookSurfacePresent(
-      options.instanceDirectory,
-      options.cwd,
-      options.principalId,
-    );
+  // ATTENDING: hook follows a settings file that contains the hook now.
+  // hookSurfaceExists is the local surface file, which stays after uninstall.
+  const settingsHook = await listenerSettingsHookInstalled(
+    options.cwd,
+    options.principalId,
+  );
   const watcher = await listenerWatcherSurfacePresent(
     options.cloud,
     options.workspaceId,
@@ -7583,10 +7636,10 @@ async function collectListenerAttendanceEvidence(options: {
   );
   return {
     pendingForMainOldestAt: options.pendingForMainOldestAt,
-    hookSurfaceExists: hook,
+    hookSurfaceExists: options.hookSurfaceExists,
     hookSurfaceAdvanced: options.hookSurfaceAdvanced,
     watcherLockHeld: watcher,
-    attendingSurfaces: listenerAttendingSurfaces(hook, watcher),
+    attendingSurfaces: listenerAttendingSurfaces(settingsHook, watcher),
   };
 }
 
