@@ -31,7 +31,9 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
 3. Cleanup of merged branches and worktrees, and PR #8: BLOCKED. The operator rejected the lead's cleanup on 2026-09-17
    and has not answered since.
 4. CLI release carrying items above. It must also fix a live bug found by the doc pass: the capability-link default host
-   is `coswarm-site.vercel.app` (deleted), in `src/cloud/capability-link.ts:8` and `src/cli.ts:995-998`.
+   is `coswarm-site.vercel.app` (deleted), in `src/cloud/capability-link.ts:8` and `src/cli.ts:995-998`. The `/see` page
+   itself was never built (404 on commonswarm.com on 2026-09-22; design `CAPABILITY-URL-ONRAMP.md` §7 "No page"), so the
+   host change alone does not make the link work; building the page is a backlog item.
 5. Then the app backlog from H0's remaining lanes (4b, 5a, 5b) with Grok/Gemini Makers.
 
 ## Window hazard kept for later migrations (measured 2026-09-17)
