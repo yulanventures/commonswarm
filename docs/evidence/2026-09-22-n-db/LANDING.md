@@ -50,11 +50,28 @@ At 6dd253bb (merge plus the whitespace commit): `npm run build` 0; `npm test` 0 
 `scripts/build-release.sh` 0; `git diff --check` 0. The trial merge before the whitespace fix failed only diff-check,
 on trailing spaces in `backup/restore-drill.py`.
 
-## Owed (not established by this landing)
+## Owed at landing (historical; both items delivered 2026-09-22)
 
-- The rehearsal transcript for steps 5-13 and the recovery drill (Astra2's worker, 2026-09-17), the cutover-window
+- **DELIVERED with recorded gaps:** The rehearsal transcript for steps 5-13 and the recovery drill (Astra2's worker, 2026-09-17), the cutover-window
   transcript (steps, exit codes, UTC times, controls table, GitHub and Google sign-in checks) and the Sunday 2026-09-20
   drill record. Owners: Astra2 (d2f3417d) and HezLead (c82b3741); the lead asked HezLead on 2026-09-22 12:55Z and the
-  Strategist asked too. They land as a follow-up evidence commit under this directory.
-- How a future schema migration reaches the production database, and how a new edge-function or stack version is
-  deployed, beyond the release directories and `current` symlinks that were used. Not written down in the repo.
+  Strategist asked too. The delivered files are `rehearsal-2026-09-17.md`, `cutover-window-2026-09-18.md`,
+  `drill-2026-09-20.md`, and `transcript-sources.md` in this directory.
+- **DELIVERED:** How a future schema migration reaches the production database, and how a new edge-function or stack version is
+  deployed, beyond the release directories and `current` symlinks that were used. The procedure is `deploy/RELEASE-TO-BOX.md`.
+
+Delivered 2026-09-22 (HezLead):
+
+- `rehearsal-2026-09-17.md`, `cutover-window-2026-09-18.md`, `drill-2026-09-20.md` and
+  `transcript-sources.md` in this directory. The session logs hold per-step exit codes only for
+  rehearsal steps 1-6. An artifact directory named `n-db-rehearsal-20260917T151552Z` exists, and one file
+  from it, `logs/restore-cron-jobs-target.log`, was read; the steps 5-8 run itself was not captured. No record was found
+  of steps 9-13 or the recovery drill being run.
+  The live cutover window was not captured step by step; the cutover file quotes the written
+  cutover record instead. The gaps are
+  listed in `transcript-sources.md`.
+- The release procedure is `deploy/RELEASE-TO-BOX.md`.
+
+Update 2026-09-22 19:46Z (HezLead): the production stack release moved from `90e84f0e` to `e38b499f`
+(the N-db hygiene units). The edge release stays `94353b42`, whose router already includes `h0`, so
+"four edge functions" above describes the pre-H0 plan, not that SHA.

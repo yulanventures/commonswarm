@@ -194,14 +194,15 @@ prepare and verify release inputs, but must not deploy, restart, change Caddy, o
 production symlinks.
 
 Every release input must be an exact reviewed SHA that has landed on `main`.
+The operational procedure is [deploy/RELEASE-TO-BOX.md](deploy/RELEASE-TO-BOX.md).
 
 | Surface | Release input and method | Automatic? |
 |---|---|---|
-| Stack | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/stack/releases/<sha>`, then the `current` symlink is changed through the operations runbook. | No. |
-| Edge | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/edge/releases/<sha>`, then the container is recreated on `commonswarm-net` through the operations runbook. | No. The six-hour recycle timer only mitigates the live leak. |
+| Stack | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/stack/releases/<sha>`, then released through `deploy/RELEASE-TO-BOX.md`. | No. |
+| Edge | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/edge/releases/<sha>`, then recreated on `commonswarm-net` through `deploy/RELEASE-TO-BOX.md`. | No. The six-hour recycle timer only mitigates the live leak. |
 | Site | `deploy/site/deploy.sh` builds `site/` from a clean archive of the checked-out `HEAD`, validates it, uploads a release, and atomically changes `/srv/commonswarm/site/current`. HezLead and Anvil own execution. | No. |
 | CLI | `scripts/build-release.sh` creates the checked single-file CLI and checksum. `scripts/build-npm.sh` creates the npm package from that same bundle. | No publish workflow exists in this repo. |
-| Schema | A schema change is a production operation performed once through the workspace runbook. It is not applied by CI or by merging `main`. | No. |
+| Schema | A schema change is a production operation performed once through `deploy/RELEASE-TO-BOX.md`. It is not applied by CI or by merging `main`. | No. |
 
 CI never deploys production. A merge to `main` does not release the stack, edge runtime,
 site, CLI, or a migration.
@@ -212,7 +213,8 @@ tests reject version drift.
 
 `deploy/supabase-stack/RUNBOOK.md` records the completed hosted-to-box cutover. Its source
 migration steps and `/home/commonswarm/migration.env` are historical. Do not reuse them as
-the current release procedure. The cross-repository operations runbook is authoritative.
+the current release procedure. The linked repository procedure governs CommonSwarm releases;
+the cross-repository operations runbook remains authoritative for host operations.
 
 ## CI
 

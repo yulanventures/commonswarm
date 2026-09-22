@@ -10,6 +10,6 @@
 
 ## Production pin replacement point
 
-The cutover is done. Production is the server `yulan-vps-1`. Not established: there is no written procedure yet for how image pins are checked. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`. PostgreSQL stays on the ruled 17.6.1.x line. Keep the recorded local CLI pins for services that publish no version.
+The cutover is done. Production is the server `yulan-vps-1`. Image-pin releases use `deploy/RELEASE-TO-BOX.md`. PostgreSQL stays on the ruled 17.6.1.x line. Keep the recorded local CLI pins for services that publish no version.
 
 Tags are used instead of floating names so a restart cannot change a service without a reviewed file change.

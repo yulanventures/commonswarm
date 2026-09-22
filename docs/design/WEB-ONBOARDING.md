@@ -135,7 +135,7 @@ applied; say which one you mean.
 
 ## Step 2 — deploy the edge functions
 
-Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+The current box release procedure for edge functions is `deploy/RELEASE-TO-BOX.md`.
 
 Do **not** deploy `capability` as part of switching signup on. It is the §7 anonymous
 capability-URL read, it is gated off by `SWARM_CAPABILITY_URLS` in both functions
