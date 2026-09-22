@@ -433,3 +433,53 @@ Those results do not establish a product test failure or a pass for Fold 4.
 `python3 -m py_compile` could not write its cache outside the sandbox;
 `ast.parse` of both changed Python test files passed. `bash -n` of both
 changed shell scripts passed.
+
+## Fold 5
+
+The Fold 4 principal `FOR UPDATE` lock caused SQLSTATE `55P03` in the
+stalled-seat test: a poll slice held the principal while waiting for the seat
+row. The transaction holding that seat row called `postAsk`; signal and delivery
+foreign keys needed `KEY SHARE` on the principal. The signal writer could not
+finish, so the test could not release the seat row until the poll's five-second
+lock timeout. The H0 poll and shared `claimAgentInbox` principal locks now use
+`FOR NO KEY UPDATE`. This still serializes claims and conflicts with `FOR SHARE`,
+but allows the writer's `KEY SHARE`. The stalled-seat test passes and the H0
+handler logs only SQLSTATE on an unexpected database error.
+
+The lock-order test now probes the seat row with `FOR UPDATE NOWAIT` while its
+first slice waits on the principal. Removing both `lockPollPrincipal` calls
+made that probe fail with SQLSTATE `55P03` (mutation exit 1); restoring the calls
+made it pass. The waiting-slice, stalled-seat, global admission, and two-claim
+cap tests passed together (4 tests). The full server gate passed 238/238.
+
+Each H0 test seat now mints a one-seat join credential, registers, and revokes
+the credential. This removes cross-test use of a ten-seat cap and keeps the
+per-identity live-credential limit free. The global admission test passes.
+
+The exact poll catalog expected `h0_poll_locks_expires_at_check`, but
+PostgreSQL creates `h0_poll_locks_check` from the unnamed table CHECK. The
+Docker helper now prints the protected SQL log tail on failure. Its synthetic
+baseline grants `swarm_admin` schema usage, as the real schema does. The
+post-upgrade count verifier reads the exported cron job name with `awk` because
+the pinned PostgreSQL image has no Python. The full Docker gate passed 37/37,
+including all three one-migration-at-a-time release proofs. Removing its exact
+index comparison made `poll wrong active predicate` unexpectedly pass, so the
+mutation gate exited 1; restoring the comparison made it reject that case.
+
+Fold 5 gates: `npm run build` exit 0; `npm run check:tests` exit 0;
+`npm run check:edge` exit 0; `npm run test:h0-counts` exit 0 (16 tests);
+`npm run test:h0-upgrade:local` exit 0 (37 checks); `npm run test:p1-server`
+exit 0 (238 tests). `npm test` exited 1 (894 pass, 2 sandbox `spawn EPERM`
+failures in resume process tests). `npm run test:p1-cli` exited 1 after an
+interrupted sandbox run (812 pass, 18 fail, 1 cancelled); failures include
+`EPERM` on `ps` and writes outside the writable worktree. The run stopped
+producing output for more than two minutes, so it did not establish a full
+CLI gate result. `bash scripts/build-release.sh` exited 0 and ran the shipped
+bundle. `git diff --check a103a512...HEAD` exited 0 after the commit.
+
+No production host or hosted service was contacted. The schema upgrade was
+proved in an isolated local PostgreSQL container; no production apply or
+deployment was established.
+The two D-036 review arms were not run because this Maker was told to start no
+other model. The local process inventory could not be checked: `pgrep` exited 3
+because `sysmond` is unavailable in this sandbox.

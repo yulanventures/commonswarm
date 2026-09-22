@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 IMAGE = 'public.ecr.aws/supabase/postgres:17.6.1.147'
 BASELINE = '''
 CREATE SCHEMA swarm;
+GRANT USAGE ON SCHEMA swarm TO swarm_admin;
 CREATE SCHEMA swarm_read;
 CREATE SCHEMA auth;
 CREATE SCHEMA cron;
@@ -64,7 +65,11 @@ def main():
             if result.returncode:
                 # All inputs are synthetic. Preserve diagnostics locally, never print rows.
                 (work/'failure.log').write_text(result.stdout + result.stderr)
-                raise AssertionError(label + ' failed: ' + result.stderr[-600:])
+                logs = work/'artifacts/logs/apply-h0-upgrade.log'
+                detail = (result.stdout + result.stderr).strip()
+                if logs.exists():
+                    detail += '\nSQL log tail:\n' + logs.read_text()[-1600:].strip()
+                raise AssertionError(f'{label} failed (exit {result.returncode}): {detail[-2200:]}')
             return result.stdout.strip()
         try:
             check(run(['docker','run','-d','--name',name,'-e','POSTGRES_PASSWORD=isolated-test-only',

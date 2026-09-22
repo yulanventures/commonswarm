@@ -67,8 +67,6 @@ let functionProcess: ReturnType<typeof spawn> | undefined;
 let functionLogs = "";
 let envDir: string | undefined;
 let owner: Owner;
-let joinSecret: string;
-let spareSecret: string;
 
 function localEnvironment(): LocalEnvironment {
   const output = execFileSync("supabase", ["status", "-o", "json"], {
@@ -128,7 +126,20 @@ async function command(
   };
 }
 
-async function makeSeat(secret = joinSecret): Promise<Seat> {
+async function makeSeat(secret?: string): Promise<Seat> {
+  // Each seat gets its own credential. A shared ten-seat cap makes unrelated
+  // cases depend on how many earlier tests registered.
+  let mintedId: string | undefined;
+  if (secret === undefined) {
+    const minted = await command(owner.ownerJwt, {
+      kind: "mint_agent_join_credential",
+      seat_cap: 1,
+      ttl_hours: 4,
+    });
+    assert.equal(minted.status, 200, JSON.stringify(minted.body));
+    secret = String(minted.body.join_credential);
+    mintedId = String(minted.body.join_credential_id);
+  }
   const response = await fetch(`${local.API_URL}/functions/v1/command`, {
     method: "POST",
     headers: {
@@ -151,6 +162,13 @@ async function makeSeat(secret = joinSecret): Promise<Seat> {
   assert.equal(response.status, 200, String(body.error ?? "register failed"));
   assert.equal(typeof body.agent_token, "string");
   assert.equal(typeof body.principal_id, "string");
+  if (mintedId !== undefined) {
+    const revoked = await command(owner.ownerJwt, {
+      kind: "revoke_agent_join_credential",
+      join_credential_id: mintedId,
+    });
+    assert.equal(revoked.status, 200, JSON.stringify(revoked.body));
+  }
   return { token: String(body.agent_token), principalId: String(body.principal_id) };
 }
 
@@ -353,22 +371,6 @@ before(async () => {
     `;
   });
   owner = { workspace, ownerId: user.id, ownerJwt: user.jwt };
-  const minted = await command(owner.ownerJwt, {
-    kind: "mint_agent_join_credential",
-    seat_cap: 10,
-    ttl_hours: 4,
-  });
-  assert.equal(minted.status, 200, String(minted.body.error ?? "mint failed"));
-  assert.equal(typeof minted.body.join_credential, "string");
-  joinSecret = String(minted.body.join_credential);
-  const spare = await command(owner.ownerJwt, {
-    kind: "mint_agent_join_credential",
-    seat_cap: 10,
-    ttl_hours: 4,
-  });
-  assert.equal(spare.status, 200, String(spare.body.error ?? "spare mint failed"));
-  assert.equal(typeof spare.body.join_credential, "string");
-  spareSecret = String(spare.body.join_credential);
 });
 
 after(async () => {
@@ -623,9 +625,14 @@ test("a waiting slice and a second poll use one principal-seat lock order", { ti
       SELECT principal_id FROM swarm.agent_principals
       WHERE principal_id = ${seat.principalId}::uuid FOR SHARE
     `;
-    // The first slice now waits for principal FOR UPDATE. In the old order
+    // The first slice now waits for principal FOR NO KEY UPDATE. In the old order
     // it held the seat row while waiting to upgrade its principal lock.
     await delay(1_200);
+    const unlockedSeat = await sql<{ holder: string }[]>`
+      SELECT holder::text FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid FOR UPDATE NOWAIT
+    `;
+    assert.equal(unlockedSeat.length, 1, "the waiting slice locked the seat before the principal");
     second = h0("poll", seat.token, { wait: 0 });
     await delay(1_200);
     assert.equal(firstSettled, false, "first poll ended before the overlap");
@@ -639,7 +646,7 @@ test("a waiting slice and a second poll use one principal-seat lock order", { ti
 });
 
 test("a slice blocked on its seat row cannot collect after the lock ends", { timeout: 25_000 }, async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   let firstSettled = false;
   const firstPromise = h0("poll", seat.token, { wait: 4 });
   void firstPromise.then(() => { firstSettled = true; }, () => { firstSettled = true; });
@@ -673,7 +680,8 @@ test("a slice blocked on its seat row cannot collect after the lock ends", { tim
     await delay(100);
   });
   const [first, second] = await Promise.all([firstPromise, secondPromise!]);
-  assert.equal(first.status, H0_POLL_LOCK_ENDED_STATUS, JSON.stringify(first.body));
+  assert.equal(first.status, H0_POLL_LOCK_ENDED_STATUS,
+    `${JSON.stringify(first.body)}; edge codes: ${functionLogs.match(/h0 poll failed[^\n]*/g)?.join("; ") ?? "none"}`);
   assert.equal(first.body.error, H0_POLL_LOCK_ENDED);
   assert.equal(second.status, 200, JSON.stringify(second.body));
   assert.equal(deliveriesOf(second.body)[0]?.signal.id, signalId);
@@ -839,8 +847,8 @@ test("one waiting poll is admitted for the whole deployment", { timeout: 30_000 
 const ABORT_SLOT_FREE_MS = 2_000;
 
 test("an aborted waiting poll frees the slot for another seat", { timeout: 30_000 }, async () => {
-  const first = await makeSeat(spareSecret);
-  const second = await makeSeat(spareSecret);
+  const first = await makeSeat();
+  const second = await makeSeat();
   const dir = mkdtempSync(join(tmpdir(), "h0-abort-"));
   const script = join(dir, "abort.ts");
   const handler = join(process.cwd(), "supabase/functions/h0/poll-ack.ts");
@@ -989,7 +997,7 @@ await sql.end({ timeout: 2 });
 });
 
 test("the wait ends from the lock row, not from a clock started after the claim", { timeout: 15_000 }, async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   const pending = h0("poll", seat.token, { wait: 20 });
   const seenBy = Date.now() + 3_000;
   let holder: string | null = null;
@@ -1028,7 +1036,7 @@ test("the wait ends from the lock row, not from a clock started after the claim"
 });
 
 test("a poll whose own lock ends returns h0_poll_lock_ended", { timeout: 20_000 }, async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   const pending = h0("poll", seat.token, { wait: 8 });
   const seenBy = Date.now() + 3_000;
   let holder: string | null = null;
@@ -1061,7 +1069,7 @@ test("a poll whose own lock ends returns h0_poll_lock_ended", { timeout: 20_000 
 });
 
 test("a retried stale ackBatch says to poll again without ackBatch", async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   const signalId = await postAsk(seat.principalId);
   const first = await h0("poll", seat.token, { wait: 0 });
   assert.equal(first.status, 200, JSON.stringify(first.body));
@@ -1089,7 +1097,7 @@ function batchImmutable(error: unknown): boolean {
 }
 
 test("closed poll batches older than the retention age can be deleted", async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   const workspace = await sql<{ workspace_id: string }[]>`
     SELECT workspace_id::text
     FROM swarm.agent_principals
@@ -1238,7 +1246,7 @@ test("closed poll batches older than the retention age can be deleted", async ()
 });
 
 test("a poll cannot take the waiting slot while the admission lock is held", { timeout: 20_000 }, async () => {
-  const seat = await makeSeat(spareSecret);
+  const seat = await makeSeat();
   const gate = postgres(local.DB_URL, { prepare: false, max: 1 });
   let releaseGate = (): void => {};
   const untilRelease = new Promise<void>((resolve) => {

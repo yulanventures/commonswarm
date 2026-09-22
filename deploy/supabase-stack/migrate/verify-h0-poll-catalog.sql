@@ -135,7 +135,7 @@ DECLARE
        ["acquired_at","timestamp with time zone",true,"statement_timestamp()"],
        ["expires_at","timestamp with time zone",true,null],["waiting","boolean",true,"false"]],
      "constraints":[
-       ["h0_poll_locks_expires_at_check","c","CHECK (expires_at >= acquired_at)"],
+       ["h0_poll_locks_check","c","CHECK (expires_at >= acquired_at)"],
        ["h0_poll_locks_pkey","p","PRIMARY KEY (workspace_id, principal_id)"],
        ["h0_poll_locks_principal_id_workspace_id_fkey","f","FOREIGN KEY (principal_id, workspace_id) REFERENCES swarm.agent_principals(principal_id, workspace_id)" ]],
      "indexes":[
@@ -181,7 +181,7 @@ BEGIN
     SELECT COALESCE(jsonb_agg(jsonb_build_array(c.conname,c.contype,pg_get_constraintdef(c.oid,true)) ORDER BY c.conname),'[]'::jsonb)
       INTO actual FROM pg_constraint c WHERE c.conrelid=obj AND c.convalidated
         AND NOT c.condeferrable AND NOT c.condeferred;
-    IF actual IS DISTINCT FROM item->'constraints' THEN RAISE EXCEPTION 'H0 poll constraints mismatch: %',item->>'name'; END IF;
+    IF actual IS DISTINCT FROM item->'constraints' THEN RAISE EXCEPTION 'H0 poll constraints mismatch: %, got %, expected %',item->>'name',actual,item->'constraints'; END IF;
     SELECT COALESCE(jsonb_agg(jsonb_build_array(c.relname,i.indisvalid,i.indisready,i.indisunique,
       pg_get_indexdef(i.indexrelid)) ORDER BY c.relname),'[]'::jsonb)
       INTO actual FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid=obj;

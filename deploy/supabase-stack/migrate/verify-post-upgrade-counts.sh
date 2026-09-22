@@ -19,13 +19,18 @@ done
 derived="$(mktemp -d "$MIGRATION_ARTIFACT_DIR/h0-expected.XXXXXX")"
 chmod 0700 "$derived"
 cp "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" "$derived/cron-jobs.ndjson"
-existing_purge_count=$(python3 - "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" <<'PY'
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as source:
-    jobs = [json.loads(line) for line in source if line.strip()]
-print(sum(job.get('jobname') == 'swarm-purge-h0-poll-batches' for job in jobs))
-PY
-)
+# cron_jobs_json_sql emits jobname as the first JSON field. Read that exact
+# field without requiring Python in the PostgreSQL tool image.
+existing_purge_count=$(awk '
+  /^[[:space:]]*$/ { next }
+  {
+    name=$0
+    if (sub(/^[[:space:]]*\{[[:space:]]*"jobname"[[:space:]]*:[[:space:]]*"/, "", name) != 1) exit 1
+    sub(/".*/, "", name)
+    if (name == "swarm-purge-h0-poll-batches") count++
+  }
+  END { print count+0 }
+' "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson")
 if [[ "$existing_purge_count" -eq 0 ]]; then
   target_psql --quiet --tuples-only --no-align -c "
   SELECT json_build_object(

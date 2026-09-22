@@ -45,7 +45,11 @@ Deno.serve((request) => {
         if (error instanceof H0ClientAbort) return new Response(null, { status: 204 });
         const retryable = h0RetryableDatabaseFailure(error);
         if (retryable !== null) return retryable;
-        console.error("h0 poll failed");
+        const code = typeof error === "object" && error !== null && "code" in error &&
+            typeof error.code === "string" && /^[0-9A-Z]{5}$/.test(error.code)
+          ? error.code
+          : "unknown";
+        console.error("h0 poll failed", { code });
         return h0VerbFailure();
       });
     }

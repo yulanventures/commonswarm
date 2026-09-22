@@ -315,16 +315,18 @@ async function sessionOrRefusal(
   };
 }
 
-// H0 transaction order: agent principal FOR UPDATE, session row, seat lock row,
+// H0 transaction order: agent principal FOR NO KEY UPDATE, session row, seat lock row,
 // then batch and delivery rows. Admission and release take advisory -> seat row;
 // neither takes the principal after the seat row or takes advisory after it.
+// Signal inserts and delivery fan-out hold a foreign-key KEY SHARE lock on the
+// principal. NO KEY UPDATE permits that lock while serializing poll claims.
 async function lockPollPrincipal(tx: Tx, seat: Seat): Promise<void> {
   const rows = await tx<{ principal_id: string }[]>`
     SELECT principal_id::text
     FROM swarm.agent_principals
     WHERE workspace_id = ${seat.workspaceId}::uuid
       AND principal_id = ${seat.principalId}::uuid
-    FOR UPDATE
+    FOR NO KEY UPDATE
   `;
   if (rows.length !== 1) throw new Error("h0 poll principal missing");
 }
