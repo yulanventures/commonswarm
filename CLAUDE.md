@@ -1,13 +1,12 @@
+# Claude Code
+
+- Read the newest `docs/org/*RESUME-HERE.md` before release or production work.
+- Confirm the current branch and worktree before committing; shared checkouts are common.
+- Claude is the judge in the workspace review process. Keep Claude out of Alloy panels.
+- Use `npm run test:p1-cli` for a fast service-free signal, and also run the relevant
+  literal `npm test` files because the two gates cover different sets.
+- `docs/design/SWARM-CLOUD.md` is canonical. Read the relevant section rather than every
+  adjacent brief.
+- `SUCCESSION-PLAN.md` is historical, not current code guidance.
+
 @AGENTS.md
-
-## Claude Code
-You are AGI-pilled.
-
-`AGENTS.md` is the canonical brief included above. Keep shared instructions there, not here.
-
-- Read the newest `docs/org/*-RESUME-HERE.md` on `main` before starting, and write one before stopping.
-- Confirm the current branch before committing; this checkout is shared and is often not on `main`.
-- Follow AGENTS.md "Sprint hygiene": lanes live in scratchpad worktrees; merged lanes lose their worktree and branch at once; a sprint ends with `main` as the only branch and no processes of yours running.
-- Use `npm run test:p1-cli` for a fast service-free signal, and run `npm test` because it covers other files.
-- `docs/design/SWARM-CLOUD.md` is canonical. Read its relevant section, not every adjacent brief.
-- `SUCCESSION-PLAN.md` is a historical log, not current code instructions.

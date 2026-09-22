@@ -1,69 +1,57 @@
-## Done means done
+# AGENTS.md — CommonSwarm site
 
-Not half done. Not done except for the part you decided to skip. And not a report about how it will be done.
+The root `../AGENTS.md` is canonical and applies to all work in this directory.
 
-Five things asked means five things delivered, no matter how long they'll take. If the fifth is genuinely blocked, finish the other four and name the blocker in one sentence. The specific blocker. Not "this needs more investigation."
+## Site stack
 
-## Act. Don't ask.
+`site/` is the Astro 7 static site for CommonSwarm. It requires Node 22.12 or newer and
+uses static output, hand-written CSS, and vanilla browser JavaScript. Do not add Tailwind,
+React, or UI libraries.
 
-Reversible and cheap? Do it, then tell me. Research, data pulls, analysis, drafts, refactors inside the scope I gave you, testing an API. A question costs me more than a re-run costs you.
+- Design tokens: `src/styles/tokens.css`
+- Base styles: `src/styles/global.css`
+- UI primitives: `src/styles/ui.css`
+- Motion: `src/styles/motion.css`
+- Self-hosted fonts: `public/fonts/`
 
-Ask first only for: anything reaching an audience, anything we cannot undo, anything expensive.
+## Commands
 
-Something is broken? Fix it. Reporting an issue you could have fixed turns your work into my to-do list.
+Run site commands from `site/`:
 
-## A question is a question
-
-When I ask a question, answer it. Do not implement it.
-
-"Should we use X?" is not "migrate everything to X." "What would it take to add Y?" is not "add Y."
-
-When in doubt, assume it's a question. Answer first. Act when I say go.
-
-## Speed (Opus 5 only)
-
-When running as Opus 5: optimize for wall-clock speed. Finish tasks quickly.
-
-- Parallelize aggressively. Independent tasks run at the same time, never one after another — batch tool calls, spawn subagents concurrently.
-- Delegate by complexity: Sonnet 5 subagents for routine work (search, bulk edits, boilerplate, verification), Opus 5 subagents for hard reasoning that can run independently.
-- Keep working in the main thread while subagents run — don't sit idle waiting on them.
-- Don't over-deliberate. Enough info to act = act. No long option surveys for decisions with an obvious default.
-- Speed never trades away quality: same rigor, same verification, same "done means done". If parallelizing risks a worse result, slow down.
-- No conflicts from parallelism: never let two subagents touch the same files or overlapping scope. Split work by non-overlapping boundaries; merge and reconcile results in the main thread.
-
-## Short responses
-
-It's been a long day and my brain is fried, talk to me like I'm 5.
-
-Small words, short sentences, short paragraphs. If you have to use a big word, explain it right after. Only return what's actually necessary.
-
-Just tell me what you did, did it work, what do I do now.
-
-If I have to decide something: 2 options max, the context I need to pick fast, and which one you'd go with.
-
-Keep paths and commands exact.
-
-Always use ASD-STE100 Simplified Technical English when you talk to me.
-
-## Development
-
-When starting the dev server, use background mode:
-
-```
-astro dev --background
+```sh
+npm install
+npm run dev
+npm run build
+npm test
+npm run preview
 ```
 
-Manage the background server with `astro dev stop`, `astro dev status`, and `astro dev logs`.
+Before using background development commands, verify support in `package.json`. When the
+repository supports them, use `astro dev --background`, `astro dev status`,
+`astro dev logs`, and `astro dev stop` through the repository's Astro script.
 
-## Documentation
+Commands displayed on the site must match the current built CLI. Rebuild the root CLI
+before treating `../dist/cli.js --help` as evidence:
 
-Full documentation: https://docs.astro.build
+```sh
+(cd .. && npm run build)
+node ../dist/cli.js --help
+```
 
-Consult these guides before working on related tasks:
+## Product and deployment
 
-- [Adding pages, dynamic routes, or middleware](https://docs.astro.build/en/guides/routing/)
-- [Working with Astro components](https://docs.astro.build/en/basics/astro-components/)
-- [Using React, Vue, Svelte, or other framework components](https://docs.astro.build/en/guides/framework-components/)
-- [Adding or managing content](https://docs.astro.build/en/guides/content-collections/)
-- [Adding styles or using Tailwind](https://docs.astro.build/en/guides/styling/)
-- [Supporting multiple languages](https://docs.astro.build/en/guides/internationalization/)
+`/app` owns the live workspace and sign-up. `/start` is a compatibility handoff. Do not
+restore copy that describes the site as a preview or invite-only.
+
+Production is static files at `/srv/commonswarm/site/current` on `yulan-vps-1`, served by
+Caddy at `commonswarm.com` behind Cloudflare. Releases use `deploy/site/deploy.sh` and are
+performed only by Anvil under HezLead's direction. Other agents must never release the site. Never use
+Vercel.
+
+Site build variables live in untracked `site/.env`:
+
+- `PUBLIC_SUPABASE_URL=https://api.commonswarm.com`
+- `PUBLIC_SUPABASE_ANON_KEY` must be an anon JWT, never a service-role key.
+
+Brain-link parsing uses `BRAIN_SLUG_SEPARATORS` from `src/lib/brain-links.ts`. Do not
+retype that separator set.
