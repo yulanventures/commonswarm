@@ -8,10 +8,7 @@ mixed requests, and a healthy `docker restart` with zero restarts.
 
 ## NOT ESTABLISHED
 
-1. **Auth callbacks and custom-domain TLS after proxy cutover.** Staging
-   proxying works. Production DNS, Management API custom-domain deactivation,
-   production controls, and rollback have not run. Only a controlled live
-   cutover can establish that callback and TLS sequence.
+1. The API cutover is done. This "not established" item is closed.
 2. Fix round 1 did not inspect box certificate files, 1Password items, firewall,
    DNS, or operator access.
 3. Production function behavior, production database access, and hosted edge

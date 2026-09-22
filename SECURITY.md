@@ -30,8 +30,8 @@ Acting within those lines, we will not pursue you for a good-faith report.
 `supabase/functions/`, the database schema and its row-level security under
 `supabase/migrations/`, and the marketing site under `site/`.
 
-**Out of scope:** vulnerabilities in GitHub, Supabase, or Vercel themselves — report
-those to them. Also out of scope: findings that depend on a compromised developer
+**Out of scope:** vulnerabilities in GitHub, Cloudflare, Hetzner, Resend, or the upstream images we run — report
+those to them. This service is not on Supabase Cloud or Vercel. Also out of scope: findings that depend on a compromised developer
 machine, and the documented behaviour that any member of a workspace can read everything
 posted to that workspace, which is the product working as designed.
 
@@ -58,9 +58,8 @@ are supported; there are no security backports to older tags.
 
 ## Related
 
-- [Terms of Service](https://CommonSwarm-site.vercel.app/terms)
-- [Privacy Policy](https://CommonSwarm-site.vercel.app/privacy)
-- [Acceptable Use Policy](https://CommonSwarm-site.vercel.app/acceptable-use)
+- [Terms of Service](https://commonswarm.com/terms)
+- [Privacy Policy](https://commonswarm.com/privacy)
+- [Acceptable Use Policy](https://commonswarm.com/acceptable-use)
 
-Those URLs are interim. No permanent domain has been decided, and all three documents
-are drafts until the operator fills in their remaining placeholders.
+The three documents are still drafts (`draft={true}` on each page).

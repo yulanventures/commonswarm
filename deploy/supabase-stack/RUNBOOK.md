@@ -1,6 +1,8 @@
-# N-db cutover runbook — NOT RUN
+# N-db cutover runbook
 
-This lane deployed nothing. HezLead runs every command in this file.
+Status: the database cutover is done. Do not run this file against a source project. The commands below are the record of the window.
+
+Not established: there is no written procedure yet for how a schema migration reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 
 ## Fixed design
 
@@ -108,7 +110,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
 
-4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. For both the rehearsal and window, set `SOURCE_STORAGE_URL=https://ukezjcnxjvkpkeezxaew.supabase.co/storage/v1` and `TARGET_STORAGE_URL=http://127.0.0.1:18004`. Both are Storage API base URLs and `copy-storage.mjs` appends `/object/...`: hosted Supabase serves the Storage API under `/storage/v1`, and the box Storage API on loopback serves it at the root (Caddy strips `/storage/v1` in front of it). The target and does not use the public host whose POST requests return 503 during the window.
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. The hosted Storage API is gone. Files are in Cloudflare R2 through the server Storage API. `copy-storage.mjs` appends `/object/...`. The box Storage API on loopback serves that path at the root (Caddy strips `/storage/v1` in front of it).
 
    Compare the SHA-256 digests of the five JWT secret names without printing a value or digest. This command must print `JWT secret digests match: 1 distinct digest` and exit 0:
 
@@ -269,7 +271,7 @@ Run every window block one command at a time and read each exit code. Never run 
    export ARTIFACT_DIR
    ```
 
-1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
+1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. At this step of the window, public DNS still pointed at the hosted project. That project is now deleted, and DNS points at the server.
 
 2. Move `api.commonswarm.com` to the box (A 178.105.29.28, proxied) through the DNS holder. Judge DNS through `1.1.1.1` or a flushed resolver, never a local cache. From here the maintenance behaviour is:
 
@@ -310,7 +312,7 @@ Run every window block one command at a time and read each exit code. Never run 
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
    ```
 
-   What the freeze cannot stop: a session that refused termination keeps its older writable default and can write an unguarded table without `BEGIN READ WRITE`; other sessions can write to the tables the source role cannot trigger (the preflight list) if they override the database default; and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com` bypasses maintenance. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
+   What the freeze cannot stop: a session that refused termination keeps its older writable default and can write an unguarded table without `BEGIN READ WRITE`; other sessions can write to the tables the source role cannot trigger (the preflight list) if they override the database default.
 
    ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then restore DNS and Caddy.
 
@@ -383,7 +385,7 @@ Run every window block one command at a time and read each exit code. Never run 
 
 7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. Never install the fallback Caddy file after this point. Fix later failures forward. Production controls on `api.commonswarm.com`: GitHub sign-in and Google sign-in end to end in the operator's browser (both callbacks are `https://api.commonswarm.com/auth/v1/callback`, so this is their first proof on the box), `cswarm check` and a listener wake, one command, one upload, the install page, and the site.
 
-8. Tell humans to sign in once. Keep the hosted project frozen for 48 hours. Keep the moved rehearsal data directory through this step. Do not unfreeze the hosted project.
+8. Tell humans to sign in once. Keep the moved rehearsal data directory through this step.
 
 ## Recovery drill after the decision point
 
@@ -440,7 +442,7 @@ Rehearse this drill on a second local database before the window.
 
 An old asymmetric browser access token can fail against the HS256 box. The site clears it and shows sign-in. The human signs in once, with GitHub, Google, or email (production enables all three: read-only `/auth/v1/settings`, 2026-09-17).
 
-Before the window: a GitHub OAuth app owned by the yulanventures organization with callback `https://api.commonswarm.com/auth/v1/callback` (HezLead creates it; the client secret goes to the vault), and that same URI added to the authorized redirect URIs of the existing Google client in project `commonswarm` (the operator; the console needs the operator's password). Adding a redirect URI does not change hosted auth.
+Sign-in is GoTrue on the server: GitHub (yulanventures OAuth app), Google, and email. SMTP is Resend. The GitHub callback is `https://api.commonswarm.com/auth/v1/callback`. The same URI is on the Google client in project `commonswarm`.
 
 The migrated Auth rows preserve refresh tokens. The CLI refresh path can exchange a valid migrated token for a new HS256 session. The rehearsal must prove this.
 

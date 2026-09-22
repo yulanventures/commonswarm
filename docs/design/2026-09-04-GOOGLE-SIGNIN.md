@@ -1,9 +1,8 @@
 # Google sign-in
 
-Status: **written and dark.** A build renders the providers that are BOTH named in
+Status: Google, GitHub, and email are enabled on the server GoTrue. A build renders the providers that are BOTH named in
 `site/src/lib/auth-providers.ts` and reported as enabled by the deployment it points at.
-Google is **off** in the Supabase dashboard, so no build can show a Google button today. Turning it on is the operator checklist at the end: one dashboard change,
-then a rebuild and deploy. There is no second switch in the repo.
+Change GoTrue on the server, then rebuild the site and publish it with `deploy/site/deploy.sh`. There is no second switch in the repo.
 
 **Retired during review (2026-09-04), kept because the first commit message names it.** An
 earlier draft chose the rendered set from a `PUBLIC_SWARM_AUTH_PROVIDERS` build variable, and
@@ -19,15 +18,13 @@ itself, so that state is unreachable.
 
 ## Why
 
-GitHub sign-in and an email link are the two doors today. GitHub asks for a developer account,
-and the email link is rate limited to **2 emails per hour for the whole project** while the
-built-in sender is in use (`site/src/lib/commonswarm.ts`, `EmailRateLimited`) — so a first-time
-visitor can be blocked by a stranger's signup. Google is the door that is neither: no developer
-account, no email delivery, one press.
+GitHub sign-in, Google sign-in, and an email link are the doors. GitHub asks for a developer account.
+Sign-in email is sent through Resend. The send rate on the server is not established. Google asks for no developer
+account and no email delivery.
 
 ## Measured starting state (2026-09-04)
 
-Everything below was read off the live deployment, not assumed.
+Everything below was read off the deployment on that date. The project ref in this table is deleted. Google, GitHub, and email are enabled on the server GoTrue now.
 
 | Fact | How it was measured |
 |---|---|
@@ -225,32 +222,31 @@ Two things this table does **not** cover, both measured:
   page. Working offline means emptying both `PUBLIC_SUPABASE_` values, which is the
   no-backend build in the table above: the whole site renders, with no OAuth buttons.
 - **Nothing in CI builds this site.** `.github/workflows/` holds `commit-identity.yml` and
-  nothing else, and the deploy in AGENTS.md uploads a `dist/` built on the operator's machine
-  (`vercel deploy dist`). So "the build fails when the backend is unreachable" costs a person a
+  nothing else, and the site deploy is `deploy/site/deploy.sh`. So "the build fails when the backend is unreachable" costs a person a
   clear error and a retry; it does not break a pipeline, because there is no pipeline.
 
 The third row is the deliberate one. The alternative is to guess a provider list and publish
 it, which is the failure this whole design exists to prevent. A sign-in page whose doors cannot
 be confirmed does not get published, and the operator sees why on the same line.
 
-A **runtime** read was considered — the page asks `/auth/v1/settings` on load, so a dashboard
-toggle needs no deploy — and rejected: it puts a blocking network request and a new failure
+A **runtime** read was considered — the page asks `/auth/v1/settings` on load, so a GoTrue
+setting change would need no deploy — and rejected: it puts a blocking network request and a new failure
 mode on the sign-in path, to save a deploy the operator is already doing.
 
 ### Why the order still matters
 
-**Supabase dashboard first, then rebuild and deploy.** This is now enforced by the code rather
+Change GoTrue on the server, then rebuild the site and publish it with `deploy/site/deploy.sh`. This is now enforced by the code rather
 than by the operator remembering it, but the reason is worth keeping.
 
 `signInWithOAuth` builds the authorize URL in the browser and navigates to it. It asks GoTrue
-nothing first. So a button for a provider that is off in the dashboard produces **no client-side
+nothing first. So a button for a provider that is off in GoTrue produces **no client-side
 error at all** — the reader is navigated to the API host and shown raw JSON:
 
 ```
 {"code":400,"error_code":"validation_failed","msg":"Unsupported provider: provider is not enabled"}
 ```
 
-No `catch` block can improve that page. Because the button list is read from the dashboard's own
+No `catch` block can improve that page. Because the button list is read from GoTrue's own
 answer, a build cannot produce that page: press-and-get-JSON needs a button for a disabled
 provider, and no such button can be built. Turning Google **off** again is the same one toggle;
 the button disappears from the next build.
@@ -273,8 +269,7 @@ the button disappears from the next build.
    credentials to be worth anything, and the file carries an *enumerated* note that no external
    provider block exists — adding a dead block would make that note false to save nothing.
 7. **No Google Workspace domain restriction (`hd`).** CommonSwarm is an open free tier.
-8. **Nothing is enabled in production.** No write of any kind was made against
-   `ukezjcnxjvkpkeezxaew`.
+8. **This document's author enabled nothing.** Google, GitHub, and email are enabled on the server GoTrue. The project `ukezjcnxjvkpkeezxaew` is deleted.
 
 ---
 
@@ -432,17 +427,12 @@ to schedule. So do steps 7 and 8 in one sitting, or not yet.
      URL-decoded, `redirect_uri` is `https://api.commonswarm.com/auth/v1/callback`. That is the
      value GoTrue hands the provider, so it is the value Google must accept.
 
-     **Do not add `https://ukezjcnxjvkpkeezxaew.supabase.co/auth/v1/callback`.** The same probe
-     run against the `supabase.co` host returns the **`api.commonswarm.com`** callback too, so
-     the `supabase.co` form is never sent to Google. It would also force `supabase.co` into the
-     authorized-domain list in step 2, which is a domain we cannot verify.
+     **Do not add `https://ukezjcnxjvkpkeezxaew.supabase.co/auth/v1/callback`.** That host is retired.
 
      **And do not add `http://localhost:4321`, or any localhost entry.** Google never sees a
      localhost address here: GoTrue hands the provider its own callback, which is always
      `api.commonswarm.com`, whatever machine started the sign-in. What a local `astro dev`
-     sign-in needs is the **Supabase** side, under Authentication → URL Configuration →
-     Redirect URLs, because that is the list `redirect_to` is checked against. That is a
-     Supabase setting, not a Google one, and this checklist does not change it.
+     sign-in needs is the GoTrue redirect list on the server, because that is the list `redirect_to` is checked against. Change GoTrue settings on the server. Do not open the Supabase dashboard. This checklist does not change that list.
 
    - Press **Create**. Google shows the **Client ID** and the **Client secret** once, inside
      the creation dialog, and never again.
@@ -582,59 +572,13 @@ to schedule. So do steps 7 and 8 in one sitting, or not yet.
     hides the provider in an attribute value and reads it back at runtime passes all three;
     that is the stated bound above.
 
-### Supabase dashboard
+### GoTrue on the server
 
-7. **Enable the provider.**
-   <https://supabase.com/dashboard/project/ukezjcnxjvkpkeezxaew/auth/providers?provider=Google>
+7. Google, GitHub, and email are enabled on the server GoTrue. Change GoTrue settings on the server. Do not open the Supabase dashboard.
 
-   **Corrected 2026-09-06.** This step assumed the Google provider page would be blank. It is
-   not. **Measured:** the page already held a DEAD client from an abandoned project called
-   "gluco-tracker", with a Client Secret already set and the **Enable** toggle off. Before
-   pasting anything:
+   Measured 2026-09-06, `https://api.commonswarm.com/auth/v1/settings` answered `{"github": true, "google": true, "email": true}`. `"github": true` in that answer is the positive control that the probe reached a settings document. `"google": true` is the Google result.
 
-   - Expect existing values in *Client IDs* and *Client Secret (for OAuth)*. Do not assume the
-     fields are empty.
-   - **Confirm before overwriting.** Supabase stores exactly ONE secret per provider. Pasting
-     the new Client ID and secret replaces the gluco-tracker ones outright; there is no way to
-     hold both at once. Confirm first that nothing still depends on the gluco-tracker client,
-     because overwriting it will break that.
-
-   - Toggle **Enable Sign in with Google** on.
-   - Paste the **Client ID** into *Client IDs*, replacing whatever is already there.
-   - Paste the **Client secret** into *Client Secret (for OAuth)*, replacing whatever is
-     already there.
-   - Leave *Skip nonce check* **off**. It is only for native One Tap, which we do not use.
-   - Save.
-   - **Confirm it took, from outside the dashboard:**
-
-     ```sh
-     curl -s https://api.commonswarm.com/auth/v1/settings \
-       -H "apikey: <the anon key>" | grep -o '"google":[a-z]*'
-     # want: "google":true      (it reads "google":false today)
-     ```
-
-     **MEASURED 2026-09-06, step 7 IS DONE.** `https://api.commonswarm.com/auth/v1/settings`
-     answers `{"github": true, "google": true, "email": true}`. The toggle is on in production.
-
-     **This arms step 8 and makes it urgent.** A site build now reads `google: true` and renders
-     a Google button on `/app` and `/invite`. The site deployed at the time of measurement is an
-     older build: it offers GitHub only and its privacy policy names only GitHub, so nothing is
-     inconsistent while it stands. The moment the site is rebuilt and deployed, the buttons
-     change. Deploy a build that carries the step 6 copy, or the published page offers a Google
-     button beside a privacy policy that does not name Google LLC as a processor. Any site
-     deploy for an unrelated reason does this too, which is why the copy work is a prerequisite
-     and not a follow-up.
-
-     **Corrected 2026-09-06, stated plainly.** Reading `"github":true` in the same output is
-     not a step to perform. GitHub is already configured and enabled on this project, so
-     `"github":true` coming back is a POSITIVE CONTROL: it shows the probe reached a real
-     settings answer, not a cached or empty one. `"google":true` is the actual result being
-     checked.
-
-   ⚠️ `ukezjcnxjvkpkeezxaew` **is production.** There is no separate CommonSwarm production
-   project. This step is live the moment it is saved: the Auth API accepts `?provider=google`
-   from anyone who types it, and the next site build by anyone renders the button. Step 6 is
-   above this one for that reason.
+   A site build reads that answer and renders a Google button on `/app` and `/invite` when Google is enabled. The privacy page is the owner's. A build that offers Google beside copy that does not name Google LLC is the mismatch step 6 exists to catch.
 
 ### The site
 
@@ -643,10 +587,8 @@ to schedule. So do steps 7 and 8 in one sitting, or not yet.
    step 7's toggle.
 
    ```sh
-   cd site && rm -rf dist && npm run build
    npm test                     # MUST be green: this is where step 6 and step 7 shake hands
-   cp -r .vercel dist/.vercel
-   vercel deploy dist --prod --yes --scope ridgedotio
+   deploy/site/deploy.sh yulan-vps-1
    ```
 
    The test line is not optional. Without it, an operator who did steps 1-5 and 7 can publish a

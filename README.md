@@ -100,7 +100,7 @@ npm run test:p1-server  # local Supabase; announce an exclusive DB slot
 
 ## Thin cloud CLI
 
-Build once, then target either local or hosted Supabase with the same flags:
+Build once, then target the local Supabase CLI, or the production API at https://api.commonswarm.com, with the same flags:
 
 ```bash
 npm run build

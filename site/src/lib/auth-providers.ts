@@ -25,7 +25,7 @@
  * RETIRED 2026-09-04, kept here because the design doc and the first commit message name it:
  * an earlier draft chose the rendered set from a `PUBLIC_SWARM_AUTH_PROVIDERS` build
  * variable. That is a hand-set flag; it let an operator publish a button for a provider that
- * was still off in the dashboard, and the reader of that button got raw JSON. The variable is
+ * was still off in GoTrue, and the reader of that button got raw JSON. The variable is
  * gone and nothing reads it.
  */
 

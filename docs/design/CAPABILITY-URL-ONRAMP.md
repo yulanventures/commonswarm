@@ -58,7 +58,7 @@ cswarm link revoke --capability-id <uuid> [--json]
 ```
 Capability link created for work item 11111111-1111-4111-8111-111111111111.
 
-  https://coswarm-site.vercel.app/see#swm_cap_...
+  https://commonswarm.com/see#swm_cap_...
 
 This is the only time the link is shown. CommonSwarm stores just a hash of it, so it
 cannot be printed again — if it is lost, create another and revoke this one.
@@ -89,8 +89,8 @@ else in `src/` builds a `/see` URL.
 
 **`--site` is an allowlist, not a syntax check** (`capabilitySiteOrigin` in
 `src/cloud/capability-link.ts`, `CAPABILITY_ALLOWED_HOSTS`). `--site` and
-`CSWARM_SITE_ORIGIN` may name only `coswarm-site.vercel.app` (the default),
-`commonswarm.com`, `www.commonswarm.com`, or a loopback host for developing the page; each
+`CSWARM_SITE_ORIGIN` may name only `commonswarm.com` (the default) or
+`www.commonswarm.com`, or a loopback host. The `/see` page does not exist (section 7). Each
 must be `https` (loopback may be `http`), a bare origin, portless, with no path, query,
 fragment or userinfo, and the error names the permitted set. Validated *before* the mint
 request, so a wrong origin costs a line of output rather than a credential. Every one of

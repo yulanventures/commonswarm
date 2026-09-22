@@ -10,6 +10,6 @@
 
 ## Production pin replacement point
 
-Before the box rehearsal, the lead repeats the available public version checks. If a published production version differs, change only that service's `image:` line in `compose.yaml`, rerun the full box rehearsal from a fresh dump, and record the pin in the rehearsal evidence. PostgreSQL stays on the ruled 17.6.1.x line unless the source server version proves a different patch requirement. Keep the recorded local CLI pins for services that publish no production version.
+The cutover is done. Production is the server `yulan-vps-1`. Not established: there is no written procedure yet for how image pins are checked. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`. PostgreSQL stays on the ruled 17.6.1.x line. Keep the recorded local CLI pins for services that publish no version.
 
 Tags are used instead of floating names so a restart cannot change a service without a reviewed file change.

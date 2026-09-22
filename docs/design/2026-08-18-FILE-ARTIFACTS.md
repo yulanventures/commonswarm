@@ -389,7 +389,7 @@ no script reaches is silently not run (AGENTS.md trap; the D-025 scar).
 | S4 | storage integration end-to-end against local Supabase: signed upload, commit verification, pending-GC | `test:p1-local` |
 | S5 | web read-only list | `npm --prefix site test` |
 | S5b | ★R11: amend the LIVE `/acceptable-use` page BEFORE the feature ships — its current text names "a file store" as a breach of policy, which would make this feature a policy violation on its own site. The amendment scopes it: workspace file artifacts are a product feature; the "general infrastructure" prohibition stays for non-artifact bulk storage | site deploy + a grep of the DEPLOYED page for both the new carve-out and the retained prohibition |
-| S6 | migration applied to production, functions deployed, CLI released (both assets + npm), site deployed, `api.md` section added | the deploy checklist in AGENTS.md, verified against the DEPLOYED surfaces |
+| S6 | migration applied to production, functions deployed, CLI released (both assets + npm), site deployed, `api.md` section added | Site: `deploy/site/deploy.sh yulan-vps-1`. Not established: there is no written procedure yet for how a schema migration or a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`. |
 
 S1+S2 land together (a migration nothing reads is inert but a command without its tables is
 red); S3 can land behind them; S4 gates S6. Two-arm review per D-036 on every SHA-changing

@@ -14,7 +14,7 @@
  * THE SET COMES FROM THE DEPLOYMENT, NOT FROM A FLAG. `astro.config.mjs` sets
  * `output: "static"`, so this frontmatter runs once, at build, in Node. It asks the very
  * GoTrue the buttons will point at which providers are enabled, and renders those. Turning
- * Google on is one dashboard toggle plus a rebuild and deploy; there is no second switch to
+ * Google on is a GoTrue setting on the server, then a rebuild and `deploy/site/deploy.sh`; there is no second switch to
  * forget, and no build can publish a button for a provider that is off — that button would
  * navigate the reader to raw JSON, which no catch block can improve.
  *
@@ -26,7 +26,7 @@
  * ZERO PROVIDERS MUST TAKE THE PAGE FURNITURE WITH IT. A host page puts a divider, a heading,
  * or an "or" above these buttons. Leaving that behind when there are no buttons is a page that
  * promises a choice it does not offer, and it is reachable in production: an operator who
- * turns every OAuth provider off in the dashboard gets it on the next build. So the host
+ * turns every OAuth provider off in GoTrue gets it on the next build. So the host
  * passes that furniture in the `before` slot and the wrapper class in `listClass`, and this
  * component renders BOTH or NEITHER.
  */

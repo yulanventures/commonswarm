@@ -176,7 +176,7 @@ Things that have bitten this repo before:
 ## Deploy
 
 ```sh
-vercel deploy dist --prod --yes --name coswarm-site --scope ridgedotio
+deploy/site/deploy.sh yulan-vps-1
 ```
 
-Build first — that command uploads `dist/` as-is and does not build for you.
+The script builds `site/` from a clean archive and publishes the files. It needs `site/.env`. See `deploy/site/RUNBOOK.md`.

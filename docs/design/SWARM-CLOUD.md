@@ -21,8 +21,7 @@
 `cswarm accept <link>`, `cswarm working-on "…"`). The domain is `commonswarm.com`.
 ~~It is decided but not wired — DNS is parked and nothing serves it; the live site is
 `coswarm-site.vercel.app` until the operator repoints it.~~ ★ **SUPERSEDED — DEAD.**
-`commonswarm.com` is the live public URL on Cloudflare; the Vercel project alias still
-serves underneath. An interim name `coswarm` was used between this document and the
+https://commonswarm.com is the public site, served by Caddy on the Hetzner server. The Vercel alias is gone. An interim name `coswarm` was used between this document and the
 rename; it collided with a competitor and is dead — treat any `coswarm` you find as superseded.
 
 This document is older than both names and was written when the cloud service was an evolution of the
