@@ -852,7 +852,7 @@ test("durable markers select durable mode before probe rows can be cursor-proces
   });
 });
 
-test("claim without ACK capability retries before provider work", async () => {
+test("claim without ACK capability retries before provider work", { timeout: 15_000 }, async () => {
   const model = new FakeModel();
   const controller = new AbortController();
   let reads = 0;
@@ -3114,7 +3114,7 @@ test("MAJOR-4: a mid-run expired lease 403 clears stale state without credential
   assert.equal(journal.record.active, null);
 });
 
-test("runtime retries an old read edge without starting or prompting a model", async () => {
+test("runtime retries an old read edge without starting or prompting a model", { timeout: 15_000 }, async () => {
   const model = new FakeModel();
   const controller = new AbortController();
   let reads = 0;
@@ -3474,7 +3474,7 @@ test("command-edge forbidden is not a confirmed credential loss", async () => {
   assert.ok(clock.elapsed() < CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
 });
 
-test("real signal read HTTP codes enter the listener confirmation window", async () => {
+test("real signal read HTTP codes enter the listener confirmation window", { timeout: 15_000 }, async () => {
   for (const [status, code] of [[401, "unauthenticated"], [403, "forbidden"]] as const) {
     const controller = new AbortController();
     const events: ListenerRuntimeEvent[] = [];
@@ -3521,7 +3521,7 @@ test("real signal read HTTP codes enter the listener confirmation window", async
   assert.equal(reads, 2, "bare 403 retries");
 });
 
-test("claim-only delivery refusals force a read and expose revocation", async () => {
+test("claim-only delivery refusals force a read and expose revocation", { timeout: 15_000 }, async () => {
   const controller = new AbortController();
   const journal = new MemoryDeliveryJournal();
   const events: ListenerRuntimeEvent[] = [];
@@ -3562,7 +3562,7 @@ test("claim-only delivery refusals force a read and expose revocation", async ()
   assert.ok(events.some((event) => event.type === "credential_check"));
 });
 
-test("foreign read responses retry with bounded sleep instead of a permanent stop", async () => {
+test("foreign read responses retry with bounded sleep instead of a permanent stop", { timeout: 15_000 }, async () => {
   for (const [status, body] of [
     [400, "{}"], [404, "{}"], [426, "{}"], [200, "<html>wrong backend</html>"],
   ] as const) {

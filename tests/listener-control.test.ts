@@ -1552,7 +1552,7 @@ test("D-051: a listener that recovers on a restart is not reported as failed", a
   assert.equal(status.lastErrorCode, null);
 });
 
-test("nextAttemptAt clears as the next attempt begins", async () => {
+test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-attempt-"));
   const target = paths(root);
   let runs = 0;
@@ -1646,7 +1646,7 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
   );
 });
 
-test("credential and claim status use the answering edge and current retry state", () => {
+test("credential and claim status use the answering edge and current retry state", { timeout: 15_000 }, () => {
   const target = paths(join(tmpdir(), "listener-status-copy"));
   const stopAt = "2026-09-22T00:10:00.000Z";
   const command = renderListenerStatus({
@@ -1835,7 +1835,7 @@ test("the restart attempt count resets after a clean run", async () => {
   assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], 500);
 });
 
-test("D-051: one rejected write does not poison the rest of the supervisor's writes", async () => {
+test("D-051: one rejected write does not poison the rest of the supervisor's writes", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
   const target = paths(root);
   const workspaceId = randomUUID();
@@ -1856,7 +1856,7 @@ test("D-051: one rejected write does not poison the rest of the supervisor's wri
       // only itself: the terminal lines after it still have to land, because
       // they are the ones that say why the listener is down.
       onEvent({ type: "unknown_event_kind" } as unknown as ListenerRuntimeEvent);
-      return { reason: "fatal", error: new SignalHttpError(400) };
+      return { reason: "fatal", error: new AcpProtocolError("bad frame", "malformed_frame") };
     },
   });
 

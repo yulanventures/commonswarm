@@ -212,6 +212,25 @@ Status records the listener's project directory on start and uses it to check th
 
 Other read-response paths a foreign backend can produce now retry with capped backoff: HTTP 400, 404, and 426; a malformed success body such as HTML on 200; malformed read rows; and missing or inconsistent read-service capabilities (`sender_relation_capability_missing`, `cursor_capability_missing`, `delivery_capability_inconsistent`). The local `delivery_configuration_missing` capability error remains fatal. The real-response test covers 400, 404, 426 and HTML 200; the capability test covers a missing marker. Local errors such as invalid delivery journal state, ACP protocol/configuration failures, and an unknown untyped exception remain fatal. `cswarm inbox --follow` remains unchanged and still stops on one confirmed read code.
 
-Verification in this sandbox: `npm run build` and `npm run check:tests` exited 0. Ten targeted tests for the new paths and classifiers, plus four changed-behavior and citation tests, exited 0. `bash scripts/build-release.sh` exited 0. The final full `npm test` gate had 911 tests: 851 passed, 58 failed, 2 skipped (exit 1). The final `npm run test:p1-cli` gate had 822 tests: 713 passed, 103 failed, 6 skipped (exit 1). The remaining failures trace to sandbox-denied Unix/TCP control sockets, process spawning, and local-state access; three feedback tests assert after their TCP fixture failed to bind. The lead must run both gates outside this sandbox. No detached listener could be started here because even temporary local control sockets are denied. No production host was contacted and no real workspace listener was started.
+Superseded gate snapshot from the fold-2 sandbox: `npm run build` and `npm run check:tests` exited 0. Ten targeted tests for the new paths and classifiers, plus four changed-behavior and citation tests, exited 0. `bash scripts/build-release.sh` exited 0. The full `npm test` gate had 911 tests: 851 passed, 58 failed, 2 skipped (exit 1). The `npm run test:p1-cli` gate had 822 tests: 713 passed, 103 failed, 6 skipped (exit 1). Those counts are historical and are replaced by the fold-3 gate results below. In fold 2, the sandbox denied Unix/TCP control sockets, process spawning, and local-state access; three feedback tests asserted after their TCP fixture failed to bind. No detached listener could be started there. No production host was contacted and no real workspace listener was started.
 
-`git diff --check a9846955...HEAD` and the working-tree `git diff --check` exited 0. `git add` could not create the worktree's `index.lock` under the parent repository `.git` directory (`Operation not permitted`), so this fold is uncommitted in the working tree. The lead must stage and commit it with the requested authorship trailers.
+`git diff --check a9846955...HEAD` and the working-tree `git diff --check` exited 0. `git add` could not create the worktree's `index.lock` under the parent repository `.git` directory (`Operation not permitted`), so this fold was left uncommitted there. The lead subsequently committed it as `9089681a`.
+
+## Fold 3
+
+The isolated `tests/listener-control.test.ts` run reached 34 passing tests and then hit the enforced 180-second wall limit. The next test, "D-051: one rejected write does not poison the rest of the supervisor's writes", returned `SignalHttpError(400)` as a supposedly terminal fixture. Fold 2 made that response restartable, and the test left the supervisor on the production default of unlimited retries, so the promise never settled. It now returns a terminal `AcpProtocolError` and has a 15-second test timeout. The new live-control test and all five new asynchronous runtime tests have 15-second timeouts. The isolated control file then exited 0 in 2.4 seconds: 49 passed, 0 failed, 0 skipped.
+
+The fold-2 read-path mutation control was repeated with a temporary HOME. Removing the `followHttpDetails` exclusion from local credential classification made the stub-fetcher test fail on the first HTTP 401: actual `credential`, expected `cancelled` (exit 1). Restoring the exact source bytes made that same test pass (1 passed, exit 0).
+
+Gates with a temporary HOME and `FORCE_COLOR` unset:
+
+| Gate | Exit | Counts or result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 913 tests: 911 passed, 2 failed, 0 skipped. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 827 tests: 824 passed, 3 failed, 0 skipped. The 1,248-case command dispatcher baseline passed. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file bundle built and executed. |
+| `git diff --check a9846955...HEAD` | 0 | No whitespace errors. |
+
+Both full suites' failures are confined to process-table checks: `tests/p1-cli/resume-process-table.test.ts` and `tests/p1-cli/resume.test.ts` in both suites, plus `tests/p1-cli/unknown-flag-message.test.ts` in the CLI suite. This environment rejects `ps` with `spawn EPERM` or `spawnSync ps EPERM`; a direct `ps` probe returned `operation not permitted`. The listener tests passed in the full `npm test` gate. This fold did not establish green full-suite gates in an environment that permits `ps`, a detached listener with a temporary state directory, or behavior on a hosted workspace. No production host or real workspace was contacted.
