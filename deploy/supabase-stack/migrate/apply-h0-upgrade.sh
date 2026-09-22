@@ -23,12 +23,14 @@ file1="/migrations/20260916000001_agent_join_credentials.sql"
 file2="/migrations/20260916000002_agent_join_attempts.sql"
 file3="/migrations/20260922000001_h0_poll_lock_and_batch.sql"
 file4="/migrations/20260922000002_h0_poll_wait_admission.sql"
+file5="/migrations/20260922000003_h0_poll_batch_retention.sql"
 sha1="e3271bd3b8c0e8f7f80df0ec8cf5141f3dd4c3f09a07dd86418b0f45320b9f50"
 sha2="fbd0a9bd76f651b2d11f2500485cc3f4f07fa24de780bb32e50b7ee17c20b801"
-sha3="d151e09f3b6449c504106e35fd0aad2a45e12bc418f4698db8380590db0d289a"
+sha3="beb6bf0fc0a77e24b0a36f1defcb06819e05a6f6f6441cb026879bd64747df3e"
 sha4="3d57cf0abc18dced874b8ac4ddd929a9a990c80286b35ff6612fc4a81c2b4992"
+sha5="ba059d9d7b14950a89e90bad11ab907deab11a38797e21b54eb90931a78298ac"
 
-if [[ ! -f "$file1" || ! -f "$file2" || ! -f "$file3" || ! -f "$file4" ]]; then
+if [[ ! -f "$file1" || ! -f "$file2" || ! -f "$file3" || ! -f "$file4" || ! -f "$file5" ]]; then
   echo "migration files missing in /migrations" >&2
   exit 1
 fi
@@ -47,6 +49,10 @@ if ! echo "$sha3  $file3" | sha256sum -c >/dev/null; then
 fi
 if ! echo "$sha4  $file4" | sha256sum -c >/dev/null; then
   echo "SHA256 mismatch for $file4" >&2
+  exit 1
+fi
+if ! echo "$sha5  $file5" | sha256sum -c >/dev/null; then
+  echo "SHA256 mismatch for $file5" >&2
   exit 1
 fi
 
@@ -76,6 +82,7 @@ verify_sql="$(make_temp_sql)"
 run_sql="$(make_temp_sql)"
 trap 'rm -f "$verify_sql" "$run_sql"' EXIT
 cp "$script_dir/verify-h0-catalog.sql" "$verify_sql"
+cat "$script_dir/verify-h0-poll-catalog.sql" >>"$verify_sql"
 
 cat >"$run_sql" <<EOF
 BEGIN;
@@ -87,10 +94,10 @@ if [[ "$join_count" -eq 2 && "$poll_count" -eq 2 ]]; then
   log "Tables already exist, verifying catalog state for idempotent skip"
 elif [[ "$join_count" -eq 0 && "$poll_count" -eq 0 ]]; then
   log "Tables are absent, applying migrations"
-  cat >>"$run_sql" <<< "\i $file1"$'\n'"\i $file2"$'\n'"\i $file3"$'\n'"\i $file4"
+  cat >>"$run_sql" <<< "\i $file1"$'\n'"\i $file2"$'\n'"\i $file3"$'\n'"\i $file4"$'\n'"\i $file5"
 elif [[ "$join_count" -eq 2 && "$poll_count" -eq 0 ]]; then
   log "Join tables exist, applying poll migrations"
-  cat >>"$run_sql" <<< "\i $file3"$'\n'"\i $file4"
+  cat >>"$run_sql" <<< "\i $file3"$'\n'"\i $file4"$'\n'"\i $file5"
 else
   echo "Corrupt/mixed state: $join_count join tables and $poll_count poll tables exist" >&2
   exit 1

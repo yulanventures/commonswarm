@@ -93,7 +93,7 @@ done
 migration_mount=()
 if [[ "$script_name" == apply-h0-upgrade.sh ]]; then
   repo_dir="$(cd "$stack_dir/../.." && pwd)"
-  for migration in 20260916000001_agent_join_credentials.sql 20260916000002_agent_join_attempts.sql 20260922000001_h0_poll_lock_and_batch.sql 20260922000002_h0_poll_wait_admission.sql; do
+  for migration in 20260916000001_agent_join_credentials.sql 20260916000002_agent_join_attempts.sql 20260922000001_h0_poll_lock_and_batch.sql 20260922000002_h0_poll_wait_admission.sql 20260922000003_h0_poll_batch_retention.sql; do
     [[ -f "$repo_dir/supabase/migrations/$migration" ]] || {
       echo "required pinned H0 migration missing from release: $migration" >&2
       exit 1

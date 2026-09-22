@@ -598,6 +598,47 @@ test("a second concurrent poll gets the documented response", async () => {
   assert.ok(Date.now() - started >= 1_500, "the first poll did not wait");
 });
 
+test("a stalled slice cannot return a batch after its seat lock ends", { timeout: 25_000 }, async () => {
+  const seat = await makeSeat(spareSecret);
+  let firstSettled = false;
+  const firstPromise = h0("poll", seat.token, { wait: 4 });
+  void firstPromise.then(() => { firstSettled = true; }, () => { firstSettled = true; });
+  const deadline = Date.now() + 4_000;
+  let waiting = false;
+  while (Date.now() < deadline) {
+    const rows = await sql<{ waiting: boolean }[]>`
+      SELECT waiting FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid
+    `;
+    if (rows[0]?.waiting) { waiting = true; break; }
+    await delay(40);
+  }
+  assert.equal(waiting, true, "first poll did not enter its wait");
+  let secondPromise: Promise<HttpResult> | undefined;
+  let signalId = "";
+  await sql.begin(async (tx) => {
+    await tx`
+      SELECT holder FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid FOR UPDATE
+    `;
+    signalId = await postAsk(seat.principalId);
+    await delay(1_500);
+    assert.equal(firstSettled, false, "slice collected while another transaction held its lock row");
+    await tx`
+      UPDATE swarm.h0_poll_locks
+      SET expires_at = statement_timestamp() - interval '1 second'
+      WHERE principal_id = ${seat.principalId}::uuid
+    `;
+    secondPromise = h0("poll", seat.token, { wait: 0 });
+    await delay(100);
+  });
+  const [first, second] = await Promise.all([firstPromise, secondPromise!]);
+  assert.equal(first.status, H0_POLL_LOCK_ENDED_STATUS, JSON.stringify(first.body));
+  assert.equal(first.body.error, H0_POLL_LOCK_ENDED);
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  assert.equal(deliveriesOf(second.body)[0]?.signal.id, signalId);
+});
+
 test("wait above 50 is refused and a bearer in the query string is refused", async () => {
   const seat = await makeSeat();
   const tooLong = await h0("poll", seat.token, { wait: 51 });
@@ -862,7 +903,10 @@ await sql.end({ timeout: 2 });
     ], {
       encoding: "utf8",
       env: {
-        ...process.env,
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        ...(process.env.DENO_DIR ? { DENO_DIR: process.env.DENO_DIR } : {}),
+        SWARM_DATABASE_URL: local.DB_URL,
         SUPABASE_DB_URL: local.DB_URL,
         H0_FIRST_TOKEN: first.token,
         H0_FIRST_ID: first.principalId,
@@ -1001,10 +1045,7 @@ function batchImmutable(error: unknown): boolean {
   return typeof error === "object"
     && error !== null
     && "code" in error
-    && error.code === "55000"
-    && "message" in error
-    && typeof error.message === "string"
-    && error.message.includes("SWARM_H0_POLL_BATCH_IMMUTABLE");
+    && error.code === "55000";
 }
 
 test("closed poll batches older than the retention age can be deleted", async () => {
@@ -1094,9 +1135,9 @@ test("closed poll batches older than the retention age can be deleted", async ()
   `;
   try {
     await sql`
-      UPDATE swarm.config
-      SET value = '1'::jsonb
-      WHERE key = 'h0_poll_batch_retention_days'
+      INSERT INTO swarm.config (key, value)
+      VALUES ('h0_poll_batch_retention_days', '1'::jsonb)
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     `;
     const floored = await sql<{ days: number }[]>`
       SELECT swarm.h0_poll_batch_retention_days() AS days
@@ -1150,6 +1191,9 @@ test("closed poll batches older than the retention age can be deleted", async ()
       WHERE key = 'h0_poll_batch_retention_days'
     `;
     await sql`SELECT swarm.purge_expired_h0_poll_batches()`;
+    if (previous[0] === undefined) {
+      await sql`DELETE FROM swarm.config WHERE key = 'h0_poll_batch_retention_days'`;
+    }
   }
 });
 

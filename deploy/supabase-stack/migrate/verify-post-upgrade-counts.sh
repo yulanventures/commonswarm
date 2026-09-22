@@ -19,6 +19,16 @@ done
 derived="$(mktemp -d "$MIGRATION_ARTIFACT_DIR/h0-expected.XXXXXX")"
 chmod 0700 "$derived"
 cp "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" "$derived/cron-jobs.ndjson"
+target_psql --quiet --tuples-only --no-align -c "
+  SELECT json_build_object(
+    'jobname', 'swarm-purge-h0-poll-batches',
+    'schedule', '29 4 * * *',
+    'command', 'SELECT swarm.purge_expired_h0_poll_batches()',
+    'database', current_database(),
+    'username', current_user,
+    'active', true
+  )
+" >>"$derived/cron-jobs.ndjson" 2>>"$LOG_FILE"
 cat >"$derived/table-names.sql" <<'SQL'
 SELECT schemaname || '.' || tablename
 FROM pg_tables

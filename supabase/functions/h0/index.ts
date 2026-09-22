@@ -4,6 +4,7 @@ import {
   internalErrorResponse,
 } from "./core.ts";
 import {
+  H0ClientAbort,
   h0VerbFailure,
   handleH0AckRequest,
   handleH0PollRequest,
@@ -39,7 +40,8 @@ Deno.serve((request) => {
   try {
     const verb = h0VerbPath(new URL(request.url).pathname);
     if (verb === "poll") {
-      return handleH0PollRequest(request).catch(() => {
+      return handleH0PollRequest(request).catch((error: unknown) => {
+        if (error instanceof H0ClientAbort) return new Response(null, { status: 204 });
         console.error("h0 poll failed");
         return h0VerbFailure();
       });

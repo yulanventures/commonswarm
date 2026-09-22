@@ -130,7 +130,7 @@ export function h0VerbFailure(): Response {
   return json(500, { error: "internal_error" });
 }
 
-class H0ClientAbort extends Error {
+export class H0ClientAbort extends Error {
   constructor() {
     super("The poll client closed the request.");
     this.name = "H0ClientAbort";
@@ -744,8 +744,9 @@ function lockEndedCollected(): Collected {
  * transaction. acquired_at and expires_at were written together with
  * statement_timestamp(). clock_timestamp() is the same timeline, read at
  * the check, so a slow statement_timestamp does not extend the wait.
- * The slice stops when the holder differs, when expires_at has passed, or
- * when acquired_at plus the requested wait has passed.
+ * FOR UPDATE holds the seat row through collect in the caller's transaction.
+ * A takeover must wait until that transaction ends. The slice stops when the
+ * holder differs, when expires_at has passed, or when the wait has ended.
  */
 async function readWaitHold(
   tx: Tx,
@@ -753,6 +754,16 @@ async function readWaitHold(
   holder: string,
   waitSeconds: number,
 ): Promise<{ outcome: "wait" | "done" | "ended"; remainingMs: number }> {
+  // Lock first, then read the clock. A query stalled behind another holder
+  // must not use a time value computed before it acquired the row lock.
+  const locked = await tx<{ holder: string }[]>`
+    SELECT holder::text
+    FROM swarm.h0_poll_locks
+    WHERE workspace_id = ${seat.workspaceId}::uuid
+      AND principal_id = ${seat.principalId}::uuid
+    FOR UPDATE
+  `;
+  if (locked.length === 0) return { outcome: "ended", remainingMs: 0 };
   const rows = await tx<{
     same_holder: boolean;
     unexpired: boolean;

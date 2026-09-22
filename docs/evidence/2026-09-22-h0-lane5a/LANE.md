@@ -137,16 +137,13 @@ HTTP 403. The condition was restored. `false && refusal` is not in the file.
 
 - The running box does not yet pass these database names into the h0 worker.
   The names are listed in this tree. Deploy was not run.
-- `deploy/supabase-stack/migrate/apply-h0-upgrade.sh` now applies
-  `20260922000001_h0_poll_lock_and_batch.sql` and
-  `20260922000002_h0_poll_wait_admission.sql` after the two 2026-09-16
-  migrations, in that order. The retired wording said the script applied
-  only the two earlier files. Deploy was not run.
-- `20260922000003_h0_poll_batch_retention.sql` is not in that script. The
-  post-upgrade check requires the source cron set to stay the same, and this
-  migration schedules `swarm-purge-h0-poll-batches`. A database that runs the
-  migration folder, including the local reset, has the purge. The box upgrade
-  path does not apply this file.
+- `deploy/supabase-stack/migrate/apply-h0-upgrade.sh` applies the two
+  2026-09-16 files and all three 2026-09-22 poll files in order. The retired
+  wording said it applied only the 2026-09-16 files, then later said it
+  applied only the first two poll files. Deploy was not run.
+- The post-upgrade check expects the source cron set plus exactly one
+  `swarm-purge-h0-poll-batches` job. The retired wording said it expected
+  the source cron set unchanged. The box was not checked.
 - H0 poll and ack do not use the command edge's delivery rate buckets.
 - Register, ask, note, reply, and working-on are not forwarded. That is lane 5b.
 - No detached `cswarm listen` was started. The fence was measured through the
@@ -271,3 +268,87 @@ These are the fixes.
 
 Fold 2 rerun of `tests/p1-server/h0-poll-ack.test.ts` after the advisory
 lock was restored: 15 tests, exit 0. The box was not exercised.
+
+## Fold 3
+
+Each wait slice now uses `SELECT ... FOR UPDATE` on its seat lock row inside
+the transaction that calls `collect`. The holder and expiry are checked after
+the row lock is acquired. A takeover waits for that transaction to commit;
+if the holder or expiry changed, the old slice returns `h0_poll_lock_ended`.
+The new server test holds that row from another connection, makes a delivery
+available, and ends the old lock while the slice is blocked. It requires the
+old poll to return 409 and only the next poll to receive the delivery. A plain
+SELECT would let the old poll finish while the test holds the row.
+
+The box upgrade now pins and applies `20260922000003` after `000002`. Its
+one transaction runs both `verify-h0-catalog.sql` and
+`verify-h0-poll-catalog.sql`. The latter checks poll columns, owner, RLS,
+grants, guard triggers and functions, indexes, purge functions, and the one
+named cron job. It also runs on the all-tables-present skip branch. The
+post-upgrade count verifier expects the original cron listing plus exactly
+one new purge job. The isolated upgrade test now sets up the live-box branch
+with join tables present and poll tables absent, then exercises poll catalog
+mutations. The closed batch purge has an index on `closed_at`. Migration
+`000001` keeps its header comment together.
+
+`H0ClientAbort` is a named class. The h0 entrypoint turns that class into a
+quiet 204 response and leaves other failures on the error path. The abort
+test child receives only the loopback database URLs and its required local
+process values; it does not inherit an exported database URL or TLS CA.
+The batch guard test classifies SQLSTATE `55000` without reading message text.
+
+**Box abort propagation is not established.** The repo pins
+`public.ecr.aws/supabase/edge-runtime:v1.73.13` and calls
+`worker.fetch(forwarded)`; `rewriteFunctionRequest` carries the Request's
+signal. No vendored or cached v1.73.13 `UserWorker.fetch` type or source was
+found offline. The exact box question is: *does an aborted client request to
+the main service abort the `Request.signal` seen by the h0 user worker when
+`worker.fetch(forwarded)` is called without a second options argument?* If
+not, does v1.73.13 support `worker.fetch(forwarded, { signal: request.signal })`?
+No gateway signal change was guessed. The handler-level abort is established
+only with an injected Request signal.
+
+The sandbox denied the Docker socket during the isolated upgrade test. Local
+PostgreSQL and server-test results for this fold are not established here.
+The plain-SELECT mutation could not run for the same reason. The test is
+written to fail if a slice collects while another transaction holds the row.
+
+Fold 3 gate results in this sandbox:
+
+- `npm run build`: exit 0.
+- `env -u FORCE_COLOR npm test`: exit 1; 894 tests, 842 pass, 50 fail,
+  2 skipped. Local listener sockets failed with `listen EPERM`.
+- `env -u FORCE_COLOR npm run test:p1-cli`: exit 1; 826 tests, 717 pass,
+  103 fail, 6 skipped. Local socket tests failed with `listen EPERM`.
+- `npm run check:tests`: exit 0.
+- `npm run check:edge`: exit 0.
+- `env -u FORCE_COLOR npm run test:p1-server`, alone: exit 1;
+  212 tests, 0 pass, 196 fail, 16 cancelled. `supabase status -o json`
+  failed before the tests reached local PostgreSQL.
+- `python3 deploy/supabase-stack/migrate/test-post-upgrade-counts.py`:
+  exit 0, 14 tests. Missing and duplicate purge jobs are negative controls.
+- `python3 deploy/supabase-stack/migrate/test-h0-upgrade.py`: exit 1 at
+  Docker startup: permission denied on the Docker API socket. No catalog or
+  branch test ran.
+- `bash scripts/build-release.sh`: exit 0; the artifact ran and reported
+  version 0.1.72.
+- `git diff --check` on the working tree: exit 0.
+- `git diff --check a103a512...HEAD`: exit 0, against the unchanged
+  `3dc812c9` HEAD. It does not include Fold 3 because the commit was blocked.
+
+`git add` could not create this worktree's git index lock under the shared
+checkout: `Operation not permitted`. No commit was made. The Fold 3 files
+remain in this worktree for the lead to stage, run the local gates and mutation,
+and commit. No production endpoint or host was contacted.
+
+Requested commit message and trailers for the lead:
+
+```text
+fix(h0): lock the seat row across each poll slice; box path applies and verifies all three poll migrations
+
+Agent-Name: Yulan Bot
+Agent-Model: gpt-6
+Agent-Family: openai
+Agent-Tool: codex 0.156.0
+Agent-Model-Source: runtime-ambiguous
+```

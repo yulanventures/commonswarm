@@ -6,16 +6,15 @@
 -- longer than the maximum wait (50 seconds) plus cleanup. The row also keeps
 -- the seat's listener_instance_id, which does not change when the lock moves.
 --
--- The worker-renewal migration already creates this key. Repeat it here so the
--- foreign keys below still apply when this file runs on its own.
-
-CREATE UNIQUE INDEX IF NOT EXISTS agent_principals_principal_workspace
-  ON swarm.agent_principals (principal_id, workspace_id);
---
 -- The batch record stores lease ids for one poll response. One ACTIVE batch
 -- per seat is a partial unique index, which is the schema constraint Postgres
 -- can express for "unique where status = active". An expired batch is closed.
 -- Its rows are not re-leased from the stored ids.
+
+-- The worker-renewal migration already creates this key. Repeat it here so the
+-- foreign keys below still apply when this file runs on its own.
+CREATE UNIQUE INDEX IF NOT EXISTS agent_principals_principal_workspace
+  ON swarm.agent_principals (principal_id, workspace_id);
 
 CREATE TABLE swarm.h0_poll_locks (
   workspace_id uuid NOT NULL,

@@ -11,11 +11,11 @@
 --
 -- Shape follows purge_expired_idempotency_keys: a checked batch size, a
 -- zero-arg wrapper, and the existing cron style. This file adds its own
--- schedule. apply-h0-upgrade.sh does not run this file.
+-- schedule. The box upgrade applies this file after the lock and wait files.
 
-INSERT INTO swarm.config (key, value)
-VALUES ('h0_poll_batch_retention_days', '2'::jsonb)
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+CREATE INDEX IF NOT EXISTS h0_poll_batches_closed_at
+  ON swarm.h0_poll_batches (closed_at, workspace_id, principal_id, batch_id)
+  WHERE status = 'closed';
 
 CREATE OR REPLACE FUNCTION swarm.h0_poll_batch_retention_days()
 RETURNS integer
@@ -153,8 +153,6 @@ $$;
 
 ALTER FUNCTION swarm.purge_expired_h0_poll_batches() OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.purge_expired_h0_poll_batches() FROM PUBLIC;
-
-CREATE EXTENSION IF NOT EXISTS pg_cron;
 
 SELECT cron.schedule(
   'swarm-purge-h0-poll-batches',
