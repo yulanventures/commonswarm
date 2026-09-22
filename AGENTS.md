@@ -1,375 +1,276 @@
-# AGENTS.md — commonswarm
+# AGENTS.md — CommonSwarm
 
-You are AGI-pilled.
+This is the canonical repository instruction file for all coding agents.
 
----
+Read the workspace root `AGENTS.md` first (`Ridge.io/AGENTS.md`; on the Mac mini that is
+`/Users/yulanbot/Developer/Ridge.io/AGENTS.md`). It defines the Yulan Ventures
+workspace rules, agent process, security rules, and CI fleet. For production operations,
+read `hetzner-handoff/HETZNER-OPERATIONS.md` from the workspace root. Do not copy either
+file into this repository.
 
-## Done means done
+## Scope and product
 
-Not half done. Not done except for the part you decided to skip. And not a report about how it will be done.
+CommonSwarm is a coordination service for people and AI agents. It includes the `cswarm`
+CLI, a Supabase-compatible backend, and the static site at `https://commonswarm.com`.
+Agents post short, immutable signals of intent so collaborators can avoid overlapping
+work. A signal never claims, blocks, or closes a task.
 
-Five things asked means five things delivered, no matter how long they'll take. If the fifth is genuinely blocked, finish the other four and name the blocker in one sentence. The specific blocker. Not "this needs more investigation."
+Status: P3-1, open free tier. `SWARM_SELF_SERVE=1` is live. `/app` owns sign-up and the
+workspace. `/start` is a compatibility handoff. Node 22 or newer is required; `site/`
+requires Node 22.12 or newer.
 
-## Act. Don't ask.
+The product was renamed from `coswarm` to CommonSwarm and `cswarm` in 2026. Prose says
+CommonSwarm. Text that a user types says `cswarm`. Keep these unrelated names unchanged:
 
-Reversible and cheap? Do it, then tell me. Research, data pulls, analysis, drafts, refactors inside the scope I gave you, testing an API. A question costs me more than a re-run costs you.
+- `__COSWARM_VERSION__` in `scripts/build-release.sh` and `src/cli.ts`;
+- the PostgreSQL schema `swarm` and `SWARM_*` environment variables;
+- the separate local `swarm` CLI.
 
-Ask first only for: anything reaching an audience, anything we cannot undo, anything expensive.
+The GitHub repository is `yulanventures/commonswarm`. Old `Ridge-io` URLs can redirect,
+but new URLs and documentation use `yulanventures`.
 
-Something is broken? Fix it. Reporting an issue you could have fixed turns your work into my to-do list.
+## Product and code invariants
 
-## A question is a question
+- `docs/design/SWARM-CLOUD.md` is the canonical product specification. On conflict, it
+  wins.
+- The authority core is a deterministic reducer. Every backend state change goes through
+  the transactional command path. Clients do not write authority state directly.
+- Signals are append-only. Corrections are new signals.
+- Durable operator or system state belongs in PostgreSQL. Process memory is only a cache
+  or a home for state that can be derived again.
+- A wake event is a latency hint. `swarm.signal_deliveries` is delivery truth. A status
+  may say push only while its Realtime socket is subscribed.
+- The optional local listener wakes its own seat. It does not start a model or create a
+  worker. Agent-based monitoring is not an active workspace practice; agents must not run
+  `cswarm listen` for repository coordination.
+- User-facing output says what happened, what is now true, and what the user must do next.
+  A success-shaped response must not hide work that is still in progress.
+- Product language is plain and calm. Describe coordination and unblocking, not control,
+  authority, or enforcement.
+- Claims about CommonSwarm behavior must hold for the hosted workspace and the optional
+  local listener unless the copy names one of them.
+- Onboarding asks for the minimum. Detect context instead of asking when detection is
+  reliable; return no value instead of guessing. Inherited runtime markers such as
+  `CLAUDE_CODE_ENTRYPOINT` are not reliable agent identity.
+- Brain-link parsing uses `BRAIN_SLUG_SEPARATORS` in `site/src/lib/brain-links.ts`. Do not
+  retype that separator set. See `docs/design/2026-09-04-BRAIN-LINKS-IN-SIGNALS.md`.
 
-When I ask a question, answer it. Do not implement it.
+## Repository layout
 
-"Should we use X?" is not "migrate everything to X." "What would it take to add Y?" is not "add Y."
+| Path | Purpose |
+|---|---|
+| `src/protocol/` | Pure authority core: commands, events, and reducer; no I/O. |
+| `src/cloud/` | Client auth, signals, workspaces, and transport. |
+| `src/cli.ts` | `cswarm` CLI entry point. |
+| `supabase/` | Migrations and Deno functions: `command`, `read`, `capability`, `activity`, and `h0`. |
+| `deploy/supabase-stack/` | Self-hosted PostgreSQL, GoTrue, PostgREST, Realtime, and Storage definitions. |
+| `deploy/edge-runtime/` | Self-hosted Deno edge runtime and router. |
+| `deploy/site/` | Static-site build, validation, release, and Caddy files. |
+| `tests/` | Pure, CLI, local-stack, server-stack, and UX suites. |
+| `site/` | Astro 7 site; see `site/AGENTS.md`. |
+| `docs/design/` | Product and technical design. |
+| `docs/evidence/` | Committed evidence for completion claims. |
 
-When in doubt, assume it's a question. Answer first. Act when I say go.
+`scratchpad/` is ignored. Put durable evidence in `docs/evidence/` or `docs/org/`.
 
-## Speed (Opus 5 only)
-
-When running as Opus 5: optimize for wall-clock speed. Finish tasks quickly.
-
-- Parallelize aggressively. Independent tasks run at the same time, never one after another — batch tool calls, spawn subagents concurrently.
-- Delegate by complexity: Sonnet 5 subagents for routine work (search, bulk edits, boilerplate, verification), Opus 5 subagents for hard reasoning that can run independently.
-- Keep working in the main thread while subagents run — don't sit idle waiting on them.
-- Don't over-deliberate. Enough info to act = act. No long option surveys for decisions with an obvious default.
-- Speed never trades away quality: same rigor, same verification, same "done means done". If parallelizing risks a worse result, slow down.
-- No conflicts from parallelism: never let two subagents touch the same files or overlapping scope. Split work by non-overlapping boundaries; merge and reconcile results in the main thread.
-
-## Short responses
-
-It's been a long day and my brain is fried, talk to me like I'm 5.
-
-Small words, short sentences, short paragraphs. If you have to use a big word, explain it right after. Only return what's actually necessary.
-
-Just tell me what you did, did it work, what do I do now.
-
-If I have to decide something: 2 options max, the context I need to pick fast, and which one you'd go with.
-
-Keep paths and commands exact.
-
-Always use ASD-STE100 Simplified Technical English when you talk to me.
----
-
-**CommonSwarm** is a coordination service for people and AI agents working side by side. It has the
-`cswarm` CLI, a backend on one Hetzner server in Falkenstein, and the website at https://commonswarm.com on that same server. Agents post
-short, immutable signals of intent so collaborators do not step on each other. A signal never claims,
-blocks, or closes a task.
-
-Status: **P3-1, open free tier**. `SWARM_SELF_SERVE=1` is live in production; `/app` owns signup and
-the workspace, while `/start` is a compatibility handoff. Node >= 22. The old "no web UI" and
-"invite-only" claims are retired.
-
-The product was renamed from `coswarm` to CommonSwarm / `cswarm` on 2026-07-27. Prose says
-CommonSwarm; anything a user types says `cswarm`. Do not rename the paired build identifier
-`__COSWARM_VERSION__` in `scripts/build-release.sh` and `src/cli.ts`. The PostgreSQL schema
-`swarm.`, `SWARM_*` variables, and separate local `swarm` CLI are unrelated names.
-
-The repo moved on 2026-08-10 by creating `Ridge-io/commonswarm`, not by renaming the old repo. Its
-history was rewritten, so every SHA changed. `Ridge-io/cloud-swarm` was deleted on 2026-08-17.
-
-## Commands
+## Local development and tests
 
 | Command | What it does |
 |---|---|
-| `npm install` | Installs dependencies; `prepare` builds the package. |
-| `npm run build` | `tsc` → `dist/`; wipes `dist/` first and makes `dist/cli.js` executable after. |
-| `npm test` | Pure gate for every file named in the literal `test` script; no network or database. |
-| `npm run test:p1-cli` | Pure gate that globs `tests/p1-cli/**/*.test.ts`; no network or database. |
-| `npm run test:p1-local` | Runs the six files named in the script; needs local Supabase and an exclusive DB slot. |
-| `npm run test:p1-server` | Globs `tests/p1-server/**/*.test.ts`; needs local Supabase and an exclusive DB slot. |
-| `npm run test:uxtest` | Runs the cross-machine UX harness. |
-| `npm run check:tests` | Typechecks `tests/` as well as `src/`. |
-| `npm run db:start` / `db:stop` / `db:reset` / `db:status` | Controls local Supabase; needs Docker. |
-| `npm run build:command-core` | Regenerates the edge-function protocol bundle. |
-| `npm run check:edge` | Runs `deno check` on `command`, `read`, `capability`, and `activity`; needs Deno. |
+| `npm install` | Install dependencies; `prepare` builds the package. |
+| `npm run build` | Clean `dist/`, run `tsc`, and make `dist/cli.js` executable. |
+| `npm test` | Run the service-free files named in the literal `test` script. |
+| `npm run test:p1-cli` | Build the CLI if needed, then run `tests/p1-cli/**/*.test.ts`. |
+| `npm run check:tests` | Type-check `tests/` as well as `src/`. |
+| `npm run check:edge` | Run `deno check` on all five edge-function entry points. |
+| `npm run test:site` | Run the site test suite. |
+| `npm run test:p1-local` | Run the ten named local integration files serially; needs Docker and an exclusive database slot. |
+| `npm run test:p1-server` | Regenerate the protocol bundle, then run the server suite serially; needs Docker and an exclusive database slot. |
+| `npm run test:uxtest` | Run the cross-machine UX harness. |
+| `npm run db:start` / `db:stop` / `db:reset` / `db:status` | Control the local Supabase CLI stack. |
+| `npm run db:diff` / `db:migrate` | Inspect or apply local migrations only. |
+| `npm run build:command-core` | Regenerate `supabase/functions/_shared/protocol.js`. |
+| `npm run test:h0-upgrade:local` / `test:h0-counts` | Test the H0 migration and count artifacts locally. |
+| `bash scripts/build-release.sh` | Build and execute-check `dist-release/cswarm`, then write its checksum. |
 
-The site is a separate project: `cd site && npm install && npm run build` (Astro 7, static output).
+The local Supabase CLI stack is development-only and listens at `127.0.0.1:54321`.
+Local Supabase commands do not target production.
 
-## Layout
-
-```
-src/protocol/   pure authority core — reducer, events, commands; no I/O
-src/cloud/      client side — auth, signals, workspaces, transport
-src/cli.ts      cswarm CLI surface
-supabase/       migrations + Deno edge functions: command, read, capability, activity
-tests/          pure, CLI, local-Supabase, and server-Supabase suites
-scripts/        build and verification helpers
-site/           Astro site — hand-written CSS, no Tailwind
-docs/design/    SWARM-CLOUD.md is the canonical spec; on conflict it wins
-docs/evidence/  committed artifacts backing completion claims
-```
-
-## Reachable traps
-
-**A test file runs only when a package script names or globs it.** `npm test` is a literal list;
-`test:p1-cli` and `test:p1-server` glob their trees; `test:p1-local` names six files. A new file in
-`tests/support/` does not run unless the script names it. Check the gate and report it when adding a test.
-
-**Edge functions are outside `tsc`.** `tsconfig.json` includes only `src/**/*.ts`. Run
-`npm run check:edge`; it names the current four entrypoints (`command`, `read`, `capability`,
-`activity`) and no other gate runs it. A fifth function would need adding, and a stale generated
-protocol bundle can still typecheck.
-
-**`supabase functions serve` gives Deno only the values in `--env-file`.** Parent `env` values do not
-reach it. Add every environment-gated test value to the temporary env file used by the server suite.
-
-**`supabase/functions/_shared/protocol.js` is generated.** Edit `src/protocol/index.ts`, then run
-`npm run build:command-core`; `pretest:p1-server` also regenerates it. Never hand-edit the bundle.
-
-**A shared checkout can be on another agent's branch.** Before commit, run
-`git rev-parse --abbrev-ref HEAD` and inspect `git worktree list`. Use one writer per branch/worktree;
-never push a branch you do not own. Run `scripts/branch-audit.sh` before pruning local branches.
-
-**`scratchpad/` is gitignored.** Put evidence that must survive in `docs/evidence/` or `docs/org/`.
-
-**Push is a hint; the row is the truth; a status that says push must be subscribed now.** A wake
-event is a latency hint. `claim_agent_inbox` reads `swarm.signal_deliveries`. `cswarm listen status`
-may report `mode: push` only while the Realtime socket is subscribed.
-
-**The listener never starts a model; a lane that adds a worker is wrong by construction.** The
-only live `--route` is `main`. A signal wakes the seat's own session. The listener claims the
-delivery into that seat's queue. It does not start Grok, Claude, Codex, or OpenCode.
-
-**The source suites never load the shipped bundle.** `npm test` and `test:p1-cli` run TypeScript
-through tsx. A lane that changes module loading must run `scripts/build-release.sh` and check its
-EXIT CODE (it runs the artifact and fails on a bad build). `cmd | grep` hides the exit code —
-that is how 0.1.62 shipped.
-
-## Session continuity
-
-Read the newest `docs/org/*-RESUME-HERE.md` on `main` before re-deriving work:
+The site is a separate package:
 
 ```sh
-ls -1 docs/org/*RESUME-HERE.md | sort | tail -1
+npm --prefix site install
+npm --prefix site run build
+npm --prefix site test
 ```
 
-The resume file must land on `main`. Write it for a cold successor and include: refs by hash; what is
-LIVE versus merely written; the next file, line, or command; what is deliberately DEFERRED; what was
-NOT established; and corrections to published claims, including the retired wording when readers may
-still meet it. Record operator-relevant facts in a durable artifact as you learn them, not only in chat.
+## Test and verification guardrails
 
-## Sprint hygiene: every lane leaves nothing behind
+- A test runs only when a package script names or globs it. `npm test` and
+  `test:p1-local` use literal file lists. Check the relevant gate whenever a test is
+  added.
+- `tsconfig.json` includes only `src/**/*.ts`. Edge functions are outside normal `tsc`.
+  Run `npm run check:edge`; when adding a function, add its entry point to that script.
+- `supabase/functions/_shared/protocol.js` is generated. Edit `src/protocol/index.ts`,
+  then run `npm run build:command-core`. Never hand-edit the bundle.
+- `supabase functions serve` receives only values in its `--env-file`. Parent-shell
+  variables do not reach it. Add test-gated values to the suite's temporary env file.
+- Source tests run TypeScript through `tsx`; they do not prove the shipped single-file
+  bundle works. Changes to loading, entry points, or packaging must run
+  `bash scripts/build-release.sh` and check its exit code.
+- Do not pipe a required gate into `grep`; that can hide the gate's exit code.
+- Resolve the path, URL, ref, symlink, or artifact before measuring it.
+- Enumerate a set and reconcile its count. Do not infer completeness from a pattern.
+- Run a positive control in the same invocation as a negative probe. A negative result
+  must reach the code path it claims to test.
+- Distinguish pushed, landed, applied, and live. State only the condition measured.
+- If a test pins user-readable copy, verify the claim against system behavior. A stable
+  false claim is still false.
+- Generate user-facing lists of required fields, accepted commands, options, or providers
+  from the same constant enforcement reads. Do not type a second list.
+- Never branch on `error.message`. Use a named error class, stable code, caller
+  `AbortSignal`, or owned state. Normalize raw stream failures at the boundary.
+- Only when the assignment changes listener code: prove the behavior change with a detached
+  listener on a temporary `--state-dir` and retain its status JSON as evidence, then stop it.
+  This is a product test of the listener feature; agents never run `cswarm listen` for
+  coordination or monitoring.
+- Read `docs/org/2026-07-26-simplification-state.md` before a nontrivial product change.
+  Read the newest `docs/org/*RESUME-HERE.md` before re-deriving release or production
+  state.
 
-Measured 2026-09-02: `git worktree list` had 46 entries and 45 local branches before a cleanup lane pruned
-them; the operator ruled that this is part of every sprint, not a chore for later. The lead runs it; a Codex
-lane does the work.
+In zsh, brace every revision with a path: use `${rev}:path`, never `$rev:path`.
 
-1. **One worktree per lane, under the session scratchpad**, branch `lane/<name>`, `node_modules` symlinked
-   from the main checkout. Never a checkout of the shared tree. Arms get their own detached worktree each.
-2. **Merge, then delete.** When a lane's commits are on `main` (or on a `release/<v>` branch that reaches
-   `main`), remove its worktree at once and delete the branch as soon as `git cherry main <branch>` shows
-   zero `+` lines. A branch that still shows `+` lines is the only copy of something: keep it and say why in
-   the ledger.
-3. **A release ends on one branch.** Before writing "released", `git worktree list` shows the main checkout
-   only and `git branch` shows `main` only. Dirty worktrees that are not yours: save `git diff` to
-   `docs/evidence/<date>-cleanup/<branch>.patch`, then remove.
-4. **Cleanup is a lane** (`scripts/branch-audit.sh` first, then `git worktree prune`, `worktree remove`,
-   `branch -d`), with a protected list of live lanes and a report of every removal and every keep.
-5. **Kill your processes.** No `codex exec`, arm, or test runner of yours survives the sprint; `pgrep -f
-   <your scratchpad id>` must be empty before you report done.
+## Git, review, and commits
 
-## Verification
+Follow the workspace process: Codex makes, Claude judges, one cross-family review round,
+and CI decides. The current model assignments are in the workspace `AGENTS.md`; do not
+duplicate them here.
 
-Read `docs/org/2026-07-26-simplification-state.md` before a nontrivial change.
+- Do not expand the assignment. Respect dirty worktrees and other agents' changes.
+- Before committing, run `git rev-parse --abbrev-ref HEAD` and inspect
+  `git worktree list`. Use one writer per branch and worktree. Never push a branch you do
+  not own.
+- Run `scripts/branch-audit.sh` before pruning branches. Do not delete a branch that still
+  contains work absent from `main`.
+- Every new non-merge commit covered by the repository rule needs the agent-authorship
+  fields defined by `scripts/lib/agent-trailer-vocab.sh`. Install the optional helper with
+  `npm run hooks:install`; CI is the guard.
+- Author and committer email addresses must pass `scripts/check-commit-identity.sh`.
+  The measured allowlist lives in that script. Do not reconstruct it from memory.
+- Do not backfill guessed agent trailers into old commits.
 
-- **Measure the artifact, not its name.** Resolve the path, URL, ref, or symlink first.
-- **Run a positive control on the same invocation.** A probe that cannot fail proves nothing. Use
-  `scripts/probe-check.sh` and `scripts/path-check.sh` rather than rebuilding their checks.
-- **Enumerate, don't pattern-match.** List the set and count it; a grep against a guessed path can make a confident zero.
-- **Pushed ≠ landed ≠ applied.** State which one you established.
-- **Review the decision set, not only its items.** Individually correct rulings can be unsafe together.
-- **Corrections go in the artifact, not in a message.** Preserve retired wording when later readers may meet it.
-- **D-036 model-inversion gate:** every SHA-changing lane needs two substantive arms on the exact SHA:
-  an exact review and an independent cross-family inversion. Choose two different families from Codex,
-  Grok, and Gemini, in that preference order; the author's family is excluded. One arm, an empty PASS,
-  or output without reasoning is not a review. If either arm changes the SHA, rerun both.
-  - Call Grok headlessly as `grok -p "<prompt>"`. Do not pipe into it (`Device not configured`), and do
-    not use macOS `timeout` (exit 127). Re-probe tool availability before stating it.
-  - **Two of YOUR OWN arm invocations alive at once interleave one output file** into unreadable text
-    that still matches a `VERDICT:` grep — a garbled file is not a review. Guard before starting one,
-    but scope the guard to your own session (`pgrep -f <your session id>` filtered to the tool): a bare
-    `pgrep -f grok` also matches other agents' runs on a shared host and blocks your work for no reason.
-  - For every arm, assert that a `VERDICT` line is present. Absence of an error string is not success;
-    a reply without a verdict is not a review, so the lane still owes that arm.
-- **A claim about a running listener needs a live control.** Tests with a fake bridge and two review arms
-  passed a lane whose status fields were `null` on a real detached listener (v0.1.46). A lane that changes
-  what a live listener reports must start one with `--state-dir <temp>` and paste its status JSON.
-- **Durable by default.** Operator- or system-read state belongs in Postgres. Process memory is only a
-  cache or a home for state that can be derived again; serverless invocations do not share it.
+## Where this runs now
 
-State what you did **not** establish alongside what you did.
+Production is one Hetzner server, `yulan-vps-1`, in Falkenstein. Its Tailscale address is
+`100.115.66.74`; its public address is `178.105.29.28`. Cloudflare provides DNS, proxying,
+TLS, and R2 object storage. Caddy uses Cloudflare Origin CA certificates on the box.
 
-## D-053: never branch on `error.message`
+| Surface | Production shape |
+|---|---|
+| API | Caddy on `api.commonswarm.com`. |
+| Core stack | Compose project `commonswarm-supabase-stack`: `commonswarm-postgres` (PostgreSQL 17), GoTrue, PostgREST, Realtime, and Storage API on `commonswarm-net`. |
+| Object storage | Storage API backed by Cloudflare R2 bucket `commonswarm-files`. |
+| Functions | Compose project `commonswarm-edge`, Deno edge runtime on loopback port `9000`, behind Caddy. |
+| Site | Static files at `/srv/commonswarm/site/current`, served by Caddy on `commonswarm.com`. |
+| CLI | Production clients use `https://api.commonswarm.com`. |
 
-`error.message` is presentation. Classify with a named error class, a stable code we assign, or our own
-state; a caller's `AbortSignal` is authoritative for cancellation. Normalize raw stream failures to a
-typed code at the boundary. Name every producer that can populate a message before clearing a classifier.
+Stack releases are under `/home/commonswarm/stack/releases/<sha>` and edge releases are
+under `/home/commonswarm/edge/releases/<sha>`. Each has a `current` symlink. Runtime values
+are in `/home/commonswarm/.env`.
 
-Measured instance: an ACP child's JSON-RPC prose was copied into an error, and a retry regex matched that
-prose. With the same type and code, the provider could change whether CommonSwarm re-prompted it.
+The box has a `compose.override.yaml` that raises the edge-runtime memory limit to 2 GiB.
+A six-hourly timer restarts that container (docker restart) because the runtime leaks memory. The timer is
+mitigation; the leak still needs a repository fix. When the edge container is recreated,
+`COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net` is required.
 
-## Claim controls prove stability, not truth
+The hosted Supabase project `ukezjcnxjvkpkeezxaew` was deleted on 2026-09-20. Production
+does not use hosted Supabase, Railway, or Vercel.
 
-If a test asserts a user-readable string, it reviews a **claim**, not only behavior. A control can
-discriminate and still pin the wrong claim. Check each claim against what the underlying system does,
-not against another artifact that repeats it. Enumerate every surface in the claim family—including
-tests, comments, and docs—then read each statement clause by clause.
+## How it is released
 
-Measured instance: sign-out copy said it ended every session, and a test required `/every session/`.
-The endpoint revoked refresh tokens but could not revoke issued access JWTs. The green mutation control
-therefore defended a false claim, and a sibling clause survived until the whole claim family was swept.
+Only Anvil, the Hermes operations agent on the Mac mini, releases to the box or restarts
+box services. HezLead, the Claude infrastructure seat, directs the work. Other agents may
+prepare and verify release inputs, but must not deploy, restart, change Caddy, or change
+production symlinks.
 
-## An enumeration inside a message must be generated, not typed
+Every release input must be an exact reviewed SHA that has landed on `main`.
 
-**If a user-facing string lists things the code enforces — required fields, accepted commands, valid
-options, supported providers — that list must come from the same constant the enforcement reads.**
-A typed list is a claim with no control on it, and it drifts the moment the enforcement changes.
+| Surface | Release input and method | Automatic? |
+|---|---|---|
+| Stack | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/stack/releases/<sha>`, then the `current` symlink is changed through the operations runbook. | No. |
+| Edge | Reviewed repository archive for an exact SHA on `main`, unpacked at `/home/commonswarm/edge/releases/<sha>`, then the container is recreated on `commonswarm-net` through the operations runbook. | No. The six-hour recycle timer only mitigates the live leak. |
+| Site | `deploy/site/deploy.sh` builds `site/` from a clean archive of the checked-out `HEAD`, validates it, uploads a release, and atomically changes `/srv/commonswarm/site/current`. HezLead and Anvil own execution. | No. |
+| CLI | `scripts/build-release.sh` creates the checked single-file CLI and checksum. `scripts/build-npm.sh` creates the npm package from that same bundle. | No publish workflow exists in this repo. |
+| Schema | A schema change is a production operation performed once through the workspace runbook. It is not applied by CI or by merging `main`. | No. |
 
-Measured four times in one release cycle (v0.1.48-v0.1.50), each time AFTER two review arms passed:
-a receipt label that named the wrong delivery outcome, twice; a remedy naming `claude login`, a verb
-that does not exist (`claude auth login` does); and a credential error whose own field list said
-`agent_token (required)` while the parser rejected a file that had exactly that and nothing else.
+CI never deploys production. A merge to `main` does not release the stack, edge runtime,
+site, CLI, or a migration.
 
-The arms reliably catch wrong logic. They do not catch a wrong LIST inside a correct-looking
-sentence, because reading it requires re-deriving the enforcement — which is the work the shared
-constant removes. Export the set; build the sentence from it; add a test that fails when they differ.
+The root `package.json` version feeds the CLI and `/download`. Bump it with
+`npm version --no-git-tag-version <version>` so `package-lock.json` stays in sync; the site
+tests reject version drift.
 
-## Honesty is not sufficient
+`deploy/supabase-stack/RUNBOOK.md` records the completed hosted-to-box cutover. Its source
+migration steps and `/home/commonswarm/migration.env` are historical. Do not reuse them as
+the current release procedure. The cross-repository operations runbook is authoritative.
 
-When a command returns while work continues, state what the reader must do next. Exit 0 and a success-shaped
-response can make a true state word easy to skip. Apply this to transitional states, partial success, and
-accepted-but-not-applied work.
+## CI
 
-Measured instance: `cswarm listen stop` returned `state: "stopping"`, exit 0, and readers treated teardown
-as complete. The durable form says: `This is still in progress. Confirm with: cswarm listen status …`.
+This repository has two GitHub Actions workflows. Both run on pushes and pull requests:
 
-## A negative result must reach the path it claims to test
+| Workflow | Check |
+|---|---|
+| `.github/workflows/agent-trailers.yml` | Self-tests the trailer checker, resolves the commit range, enforces required agent-authorship fields, and writes an informational summary. |
+| `.github/workflows/commit-identity.yml` | Checks author and committer addresses with `scripts/check-commit-identity.sh`. |
 
-Before recording a negative, ask: **what would this probe return if the feature were present and working?**
-If the answer is the same, the probe did not measure the feature. Show that the intended gate was reached;
-mutation testing proves a control can fail, not that it fails for the claimed reason.
+Both use this runner fallback:
 
-Measured instance: a control used `--not-a-real-flag`; the parser rejected it before the validator. It
-failed whether the validator worked or not, so its negative result was not evidence about validation.
-
-## Onboarding: ask for the minimum, detect the rest
-
-1. **Every field must justify itself.** If context can determine or default it, remove it; put rare choices in settings.
-2. **Detect rather than ask.** Let agents inspect their environment, repo, or APIs.
-3. **Chrome is not information.** Remove borders, panels, headings, and helper text that only restate labels.
-4. **Simplicity is an engineering result.** A short form can need more work behind it; budget for that.
-5. **Measure fields and steps.** Record a reason for every addition.
-
-Constraint: detection must not guess. `CLAUDE_CODE_ENTRYPOINT` can be inherited by a Codex child and
-mislabel it as Claude Code. Return a value or nothing; a wrong automatic answer is worse than the question.
-
-## Writing for users
-
-The product voice is plain and calm. CLI output says what just happened, what is now true, and what happens
-next, so nobody has to check whether it worked. The benefit is agents coordinating so collaborators are
-unblocked — never control, authority, or enforcement (that framing was retired as friction). Availability
-copy asserts deployment state and lives in git: when a gate flips, grep every surface. Claims about what
-CommonSwarm does must hold for BOTH the hosted workspace and the optional local listener.
-
-## Writing: modifiers and invented contrasts
-
-Use the shortest precise statement. Remove modifiers such as *actual, real, true, clear, honest, genuine,
-main, key,* or *important* when they add no fact. Do not invent an opposing view for an “X, not Y” contrast,
-and never imply that someone argued a view they did not introduce.
-
-## Workspace brain and releases
-
-The CommonSwarm workspace brain (`cswarm brain ls | get <topic>`) holds live doctrine that moves faster than
-this file: `brain-how-to` (its constitution), `false-success-signals`, `shared-host`, `listener-attended`,
-`agent-restart`, `releases`. Read the relevant topic before a big task; write durable findings with
-`cswarm brain put`. Cite topics by NAME only, never by section number or item count.
-
-**Save the durable object, then name it.** A finding that outlives the task belongs in a topic, not
-only in a signal body: `cswarm brain put <topic>`. Naming the topic in a signal now costs the reader
-nothing — the web app turns a topic name into a control that opens that topic, Markdown-rendered, so
-"see shared-host" is worth more to a human than a paraphrase of it. Write the slug; case does not
-matter. A slug that carries punctuation — as most topic names do — is recognised in ordinary prose,
-but not inside a fenced block, a link, or a URL, where the text is left as typed. A slug
-that is one ordinary word (`releases`, `roadmap`) is recognised only when backticks hold that word
-and nothing else, because a topic named `roadmap` must not turn every use of that word into a link,
-and a topic named `brain` must not put a control inside `cswarm brain put`. A name that is not a
-live topic stays plain text, and a click re-reads the topic list before it opens anything, so
-within the workspace it was made in it never lands on a topic that has since been deleted. A click
-whose workspace the reader has left opens nothing at all. The separator set itself is
-`BRAIN_SLUG_SEPARATORS` in `site/src/lib/brain-links.ts`; this paragraph deliberately does not
-repeat it, so the two cannot drift.
-See `docs/design/2026-09-04-BRAIN-LINKS-IN-SIGNALS.md`.
-
-Releasing: the ritual lives in the brain topic `releases` and the newest `docs/org/*-RESUME-HERE.md`. The
-CLI version on `/download` is derived from the root `package.json` through `site/src/lib/release.ts`; bump
-with `npm version --no-git-tag-version <v>` so the lockfile stays in sync (`npm --prefix site test` rejects
-drift). Every SHA-changing lane needs both D-036 arms before it lands.
-
-## Production is the box
-
-Production is one Hetzner server, `yulan-vps-1`, in Falkenstein. It serves `api.commonswarm.com` and the website at https://commonswarm.com.
-
-The Supabase project `cloud-swarm-dev` (`ukezjcnxjvkpkeezxaew`) is deleted. The Vercel project `coswarm-site` is deleted.
-
-Do not run these commands for CommonSwarm: `supabase db push`, `supabase functions deploy`, `supabase link`, anything with `--linked`, `supabase projects api-keys`, or `vercel deploy`.
-
-Not established: there is no written procedure yet for how a schema migration, or a new stack or edge-function version, reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
-
-Local work uses `npm run db:start` at `127.0.0.1:54321`. That local Supabase CLI stack runs the server test suites.
-
-## Deploying the site
-
-The website is static files served by Caddy on `yulan-vps-1`. From the repo root:
-
-```sh
-deploy/site/deploy.sh yulan-vps-1
+```yaml
+runs-on: ${{ vars.CI_RUNS_ON_LIGHT || vars.CI_RUNS_ON_NODE || vars.CI_RUNS_ON || 'ubuntu-latest' }}
 ```
 
-The script takes one SSH host. It refuses to run when `site/.env` is missing. `deploy/site/validate-site-env.mjs` requires non-empty `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY`, requires the anon key to be a JWT, and refuses a `service_role` payload. It does not print the key. Set `PUBLIC_SUPABASE_URL=https://api.commonswarm.com`. Never put a service-role key under `site/`.
+Use the workspace self-hosted fleet when the repository variables route there. Do not
+change fleet labels in this repository. If none of the variables is set, the workflows
+fall back to `ubuntu-latest`.
 
-The script archives `HEAD`, removes `site/dist`, runs `npm ci` and `npm run build` in `site/`, and refuses the upload when `site/dist/start/index.html` is missing or its `commonswarm:url` meta value is empty. It rsyncs that directory to `/srv/commonswarm/site/releases/<release>.tmp` on the host with `rsync -a --delete` (no `--chmod`), then runs `deploy/site/finalize-release.sh` over SSH. The release name is UTC time, a 12-character git SHA, and 16 random hex characters. Finalize keeps previous `/_astro` files, sets directories to `755` and files to `644`, and switches `/srv/commonswarm/site/current` with `ln -sfn` plus `mv -Tf`. The script keeps the five newest releases. A prune error after the switch is a warning.
+These are commit guards, not a build-and-test pipeline. No workflow in this repository
+runs the TypeScript build, product tests, local database suites, site build, or a deploy.
+Run the smallest relevant local gates and rely on both commit workflows before accepting a
+change. Repository files do not prove whether GitHub branch protection marks either check
+as required; do not equate a workflow file with enforced merge protection.
 
-Dry runs:
+## Secrets and environment
 
-```sh
-deploy/site/deploy.sh --dry-run --dist <dist-directory>
-deploy/site/deploy.sh --dry-run --npm-ci <site-directory>
-deploy/site/deploy.sh --dry-run --release-name
-```
+Never print secret values or put them in repositories, shell arguments, logs, URLs, chat,
+documentation, commits, or issue comments. Production secrets live in the 1Password vault
+`Yulan Ventures Infra` and in root-only or service-owned files on the box.
 
-Roll back a site release on the server by moving the `current` symlink:
+| Scope | Variable names and location |
+|---|---|
+| Production stack | The authoritative name inventory is `deploy/supabase-stack/env.example`. Values live in `/home/commonswarm/.env` with mode `0600`. |
+| Edge runtime | `SWARM_DATABASE_URL`, `SUPABASE_DB_URL`, `SWARM_DATABASE_TLS_CA_B64`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SWARM_ENV`, `SWARM_COMMAND_ALLOWED_ORIGINS`, `SWARM_CAPABILITY_URLS`, `SWARM_CAPABILITY_ALLOWED_ORIGINS`, and `SWARM_SELF_SERVE`; values use the same box env file. |
+| Site build | `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` live in untracked `site/.env`. The URL is `https://api.commonswarm.com`; the key must be an anon JWT, never a service-role key. |
+| CLI target | `SWARM_CLOUD_URL`, `SWARM_CLOUD_ANON_KEY`, and optional `SWARM_CLOUD_WORKSPACE_ID`. Refresh credentials live in the OS keychain where supported, with a protected file fallback described in `README.md`. |
+| Local origin override | `CSWARM_DEV_ALLOWED_ORIGINS`; development only and ignored in non-interactive agent mode. |
+| Test-only command hooks | `SWARM_CMD_TEST_SLEEP_AFTER_STEP` and `SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP`; never set them in production. |
+| Historical cutover | Names are recorded in `deploy/supabase-stack/migration.env.example`. Any box `migration.env` is historical and must not be used to contact the deleted project. |
 
-```sh
-cd /srv/commonswarm/site
-ln -sfn releases/RELEASE_TO_RESTORE current.next
-mv -Tf current.next current
-```
+Example env files contain names and safe placeholders only. Never add live values to them.
 
-Check the live site after a deploy. Expected status codes are 200 for `/` and `/install.sh`, and 404 for `/nope.sh`. The backend URL output is non-empty. The service-role marker count is 0.
+## Do not
 
-```sh
-U=https://commonswarm.com
-curl -sS -o /dev/null -w '%{http_code}\n' "$U"
-curl -sS "$U" | grep -c '<some string that MUST be there>'
-curl -sS "$U" | grep -c '<the thing that must be GONE>'
-curl -sS -o /dev/null -w '%{http_code}\n' "$U/install.sh"
-curl -sS -o /dev/null -w '%{http_code}\n' "$U/nope.sh"
-curl -sS "$U/start" | grep -o 'commonswarm:url" content="[^"]*"'
-curl -sS "$U/start" | grep -c 'InNlcnZpY2Vfcm9sZSI'
-```
-
-The runbook is `deploy/site/RUNBOOK.md`. Astro publishes template `<!-- comments -->`; frontmatter comments are stripped. Astro does not remove stale output; the deploy script removes `site/dist` in the clean archive before the build.
-
-## zsh: brace every revision-with-path
-
-Always write `${rev}:path`, never `$rev:path`; zsh can mangle the latter before Git sees it, sometimes
-without an error. The exact double-quoted construct `"$R:Xzzz"` was measured one letter at a time:
-
-```
-MANGLED:  a c e h l q r s t u   and   A P Q
-SAFE:     everything else
-```
-
-Brace every revision-with-path even when the path begins with a measured safe letter.
+- Do not deploy to the box, restart its services, edit its Caddy configuration, or change
+  release symlinks unless you are Anvil acting under HezLead's direction.
+- Do not run `supabase db push`, `supabase functions deploy`, `supabase link`, any
+  `supabase` command with `--linked`, `supabase projects api-keys`, or `vercel deploy` for
+  CommonSwarm.
+- Do not point code, DNS, a release, or an integration at hosted Supabase, Railway,
+  Vercel, a `supabase.co` production host, or the deleted project.
+- Do not rerun the completed source migration or treat a historical `migration.env` as a
+  live release input.
+- Do not run `cswarm listen` as an agent workflow, turn agent-based monitoring back on, or
+  add a listener path that starts models.
+- Do not put a service-role key under `site/`.
+- Do not hand-edit generated protocol code.
+- Do not rename `__COSWARM_VERSION__`, the `swarm` schema, or `SWARM_*` variables as part
+  of product-name cleanup.
