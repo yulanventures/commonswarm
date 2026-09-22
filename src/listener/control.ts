@@ -63,6 +63,7 @@ import type { ActivityPublishErrorCode } from "./activity.js";
 export type ListenerStatusState =
   | "starting"
   | "ready"
+  | "credential_check"
   | "stopping"
   | "stopped"
   | "failed";
@@ -192,6 +193,12 @@ export interface ListenerStatus {
    * the listener is ready, or it has stopped. Optional: older files omit it.
    */
   nextAttemptAt?: string | null;
+  /**
+   * When a credential-check listener will stop if every remaining check
+   * confirms the loss. Present only in `credential_check`. Optional: older
+   * files omit it.
+   */
+  credentialStopAt?: string | null;
   logPath: string;
 }
 
@@ -302,6 +309,7 @@ const STATUS_ALLOWED_KEYS = new Set([
   "idlePollMs",
   "wake",
   "nextAttemptAt",
+  "credentialStopAt",
 ]);
 const STATUS_ACTIVITY_ERROR_CODES = new Set<ActivityPublishErrorCode>([
   "activity_credential_failed",
@@ -503,7 +511,7 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !Number.isSafeInteger(row.pid) ||
     (row.pid as number) < 1 ||
     typeof row.state !== "string" ||
-    !["starting", "ready", "stopping", "stopped", "failed"].includes(row.state) ||
+    !["starting", "ready", "credential_check", "stopping", "stopped", "failed"].includes(row.state) ||
     typeof row.startedAt !== "string" ||
     !Number.isFinite(Date.parse(row.startedAt)) ||
     !(row.readyAt === null ||
@@ -626,7 +634,8 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
       row.idlePollMs === null ||
       (typeof row.idlePollMs === "number" &&
         Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
-    !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt))
+    !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt)) ||
+    !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt))
   ) {
     throw new Error("stored listener status is malformed");
   }

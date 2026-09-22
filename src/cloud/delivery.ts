@@ -73,20 +73,17 @@ const FAILED_TERMINAL_CODES_SET = new Set([
   "credential_unavailable",
 ]);
 
-const SERVER_ERROR_CODES_SET = new Set([
-  "unauthenticated",
-  "fresh_auth_required",
-  "invalid_request",
-  "payload_too_large",
-  "forbidden",
-  "delivery_unavailable",
-  "delivery_ack_conflict",
-  "command_id_conflict",
-  "rate_limited",
-  "upgrade_required",
-  "temporarily_unavailable",
-  "internal_error",
-]);
+/**
+ * Claim refusal for a link-joined (H0) seat. The command edge constant is
+ * `H0_SEAT_CLAIM_REFUSED` in `supabase/functions/command/h0-seat.ts`
+ * (lane/h0-poll-ack). A listener must not treat this as credential loss and
+ * must not retry the claim.
+ */
+export const H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
+
+/** Status sentence for a listener that cannot serve an H0 seat. */
+export const H0_SEAT_LISTENER_STOP_SENTENCE =
+  "This seat is a link-joined (H0) seat that receives messages through the h0 poll, so a cswarm listener cannot serve it.";
 
 /** Allowed client failure codes for failed_terminal outcomes. */
 export const DELIVERY_FAILED_TERMINAL_CODES: readonly string[] = Object.freeze([
@@ -110,7 +107,12 @@ export const DELIVERY_SERVER_ERROR_CODES: readonly string[] = Object.freeze([
   "upgrade_required",
   "temporarily_unavailable",
   "internal_error",
+  H0_SEAT_CLAIM_REFUSED_CODE,
 ]);
+
+const SERVER_ERROR_CODES_SET: ReadonlySet<string> = new Set(
+  DELIVERY_SERVER_ERROR_CODES,
+);
 
 export const DELIVERY_UNKNOWN_ERROR_CODE = "unknown_error";
 

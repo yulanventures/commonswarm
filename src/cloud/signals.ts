@@ -2322,47 +2322,77 @@ export function resolveRefusalToleranceMs(
 }
 
 /**
- * Server `error` slugs that mean this credential is revoked, expired, or unknown.
+ * Which edge produced the HTTP refusal. The same slug does not mean the same
+ * thing on both.
+ */
+export type CredentialCheckSurface = "read" | "command";
+
+/**
+ * Read-edge `error` slugs that mean this credential is revoked, expired, or
+ * unknown. The read edge assigns them; this client does not invent them.
  *
- * The command and read edges assign these; this client does not invent them.
- * Unknown or expired is `unauthenticated`: the read edge returns 401 when
- * `agent_delivery_read_context` yields no row, and an expired token yields no
- * row; the command edge returns 401 when `authenticateAgent` is null, which is
- * also how `loadAgentCredential` reports a missing or expired token. Revoked is
- * `forbidden`: the read edge returns 403 when `agent.is_revoked`, and the
- * command edge returns 403 from `revoked()` on a non-delivery command.
+ * Unknown or expired is `unauthenticated`: 401 when `agent_delivery_read_context`
+ * yields no row, which is also what an expired token yields. Revoked is
+ * `forbidden`: the read edge's only 403 `forbidden` is `agent.is_revoked`.
  *
- * `delivery_unavailable` is not in this set. The command edge uses that slug
- * both when a delivery command's credential is revoked and when routing fails,
- * so the slug does not confirm that the credential itself is dead.
+ * Status copy joins this list. It is the read surface, not every 403 the
+ * command edge can return.
  */
 export const CONFIRMED_CREDENTIAL_LOSS_CODES: readonly string[] = Object.freeze([
   "unauthenticated",
   "forbidden",
 ]);
 
-const CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
+/**
+ * Command-edge slugs that confirm the credential itself is dead.
+ *
+ * `unauthenticated` is the auth failure: missing bearer, a token
+ * `authenticateAgent` cannot load, or an expired token. `forbidden` is not in
+ * this set. The command edge returns that slug for refusals that are not a
+ * credential check (role, scope, target eligibility, and the rest of the list
+ * in the outage lane record). A revoked delivery command is
+ * `delivery_unavailable`, which is also absent: that slug is shared with a
+ * route failure.
+ */
+export const COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES: readonly string[] =
+  Object.freeze([
+    "unauthenticated",
+  ]);
+
+const READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
   CONFIRMED_CREDENTIAL_LOSS_CODES,
 );
+const COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+);
 
-/** True when `code` is one of `CONFIRMED_CREDENTIAL_LOSS_CODES`. */
+/** True when `code` confirms a dead credential on `surface`. Default is the read edge. */
 export function isConfirmedCredentialLossCode(
   code: string | null | undefined,
+  surface: CredentialCheckSurface = "read",
 ): boolean {
-  return typeof code === "string" && CONFIRMED_CREDENTIAL_LOSS_CODE_SET.has(code);
+  if (typeof code !== "string") return false;
+  const set = surface === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET
+    : READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
+  return set.has(code);
 }
 
 /**
- * A credential stop is HTTP 401 or 403 plus one confirmed code. Status alone
- * is not enough: a foreign backend can answer 403 with HTML or another body's
- * JSON during a DNS cut, and that credential is still good.
+ * A confirmed credential-loss answer is HTTP 401 or 403 plus a code that
+ * surface assigns to a dead credential. Status alone is not enough: a foreign
+ * backend can answer 403 with HTML or another body's JSON during a DNS cut,
+ * and that credential is still good. One such answer is still not a permanent
+ * listener stop; the listener re-checks it across a window of at least ten
+ * minutes and three checks before it stops.
  */
 export function isConfirmedCredentialHttpFailure(
   status: number,
   code: string | null | undefined,
+  surface: CredentialCheckSurface = "read",
 ): boolean {
   return (status === 401 || status === 403) &&
-    isConfirmedCredentialLossCode(code);
+    isConfirmedCredentialLossCode(code, surface);
 }
 
 export function isRetryableFollowError(error: unknown): boolean {

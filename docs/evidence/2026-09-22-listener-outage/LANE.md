@@ -82,3 +82,120 @@ A live listener was not run. That is the lead's to do: a detached listener on a 
 `listen start` can still treat a leftover hook-surface file as an attendance surface. Status no longer does.
 
 A delivery command whose credential is revoked is answered with `delivery_unavailable`, the same slug as a route failure. That path retries. It becomes a permanent credential stop when a signal read returns `forbidden` or `unauthenticated`. This lane did not prove that a listener stuck in an acknowledgement retry reaches that read.
+
+## Fold 1
+
+A single confirmed code is no longer a permanent stop. After the first confirmed-loss answer the listener stays up in state `credential_check` and re-reads at `CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS`. It stops with `credential_stopped` only when every counted check in the window was a confirmed-loss code, at least `CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS` of them have arrived, and the time since the first is at least `CREDENTIAL_LOSS_CONFIRM_WINDOW_MS`.
+
+Constants in `src/listener/runtime.ts`:
+
+| Constant | Value |
+|---|---|
+| `CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS` | 3 |
+| `CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS` | 300000 (five minutes) |
+| `CREDENTIAL_LOSS_CONFIRM_WINDOW_MS` | 600000 (ten minutes), `(MIN_CHECKS - 1) * INTERVAL` |
+
+A successful read or claim clears the window and the listener is `ready` again. A transient failure (network, timeout, 5xx, or a 401/403 that is not a confirmed code) does not count as a check and does not clear the window. The stated stop time moves out by the remaining intervals. `cswarm listen stop` aborts the wait and the listener ends `stopped`. A local renewal stop or a missing local secret still stops at once: those are not a server answer.
+
+`forbidden` confirms a lost credential only on the read edge. On the command edge the only confirmed code is `unauthenticated`. `COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES` is that one-element list. `CONFIRMED_CREDENTIAL_LOSS_CODES` stays the read-edge list (`unauthenticated`, `forbidden`).
+
+### 403 forbidden on the command and read edges
+
+"Credential lost" here means the answer is the revoked, expired, or unknown credential check. A live credential that fails some other rule is not lost.
+
+Read edge:
+
+| Place | Credential lost? |
+|---|---|
+| `supabase/functions/read/index.ts:475` — `agent.is_revoked` after `agent_delivery_read_context` returned a row | Yes. This is the read edge's only 403 `forbidden`. |
+
+Command edge. The HTTP body is `{ error: "forbidden" }` unless the row says otherwise.
+
+| Place | Credential lost? |
+|---|---|
+| `command/index.ts:2753` `replayResult` — rejected `accept_invitation` replay | No. The caller authenticated. The invitation was rejected. |
+| `command/index.ts:4711` `registerLoginDevice` — bearer is not a user credential | No. Wrong credential kind. |
+| `command/index.ts:4776` `registerLoginDevice` — device missing, owned by someone else, or revoked | No. The human credential is valid. |
+| `command/index.ts:4830` `createSelfServeWorkspace` — `self_serve_disabled` or `credential_kind_forbidden` | No. Feature gate or wrong kind. |
+| `command/index.ts:5973` `registerAgentSeat` — join credential missing, revoked, or expired | Yes. That join credential is dead. The listener does not send this command. |
+| `command/index.ts:5988` `registerAgentSeat` — the join credential owner's membership is gone | Yes. The join credential can no longer register. Not the listener's agent token. |
+| `command/index.ts:6021` `registerAgentSeat` — exact-kind gate failed after the join credential was accepted | No. |
+| `command/index.ts:6468` `mintAgentJoinCredential` — not a user credential | No. |
+| `command/index.ts:6707` `revokeAgentJoinCredential` — not a user credential | No. |
+| `command/index.ts:6747` `revokeAgentJoinCredential` — id missing or caller not permitted | No. |
+| `command/index.ts:6925` `capabilityPreamble` — capability URLs disabled | No. |
+| `command/index.ts:6930` `capabilityPreamble` — not a user credential | No. |
+| `command/index.ts:6934` `capabilityPreamble` — identity not verified | No. The credential is valid. The email is not verified. |
+| `command/index.ts:7001` `capabilityPreamble` — role is not owner or admin | No. |
+| `command/index.ts:7108` `mintCapabilityUrl` — work item id is ambiguous | No. |
+| `command/index.ts:7117` `mintCapabilityUrl` — work item not found | No. |
+| `command/index.ts:7384` `revokeCapabilityUrl` — link missing or not permitted | No. |
+| `command/index.ts:7567` `resumeRenewalGrant` — not a user credential | No. |
+| `command/index.ts:7575` `resumeRenewalGrant` — identity not verified | No. |
+| `command/index.ts:7698` `resumeRenewalGrant` — `swarm.resume_renewal_grant` returned a refusal code | No. |
+| `command/index.ts:8897` `handleTransaction` — `register_agent_seat` with no join-credential hash | Yes. Nothing was presented that this command can authenticate. Not the listener's agent token. |
+| `command/index.ts:9029` `handleTransaction` — route resolution failed. Delivery commands get `delivery_unavailable` instead | No. The credential authenticated and has no route. |
+| `command/index.ts:9044` `handleTransaction` `revoked()` — membership or agent credential revoked. Delivery commands get `delivery_unavailable` instead | Yes, for a non-delivery command. The same slug is used by the rows above and below, so the client cannot treat command-edge `forbidden` as this check. |
+| `command/index.ts:9182` — `declare_agent_model` without an agent credential | No. |
+| `command/index.ts:9194` — renewal without an agent credential | No. |
+| `command/index.ts:9245` — agent is missing the command's scope | No. |
+| `command/index.ts:9258` — mint bindings are not valid | No. |
+| `command/index.ts:9478` — `signals_seen` actor id is null | No. Auth succeeded and the actor id is missing. |
+| `command/index.ts:9504` — signal is not eligible for a receipt. `human-receipts.ts` returns `status: "forbidden"` and this line writes the HTTP 403 | No. |
+| `command/index.ts:9643` — `post_signal` target or reply is not eligible | No. `revoked()` has already passed. |
+| `command/index.ts:10140` — file refusal whose `error` is `forbidden`, from `file-artifacts.ts` | No. The four sites are `fileVersionCreate` line 535 (workspace row missing), `fileVersionCommit` line 850 (someone else created the pending version), `fileTombstone` line 1165 (an agent tombstoning another principal's file), `fileRestore` line 1264 (an agent restoring another principal's file). |
+| `command/index.ts:10842` — reducer class `authz` (`role_forbidden`, `credential_kind_forbidden`, and the other authz reasons) | No. `revoked()` has already passed. |
+| `command/index.ts:10996` — rejected `accept_invitation` | No. |
+| `command/index.ts:11207` `handlePostRequest` — `register_agent_seat` bearer missing or not a join credential | Yes. The join credential was not presented. Not the listener's agent token. |
+| `command/index.ts:11227` `handlePostRequest` — a join credential used on another command | No. The join credential is the wrong kind for that command. |
+| `command/index.ts:11500` `lockHumanManagedPrincipal` — not a user credential | No. |
+| `command/index.ts:11524` `lockHumanManagedPrincipal` — principal or live membership missing | No. |
+| `command/index.ts:11527` `lockHumanManagedPrincipal` — role is not owner or admin | No. |
+| `command/index.ts:11695` `acquireAgentSession` — not an agent credential | No. |
+| `command/index.ts:11880` `renewAgentSession` — not an agent credential | No. |
+| `command/index.ts:11925` `releaseAgentSession` — not an agent credential | No. |
+
+Because most of those command-edge answers are not a lost credential, and they share the slug with the one that is (`revoked()` on a non-delivery command), a command-edge `forbidden` does not open the confirmation window. A revoked agent token still fails the next signal read with read-edge `forbidden`, and that read is the check the window counts. `unauthenticated` remains a confirmed code on both edges: every command and read site that returns it is an authentication failure (missing bearer, unknown token, or expired token).
+
+### H0 seat
+
+`H0_SEAT_CLAIM_REFUSED_CODE` in `src/cloud/delivery.ts` is `"h0_seat_uses_poll"`. The comment names the edge constant `H0_SEAT_CLAIM_REFUSED` in `supabase/functions/command/h0-seat.ts` on `lane/h0-poll-ack`. The delivery error allowlist includes that constant, so a claim response with that slug is not collapsed to `unknown_error`. A listener that receives it stops with `lastErrorCode` `h0_seat_uses_poll`. It does not retry the claim and it does not enter the credential window. `isRestartableListenerStop` is false for that error.
+
+### Status sentences
+
+Credential check, while the listener is still running. First line: `Listener credential check for agent <principal>.` Next line: `The server refused this credential (unauthenticated or forbidden). The listener is still running and will stop at <credentialStopAt> unless the credential works again. Run cswarm whoami with this credential to see the grant state.` The two code names are `CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")`. `<credentialStopAt>` is the ISO time written on the status.
+
+Permanent credential stop. Unchanged from the section above: `the server refused this credential (unauthenticated or forbidden means revoked, expired, or unknown) or a local renewal stop fired. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`.
+
+H0 seat, failed listener. `This seat is a link-joined (H0) seat that receives messages through the h0 poll, so a cswarm listener cannot serve it.` `listenerFailureMessage` returns that sentence for code `h0_seat_uses_poll`. The failed-listener line is the same sentence with a period.
+
+### Tests and which script runs them
+
+| Test | File | Script |
+|---|---|---|
+| Window constants are at least ten minutes and three checks; read `forbidden` confirms and command `forbidden` does not | `tests/listener-runtime.test.ts` | `npm test` |
+| Confirmed `forbidden` for the whole window returns `credential` | `tests/listener-runtime.test.ts` | `npm test` |
+| Confirmed codes for the whole window, live status says `credential_check` and the stop time, then `credential_stopped` | `tests/listener-runtime.test.ts` | `npm test` |
+| A confirmed code then a successful read is `ready` again | `tests/listener-runtime.test.ts` | `npm test` |
+| A 500 between confirmed codes keeps the window going and still reaches `credential` | `tests/listener-runtime.test.ts` | `npm test` |
+| `cswarm listen stop` during the check ends `stopped` on the first read | `tests/listener-runtime.test.ts` | `npm test` |
+| Repeated command-edge `forbidden` on claim does not become `credential` | `tests/listener-runtime.test.ts` | `npm test` |
+| H0 claim stops once with `h0_seat_uses_poll` and the status sentence | `tests/listener-runtime.test.ts` | `npm test` |
+| Claim parser keeps `h0_seat_uses_poll` | `tests/delivery-client.test.ts` | `npm test` |
+| Delivery and command `forbidden` stay restartable; read `forbidden` does not | `tests/listener-control.test.ts` | `npm test` |
+
+### Mutation
+
+`holdCredentialWindow` was changed so the first confirmed-loss answer returned `credential` immediately. `a confirmed credential loss then a successful read keeps the listener running` failed: `assert.ok(reads >= 2)` was false, because the runtime stopped before the successful read. The test process exited 1. The condition was restored. The same test then passed.
+
+### What this fold did not establish
+
+A live listener was not run. No production host was contacted. This fold did not prove the behavior on the hosted workspace or on the box.
+
+`cswarm follow` still stops on one confirmed read code. The confirmation window is the listener.
+
+The H0 fence is on `lane/h0-poll-ack`, not on this branch and not on main. This client recognizes the code. It did not run that edge.
+
+A command-edge `forbidden` from `revoked()` on a non-delivery command does not by itself open the window. The next signal read does. This fold did not prove that a listener whose only failing call is a command post reaches that read.
+
+A local renewal stop still ends the listener at once.

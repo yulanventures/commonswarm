@@ -23,6 +23,7 @@ import {
   DeliveryTransportError,
   DELIVERY_SERVER_ERROR_CODES,
   DELIVERY_UNKNOWN_ERROR_CODE,
+  H0_SEAT_CLAIM_REFUSED_CODE,
   observationCommandId,
   type DeliveryAckRequest,
   type DeliveryClaimRequest,
@@ -789,6 +790,7 @@ test("vocabularies are unexported Sets backed by exported frozen tuples, resisti
   assert.equal(Object.isFrozen(DELIVERY_SERVER_ERROR_CODES), true);
   assert.equal(Object.isFrozen(DELIVERY_FAILED_TERMINAL_CODES), true);
   assert.equal(DELIVERY_SERVER_ERROR_CODES.includes("delivery_unavailable"), true);
+  assert.equal(DELIVERY_SERVER_ERROR_CODES.includes(H0_SEAT_CLAIM_REFUSED_CODE), true);
   assert.equal(DELIVERY_FAILED_TERMINAL_CODES.includes("provider_refused"), true);
   assert.equal(DELIVERY_SERVER_ERROR_CODES.includes("attacker_selected_code"), false);
   assert.equal(DELIVERY_FAILED_TERMINAL_CODES.includes("attacker_selected_code"), false);
@@ -835,6 +837,7 @@ test("claim maps bounded HTTP refusals without body or bearer leakage", async ()
     [429, "rate_limited"],
     [500, "internal_error"],
     [503, "temporarily_unavailable"],
+    [403, H0_SEAT_CLAIM_REFUSED_CODE],
   ];
   for (const [status, code] of cases) {
     const client = new DeliveryCommandClient(

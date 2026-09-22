@@ -1880,7 +1880,9 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), false],
   ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), true],
   ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), true],
-  ["delivery 403 forbidden", new DeliveryHttpError(403, "forbidden", "delivery failed (HTTP 403)"), false],
+  // Command-edge `forbidden` is not a credential check, so a delivery 403
+  // with that slug stays restartable. Read-edge `forbidden` does not.
+  ["delivery 403 forbidden", new DeliveryHttpError(403, "forbidden", "delivery failed (HTTP 403)"), true],
   ["delivery 401 unauthenticated", new DeliveryHttpError(401, "unauthenticated", "delivery failed (HTTP 401)"), false],
   ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), false],
   ["delivery protocol", new DeliveryProtocolError("delivery claim returned more than one row"), false],
@@ -1891,7 +1893,7 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["command 429", new CommandHttpError(429), true],
   ["command 400", new CommandHttpError(400), false],
   ["command 403", new CommandHttpError(403), true],
-  ["command 403 forbidden", new CommandHttpError(403, "command failed (HTTP 403)", "forbidden"), false],
+  ["command 403 forbidden", new CommandHttpError(403, "command failed (HTTP 403)", "forbidden"), true],
 
   // --- ACP host ------------------------------------------------------------
   ["acp timeout", new AcpTimeoutError("ACP request timed out"), true],

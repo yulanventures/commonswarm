@@ -374,6 +374,8 @@ export async function runListenerSupervisor(
     activityLastErrorCode: null,
     idlePollMs: null,
     wake: emptyListenerWakeStatus(),
+    nextAttemptAt: null,
+    credentialStopAt: null,
     logPath: options.paths.logPath,
   };
   let writes = Promise.resolve();
@@ -555,6 +557,7 @@ export async function runListenerSupervisor(
       transition("ready", {
         readyAt: event.ts,
         nextAttemptAt: null,
+        credentialStopAt: null,
         // Deliberately does NOT clear consecutiveAckFailureCount. Reaching
         // `ready` is not provider proof: the permission canary is its own
         // prompt, and a provider can answer it and fail every real one --
@@ -622,6 +625,37 @@ export async function runListenerSupervisor(
             ? { turn_budget_ms: budget }
             : {};
         })(),
+      });
+      return;
+    }
+    if (event.type === "credential_check") {
+      transition("credential_check", {
+        credentialStopAt: event.stopAt,
+        lastErrorCode: event.code,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: null,
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check",
+        failure_code: event.code,
+        attempt: event.checks,
+        reason: event.stopAt,
+      });
+      return;
+    }
+    if (event.type === "credential_check_cleared") {
+      transition(status.readyAt === null ? "starting" : "ready", {
+        credentialStopAt: null,
+        lastErrorCode: null,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: null,
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check_cleared",
       });
       return;
     }
@@ -954,6 +988,7 @@ export async function runListenerSupervisor(
         lastWorkerStderrTail: restartStderrTail,
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
         nextAttemptAt,
+        credentialStopAt: null,
       });
       await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
@@ -972,6 +1007,7 @@ export async function runListenerSupervisor(
         lastWorkerStderrTail: null,
         providerMinimumRequiredVersion: null,
         nextAttemptAt: null,
+        credentialStopAt: null,
       });
       log({ ts: stoppedAt, event: "listener_stopped" });
     } else {
@@ -987,6 +1023,7 @@ export async function runListenerSupervisor(
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
         lastWorkerStderrTail: failedStderrTail,
         nextAttemptAt: null,
+        credentialStopAt: null,
       });
       // Record why it is down and why it stopped trying — a listener left down
       // after exhausting restarts must be distinguishable from one that was
@@ -1021,6 +1058,7 @@ export async function runListenerSupervisor(
       ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
       lastWorkerStderrTail: failedStderrTail,
       nextAttemptAt: null,
+      credentialStopAt: null,
     });
     log({
       ts: stoppedAt,
@@ -1052,6 +1090,7 @@ export async function effectiveListenerStatus(
       stored &&
       (stored.state === "starting" ||
         stored.state === "ready" ||
+        stored.state === "credential_check" ||
         stored.state === "stopping")
     ) {
       const failed: ListenerStatus = {
@@ -1067,6 +1106,8 @@ export async function effectiveListenerStatus(
         currentDeliverySignalId: null,
         currentDeliverySince: null,
         heldBackDeliveries: [],
+        credentialStopAt: null,
+        nextAttemptAt: null,
       };
       await writeListenerStatus(paths, failed);
       return failed;

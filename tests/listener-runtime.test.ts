@@ -16,12 +16,19 @@ import {
   DeliveryProtocolError,
   DeliveryTransportError,
   DELIVERY_REQUEST_TIMEOUT_MS,
+  H0_SEAT_CLAIM_REFUSED_CODE,
+  H0_SEAT_LISTENER_STOP_SENTENCE,
   DELIVERY_ACK_OUTCOMES,
   type DeliveryClaimResult,
   type DeliveryOutcome,
   type DeliveryRow,
 } from "../src/cloud/delivery.js";
-import { listenerStatusJson, renderListenerStatus, usage } from "../src/cli.js";
+import {
+  listenerFailureMessage,
+  listenerStatusJson,
+  renderListenerStatus,
+  usage,
+} from "../src/cli.js";
 import {
   idlePollStatusSentence,
   IDLE_POLL_DEFAULT_MS,
@@ -37,6 +44,7 @@ import type {
 } from "../src/cloud/signals.js";
 import {
   CONFIRMED_CREDENTIAL_LOSS_CODES,
+  isConfirmedCredentialHttpFailure,
   SIGNAL_READ_TIMEOUT_MS,
   SignalHttpError,
   SignalTransportError,
@@ -45,6 +53,11 @@ import { ACP_DEFAULT_REQUEST_TIMEOUT_MS } from "../src/host/bounds.js";
 import { AcpHostError } from "../src/host/types.js";
 import {
   runListenerRuntime as runListenerRuntimeActual,
+  CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
+  CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
+  CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+  ListenerH0SeatError,
+  isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
   LISTENER_DELIVERY_SAFETY_MARGIN_MS,
   LISTENER_HOST_PORTS_PROBE_MS,
@@ -3157,8 +3170,53 @@ test("unconfirmed HTTP 403 retries and recovers when the read succeeds", async (
   assert.equal(model.starts, 0);
 });
 
-test("runtime reports agent read revocation as a credential stop", async () => {
+function forbiddenRead(): SignalHttpError {
+  return new SignalHttpError(403, null, {
+    error: "forbidden",
+    requestId: null,
+    retryable: null,
+  });
+}
+
+function advancingClock(start = "2026-09-22T22:00:00.000Z") {
+  const startMs = Date.parse(start);
+  let clock = startMs;
+  return {
+    startMs,
+    now: () => clock,
+    elapsed: () => clock - startMs,
+    sleep: async (ms: number, signal?: AbortSignal) => {
+      if (signal?.aborted) return;
+      clock += ms;
+    },
+  };
+}
+
+test("the credential confirmation window is at least ten minutes and three checks", () => {
+  assert.ok(CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS >= 3);
+  assert.ok(CREDENTIAL_LOSS_CONFIRM_WINDOW_MS >= 10 * 60_000);
+  assert.equal(
+    CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+    (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(403, "forbidden", "read"),
+    true,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(403, "forbidden", "command"),
+    false,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(401, "unauthenticated", "command"),
+    true,
+  );
+});
+
+test("runtime reports agent read revocation as a credential stop after the confirmation window", async () => {
   const model = new FakeModel();
+  const clock = advancingClock();
+  let reads = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3166,37 +3224,22 @@ test("runtime reports agent read revocation as a credential stop", async () => {
     credentialSession: { async bearer() { return "token"; } },
     store: new MemoryStore(),
     model,
+    now: clock.now,
+    sleep: clock.sleep,
     readPage: async () => {
-      throw new SignalHttpError(403, null, {
-        error: "forbidden",
-        requestId: null,
-        retryable: null,
-      });
+      reads += 1;
+      throw forbiddenRead();
     },
   });
+  assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+  assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
   assert.equal(stop.reason, "credential");
   assert.equal(model.starts, 0);
   assert.equal(model.closes, 1);
 });
 
-test("HTTP 403 forbidden stops the listener with credential_stopped", async () => {
-  const model = new FakeModel();
-  const runtimeStop = await runListenerRuntime({
-    target: cloudTarget("https://cloud.example.test", "anon"),
-    workspaceId: WORKSPACE_ID,
-    principalId: PRINCIPAL_ID,
-    credentialSession: { async bearer() { return "token"; } },
-    store: new MemoryStore(),
-    model,
-    readPage: async () => {
-      throw new SignalHttpError(403, null, {
-        error: "forbidden",
-        requestId: null,
-        retryable: null,
-      });
-    },
-  });
-  assert.equal(runtimeStop.reason, "credential");
+test("HTTP 403 forbidden across the confirmation window stops the listener with credential_stopped", async () => {
+  const clock = advancingClock();
   const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-"));
   try {
     const target = listenerPaths({
@@ -3205,14 +3248,49 @@ test("HTTP 403 forbidden stops the listener with credential_stopped", async () =
       principalId: PRINCIPAL_ID,
       stateDirectory: root,
     });
+    const during: ListenerStatus[] = [];
+    let reads = 0;
     const status = await runListenerSupervisor({
       paths: target,
       profileId: "profile-credential-stop",
       workspaceId: WORKSPACE_ID,
       principalId: PRINCIPAL_ID,
+      now: clock.now,
       restart: { maxAttempts: 3, sleep: async () => undefined, random: () => 0 },
-      run: async () => runtimeStop,
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          during.push(await queryListenerControl(target, "status"));
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          throw forbiddenRead();
+        },
+      }),
     });
+    assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+    assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+    assert.ok(during.length >= 1);
+    assert.equal(during[0]?.state, "credential_check");
+    assert.equal(
+      during[0]?.credentialStopAt,
+      new Date(clock.startMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS).toISOString(),
+    );
+    const checking = renderListenerStatus(during[0]!);
+    assert.match(checking, /^Listener credential check /);
+    assert.match(checking, /The server refused this credential/);
+    assert.match(checking, /will stop at /);
+    assert.match(checking, /unless the credential works again/);
+    assert.match(checking, /Run cswarm whoami with this credential/);
     assert.equal(status.state, "failed");
     assert.equal(status.lastErrorCode, "credential_stopped");
     const rendered = renderListenerStatus(status);
@@ -3223,6 +3301,244 @@ test("HTTP 403 forbidden stops the listener with credential_stopped", async () =
       new RegExp(CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")),
     );
     assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a confirmed credential loss then a successful read keeps the listener running", async () => {
+  const clock = advancingClock();
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-recover-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-recover",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let reads = 0;
+    let running: ListenerStatus | null = null;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-recover",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      now: clock.now,
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          if (reads >= 2 && running === null) {
+            running = await queryListenerControl(target, "status");
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          if (reads === 1) throw forbiddenRead();
+          return page([]);
+        },
+      }),
+    });
+    assert.ok(reads >= 2);
+    const observed = running as ListenerStatus | null;
+    assert.ok(observed, "the listener did not become ready again");
+    assert.equal(observed.state, "ready");
+    assert.equal(observed.credentialStopAt ?? null, null);
+    assert.equal(status.state, "stopped");
+    assert.notEqual(status.lastErrorCode, "credential_stopped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a transient failure during a credential check keeps the window going", async () => {
+  const clock = advancingClock();
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    now: clock.now,
+    sleep: clock.sleep,
+    readPage: async () => {
+      reads += 1;
+      if (reads === 2) throw new SignalHttpError(500);
+      throw forbiddenRead();
+    },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS + 1);
+  assert.ok(clock.elapsed() > CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+});
+
+test("cswarm listen stop ends a credential check at once", async () => {
+  const clock = advancingClock();
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-now-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-stop-now",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let reads = 0;
+    let asked = false;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-stop-now",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      now: clock.now,
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          if (!asked) {
+            asked = true;
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          throw forbiddenRead();
+        },
+      }),
+    });
+    assert.equal(reads, 1);
+    assert.equal(status.state, "stopped");
+    assert.notEqual(status.lastErrorCode, "credential_stopped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("command-edge forbidden is not a confirmed credential loss", async () => {
+  const clock = advancingClock();
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    now: clock.now,
+    sleep: async (ms, sleepSignal) => {
+      await clock.sleep(ms, sleepSignal);
+    },
+    readPage: async () => durablePage([], 0),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        if (claims >= 4) controller.abort();
+        throw new DeliveryHttpError(
+          403,
+          "forbidden",
+          "delivery command failed (HTTP 403): forbidden",
+        );
+      },
+      async ackAgentDelivery() {
+        throw new Error("ack must not run");
+      },
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(claims >= 4);
+  assert.ok(clock.elapsed() < CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+});
+
+test("an H0 seat claim stops with its own code and is not retried", async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    sleep: async () => undefined,
+    readPage: async () => durablePage([], 1),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        if (claims >= 3) controller.abort();
+        throw new DeliveryHttpError(
+          403,
+          H0_SEAT_CLAIM_REFUSED_CODE,
+          `delivery command failed (HTTP 403): ${H0_SEAT_CLAIM_REFUSED_CODE}`,
+        );
+      },
+      async ackAgentDelivery() {
+        throw new Error("ack must not run");
+      },
+    },
+  });
+  assert.equal(claims, 1);
+  assert.equal(stop.reason, "fatal");
+  if (stop.reason !== "fatal") return;
+  assert.ok(stop.error instanceof ListenerH0SeatError);
+  assert.equal(stop.error.code, H0_SEAT_CLAIM_REFUSED_CODE);
+  assert.equal(isRestartableListenerStop(stop), false);
+  const root = await mkdtemp(join(tmpdir(), "cswarm-h0-seat-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-h0-seat",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let runs = 0;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-h0-seat",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      restart: { maxAttempts: 2, sleep: async () => undefined, random: () => 0 },
+      run: async () => {
+        runs += 1;
+        return stop;
+      },
+    });
+    assert.equal(runs, 1);
+    assert.equal(status.state, "failed");
+    assert.equal(status.lastErrorCode, H0_SEAT_CLAIM_REFUSED_CODE);
+    const rendered = renderListenerStatus(status);
+    assert.match(rendered, new RegExp(H0_SEAT_LISTENER_STOP_SENTENCE.replace(/[()]/g, "\\$&")));
+    assert.doesNotMatch(rendered, /credential_stopped/);
+    assert.equal(
+      listenerFailureMessage(H0_SEAT_CLAIM_REFUSED_CODE),
+      H0_SEAT_LISTENER_STOP_SENTENCE,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

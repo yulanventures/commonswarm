@@ -275,7 +275,11 @@ import {
   DeliveryReceiptReadError,
   readAgentDeliveryReceipts,
 } from "./cloud/delivery-receipts.js";
-import { DELIVERY_HANDLED_OUTCOMES } from "./cloud/delivery.js";
+import {
+  DELIVERY_HANDLED_OUTCOMES,
+  H0_SEAT_CLAIM_REFUSED_CODE,
+  H0_SEAT_LISTENER_STOP_SENTENCE,
+} from "./cloud/delivery.js";
 import {
   renderedBroadcastIds,
   reportRenderedBroadcasts,
@@ -5686,6 +5690,13 @@ function credentialStoppedSentence(): string {
   return `the server refused this credential (${codes} means revoked, expired, or unknown) or a local renewal stop fired. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
 }
 
+function credentialCheckSentence(status: ListenerStatus): string | null {
+  if (status.state !== "credential_check") return null;
+  if (typeof status.credentialStopAt !== "string") return null;
+  const codes = CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ");
+  return `The server refused this credential (${codes}). The listener is still running and will stop at ${status.credentialStopAt} unless the credential works again. Run cswarm whoami with this credential to see the grant state.`;
+}
+
 function listenerRetrySentence(status: ListenerStatus): string | null {
   if (status.state !== "starting" || typeof status.nextAttemptAt !== "string") {
     return null;
@@ -5701,6 +5712,9 @@ function listenerDownSentence(status: ListenerStatus): string | null {
   if (status.state !== "failed") return null;
   if (status.lastErrorCode === "credential_stopped") {
     return `This listener stopped because ${credentialStoppedSentence()}.`;
+  }
+  if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
   }
   const code = status.lastErrorCode ?? "no code recorded";
   return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
@@ -5726,11 +5740,14 @@ export function renderListenerStatus(
   const down = status.state === "stopped" || status.state === "failed";
   const retrying = status.state === "starting" &&
     typeof status.nextAttemptAt === "string";
+  const credentialCheck = credentialCheckSentence(status);
   const retrySentence = listenerRetrySentence(status);
   const downSentence = listenerDownSentence(status);
   const lines = [
     down
       ? `Listener ${status.state} for agent ${status.principalId}.`
+      : credentialCheck !== null
+      ? `Listener credential check for agent ${status.principalId}.`
       : retrying
       ? `Listener retrying for agent ${status.principalId}.`
       : lapseNotices.length > 0
@@ -5738,6 +5755,7 @@ export function renderListenerStatus(
       : pendingForMainCount > 0
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
+    ...(credentialCheck === null ? [] : [credentialCheck]),
     ...(retrySentence === null ? [] : [retrySentence]),
     ...(downSentence === null ? [] : [downSentence]),
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
@@ -6196,6 +6214,9 @@ export function listenerFailureMessage(
   }
   if (code === "credential_stopped") {
     return credentialStoppedSentence();
+  }
+  if (code === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return H0_SEAT_LISTENER_STOP_SENTENCE;
   }
   if (code === "permission_canary_failed") {
     if (provider === "claude") {
