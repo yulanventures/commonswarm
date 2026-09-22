@@ -9,6 +9,20 @@ root (`../src`, `../supabase`).
 
 ---
 
+## PUBLIC_H0_LINK_JOIN
+
+Build-time flag for the Add an agent invite.
+
+`src/lib/h0-link-join-flag.ts` is the only place that reads it. The value `1` shows
+the invite: a signed-in person mints a join credential and copies the message from
+`h0AgentPaste`. Any other value, including an unset variable, hides that invite. Add
+an agent then matches the page without it.
+
+Leave the flag unset on a site deploy until the h0 document route is deployed. A
+deploy with the flag unset does not offer that document link.
+
+---
+
 ## The split that shapes this site
 
 - **Humans use the web UI.** There is exactly one write operation in the product —
