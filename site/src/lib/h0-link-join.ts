@@ -3,8 +3,7 @@
  *
  * AgentConnect does not import this file statically. It calls loadLinkJoin()
  * from h0-link-join-flag.ts, and that function imports this file only inside
- * the branch where the build-time flag is on. A default site build drops the
- * branch, so this file is not in that build.
+ * the branch where the build-time flag is on.
  */
 import type { Session } from "@supabase/supabase-js";
 import { h0AgentPaste } from "../../../src/h0/paste";

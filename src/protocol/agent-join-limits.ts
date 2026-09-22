@@ -16,7 +16,7 @@ export const AGENT_JOIN_TTL_MAX_HOURS = 24;
 
 /**
  * Live (unrevoked, unexpired) join credentials. The command edge uses these
- * same numbers: one person, then the whole workspace.
+ * same numbers: one person in one workspace, then the whole workspace.
  */
 export const AGENT_JOIN_LIVE_PER_USER_LIMIT = 5;
 export const AGENT_JOIN_LIVE_PER_WORKSPACE_LIMIT = 20;

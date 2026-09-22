@@ -9,6 +9,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
+import vm from "node:vm";
 import ts from "typescript";
 import {
   joinInviteBeforeDoneSentences,
@@ -351,6 +352,101 @@ test("flag off matches today's Add an agent controls and token handoff", () => {
   assert.doesNotMatch(CONNECT, /h0\/agent-doc/);
   assert.doesNotMatch(CONNECT, /mint_agent_join_credential/);
   assert.doesNotMatch(CONNECT, /joinCredential/);
+});
+
+test("pagehide forgets a shown join invite, and flag off adds no handler", () => {
+  const script = CONNECT.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script);
+  const classSource = script.slice(script.indexOf("class AgentConnectElement"));
+  const runnable = ts.transpileModule(classSource, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+
+  for (const enabled of [true, false]) {
+    const nodes = new Map<string, {
+      textContent: string;
+      hidden: boolean;
+      disabled: boolean;
+      addEventListener: (name: string, listener: () => void) => void;
+      click: () => void;
+      removeAttribute: () => void;
+    }>();
+    const listeners = new Map<string, Array<() => void>>();
+    const page = {
+      addEventListener(name: string, listener: () => void) {
+        listeners.set(name, [...(listeners.get(name) ?? []), listener]);
+      },
+      dispatchEvent(event: { type: string }) {
+        for (const listener of listeners.get(event.type) ?? []) listener();
+      },
+      clearInterval() {},
+      clearTimeout() {},
+    };
+    let copied = 0;
+    let elementClass: new () => {
+      dataset: { state: string };
+      connectedCallback: () => void;
+    };
+    class ElementFixture {
+      dataset = { state: "loading" };
+      isConnected = true;
+      querySelector(selector: string) {
+        let node = nodes.get(selector);
+        if (!node) {
+          const handlers = new Map<string, () => void>();
+          node = {
+            textContent: "",
+            hidden: false,
+            disabled: false,
+            addEventListener: (name, listener) => { handlers.set(name, listener); },
+            click: () => { handlers.get("click")?.(); },
+            removeAttribute: () => {},
+          };
+          nodes.set(selector, node);
+        }
+        return node;
+      }
+      toggleAttribute() {}
+      dispatchEvent() { return true; }
+    }
+    vm.runInNewContext(runnable, {
+      HTMLElement: ElementFixture,
+      CustomEvent: class { constructor(readonly type: string) {} },
+      customElements: {
+        get: () => undefined,
+        define: (_name: string, value: typeof elementClass) => { elementClass = value; },
+      },
+      h0LinkJoinEnabled: enabled,
+      loadLinkJoin: () => ({
+        startJoinMint: (api: { showInvite: (value: unknown) => void }) => api.showInvite({
+          paste: SECRET,
+          inviteId: JOIN_ID,
+          documentUrl: "https://example.test/agent",
+          lead: "Invite ready",
+          withheld: false,
+        }),
+      }),
+      callLinkJoin: (module: unknown, action: (value: unknown) => void) => action(module),
+      concealJoinInvite,
+      dismissShownJoin,
+      shownJoinAfterRevoke,
+      deployment: () => null,
+      window: page,
+      navigator: { clipboard: { writeText: () => { copied += 1; } } },
+    });
+    const element = new elementClass!();
+    element.connectedCallback();
+    assert.equal(listeners.get("pagehide")?.length ?? 0, enabled ? 1 : 0);
+    if (!enabled) continue;
+    nodes.get('[data-action="mint-join"]')?.click();
+    assert.equal(element.dataset.state, "done");
+    assert.equal(nodes.get('[data-slot="prompt"]')?.textContent, SECRET);
+    page.dispatchEvent({ type: "pagehide" });
+    assert.equal(element.dataset.state, "ready");
+    assert.equal(nodes.get('[data-slot="prompt"]')?.textContent, "");
+    nodes.get('[data-action="copy"]')?.click();
+    assert.equal(copied, 0, "the prompt was also dropped from the element's state");
+  }
 });
 
 test("PUBLIC_H0_LINK_JOIN is read in one file", () => {

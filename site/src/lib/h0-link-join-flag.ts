@@ -3,8 +3,8 @@
  * The value "1" shows the Add an agent invite. Any other value hides it.
  *
  * loadLinkJoin is how the page reaches the invite module. h0LinkJoinEnabled is
- * a build-time constant. When it is false, the bundler drops the import below,
- * so a default site build does not contain that module.
+ * a build-time constant. The page loads the module only through the flag-on
+ * dynamic import below.
  */
 export const h0LinkJoinEnabled = import.meta.env.PUBLIC_H0_LINK_JOIN === "1";
 

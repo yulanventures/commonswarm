@@ -398,6 +398,9 @@ const {
         this.finishPrompt("done");
       });
       if (h0LinkJoinEnabled) {
+        window.addEventListener("pagehide", () => {
+          if (this.#joinActive) this.finishPrompt("done");
+        });
         if (this.#tokenResultTitle === "") {
           this.#tokenResultTitle = this.querySelector(".ac__result-title")?.textContent ?? "";
           this.#tokenResultLead = this.querySelector(".ac__result-lead")?.textContent ?? "";
