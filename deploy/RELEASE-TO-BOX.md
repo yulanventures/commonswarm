@@ -336,7 +336,7 @@ ending in `.log`. Create the list with a protected editor as root and mode
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -f "$PROOF_DIR/copy-back.list"
   test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
-  grep -Fx 'copy-back.list' "$PROOF_DIR/copy-back.list"
+  grep -qFx 'copy-back.list' "$PROOF_DIR/copy-back.list"
   while IFS= read -r path; do
     test -n "$path"
     while [[ "$path" == ./* ]]; do path="${path#./}"; done
@@ -1589,3 +1589,13 @@ database files. This does not remove release evidence:
     "/run/commonswarm-release-${SHA}-session.sh"
 )
 ```
+
+## Open follow-ups (Opus Checker round 3, 2026-09-22)
+
+These do not block H0. Fold them together with the findings from the first H0 run.
+
+- The guarded switch accepts a `failed` backup or restore service before it switches, but after the switch it requires `inactive` plus `success`. A drill that failed earlier therefore makes both apply and rollback report failure.
+- The stack runtime-file comparison ignores `deploy/supabase-stack/migrate/`, although the backup and the drill run helpers from it through `stack/current`.
+- The pasted Mac preflight can still end with exit 0 after a failed check, and a second run empties `run.log`.
+- The H0 note says "section 7 diff", but the runtime-file comparison runs in section 1, before `window.env` exists.
+- The test-hook environment names are typed by hand, and `SWARM_ENV=test` is accepted.
