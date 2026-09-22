@@ -1,9 +1,8 @@
 # cloud-swarm — Lead succession & build plan
 
-**Read this first if you are a new Lead.** This is the durable baton-pass for the
-cloud-swarm build. It is version-controlled so every Lead updates it before
-rotating out. If you are picking this up, you are the current Lead — adopt the
-succession protocol below for yourself.
+This file is a historical log. Production is the box. See the newest `docs/org/*-RESUME-HERE.md`. Never run the Supabase or Vercel steps in this file.
+
+**Do not follow this file.** It is a record of an earlier lead handoff. A new lead does not adopt the protocol below.
 
 ---
 

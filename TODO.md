@@ -41,13 +41,12 @@ warning in mind only as history — nothing should point at it either way.
 
    Verified: `https://commonswarm.com` and `https://www.commonswarm.com` both return **200**
    with 17 content markers and a control string at 0; apex cert `CN=commonswarm.com` valid
-   to 26 Oct 2026; `https://coswarm-site.vercel.app` still 200, so nothing broke.
+   to 26 Oct 2026.
    `site/astro.config.mjs` now sets `site: "https://commonswarm.com"` — the deliberately
    unresolvable `coswarm.invalid` placeholder is gone. DNS subsequently moved to Cloudflare;
    its nameservers are now `chelsea.ns.cloudflare.com` and `ezra.ns.cloudflare.com`.
 
-   Still open here: the Vercel **project** is still named `coswarm-site`. Renaming it moves
-   the deployment URL and is an operator action; the custom domain makes it cosmetic.
+   The Vercel project `coswarm-site` is deleted. The site is static files from Caddy on `yulan-vps-1`.
 2. ~~**The mailboxes do not exist.**~~ ★ **DONE, 2026-07-29.** The superseded sentence is
    **dead**: the operator reports `legal@commonswarm.com` and
    `security@commonswarm.com` verified end to end (D-007/D-008). This seat independently
@@ -83,9 +82,7 @@ commits not on `main`. Nothing above is live today.
 
 ~~Interim hosting stays the Vercel alias `https://coswarm-site.vercel.app`.~~ ★
 **SUPERSEDED — DEAD as the canonical-host instruction.** `https://commonswarm.com` is the
-live public URL on Cloudflare. The Vercel alias still returns 200 and the Vercel project
-keeps its `coswarm-site` name; renaming that underlying project remains a separate operator
-action.
+live public URL, served by Caddy on `yulan-vps-1`. The Vercel project is deleted.
 
 ---
 
@@ -211,9 +208,7 @@ and leave the renewal note standing.
 
 ## 5. Supabase production hosting region — needed by the privacy policy
 
-`privacy.astro` carries `[[HOSTING REGION]]`. The value is the region of the production
-Supabase project and **lives in the Supabase dashboard, not in this repo** — nothing in
-the tree records it. The operator must read it off the project and supply it.
+The production database is in Falkenstein, Germany. Do not read a Supabase dashboard. The privacy page is the owner's.
 
 ---
 
@@ -318,13 +313,13 @@ closed, and leaving them listed would have made the table lie about the state of
 | 2 | Release repo + published installer | Decision + deploy | ✅ **DONE** — repo is public, release `v0.1.1` carries `cswarm` + `cswarm.sha256`, and `commonswarm.com/install.sh` serves the repo's installer (verified end to end: a clean `curl \| sh` installed a working `cswarm 0.1.1`) | `curl \| sh` installing at all |
 | 3 | State of formation | Fact to confirm | ✅ **DONE** — WA-formed LLC, TX office, venue kept | correctness of the terms |
 | 4 | DMCA agent | External filing | ◐ **HALF** — named in the document, **not registered** | the §512 safe harbour |
-| 5 | Supabase hosting region | Fact from dashboard | ✅ **DONE** — East US (North Virginia) | the privacy policy |
+| 5 | Database region | Fact | The production database is in Falkenstein, Germany. The privacy page is the owner's. | the privacy policy |
 | 6 | `SWARM_SELF_SERVE=1` | Production gate + deploy | ✅ **DONE** — set on the production project 2026-07-28, after all 10 migrations were pushed and the three edge functions redeployed. The web app is now wired to the backend too (`PUBLIC_SUPABASE_URL` / anon key at build time) and GitHub OAuth answers 302 to github.com with a real client id | public signup |
 | 7 | Attorney review | External review | ⬜ **OPEN** | publishing the legal docs as in-force |
 | 8 | One re-login per dogfood machine | Human action | ✅ **DONE 2026-07-29** — mini logged in as GitHub `Ridgeio`, laptop as `tlangridge`, both live in project `CommonSwarm Build`. First real two-machine, two-identity dogfood run; see `docs/evidence/2026-07-29-first-real-dogfood.md` | dogfood surviving the rename |
 | 9 | `legal@commonswarm.com` delivers | Test to run | ✅ **DONE 2026-07-29** — operator-confirmed end-to-end delivery for `legal@` and `security@` (D-007/D-008); this seat independently verified the Cloudflare Email Routing DNS | every document that names it |
 | 10 | USPTO check on "CommonSwarm" | Research | ⬜ **OPEN** — prompt written for an agent | launching under a name nobody has cleared |
-| 11 | **Custom SMTP for magic-link sign-in** | External account + DNS | ◐ **IN FLIGHT** — Resend verified; Supabase custom SMTP is active at 30 emails/hour with `CommonSwarm <hello@commonswarm.com>`; production accepted a request and Resend recorded delivery, but inbox-visible receipt and the magic-link return leg are not established | complete email sign-in, not only sender delivery |
+| 11 | **Custom SMTP for magic-link sign-in** | External account + DNS | Sign-in email uses Resend SMTP on the server. The send rate on the server is not established. Production accepted a request and Resend recorded delivery, but inbox-visible receipt and the magic-link return leg are not established | complete email sign-in, not only sender delivery |
 
 ### Item 11 in full — cutover complete, return leg still needs proof
 

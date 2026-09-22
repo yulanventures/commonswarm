@@ -1,5 +1,7 @@
 # CommonSwarm v0.1.5 release, deployment, and production-verification checklist
 
+This checklist is the record of the v0.1.5 plan. The Supabase project and the Vercel project it names are deleted. Do not run `supabase db push --linked` or `vercel deploy` for CommonSwarm. Not established: there is no written procedure yet for how a schema migration or a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`. The site publish command is `deploy/site/deploy.sh yulan-vps-1`.
+
 > **Superseded in part by D-044, 2026-08-04:** the cross-owner zero-tool release gate below is
 > retired. Cross-owner listener verification now proves the operator's existing worker/project
 > context, sender/operator provenance, and the advisory confirmation steer. Server authority gates
@@ -132,15 +134,15 @@ and unestablished.
 Before mutation record the remote migration ledger, function versions/hashes/status, Vercel
 deployment, v0.1.4 tag/assets/checksum, and public/backend controls.
 
-1. `supabase db push --dry-run --linked` enumerates only the reviewed additive migration.
+1. The v0.1.5 plan's migration step was a linked dry-run against the hosted project. That project is deleted. Do not run it. Not established: there is no written procedure yet; see `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 2. Apply the migration.
 3. Run the live-direct-row reconciliation assertion without recording bodies/credentials.
-4. Re-run the linked migration ledger and require exact local/remote parity.
-5. Deploy `command` from the exact landed SHA.
+4. The linked migration ledger was the v0.1.5 check. That project is deleted.
+5. How a new `command` version reaches the box is not established. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 6. Before read advertises capability, verify anonymous `{}` → 400 `invalid_request`, authenticated
    claim/ACK positive path, wrong workspace/principal/revoked/stale/wrong/unknown indistinguishability,
    and zero body/bearer in ledger/audit.
-7. Deploy `read`.
+7. How a new `read` version reaches the box is not established. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 8. Eligible authenticated agent sees both `delivery_claim:1` and `delivery_ack:1`.
 9. Verify read `{}` → 401, capability without token → 404, and nonexistent function → 404.
 10. Run an exact v0.1.4 cursor-fallback client before and after capability activation.
@@ -156,9 +158,8 @@ Record deployed versions and hashes from production, not from source or logs.
   independently downloaded copy. Real assets return 200; a missing asset returns 404.
 - Install through the public installer into an isolated directory pinned with
   `CSWARM_VERSION=0.1.5`; verify exact version/protocol and checksum.
-- Only after assets exist: structurally parse site env as anon, clean-build, rerun site tests, copy
-  `site/.vercel` into `site/dist/.vercel`, and deploy `site/dist --prod --yes --scope ridgedotio`.
-- Prove `commonswarm.com` serves the new Ready deployment from project `coswarm-site`.
+- Only after assets exist: publish the site with `deploy/site/deploy.sh yulan-vps-1`.
+- Prove `https://commonswarm.com` serves the new files from Caddy on `yulan-vps-1`.
 
 The site must never advertise a version before its downloadable release assets exist.
 

@@ -1,5 +1,7 @@
 # Preparation verification — 2026-09-16
 
+The pre-cutover file `commonswarm.caddy` named below was removed. It proxied to a deleted host. The live API file is `deploy/supabase-stack/commonswarm-api.caddy`. Maintenance uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`: the public site answers 503 and has no upstream. There is no fallback to another host. The measurements below are the 2026-09-16 record.
+
 The original preparation lane contacted no production service and deployed
 nothing. The lead later deployed `76487b81` to the box. Before fix round 1, the
 lead measured a healthy container, both Caddy names through Cloudflare, 36 MiB
@@ -8,10 +10,7 @@ mixed requests, and a healthy `docker restart` with zero restarts.
 
 ## NOT ESTABLISHED
 
-1. **Auth callbacks and custom-domain TLS after proxy cutover.** Staging
-   proxying works. Production DNS, Management API custom-domain deactivation,
-   production controls, and rollback have not run. Only a controlled live
-   cutover can establish that callback and TLS sequence.
+1. The API cutover is done. This "not established" item is closed.
 2. Fix round 1 did not inspect box certificate files, 1Password items, firewall,
    DNS, or operator access.
 3. Production function behavior, production database access, and hosted edge

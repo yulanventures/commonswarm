@@ -53,7 +53,7 @@ Always use ASD-STE100 Simplified Technical English when you talk to me.
 ---
 
 **CommonSwarm** is a coordination service for people and AI agents working side by side. It has the
-`cswarm` CLI, a hosted Supabase backend, and a web front door at https://commonswarm.com. Agents post
+`cswarm` CLI, a backend on one Hetzner server in Falkenstein, and the website at https://commonswarm.com on that same server. Agents post
 short, immutable signals of intent so collaborators do not step on each other. A signal never claims,
 blocks, or closes a task.
 
@@ -62,10 +62,9 @@ the workspace, while `/start` is a compatibility handoff. Node >= 22. The old "n
 "invite-only" claims are retired.
 
 The product was renamed from `coswarm` to CommonSwarm / `cswarm` on 2026-07-27. Prose says
-CommonSwarm; anything a user types says `cswarm`. Do not rename the Vercel project or alias
-`coswarm-site`, or the paired build identifier `__COSWARM_VERSION__` in `scripts/build-release.sh`
-and `src/cli.ts`. The PostgreSQL schema `swarm.`, `SWARM_*` variables, and separate local `swarm` CLI
-are unrelated names.
+CommonSwarm; anything a user types says `cswarm`. Do not rename the paired build identifier
+`__COSWARM_VERSION__` in `scripts/build-release.sh` and `src/cli.ts`. The PostgreSQL schema
+`swarm.`, `SWARM_*` variables, and separate local `swarm` CLI are unrelated names.
 
 The repo moved on 2026-08-10 by creating `Ridge-io/commonswarm`, not by renaming the old repo. Its
 history was rewritten, so every SHA changed. `Ridge-io/cloud-swarm` was deleted on 2026-08-17.
@@ -308,47 +307,60 @@ CLI version on `/download` is derived from the root `package.json` through `site
 with `npm version --no-git-tag-version <v>` so the lockfile stays in sync (`npm --prefix site test` rejects
 drift). Every SHA-changing lane needs both D-036 arms before it lands.
 
-## ⚠️ `cloud-swarm-dev` IS PRODUCTION
+## Production is the box
 
-The Supabase project `cloud-swarm-dev` (ref `ukezjcnxjvkpkeezxaew`) is the CommonSwarm production project;
-there is no separate CommonSwarm production project. The live site publishes
-`https://api.commonswarm.com` in its `commonswarm:url` meta tag. That active custom domain and
-`https://ukezjcnxjvkpkeezxaew.supabase.co` serve the same project.
+Production is one Hetzner server, `yulan-vps-1`, in Falkenstein. It serves `api.commonswarm.com` and the website at https://commonswarm.com.
 
-Resolve the ref against the live page before `supabase db push`, `functions deploy`, or any destructive
-operation. Local work uses `npm run db:start` at `127.0.0.1:54321` and must never touch this project.
+The Supabase project `cloud-swarm-dev` (`ukezjcnxjvkpkeezxaew`) is deleted. The Vercel project `coswarm-site` is deleted.
 
-## Deploying the marketing site
+Do not run these commands for CommonSwarm: `supabase db push`, `supabase functions deploy`, `supabase link`, anything with `--linked`, `supabase projects api-keys`, or `vercel deploy`.
 
-Live: https://commonswarm.com. Vercel project: `coswarm-site`; scope: `ridgedotio`; public project alias:
-`coswarm-site.vercel.app`. The old project name is intentional.
+Not established: there is no written procedure yet for how a schema migration, or a new stack or edge-function version, reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 
-Before building, `site/.env` must contain `PUBLIC_SUPABASE_URL=https://api.commonswarm.com` and the anon
-key from `supabase projects api-keys`. A build without them succeeds but publishes empty target metadata;
-`/app` and GitHub sign-in fail, and `/start` hands off to that broken app. Never put a service-role key under `site/`.
+Local work uses `npm run db:start` at `127.0.0.1:54321`. That local Supabase CLI stack runs the server test suites.
+
+## Deploying the site
+
+The website is static files served by Caddy on `yulan-vps-1`. From the repo root:
 
 ```sh
-cd site && rm -rf dist && npm run build
-cp -r .vercel dist/.vercel
-vercel deploy dist --prod --yes --scope ridgedotio
+deploy/site/deploy.sh yulan-vps-1
 ```
 
-1. **Clean `dist/`.** Astro does not remove stale output; `rm -rf dist` before the build is load-bearing.
-2. **Remove HTML comments.** Astro publishes template `<!-- comments -->`; frontmatter comments are stripped.
-3. **Use the public alias.** Per-deploy URLs can return 302 to Vercel SSO; check before sharing one.
-4. **Verify production.** Fetch the deployed page with a positive control; source and build logs are insufficient.
-5. **Preserve the project link.** `--name` is deprecated; copy `.vercel` into rebuilt `dist/` or deployment can silently target a new `dist` project.
+The script takes one SSH host. It refuses to run when `site/.env` is missing. `deploy/site/validate-site-env.mjs` requires non-empty `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY`, requires the anon key to be a JWT, and refuses a `service_role` payload. It does not print the key. Set `PUBLIC_SUPABASE_URL=https://api.commonswarm.com`. Never put a service-role key under `site/`.
+
+The script archives `HEAD`, removes `site/dist`, runs `npm ci` and `npm run build` in `site/`, and refuses the upload when `site/dist/start/index.html` is missing or its `commonswarm:url` meta value is empty. It rsyncs that directory to `/srv/commonswarm/site/releases/<release>.tmp` on the host with `rsync -a --delete` (no `--chmod`), then runs `deploy/site/finalize-release.sh` over SSH. The release name is UTC time, a 12-character git SHA, and 16 random hex characters. Finalize keeps previous `/_astro` files, sets directories to `755` and files to `644`, and switches `/srv/commonswarm/site/current` with `ln -sfn` plus `mv -Tf`. The script keeps the five newest releases. A prune error after the switch is a warning.
+
+Dry runs:
+
+```sh
+deploy/site/deploy.sh --dry-run --dist <dist-directory>
+deploy/site/deploy.sh --dry-run --npm-ci <site-directory>
+deploy/site/deploy.sh --dry-run --release-name
+```
+
+Roll back a site release on the server by moving the `current` symlink:
+
+```sh
+cd /srv/commonswarm/site
+ln -sfn releases/RELEASE_TO_RESTORE current.next
+mv -Tf current.next current
+```
+
+Check the live site after a deploy. Expected status codes are 200 for `/` and `/install.sh`, and 404 for `/nope.sh`. The backend URL output is non-empty. The service-role marker count is 0.
 
 ```sh
 U=https://commonswarm.com
-curl -s -o /dev/null -w '%{http_code}\n' "$U"                         # 200, not 302
-curl -s "$U" | grep -c '<some string that MUST be there>'            # positive control
-curl -s "$U" | grep -c '<the thing that must be GONE>'               # 0
-curl -s -o /dev/null -w '%{http_code}\n' "$U/install.sh"             # 200
-curl -s -o /dev/null -w '%{http_code}\n' "$U/nope.sh"                # 404 control
-curl -s "$U/start" | grep -o 'commonswarm:url" content="[^"]*"'     # non-empty
-curl -s "$U/start" | grep -c 'InNlcnZpY2Vfcm9sZSI'                   # 0: no service_role JWT
+curl -sS -o /dev/null -w '%{http_code}\n' "$U"
+curl -sS "$U" | grep -c '<some string that MUST be there>'
+curl -sS "$U" | grep -c '<the thing that must be GONE>'
+curl -sS -o /dev/null -w '%{http_code}\n' "$U/install.sh"
+curl -sS -o /dev/null -w '%{http_code}\n' "$U/nope.sh"
+curl -sS "$U/start" | grep -o 'commonswarm:url" content="[^"]*"'
+curl -sS "$U/start" | grep -c 'InNlcnZpY2Vfcm9sZSI'
 ```
+
+The runbook is `deploy/site/RUNBOOK.md`. Astro publishes template `<!-- comments -->`; frontmatter comments are stripped. Astro does not remove stale output; the deploy script removes `site/dist` in the clean archive before the build.
 
 ## zsh: brace every revision-with-path
 

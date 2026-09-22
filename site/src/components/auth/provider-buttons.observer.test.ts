@@ -724,7 +724,7 @@ test("CONTROL: a company abbreviation does not end a sentence, and a full stop s
 
 test("CONTROL: sign-in copy names the providers this build renders, in every provider state", async () => {
   /*
-   * The failure this catches, in order: an operator turns Google on in the Supabase dashboard,
+   * The failure this catches, in order: an operator turns Google on in GoTrue,
    * some lane deploys the site for an unrelated reason, and the invite page grows a Google
    * button while the privacy policy still says "You sign in with GitHub". Nothing in the repo
    * would have noticed. This does, in both directions: a page that names a provider with no

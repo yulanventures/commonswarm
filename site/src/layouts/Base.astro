@@ -88,8 +88,8 @@ const THEME_COLOR_DARK = "#08090c";
  * build time, so a build made WITH PUBLIC_SUPABASE_URL set can NOT be repointed by editing
  * these tags — the bundle no longer reads them. A bundle you intend to hand someone else to
  * point at their own project must therefore be built with both env vars UNSET. Our own
- * Vercel builds set them; that is the ordinary case and the tags are then only a record of
- * what the bundle already contains.
+ * The site build on the operator machine sets them, then deploy/site/deploy.sh publishes
+ * the files. The tags are then only a record of what the bundle already contains.
  *
  * NO KEY IS WRITTEN HERE, EVER. Both values come from the environment. The anon key is a
  * public identifier rather than a secret (see the header of src/lib/commonswarm.ts), but a

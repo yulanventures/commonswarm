@@ -330,10 +330,9 @@ export function fileRestore(
 }
 
 /**
- * The signed paths in create/download responses are RELATIVE to the deployment
- * URL on purpose: the server cannot know which host (custom domain or the
- * supabase.co origin) the caller can reach — recorded in
- * docs/evidence/2026-08-18-file-artifacts-s1/README.md. The client composes.
+ * The signed paths in create/download responses are relative to the deployment
+ * URL. The client composes the absolute URL from the saved target. The record
+ * of that choice is docs/evidence/2026-08-18-file-artifacts-s1/README.md.
  */
 export function absoluteStorageUrl(target: CloudTarget, path: string): string {
   if (!path.startsWith("/")) {

@@ -324,7 +324,7 @@ function missingTargetError(mode: "human" | "agent"): Error {
      * hosted reader because <key> named no source. The anon key is public (RLS-protected) and
      * published in the meta tags of https://commonswarm.com/start — say so. Same F-1/D-067
      * family: a route you cannot complete is not a route. */
-    "no Cloud target is selected: most commands discover the hosted target from https://commonswarm.com automatically, so seeing this usually means that fetch failed — check network or your egress allowlist. Otherwise start with cswarm accept --link-stdin because invite links carry the Cloud target and save its Supabase project base URL, or run cswarm target set --url https://api.commonswarm.com --anon-key <key> for the hosted service — the anon key is public, in the meta tags at https://commonswarm.com/start (a self-hosted deployment uses its https://<ref>.supabase.co URL from whoever runs it, or from your own project's API settings if you created it); scripts and CI may instead pass --url and --anon-key or set SWARM_CLOUD_URL and SWARM_CLOUD_ANON_KEY",
+    "no Cloud target is selected: most commands discover the hosted target from https://commonswarm.com automatically, so seeing this usually means that fetch failed — check network or your egress allowlist. Otherwise start with cswarm accept --link-stdin because invite links carry the Cloud target and save the service base URL. The service we run is https://api.commonswarm.com (run cswarm target set --url https://api.commonswarm.com --anon-key <key>). The anon key is public, in the meta tags at https://commonswarm.com/start (a deployment uses its own base URL). Scripts and CI may instead pass --url and --anon-key or set SWARM_CLOUD_URL and SWARM_CLOUD_ANON_KEY",
   );
 }
 

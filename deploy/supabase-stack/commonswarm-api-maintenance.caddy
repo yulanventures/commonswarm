@@ -1,54 +1,7 @@
-# N-db window maintenance site file. Install it (swap with the installed api site file, caddy validate, reload) AFTER
-# api.commonswarm.com points at the box and BEFORE either database is frozen.
-#
-# api.commonswarm.com (public): every write and every /auth/v1 call answers 503 with Retry-After, so no client can write
-# anywhere during the window; reads (GET, HEAD, the realtime websocket) go to the Supabase origin, which is the frozen
-# source until the decision point closes.
-# edge-staging.commonswarm.com (controls only): the full post-N-db routes to the box services, so the decision-point
-# checklist can sign in, upload, command and wake against the restored box while the public stays in maintenance.
-
-(supabase_origin) {
-	reverse_proxy https://ukezjcnxjvkpkeezxaew.supabase.co {
-		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
-		header_up X-Forwarded-Host ukezjcnxjvkpkeezxaew.supabase.co
-		header_up X-Forwarded-Proto https
-		# Supabase is also behind Cloudflare. Forwarding the incoming Cloudflare
-		# identity headers makes its edge reject the request. Caddy keeps its
-		# normal X-Forwarded-For chain; do not replace it here.
-		header_up -CF-Connecting-IP
-		header_up -CF-Ray
-		header_up -CF-Visitor
-		header_up -CF-IPCountry
-		header_up -CDN-Loop
-		header_up -True-Client-IP
-		transport http {
-			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
-		}
-	}
-}
-
-(supabase_realtime_origin) {
-	reverse_proxy https://ukezjcnxjvkpkeezxaew.supabase.co {
-		header_up Host ukezjcnxjvkpkeezxaew.supabase.co
-		header_up X-Forwarded-Host ukezjcnxjvkpkeezxaew.supabase.co
-		header_up X-Forwarded-Proto https
-		# Realtime reaches the same Supabase Cloudflare edge, so it needs the
-		# same removal set and Caddy's normal X-Forwarded-For chain.
-		header_up -CF-Connecting-IP
-		header_up -CF-Ray
-		header_up -CF-Visitor
-		header_up -CF-IPCountry
-		header_up -CDN-Loop
-		header_up -True-Client-IP
-		# Realtime needs an HTTP/1.1 upstream for websocket Upgrade. Auth, REST,
-		# and Storage do not upgrade and can keep the default HTTP/2 transport.
-		flush_interval -1
-		transport http {
-			versions 1.1
-			tls_server_name ukezjcnxjvkpkeezxaew.supabase.co
-		}
-	}
-}
+# Maintenance site file. Install it for a recovery drill or a later pause.
+# api.commonswarm.com answers every request except CORS preflight with 503.
+# That site has no upstream.
+# edge-staging.commonswarm.com imports box_routes, the containers on this server.
 
 (box_routes) {
 	@edge_functions path /functions/v1 /functions/v1/*
@@ -116,31 +69,12 @@ api.commonswarm.com {
 		respond "" 204
 	}
 
-	@maintenance_auth path /auth/v1/*
-	handle @maintenance_auth {
-		header Access-Control-Allow-Origin "*"
-		header Cache-Control "no-store"
-		header Content-Type "application/json"
-		header Retry-After "300"
-		respond "{\"error\":\"maintenance\",\"message\":\"writes are paused for database migration\"}" 503
-	}
-
-	@maintenance_write method POST PUT PATCH DELETE
-	handle @maintenance_write {
-		header Access-Control-Allow-Origin "*"
-		header Cache-Control "no-store"
-		header Content-Type "application/json"
-		header Retry-After "300"
-		respond "{\"error\":\"maintenance\",\"message\":\"writes are paused for database migration\"}" 503
-	}
-
-	@supabase_realtime path /realtime/v1 /realtime/v1/*
-	handle @supabase_realtime {
-		import supabase_realtime_origin
-	}
-
 	handle {
-		import supabase_origin
+		header Access-Control-Allow-Origin "*"
+		header Cache-Control "no-store"
+		header Content-Type "application/json"
+		header Retry-After "300"
+		respond "{\"error\":\"maintenance\",\"message\":\"writes are paused for database migration\"}" 503
 	}
 }
 

@@ -70,33 +70,22 @@ Supabase client calls in those files.
 | `/functions/v1/activity` | listener activity publisher | loopback edge runtime |
 | `/functions/v1/capability/...` | capability links | loopback edge runtime |
 | `/functions/v1/h0/...` | H0 agent document and later H0 calls | loopback edge runtime |
-| `/auth/v1/authorize`, `/auth/v1/token`, `/auth/v1/user`, `/auth/v1/logout`, `/auth/v1/otp`, `/auth/v1/settings` | CLI and site through supabase-js, plus the site build provider check | Supabase project origin |
-| `/rest/v1/memberships`, `/workspaces`, `/member_profiles`, `/agent_principals`, `/tasks`, `/channels`, `/signals`, `/files`, `/my_devices`, `/pending_invitations` | CLI and site, directly or through supabase-js | Supabase project origin |
-| `/storage/v1/object/upload/sign/...`, `/object/info/authenticated/...`, `/object/sign/...`, `/object/...` | command function and site file upload/download | Supabase project origin |
-| `/realtime/v1`, `/realtime/v1/`, `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Supabase project origin; Caddy uses the unbuffered HTTP/1.1 upstream |
-| every other path | compatibility fallback | Supabase project origin |
+| `/auth/v1/authorize`, `/auth/v1/token`, `/auth/v1/user`, `/auth/v1/logout`, `/auth/v1/otp`, `/auth/v1/settings` | CLI and site through supabase-js, plus the site build provider check | GoTrue on the server, `127.0.0.1:18001` |
+| `/rest/v1/memberships`, `/workspaces`, `/member_profiles`, `/agent_principals`, `/tasks`, `/channels`, `/signals`, `/files`, `/my_devices`, `/pending_invitations` | CLI and site, directly or through supabase-js | PostgREST on the server, `127.0.0.1:18002` |
+| `/storage/v1/object/upload/sign/...`, `/object/info/authenticated/...`, `/object/sign/...`, `/object/...` | command function and site file upload/download | Storage API on the server, `127.0.0.1:18004` |
+| `/realtime/v1`, `/realtime/v1/`, `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Realtime on the server, `127.0.0.1:18003`, HTTP/1.1 |
+| every other path | no upstream | `404` JSON from the live API file |
 
-The reverse proxy sends the project origin as HTTP `Host`,
-`X-Forwarded-Host`, and TLS SNI. It fixes `X-Forwarded-Proto` to `https`, so
-GoTrue cannot derive its callback origin from the public proxy name. The Caddy
-global options must include the `servers { ... }` fragment from
-`caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on
-2026-09-16. The local functions route replaces `X-Forwarded-For` with Caddy's
-derived visitor address, so capability rate limiting does not use a Cloudflare
-edge or spoofed header. Supabase-origin routes keep Caddy's default forwarded
-chain and remove incoming Cloudflare identity headers before the request reaches
-Supabase's separate Cloudflare edge. `commonswarm.caddy` is only an imported
-site file and deliberately contains no global options block.
+The live routes are in `deploy/supabase-stack/commonswarm-api.caddy`. The pre-cutover site file was removed. It proxied to a deleted host. There is no fallback to another host. A pause uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`: the public site answers 503 and has no upstream, and staging keeps the box routes. The Caddy global options must include the `servers { ... }` fragment from `caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on 2026-09-16. The functions route replaces `X-Forwarded-For` with Caddy's derived visitor address, so capability rate limiting does not use a Cloudflare edge or spoofed header.
 
 ## Caddy validation shape
 
-Do not validate `commonswarm.caddy` by itself. The box imports it from a main
-Caddyfile that already owns the global options block. Build both local fixtures
+Validate `deploy/supabase-stack/commonswarm-api.caddy`. Do not install a file that names a supabase.co host. The local validation fixture builds a main Caddyfile around that live file, or around the maintenance file when you pass its path. The site file has no global options block. Build both local fixtures
 with `build-caddy-validation-fixture.mjs`: mode `with-trusted-proxies` pastes the
 server fragment inside that block; mode `without-trusted-proxies` models the
 valid state before the box operator applies it. Validate each generated
 `Caddyfile` with `caddy:2.11` and dummy certificate mounts. The adapted-JSON
-checker accepts the same mode as its second argument.
+checker takes `live` or `maintenance`, then the same trust mode.
 
 ## Known box state
 
@@ -105,14 +94,4 @@ container was healthy at 36 MiB idle and 155 MiB after 50 requests across all
 five functions. Twelve sequential and twelve mixed requests returned in 2–56 ms.
 A `docker restart` returned healthy with zero restarts.
 
-End-to-end latency is still slower than production:
-
-| Operation | Box p50 / p95 | Production p50 / p95 |
-|---|---:|---:|
-| read members | 2.77 / 3.32 s | 0.85 / 1.16 s |
-| read feed | 2.07 / 2.93 s | 0.73 / 1.09 s |
-| command receipt | 1.68 / 2.11 s | 0.70 / 0.90 s |
-
-The evidence is `docs/evidence/2026-09-16-n-edge/LATENCY-2026-09-16.md`
-on main. The named remedy is **N-db**. A production timeout after cutover means
-DNS rollback, not timeout tuning.
+The server is production. N-db has landed. The 2026-09-16 latency note is `docs/evidence/2026-09-16-n-edge/LATENCY-2026-09-16.md`. Do not roll DNS back to supabase.co.

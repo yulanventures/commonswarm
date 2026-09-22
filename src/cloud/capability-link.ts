@@ -1,24 +1,21 @@
 import { assertCapabilityToken } from "./command-client.js";
 
 /**
- * The public project alias, never a per-deployment Vercel host: those 302 to Vercel SSO
- * for anyone the link is forwarded to, which is exactly the person a capability link is
- * for (AGENTS.md, "Deploying the marketing site", trap 3).
+ * The public site. The /see page is not on the site (it returns 404), so the
+ * credential is the fragment, not a page that opens.
  */
-export const CAPABILITY_SITE_ORIGIN = "https://coswarm-site.vercel.app";
+export const CAPABILITY_SITE_ORIGIN = "https://commonswarm.com";
 
 /**
  * The complete set of hosts a capability link may point at. An allowlist, not a syntax
- * check: the printed link IS the credential, so accepting any well-formed https origin
+ * check: the printed link is the credential, so accepting any well-formed https origin
  * means one mistyped or attacker-supplied --site (or CSWARM_SITE_ORIGIN, which nothing
  * about the CLI's own invocation reveals) sends the operator to paste a working token
  * into a stranger's host, where it reads the work item and is then held indefinitely.
- * `coswarm-site.vercel.app` is the Vercel project alias and stays until DNS moves.
  */
 export const CAPABILITY_ALLOWED_HOSTS: readonly string[] = [
   "commonswarm.com",
   "www.commonswarm.com",
-  "coswarm-site.vercel.app",
 ];
 
 /**
@@ -94,16 +91,16 @@ export function capabilitySiteOrigin(
   // the credential the operator is about to paste there.
   if (!loopback && !CAPABILITY_ALLOWED_HOSTS.includes(parsed.hostname)) {
     throw new Error(
-      `${source} must name a CommonSwarm page — ${
+      `${source} must name a CommonSwarm site — ${
         CAPABILITY_ALLOWED_HOSTS.map((host) => `https://${host}`).join(", ")
-      }, or http://localhost / http://127.0.0.1 while developing that page. The link this prints is a live credential for one work item, so it may only point somewhere CommonSwarm serves.`,
+      }, or http://localhost / http://127.0.0.1. The link this prints is a live credential for one work item, so it may only point somewhere CommonSwarm serves. Opening /see on the site returns 404.`,
     );
   }
   // A port would still be a CommonSwarm host, but nothing CommonSwarm serves listens on
   // one, so it is a typo rather than a deployment.
   if (!loopback && parsed.port !== "") {
     throw new Error(
-      `${source} must not carry a port; a CommonSwarm page is served on the default https port`,
+      `${source} must not carry a port; a CommonSwarm site is served on the default https port`,
     );
   }
   return parsed.origin;

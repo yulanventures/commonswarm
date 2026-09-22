@@ -135,10 +135,7 @@ applied; say which one you mean.
 
 ## Step 2 — deploy the edge functions
 
-```sh
-supabase functions deploy command --project-ref <ref>
-supabase functions deploy read    --project-ref <ref>
-```
+Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 
 Do **not** deploy `capability` as part of switching signup on. It is the §7 anonymous
 capability-URL read, it is gated off by `SWARM_CAPABILITY_URLS` in both functions
@@ -176,20 +173,11 @@ from function rejection. Clients should keep sending `apikey` anyway; the CLI do
 
 ---
 
-## Step 3 — configure hosted auth
+## Step 3 — configure sign-in
 
-In the Supabase **dashboard** for the production project, not in this repo:
+Change GoTrue settings on the server. Do not open the Supabase dashboard.
 
-1. Enable the **GitHub** provider with real OAuth credentials. Both surfaces use GitHub and
-   only GitHub — `src/cloud/auth.ts:213` for the CLI, `site/src/lib/commonswarm.ts:88` for
-   the browser. Adding a second provider on one surface and not the other would give the two
-   surfaces different identity sets for the same person.
-2. Add the site's callback to the **redirect allow-list**: the browser client asks to return
-   to `<origin>/app` (`site/src/components/app/LiveDashboard.astro:167`), so
-   `https://commonswarm.com/app` — plus `https://coswarm-site.vercel.app/app` while that
-   alias is still served. A URL that is not on the list does not error; Supabase silently
-   returns the user to the project's Site URL, which reads to the user as "sign-in did
-   nothing".
+Sign-in is GoTrue on the server: GitHub (yulanventures OAuth app), Google, and email. SMTP is Resend. The browser client asks to return to `<origin>/app` (`site/src/components/app/LiveDashboard.astro`), so the redirect allow-list includes `https://commonswarm.com/app`. A URL that is not on the list does not error; GoTrue returns the user to the Site URL, which reads to the user as "sign-in did nothing".
 
 `supabase/config.toml` configures **local** Supabase only and cannot open or close anything
 in production. Note also that it has **no `[auth.external.github]` block at all** — so GitHub
@@ -197,8 +185,7 @@ sign-in cannot be exercised against a plain `supabase start` until one is added 
 credentials. A comment stating this now sits above `[auth]` at `supabase/config.toml:150-163`.
 
 **What breaks if this is out of order.** Deploy the app before the provider exists and the
-sign-in button opens an OAuth error page on Supabase's domain — the user's first impression
-of the product is a stranger's error screen.
+sign-in button opens an OAuth error page from GoTrue on `api.commonswarm.com`.
 
 ---
 
@@ -228,20 +215,7 @@ A build made with `PUBLIC_SUPABASE_URL` set therefore **cannot** be repointed by
 meta tags — the bundle no longer reads them. If you want a bundle someone else can point at
 their own project, build it with both variables **unset**.
 
-**The deploy trap that makes this different from every other Vercel project.** The build runs
-on the operator's machine and `vercel deploy dist` uploads a finished folder (AGENTS.md,
-"Deploying the marketing site"). **Environment variables set in the Vercel dashboard have no
-effect** — nothing is built there. The variables must be in the shell that runs
-`npm run build`:
-
-```sh
-cd site
-export PUBLIC_SUPABASE_URL='https://api.commonswarm.com'
-export PUBLIC_SUPABASE_ANON_KEY='<the project anon key>'
-rm -rf dist && npm run build
-cp -r .vercel dist/.vercel                       # load-bearing — AGENTS.md trap 5
-vercel deploy dist --prod --yes --scope ridgedotio
-```
+The site build reads `PUBLIC_SUPABASE_URL` and `PUBLIC_SUPABASE_ANON_KEY` from `site/.env`. Build with `PUBLIC_SUPABASE_URL=https://api.commonswarm.com` and the anon key, then run `deploy/site/deploy.sh yulan-vps-1`. The script builds from a clean archive of `HEAD` and publishes the files to Caddy on `yulan-vps-1`.
 
 **The anon key comes from the environment and is never committed.** It is a public
 identifier, not a secret — every Supabase browser app ships one, and authorisation is the
@@ -264,9 +238,7 @@ whatever function version happens to be live — today that means `command` answ
 
 ## Step 5 — `SWARM_SELF_SERVE=1`
 
-```sh
-supabase secrets set SWARM_SELF_SERVE=1 --project-ref <ref>
-```
+Not established: there is no written procedure yet for where the edge runtime reads `SWARM_SELF_SERVE` on the server. The value in production is still 1. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 
 This is the whole of the switch: `supabase/functions/command/index.ts:366` reads it, and
 `createSelfServeWorkspace` refuses with `403` at `:2424` for any other value, including

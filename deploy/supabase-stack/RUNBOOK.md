@@ -1,6 +1,8 @@
-# N-db cutover runbook — NOT RUN
+# N-db cutover runbook
 
-This lane deployed nothing. HezLead runs every command in this file.
+Status: the database cutover is done. Do not run this file against a source project. The commands below are the record of the window.
+
+Not established: there is no written procedure yet for how a schema migration reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 
 ## Fixed design
 
@@ -108,7 +110,7 @@ Use a new protected artifact directory for each attempt. Never reuse a dump afte
 
    The directory is `0750`. All three files in it are owned by `100:101`. The certificate and CA are `0644`. The private key is owned by `100:101` and is `0600`.
 
-4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. For both the rehearsal and window, set `SOURCE_STORAGE_URL=https://ukezjcnxjvkpkeezxaew.supabase.co/storage/v1` and `TARGET_STORAGE_URL=http://127.0.0.1:18004`. Both are Storage API base URLs and `copy-storage.mjs` appends `/object/...`: hosted Supabase serves the Storage API under `/storage/v1`, and the box Storage API on loopback serves it at the root (Caddy strips `/storage/v1` in front of it). The target and does not use the public host whose POST requests return 503 during the window.
+4. Render the two environment files. Values are never quoted. Keep `CUTOVER_CONFIRM=` empty in the migration file. The hosted Storage API is gone. Files are in Cloudflare R2 through the server Storage API. `copy-storage.mjs` appends `/object/...`. The box Storage API on loopback serves that path at the root (Caddy strips `/storage/v1` in front of it).
 
    Compare the SHA-256 digests of the five JWT secret names without printing a value or digest. This command must print `JWT secret digests match: 1 distinct digest` and exit 0:
 
@@ -253,7 +255,7 @@ A failed control means repeat the rehearsal from a fresh dump.
 
 ## Cutover window
 
-Ruling 9084e3e1 applies. Rollback exists only before the box accepts writes. After step 7, fix forward on the box. Never install `commonswarm-api-fallback.caddy` after step 7.
+Ruling 9084e3e1 applies. Rollback existed only before the box accepted writes. After step 7, fix forward on the box. There is no fallback file and no fallback to another host. A later pause uses `commonswarm-api-maintenance.caddy`. Its public site answers 503 and has no upstream.
 
 Use the protected environment files for every call. Their values are unquoted. `CUTOVER_CONFIRM=` stays empty in the migration file. Set `CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW` inline only on freeze and unfreeze commands.
 
@@ -269,24 +271,19 @@ Run every window block one command at a time and read each exit code. Never run 
    export ARTIFACT_DIR
    ```
 
-1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. The public DNS still points to Supabase.
+1. Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy`, keeping the previous file as `.prev`. Validate Caddy and read the exit code. Reload it. The public site answers every request except CORS preflight with 503 and has no upstream. `edge-staging.commonswarm.com` keeps the box routes. There is no fallback to another host. At this step of the window, public DNS still pointed at the hosted project. That project is now deleted, and DNS points at the server.
 
-2. Move `api.commonswarm.com` to the box (A 178.105.29.28, proxied) through the DNS holder. Judge DNS through `1.1.1.1` or a flushed resolver, never a local cache. From here the maintenance behaviour is:
+2. Move `api.commonswarm.com` to the box (A 178.105.29.28, proxied) through the DNS holder. Judge DNS through `1.1.1.1` or a flushed resolver, never a local cache. This step is the record of the window. The maintenance file now does this:
 
-   - Every `POST`, `PUT`, `PATCH`, and `DELETE` returns 503. This includes the POST-only edge functions.
-   - Every `/auth/v1` call returns 503.
-   - `GET` and `HEAD` reads go to the Supabase origin.
-   - The Realtime websocket goes to the Supabase origin. Its frames are wake hints and are not migrated data.
-   - `cswarm check` exits 1 in about 3.2 seconds.
-   - `cswarm inbox` exits 1.
-   - `cswarm note` exits 1 in about 6.2 seconds with the maintenance sentence.
-   - The hook form was not measured.
-
-   - `capability` counts a GET in its rate buckets before its 405. Before the step-3 freeze those rows are in the final dump; after it the write fails with SQLSTATE 25006.
+   - Every request except CORS preflight returns 503, `Retry-After: 300`, and `{"error":"maintenance","message":"writes are paused for database migration"}`.
+   - `OPTIONS` preflight returns 204 with the CORS headers.
+   - The public site has no upstream. `GET` and `HEAD` do not reach another host.
+   - `edge-staging.commonswarm.com` keeps the box routes.
+   - Measured earlier, against a loopback 503: `cswarm check` exits 1 in about 3.2 seconds, `cswarm inbox` exits 1, and `cswarm note` exits 1 in about 6.2 seconds with the maintenance sentence. The hook form was not measured.
 
    Path proof: a POST to `https://api.commonswarm.com/functions/v1/read` answers 503 with `{"error":"maintenance"}` (only the box sends that body) and `Retry-After: 300`. Then announce the write pause.
 
-   ABORT-A (path proof fails): restore the Supabase CNAME (not proxied) and the `.prev` Caddy file.
+   ABORT-A (path proof fails): there is no other host to restore. The hosted project is deleted. Fix forward on the box.
 
 3. Compute both acknowledgements during this window, freeze the source, and prove it. Run these commands in order. Copy each list from this run's output, never from the rehearsal. The first frozen probe intentionally omits `FREEZE_UNPROBED_ROLES`; it must exit 65 after printing the roles this connection cannot assume. If `enable` has to run again after a later failure is fixed, a second run while frozen is safe: it exits 0, adds no trigger, and the freeze stays.
 
@@ -310,9 +307,9 @@ Run every window block one command at a time and read each exit code. Never run 
    "$MIGRATE/run-db-tool.sh" probe-database-freeze.sh "$ARTIFACT_DIR" frozen source
    ```
 
-   What the freeze cannot stop: a session that refused termination keeps its older writable default and can write an unguarded table without `BEGIN READ WRITE`; other sessions can write to the tables the source role cannot trigger (the preflight list) if they override the database default; and any client that calls `ukezjcnxjvkpkeezxaew.supabase.co` directly instead of `api.commonswarm.com` bypasses maintenance. Before the window, read the Supabase API logs for requests whose host is the supabase.co name; if a product client still uses it, fix that client first.
+   What the freeze cannot stop: a session that refused termination keeps its older writable default and can write an unguarded table without `BEGIN READ WRITE`; other sessions can write to the tables the source role cannot trigger (the preflight list) if they override the database default.
 
-   ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then restore DNS and Caddy.
+   ABORT-B: if the probe fails after enable, unfreeze inline, then run the writable probe. The writable probe creates and drops `commonswarm_cutover_probe` to prove DDL and writes work. Then put the previous Caddy file back. Do not point DNS at a supabase.co name. There is no fallback host.
 
    ```sh
    CUTOVER_CONFIRM=COMMONSWARM_N_DB_WINDOW \
@@ -368,7 +365,7 @@ Run every window block one command at a time and read each exit code. Never run 
 
    Run the seed command twice. The second run must also exit 0; this proves that seeding is idempotent.
 
-   ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Restore DNS and Caddy. Discard the new box database. Any step-5 staging upload can leave R2 bytes with no restored `storage.objects` row. The orphan names are `swarm-files/<the upload names recorded in step 5>`. Find them from the recorded step-5 upload names, check those exact bucket/name pairs against `storage.objects`, and remove the orphan bytes before another attempt. No hosted bytes are removed.
+   ABORT-C: if a step fails, use the ABORT-B unfreeze and writable probe. Put the previous Caddy file back. Do not point DNS at a supabase.co name. There is no fallback host. Discard the new box database. Any step-5 staging upload can leave R2 bytes with no restored `storage.objects` row. The orphan names are `swarm-files/<the upload names recorded in step 5>`. Find them from the recorded step-5 upload names, check those exact bucket/name pairs against `storage.objects`, and remove the orphan bytes before another attempt. No hosted bytes are removed.
 
 5. Complete the decision checklist within 30 minutes through the staging host. Use the recorded pre-start baseline and post-upgrade count gates from step 4. They compare every selected table count and `cron-jobs.ndjson` as a multiset of jobs (every field, duplicate rows included), so a different database collation cannot fail a match. Do not compare a live, writing database to a stale source snapshot with the unmodified baseline verifier. Also prove object totals and digests, a migrated human refresh, REST, `cswarm check` within its budget, a listener wake, an edge command and read, a Realtime private Broadcast wake, one Storage upload and signed download with a digest match, and the timeout table at every client timeout at least twice its p95. Record the exact bucket and object name for every staging upload so ABORT-C can find any R2 orphan. If one control fails, run ABORT-C.
 
@@ -381,15 +378,15 @@ Run every window block one command at a time and read each exit code. Never run 
    "$MIGRATE/run-db-tool.sh" dump-source.sh "$RECOVERY_ARTIFACT_DIR" target
    ```
 
-7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. Never install the fallback Caddy file after this point. Fix later failures forward. Production controls on `api.commonswarm.com`: GitHub sign-in and Google sign-in end to end in the operator's browser (both callbacks are `https://api.commonswarm.com/auth/v1/callback`, so this is their first proof on the box), `cswarm check` and a listener wake, one command, one upload, the install page, and the site.
+7. Install `commonswarm-api.caddy`. Validate, read the exit code, and reload. The box now accepts writes and is the system of record. There is no fallback to another host. Fix later failures forward. A later pause installs `commonswarm-api-maintenance.caddy` again. Production controls on `api.commonswarm.com`: GitHub sign-in and Google sign-in end to end in the operator's browser (both callbacks are `https://api.commonswarm.com/auth/v1/callback`, so this is their first proof on the box), `cswarm check` and a listener wake, one command, one upload, the install page, and the site.
 
-8. Tell humans to sign in once. Keep the hosted project frozen for 48 hours. Keep the moved rehearsal data directory through this step. Do not unfreeze the hosted project.
+8. Tell humans to sign in once. Keep the moved rehearsal data directory through this step.
 
 ## Recovery drill after the decision point
 
 Use the artifact directory created by `dump-source.sh` in window step 6. A plain nightly `pg_dump -Fc` is not accepted by these restore scripts.
 
-Stop every service and the edge runtime. Move the broken data directory to a unique timestamped name, create a fresh box data directory, and start only PostgreSQL. Wait at most 180 seconds for PostgreSQL before any restore. Restore in this order behind the maintenance Caddy file. Then start the full stack, restart Realtime, wait for Storage API, copy Storage, restore its metadata, start the edge with both inline variables, and wait at most 180 seconds for the edge:
+Install `commonswarm-api-maintenance.caddy` over `/etc/caddy/sites/10-commonswarm-api.caddy` before the restore. Validate Caddy and read the exit code. Reload it. The public site answers every request except CORS preflight with 503 and has no upstream. `edge-staging.commonswarm.com` keeps the box routes. There is no fallback to another host. Stop every service and the edge runtime. Move the broken data directory to a unique timestamped name, create a fresh box data directory, and start only PostgreSQL. Wait at most 180 seconds for PostgreSQL before any restore. Restore in this order. Then start the full stack, restart Realtime, wait for Storage API, copy Storage, restore its metadata, start the edge with both inline variables, and wait at most 180 seconds for the edge. When the restore is proved, install `commonswarm-api.caddy` again, validate, and reload:
 
 ```sh
 COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
@@ -440,7 +437,7 @@ Rehearse this drill on a second local database before the window.
 
 An old asymmetric browser access token can fail against the HS256 box. The site clears it and shows sign-in. The human signs in once, with GitHub, Google, or email (production enables all three: read-only `/auth/v1/settings`, 2026-09-17).
 
-Before the window: a GitHub OAuth app owned by the yulanventures organization with callback `https://api.commonswarm.com/auth/v1/callback` (HezLead creates it; the client secret goes to the vault), and that same URI added to the authorized redirect URIs of the existing Google client in project `commonswarm` (the operator; the console needs the operator's password). Adding a redirect URI does not change hosted auth.
+Sign-in is GoTrue on the server: GitHub (yulanventures OAuth app), Google, and email. SMTP is Resend. The GitHub callback is `https://api.commonswarm.com/auth/v1/callback`. The same URI is on the Google client in project `commonswarm`.
 
 The migrated Auth rows preserve refresh tokens. The CLI refresh path can exchange a valid migrated token for a new HS256 session. The rehearsal must prove this.
 

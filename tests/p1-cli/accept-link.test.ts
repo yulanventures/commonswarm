@@ -297,15 +297,11 @@ test("invite link grammar rejects bad versions, padding, oversize, and malformed
   );
 });
 
-test("origin pin accepts both production origins; equivalents normalize; lookalikes refuse", async () => {
-  // api.commonswarm.com is the active custom domain (2026-08-17); the supabase.co host still
-  // serves the same project. A link carrying either must pass with no confirmation prompt.
+test("origin pin accepts the production origin; the retired host is refused", async () => {
   // cloudTarget() collapses spelling variants to URL.origin BEFORE the gate compares, so
-  // equivalent spellings pass as the same origin — that is normalization working, not a
-  // widened allowlist. Non-equivalent origins (scheme change, lookalike suffix) refuse.
+  // equivalent spellings pass as the same origin. Non-equivalent origins refuse.
   for (const url of [
     "https://api.commonswarm.com",
-    "https://ukezjcnxjvkpkeezxaew.supabase.co",
     "https://api.commonswarm.com/",
     "https://API.commonswarm.com",
     "https://api.commonswarm.com:443",
@@ -317,6 +313,26 @@ test("origin pin accepts both production origins; equivalents normalize; lookali
     });
     assert.equal(output, "", `${url} must pass silently`);
   }
+
+  const retired = "https://ukezjcnxjvkpkeezxaew.supabase.co";
+  await assert.rejects(
+    requirePinnedOrigin(cloudTarget(retired, "anon"), {
+      interactive: false,
+      output: { write: () => undefined },
+    }),
+    /retired host https:\/\/ukezjcnxjvkpkeezxaew\.supabase\.co[\s\S]*new invite/,
+    "the retired host must refuse before login",
+  );
+  await assert.rejects(
+    requirePinnedOrigin(cloudTarget(retired, "anon"), {
+      interactive: true,
+      output: { write: () => undefined },
+      readConfirmation: async () => retired,
+    }),
+    /retired host https:\/\/ukezjcnxjvkpkeezxaew\.supabase\.co[\s\S]*new invite/,
+    "retyping the retired host must not accept it",
+  );
+
   for (const url of [
     "http://api.commonswarm.com",
     "https://api.commonswarm.com.attacker.example",

@@ -1,5 +1,5 @@
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const outputDirectory = process.argv[2];
@@ -10,17 +10,18 @@ if (
 ) {
   throw new Error(
     "usage: node build-caddy-validation-fixture.mjs <output-directory> " +
-      "<with-trusted-proxies|without-trusted-proxies>",
+      "<with-trusted-proxies|without-trusted-proxies> [site-caddy]",
   );
 }
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
+const siteFile = resolve(
+  process.argv[4] ??
+    join(sourceDirectory, "..", "supabase-stack", "commonswarm-api.caddy"),
+);
 const sitesDirectory = join(outputDirectory, "sites");
 await mkdir(sitesDirectory, { recursive: true });
-await copyFile(
-  join(sourceDirectory, "commonswarm.caddy"),
-  join(sitesDirectory, "10-commonswarm-api.caddy"),
-);
+await copyFile(siteFile, join(sitesDirectory, "10-commonswarm-api.caddy"));
 
 let globalServers = "";
 if (mode === "with-trusted-proxies") {

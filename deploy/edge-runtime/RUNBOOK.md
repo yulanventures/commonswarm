@@ -1,21 +1,16 @@
 # Edge-runtime box runbook
 
-Every action below is **NOT RUN by this fix lane**. The lead deployed `76487b81`
-to the box before this round. The container is healthy and Caddy serves both
-`api.commonswarm.com` and `edge-staging.commonswarm.com`; staging was measured
-through Cloudflare.
+The API cutover is done. `api.commonswarm.com` is Caddy on `yulan-vps-1`. The steps below are the record of the edge-runtime lane. The pre-cutover site file was removed. It proxied to a deleted host. The live routes are `deploy/supabase-stack/commonswarm-api.caddy`. There is no fallback to another host. A pause uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`. Its public site answers 503 and has no upstream.
 
 ## NOT ESTABLISHED
 
-1. **NOT ESTABLISHED — auth callbacks and custom-domain TLS after proxy
-   cutover.** Staging proxying works, but production DNS, the Management API
-   custom-domain deactivation, production controls, and rollback have not run.
-   Only a controlled live cutover can establish that callback and TLS sequence.
+1. The API cutover is done. Do not deactivate a Supabase custom domain.
+   Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
 2. **NOT ESTABLISHED — the three 1Password items named below exist or contain the
    current material.** An operator must confirm them without printing values.
 3. **NOT ESTABLISHED — this lane did not inspect the box firewall, certificate
    files, secret source, or current operator access.**
-4. **NOT ESTABLISHED — production DNS, hosted invocation decrease, and rollback.**
+4. Production DNS for the API already points at the server. Do not measure a Supabase Edge Functions dashboard, and do not roll DNS back to a supabase.co name.
 
 ## 1. Install and stage
 
@@ -90,9 +85,7 @@ Use the 1Password vault **Yulan Ventures Infra**. Refer to items by these names:
   `caddy-global-servers.caddy`, pinned 2026-09-16, with Cloudflare's current
   published list. If it changed, ask the box operator to update the main global
   block and repeat the adapted-config check.
-- [ ] **NOT RUN** — copy `commonswarm.caddy` to
-  `/etc/caddy/sites/10-commonswarm-api.caddy`. The box main Caddyfile already
-  imports `sites/*.caddy`. The site file must not contain a global options block.
+- [ ] Copy `deploy/supabase-stack/commonswarm-api.caddy` to `/etc/caddy/sites/10-commonswarm-api.caddy`. The pre-cutover site file was removed. Do not point this route at a supabase.co host. There is no fallback to another host.
 
 ## 3. Start the edge runtime
 
@@ -155,103 +148,9 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
   `edge-staging.commonswarm.com` reaches the box through Cloudflare.
 - [ ] **NOT RUN** — through `edge-staging.commonswarm.com`, repeat all five
   function smokes and the bare `/functions/v1` 404 control.
-- [ ] **NOT RUN** — through staging, check `/auth/v1/settings`, one membership
-  REST read, one signed Storage request, and a Realtime subscription. Confirm
-  Auth, REST, Storage, and Realtime reach the project URL with the upstream Host
-  and `X-Forwarded-Host` rewritten to `ukezjcnxjvkpkeezxaew.supabase.co`, and
-  `X-Forwarded-Proto` set to `https`. Confirm Supabase-origin requests do not
-  carry `CF-Connecting-IP`, `CF-Ray`, `CF-Visitor`, `CF-IPCountry`, `CDN-Loop`,
-  or `True-Client-IP`, and return no Supabase Cloudflare 403. Confirm the
-  capability function still sees the visitor address, not the Cloudflare edge
-  address.
-- [ ] **NOT RUN** — do not open the production window until every staging check
-  passes. Record failures; do not compensate by raising timeouts.
+- [ ] Check Auth, REST, Storage, and Realtime on the server containers. Do not rewrite Host to the deleted supabase.co name. The live routes are in `deploy/supabase-stack/commonswarm-api.caddy`.
+## 6. After the cutover
 
-## 6. Production cutover with a 48-hour project-URL fallback
+The API cutover is done. Caddy sends Auth, REST, Storage, and Realtime to the local containers in `deploy/supabase-stack/commonswarm-api.caddy`.
 
-The Strategist ruling dated 2026-09-16 21:07Z defines this binding order. Do not
-deactivate the custom domain before DNS moves.
-
-- [ ] **NOT RUN — (1) land** — land the reviewed release, install that exact
-  release on the box, validate the full Caddyfile, and record the passing
-  `edge-staging.commonswarm.com` rehearsal. Confirm Caddy sends functions to
-  loopback and sends Auth, REST, Storage, and Realtime to the project host with
-  the ruled header changes.
-- [ ] **NOT RUN — (2) switch DNS** — record the old row for rollback, then change
-  `api.commonswarm.com` from the DNS-only CNAME
-  `ukezjcnxjvkpkeezxaew.supabase.co` to `A 178.105.29.28`, **PROXIED**, with a
-  low TTL. Leave the Supabase custom domain active. The box already proxies all
-  non-function project paths back to the project host, so they continue to work
-  while DNS propagates.
-- [ ] **NOT RUN — (3) prove the new path and run controls** — first GET
-  `https://api.commonswarm.com/functions/v1/h0/agent-doc/cutover`. H0 exists only
-  on the box, so this is the required proof that the public name reaches the
-  box; a normal Supabase path cannot prove that while Cloudflare-for-SaaS still
-  owns the custom hostname. Only after H0 passes, run all five function smokes,
-  an Auth settings read, a membership REST read, a Realtime subscribe, one file
-  upload, one seat wake round trip, and the acceptable-use and install-page
-  checks from two networks.
-- [ ] **NOT RUN — (4) last reversible-state check, then the one-way door** — do
-  this only when every step-(3) control is green and the operator has added
-  `https://ukezjcnxjvkpkeezxaew.supabase.co/auth/v1/callback` as the Google
-  redirect URI. Deactivate the Supabase custom domain through the Supabase
-  Management API and record its response and time. Do not deactivate it in the
-  dashboard and do not let it lapse.
-- [ ] **NOT RUN — (5) sign in** — complete one GitHub sign-in end to end through
-  the public app. The GitHub OAuth app already lists both the project-URL and
-  `api.commonswarm.com` callbacks; make no GitHub console change. GoTrue's Site
-  URL and URI allow-list already contain the app's real URLs; make no GoTrue
-  change.
-- [ ] **NOT RUN** — keep
-  `https://ukezjcnxjvkpkeezxaew.supabase.co` and its hosted functions available
-  as the fallback for at least 48 hours.
-- [ ] **NOT RUN** — treat any production client timeout after cutover as a DNS
-  rollback signal. Do not tune Caddy, worker, queue, or client timeouts in place.
-
-## 7. Measure the hosted edge decrease
-
-- [ ] **NOT RUN** — before cutover, record 5-minute and 60-minute invocation counts
-  for `command`, `read`, `capability`, `activity`, and `h0` in the Supabase Edge
-  Functions dashboard or Log Explorer.
-- [ ] **NOT RUN** — after cutover, record the same windows. Function invocations at
-  Supabase should fall to zero after DNS caches drain, while Auth, REST, Storage,
-  and Realtime traffic continues at the project origin.
-- [ ] **NOT RUN** — investigate any hosted function invocation before declaring the
-  move complete. A nonzero count means a client bypasses the custom host or DNS has
-  not drained.
-- [ ] **NOT RUN** — compare end-to-end latency with the recorded 2026-09-16
-  baseline: box p50/p95 read members 2.77/3.32 s, read feed 2.07/2.93 s, command
-  receipt 1.68/2.11 s; production 0.85/1.16 s, 0.73/1.09 s, and 0.70/0.90 s.
-  The remedy is N-db, not timeout tuning.
-
-## 8. Roll back
-
-- [ ] **NOT RUN — before cutover step (4)** — rollback is only restoring the
-  DNS-only CNAME `ukezjcnxjvkpkeezxaew.supabase.co`. Do not change GitHub or
-  GoTrue. Wait the low TTL plus resolver cache time, then confirm H0 no longer
-  answers and Supabase project paths do.
-- [ ] **NOT RUN — after cutover step (4)** — keep the A record pointed at the
-  working box while the operator re-adds `api.commonswarm.com` as the Supabase
-  custom domain through the Management API. Publish the new Supabase DNS
-  verification record, wait for verification and custom-domain TLS to become
-  active, and only then restore the DNS-only CNAME
-  `ukezjcnxjvkpkeezxaew.supabase.co`.
-- [ ] **NOT RUN** — budget from minutes up to 48 hours for DNS propagation,
-  Supabase verification, and certificate activation after re-adding the custom
-  domain. This is not an immediate rollback. That delay is why deactivation is
-  the last step before final sign-in.
-- [ ] **NOT RUN** — make no GitHub console or GoTrue rollback changes; cutover
-  changed neither. Complete one GitHub sign-in through `api.commonswarm.com`
-  after the restored custom domain and CNAME are active.
-- [ ] **NOT RUN** — verify the Realtime subscribe, file upload, seat wake round
-  trip, acceptable-use page, install page, and all five Supabase-hosted functions.
-- [ ] **NOT RUN** — stop the box service only after the public host, custom
-  domain, DNS row, and production controls are all restored:
-
-  ```sh
-  cd /opt/commonswarm/current
-  docker compose -p commonswarm-edge -f deploy/edge-runtime/compose.yaml down
-  ```
-
-- [ ] **NOT RUN** — keep the box files for 48 hours after rollback. Then remove
-  them only under a separate approved cleanup plan.
+Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.

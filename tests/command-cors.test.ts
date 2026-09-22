@@ -10,6 +10,43 @@ import {
 } from "../supabase/functions/command/cors.js";
 
 const productionOrigin = "https://commonswarm.com";
+const wwwOrigin = "https://www.commonswarm.com";
+const deletedSiteOrigin = "https://coswarm-site.vercel.app";
+
+test("an empty origin setting allows only the commonswarm.com hosts", () => {
+  assert.deepEqual([...DEFAULT_COMMAND_ALLOWED_ORIGINS], [
+    productionOrigin,
+    wwwOrigin,
+  ]);
+  assert.deepEqual([...commandAllowedOrigins(undefined)], [
+    productionOrigin,
+    wwwOrigin,
+  ]);
+  assert.deepEqual([...commandAllowedOrigins("")], [
+    productionOrigin,
+    wwwOrigin,
+  ]);
+  for (const origin of [productionOrigin, wwwOrigin]) {
+    const response = commandPreflight(
+      new Request("https://example.supabase.co/functions/v1/command", {
+        method: "OPTIONS",
+        headers: { origin },
+      }),
+      commandAllowedOrigins(undefined),
+      undefined,
+    );
+    assert.equal(response.headers.get("access-control-allow-origin"), origin);
+  }
+  const deleted = commandPreflight(
+    new Request("https://example.supabase.co/functions/v1/command", {
+      method: "OPTIONS",
+      headers: { origin: deletedSiteOrigin },
+    }),
+    commandAllowedOrigins(undefined),
+    undefined,
+  );
+  assert.equal(deleted.headers.get("access-control-allow-origin"), null);
+});
 
 test("command preflight authorizes the production browser request", () => {
   assert.ok(DEFAULT_COMMAND_ALLOWED_ORIGINS.includes(productionOrigin));
@@ -137,6 +174,30 @@ function commandCorsIsWired(source: string): boolean {
       handler.indexOf("await handlePostRequest(request)")
   );
 }
+
+function capabilityDefaultIsPublicSite(source: string): boolean {
+  return source.includes(
+    'const DEFAULT_ALLOWED_ORIGIN = "https://commonswarm.com";',
+  ) && !source.includes("vercel.app");
+}
+
+test("capability default origin is https://commonswarm.com when its setting is empty", () => {
+  const source = readFileSync(
+    join(process.cwd(), "supabase", "functions", "capability", "index.ts"),
+    "utf8",
+  );
+  // The module opens a database connection at load, so this pin reads the source.
+  assert.equal(capabilityDefaultIsPublicSite(source), true);
+  assert.equal(
+    capabilityDefaultIsPublicSite(
+      source.replace(
+        'const DEFAULT_ALLOWED_ORIGIN = "https://commonswarm.com";',
+        'const DEFAULT_ALLOWED_ORIGIN = "https://coswarm-site.vercel.app";',
+      ),
+    ),
+    false,
+  );
+});
 
 test("edge entrypoint wires preflight before the command handler and CORS onto responses", () => {
   const source = readFileSync(

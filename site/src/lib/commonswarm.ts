@@ -252,7 +252,7 @@ export async function subscribeWorkspaceSignals(
  * A PROVIDER THE DEPLOYMENT HAS NOT ENABLED DOES NOT REACH THE CATCH BLOCK BELOW, AND THAT IS
  * WHY THE FLIP ORDER IS LOAD-BEARING. `signInWithOAuth` builds the authorize URL in the
  * browser and navigates to it; it does not ask GoTrue anything first. So a provider that is
- * off in the Supabase dashboard produces no client error at all — the browser lands on the
+ * off in GoTrue produces no client error at all — the browser lands on the
  * API host and the reader sees raw JSON. Measured 2026-09-04:
  *
  *   GET https://api.commonswarm.com/auth/v1/authorize?provider=google
@@ -261,8 +261,8 @@ export async function subscribeWorkspaceSignals(
  *
  * No handler here can improve that page, which is why nothing chooses the buttons but the
  * deployment itself: ProviderButtons.astro reads GoTrue's /auth/v1/settings at build time, so
- * a provider that is off cannot get a button. Enable it in the dashboard, then rebuild and
- * deploy — docs/design/2026-09-04-GOOGLE-SIGNIN.md gives the order and the reason.
+ * a provider that is off cannot get a button. Change GoTrue on the server, then rebuild
+ * and publish with deploy/site/deploy.sh. docs/design/2026-09-04-GOOGLE-SIGNIN.md gives the order.
  */
 export async function signInWithProvider(
   provider: string,
@@ -293,11 +293,9 @@ export async function signInWithProvider(
 /**
  * Too many links asked for too quickly — the address is fine, the pace is not.
  *
- * ★ TODAY THIS IS ALMOST ALWAYS OUR FAULT RATHER THAN THE CALLER'S. With no custom SMTP
- * configured, the built-in sender permits 2 emails per hour for the ENTIRE PROJECT, and the
- * Management API refuses to raise the limit without SMTP credentials. A first-time visitor
- * can therefore be rate limited by somebody else's signup. Whatever message is shown for this
- * must not imply the user did anything, and must offer the other door.
+ * Sign-in email is sent through Resend. Do not describe the Supabase built-in 2-per-hour
+ * sender as production. The send rate on the server is not established. Whatever message
+ * is shown for this must not imply the user did anything, and must offer the other door.
  */
 export class EmailRateLimited extends Error {
   readonly retryAfterSeconds: number | null;

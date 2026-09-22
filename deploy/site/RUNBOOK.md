@@ -1,6 +1,6 @@
-# CommonSwarm site move to Hetzner
+# CommonSwarm site on Hetzner
 
-Status: **PRODUCTION CUTOVER NOT RUN**. The lead deployed this lane to `yulan-vps-1` and checked it through Cloudflare at `site-staging.commonswarm.com`. Production DNS still points to Vercel.
+Status: the site cutover is done. https://commonswarm.com is served by Caddy on yulan-vps-1. Publish with `deploy/site/deploy.sh yulan-vps-1`. The checks below are the ones used for that cutover. The Vercel project `coswarm-site` is deleted.
 
 ## Before the first deploy
 
@@ -84,15 +84,4 @@ ln -sfn releases/RELEASE_TO_RESTORE current.next
 mv -Tf current.next current
 ```
 
-For a full rollback to Vercel, restore the former Cloudflare DNS records for both `commonswarm.com` and `www.commonswarm.com`. Then run the parity check and production controls against `https://commonswarm.com`.
-
-## Retire Vercel
-
-Delete the Vercel `coswarm-site` project only after the operator confirms all of these points:
-
-- DNS has served the Hetzner box for the full old TTL window.
-- The parity check and production controls pass through Cloudflare.
-- Sign-in and `/app` work in a browser.
-- The Vercel DNS values needed for rollback are recorded.
-
-The Vercel project name is intentionally old. Do not delete it before this confirmation.
+Roll back a site release on the server by moving the `current` symlink. Do not point DNS at Vercel.
