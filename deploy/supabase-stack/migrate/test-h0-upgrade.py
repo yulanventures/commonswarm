@@ -122,9 +122,13 @@ def main():
             poll_mutations = {
                 'poll column': 'ALTER TABLE swarm.h0_poll_locks DROP COLUMN waiting',
                 'poll unique active index': 'DROP INDEX swarm.h0_poll_batches_one_active',
+                'poll wrong active predicate': "DROP INDEX swarm.h0_poll_batches_one_active; CREATE UNIQUE INDEX h0_poll_batches_one_active ON swarm.h0_poll_batches (workspace_id, principal_id) WHERE status <> 'active'",
                 'poll guard': 'ALTER TABLE swarm.h0_poll_batches DISABLE TRIGGER h0_poll_batches_guard',
+                'poll wrong trigger function': "CREATE FUNCTION swarm.h0_wrong_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'; DROP TRIGGER h0_poll_batches_guard ON swarm.h0_poll_batches; CREATE TRIGGER h0_poll_batches_guard BEFORE UPDATE OR DELETE ON swarm.h0_poll_batches FOR EACH ROW EXECUTE FUNCTION swarm.h0_wrong_guard()",
                 'poll guard body': "CREATE OR REPLACE FUNCTION swarm.h0_poll_batches_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'",
                 'poll grant': 'REVOKE UPDATE ON swarm.h0_poll_locks FROM swarm_command',
+                'poll truncate grant': 'GRANT TRUNCATE ON swarm.h0_poll_locks TO swarm_command',
+                'poll purge search path': 'ALTER FUNCTION swarm.purge_expired_h0_poll_batches() RESET search_path',
                 'poll purge': 'DROP FUNCTION swarm.purge_expired_h0_poll_batches() CASCADE',
                 'poll cron': "DELETE FROM cron.job WHERE jobname='swarm-purge-h0-poll-batches'",
             }
@@ -132,6 +136,29 @@ def main():
                 reset(); check(helper(), 'setup '+label)
                 check(sql(statement, 'h0_fixture'), 'mutate '+label)
                 rejected(label, helper())
+            # Release procedure section 5: each standalone proof must change
+            # from f to t on its own migration, without later H0 objects.
+            reset()
+            check(sql('\\i /migrations/20260916000001_agent_join_credentials.sql\n'
+                      '\\i /migrations/20260916000002_agent_join_attempts.sql\n', 'h0_fixture'), 'proof join setup')
+            proof_dir = '/repo/deploy/release-proofs/h0'
+            def catalog(version):
+                statement = f'\\i {proof_dir}/{version}-catalog.sql\n\\echo :catalog_ok\n'
+                return check(sql(statement, 'h0_fixture'), 'catalog proof '+version).splitlines()[-1]
+            for version, migration in (
+                ('20260922000001', '20260922000001_h0_poll_lock_and_batch.sql'),
+                ('20260922000002', '20260922000002_h0_poll_wait_admission.sql'),
+                ('20260922000003', '20260922000003_h0_poll_batch_retention.sql'),
+            ):
+                assert catalog(version) == 'f', version+' absent proof was true'
+                check(sql('\\i /migrations/'+migration+'\n', 'h0_fixture'), 'apply '+version)
+                assert catalog(version) == 't', version+' applied proof was false'
+                check(sql('\\i '+proof_dir+'/'+version+'-functional.sql\n', 'h0_fixture'),
+                      'functional proof '+version)
+                passed += 1; print('PASS release proofs '+version)
+            check(sql('DROP INDEX swarm.h0_poll_batches_one_active', 'h0_fixture'), 'partial proof mutation')
+            assert catalog('20260922000001') == 'f', 'partial 000001 proof was true'
+            passed += 1; print('PASS partial release proof refused')
             # Both verification and apply branches must reject a wrong target marker.
             check(sql("ALTER DATABASE h0_fixture SET commonswarm.stack_identity='wrong-target'"), 'wrong identity')
             rejected('present branch target identity', helper())
@@ -140,6 +167,13 @@ def main():
             rejected('partial catalog', helper()); assert count() == '1'
             reset(); check(sql("CREATE FUNCTION swarm.agent_join_credentials_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'", 'h0_fixture'), 'orphan guard')
             rejected('orphan guard without tables', helper()); assert count() == '0'
+            for label, statement in (
+                ('orphan retention function', "CREATE FUNCTION swarm.h0_poll_batch_retention_days() RETURNS integer LANGUAGE sql AS 'SELECT 2'"),
+                ('orphan purge function', "CREATE FUNCTION swarm.purge_expired_h0_poll_batches() RETURNS integer LANGUAGE sql AS 'SELECT 0'"),
+                ('orphan purge cron', "INSERT INTO cron.job(jobname,schedule,command,database,username,active) VALUES ('swarm-purge-h0-poll-batches','29 4 * * *','SELECT 1',current_database(),current_user,true)"),
+            ):
+                reset(); check(sql(statement,'h0_fixture'),'setup '+label)
+                rejected(label, helper())
             mutations = {
                 'column nullability': 'ALTER TABLE swarm.agent_join_credentials ALTER COLUMN locator DROP NOT NULL',
                 'constraint': 'ALTER TABLE swarm.agent_join_credentials DROP CONSTRAINT agent_join_credentials_seat_cap_check',

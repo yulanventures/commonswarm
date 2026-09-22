@@ -598,7 +598,47 @@ test("a second concurrent poll gets the documented response", async () => {
   assert.ok(Date.now() - started >= 1_500, "the first poll did not wait");
 });
 
-test("a stalled slice cannot return a batch after its seat lock ends", { timeout: 25_000 }, async () => {
+test("a waiting slice and a second poll use one principal-seat lock order", { timeout: 20_000 }, async () => {
+  const seat = await makeSeat();
+  let firstSettled = false;
+  const first = h0("poll", seat.token, { wait: 5 });
+  void first.then(() => { firstSettled = true; }, () => { firstSettled = true; });
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const rows = await sql<{ waiting: boolean }[]>`
+      SELECT waiting FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid
+    `;
+    if (rows[0]?.waiting) break;
+    await delay(40);
+  }
+  const waiting = await sql<{ waiting: boolean }[]>`
+    SELECT waiting FROM swarm.h0_poll_locks
+    WHERE principal_id = ${seat.principalId}::uuid
+  `;
+  assert.equal(waiting[0]?.waiting, true, "first poll did not enter its wait");
+  let second: Promise<HttpResult> | undefined;
+  await sql.begin(async (tx) => {
+    await tx`
+      SELECT principal_id FROM swarm.agent_principals
+      WHERE principal_id = ${seat.principalId}::uuid FOR SHARE
+    `;
+    // The first slice now waits for principal FOR UPDATE. In the old order
+    // it held the seat row while waiting to upgrade its principal lock.
+    await delay(1_200);
+    second = h0("poll", seat.token, { wait: 0 });
+    await delay(1_200);
+    assert.equal(firstSettled, false, "first poll ended before the overlap");
+  });
+  const overlap = await second!;
+  assert.equal(overlap.status, H0_POLL_IN_PROGRESS_STATUS, JSON.stringify(overlap.body));
+  assert.equal(overlap.body.error, H0_POLL_IN_PROGRESS);
+  assert.equal(firstSettled, false, "first poll stopped waiting after the overlap");
+  const finished = await first;
+  assert.equal(finished.status, 200, JSON.stringify(finished.body));
+});
+
+test("a slice blocked on its seat row cannot collect after the lock ends", { timeout: 25_000 }, async () => {
   const seat = await makeSeat(spareSecret);
   let firstSettled = false;
   const firstPromise = h0("poll", seat.token, { wait: 4 });

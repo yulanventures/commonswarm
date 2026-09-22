@@ -352,3 +352,84 @@ Agent-Family: openai
 Agent-Tool: codex 0.156.0
 Agent-Model-Source: runtime-ambiguous
 ```
+
+### Fold 3 lead measurements at `f1ba1fb3`
+
+Measured by the lead outside the sandbox at `f1ba1fb3`; these supersede the
+Maker's sandbox gate figures above, which remain as a record of that sandbox:
+
+- `npm run build`: exit 0.
+- `npm test`: 896 pass.
+- `npm run test:p1-cli`: 831 pass.
+- `npm run check:tests`: exit 0.
+- `npm run check:edge`: exit 0.
+- `npm run test:p1-server`: 237 pass.
+- `npm run test:h0-counts`: 14 tests OK.
+- `npm run test:h0-upgrade:local`: exit 0.
+- `bash scripts/build-release.sh`: exit 0.
+- `git diff --check`: exit 0.
+- Mutation: without `FOR UPDATE` at `poll-ack.ts:764`, the stalled-slice
+  test failed because the stalled poll returned the delivery. After the
+  `FOR UPDATE` was restored, it passed.
+
+The Fold 3 paragraph saying that no commit was made describes the Maker's
+sandbox state before the lead committed `f1ba1fb3`.
+
+## Fold 4
+
+A wait slice and the opening poll transaction now lock the agent principal row
+`FOR UPDATE` before session proof, the seat row, and delivery work. This is the
+same row that `claimAgentInbox` locks. The advisory admission and release paths
+still take advisory then seat row; neither takes principal or advisory after
+seat row. SQLSTATE `40P01` and `40001` map to HTTP 503
+`h0_transaction_retryable`. The overlapping-polls server test holds a principal
+share lock so an old-order slice would hold the seat row while waiting to
+upgrade principal; it requires the second poll to return 409 and the first to
+keep waiting. The lead must run this test and the old-order mutation outside
+the sandbox. For that mutation, remove the `await lockPollPrincipal` call before
+`sessionOrRefusal` in both the opening and slice transactions.
+
+The post-upgrade cron count check adds the purge job only when the baseline
+lacks it. The Python count gate now includes a recovery baseline that already
+has it once and a duplicate negative. The upgrade helper refuses orphan poll
+purge functions, the retention function, and the purge cron job when both
+poll tables are absent. The Docker gate has mutations for those orphans.
+
+The poll catalog check now compares exact JSON sets for relation metadata,
+columns and defaults, constraints, indexes, triggers, policies, and function
+config/ACL, alongside the earlier function body hashes and cron check. The
+Docker mutation list adds the wrong active predicate, wrong trigger target,
+missing SECURITY DEFINER search path, and TRUNCATE grant. The lead must run
+this gate and a mutation of the exact predicate check outside the sandbox.
+For that mutation, remove the exact `indexes` comparison in
+`verify-h0-poll-catalog.sql` (the `SELECT ... pg_get_indexdef` and following
+`IF actual IS DISTINCT FROM item->'indexes'` lines). The old broad active-index
+check then accepts the wrong-predicate Docker case, so its rejection assertion
+must fail. Restore the exact comparison; the rejection must pass.
+
+The stalled-slice test is named for what it tests: a slice blocked on the seat
+row cannot collect after the lock ends. A slice that stalls for more than about
+6 seconds in one transaction after its hold check can return an active batch
+that a later poll also replays. Both responses have the same leases and one
+`listener_instance_id`; this is like a lost-response replay, not a second claim.
+
+`deploy/release-proofs/h0/` contains catalog and read-only functional SQL for
+000001, 000002, and 000003. Each catalog file ends with its own `\gset` of
+`catalog_ok`. The Docker upgrade test applies these migrations one at a time
+and checks each catalog proof is `f` before and `t` after, plus a dropped-index
+partial state that must be `f`.
+
+Fold 4 Maker sandbox checks: `npm run build` exit 0; `npm run check:tests`
+exit 0; `npm run check:edge` exit 0; Python post-upgrade counts 16 tests OK;
+`git diff --check` exit 0. Database, Docker, server, and mutation controls
+are not established here. No production host was contacted. The lead will
+commit after those gates and correct any PostgreSQL deparse mismatch found by
+the exact JSON verifier.
+The focused `tests/p1-cli/h0-poll-contract.test.ts` pure gate passed 5 tests.
+
+The Maker also ran the pure `npm test` and `npm run test:p1-cli` gates in this
+sandbox. Both exited 1 on sandbox `listen EPERM` and `spawn EPERM` failures.
+Those results do not establish a product test failure or a pass for Fold 4.
+`python3 -m py_compile` could not write its cache outside the sandbox;
+`ast.parse` of both changed Python test files passed. `bash -n` of both
+changed shell scripts passed.

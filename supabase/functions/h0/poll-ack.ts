@@ -130,6 +130,13 @@ export function h0VerbFailure(): Response {
   return json(500, { error: "internal_error" });
 }
 
+export function h0RetryableDatabaseFailure(error: unknown): Response | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = error.code;
+  if (code !== "40P01" && code !== "40001") return null;
+  return json(503, { error: "h0_transaction_retryable" });
+}
+
 export class H0ClientAbort extends Error {
   constructor() {
     super("The poll client closed the request.");
@@ -306,6 +313,20 @@ async function sessionOrRefusal(
       }
       : null,
   };
+}
+
+// H0 transaction order: agent principal FOR UPDATE, session row, seat lock row,
+// then batch and delivery rows. Admission and release take advisory -> seat row;
+// neither takes the principal after the seat row or takes advisory after it.
+async function lockPollPrincipal(tx: Tx, seat: Seat): Promise<void> {
+  const rows = await tx<{ principal_id: string }[]>`
+    SELECT principal_id::text
+    FROM swarm.agent_principals
+    WHERE workspace_id = ${seat.workspaceId}::uuid
+      AND principal_id = ${seat.principalId}::uuid
+    FOR UPDATE
+  `;
+  if (rows.length !== 1) throw new Error("h0 poll principal missing");
 }
 
 function refsFrom(rows: Array<{
@@ -839,6 +860,7 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
       await setRole(tx);
       const auth = await authenticate(tx, tokenHash);
       if (!auth.ok) return { acquired: false as const, response: json(auth.status, { error: auth.error, message: auth.message }) };
+      await lockPollPrincipal(tx, auth.seat);
       const session = await sessionOrRefusal(tx, auth.seat, request);
       if (!session.ok) {
         return {
@@ -903,6 +925,7 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
                 remainingMs: 0,
               };
             }
+            await lockPollPrincipal(tx, auth.seat);
             const session = await sessionOrRefusal(tx, auth.seat, request);
             if (!session.ok) {
               return {

@@ -55,6 +55,12 @@ compare_cron_job_listings() { cmp -s "$1" "$2"; }
         text=self.actual.replace('attempts|0','attempts|4').replace('credentials|0','credentials|2')
         (self.art/'source-counts.tsv').write_text(text);(self.root/'counts').write_text(text)
         self.assertEqual(self.run_check().returncode,0)
+    def test_recovery_keeps_existing_purge_job_once(self):
+        (self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n'+self.newcron)
+        self.assertEqual(self.run_check().returncode,0)
+    def test_duplicate_purge_in_baseline_fails(self):
+        (self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n'+self.newcron+self.newcron)
+        self.assertNotEqual(self.run_check().returncode,0)
     def test_new_table_with_rows_fails(self):
         (self.root/'counts').write_text(self.actual.replace('attempts|0','attempts|1'))
         self.assertNotEqual(self.run_check().returncode,0)

@@ -70,9 +70,9 @@ if [[ "$join_count" -eq 0 ]]; then
   fi
 fi
 if [[ "$poll_count" -eq 0 ]]; then
-  poll_guard_count=$(target_psql -t -A -c "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='swarm' AND p.proname IN ('h0_poll_locks_guard','h0_poll_batches_guard');")
-  if [[ "$poll_guard_count" -ne 0 ]]; then
-    echo "Corrupt/mixed state: H0 poll guards exist without H0 poll tables" >&2
+  poll_orphan_count=$(target_psql -t -A -c "SELECT (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='swarm' AND p.proname IN ('h0_poll_locks_guard','h0_poll_batches_guard','h0_poll_batch_retention_days','purge_expired_h0_poll_batches')) + (SELECT count(*) FROM cron.job WHERE jobname='swarm-purge-h0-poll-batches');")
+  if [[ "$poll_orphan_count" -ne 0 ]]; then
+    echo "Corrupt/mixed state: H0 poll functions or cron job exist without H0 poll tables" >&2
     exit 1
   fi
 fi

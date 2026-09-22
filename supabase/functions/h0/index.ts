@@ -6,6 +6,7 @@ import {
 import {
   H0ClientAbort,
   h0VerbFailure,
+  h0RetryableDatabaseFailure,
   handleH0AckRequest,
   handleH0PollRequest,
 } from "./poll-ack.ts";
@@ -42,12 +43,16 @@ Deno.serve((request) => {
     if (verb === "poll") {
       return handleH0PollRequest(request).catch((error: unknown) => {
         if (error instanceof H0ClientAbort) return new Response(null, { status: 204 });
+        const retryable = h0RetryableDatabaseFailure(error);
+        if (retryable !== null) return retryable;
         console.error("h0 poll failed");
         return h0VerbFailure();
       });
     }
     if (verb === "ack") {
-      return handleH0AckRequest(request).catch(() => {
+      return handleH0AckRequest(request).catch((error: unknown) => {
+        const retryable = h0RetryableDatabaseFailure(error);
+        if (retryable !== null) return retryable;
         console.error("h0 ack failed");
         return h0VerbFailure();
       });
