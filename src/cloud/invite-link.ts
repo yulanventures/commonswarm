@@ -21,13 +21,14 @@ const INVITE_WRAPPER_ERROR =
 const ACCEPT_INPUT_ERROR =
   "accept input was not recognized; use an https://...#invite=<payload> link, cswarm://accept/<payload>, or a swm_inv_ invitation capability";
 
-/* Both origins serve the SAME production project: api.commonswarm.com is the active custom
- * domain (2026-08-17) and the supabase.co host keeps working underneath it. Links minted by
- * clients discovered under either URL must accept without the unknown-origin friction —
- * before this set existed, a link carrying api.commonswarm.com was REFUSED in agent mode. */
+/* The production API origin is https://api.commonswarm.com. The old supabase.co host
+ * is retired: an invite that still names it is refused, and the reader is asked for a
+ * new invite. Before this set existed, a link carrying api.commonswarm.com was refused
+ * in agent mode. */
+const RETIRED_CLOUD_ORIGIN = "https://ukezjcnxjvkpkeezxaew.supabase.co";
+
 export const PRODUCTION_CLOUD_ORIGINS: ReadonlySet<string> = new Set([
   "https://api.commonswarm.com",
-  "https://ukezjcnxjvkpkeezxaew.supabase.co",
 ]);
 
 export interface InviteLinkPayload {
@@ -282,6 +283,11 @@ export async function requirePinnedOrigin(
   target: CloudTarget,
   options: OriginPinOptions,
 ): Promise<void> {
+  if (target.url === RETIRED_CLOUD_ORIGIN) {
+    throw new Error(
+      `invite link targets retired host ${RETIRED_CLOUD_ORIGIN}. Ask for a new invite.`,
+    );
+  }
   if (PRODUCTION_CLOUD_ORIGINS.has(target.url) || loopback(target)) return;
   if (
     options.interactive &&

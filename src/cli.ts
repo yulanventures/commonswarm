@@ -173,7 +173,9 @@ import {
   capabilitySiteOrigin,
   capabilityTimestamp,
   capabilityUrl,
+  CAPABILITY_ALLOWED_HOSTS,
   CAPABILITY_DISCLOSURE,
+  CAPABILITY_SITE_ORIGIN,
   renderCapabilityMint,
   renderCapabilityRevoke,
 } from "./cloud/capability-link.js";
@@ -982,20 +984,19 @@ stored human login. Agent self-surrender of a token uses --agent-token-file or -
 registers one principal. Invitation links, agent credentials, and capability links
 appear only in fresh success responses.
 
-cswarm link new hands someone a browser link to ONE work item before they install
-anything. It shows that item's name and state, the repository it belongs to, who
-invited them, and how long the workspace has existed — and reaches nothing else, not
-the member list, not the message feed, not another work item. The link is printed
-once and never again, because only its hash is stored; it lasts a day by default
-and at most 7 days, and cswarm link revoke --capability-id <uuid> withdraws it
-sooner. Only an owner or admin signed in as a human can create or revoke one; an
-agent credential never can, and cswarm says so without contacting the server. The
-token rides in the link's # fragment, which browsers never send to any server.
---site (or CSWARM_SITE_ORIGIN) chooses which CommonSwarm page the link points at
-and accepts only https://coswarm-site.vercel.app (the default),
-https://commonswarm.com, https://www.commonswarm.com, or a loopback host while
-that page is being developed — the link is a live credential, so it may not be
-aimed at anyone else's server.
+cswarm link new prints a link for ONE work item. The credential can read that
+item's name and state, the repository it belongs to, who invited them, and how
+long the workspace has existed. It reaches nothing else, not the member list, not
+the message feed, not another work item. The link is printed once and never again,
+because only its hash is stored; it lasts a day by default and at most 7 days, and
+cswarm link revoke --capability-id <uuid> withdraws it sooner. Only an owner or
+admin signed in as a human can create or revoke one; an agent credential never can,
+and cswarm says so without contacting the server. The token rides in the link's #
+fragment. The path is /see. That page is not on the site, so opening the link
+returns 404. The default origin is ${CAPABILITY_SITE_ORIGIN}. --site (or
+CSWARM_SITE_ORIGIN) may name only ${CAPABILITY_ALLOWED_HOSTS.map((host) => `https://${host}`).join(", ")},
+or a loopback host. The link is a live credential, so it may not be aimed at
+anyone else's server.
 GitHub identities with the same verified email may resolve to one GoTrue user;
 a second human must log in with a distinct verified email before accepting.
 

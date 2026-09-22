@@ -464,17 +464,29 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     /client_ip_headers CF-Connecting-IP X-Forwarded-For/,
   );
 
-  const upstreamHost = "ukezjcnxjvkpkeezxaew.supabase.co";
-  assert.equal(
-    (caddy.match(new RegExp(`header_up Host ${upstreamHost}`, "g")) ?? [])
-      .length,
-    2,
+  // deploy/edge-runtime/commonswarm.caddy is not the live API file. It remains
+  // the pre-cutover fragment, and commonswarm-api-fallback.caddy is a copy of it.
+  // The live routes are deploy/supabase-stack/commonswarm-api.caddy.
+  const live = await readFile(
+    resolve(repoRoot, "deploy/supabase-stack/commonswarm-api.caddy"),
+    "utf8",
   );
-  assert.equal(
-    (caddy.match(
-      new RegExp(`header_up X-Forwarded-Host ${upstreamHost}`, "g"),
-    ) ?? []).length,
-    2,
+  assert.doesNotMatch(live, /ukezjcnxjvkpkeezxaew\.supabase\.co/);
+  assert.match(
+    live,
+    /handle \/auth\/v1\/\* \{\s*uri strip_prefix \/auth\/v1\s*reverse_proxy 127\.0\.0\.1:18001/,
+  );
+  assert.match(
+    live,
+    /handle \/rest\/v1\/\* \{\s*uri strip_prefix \/rest\/v1\s*reverse_proxy 127\.0\.0\.1:18002/,
+  );
+  assert.match(
+    live,
+    /handle \/storage\/v1\/\* \{\s*uri strip_prefix \/storage\/v1\s*reverse_proxy 127\.0\.0\.1:18004/,
+  );
+  assert.match(
+    live,
+    /reverse_proxy 127\.0\.0\.1:18003 \{\s*header_up Host realtime-dev\s*header_up X-Forwarded-Host \{host\}\s*flush_interval -1\s*transport http \{\s*versions 1\.1/,
   );
   assert.equal(
     (caddy.match(/header_up X-Forwarded-Proto https/g) ?? []).length,
