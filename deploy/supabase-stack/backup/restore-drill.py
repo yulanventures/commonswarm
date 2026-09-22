@@ -238,21 +238,21 @@ def run_drill(workdir, unique_label):
     net_name = 'cold-net-' + secrets.token_hex(4)
     image = 'public.ecr.aws/supabase/postgres:17.6.1.147'
     stack_dir = STACK_DIR
-    
+
     run_cmd(['docker', 'network', 'create', '--internal', '--label', unique_label, net_name])
-    
+
     pw = secrets.token_hex(24)
     jwt_secret = secrets.token_hex(32)
     env_file = workdir / 'database.env'
     env_content = f"POSTGRES_PASSWORD={pw}\nJWT_SECRET={jwt_secret}\nJWT_EXP=3600\nBACKUP_RO_PASSWORD={secrets.token_hex(24)}\nCOMMONSWARM_EDGE_DB_PASSWORD={secrets.token_hex(24)}\n"
     env_file.write_text(env_content)
     env_file.chmod(0o600)
-    
+
     run_cmd(['docker', 'run', '-d', '--name', db_name, '--network', net_name, '--network-alias', 'cold-db', '--memory', '768m', '--env-file', str(env_file), '--label', unique_label, image, 'postgres', '-D', '/etc/postgresql', '-c', 'cron.launch_active_jobs=off', '-c', 'shared_buffers=64MB', '-c', 'max_connections=40'])
-    
+
     def sql(q):
         return run_cmd(['docker', 'exec', '-i', db_name, 'sh', '-c', 'PGPASSWORD="$POSTGRES_PASSWORD" psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U supabase_admin -d postgres -Atq'], input=q, check=False, timeout=15)
-    
+
     ready = False
     for _ in range(180):
         r = sql("SELECT setting FROM pg_settings WHERE name='cron.launch_active_jobs';")
@@ -262,22 +262,22 @@ def run_drill(workdir, unique_label):
         time.sleep(1)
     if not ready:
         raise RuntimeError("isolated database not ready/cron not disabled")
-    
+
     r_inspect = run_cmd(['docker', 'inspect', db_name])
     address = assert_owned_db(json.loads(r_inspect.stdout)[0], unique_label, net_name)
 
     setup_q = f"ALTER DATABASE postgres SET \"commonswarm.stack_identity\" TO 'n-db-target-v1'; ALTER DATABASE postgres SET \"commonswarm.local_rehearsal\" TO '1'; ALTER DATABASE postgres SET \"commonswarm.local_target_address\" TO '{address}';"
     if sql(setup_q).returncode != 0:
         raise RuntimeError("Failed to set local rehearsal variables")
-    
+
     service_file = workdir / 'service'
     service_file.write_text("[target]\nhost=cold-db\nport=5432\ndbname=postgres\nuser=supabase_admin\nsslmode=disable\n")
     service_file.chmod(0o600)
-    
+
     pass_file = workdir / 'pass'
     pass_file.write_text(f"cold-db:5432:postgres:supabase_admin:{pw}\n")
     pass_file.chmod(0o600)
-    
+
     scripts = ['restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh']
     for script in scripts:
         args = ['docker', 'run', '--rm', '--network', net_name, '--env-file', str(env_file), '-e', 'MIGRATION_ARTIFACT_DIR=/artifacts', '-e', 'PGSERVICEFILE=/run/service', '-e', 'PGPASSFILE=/run/pass', '-e', 'TARGET_DATABASE_URL=isolated-cold-recovery', '-v', f"{stack_dir}:/work:ro", '-v', f"{db_artifact}:/artifacts", '-v', f"{service_file}:/run/service:ro", '-v', f"{pass_file}:/run/pass:ro", '--label', unique_label, '--entrypoint', '/bin/bash', image, f"/work/migrate/{script}"]
@@ -285,19 +285,19 @@ def run_drill(workdir, unique_label):
         (workdir / f"{script}.log").write_text(res.stdout + '\n' + res.stderr)
         if res.returncode != 0:
             raise RuntimeError(f"Script {script} failed")
-    
+
     if int(sql('SELECT count(*) FROM storage.objects;').stdout.strip()) != len(rows):
         raise ValueError('restored file row count mismatch')
     tenant_prefix = destination.split('yulan-vps-1-backups/', 1)[1] + '/objects/commonswarm'
     endpoint, acc_key, digest, session = generate_temp_credentials(tenant_prefix)
-    
+
     def enc(v): return base64.urlsafe_b64encode(json.dumps(v, separators=(',', ':')).encode('utf-8')).decode('utf-8').rstrip('=')
     now_t = int(time.time())
     def make_jwt(role):
         data = enc({'alg': 'HS256', 'typ': 'JWT'}) + '.' + enc({'role': role, 'iss': 'supabase', 'iat': now_t, 'exp': now_t + 3600})
         sig = base64.urlsafe_b64encode(hmac.new(jwt_secret.encode('utf-8'), data.encode('utf-8'), hashlib.sha256).digest()).decode('utf-8').rstrip('=')
         return data + '.' + sig
-    
+
     storage_env = {
         'ANON_KEY': make_jwt('anon'),
         'SERVICE_KEY': make_jwt('service_role'),
@@ -326,14 +326,14 @@ def run_drill(workdir, unique_label):
     storage_env_file = workdir / 'storage.env'
     storage_env_file.write_text(''.join(f"{k}={v}\n" for k, v in storage_env.items()))
     storage_env_file.chmod(0o600)
-    
+
     storage_name = 'cold-storage-' + secrets.token_hex(4)
     run_cmd(['docker', 'create', '--name', storage_name, '--network', net_name, '--memory', '384m', '--env-file', str(storage_env_file), '--label', unique_label, 'public.ecr.aws/supabase/storage-api:v1.77.5'])
     egress_name = net_name + '-egress'
     run_cmd(['docker', 'network', 'create', '--label', unique_label, egress_name])
     run_cmd(['docker', 'network', 'connect', egress_name, storage_name])
     run_cmd(['docker', 'start', storage_name])
-    
+
     s_ready = False
     for _ in range(120):
         r = run_cmd(['docker', 'exec', storage_name, 'node', '-e', "fetch('http://127.0.0.1:5000/status',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"], check=False, timeout=10)
@@ -343,20 +343,20 @@ def run_drill(workdir, unique_label):
         time.sleep(1)
     if not s_ready:
         raise RuntimeError("isolated storage API not ready")
-    
+
     items_expected = fetch_offsite_bytes(rows, endpoint, acc_key, digest, session, tenant_prefix)
     results = fetch_api_bytes(items_expected, storage_name)
-    
+
     if len(results) != len(rows):
         raise RuntimeError("API results length mismatch")
-    
+
     if sorted(x['index'] for x in results) != list(range(len(rows))):
         raise RuntimeError("Duplicate or missing indices in API results")
-    
+
     matched_count = sum(1 for x in results if x.get('matches') is True and x.get('status') == 200)
     if matched_count != len(rows):
         raise RuntimeError("Object match failed for some items")
-    
+
     return {'destination': destination, 'objects': len(rows), 'tables': len(counts),
             'database_verified': True, 'all_files_verified': True}
 
