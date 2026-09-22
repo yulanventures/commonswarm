@@ -36,6 +36,7 @@ import type {
   SignalCursor,
 } from "../src/cloud/signals.js";
 import {
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
   SIGNAL_READ_TIMEOUT_MS,
   SignalHttpError,
   SignalTransportError,
@@ -2784,7 +2785,7 @@ test("MAJOR-4: delivery_unavailable at exact lease expiry clears stale state", a
   assert.equal(journal.record.active, null);
 });
 
-test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss", async () => {
+test("MAJOR-4: delivery_unavailable before lease expiry is retried, not a credential stop", async () => {
   const directNote = note(
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaad4",
     "2026-07-30T00:00:01.000Z",
@@ -2804,6 +2805,8 @@ test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss"
     senderOwnerRelation: "same_owner",
     updatedAt: "2026-07-30T00:00:02.000Z",
   }));
+  const controller = new AbortController();
+  let ackAttempts = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -2813,17 +2816,23 @@ test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss"
     deliveryClient: {
       async claimAgentInbox() { throw new Error("claim must not run"); },
       async ackAgentDelivery() {
+        ackAttempts += 1;
         throw new DeliveryHttpError(403, "delivery_unavailable", "unavailable");
       },
     },
     credentialSession: { async bearer() { return "token"; } },
     store,
     model: new FakeModel(),
+    signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:02:00.000Z"),
-    sleep: async () => undefined,
+    sleep: async () => {
+      if (ackAttempts >= 2) controller.abort();
+    },
     readPage: async () => durablePage([], 1),
   });
-  assert.equal(stop.reason, "credential");
+  assert.equal(stop.reason, "cancelled");
+  assert.notEqual(stop.reason, "credential");
+  assert.ok(ackAttempts >= 2);
   assert.equal(journal.record.active?.phase, "ack_pending");
 });
 
@@ -3122,6 +3131,32 @@ test("runtime refuses old edges before starting or prompting a model", async () 
   assert.equal(model.closes, 1);
 });
 
+test("unconfirmed HTTP 403 retries and recovers when the read succeeds", async () => {
+  const model = new FakeModel();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model,
+    sleep: async () => undefined,
+    onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads += 1;
+      if (reads < 3) throw new SignalHttpError(403);
+      return page([]);
+    },
+  });
+  assert.ok(reads >= 3, "the read must be attempted again after the bare 403");
+  assert.notEqual(stop.reason, "credential");
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(events.some((event) => event.type === "ready"));
+  assert.equal(model.starts, 0);
+});
+
 test("runtime reports agent read revocation as a credential stop", async () => {
   const model = new FakeModel();
   const stop = await runListenerRuntime({
@@ -3132,12 +3167,65 @@ test("runtime reports agent read revocation as a credential stop", async () => {
     store: new MemoryStore(),
     model,
     readPage: async () => {
-      throw new SignalHttpError(403);
+      throw new SignalHttpError(403, null, {
+        error: "forbidden",
+        requestId: null,
+        retryable: null,
+      });
     },
   });
   assert.equal(stop.reason, "credential");
   assert.equal(model.starts, 0);
   assert.equal(model.closes, 1);
+});
+
+test("HTTP 403 forbidden stops the listener with credential_stopped", async () => {
+  const model = new FakeModel();
+  const runtimeStop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model,
+    readPage: async () => {
+      throw new SignalHttpError(403, null, {
+        error: "forbidden",
+        requestId: null,
+        retryable: null,
+      });
+    },
+  });
+  assert.equal(runtimeStop.reason, "credential");
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-stop",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-stop",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      restart: { maxAttempts: 3, sleep: async () => undefined, random: () => 0 },
+      run: async () => runtimeStop,
+    });
+    assert.equal(status.state, "failed");
+    assert.equal(status.lastErrorCode, "credential_stopped");
+    const rendered = renderListenerStatus(status);
+    assert.match(rendered, /^Listener failed /);
+    assert.match(rendered, /will not retry/);
+    assert.match(
+      rendered,
+      new RegExp(CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")),
+    );
+    assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("runtime drains pages, resets scan cursor, and posts stable replies", async () => {

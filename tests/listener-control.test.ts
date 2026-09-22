@@ -12,7 +12,10 @@ import test from "node:test";
 import { GrokListenerModel } from "../src/listener/grok-model.js";
 import {
   ListenerAlreadyRunningError,
+  LISTENER_RESTART_CLEAN_RUN_MS,
+  LISTENER_RESTART_MAX_ATTEMPTS,
   LISTENER_RESTART_MAX_MS,
+  LISTENER_RESTART_SUSTAINED_MAX_MS,
   ackCommandId,
   appendListenerEvent,
   claimCommandId,
@@ -1500,7 +1503,8 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
   assert.equal(credentialStatus.state, "failed");
   assert.equal(credentialStatus.lastErrorCode, "credential_stopped");
 
-  // A 4xx refusal will refuse identically forever; restarting cannot help.
+  // A 400 refusal will refuse identically forever; restarting cannot help.
+  // A bare 403 is not in this set: it has no confirmed credential code.
   const fatalTarget = paths(root);
   let fatalRuns = 0;
   await runListenerSupervisor({
@@ -1511,7 +1515,7 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
     restart: { maxAttempts: 3, sleep: async () => {}, random: () => 0 },
     run: async () => {
       fatalRuns += 1;
-      return { reason: "fatal", error: new SignalHttpError(403) };
+      return { reason: "fatal", error: new SignalHttpError(400) };
     },
   });
   assert.equal(fatalRuns, 1);
@@ -1582,7 +1586,7 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
     }),
     false,
   );
-  for (const status of [400, 401, 403, 404, 426]) {
+  for (const status of [400, 404, 426]) {
     assert.equal(
       isRestartableListenerStop({
         reason: "fatal",
@@ -1592,6 +1596,24 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
       `HTTP ${status} must not restart`,
     );
   }
+  assert.equal(
+    isRestartableListenerStop({
+      reason: "fatal",
+      error: new SignalHttpError(403),
+    }),
+    true,
+  );
+  assert.equal(
+    isRestartableListenerStop({
+      reason: "fatal",
+      error: new SignalHttpError(403, null, {
+        error: "forbidden",
+        requestId: null,
+        retryable: null,
+      }),
+    }),
+    false,
+  );
   assert.equal(
     isRestartableListenerStop({
       reason: "fatal",
@@ -1610,6 +1632,146 @@ test("D-051: the restart delay is bounded by its own cap, not the read backoff c
     LISTENER_RESTART_MAX_MS,
   );
   assert.ok(nextListenerRestartMs(12, {}, () => 0) <= LISTENER_RESTART_MAX_MS);
+  assert.ok(LISTENER_RESTART_SUSTAINED_MAX_MS <= 5 * 60_000);
+  assert.ok(LISTENER_RESTART_SUSTAINED_MAX_MS > LISTENER_RESTART_MAX_MS);
+});
+
+test("a 500 past the fast attempts keeps retrying and recovers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-sustain-"));
+  const target = paths(root);
+  let runs = 0;
+  const delays: number[] = [];
+  let duringSustained: ListenerStatus | null = null;
+  const status = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-sustain",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: {
+      sleep: async (ms) => {
+        delays.push(ms);
+        if (delays.length === LISTENER_RESTART_MAX_ATTEMPTS + 1) {
+          duringSustained = await queryListenerControl(target, "status");
+        }
+      },
+      random: () => 0,
+    },
+    run: async () => {
+      runs += 1;
+      if (runs <= LISTENER_RESTART_MAX_ATTEMPTS + 1) return saturationStop();
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, LISTENER_RESTART_MAX_ATTEMPTS + 2);
+  assert.equal(status.state, "stopped");
+  assert.notEqual(status.state, "failed");
+  assert.equal(delays.length, LISTENER_RESTART_MAX_ATTEMPTS + 1);
+  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS - 1], 8_000);
+  assert.equal(
+    delays[LISTENER_RESTART_MAX_ATTEMPTS],
+    LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
+  );
+  assert.ok(duringSustained);
+  assert.equal(duringSustained.state, "starting");
+  assert.notEqual(duringSustained.state, "failed");
+  const rendered = renderListenerStatus(duringSustained);
+  assert.match(rendered, /^Listener retrying /);
+  assert.match(rendered, /will try again at/);
+  assert.match(rendered, /Leave it running/);
+  assert.match(rendered, /cswarm listen stop --workspace-id/);
+  const events = await readEvents(target);
+  assert.equal(events.some((event) => event.event === "listener_failed"), false);
+});
+
+test("cswarm listen stop ends a backoff sleep at once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-backoff-"));
+  const target = paths(root);
+  let runs = 0;
+  const started = Date.now();
+  const pending = runListenerSupervisor({
+    paths: target,
+    profileId: "profile-stop-backoff",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: {
+      sleep: (_ms, signal) => new Promise((resolve) => {
+        const timer = setTimeout(resolve, 60_000);
+        const finish = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        if (signal.aborted) finish();
+        else signal.addEventListener("abort", finish, { once: true });
+      }),
+      random: () => 0,
+    },
+    run: async () => {
+      runs += 1;
+      return saturationStop();
+    },
+  });
+  let waiting: ListenerStatus | null = null;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && waiting === null) {
+    try {
+      const live = await queryListenerControl(target, "status", 200);
+      if (typeof live.nextAttemptAt === "string") waiting = live;
+    } catch {
+      // The control socket is not up yet.
+    }
+  }
+  assert.ok(waiting, "the listener must be waiting to try again");
+  assert.notEqual(waiting.state, "failed");
+  await stopListener(target);
+  const final = await pending;
+  assert.equal(final.state, "stopped");
+  assert.equal(runs, 1);
+  assert.ok(Date.now() - started < 5_000, "stop must not wait out the backoff");
+});
+
+test("the restart attempt count resets after a clean run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-clean-run-"));
+  const target = paths(root);
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  let clock = Date.parse("2026-09-22T00:00:00.000Z");
+  let runs = 0;
+  const delays: number[] = [];
+  const status = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-clean",
+    workspaceId,
+    principalId,
+    now: () => clock,
+    restart: {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      random: () => 0,
+    },
+    run: async (_signal, onEvent) => {
+      runs += 1;
+      if (runs <= LISTENER_RESTART_MAX_ATTEMPTS + 1) return saturationStop();
+      if (runs === LISTENER_RESTART_MAX_ATTEMPTS + 2) {
+        onEvent({
+          type: "ready",
+          workspaceId,
+          principalId,
+          ts: new Date(clock).toISOString(),
+        });
+        clock += LISTENER_RESTART_CLEAN_RUN_MS;
+        return saturationStop();
+      }
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, LISTENER_RESTART_MAX_ATTEMPTS + 3);
+  assert.equal(status.state, "stopped");
+  assert.equal(
+    delays[LISTENER_RESTART_MAX_ATTEMPTS],
+    LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
+  );
+  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], 500);
 });
 
 test("D-051: one rejected write does not poison the rest of the supervisor's writes", async () => {
@@ -1633,7 +1795,7 @@ test("D-051: one rejected write does not poison the rest of the supervisor's wri
       // only itself: the terminal lines after it still have to land, because
       // they are the ones that say why the listener is down.
       onEvent({ type: "unknown_event_kind" } as unknown as ListenerRuntimeEvent);
-      return { reason: "fatal", error: new SignalHttpError(403) };
+      return { reason: "fatal", error: new SignalHttpError(400) };
     },
   });
 
@@ -1688,8 +1850,18 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
     retryable: false,
   }), true],
   ["read 400", new SignalHttpError(400), false],
-  ["read 401", new SignalHttpError(401), false],
-  ["read 403", new SignalHttpError(403), false],
+  ["read 401", new SignalHttpError(401), true],
+  ["read 403", new SignalHttpError(403), true],
+  ["read 403 forbidden", new SignalHttpError(403, null, {
+    error: "forbidden",
+    requestId: null,
+    retryable: null,
+  }), false],
+  ["read 401 unauthenticated", new SignalHttpError(401, null, {
+    error: "unauthenticated",
+    requestId: null,
+    retryable: null,
+  }), false],
   ["read 404", new SignalHttpError(404), false],
   ["read 426", new SignalHttpError(426), false],
   ["read timeout", new SignalReadTimeoutError(), true],
@@ -1703,8 +1875,10 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["delivery 503", new DeliveryHttpError(503, "delivery_503", "delivery failed (HTTP 503)"), true],
   ["delivery 429", new DeliveryHttpError(429, "delivery_429", "delivery failed (HTTP 429)"), true],
   ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), false],
-  ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), false],
-  ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), false],
+  ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), true],
+  ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), true],
+  ["delivery 403 forbidden", new DeliveryHttpError(403, "forbidden", "delivery failed (HTTP 403)"), false],
+  ["delivery 401 unauthenticated", new DeliveryHttpError(401, "unauthenticated", "delivery failed (HTTP 401)"), false],
   ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), false],
   ["delivery protocol", new DeliveryProtocolError("delivery claim returned more than one row"), false],
 
@@ -1713,7 +1887,8 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["command 500", new CommandHttpError(500), true],
   ["command 429", new CommandHttpError(429), true],
   ["command 400", new CommandHttpError(400), false],
-  ["command 403", new CommandHttpError(403), false],
+  ["command 403", new CommandHttpError(403), true],
+  ["command 403 forbidden", new CommandHttpError(403, "command failed (HTTP 403)", "forbidden"), false],
 
   // --- ACP host ------------------------------------------------------------
   ["acp timeout", new AcpTimeoutError("ACP request timed out"), true],

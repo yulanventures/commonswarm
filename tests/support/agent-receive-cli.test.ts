@@ -388,10 +388,18 @@ test("follow error classification: retryable 5xx/429/transport; fatal 4xx/malfor
   assert.equal(isRetryableFollowError(new SignalHttpError(429, 1_000)), true);
   assert.equal(isRetryableFollowError(new SignalTransportError()), true);
   assert.equal(isRetryableFollowError(new SignalReadTimeoutError()), true);
-  assert.equal(isRetryableFollowError(new SignalHttpError(401)), false);
+  assert.equal(isRetryableFollowError(new SignalHttpError(401)), true);
+  assert.equal(isRetryableFollowError(new SignalHttpError(403)), true);
   assert.equal(isFatalFollowError(new SignalHttpError(400)), true);
-  assert.equal(isFatalFollowError(new SignalHttpError(401)), true);
-  assert.equal(isFatalFollowError(new SignalHttpError(403)), true);
+  assert.equal(isFatalFollowError(new SignalHttpError(401)), false);
+  assert.equal(isFatalFollowError(new SignalHttpError(403)), false);
+  const revoked = new SignalHttpError(403, null, {
+    error: "forbidden",
+    requestId: null,
+    retryable: null,
+  });
+  assert.equal(isRetryableFollowError(revoked), false);
+  assert.equal(isFatalFollowError(revoked), true);
   assert.equal(isFatalFollowError(new SignalHttpError(404)), true);
   assert.equal(isFatalFollowError(new SignalHttpError(426)), true);
   assert.equal(isFatalFollowError(new SignalMalformedError("bad")), true);
@@ -635,9 +643,16 @@ test("follow secret/credential absence never emits ready", async () => {
   assert.equal(terminal.request_id, null);
 });
 
-test("follow classifies agent read 401/403 as credential stop", async () => {
-  for (const status of [401, 403]) {
-    const refusal = new SignalHttpError(status);
+test("follow classifies a confirmed credential code as a stop and retries a bare 403", async () => {
+  for (const [status, code] of [
+    [401, "unauthenticated"],
+    [403, "forbidden"],
+  ] as const) {
+    const refusal = new SignalHttpError(status, null, {
+      error: code,
+      requestId: null,
+      retryable: null,
+    });
     assert.equal(isFollowCredentialFailure(refusal), true);
     const stop = await runInboxFollow({
       workspaceId: WORKSPACE,
@@ -658,6 +673,28 @@ test("follow classifies agent read 401/403 as credential stop", async () => {
     assert.equal(stop.reason, "credential");
     assert.equal(stop.error, refusal);
   }
+
+  const controller = new AbortController();
+  let arms = 0;
+  let sleeps = 0;
+  const bare = await runInboxFollow({
+    workspaceId: WORKSPACE,
+    now: () => 1_700_000_000_000,
+    random: () => 0,
+    signal: controller.signal,
+    sleep: async () => {
+      sleeps += 1;
+      if (sleeps >= 2) controller.abort();
+    },
+    arm: async () => {
+      arms += 1;
+      throw new SignalHttpError(403);
+    },
+    emit: () => undefined,
+  });
+  assert.notEqual(bare.reason, "credential");
+  assert.equal(bare.reason, "cancelled");
+  assert.equal(arms, 2);
 });
 
 test("follow cancels during retry backoff and clears the delay timer", async () => {
@@ -1704,10 +1741,19 @@ test("D-051: the retryable veto is one-directional", () => {
   });
   assert.equal(isRetryableFollowError(refusedRetryable), false);
 
-  // retryable:true must not promote a status this client refuses to retry,
-  // or a server could talk the client into hammering its own auth failure.
-  const permittedFatal = new SignalHttpError(401, null, {
+  // A slug this deployment does not assign for a dead credential is transient.
+  // "unauthorized" is not unauthenticated or forbidden.
+  const foreignAuth = new SignalHttpError(401, null, {
     error: "unauthorized",
+    requestId: null,
+    retryable: true,
+  });
+  assert.equal(isRetryableFollowError(foreignAuth), true);
+  assert.equal(isFatalFollowError(foreignAuth), false);
+  // retryable:true must not promote a confirmed credential refusal, or a
+  // server could talk the client into hammering a credential that is dead.
+  const permittedFatal = new SignalHttpError(401, null, {
+    error: "unauthenticated",
     requestId: null,
     retryable: true,
   });
@@ -1955,8 +2001,24 @@ test("D-051: a credential verdict off the wire is decided by status, not wording
     isFollowCredentialFailure(new Error("the agent secret is absent")),
     true,
   );
-  assert.equal(isFollowCredentialFailure(new SignalHttpError(401)), true);
-  assert.equal(isFollowCredentialFailure(new SignalHttpError(403)), true);
+  assert.equal(isFollowCredentialFailure(new SignalHttpError(401)), false);
+  assert.equal(isFollowCredentialFailure(new SignalHttpError(403)), false);
+  assert.equal(
+    isFollowCredentialFailure(new SignalHttpError(401, null, {
+      error: "unauthenticated",
+      requestId: null,
+      retryable: null,
+    })),
+    true,
+  );
+  assert.equal(
+    isFollowCredentialFailure(new SignalHttpError(403, null, {
+      error: "forbidden",
+      requestId: null,
+      retryable: null,
+    })),
+    true,
+  );
 
   // A wire error carrying the phrase must not be promoted to a credential
   // stop by its text. Status is the only vote it gets.
@@ -2095,10 +2157,10 @@ test("D-058: a real HTTP failure still carries its status without the regex", as
       status,
       `HTTP ${status} must still be readable from the identity tag`,
     );
-    // And the restart verdict follows the status, as before.
+    // A 401 with no confirmed credential code is transient. 400 is not.
     assert.equal(
       isRestartableReadError(error),
-      status === 429 || status >= 500,
+      status === 429 || status >= 500 || status === 401,
       `HTTP ${status} restart verdict`,
     );
   }
