@@ -84,13 +84,13 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [10788, 10793],
+    lines: [10818, 10823],
     contains: "horizon_expires_at: prepared.command.renewal_horizon_ms === null",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon, replay)",
     file: "supabase/functions/command/index.ts",
-    lines: [2691, 2694],
+    lines: [2695, 2698],
     contains: "horizon_expires_at: response.horizon_expires_at as string | null",
   },
   /* Two citations in agent-connect.ts had NO entry here, and both had drifted on main before the
@@ -99,57 +99,57 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (the mint's device binding)",
     file: "supabase/functions/command/index.ts",
-    lines: [3221, 3231],
+    lines: [3225, 3235],
     contains: "device.revoked_at !== null",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (the agent scope check)",
     file: "supabase/functions/command/index.ts",
-    lines: [9228, 9234],
+    lines: [9232, 9238],
     contains: "!auth.agent.scopes.includes(validation.command.kind)",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (the 400 message)",
     file: "supabase/functions/command/index.ts",
-    lines: [2459, 2475],
+    lines: [2463, 2479],
     contains: "const valid = exactKeys(cmd, [",
   },
   // site/src/components/connect/agent-connect-mint.observer.test.ts
   {
     citedBy: "agent-connect-mint.observer.test.ts (timeboxed fallback, validator)",
     file: "supabase/functions/command/index.ts",
-    lines: [2448, 2450],
+    lines: [2452, 2454],
     contains: '? "timeboxed"',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (timeboxed fallback, prepared)",
     file: "supabase/functions/command/index.ts",
-    lines: [3408, 3411],
+    lines: [3412, 3415],
     contains: 'renewal_kind: wire.renewal_kind ?? "timeboxed"',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing needs an ABSENT horizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [2455, 2455],
+    lines: [2459, 2459],
     contains: 'renewalKind === "standing" && cmd.renewal_horizon_ms === undefined',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (the 400)",
     file: "supabase/functions/command/index.ts",
-    lines: [2509, 2509],
+    lines: [2513, 2513],
     contains: "mint_agent_token fields are malformed or out of bounds",
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing binds to the request device)",
     file: "supabase/functions/command/index.ts",
-    lines: [4611, 4611],
+    lines: [4615, 4615],
     contains: "standing ? prepared.wire.device_id : null",
   },
   // supabase/functions/command/index.ts — the resume handler's own comment
   {
     citedBy: "command/index.ts (resume handler, the pattern it copies)",
     file: "supabase/functions/command/index.ts",
-    lines: [3662, 3662],
+    lines: [3666, 3666],
     contains: "grant_preflight_code: (preflight[0]?.code ?? null)",
   },
   {
