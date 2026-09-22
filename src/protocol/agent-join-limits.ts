@@ -124,7 +124,7 @@ export function joinInviteLiveLimitMessage(scope: string): string | null {
       : null;
   if (limit === null) return null;
   const reached = scope === "identity"
-    ? `You already have ${limit} live invites, which is the limit for one person.`
+    ? `You already have ${limit} live invites in this workspace, which is the limit for one person in one workspace.`
     : `This workspace already has ${limit} live invites, which is the limit for one workspace.`;
   return [
     reached,

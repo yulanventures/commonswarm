@@ -732,7 +732,8 @@ test("a live-invite refusal uses the wire error and branches on scope", async ()
       assert.ok(error instanceof JoinInviteError);
       assert.equal(error.message, identity);
       assert.equal(/revoke/i.test(error.message), false);
-      assert.equal(error.message.includes("workspace"), false);
+      assert.match(error.message, /^You already have 5 live invites in this workspace, which is the limit for one person in one workspace\./);
+      assert.equal(error.message.includes("This workspace already has"), false);
       return true;
     },
   );

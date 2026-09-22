@@ -53,16 +53,11 @@ async function listen(delayMs: () => number) {
 
 test("timeout inventory and mapping are exact in both directions for each measured ref", async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
-  /* `main` is not enumerated. mapping.json aliases main to the HEAD section, and the runner
-   * still reads that alias: sourceRefForRun treats main like HEAD, and mappingForRef follows
-   * aliases.main. That is why the mapping keeps the alias. Measuring main here would only
-   * repeat the HEAD row, and only when main's tree is HEAD's tree. */
   const measured: { ref: string; enumerateRef: string | null }[] = [
     { ref: "v0.1.71", enumerateRef: "v0.1.71" },
     { ref: "HEAD", enumerateRef: null },
+    { ref: "main", enumerateRef: "main" },
   ];
-  assert.deepEqual(measured.map((entry) => entry.ref), ["v0.1.71", "HEAD"]);
-  assert.equal(mapping.aliases.main, "HEAD");
   for (const { ref, enumerateRef } of measured) {
     const inventory = enumerateRepository({ repo, ref: enumerateRef });
     assert.equal(validateMapping(inventory, mapping, ref), true);
