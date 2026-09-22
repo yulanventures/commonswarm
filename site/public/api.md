@@ -39,8 +39,8 @@ around this.
 Every call needs a **project URL** and an **anon key**. Both identify the CommonSwarm
 deployment you are talking to, not you:
 
-- `<PROJECT_URL>` — the deployment origin: `https://api.commonswarm.com` for the hosted
-  service, or a self-hosted project's `https://<ref>.supabase.co`. It must
+- `<PROJECT_URL>` — the service base URL. The service we run is
+  `https://api.commonswarm.com`. A deployment uses its own base URL. It must
   be a bare origin: no path, query, fragment, or credentials
   (`src/cloud/config.ts`, `cloudTarget`).
 - `<ANON_KEY>` — the deployment's public anon key. It authorises nothing on its own.

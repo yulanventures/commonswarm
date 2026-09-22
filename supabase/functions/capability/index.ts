@@ -181,9 +181,8 @@ const DEAD_STATUS_REASONS = new Map<string, { reason: string; outcome: string }>
   }],
 ]);
 
-// AGENTS.md: the per-deployment Vercel URL is SSO-protected; the project alias is
-// the public one. Never "*".
-const DEFAULT_ALLOWED_ORIGIN = "https://coswarm-site.vercel.app";
+// Public site origin when SWARM_CAPABILITY_ALLOWED_ORIGINS is empty. Never "*".
+const DEFAULT_ALLOWED_ORIGIN = "https://commonswarm.com";
 
 // Character-for-character the command function's SIGNAL_UNSAFE_GLOBAL_RE. The
 // narrower set this replaced (C0/C1, \u202a-\u202e and \u2066-\u2069) let through the

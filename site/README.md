@@ -175,6 +175,8 @@ Things that have bitten this repo before:
 
 ## Deploy
 
+Run this from the repository root. The commands above this section run from `site/`. From `site/`, the same command is `../deploy/site/deploy.sh yulan-vps-1`.
+
 ```sh
 deploy/site/deploy.sh yulan-vps-1
 ```

@@ -54,6 +54,10 @@ test("missing cloud URL names invite acceptance as the real front door", async (
   assert.match(result.stderr, /SWARM_CLOUD_URL/);
   assert.match(result.stderr, /SWARM_CLOUD_ANON_KEY/);
   assert.doesNotMatch(result.stderr, /Project Settings/);
+  /* The route must be COMPLETABLE: the hosted command names its key source (the public meta
+   * tags on /start), and the discovery path is named first because reaching this message
+   * usually means discovery failed. Found by the inversion arm on the api.commonswarm.com
+   * change: the URL pin alone stayed green while <key> had no source. */
   assert.match(result.stderr, /meta tags at https:\/\/commonswarm\.com\/start/);
   assert.match(result.stderr, /discover/);
   assert.deepEqual(

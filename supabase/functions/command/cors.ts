@@ -1,7 +1,6 @@
 export const DEFAULT_COMMAND_ALLOWED_ORIGINS = [
   "https://commonswarm.com",
   "https://www.commonswarm.com",
-  "https://coswarm-site.vercel.app",
 ] as const;
 
 export function commandAllowedOrigins(
