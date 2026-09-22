@@ -201,13 +201,14 @@ export async function claimAgentInbox(
   const managed = args.managed === true;
   const sessionId = args.session?.session_id ?? null;
   const sessionGeneration = args.session?.generation ?? null;
-  // 1. Hold a row lock on the exact recipient agent principal row FOR UPDATE
+  // 1. Serialize claims on this principal without blocking signal writers'
+  //    foreign-key KEY SHARE locks. Poll holds the same lock before the seat row.
   const principalRows = await tx<{ principal_id: string; revoked_at: Date | null }[]>`
     SELECT principal_id, revoked_at
     FROM swarm.agent_principals
     WHERE workspace_id = ${args.workspaceId}::uuid
       AND principal_id = ${args.recipientPrincipalId}::uuid
-    FOR UPDATE
+    FOR NO KEY UPDATE
   `;
   const principalRow = principalRows[0];
   if (!principalRow || principalRow.revoked_at !== null) {

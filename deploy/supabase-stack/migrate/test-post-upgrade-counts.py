@@ -13,10 +13,13 @@ class CountsTests(unittest.TestCase):
         for name in ('verify-counts.sh','verify-post-upgrade-counts.sh'):
             shutil.copyfile(Path(__file__).with_name(name),self.scripts/name)
         self.baseline='auth.users|1\nstorage.objects|3\nswarm.agent_tokens|2\n'
-        self.actual=self.baseline+'swarm.agent_join_attempts|0\nswarm.agent_join_credentials|0\n'
+        self.actual=self.baseline+'swarm.agent_join_attempts|0\nswarm.agent_join_credentials|0\nswarm.h0_poll_batches|0\nswarm.h0_poll_locks|0\n'
         (self.art/'source-counts.tsv').write_text(self.baseline);(self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n')
         (self.root/'counts').write_text(self.actual);(self.root/'names').write_text(''.join(l.split('|')[0]+'\n' for l in self.actual.splitlines()))
         (self.root/'cron').write_text('{"jobname":"test"}\n')
+        self.newcron='{"jobname" : "swarm-purge-h0-poll-batches", "schedule" : "29 4 * * *", "command" : "SELECT swarm.purge_expired_h0_poll_batches()", "database" : "fake", "username" : "supabase_admin", "active" : true}\n'
+        (self.root/'newcron').write_text(self.newcron)
+        (self.root/'cron').write_text('{"jobname":"test"}\n'+self.newcron)
         (self.scripts/'lib.sh').write_text('''
 require_commands() { :; }
 require_vars() { for name in "$@"; do [[ -n "${!name:-}" ]] || return 1; done; }
@@ -24,7 +27,13 @@ start_log() { mkdir -p "$MIGRATION_ARTIFACT_DIR/logs"; LOG_FILE="$MIGRATION_ARTI
 log() { echo "$*" >>"$LOG_FILE"; }
 assert_target_identity() { echo guard >>"$TEST_ROOT/calls"; [[ "${TEST_IDENTITY_OK:-1}" == 1 ]]; }
 make_temp_sql() { mktemp "$TEST_ROOT/query.XXXXXX"; }
-target_psql() { echo names >>"$TEST_ROOT/calls"; cat "$TEST_ROOT/names"; }
+target_psql() {
+  if [[ " $* " == *" -c "* ]]; then
+    echo cron_expected >>"$TEST_ROOT/calls"; cat "$TEST_ROOT/newcron"
+  else
+    echo names >>"$TEST_ROOT/calls"; cat "$TEST_ROOT/names"
+  fi
+}
 cron_jobs_json_sql() { echo CRON_QUERY; }
 database_psql() {
   echo query >>"$TEST_ROOT/calls"
@@ -46,6 +55,12 @@ compare_cron_job_listings() { cmp -s "$1" "$2"; }
         text=self.actual.replace('attempts|0','attempts|4').replace('credentials|0','credentials|2')
         (self.art/'source-counts.tsv').write_text(text);(self.root/'counts').write_text(text)
         self.assertEqual(self.run_check().returncode,0)
+    def test_recovery_keeps_existing_purge_job_once(self):
+        (self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n'+self.newcron)
+        self.assertEqual(self.run_check().returncode,0)
+    def test_duplicate_purge_in_baseline_fails(self):
+        (self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n'+self.newcron+self.newcron)
+        self.assertNotEqual(self.run_check().returncode,0)
     def test_new_table_with_rows_fails(self):
         (self.root/'counts').write_text(self.actual.replace('attempts|0','attempts|1'))
         self.assertNotEqual(self.run_check().returncode,0)
@@ -53,7 +68,13 @@ compare_cron_job_listings() { cmp -s "$1" "$2"; }
         (self.root/'counts').write_text(self.actual.replace('users|1','users|2'))
         self.assertNotEqual(self.run_check().returncode,0)
     def test_cron_change_fails(self):
-        (self.root/'cron').write_text('{"jobname":"different"}\n')
+        (self.root/'cron').write_text('{"jobname":"different"}\n'+self.newcron)
+        self.assertNotEqual(self.run_check().returncode,0)
+    def test_missing_purge_job_fails(self):
+        (self.root/'cron').write_text('{"jobname":"test"}\n')
+        self.assertNotEqual(self.run_check().returncode,0)
+    def test_extra_purge_job_fails(self):
+        with (self.root/'cron').open('a') as f:f.write(self.newcron)
         self.assertNotEqual(self.run_check().returncode,0)
     def test_extra_table_fails(self):
         with (self.root/'names').open('a') as f:f.write('swarm.unexpected\n')

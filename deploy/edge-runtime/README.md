@@ -34,11 +34,11 @@ straight to Storage and do not pass through a function request body.
 Compose gives shutdown 80 seconds before SIGKILL. This leaves 10 seconds beyond
 the runtime's configured 70-second graceful worker-drain window.
 
-The later H0 poll may hold a worker for 50 seconds. The poll lane must not enable
-that path until it prevents H0 polls from occupying all four slots and starving
-`command`, `read`, `activity`, or `capability`. This lane does not choose the
-isolation or admission design. The poll lane must also add every environment name
-H0 starts reading to `FUNCTION_ENV_NAMES.h0`.
+The database admits at most `H0_MAX_CONCURRENT_WAITS` waiting polls at a time,
+for the whole deployment (`src/h0/verbs.ts`). A waiting poll holds one worker.
+A poll that cannot take a waiting slot returns at once with `retryAfterSeconds`.
+`FUNCTION_ENV_NAMES.h0` lists the database environment names H0 reads:
+`SWARM_DATABASE_URL`, `SUPABASE_DB_URL`, and `SWARM_DATABASE_TLS_CA_B64`.
 
 `h0-deno.json` supplies the bare `postgres` import mapping that H0 reaches through
 shared command types. `bootstrap.sh` copies the read-only mounted functions to an

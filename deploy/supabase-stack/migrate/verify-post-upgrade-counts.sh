@@ -19,6 +19,30 @@ done
 derived="$(mktemp -d "$MIGRATION_ARTIFACT_DIR/h0-expected.XXXXXX")"
 chmod 0700 "$derived"
 cp "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson" "$derived/cron-jobs.ndjson"
+# cron_jobs_json_sql emits jobname as the first JSON field. Read that exact
+# field without requiring Python in the PostgreSQL tool image.
+existing_purge_count=$(awk '
+  /^[[:space:]]*$/ { next }
+  {
+    name=$0
+    if (sub(/^[[:space:]]*\{[[:space:]]*"jobname"[[:space:]]*:[[:space:]]*"/, "", name) != 1) exit 1
+    sub(/".*/, "", name)
+    if (name == "swarm-purge-h0-poll-batches") count++
+  }
+  END { print count+0 }
+' "$MIGRATION_ARTIFACT_DIR/cron-jobs.ndjson")
+if [[ "$existing_purge_count" -eq 0 ]]; then
+  target_psql --quiet --tuples-only --no-align -c "
+  SELECT json_build_object(
+    'jobname', 'swarm-purge-h0-poll-batches',
+    'schedule', '29 4 * * *',
+    'command', 'SELECT swarm.purge_expired_h0_poll_batches()',
+    'database', current_database(),
+    'username', current_user,
+    'active', true
+  )
+" >>"$derived/cron-jobs.ndjson" 2>>"$LOG_FILE"
+fi
 cat >"$derived/table-names.sql" <<'SQL'
 SELECT schemaname || '.' || tablename
 FROM pg_tables
@@ -44,6 +68,14 @@ awk -F'|' '
       if (!a) {
         expected["swarm.agent_join_credentials"]=0
         expected["swarm.agent_join_attempts"]=0
+        total+=2
+      }
+      c=("swarm.h0_poll_locks" in expected)
+      d=("swarm.h0_poll_batches" in expected)
+      if (c!=d) fail()
+      if (!c) {
+        expected["swarm.h0_poll_locks"]=0
+        expected["swarm.h0_poll_batches"]=0
         total+=2
       }
       initialized=1

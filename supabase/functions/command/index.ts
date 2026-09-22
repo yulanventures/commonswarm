@@ -82,6 +82,10 @@ import {
   type DeliveryAckOutcome,
 } from "./durable-delivery.ts";
 import {
+  h0SeatClaimRefusal,
+  principalIsH0Seat,
+} from "./h0-seat.ts";
+import {
   FILE_BUCKET,
   FILE_COMMAND_KINDS,
   FILE_CREATE_RATE_LIMIT_PER_HOUR, FILE_CREATE_RATE_LIMIT_PER_WORKSPACE_PER_HOUR,
@@ -7673,7 +7677,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3662 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3666 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -9289,6 +9293,32 @@ async function handleTransaction(
       const agent = auth.agent;
       if (agent === null) {
         return { status: 403, body: { error: "delivery_unavailable" } };
+      }
+      /* H0 SEAT FENCE. claimAgentInbox has one caller in this file, the claim
+       * branch below. Refuse here, before the idempotency replay and before
+       * that call, so a stored claim cannot bypass the fence. The h0 poll
+       * calls claimAgentInbox directly and does not pass through this branch.
+       * Ack is the other arm of this if and stays open. */
+      if (kind === CLAIM_AGENT_INBOX_KIND) {
+        const refusal = h0SeatClaimRefusal(
+          await principalIsH0Seat(tx, route.workspaceId, agent.principal_id),
+        );
+        if (refusal !== null) {
+          await insertAudit(tx, {
+            auth,
+            commandKind: kind,
+            workspaceId: route.workspaceId,
+            streamId: route.streamId,
+            outcome: "authz",
+            reason: refusal.error,
+            detail: ignoredIdentity,
+            hash,
+          });
+          return {
+            status: 403,
+            body: { error: refusal.error, message: refusal.message },
+          };
+        }
       }
       const operation = kind === CLAIM_AGENT_INBOX_KIND ? "claim" : "ack";
       /* Idle claims have nothing unacked. They must not upsert rate_buckets.

@@ -10143,8 +10143,7 @@ test("durable-delivery: Phase B lock strength — FOR SHARE holder blocks the pr
     assert.equal(Number(enqueued[0]?.n), 1, "signal enqueued");
 
     // Hold the principal row FOR SHARE — strictly weaker than the production
-    // FOR UPDATE. A FOR SHARE holder blocks the claim only if the production
-    // lock is at least FOR UPDATE strength.
+    // FOR NO KEY UPDATE lock. A FOR SHARE holder blocks that lock.
     const holder = await retainPrincipalRowLock(agent.principalId, f.workspaceA, "FOR SHARE");
     let claimPid = 0;
     let claimLedger: DeliveryClaimLedgerResponse | null = null;
@@ -10179,8 +10178,8 @@ test("durable-delivery: Phase B lock strength — FOR SHARE holder blocks the pr
       );
       assert.match(
         blocked[0]?.query ?? "",
-        /FOR UPDATE/,
-        "the blocked query is the production principal FOR UPDATE lock",
+        /FOR NO KEY UPDATE/,
+        "the blocked query is the production principal FOR NO KEY UPDATE lock",
       );
       // Release and await the claim.
       holder.release();
@@ -10305,8 +10304,8 @@ test("durable-delivery: Phase B concurrent cap — two claims behind one princip
       for (const b of blocked) {
         assert.match(
           b.query,
-          /FOR UPDATE/,
-          "the blocked query is the production principal FOR UPDATE lock",
+          /FOR NO KEY UPDATE/,
+          "the blocked query is the production principal FOR NO KEY UPDATE lock",
         );
       }
 
@@ -10916,7 +10915,7 @@ test("durable-delivery: Phase B harness control — wrong observation pattern re
       });
       const realPid = blocked[0]!.pid;
       assert.equal(realPid, claimPid, "the observed backend is the exact claim backend");
-      assert.match(blocked[0]!.query, /FOR UPDATE/);
+      assert.match(blocked[0]!.query, /FOR NO KEY UPDATE/);
 
       // Deterministic causal deadline arm. The synthetic poll returns the real
       // blocked row without spending wall-clock time, while the injected

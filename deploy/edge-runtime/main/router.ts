@@ -211,9 +211,8 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SWARM_CAPABILITY_ALLOWED_ORIGINS",
   ],
   activity: DATABASE_ENV,
-  // H0 is document-only today and reads no environment. The poll lane must add
-  // every variable it starts reading here; the source-closure test enforces it.
-  h0: [],
+  // Poll and ack read the same database environment names as command.
+  h0: DATABASE_ENV,
 };
 
 export const COMMAND_TEST_HOOKS = new Set([
