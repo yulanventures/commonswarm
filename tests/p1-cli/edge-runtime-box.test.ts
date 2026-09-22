@@ -77,13 +77,12 @@ test("H0 source reads only environment names passed to its worker", async () => 
 });
 
 test("every database worker receives the optional private CA", () => {
-  for (const functionName of ["command", "read", "capability", "activity"] as const) {
+  for (const functionName of ["command", "read", "capability", "activity", "h0"] as const) {
     assert.ok(
       FUNCTION_ENV_NAMES[functionName].includes("SWARM_DATABASE_TLS_CA_B64"),
       `${functionName} does not receive SWARM_DATABASE_TLS_CA_B64`,
     );
   }
-  assert.equal(FUNCTION_ENV_NAMES.h0.includes("SWARM_DATABASE_TLS_CA_B64"), false);
 });
 
 test("edge runtime router strips only /functions/v1 and maps all five functions", () => {

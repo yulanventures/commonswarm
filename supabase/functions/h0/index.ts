@@ -4,6 +4,12 @@ import {
   internalErrorResponse,
 } from "./core.ts";
 import {
+  h0VerbFailure,
+  handleH0AckRequest,
+  handleH0PollRequest,
+} from "./poll-ack.ts";
+import { h0VerbPath } from "./parse.ts";
+import {
   H0_VERBS,
   h0AgentDocumentDescription,
 } from "../../../src/h0/verbs.ts";
@@ -31,6 +37,19 @@ const agentDocument = buildH0AgentDocument(
 
 Deno.serve((request) => {
   try {
+    const verb = h0VerbPath(new URL(request.url).pathname);
+    if (verb === "poll") {
+      return handleH0PollRequest(request).catch(() => {
+        console.error("h0 poll failed");
+        return h0VerbFailure();
+      });
+    }
+    if (verb === "ack") {
+      return handleH0AckRequest(request).catch(() => {
+        console.error("h0 ack failed");
+        return h0VerbFailure();
+      });
+    }
     return handleH0Request(request, agentDocument);
   } catch {
     console.error("h0 request failed");

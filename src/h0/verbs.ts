@@ -15,8 +15,8 @@
  * `ack` is checked field-for-field against `AckAgentDeliveryCommand`. The field vocabulary on
  * ask, note, reply, and working-on is checked against `SignalCommand`; this does not prove that
  * those adapter surfaces expose every input they need. Fields supplied by the command envelope
- * declare that separate target. Register and poll still have no independent contract comparison
- * in this lane.
+ * declare that separate target. Poll is compared by calling the h0 poll parser, which does not
+ * read this table. Register still has no independent contract comparison.
  *
  * This is a SECOND catalog, deliberately. The CLI's 37 verbs keep their own dispatcher; item H
  * lane 1 folds this table into it. The fork is stated here rather than left for a reader to find,
@@ -103,7 +103,7 @@ export const H0_VERBS = [
     name: "poll",
     auth: "seat-token",
     summary:
-      "Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows.",
+      "Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused.",
     fields: [
       opt("wait", false, "seconds, at most 50"),
       opt("ackBatch", false, "the previous batchId; a TRANSPORT ack that advances no delivery state"),
@@ -122,7 +122,7 @@ export const H0_VERBS = [
     fields: [
       req("signal_id"),
       req("lease_id", true, "null only when outcome is `observed`"),
-      req("listener_instance_id", true, "null only when outcome is `observed`; a UUID otherwise"),
+      req("listener_instance_id", true, "null only when outcome is `observed`; otherwise the listener_instance_id poll returned"),
       req("outcome"),
       req("last_error_code", true, "PRESENT ALWAYS, null unless outcome is `failed_terminal`"),
       opt("surfaced", false, "required for MANAGED principals; ignored for unmanaged"),
@@ -235,8 +235,9 @@ export function h0AgentDocumentDescription(seatTokenTtlMs: number): string {
     "",
     "Take the join credential from the message that gave you this URL. It is not in this document.",
     "Call register once to exchange it for a seat token; the token is returned in that response",
-    "body only and is never repeated. Then poll for messages and ack each one after you have",
-    "acted on it.",
+    "body only and is never repeated. Then poll for messages. Do not call claim_agent_inbox;",
+    "this seat is refused there. Ack each message after its local effect is persisted.",
+    "Send the listener_instance_id from the poll response on each ack.",
     "",
     ...H0_VERBS.flatMap(verbLines),
   ].join("\n");
