@@ -15,8 +15,8 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
   "cloud-swarm-dev IS PRODUCTION", the Vercel site ritual, the `releases` brain topic): the doc lane below fixes them;
   until then, this file wins.
 - Still true: the local Supabase CLI stack (`npm run db:start`, 127.0.0.1:54321) runs the server test suites.
-- On main but NOT RELEASED to npm: check budget (3.9 s), H lane 1 (command table), the timeout table, and N-db's CLI
-  change (read projections, #22). The released CLI is 0.1.71.
+- RELEASED 2026-09-22: cswarm 0.1.72 (check budget, H lane 1, read projections, the live-host strings); npm latest,
+  GitHub release Latest, /download shows it. Record: docs/evidence/2026-09-22-v0.1.72-release/RELEASE.md.
 
 ## Open, in the Strategist's order (CommonSwarm ask 584d0a89)
 
@@ -30,7 +30,7 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
    corrected; the data-transfer wording needs the owner.
 3. Cleanup of merged branches and worktrees, and PR #8: BLOCKED. The operator rejected the lead's cleanup on 2026-09-17
    and has not answered since.
-4. CLI release carrying items above. It must also fix a live bug found by the doc pass: the capability-link default host
+4. CLI release: DONE (0.1.72, see above). It must also fix a live bug found by the doc pass: the capability-link default host
    is `coswarm-site.vercel.app` (deleted), in `src/cloud/capability-link.ts:8` and `src/cli.ts:995-998`. The `/see` page
    itself was never built (404 on commonswarm.com on 2026-09-22; design `CAPABILITY-URL-ONRAMP.md` §7 "No page"), so the
    host change alone does not make the link work; building the page is a backlog item.
