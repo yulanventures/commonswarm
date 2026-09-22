@@ -3146,7 +3146,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "site/src/lib/h0-link-join.ts:16,119-201",
+          "citation": "site/src/lib/h0-link-join.ts:21,130-212",
           "detail": "Browser join-credential mint and revoke commands (H0 link-join, behind PUBLIC_H0_LINK_JOIN).",
           "operation": {
             "name": "browser-h0-link-join",
@@ -3165,7 +3165,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "site/src/lib/h0-link-join.ts:128",
+          "citation": "site/src/lib/h0-link-join.ts:139",
           "detail": "Browser command Abort via setTimeout of COMMAND_TIMEOUT_MS.",
           "operation": {
             "name": "browser-h0-link-join-site",

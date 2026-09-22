@@ -18,6 +18,7 @@ import {
   REVOKE_AGENT_JOIN_CREDENTIAL_FIELDS,
 } from "../../src/protocol/agent-join-limits.js";
 import { H0_AGENT_DOCUMENT_PATH_PREFIX } from "../../src/protocol/h0-agent-document-url.js";
+import { handleH0Request } from "../../supabase/functions/h0/core.js";
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -86,11 +87,10 @@ function oneList(lists: string[][], field: string): string[] {
   return found[0]!;
 }
 
-/** Throws when the app's constants differ from the command edge or the migration. */
-export function assertJoinLimitsMatchEnforcement(): void {
+/** Throws when the app's constants differ from the command edge, the migration, or the document route. */
+export async function assertJoinLimitsMatchEnforcement(): Promise<void> {
   const command = read("supabase/functions/command/index.ts");
   const migration = read("supabase/migrations/20260916000001_agent_join_credentials.sql");
-  const core = read("supabase/functions/h0/core.ts");
 
   assert.equal(numberConst(command, "AGENT_JOIN_SEAT_CAP_MIN"), AGENT_JOIN_SEAT_CAP_MIN);
   assert.equal(numberConst(command, "AGENT_JOIN_SEAT_CAP_MAX"), AGENT_JOIN_SEAT_CAP_MAX);
@@ -122,13 +122,19 @@ export function assertJoinLimitsMatchEnforcement(): void {
     [...REVOKE_AGENT_JOIN_CREDENTIAL_FIELDS].sort(),
   );
 
-  const described = core.match(/The public URL is (\/functions\/v1\/h0\/agent-doc\/)<locator>/);
-  assert.ok(described, "h0 core names the public document URL");
-  assert.equal(H0_AGENT_DOCUMENT_PATH_PREFIX, described[1]);
-  const patternSource = core.match(/const AGENT_DOCUMENT_PATH = (\/\^[\s\S]*?\/);/);
-  assert.ok(patternSource, "AGENT_DOCUMENT_PATH");
-  const pattern = new Function(`return ${patternSource[1]}`)() as RegExp;
   const locatorSample = "b".repeat(22);
-  assert.equal(pattern.test(`${H0_AGENT_DOCUMENT_PATH_PREFIX}${locatorSample}`), true);
-  assert.equal(pattern.test(H0_AGENT_DOCUMENT_PATH_PREFIX), false);
+  const document = { marker: "h0-agent-document" };
+  const origin = "https://api.example.test";
+  const accepted = handleH0Request(
+    new Request(`${origin}${H0_AGENT_DOCUMENT_PATH_PREFIX}${locatorSample}`),
+    document,
+  );
+  assert.equal(accepted.status, 200);
+  assert.equal(await accepted.text(), JSON.stringify(document));
+  const noLocator = handleH0Request(
+    new Request(`${origin}${H0_AGENT_DOCUMENT_PATH_PREFIX}`),
+    document,
+  );
+  assert.equal(noLocator.status, 404);
+  assert.equal(await noLocator.text(), JSON.stringify({ error: "not_found" }));
 }

@@ -260,12 +260,12 @@ const {
     uuid,
   } from "../../lib/commonswarm";
   import { dashboardAgentPrompt, dashboardAgentConnection, dashboardAgentFilePrompt, promptCopyPayload } from "./agent-prompt";
-  import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
-  import { concealJoinInvite } from "../../lib/h0-link-join-flag-meaning";
+  import { h0LinkJoinEnabled, loadLinkJoin } from "../../lib/h0-link-join-flag";
   import {
-    attachLinkJoin,
-    type JoinInviteReveal,
-  } from "../../lib/h0-link-join";
+    concealJoinInvite,
+    dismissShownJoin,
+    shownJoinAfterRevoke,
+  } from "../../lib/h0-link-join-flag-meaning";
 
   /*
    * A custom element rather than a page script, so the host page can drop <AgentConnect /> in
@@ -294,7 +294,7 @@ const {
     #retargetPending = false;
     #pendingDuplicateName = "";
     #createAnotherChosen = false;
-    #joinCredentialId: string | null = null;
+    #inviteId: string | null = null;
     #joinActive = false;
     #copyLabel = "Copy prompt";
     #tokenResultTitle = "";
@@ -401,7 +401,7 @@ const {
           this.#tokenResultTitle = this.querySelector(".ac__result-title")?.textContent ?? "";
           this.#tokenResultLead = this.querySelector(".ac__result-lead")?.textContent ?? "";
         }
-        attachLinkJoin(this, {
+        const api = {
           workspaceId: () => this.#workspaceId,
           session: () => currentSession(),
           tryBegin: () => {
@@ -418,17 +418,30 @@ const {
               this.#queueLoad();
             }
           },
-          setMintPending: (pending) => {
+          setMintPending: (pending: boolean) => {
             const button = this.querySelector<HTMLButtonElement>('[data-action="mint-join"]');
             if (!button) return;
             button.disabled = pending;
             button.textContent = pending ? "Creating the invite…" : "Create an invite";
           },
-          showInvite: (reveal) => this.#showJoinInvite(reveal),
-          formError: (message) => this.#formError(message),
-          note: (message) => this.#text("copy-status", message),
-          markRevoked: (message) => this.#markJoinRevoked(message),
-          joinCredentialId: () => this.#joinCredentialId,
+          showInvite: (reveal: {
+            paste: string | null;
+            inviteId: string;
+            documentUrl: string;
+            lead: string;
+            withheld: boolean;
+          }) => this.#showJoinInvite(reveal),
+          formError: (message: string | null) => this.#formError(message),
+          note: (message: string) => this.#text("copy-status", message),
+          markRevoked: (message: string, inviteId: string) => this.#markJoinRevoked(message, inviteId),
+          inviteId: () => this.#inviteId,
+        };
+        const joining = loadLinkJoin();
+        this.querySelector<HTMLButtonElement>('[data-action="mint-join"]')?.addEventListener("click", () => {
+          void joining?.then((module) => module.startJoinMint(api));
+        });
+        this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]')?.addEventListener("click", () => {
+          void joining?.then((module) => module.startJoinRevoke(api));
         });
       }
     }
@@ -503,12 +516,18 @@ const {
         if (this.#joinActive) {
           const hidden = concealJoinInvite({
             paste: this.#prompt,
-            joinCredentialId: this.#joinCredentialId ?? "",
+            inviteId: this.#inviteId ?? "",
           });
           this.#prompt = hidden.paste;
         }
-        this.#joinCredentialId = null;
-        this.#joinActive = false;
+        const next = dismissShownJoin({
+          inviteId: this.#inviteId,
+          joinActive: this.#joinActive,
+          prompt: this.#prompt,
+        });
+        this.#inviteId = next.inviteId;
+        this.#joinActive = next.joinActive;
+        this.#prompt = next.prompt;
         this.#restoreTokenResult();
       }
       this.#prompt = null;
@@ -881,9 +900,15 @@ const {
       return "Something went wrong before a key was created. Nothing was added.";
     }
 
-    #showJoinInvite(reveal: JoinInviteReveal) {
+    #showJoinInvite(reveal: {
+      paste: string | null;
+      inviteId: string;
+      documentUrl: string;
+      lead: string;
+      withheld: boolean;
+    }) {
       this.#joinActive = true;
-      this.#joinCredentialId = reveal.joinCredentialId;
+      this.#inviteId = reveal.inviteId;
       this.#connection = null;
       this.#filePrompt = null;
       this.#tokenId = null;
@@ -921,15 +946,29 @@ const {
       );
     }
 
-    #markJoinRevoked(message: string) {
+    #markJoinRevoked(message: string, revokedInviteId: string) {
+      const next = shownJoinAfterRevoke(
+        {
+          inviteId: this.#inviteId,
+          joinActive: this.#joinActive,
+          prompt: this.#prompt,
+        },
+        revokedInviteId,
+      );
+      if (next === null) return;
       const hidden = concealJoinInvite({
         paste: this.#prompt,
-        joinCredentialId: this.#joinCredentialId ?? "",
+        inviteId: this.#inviteId ?? "",
       });
       this.#prompt = hidden.paste;
-      this.#joinActive = true;
+      this.#joinActive = next.joinActive;
+      this.#inviteId = next.inviteId;
       this.#text("prompt", "");
       this.#text("copy-status", message);
+      const title = this.querySelector(".ac__result-title");
+      if (title) title.textContent = "This invite is revoked.";
+      const lead = this.querySelector(".ac__result-lead");
+      if (lead) lead.textContent = message;
       const copy = this.querySelector<HTMLButtonElement>('[data-action="copy"]');
       if (copy) copy.disabled = true;
       const revoke = this.querySelector<HTMLButtonElement>('[data-action="revoke-join"]');
@@ -939,7 +978,7 @@ const {
     #restoreTokenResult() {
       this.#copyLabel = "Copy prompt";
       this.#joinActive = false;
-      this.#joinCredentialId = null;
+      this.#inviteId = null;
       const title = this.querySelector(".ac__result-title");
       if (title && this.#tokenResultTitle) title.textContent = this.#tokenResultTitle;
       const lead = this.querySelector(".ac__result-lead");

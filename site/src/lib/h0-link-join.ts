@@ -1,11 +1,16 @@
 /**
- * Add an agent invite: mint a join credential, show h0AgentPaste once, revoke it.
- * Imported only from the flag-on branch of AgentConnect, so a build with the
- * flag off does not ship this module.
+ * Add an agent invite: mint a join credential, show the paste once, revoke it.
+ *
+ * AgentConnect does not import this file statically. It calls loadLinkJoin()
+ * from h0-link-join-flag.ts, and that function imports this file only inside
+ * the branch where the build-time flag is on. A default site build drops the
+ * branch, so this file is not in that build.
  */
 import type { Session } from "@supabase/supabase-js";
 import { h0AgentPaste } from "../../../src/h0/paste";
 import {
+  AGENT_JOIN_SEAT_CAP_MAX,
+  AGENT_JOIN_SEAT_CAP_MIN,
   joinInviteResultLead,
   mintAgentJoinCredentialCommand,
   revokeAgentJoinCredentialCommand,
@@ -16,6 +21,9 @@ import { CLIENT_PROTOCOL_VERSION, deployment, uuid } from "./commonswarm";
 const COMMAND_TIMEOUT_MS = 30_000;
 const WITHHELD_MESSAGE =
   "The invite was created, but this page refused to show the message. Revoke it here. The credential was not shown.";
+
+export const JOIN_INVITE_REVOKED_MESSAGE =
+  "This invite is revoked. It can no longer be used to join.";
 
 export class JoinInviteError extends Error {
   override name = "JoinInviteError";
@@ -31,13 +39,13 @@ export class JoinInviteWithheld extends JoinInviteError {
 export class JoinInviteAlreadyRevoked extends JoinInviteError {
   override name = "JoinInviteAlreadyRevoked";
   constructor() {
-    super("This invite is revoked. It can no longer be used to join.");
+    super(JOIN_INVITE_REVOKED_MESSAGE);
   }
 }
 
 export interface JoinInviteReveal {
   paste: string | null;
-  joinCredentialId: string;
+  inviteId: string;
   documentUrl: string;
   lead: string;
   withheld: boolean;
@@ -52,8 +60,8 @@ export interface LinkJoinApi {
   showInvite(reveal: JoinInviteReveal): void;
   formError(message: string | null): void;
   note(message: string): void;
-  markRevoked(message: string): void;
-  joinCredentialId(): string | null;
+  markRevoked(message: string, inviteId: string): void;
+  inviteId(): string | null;
 }
 
 interface DeploymentTarget {
@@ -66,8 +74,11 @@ function shownExpiry(value: unknown): string | null {
   return value;
 }
 
-function shownSeatCap(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isSafeInteger(value) ? value : fallback;
+/** Seat cap the lead may show. Values outside the server range use the fallback. */
+export function shownSeatCap(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) return fallback;
+  if (value < AGENT_JOIN_SEAT_CAP_MIN || value > AGENT_JOIN_SEAT_CAP_MAX) return fallback;
+  return value;
 }
 
 /** Build the paste from a mint body. The credential never goes into the document URL. */
@@ -91,7 +102,7 @@ export function revealFromMintBody(
   if (!secret) {
     return {
       paste: null,
-      joinCredentialId: id,
+      inviteId: id,
       documentUrl: "",
       lead: "The credential was not in the response, so it cannot be shown. Revoke the invite if you do not want it used.",
       withheld: true,
@@ -105,7 +116,7 @@ export function revealFromMintBody(
     const paste = h0AgentPaste({ documentUrl, joinCredential: secret });
     return {
       paste,
-      joinCredentialId: id,
+      inviteId: id,
       documentUrl,
       lead,
       withheld: false,
@@ -271,7 +282,7 @@ async function onMint(api: LinkJoinApi): Promise<void> {
     if (error instanceof JoinInviteWithheld) {
       api.showInvite({
         paste: null,
-        joinCredentialId: error.joinCredentialId,
+        inviteId: error.joinCredentialId,
         documentUrl: "",
         lead: error.message,
         withheld: true,
@@ -289,19 +300,28 @@ async function onMint(api: LinkJoinApi): Promise<void> {
   }
 }
 
+/** A late result may write only while this id is still the one on screen. */
+function inviteStillShown(api: LinkJoinApi, inviteId: string): boolean {
+  return api.inviteId() === inviteId;
+}
+
 async function onRevoke(api: LinkJoinApi): Promise<void> {
-  const id = api.joinCredentialId();
+  const id = api.inviteId();
   if (!id) return;
   if (!api.tryBegin()) return;
   try {
     const session = await api.session();
     if (!session) {
-      api.note("Your sign-in expired. The invite was not revoked.");
+      if (inviteStillShown(api, id)) {
+        api.note("Your sign-in expired. The invite was not revoked.");
+      }
       return;
     }
     const workspaceId = api.workspaceId();
     if (!workspaceId) {
-      api.note("Choose a workspace first. The invite was not revoked.");
+      if (inviteStillShown(api, id)) {
+        api.note("Choose a workspace first. The invite was not revoked.");
+      }
       return;
     }
     await revokeJoinInvite({
@@ -310,10 +330,12 @@ async function onRevoke(api: LinkJoinApi): Promise<void> {
       joinCredentialId: id,
       commandId: `web_${uuid()}`,
     });
-    api.markRevoked("This invite is revoked. It can no longer be used to join.");
+    if (!inviteStillShown(api, id)) return;
+    api.markRevoked(JOIN_INVITE_REVOKED_MESSAGE, id);
   } catch (error) {
+    if (!inviteStillShown(api, id)) return;
     if (error instanceof JoinInviteAlreadyRevoked) {
-      api.markRevoked(error.message);
+      api.markRevoked(error.message, id);
       return;
     }
     api.note(
@@ -326,17 +348,10 @@ async function onRevoke(api: LinkJoinApi): Promise<void> {
   }
 }
 
-export function attachLinkJoin(host: HTMLElement, api: LinkJoinApi): void {
-  host.querySelector<HTMLButtonElement>('[data-action="mint-join"]')?.addEventListener(
-    "click",
-    () => {
-      void onMint(api);
-    },
-  );
-  host.querySelector<HTMLButtonElement>('[data-action="revoke-join"]')?.addEventListener(
-    "click",
-    () => {
-      void onRevoke(api);
-    },
-  );
+export function startJoinMint(api: LinkJoinApi): Promise<void> {
+  return onMint(api);
+}
+
+export function startJoinRevoke(api: LinkJoinApi): Promise<void> {
+  return onRevoke(api);
 }

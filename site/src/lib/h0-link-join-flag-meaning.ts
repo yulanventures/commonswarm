@@ -1,26 +1,54 @@
-/** Anything other than the string "1" leaves the invite hidden. */
-export function h0LinkJoinFlagEnabled(flag: string | undefined): boolean {
-  return flag === "1";
+export interface ShownJoinInvite {
+  inviteId: string | null;
+  joinActive: boolean;
+  prompt: string | null;
 }
 
-export interface JoinInviteSecret {
+export interface ConcealedJoinInvite {
   paste: string | null;
-  joinCredentialId: string;
+  inviteId: string;
 }
 
 /** Drop the paste. The id stays so the page can still revoke. */
-export function concealJoinInvite(secret: JoinInviteSecret): JoinInviteSecret {
-  return { paste: null, joinCredentialId: secret.joinCredentialId };
+export function concealJoinInvite(secret: {
+  paste: string | null;
+  inviteId: string;
+}): ConcealedJoinInvite {
+  return { paste: null, inviteId: secret.inviteId };
 }
 
 /**
- * The handoff a person gets. The flag-off arm is today's prompt, byte for byte.
- * The flag-on arm is the join paste. Callers pass both and this picks one.
+ * Done clears the invite. A revoke result that arrives later must see
+ * inviteId null and leave this state alone.
  */
-export function selectAddAgentHandoff(
-  enabled: boolean,
-  todayPrompt: string,
-  joinPaste: string,
-): string {
-  return enabled ? joinPaste : todayPrompt;
+export function dismissShownJoin(shown: ShownJoinInvite): ShownJoinInvite {
+  const hidden = shown.joinActive
+    ? concealJoinInvite({ paste: shown.prompt, inviteId: shown.inviteId ?? "" })
+    : null;
+  return {
+    inviteId: null,
+    joinActive: false,
+    prompt: hidden === null ? shown.prompt : hidden.paste,
+  };
+}
+
+/**
+ * A revoke result applies only when revokedInviteId is still the invite on screen.
+ * Returns null when Done has already cleared it, or when a different invite is shown.
+ * The caller must not write join state when this returns null.
+ */
+export function shownJoinAfterRevoke(
+  shown: ShownJoinInvite,
+  revokedInviteId: string,
+): ShownJoinInvite | null {
+  if (shown.inviteId !== revokedInviteId) return null;
+  const hidden = concealJoinInvite({
+    paste: shown.prompt,
+    inviteId: shown.inviteId,
+  });
+  return {
+    inviteId: hidden.inviteId,
+    joinActive: true,
+    prompt: hidden.paste,
+  };
 }

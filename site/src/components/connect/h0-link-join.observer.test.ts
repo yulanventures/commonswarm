@@ -1,63 +1,50 @@
 /**
  * Add an agent invite. The site test script globs this file.
  *
- * Flag off is today's handoff. Flag on mints, builds the paste with h0AgentPaste,
- * keeps the credential out of the document URL, shows it once, and revokes.
+ * Flag off keeps today's handoff. Flag on mints, checks the paste by
+ * properties, shows the credential once, and revokes.
  */
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, test } from "node:test";
-import { h0AgentPaste } from "../../../../src/h0/paste";
+import ts from "typescript";
 import {
-  AGENT_JOIN_SEAT_CAP_MAX,
-  AGENT_JOIN_SEAT_CAP_MIN,
-  AGENT_JOIN_TTL_MAX_HOURS,
-  AGENT_JOIN_TTL_MIN_HOURS,
   joinInviteLimitSentence,
   joinInviteResultLead,
-  mintAgentJoinCredentialCommand,
-  MINT_AGENT_JOIN_CREDENTIAL_FIELDS,
-  revokeAgentJoinCredentialCommand,
-  REVOKE_AGENT_JOIN_CREDENTIAL_FIELDS,
 } from "../../../../src/protocol/agent-join-limits";
-import { h0AgentDocumentUrl } from "../../../../src/protocol/h0-agent-document-url";
 import { CLIENT_PROTOCOL_VERSION } from "../../lib/commonswarm";
 import {
   concealJoinInvite,
-  h0LinkJoinFlagEnabled,
-  selectAddAgentHandoff,
+  dismissShownJoin,
+  shownJoinAfterRevoke,
 } from "../../lib/h0-link-join-flag-meaning";
-import { dashboardAgentPrompt } from "./agent-prompt";
 import { assertJoinLimitsMatchEnforcement } from "../../../../tests/p1-cli/h0-link-join-limits";
 
 const DEPLOYMENT_URL = "https://api.commonswarm.com";
 const WORKSPACE = "9c8b7a65-4321-4def-8abc-0123456789ab";
 const JOIN_ID = "11111111-1111-4111-8111-111111111111";
 const LOCATOR = "b".repeat(22);
-const SECRET = `swm_join_${"A".repeat(43)}`;
+const SECRET_BODY = "Aa1Bb2Cc3Dd4Ee5Ff6Gg7Hh8Ii9Jj0Kk1Ll2Mm3Nn4O";
+const SECRET = `swm_join_${SECRET_BODY}`;
 const EXPIRES = "2026-09-23T12:00:00.000Z";
 
-const TOKEN = `swm_agt_${"A_".repeat(21) + "A"}`;
-const TODAY = {
-  credential: {
-    principalId: "11111111-1111-4111-8111-111111111111",
-    principalName: "Observer",
-    tokenId: "22222222-2222-4222-8222-222222222222",
-    runId: "33333333-3333-4333-8333-333333333333",
-    token: TOKEN,
-    expiresAt: Date.parse("2099-07-29T23:00:00Z"),
-    renews: true,
-    horizonExpiresAt: null,
-    grantKind: "standing" as const,
-  },
-  workspaceId: "44444444-4444-4444-8444-444444444444",
-  workspaceName: "Observer room",
-  deploymentUrl: "https://example.supabase.co",
-  anonKey: "TEST_ONLY_PUBLIC_KEY",
-};
+const TODAY_ACTIONS = [
+  "retry",
+  "create-another",
+  "mint",
+  "copy",
+  "download-connection",
+  "done",
+];
+const TODAY_HEADINGS = [
+  "Name your agent.",
+  "Checking your session…",
+  "Not available",
+  "Creating your agent prompt.",
+  "Your agent prompt is ready.",
+];
 
 (globalThis as { document?: unknown }).document = {
   querySelector(selector: string) {
@@ -67,13 +54,34 @@ const TODAY = {
   },
 };
 
-const { mintJoinInvite, revokeJoinInvite, revealFromMintBody, JoinInviteWithheld, JoinInviteAlreadyRevoked } =
-  await import("../../lib/h0-link-join");
+const {
+  mintJoinInvite,
+  revokeJoinInvite,
+  revealFromMintBody,
+  startJoinRevoke,
+  shownSeatCap,
+  JOIN_INVITE_REVOKED_MESSAGE,
+  JoinInviteWithheld,
+  JoinInviteAlreadyRevoked,
+} = await import("../../lib/h0-link-join");
 
 interface Sent {
   url: string;
   headers: Record<string, string>;
   body: string;
+}
+
+interface RevokeApi {
+  workspaceId: () => string;
+  session: () => Promise<unknown>;
+  tryBegin: () => boolean;
+  end: () => void;
+  setMintPending: (pending: boolean) => void;
+  showInvite: () => void;
+  formError: (message: string | null) => void;
+  note: (message: string) => void;
+  markRevoked: (message: string, inviteId: string) => void;
+  inviteId: () => string | null;
 }
 
 const sent: Sent[] = [];
@@ -88,7 +96,7 @@ function acceptedMint(): Record<string, unknown> {
     event_ids: [],
     join_credential_id: JOIN_ID,
     locator: LOCATOR,
-    seat_cap: AGENT_JOIN_SEAT_CAP_MAX,
+    seat_cap: 10,
     seats_used: 0,
     expires_at: EXPIRES,
     events: [],
@@ -118,6 +126,10 @@ const LIMITS = readFileSync(
   "utf8",
 );
 const FLAG = readFileSync(new URL("../../lib/h0-link-join-flag.ts", import.meta.url), "utf8");
+const COMMANDS = readFileSync(
+  fileURLToPath(new URL("../../../../src/protocol/workspace-commands.ts", import.meta.url)),
+  "utf8",
+);
 const REPO = fileURLToPath(new URL("../../../..", import.meta.url));
 
 function stripFlagged(source: string): string {
@@ -194,6 +206,17 @@ function copyMethod(source: string): string {
   return source.slice(start, end);
 }
 
+function methodBody(source: string, signature: string): string {
+  const start = source.indexOf(`\n    ${signature}`);
+  assert.ok(start !== -1, signature);
+  let end = source.length;
+  for (const mark of ["\n    #", "\n    async #"]) {
+    const at = source.indexOf(mark, start + signature.length);
+    if (at !== -1 && at < end) end = at;
+  }
+  return source.slice(start + 1, end);
+}
+
 function filesContaining(needle: string): string[] {
   const found: string[] = [];
   const skip = new Set(["node_modules", "dist", ".git", "docs"]);
@@ -217,41 +240,109 @@ function filesContaining(needle: string): string[] {
   return found.sort();
 }
 
-test("the invite flag is off unless the value is exactly 1, and off keeps today's prompt", () => {
-  for (const flag of [undefined, "", "0", "true", "yes", "1 ", "01", "2"]) {
-    assert.equal(h0LinkJoinFlagEnabled(flag), false, JSON.stringify(flag));
-  }
-  assert.equal(h0LinkJoinFlagEnabled("1"), true);
-  const today = dashboardAgentPrompt(TODAY);
-  assert.equal(selectAddAgentHandoff(false, today, "JOIN PASTE"), today);
-  assert.equal(selectAddAgentHandoff(true, today, "JOIN PASTE"), "JOIN PASTE");
+function workspaceCommandKeys(kind: string): string[] {
+  const file = ts.createSourceFile("workspace-commands.ts", COMMANDS, ts.ScriptTarget.Latest, true);
+  const found: string[][] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isTypeLiteralNode(node)) {
+      const names: string[] = [];
+      let kindValue: string | undefined;
+      for (const member of node.members) {
+        if (!ts.isPropertySignature(member) || member.name === undefined) continue;
+        const name = ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)
+          ? member.name.text
+          : undefined;
+        if (name === undefined) continue;
+        names.push(name);
+        if (
+          name === "kind"
+          && member.type
+          && ts.isLiteralTypeNode(member.type)
+          && ts.isStringLiteral(member.type.literal)
+        ) {
+          kindValue = member.type.literal.text;
+        }
+      }
+      if (kindValue === kind) found.push(names);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.equal(found.length, 1, `workspace command shape ${kind}`);
+  return found[0]!.slice().sort();
+}
 
+function countOf(haystack: string, needle: string): number {
+  let count = 0;
+  let from = 0;
+  while (from <= haystack.length) {
+    const at = haystack.indexOf(needle, from);
+    if (at === -1) break;
+    count += 1;
+    from = at + needle.length;
+  }
+  return count;
+}
+
+function revokeApi(state: { inviteId: string | null; wrote: boolean; message: string }): RevokeApi {
+  return {
+    workspaceId: () => WORKSPACE,
+    session: async () => SESSION,
+    tryBegin: () => true,
+    end: () => {},
+    setMintPending: () => {},
+    showInvite: () => {},
+    formError: () => {},
+    note: () => {
+      state.wrote = true;
+    },
+    markRevoked: (message) => {
+      state.wrote = true;
+      state.message = message;
+    },
+    inviteId: () => state.inviteId,
+  };
+}
+
+test("the invite flag is on only for the string 1", () => {
   const expr = FLAG.match(/export const h0LinkJoinEnabled = (.+);/)?.[1];
-  assert.ok(expr);
+  assert.equal(expr, 'import.meta.env.PUBLIC_H0_LINK_JOIN === "1"');
   const compiled = new Function(
     "flag",
     `return ${expr.replace("import.meta.env.PUBLIC_H0_LINK_JOIN", "flag")};`,
   ) as (flag: string | undefined) => boolean;
-  for (const flag of [undefined, "", "0", "true", "1"]) {
-    assert.equal(compiled(flag), h0LinkJoinFlagEnabled(flag));
+  for (const flag of [undefined, "", "0", "true", " 1", "yes", "1 ", "01", "2"]) {
+    assert.equal(compiled(flag), false, JSON.stringify(flag));
   }
+  assert.equal(compiled("1"), true);
 });
 
 test("flag off matches today's Add an agent controls and token handoff", () => {
-  const main = execFileSync(
-    "git",
-    ["show", "a103a512:site/src/components/connect/AgentConnect.astro"],
-    { encoding: "utf8" },
-  );
   const stripped = stripFlagged(CONNECT);
-  assert.deepEqual(dataActions(template(stripped)), dataActions(template(main)));
-  assert.deepEqual(headings(template(stripped)), headings(template(main)));
-  assert.equal(copyMethod(CONNECT), copyMethod(main));
+  assert.deepEqual(dataActions(template(CONNECT)), [
+    ...TODAY_ACTIONS.slice(0, 3),
+    "mint-join",
+    ...TODAY_ACTIONS.slice(3, 5),
+    "revoke-join",
+    "done",
+  ]);
+  assert.deepEqual(dataActions(template(stripped)), TODAY_ACTIONS);
+  assert.deepEqual(headings(template(stripped)), TODAY_HEADINGS);
+  const copy = copyMethod(CONNECT);
+  assert.equal(copyMethod(stripped), copy);
+  assert.match(copy, /navigator\.clipboard\.writeText\(this\.#prompt\)/);
+  assert.match(copy, /Copied\. Paste the whole prompt into your AI assistant\./);
+  assert.doesNotMatch(copy, /h0LinkJoinEnabled|inviteId|loadLinkJoin/);
   assert.match(stripped, /this\.#prompt = dashboardAgentPrompt\(promptInput\)/);
   assert.match(CONNECT, /#copyLabel = "Copy prompt"/);
-  assert.equal(stripped.includes("attachLinkJoin("), false);
+  assert.equal(stripped.includes("loadLinkJoin()"), false);
+  assert.equal(stripped.includes("startJoinMint("), false);
+  assert.equal(stripped.includes("startJoinRevoke("), false);
+  assert.equal(CONNECT.includes('from "../../lib/h0-link-join"'), false);
+  assert.match(CONNECT, /const joining = loadLinkJoin\(\)/);
   assert.doesNotMatch(CONNECT, /h0\/agent-doc/);
   assert.doesNotMatch(CONNECT, /mint_agent_join_credential/);
+  assert.doesNotMatch(CONNECT, /joinCredential/);
 });
 
 test("PUBLIC_H0_LINK_JOIN is read in one file", () => {
@@ -264,11 +355,11 @@ test("PUBLIC_H0_LINK_JOIN is read in one file", () => {
   assert.equal(FLAG.match(/import\.meta\.env\.PUBLIC_H0_LINK_JOIN/g)?.length, 1);
 });
 
-test("the invite sentence is built from the server limits", () => {
-  assertJoinLimitsMatchEnforcement();
+test("the invite sentence is the current server limits", async () => {
+  await assertJoinLimitsMatchEnforcement();
   assert.equal(
     joinInviteLimitSentence(),
-    `Up to ${AGENT_JOIN_SEAT_CAP_MAX} agents can join. This invite lasts ${AGENT_JOIN_TTL_MAX_HOURS} hours.`,
+    "Up to 10 agents can join. This invite lasts 24 hours.",
   );
   const fn = LIMITS.slice(
     LIMITS.indexOf("export function joinInviteLimitSentence"),
@@ -278,16 +369,18 @@ test("the invite sentence is built from the server limits", () => {
   assert.match(fn, /AGENT_JOIN_TTL_MAX_HOURS/);
   assert.doesNotMatch(fn, /\d/);
   const lead = joinInviteResultLead({
-    seatCap: AGENT_JOIN_SEAT_CAP_MIN,
+    seatCap: 1,
     expiresAt: EXPIRES,
   });
-  assert.match(lead, new RegExp(`Up to ${AGENT_JOIN_SEAT_CAP_MIN} agents can join`));
+  assert.match(lead, /Up to 1 agents can join/);
   assert.match(lead, new RegExp(EXPIRES));
+  assert.match(lead, /This page shows the credential once/);
+  assert.match(lead, /Done leaves the invite active\./);
   assert.match(CONNECT, /joinInviteLimitSentence\(\)/);
   assert.match(CONNECT, /The joining agent chooses its name/);
 });
 
-test("mint sends seat_cap and ttl_hours inside the server limits and no credential", async () => {
+test("mint sends the join credential command and no credential", async () => {
   const reveal = await mintJoinInvite({
     session: SESSION,
     workspaceId: WORKSPACE,
@@ -296,12 +389,12 @@ test("mint sends seat_cap and ttl_hours inside the server limits and no credenti
   assert.equal(sent.length, 1);
   const envelope = JSON.parse(sent[0]!.body) as Record<string, unknown>;
   const command = envelope.command as Record<string, unknown>;
-  assert.deepEqual(command, mintAgentJoinCredentialCommand());
-  assert.deepEqual(Object.keys(command).sort(), [...MINT_AGENT_JOIN_CREDENTIAL_FIELDS].sort());
-  assert.equal(command.seat_cap, AGENT_JOIN_SEAT_CAP_MAX);
-  assert.equal(command.ttl_hours, AGENT_JOIN_TTL_MAX_HOURS);
-  assert.ok((command.seat_cap as number) >= AGENT_JOIN_SEAT_CAP_MIN);
-  assert.ok((command.ttl_hours as number) >= AGENT_JOIN_TTL_MIN_HOURS);
+  assert.deepEqual(command, {
+    kind: "mint_agent_join_credential",
+    seat_cap: 10,
+    ttl_hours: 24,
+  });
+  assert.deepEqual(Object.keys(command).sort(), workspaceCommandKeys("mint_agent_join_credential"));
   assert.equal(envelope.workspace_id, WORKSPACE);
   assert.deepEqual(envelope.stream, { kind: "workspace" });
   assert.equal(envelope.client_version, CLIENT_PROTOCOL_VERSION);
@@ -313,19 +406,39 @@ test("mint sends seat_cap and ttl_hours inside the server limits and no credenti
   assert.equal(sent[0]!.body.includes(LOCATOR), false);
   assert.equal(sent[0]!.url.includes("h0/agent-doc"), false);
 
-  const documentUrl = h0AgentDocumentUrl(DEPLOYMENT_URL, LOCATOR);
-  assert.equal(reveal.documentUrl, documentUrl);
   assert.equal(reveal.documentUrl, `${DEPLOYMENT_URL}/functions/v1/h0/agent-doc/${LOCATOR}`);
-  assert.equal(reveal.paste, h0AgentPaste({
-    joinCredential: SECRET,
-    documentUrl,
-  }));
-  assert.equal(reveal.paste?.includes(SECRET), true);
+  const paste = reveal.paste;
+  assert.equal(typeof paste, "string");
+  assert.ok(paste);
+  assert.equal(countOf(paste, SECRET), 1);
+  assert.equal(paste.includes(reveal.documentUrl), true);
   assert.equal(reveal.documentUrl.includes(SECRET), false);
-  assert.equal(reveal.documentUrl.includes("swm_join_"), false);
+  assert.equal(SECRET_BODY.length, 43);
+  for (let i = 0; i + 12 <= SECRET_BODY.length; i += 1) {
+    const piece = SECRET_BODY.slice(i, i + 12);
+    assert.equal(
+      reveal.documentUrl.toLowerCase().includes(piece.toLowerCase()),
+      false,
+      piece,
+    );
+  }
   assert.equal(reveal.withheld, false);
+  assert.equal(reveal.inviteId, JOIN_ID);
   assert.match(reveal.lead, new RegExp(EXPIRES));
   assert.match(reveal.lead, /This page shows the credential once/);
+});
+
+test("the shown seat cap stays inside 1..10", () => {
+  assert.equal(shownSeatCap(1, 7), 1);
+  assert.equal(shownSeatCap(10, 7), 10);
+  for (const bad of [0, -1, 11, 1.5, Number.NaN, "10", null, undefined]) {
+    assert.equal(shownSeatCap(bad, 7), 7, JSON.stringify(bad));
+  }
+  const low = revealFromMintBody({ ...acceptedMint(), seat_cap: 0 }, DEPLOYMENT_URL);
+  assert.equal(low.lead.includes("Up to 10 agents can join."), true);
+  assert.equal(low.lead.includes("Up to 0 agents"), false);
+  const one = revealFromMintBody({ ...acceptedMint(), seat_cap: 1 }, DEPLOYMENT_URL);
+  assert.equal(one.lead.includes("Up to 1 agents can join."), true);
 });
 
 test("a missing credential is not shown again, and a locator that carries it is refused", () => {
@@ -335,10 +448,11 @@ test("a missing credential is not shown again, and a locator that carries it is 
   }, DEPLOYMENT_URL);
   assert.equal(missing.withheld, true);
   assert.equal(missing.paste, null);
-  assert.equal(missing.joinCredentialId, JOIN_ID);
+  assert.equal(missing.inviteId, JOIN_ID);
   assert.equal(JSON.stringify(missing).includes("swm_join_"), false);
 
-  const overlapping = "A".repeat(22);
+  const overlapping = SECRET_BODY.slice(0, 22);
+  assert.equal(overlapping.length, 22);
   assert.throws(
     () => revealFromMintBody({
       ...acceptedMint(),
@@ -357,20 +471,25 @@ test("a missing credential is not shown again, and a locator that carries it is 
 
 test("the paste is shown once: conceal drops it and keeps the id for revoke", () => {
   const reveal = revealFromMintBody(acceptedMint(), DEPLOYMENT_URL);
+  assert.ok(reveal.paste);
   const hidden = concealJoinInvite({
     paste: reveal.paste,
-    joinCredentialId: reveal.joinCredentialId,
+    inviteId: reveal.inviteId,
   });
   assert.equal(hidden.paste, null);
-  assert.equal(hidden.joinCredentialId, JOIN_ID);
+  assert.equal(hidden.inviteId, JOIN_ID);
   assert.equal(JSON.stringify(hidden).includes(SECRET), false);
   assert.match(CONNECT, /this\.#prompt = reveal\.paste/);
   assert.match(CONNECT, /this\.#text\("prompt", reveal\.paste\)/);
   assert.match(CONNECT, /concealJoinInvite\(/);
   assert.match(CONNECT, /this\.#text\("prompt", ""\)/);
+  const forget = methodBody(CONNECT, "#forget()");
+  assert.match(forget, /concealJoinInvite\(/);
+  assert.match(forget, /dismissShownJoin\(/);
+  assert.match(forget, /this\.#text\("prompt", ""\)/);
 });
 
-test("revoke sends join_credential_id and nothing else", async () => {
+test("revoke sends the revoke command and nothing else", async () => {
   const mixed = "11111111-1111-4111-8111-11111111111A";
   await revokeJoinInvite({
     session: SESSION,
@@ -381,9 +500,14 @@ test("revoke sends join_credential_id and nothing else", async () => {
   assert.equal(sent.length, 1);
   const envelope = JSON.parse(sent[0]!.body) as Record<string, unknown>;
   const command = envelope.command as Record<string, unknown>;
-  assert.deepEqual(command, revokeAgentJoinCredentialCommand(mixed));
-  assert.deepEqual(Object.keys(command).sort(), [...REVOKE_AGENT_JOIN_CREDENTIAL_FIELDS].sort());
-  assert.equal(command.join_credential_id, mixed.toLowerCase());
+  assert.deepEqual(command, {
+    kind: "revoke_agent_join_credential",
+    join_credential_id: "11111111-1111-4111-8111-11111111111a",
+  });
+  assert.deepEqual(
+    Object.keys(command).sort(),
+    workspaceCommandKeys("revoke_agent_join_credential"),
+  );
   assert.equal(envelope.workspace_id, WORKSPACE);
   assert.deepEqual(envelope.stream, { kind: "workspace" });
   assert.equal(envelope.client_version, CLIENT_PROTOCOL_VERSION);
@@ -405,7 +529,9 @@ test("a revoke the server already finished is the revoked state, and errors omit
     }),
     (error: unknown) => {
       assert.ok(error instanceof JoinInviteAlreadyRevoked);
+      assert.equal(error.message, JOIN_INVITE_REVOKED_MESSAGE);
       assert.equal(error.message.includes(SECRET), false);
+      assert.equal(error.message.toLowerCase().includes("active"), false);
       return true;
     },
   );
@@ -423,4 +549,113 @@ test("a revoke the server already finished is the revoked state, and errors omit
       return true;
     },
   );
+});
+
+test("Done then a revoke result does not turn the invite back on", () => {
+  const gone = dismissShownJoin({
+    inviteId: JOIN_ID,
+    joinActive: true,
+    prompt: SECRET,
+  });
+  assert.equal(gone.joinActive, false);
+  assert.equal(gone.inviteId, null);
+  assert.equal(gone.prompt, null);
+  assert.equal(shownJoinAfterRevoke(gone, JOIN_ID), null);
+
+  const shown = { inviteId: JOIN_ID, joinActive: true, prompt: SECRET };
+  const applied = shownJoinAfterRevoke(shown, JOIN_ID);
+  assert.ok(applied);
+  assert.equal(applied.joinActive, true);
+  assert.equal(applied.inviteId, JOIN_ID);
+  assert.equal(applied.prompt, null);
+  assert.equal(JSON.stringify(applied).includes(SECRET), false);
+  assert.equal(shownJoinAfterRevoke(shown, "22222222-2222-4222-8222-222222222222"), null);
+
+  const revoked = methodBody(CONNECT, "#markJoinRevoked(");
+  const guard = revoked.indexOf("if (next === null) return;");
+  const active = revoked.indexOf("this.#joinActive = next.joinActive");
+  const lead = revoked.indexOf("lead.textContent = message");
+  assert.ok(guard !== -1 && active > guard && lead > guard);
+  assert.match(revoked, /shownJoinAfterRevoke\(/);
+  assert.doesNotMatch(revoked, /#joinActive = true/);
+  assert.match(revoked, /querySelector\("\.ac__result-lead"\)/);
+  assert.equal(
+    JOIN_INVITE_REVOKED_MESSAGE,
+    "This invite is revoked. It can no longer be used to join.",
+  );
+  assert.equal(JOIN_INVITE_REVOKED_MESSAGE.toLowerCase().includes("active"), false);
+});
+
+test("a revoke in flight that finishes after Done does not write invite state", async () => {
+  const state = { inviteId: JOIN_ID as string | null, wrote: false, message: "" };
+  let release!: (value: { status: number; text: () => Promise<string> }) => void;
+  const pending = new Promise<{ status: number; text: () => Promise<string> }>((resolve) => {
+    release = resolve;
+  });
+  let markFetched!: () => void;
+  const fetched = new Promise<void>((resolve) => {
+    markFetched = resolve;
+  });
+  globalThis.fetch = (async () => {
+    markFetched();
+    return pending;
+  }) as typeof fetch;
+
+  const running = startJoinRevoke(revokeApi(state));
+  await Promise.race([
+    fetched,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("revoke did not reach the deployment")), 1000);
+    }),
+  ]);
+  const dismissed = dismissShownJoin({
+    inviteId: state.inviteId,
+    joinActive: true,
+    prompt: SECRET,
+  });
+  state.inviteId = dismissed.inviteId;
+  release({ status: 200, text: async () => JSON.stringify({ status: "accepted" }) });
+  await running;
+  assert.equal(state.wrote, false);
+  assert.equal(state.inviteId, null);
+  assert.equal(dismissed.joinActive, false);
+});
+
+test("a failed revoke that finishes after Done does not write a note", async () => {
+  const state = { inviteId: JOIN_ID as string | null, wrote: false, message: "" };
+  let release!: (value: { status: number; text: () => Promise<string> }) => void;
+  const pending = new Promise<{ status: number; text: () => Promise<string> }>((resolve) => {
+    release = resolve;
+  });
+  let markFetched!: () => void;
+  const fetched = new Promise<void>((resolve) => {
+    markFetched = resolve;
+  });
+  globalThis.fetch = (async () => {
+    markFetched();
+    return pending;
+  }) as typeof fetch;
+
+  const running = startJoinRevoke(revokeApi(state));
+  await fetched;
+  state.inviteId = dismissShownJoin({
+    inviteId: state.inviteId,
+    joinActive: true,
+    prompt: SECRET,
+  }).inviteId;
+  release({ status: 400, text: async () => JSON.stringify({ error: "bad", join_credential: SECRET }) });
+  await running;
+  assert.equal(state.wrote, false);
+  assert.equal(state.message.includes(SECRET), false);
+});
+
+test("a revoke that finishes while the invite is shown replaces the active sentence", async () => {
+  const state = { inviteId: JOIN_ID as string | null, wrote: false, message: "" };
+  await startJoinRevoke(revokeApi(state));
+  assert.equal(state.wrote, true);
+  assert.equal(state.message, "This invite is revoked. It can no longer be used to join.");
+  assert.equal(state.message.includes("Done leaves the invite active."), false);
+  const before = joinInviteResultLead({ seatCap: 10, expiresAt: EXPIRES });
+  assert.equal(before.includes("Done leaves the invite active."), true);
+  assert.equal(before === state.message, false);
 });

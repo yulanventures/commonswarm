@@ -5,6 +5,6 @@
 import test from "node:test";
 import { assertJoinLimitsMatchEnforcement } from "./h0-link-join-limits.js";
 
-test("join invite limits match the command edge, the migration, and the document path", () => {
-  assertJoinLimitsMatchEnforcement();
+test("join invite limits match the command edge, the migration, and the document path", async () => {
+  await assertJoinLimitsMatchEnforcement();
 });
