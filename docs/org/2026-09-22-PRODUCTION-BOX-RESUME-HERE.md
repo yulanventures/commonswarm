@@ -36,9 +36,10 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
    host change alone does not make the link work; building the page is a backlog item.
 5. H0 (later on 2026-09-22). Lane 4b (the app's "Add an agent" on the link-join) LANDED behind the build flag
    `PUBLIC_H0_LINK_JOIN`, which is OFF: record `docs/evidence/2026-09-22-h0-lane4b/LANDING.md`. Lane 5a (poll, ack, the
-   listener fence, three migrations 20260922000001-3) is on `lane/h0-poll-ack`, in review fold 3. Lane 5b (the h0
-   function forwards register, ask, note, reply, working-on) has not started. The box release of H0 waits for the
-   written procedure `deploy/RELEASE-TO-BOX.md` (PR #24, HezLead; in review).
+   listener fence, three migrations 20260922000001-3, release proofs) LANDED, not deployed: record
+   `docs/evidence/2026-09-22-h0-lane5a/LANDING.md`. Lane 5b (the h0
+   function forwards register, ask, note, reply, working-on) has not started. The box release procedure
+   `deploy/RELEASE-TO-BOX.md` is on main (PR #24, merged 844d0de2); H0 is released with it, run by Anvil under HezLead.
 6. Ahead of H0, by the Strategist's ruling: `lane/listener-outage` (a listener no longer stops for good on one
    transient 403/500; found when no listener on the mini was running), to ship as 0.1.73 with a live control, then
    restart the stopped listeners one seat at a time. Then the edge memory item below.
