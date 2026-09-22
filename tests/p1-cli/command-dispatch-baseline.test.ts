@@ -37,6 +37,9 @@ type BaselineRow = {
 };
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// The CLI prints its own version in every usage text. Record it as <VERSION> so a release bump does not rewrite every
+// row; the version itself is checked by scripts/build-release.sh, which runs the artifact.
+const packageVersion = (JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8")) as { version: string }).version;
 const cliPath = join(repoRoot, "src", "cli.ts");
 const preloadPath = join(repoRoot, "tests", "fixtures", "dispatch-trace-preload.mjs");
 const baselinePath = join(repoRoot, "tests", "p1-cli", "fixtures", "command-dispatch-baseline.json");
@@ -657,6 +660,7 @@ async function prepareRow(root: string, origin: string, fixture: Fixture) {
 
 function normalize(value: string, root: string, origin: string): string {
   return value
+    .replaceAll(`cswarm ${packageVersion} (protocol`, "cswarm <VERSION> (protocol")
     .replaceAll(root, "<ROOT>")
     .replaceAll(origin, "<ORIGIN>")
     .replaceAll(repoRoot, "<REPO>")
