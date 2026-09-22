@@ -3139,6 +3139,43 @@
             "removes": [],
             "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
           }
+        },
+        "site/src/lib/h0-link-join.ts:COMMAND_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "site/src/lib/h0-link-join.ts:16,119-201",
+          "detail": "Browser join-credential mint and revoke commands (H0 link-join, behind PUBLIC_H0_LINK_JOIN).",
+          "operation": {
+            "name": "browser-h0-link-join",
+            "class": "not-run",
+            "writes": [
+              "agent join credential state"
+            ],
+            "removes": [],
+            "reason": "The calls mint or revoke a join credential and cannot be cleaned up without changing that state again.",
+            "proxy": "No fair read-only proxy exists for the command statements."
+          }
+        },
+        "site/src/lib/h0-link-join.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/command"
+          ],
+          "citation": "site/src/lib/h0-link-join.ts:128",
+          "detail": "Browser command Abort via setTimeout of COMMAND_TIMEOUT_MS.",
+          "operation": {
+            "name": "browser-h0-link-join-site",
+            "class": "not-run",
+            "writes": [
+              "agent join credential state"
+            ],
+            "removes": [],
+            "reason": "Use of COMMAND_TIMEOUT_MS."
+          }
         }
       }
     }
