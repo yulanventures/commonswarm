@@ -29,9 +29,15 @@ export const H0_POLL_IN_PROGRESS_STATUS = 409;
 export const H0_POLL_IN_PROGRESS_MESSAGE =
   "A poll for this seat is already in progress. Wait for that poll to finish, then send one poll. A second poll does not take the other half of the inbox.";
 
+/** This poll's own lock ended. A different code from a second poll overlapping the first. */
+export const H0_POLL_LOCK_ENDED = "h0_poll_lock_ended";
+export const H0_POLL_LOCK_ENDED_STATUS = 409;
+export const H0_POLL_LOCK_ENDED_MESSAGE =
+  "This poll's lock ended. Poll again.";
+
 export const H0_ACK_BATCH_MISMATCH = "h0_ack_batch_mismatch";
 export const H0_ACK_BATCH_MISMATCH_MESSAGE =
-  "ackBatch does not match the active batch. Omit ackBatch to receive that batch again, or send its batchId.";
+  "ackBatch does not match the active batch. Poll again without ackBatch.";
 
 export const H0_ACK_BATCH_UNKNOWN = "h0_ack_batch_unknown";
 export const H0_ACK_BATCH_UNKNOWN_MESSAGE =

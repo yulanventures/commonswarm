@@ -75,7 +75,29 @@ Seat token in `Authorization: Bearer` only. A query credential is
   rows, at most ten, oldest first)
 
 A second poll while the lock is held returns HTTP 409 `h0_poll_in_progress`.
-The wait is `setTimeout`. It is outside every database transaction.
+When this poll's own lock has ended, the code is `h0_poll_lock_ended`, also HTTP 409.
+The wait is slices of 1 second. Each slice re-runs authentication and the claim.
+That work is one transaction. Between slices the transaction has ended. The
+Postgres connection stays open for the whole wait: the pool idle timeout is
+3 seconds, and a slice is 1 second. The wait ends at the lock row's
+`acquired_at` plus the requested wait, and not after that row's `expires_at`.
+Both timestamps were written with `statement_timestamp()`.
+
+`POST /h0/poll` accepts any live seat, not only an H0 seat. Authentication
+checks the seat token and the membership. It does not read
+`swarm.agent_join_attempts`. The H0 marker is the claim fence only.
+`claim_agent_inbox` refuses a principal that has a join-attempt row. Poll
+calls `claimAgentInbox` for the authenticated seat, so a seat with no
+join-attempt row can poll. The fence does not run in the other direction.
+
+An active batch whose leases are all acked is replayed with that `batchId`
+and `deliveries: []` until the batch expires, if the agent never sends
+`ackBatch`. `listedLeaseRefs` returns only unacked unexpired leases. The
+batch stays active, so a later poll does not claim new rows.
+
+A retry that sends a stale `ackBatch` after the response was lost gets
+HTTP 409 `h0_ack_batch_mismatch`. The message says to poll again without
+`ackBatch`. That next poll replays the active batch.
 
 `POST ack` body: `signal_id`, `lease_id`, `listener_instance_id`, `outcome`,
 `last_error_code`, and omittable `surfaced`. It calls `ackAgentDelivery`.
@@ -115,10 +137,16 @@ HTTP 403. The condition was restored. `false && refusal` is not in the file.
 
 - The running box does not yet pass these database names into the h0 worker.
   The names are listed in this tree. Deploy was not run.
-- `deploy/supabase-stack/migrate/apply-h0-upgrade.sh` still applies only the
-  two earlier H0 migrations. `20260922000001_h0_poll_lock_and_batch.sql` and
-  `20260922000002_h0_poll_wait_admission.sql` are not on that path. Deploy
-  was not run.
+- `deploy/supabase-stack/migrate/apply-h0-upgrade.sh` now applies
+  `20260922000001_h0_poll_lock_and_batch.sql` and
+  `20260922000002_h0_poll_wait_admission.sql` after the two 2026-09-16
+  migrations, in that order. The retired wording said the script applied
+  only the two earlier files. Deploy was not run.
+- `20260922000003_h0_poll_batch_retention.sql` is not in that script. The
+  post-upgrade check requires the source cron set to stay the same, and this
+  migration schedules `swarm-purge-h0-poll-batches`. A database that runs the
+  migration folder, including the local reset, has the purge. The box upgrade
+  path does not apply this file.
 - H0 poll and ack do not use the command edge's delivery rate buckets.
 - Register, ask, note, reply, and working-on are not forwarded. That is lane 5b.
 - No detached `cswarm listen` was started. The fence was measured through the
@@ -164,3 +192,82 @@ tests, exit 0.
 
 The local `tests/p1-server/h0-poll-ack.test.ts` run is the measurement. The
 box was not exercised.
+
+## Fold 2
+
+The review pair was Codex FAIL and Opus PASS. The lead ruled on the code.
+These are the fixes.
+
+1. The wait reads `request.signal`. An abort ends the current 1 second sleep
+   and the same `finally` path releases the slot. The local gateway does not
+   abort the edge request, so the test calls `handleH0PollRequest` with a
+   Request whose signal it aborts. The test "an aborted waiting poll frees
+   the slot for another seat" requires the slot to be free within 2000 ms,
+   then shows a second seat can wait.
+
+2. `apply-h0-upgrade.sh` pins and applies the two poll migrations after the
+   two join migrations. The same checks are used: the file exists, the SHA
+   matches, an orphan guard with no table is refused, and the SQL is one
+   transaction. If the join tables are already present and the poll tables
+   are absent, it applies only the two poll files, in order. If all four
+   tables are present, it skips. `verify-post-upgrade-counts.sh` allows the
+   two poll tables at zero when the source baseline lacked them.
+   `deploy/supabase-stack/migrate/test-post-upgrade-counts.py` pins that
+   list. `test-h0-upgrade.py` requires both poll tables after apply.
+
+3. The wait deadline is the lock row's `acquired_at` plus the requested
+   wait. Each slice reads that row's holder, `acquired_at`, and `expires_at`
+   with `clock_timestamp()`. The slice stops when the holder differs, when
+   `expires_at` has passed, or when `acquired_at` plus the wait has passed.
+   The test "the wait ends from the lock row, not from a clock started after
+   the claim" moves `acquired_at` an hour back and keeps `expires_at` an
+   hour ahead. The poll returns empty in under 5 seconds.
+
+4. When this poll's own lock has ended, the code is `h0_poll_lock_ended`.
+   A second poll that overlaps a live lock is still `h0_poll_in_progress`.
+   The test "a poll whose own lock ends returns h0_poll_lock_ended" sets
+   the row's expiry in the past and requires the new code.
+
+5. Closed batches are retained by `swarm.purge_expired_h0_poll_batches`.
+   `H0_POLL_BATCH_RETENTION_DAYS` is 2. The floor is
+   `GREATEST(2, h0_poll_batch_retention_days)`. The guard and the purge read
+   `swarm.h0_poll_batch_retention_days()`. The guard still refuses a delete
+   of an active batch and of a closed batch younger than that age. The test
+   "closed poll batches older than the retention age can be deleted" deletes
+   a 3-day closed batch, refuses an active batch and a 1-day closed batch,
+   and shows a config value of 1 does not shorten the floor. The daily cron
+   name is `swarm-purge-h0-poll-batches`. It is not on the box upgrade path.
+   See Not established.
+
+6. The test "removing the fence makes the refusal assertion fail" compared
+   a hard-coded literal and could not fail. It is deleted.
+   `tests/p1-cli/h0-poll-contract.test.ts` no longer has it. The fence
+   proof is the server test "an H0 seat claim is refused, its ack is
+   accepted, and a plain seat still claims". The manual mutation in the
+   Mutation section above stays.
+
+7. The test "a poll cannot take the waiting slot while the admission lock
+   is held" holds `pg_advisory_xact_lock(hashtext('h0-wait-admission'),
+   hashtext('deployment'))` on another connection. The poll publishes its
+   seat lock and does not set `waiting` while that lock is held. After the
+   lock is released, the poll sets `waiting`. Mutation: `lockWaitAdmission`
+   no longer called `pg_advisory_xact_lock`. The same test failed, exit 1.
+   The assertion was "the poll took the slot while the admission lock was
+   held", actual 1, expected 0. The call was restored. The file was run
+   again. See the rerun recorded below.
+
+8. `h0_ack_batch_mismatch` is unchanged. The message now says to poll again
+   without `ackBatch`. The test "a retried stale ackBatch says to poll again
+   without ackBatch" closes a batch, discards the next response, sends the
+   old `ackBatch` again, gets HTTP 409 with that message, then polls without
+   `ackBatch` and receives the active batch.
+
+9. F7, F9, and the wait description are in Poll and ack above. F10: the CLI
+   listener treats `DeliveryHttpError` status 403 as credential loss
+   (`isDeliveryCredentialLoss` in `src/listener/runtime.ts`). The claim loop
+   uses that predicate. The fence returns HTTP 403 `h0_seat_uses_poll`. The
+   listener does not read that code, so it stops as credential loss. This
+   lane does not change `src/listener`. The listener lane has that fix.
+
+Fold 2 rerun of `tests/p1-server/h0-poll-ack.test.ts` after the advisory
+lock was restored: 15 tests, exit 0. The box was not exercised.

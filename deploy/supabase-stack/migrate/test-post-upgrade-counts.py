@@ -13,7 +13,7 @@ class CountsTests(unittest.TestCase):
         for name in ('verify-counts.sh','verify-post-upgrade-counts.sh'):
             shutil.copyfile(Path(__file__).with_name(name),self.scripts/name)
         self.baseline='auth.users|1\nstorage.objects|3\nswarm.agent_tokens|2\n'
-        self.actual=self.baseline+'swarm.agent_join_attempts|0\nswarm.agent_join_credentials|0\n'
+        self.actual=self.baseline+'swarm.agent_join_attempts|0\nswarm.agent_join_credentials|0\nswarm.h0_poll_batches|0\nswarm.h0_poll_locks|0\n'
         (self.art/'source-counts.tsv').write_text(self.baseline);(self.art/'cron-jobs.ndjson').write_text('{"jobname":"test"}\n')
         (self.root/'counts').write_text(self.actual);(self.root/'names').write_text(''.join(l.split('|')[0]+'\n' for l in self.actual.splitlines()))
         (self.root/'cron').write_text('{"jobname":"test"}\n')

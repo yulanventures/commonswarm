@@ -5,7 +5,7 @@
  * This file refuses any non-loopback URL from `supabase status`.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,10 +17,14 @@ import postgres from "postgres";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "../../supabase/functions/h0/core.js";
 import {
+  H0_ACK_BATCH_MISMATCH,
+  H0_ACK_BATCH_MISMATCH_MESSAGE,
   H0_BEARER_QUERY_REFUSED,
   H0_POLL_IN_PROGRESS,
   H0_POLL_IN_PROGRESS_MESSAGE,
   H0_POLL_IN_PROGRESS_STATUS,
+  H0_POLL_LOCK_ENDED,
+  H0_POLL_LOCK_ENDED_STATUS,
   H0_POLL_WAIT_REFUSED,
 } from "../../supabase/functions/h0/parse.js";
 import {
@@ -64,6 +68,7 @@ let functionLogs = "";
 let envDir: string | undefined;
 let owner: Owner;
 let joinSecret: string;
+let spareSecret: string;
 
 function localEnvironment(): LocalEnvironment {
   const output = execFileSync("supabase", ["status", "-o", "json"], {
@@ -239,6 +244,7 @@ async function h0(
   token: string | null,
   body: Record<string, unknown>,
   query = "",
+  signal?: AbortSignal,
 ): Promise<HttpResult> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (token !== null) headers.authorization = `Bearer ${token}`;
@@ -246,6 +252,7 @@ async function h0(
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal,
   });
   return {
     status: response.status,
@@ -354,6 +361,14 @@ before(async () => {
   assert.equal(minted.status, 200, String(minted.body.error ?? "mint failed"));
   assert.equal(typeof minted.body.join_credential, "string");
   joinSecret = String(minted.body.join_credential);
+  const spare = await command(owner.ownerJwt, {
+    kind: "mint_agent_join_credential",
+    seat_cap: 10,
+    ttl_hours: 4,
+  });
+  assert.equal(spare.status, 200, String(spare.body.error ?? "spare mint failed"));
+  assert.equal(typeof spare.body.join_credential, "string");
+  spareSecret = String(spare.body.join_credential);
 });
 
 after(async () => {
@@ -737,5 +752,494 @@ test("one waiting poll is admitted for the whole deployment", { timeout: 30_000 
   assert.equal(again.status, 200, JSON.stringify(again.body));
   assert.equal(again.body.retryAfterSeconds, undefined);
   assert.equal(again.body.batchId, null);
+});
+
+/** A client abort must free the deployment slot inside this bound, not after the poll's wait. */
+const ABORT_SLOT_FREE_MS = 2_000;
+
+test("an aborted waiting poll frees the slot for another seat", { timeout: 30_000 }, async () => {
+  const first = await makeSeat(spareSecret);
+  const second = await makeSeat(spareSecret);
+  const dir = mkdtempSync(join(tmpdir(), "h0-abort-"));
+  const script = join(dir, "abort.ts");
+  const handler = join(process.cwd(), "supabase/functions/h0/poll-ack.ts");
+  writeFileSync(script, `
+import postgres from "npm:postgres@3.4.9";
+import { handleH0PollRequest } from ${JSON.stringify(handler)};
+
+const dbUrl = Deno.env.get("SUPABASE_DB_URL");
+if (!dbUrl) throw new Error("missing database url");
+const sql = postgres(dbUrl, { prepare: false, max: 1 });
+const firstToken = Deno.env.get("H0_FIRST_TOKEN") ?? "";
+const firstId = Deno.env.get("H0_FIRST_ID") ?? "";
+const secondToken = Deno.env.get("H0_SECOND_TOKEN") ?? "";
+const secondId = Deno.env.get("H0_SECOND_ID") ?? "";
+
+function pollRequest(token: string, wait: number, signal: AbortSignal): Request {
+  return new Request("http://127.0.0.1/functions/v1/h0/poll", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer " + token,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ wait }),
+    signal,
+  });
+}
+
+const controller = new AbortController();
+const pending = handleH0PollRequest(pollRequest(firstToken, 8, controller.signal));
+const seenBy = Date.now() + 5_000;
+let firstWaiting = false;
+while (Date.now() < seenBy) {
+  const rows = await sql<{ n: number }[]>\`
+    SELECT count(*)::int AS n
+    FROM swarm.h0_poll_locks
+    WHERE principal_id = \${firstId}::uuid
+      AND waiting
+      AND expires_at > statement_timestamp()
+  \`;
+  if ((rows[0]?.n ?? 0) === 1) {
+    firstWaiting = true;
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const abortedAt = Date.now();
+controller.abort();
+const settled = await Promise.race([
+  pending.then(() => "done", () => "done"),
+  new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), ${ABORT_SLOT_FREE_MS})),
+]);
+const freedMs = settled === "done" ? Date.now() - abortedAt : -1;
+const free = await sql<{ n: number }[]>\`
+  SELECT count(*)::int AS n
+  FROM swarm.h0_poll_locks
+  WHERE waiting
+    AND expires_at > statement_timestamp()
+\`;
+const slotFree = (free[0]?.n ?? 1) === 0;
+const secondPending = handleH0PollRequest(pollRequest(secondToken, 3, new AbortController().signal));
+let secondWaiting = false;
+const admitBy = Date.now() + ${ABORT_SLOT_FREE_MS};
+while (Date.now() < admitBy) {
+  const rows = await sql<{ principal_id: string }[]>\`
+    SELECT principal_id::text
+    FROM swarm.h0_poll_locks
+    WHERE waiting
+      AND expires_at > statement_timestamp()
+  \`;
+  if (rows.length === 1 && rows[0]?.principal_id === secondId) {
+    secondWaiting = true;
+    break;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const secondResponse = await secondPending;
+const secondBody = await secondResponse.json() as { retryAfterSeconds?: number; batchId: string | null };
+console.log(JSON.stringify({
+  firstWaiting,
+  settled,
+  freedMs,
+  slotFree,
+  secondWaiting,
+  secondStatus: secondResponse.status,
+  retryAfterSeconds: secondBody.retryAfterSeconds ?? null,
+  batchId: secondBody.batchId,
+}));
+await sql.end({ timeout: 2 });
+`);
+  try {
+    const result = spawnSync("deno", [
+      "run",
+      "--no-lock",
+      "--config",
+      "supabase/functions/h0/deno.json",
+      "--allow-env",
+      "--allow-net",
+      "--allow-read",
+      script,
+    ], {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SUPABASE_DB_URL: local.DB_URL,
+        H0_FIRST_TOKEN: first.token,
+        H0_FIRST_ID: first.principalId,
+        H0_SECOND_TOKEN: second.token,
+        H0_SECOND_ID: second.principalId,
+      },
+      timeout: 25_000,
+    });
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    const line = result.stdout.trim().split("\n").find((row) => row.startsWith("{"));
+    assert.equal(typeof line, "string", result.stdout);
+    const body = JSON.parse(line ?? "{}") as {
+      firstWaiting: boolean;
+      settled: string;
+      freedMs: number;
+      slotFree: boolean;
+      secondWaiting: boolean;
+      secondStatus: number;
+      retryAfterSeconds: number | null;
+      batchId: string | null;
+    };
+    assert.equal(body.firstWaiting, true, "the first poll did not take the waiting slot");
+    assert.equal(body.settled, "done", "the aborted poll did not stop");
+    assert.equal(body.slotFree, true, "the aborted poll did not release the slot");
+    assert.ok(
+      body.freedMs >= 0 && body.freedMs <= ABORT_SLOT_FREE_MS,
+      `the slot was not free within ${ABORT_SLOT_FREE_MS}ms (freedMs ${body.freedMs})`,
+    );
+    assert.equal(
+      body.secondWaiting,
+      true,
+      `the second seat was not waiting within ${ABORT_SLOT_FREE_MS}ms of the release`,
+    );
+    assert.equal(body.secondStatus, 200);
+    assert.equal(body.retryAfterSeconds, null);
+    assert.equal(body.batchId, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the wait ends from the lock row, not from a clock started after the claim", { timeout: 15_000 }, async () => {
+  const seat = await makeSeat(spareSecret);
+  const pending = h0("poll", seat.token, { wait: 20 });
+  const seenBy = Date.now() + 3_000;
+  let holder: string | null = null;
+  while (Date.now() < seenBy) {
+    const rows = await sql<{ holder: string }[]>`
+      SELECT holder::text
+      FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid
+        AND expires_at > statement_timestamp()
+    `;
+    if (rows[0] !== undefined) {
+      holder = rows[0].holder;
+      break;
+    }
+    await delay(50);
+  }
+  assert.equal(typeof holder, "string");
+  const moved = await sql<{ holder: string }[]>`
+    UPDATE swarm.h0_poll_locks
+    SET
+      acquired_at = statement_timestamp() - interval '1 hour',
+      expires_at = statement_timestamp() + interval '1 hour'
+    WHERE principal_id = ${seat.principalId}::uuid
+      AND holder = ${holder}::uuid
+    RETURNING holder::text
+  `;
+  assert.equal(moved.length, 1);
+  const marked = Date.now();
+  const result = await pending;
+  const elapsed = Date.now() - marked;
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.retryAfterSeconds, undefined);
+  assert.equal(result.body.batchId, null);
+  assert.deepEqual(result.body.deliveries, []);
+  assert.ok(elapsed < 5_000, `the wait outlived the lock acquisition clock: ${elapsed}ms`);
+});
+
+test("a poll whose own lock ends returns h0_poll_lock_ended", { timeout: 20_000 }, async () => {
+  const seat = await makeSeat(spareSecret);
+  const pending = h0("poll", seat.token, { wait: 8 });
+  const seenBy = Date.now() + 3_000;
+  let holder: string | null = null;
+  while (Date.now() < seenBy) {
+    const rows = await sql<{ holder: string }[]>`
+      SELECT holder::text
+      FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid
+        AND expires_at > statement_timestamp()
+    `;
+    if (rows[0] !== undefined) {
+      holder = rows[0].holder;
+      break;
+    }
+    await delay(50);
+  }
+  assert.equal(typeof holder, "string");
+  await sql`
+    UPDATE swarm.h0_poll_locks
+    SET
+      acquired_at = statement_timestamp() - interval '1 minute',
+      expires_at = statement_timestamp() - interval '1 second'
+    WHERE principal_id = ${seat.principalId}::uuid
+      AND holder = ${holder}::uuid
+  `;
+  const result = await pending;
+  assert.equal(result.status, H0_POLL_LOCK_ENDED_STATUS);
+  assert.equal(result.body.error, H0_POLL_LOCK_ENDED);
+  assert.notEqual(result.body.error, H0_POLL_IN_PROGRESS);
+});
+
+test("a retried stale ackBatch says to poll again without ackBatch", async () => {
+  const seat = await makeSeat(spareSecret);
+  const signalId = await postAsk(seat.principalId);
+  const first = await h0("poll", seat.token, { wait: 0 });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const ackBatch = String(first.body.batchId);
+  const lost = await h0("poll", seat.token, { wait: 0, ackBatch });
+  assert.equal(lost.status, 200, JSON.stringify(lost.body));
+  const activeBatch = String(lost.body.batchId);
+  assert.notEqual(activeBatch, ackBatch);
+  const retry = await h0("poll", seat.token, { wait: 0, ackBatch });
+  assert.equal(retry.status, 409);
+  assert.equal(retry.body.error, H0_ACK_BATCH_MISMATCH);
+  assert.equal(retry.body.message, H0_ACK_BATCH_MISMATCH_MESSAGE);
+  assert.match(String(retry.body.message), /Poll again without ackBatch/);
+  const replay = await h0("poll", seat.token, { wait: 0 });
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.batchId, activeBatch);
+  assert.equal(deliveriesOf(replay.body)[0]?.signal.id, signalId);
+});
+
+function batchImmutable(error: unknown): boolean {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && error.code === "55000"
+    && "message" in error
+    && typeof error.message === "string"
+    && error.message.includes("SWARM_H0_POLL_BATCH_IMMUTABLE");
+}
+
+test("closed poll batches older than the retention age can be deleted", async () => {
+  const seat = await makeSeat(spareSecret);
+  const workspace = await sql<{ workspace_id: string }[]>`
+    SELECT workspace_id::text
+    FROM swarm.agent_principals
+    WHERE principal_id = ${seat.principalId}::uuid
+  `;
+  const workspaceId = workspace[0]?.workspace_id;
+  assert.equal(typeof workspaceId, "string");
+  const activeId = randomUUID();
+  const recentId = randomUUID();
+  const oldDirectId = randomUUID();
+  const oldPurgeId = randomUUID();
+  const keptByFloorId = randomUUID();
+  const lease = () => [randomUUID()];
+  await sql`
+    INSERT INTO swarm.h0_poll_batches (
+      workspace_id, principal_id, batch_id, lease_ids, status, expires_at
+    ) VALUES (
+      ${workspaceId}::uuid,
+      ${seat.principalId}::uuid,
+      ${activeId}::uuid,
+      ${lease()}::uuid[],
+      'active',
+      statement_timestamp() + interval '1 hour'
+    )
+  `;
+  await sql`
+    INSERT INTO swarm.h0_poll_batches (
+      workspace_id, principal_id, batch_id, lease_ids, status, expires_at, closed_at
+    ) VALUES
+      (
+        ${workspaceId}::uuid, ${seat.principalId}::uuid, ${recentId}::uuid,
+        ${lease()}::uuid[], 'closed', statement_timestamp(),
+        statement_timestamp() - interval '1 day'
+      ),
+      (
+        ${workspaceId}::uuid, ${seat.principalId}::uuid, ${oldDirectId}::uuid,
+        ${lease()}::uuid[], 'closed', statement_timestamp(),
+        statement_timestamp() - interval '3 days'
+      ),
+      (
+        ${workspaceId}::uuid, ${seat.principalId}::uuid, ${oldPurgeId}::uuid,
+        ${lease()}::uuid[], 'closed', statement_timestamp(),
+        statement_timestamp() - interval '3 days'
+      )
+  `;
+  const days = await sql<{ days: number }[]>`
+    SELECT swarm.h0_poll_batch_retention_days() AS days
+  `;
+  assert.ok((days[0]?.days ?? 0) >= 2);
+  await assert.rejects(
+    sql`
+      DELETE FROM swarm.h0_poll_batches
+      WHERE batch_id = ${activeId}::uuid
+    `,
+    batchImmutable,
+  );
+  await assert.rejects(
+    sql`
+      DELETE FROM swarm.h0_poll_batches
+      WHERE batch_id = ${recentId}::uuid
+    `,
+    batchImmutable,
+  );
+  await sql`
+    DELETE FROM swarm.h0_poll_batches
+    WHERE batch_id = ${oldDirectId}::uuid
+  `;
+  await sql`SELECT swarm.purge_expired_h0_poll_batches()`;
+  const afterPurge = await sql<{ batch_id: string }[]>`
+    SELECT batch_id::text
+    FROM swarm.h0_poll_batches
+    WHERE principal_id = ${seat.principalId}::uuid
+    ORDER BY batch_id
+  `;
+  assert.deepEqual(
+    afterPurge.map((row) => row.batch_id).sort(),
+    [activeId, recentId].sort(),
+  );
+  const previous = await sql<{ value: string }[]>`
+    SELECT value::text AS value
+    FROM swarm.config
+    WHERE key = 'h0_poll_batch_retention_days'
+  `;
+  try {
+    await sql`
+      UPDATE swarm.config
+      SET value = '1'::jsonb
+      WHERE key = 'h0_poll_batch_retention_days'
+    `;
+    const floored = await sql<{ days: number }[]>`
+      SELECT swarm.h0_poll_batch_retention_days() AS days
+    `;
+    assert.ok((floored[0]?.days ?? 0) >= 2);
+    await sql`SELECT swarm.purge_expired_h0_poll_batches()`;
+    const stillRecent = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+      FROM swarm.h0_poll_batches
+      WHERE batch_id = ${recentId}::uuid
+    `;
+    assert.equal(stillRecent[0]?.n, 1);
+    await sql`
+      UPDATE swarm.config
+      SET value = '10'::jsonb
+      WHERE key = 'h0_poll_batch_retention_days'
+    `;
+    await sql`
+      INSERT INTO swarm.h0_poll_batches (
+        workspace_id, principal_id, batch_id, lease_ids, status, expires_at, closed_at
+      ) VALUES (
+        ${workspaceId}::uuid, ${seat.principalId}::uuid, ${keptByFloorId}::uuid,
+        ${lease()}::uuid[], 'closed', statement_timestamp(),
+        statement_timestamp() - interval '3 days'
+      )
+    `;
+    await sql`SELECT swarm.purge_expired_h0_poll_batches()`;
+    const kept = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+      FROM swarm.h0_poll_batches
+      WHERE batch_id = ${keptByFloorId}::uuid
+    `;
+    assert.equal(kept[0]?.n, 1);
+  } finally {
+    if (previous[0] !== undefined) {
+      await sql`
+        UPDATE swarm.config
+        SET value = ${previous[0].value}::jsonb
+        WHERE key = 'h0_poll_batch_retention_days'
+      `;
+    }
+    await sql`
+      UPDATE swarm.h0_poll_batches
+      SET status = 'closed', closed_at = statement_timestamp() - interval '3 days'
+      WHERE batch_id = ${activeId}::uuid
+        AND status = 'active'
+    `;
+    await sql`
+      UPDATE swarm.config
+      SET value = '2'::jsonb
+      WHERE key = 'h0_poll_batch_retention_days'
+    `;
+    await sql`SELECT swarm.purge_expired_h0_poll_batches()`;
+  }
+});
+
+test("a poll cannot take the waiting slot while the admission lock is held", { timeout: 20_000 }, async () => {
+  const seat = await makeSeat(spareSecret);
+  const gate = postgres(local.DB_URL, { prepare: false, max: 1 });
+  let releaseGate = (): void => {};
+  const untilRelease = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  let notifyHeld = (): void => {};
+  const held = new Promise<void>((resolve) => {
+    notifyHeld = resolve;
+  });
+  const transaction = gate.begin(async (tx) => {
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtext('h0-wait-admission'),
+        hashtext('deployment')
+      )
+    `;
+    notifyHeld();
+    await untilRelease;
+  });
+  try {
+    const ready = await Promise.race([
+      held.then(() => "held" as const),
+      transaction.then(() => "ended" as const, () => "failed" as const),
+    ]);
+    assert.equal(ready, "held");
+    let settled = false;
+    const pending = h0("poll", seat.token, { wait: 2 }).then((body) => {
+      settled = true;
+      return body;
+    });
+    const seenBy = Date.now() + 3_000;
+    let locked = false;
+    while (Date.now() < seenBy) {
+      const rows = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+        FROM swarm.h0_poll_locks
+        WHERE principal_id = ${seat.principalId}::uuid
+          AND expires_at > statement_timestamp()
+      `;
+      if ((rows[0]?.n ?? 0) === 1) {
+        locked = true;
+        break;
+      }
+      await delay(50);
+    }
+    assert.equal(locked, true, "the poll did not publish its seat lock");
+    // Inside the claim transaction's 5 second lock_timeout. Long enough that
+    // a missing advisory lock would already have set waiting.
+    await delay(800);
+    const whileHeld = await sql<{ n: number }[]>`
+      SELECT count(*)::int AS n
+      FROM swarm.h0_poll_locks
+      WHERE principal_id = ${seat.principalId}::uuid
+        AND waiting
+        AND expires_at > statement_timestamp()
+    `;
+    assert.equal(whileHeld[0]?.n, 0, "the poll took the slot while the admission lock was held");
+    assert.equal(settled, false, "the poll returned while the admission lock was held");
+    releaseGate();
+    await transaction;
+    const admitBy = Date.now() + 2_000;
+    let admitted = false;
+    while (Date.now() < admitBy) {
+      const rows = await sql<{ n: number }[]>`
+        SELECT count(*)::int AS n
+        FROM swarm.h0_poll_locks
+        WHERE principal_id = ${seat.principalId}::uuid
+          AND waiting
+          AND expires_at > statement_timestamp()
+      `;
+      if ((rows[0]?.n ?? 0) === 1) {
+        admitted = true;
+        break;
+      }
+      await delay(50);
+    }
+    assert.equal(admitted, true, "the poll did not take the slot after the admission lock was released");
+    const body = await pending;
+    assert.equal(body.status, 200, JSON.stringify(body.body));
+    assert.equal(body.body.retryAfterSeconds, undefined);
+    assert.equal(body.body.batchId, null);
+  } finally {
+    releaseGate();
+    await transaction.then(() => undefined, () => undefined);
+    await gate.end({ timeout: 5 });
+  }
 });
 });

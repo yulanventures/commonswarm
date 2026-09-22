@@ -5,10 +5,13 @@
  * names the command function uses: SWARM_DATABASE_URL, else SUPABASE_DB_URL,
  * and SWARM_DATABASE_TLS_CA_B64 for the private CA.
  *
- * The wait is a timer. It is not a CPU spin, and it is not inside a
- * transaction. The pool connection is back in the pool before the wait starts.
- * A poll waits only after it claims a deployment-wide waiting slot. That claim
- * commits before the timer starts. H0_MAX_CONCURRENT_WAITS is the cap.
+ * The wait is slices of one second. Each slice re-runs authentication and the
+ * claim in its own transaction. Between slices that transaction has ended.
+ * The pool idle_timeout is 3 seconds, longer than a slice, so the Postgres
+ * connection stays open for the whole wait. A poll waits only after it claims
+ * a deployment-wide waiting slot. That claim commits before the first slice.
+ * The wait ends at the lock row's acquired_at plus the requested wait, and
+ * not after the lock row's expires_at. H0_MAX_CONCURRENT_WAITS is the cap.
  * The poll calls claimAgentInbox directly, so the command-edge seat fence does
  * not apply. ack calls ackAgentDelivery and advances delivery state only there.
  * ackBatch closes the batch row and writes no delivery column.
@@ -53,6 +56,9 @@ import {
   H0_POLL_IN_PROGRESS,
   H0_POLL_IN_PROGRESS_MESSAGE,
   H0_POLL_IN_PROGRESS_STATUS,
+  H0_POLL_LOCK_ENDED,
+  H0_POLL_LOCK_ENDED_MESSAGE,
+  H0_POLL_LOCK_ENDED_STATUS,
   h0BearerInQuery,
   h0PollLockDurationMs,
   parseH0AckBody,
@@ -124,10 +130,33 @@ export function h0VerbFailure(): Response {
   return json(500, { error: "internal_error" });
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
+class H0ClientAbort extends Error {
+  constructor() {
+    super("The poll client closed the request.");
+    this.name = "H0ClientAbort";
+  }
+}
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new H0ClientAbort());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new H0ClientAbort());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw new H0ClientAbort();
 }
 
 function bearer(request: Request): string | null {
@@ -701,6 +730,63 @@ async function claimWaitingSlot(seat: Seat, holder: string): Promise<WaitAdmissi
   });
 }
 
+function lockEndedCollected(): Collected {
+  return {
+    kind: "error",
+    status: H0_POLL_LOCK_ENDED_STATUS,
+    error: H0_POLL_LOCK_ENDED,
+    message: H0_POLL_LOCK_ENDED_MESSAGE,
+  };
+}
+
+/**
+ * The wait bound is the lock row, not a clock started after the first
+ * transaction. acquired_at and expires_at were written together with
+ * statement_timestamp(). clock_timestamp() is the same timeline, read at
+ * the check, so a slow statement_timestamp does not extend the wait.
+ * The slice stops when the holder differs, when expires_at has passed, or
+ * when acquired_at plus the requested wait has passed.
+ */
+async function readWaitHold(
+  tx: Tx,
+  seat: Seat,
+  holder: string,
+  waitSeconds: number,
+): Promise<{ outcome: "wait" | "done" | "ended"; remainingMs: number }> {
+  const rows = await tx<{
+    same_holder: boolean;
+    unexpired: boolean;
+    within_wait: boolean;
+    remaining_ms: number;
+  }[]>`
+    SELECT
+      holder = ${holder}::uuid AS same_holder,
+      expires_at > clock_timestamp() AS unexpired,
+      clock_timestamp() < acquired_at + (${waitSeconds} * interval '1 second') AS within_wait,
+      GREATEST(
+        0,
+        floor(extract(epoch FROM (
+          LEAST(
+            expires_at,
+            acquired_at + (${waitSeconds} * interval '1 second')
+          ) - clock_timestamp()
+        )) * 1000)
+      )::int AS remaining_ms
+    FROM swarm.h0_poll_locks
+    WHERE workspace_id = ${seat.workspaceId}::uuid
+      AND principal_id = ${seat.principalId}::uuid
+  `;
+  const row = rows[0];
+  if (row === undefined || row.same_holder !== true || row.unexpired !== true) {
+    return { outcome: "ended", remainingMs: 0 };
+  }
+  const remainingMs = Number(row.remaining_ms);
+  if (!Number.isFinite(remainingMs) || row.within_wait !== true || remainingMs <= 0) {
+    return { outcome: "done", remainingMs: 0 };
+  }
+  return { outcome: "wait", remainingMs };
+}
+
 function ackHttp(result: AckResult): Response | null {
   if (result.status === "accepted" || result.status === "idempotent") return null;
   if (result.status === "unavailable") {
@@ -779,64 +865,83 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
     let current = opened.collected;
     let retryAfterSeconds: number | undefined;
     if (current.kind === "empty" && parsed.body.wait > 0) {
+      throwIfAborted(request.signal);
       const admission = await claimWaitingSlot(opened.seat, opened.holder);
       if (admission === "lost") {
-        return json(H0_POLL_IN_PROGRESS_STATUS, {
-          error: H0_POLL_IN_PROGRESS,
-          message: "This poll's lock ended. Poll again.",
+        return json(H0_POLL_LOCK_ENDED_STATUS, {
+          error: H0_POLL_LOCK_ENDED,
+          message: H0_POLL_LOCK_ENDED_MESSAGE,
         });
       }
       if (admission === "full") {
         retryAfterSeconds = H0_POLL_RETRY_AFTER_SECONDS;
       } else {
-        const deadline = Date.now() + parsed.body.wait * 1_000;
-        while (current.kind === "empty" && Date.now() < deadline) {
-          const slice = Math.min(WAIT_SLICE_MS, deadline - Date.now());
-          if (slice > 0) await sleep(slice);
-          current = await h0Database().begin(async (tx) => {
+        while (current.kind === "empty") {
+          throwIfAborted(request.signal);
+          const slice = await h0Database().begin(async (tx) => {
             await setRole(tx);
             const auth = await authenticate(tx, tokenHash);
             if (!auth.ok) {
               return {
-                kind: "error" as const,
-                status: auth.status,
-                error: auth.error,
-                message: auth.message,
+                collected: {
+                  kind: "error" as const,
+                  status: auth.status,
+                  error: auth.error,
+                  message: auth.message,
+                },
+                remainingMs: 0,
               };
             }
             const session = await sessionOrRefusal(tx, auth.seat, request);
             if (!session.ok) {
               return {
-                kind: "error" as const,
-                status: session.status,
-                error: session.error,
-                message: "Send the session proof this managed seat requires.",
+                collected: {
+                  kind: "error" as const,
+                  status: session.status,
+                  error: session.error,
+                  message: "Send the session proof this managed seat requires.",
+                },
+                remainingMs: 0,
               };
             }
-            const still = await tx<{ held: number }[]>`
-              SELECT 1 AS held
-              FROM swarm.h0_poll_locks
-              WHERE workspace_id = ${auth.seat.workspaceId}::uuid
-                AND principal_id = ${auth.seat.principalId}::uuid
-                AND holder = ${opened.holder}::uuid
-                AND expires_at > statement_timestamp()
-            `;
-            if (still.length === 0) {
-              return {
-                kind: "error" as const,
-                status: H0_POLL_IN_PROGRESS_STATUS,
-                error: H0_POLL_IN_PROGRESS,
-                message: "This poll's lock ended. Poll again.",
-              };
-            }
-            return await collect(
+            const hold = await readWaitHold(
               tx,
               auth.seat,
-              opened.listenerInstanceId,
-              null,
-              session.session,
+              opened.holder,
+              parsed.body.wait,
             );
+            if (hold.outcome === "ended") {
+              return { collected: lockEndedCollected(), remainingMs: 0 };
+            }
+            if (hold.outcome === "done") {
+              return {
+                collected: {
+                  kind: "empty" as const,
+                  body: {
+                    batchId: null,
+                    listener_instance_id: opened.listenerInstanceId,
+                    deliveries: [],
+                  },
+                },
+                remainingMs: 0,
+              };
+            }
+            return {
+              collected: await collect(
+                tx,
+                auth.seat,
+                opened.listenerInstanceId,
+                null,
+                session.session,
+              ),
+              remainingMs: hold.remainingMs,
+            };
           });
+          current = slice.collected;
+          if (current.kind !== "empty" || slice.remainingMs <= 0) break;
+          const pause = Math.min(WAIT_SLICE_MS, slice.remainingMs);
+          if (pause <= 0) break;
+          await sleep(pause, request.signal);
         }
       }
     }

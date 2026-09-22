@@ -78,6 +78,8 @@ def main():
                             name,'bash',script,arg])
             def count():
                 return check(sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='swarm' AND c.relname IN ('agent_join_credentials','agent_join_attempts')",'h0_fixture'),'table count')
+            def poll_count():
+                return check(sql("SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='swarm' AND c.relname IN ('h0_poll_locks','h0_poll_batches')",'h0_fixture'),'poll table count')
             def rejected(label, result):
                 nonlocal passed
                 assert result.returncode != 0, label+' unexpectedly accepted'
@@ -89,7 +91,7 @@ def main():
             baseline = ''.join(table+'|'+check(sql('SELECT count(*) FROM '+table,'h0_fixture'),'baseline count')+'\n' for table in names)
             (work/'artifacts/source-counts.tsv').write_text(baseline)
             (work/'artifacts/cron-jobs.ndjson').write_text('')
-            check(helper(), 'apply'); assert count() == '2'; passed += 1; print('PASS absent apply and exact catalog')
+            check(helper(), 'apply'); assert count() == '2'; assert poll_count() == '2'; passed += 1; print('PASS absent apply and exact catalog')
             check(helper(script='/repo/deploy/supabase-stack/migrate/verify-post-upgrade-counts.sh'), 'real post counts')
             assert (work/'artifacts/source-counts.tsv').read_text() == baseline
             passed += 1; print('PASS real post-upgrade counts and immutable source TSV')
@@ -125,6 +127,7 @@ def main():
             (work/'mutated/verify-h0-catalog.sql').write_text("DO $$ BEGIN RAISE EXCEPTION 'synthetic verifier failure'; END $$;\n")
             rejected('post-apply failure atomic rollback',helper(script='/test/mutated/apply-h0-upgrade.sh'))
             assert count() == '0'
+            assert poll_count() == '0'
             print(f'PASSED {passed} real PostgreSQL H0 gates')
         finally:
             run(['docker','rm','-f',name])

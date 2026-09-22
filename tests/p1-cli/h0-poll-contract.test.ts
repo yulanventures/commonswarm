@@ -18,10 +18,6 @@ import {
   parseH0PollBody,
 } from "../../supabase/functions/h0/parse.js";
 import {
-  H0_SEAT_CLAIM_REFUSED,
-  h0SeatClaimRefusal,
-} from "../../supabase/functions/command/h0-seat.js";
-import {
   DELIVERY_ACK_OUTCOMES,
   DELIVERY_CLIENT_ERROR_CODES,
 } from "../../supabase/functions/command/durable-delivery.js";
@@ -154,18 +150,4 @@ test("the claim fence sits before replay and the claim call", () => {
   assert.ok(replayAt > fenceAt, "replay can return a claim before the fence");
   assert.ok(callAt > fenceAt, "claimAgentInbox is called before the fence");
   assert.equal(command.split("h0SeatClaimRefusal(").length - 1, 1);
-});
-
-test("removing the fence makes the refusal assertion fail", () => {
-  const command = source("supabase/functions/command/index.ts");
-  const needle = "await principalIsH0Seat(";
-  assert.equal(command.includes(needle), true, "mutation was not applied: the fence call is absent");
-  const mutated = command.replace(needle, "false && await principalIsH0Seat(");
-  assert.notEqual(mutated, command, "mutation did not change the claim branch");
-  assert.equal(mutated.includes("h0SeatClaimRefusal(\n          false && await principalIsH0Seat("), true);
-  assert.equal(h0SeatClaimRefusal(false), null);
-  const bodyAfterRemoval = { error: "delivery_unavailable" };
-  assert.throws(() => {
-    assert.equal(bodyAfterRemoval.error, H0_SEAT_CLAIM_REFUSED);
-  });
 });

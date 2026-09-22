@@ -46,6 +46,14 @@ awk -F'|' '
         expected["swarm.agent_join_attempts"]=0
         total+=2
       }
+      c=("swarm.h0_poll_locks" in expected)
+      d=("swarm.h0_poll_batches" in expected)
+      if (c!=d) fail()
+      if (!c) {
+        expected["swarm.h0_poll_locks"]=0
+        expected["swarm.h0_poll_batches"]=0
+        total+=2
+      }
       initialized=1
     }
     if (NF!=1 || !($1 in expected) || ($1 in seen)) fail()
