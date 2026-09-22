@@ -6,7 +6,7 @@ Box: `yulan-vps-1` (Hetzner CPX42, Tailscale `100.115.66.74`). Cutover time of r
 
 **Neither source log contains a raw, live execution transcript of the cutover itself.** The main Claude session log has no entries at all dated 2026-09-18 (its last 2026-09-17 entry is 14:55:32Z; its next entries are 2026-09-19). Astra2's Codex session that covers the morning of 2026-09-18 (`rollout-2026-09-17T10-13-07-...`, forked from the 09-17 rehearsal session) ends at **14:34:55 UTC on 09-18** — before the 16:20:12 UTC cutover — and was doing isolated-fixture testing of a new "H0 schema upgrade" migration step at that point, not a live box run. The next available Astra2 Codex session (`rollout-2026-09-18T13-16-35-...`) starts at **18:16:35 UTC**, about two hours *after* the cutover, and its visible work in that window is PromptEden-repository code review, not CommonSwarm cutover commands.
 
-Everything below about the cutover's steps, controls, and checks is therefore reconstructed from **retrospective documentation that HezLead read back into its own Claude session on 2026-09-19** (`hetzner-handoff/HETZNER-OPERATIONS.md` and `hetzner-handoff/OLD-SERVICES-RETIREMENT.md`, both "Verified 2026-09-19", read at 19:55:15–19:55:20Z on 09-19) — not from a step-by-step log with individual UTC timestamps and exit codes for the cutover run itself. Where a specific time, count, or check is quoted below, it is quoted from that documentation, and is marked as such.
+Everything below about the cutover's steps, controls, and checks comes from retrospective documentation, not a step-by-step log with individual UTC timestamps and exit codes. HezLead read `hetzner-handoff/HETZNER-OPERATIONS.md` and `hetzner-handoff/OLD-SERVICES-RETIREMENT.md` into its Claude session on 2026-09-19. The workspace record `hetzner-handoff/evidence/2026-09-18-core-cutover-HISTORICAL.md` was also read directly on 2026-09-22. Where a specific time, count, or check is used below, its source is named.
 
 ## Written record of the cutover
 
@@ -34,7 +34,7 @@ That record gives outcomes, not per-step exit codes. The per-step times and exit
 | Identity/auth checks | "Production Google and GitHub sign-in passed; an existing workspace and Files view opened" | OLD-SERVICES-RETIREMENT.md |
 | `cswarm check` | "the real installed `cswarm check` passed in 464 ms" | HETZNER-OPERATIONS.md §6 |
 | Native reads | "native reads passed" | HETZNER-OPERATIONS.md §6 |
-| Detailed step-by-step transcript with per-step UTC times/exit codes | **Not found in these logs** (see note above; a file `evidence/2026-09-18-core-cutover-HISTORICAL.md` is referenced by the documentation but its content was never read into either source log, only listed by filename) | — |
+| Detailed step-by-step transcript with per-step UTC times/exit codes | **Not found.** The historical cutover record was read and contains outcomes, not a command-by-command transcript. | `hetzner-handoff/evidence/2026-09-18-core-cutover-HISTORICAL.md` |
 
 ## Steps, in the order the handoff plan specified them (2026-09-17 14:50Z plan, not a 09-18 execution log)
 
@@ -80,4 +80,4 @@ This is the only mention of the GitHub/Google sign-in checks and the `cswarm che
 
 ## What is NOT in these logs
 
-See `SOURCES.md` for the complete list. In short: no raw command-by-command transcript of the 16:20:12 UTC cutover exists in either the Claude session log or the Astra2 Codex session logs examined. Everything above is either (a) the pre-cutover plan (09-17), or (b) retrospective, already-summarized documentation read back into the Claude session on 09-19, quoted verbatim and attributed. No independent confirmation of exact per-step exit codes for the cutover run was found.
+See `transcript-sources.md` for the complete list. In short: no raw command-by-command transcript of the 16:20:12 UTC cutover exists in the Claude or Astra2 Codex session logs examined, and the historical cutover record contains outcomes rather than per-step exit codes. Everything above is either the 09-17 pre-cutover plan or attributed retrospective documentation.

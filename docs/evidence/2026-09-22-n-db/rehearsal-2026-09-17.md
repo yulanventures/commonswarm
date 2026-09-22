@@ -17,11 +17,11 @@ Runbook reference: `deploy/supabase-stack/RUNBOOK.md`, section "Box rehearsal fr
 | Production source-DB password reset | Anvil (not in either source log directly; referenced by HezLead) | 14:53 UTC | Reset confirmed, pooler `select 1` OK |
 | `migration.env` `SOURCE_DATABASE_URL` rewritten + verified | HezLead (Claude session) | 14:54:52–14:55:08 | "source login OK"; file rewritten 0600 |
 | Gate-open message: "run rehearsal steps 5–13 now" | HezLead → Astra2 | 14:55:19 | Accepted — **this is the last CommonSwarm-rehearsal action in the Claude session log; the session has no further 2026-09-17 entries after 14:55:32** |
-| Steps 5–8 (dump, restore-target, prepare-target, restore-cron-jobs, seed-realtime, setup-realtime, verify-counts) | Astra2 / its worker | artifact directory timestamped 15:15:52Z | **Not directly visible as raw command output in the Astra2 Codex session log.** By 15:19:26 Astra2 is already reading completed result artifacts from `/home/commonswarm/migration-artifacts/n-db-rehearsal-20260917T151552Z/` (see below) |
+| Steps 5–8 (dump, restore-target, prepare-target, restore-cron-jobs, seed-realtime, setup-realtime, verify-counts) | Not captured | artifact directory name contains 15:15:52Z | The directory `/home/commonswarm/migration-artifacts/n-db-rehearsal-20260917T151552Z/` exists, and Astra2 read one log from it: `logs/restore-cron-jobs-target.log`. The run itself is not in the captured commands. |
 | Steps 9–13 (edge cutover to box DB, freeze/probe/enable/disable sequence) | Astra2 | runner script written and reviewed by 15:36:48; explicitly marked **"not executed"** | No later execution found in these logs |
 | Recovery drill | — | — | **Not found in these logs** — only mentioned as a RUNBOOK section name, never as an executed step |
 
-**Important caveat:** the two source logs do not contain a raw, per-step transcript for rehearsal steps 5–8 with individual exit codes (the kind HezLead produced for steps 1–6). What the Astra2 Codex session shows is (a) the *prepared* runner scripts and RUNBOOK text, and (b) Astra2 *reading the output artifacts* of a run that had already finished by 15:15:52Z — 20 minutes after HezLead's 14:55Z handoff. The process that actually executed steps 5–8 is not captured as an `exec` tool call in the Astra2 rollout files examined (`rollout-2026-09-17T10-13-07-...`, `rollout-2026-09-17T10-12-34-...`, `rollout-2026-09-17T20-20-16-...`). See `SOURCES.md`.
+**Important caveat:** the two source logs do not contain a raw, per-step transcript for rehearsal steps 5–8 with individual exit codes (the kind HezLead produced for steps 1–6). The Astra2 Codex session shows prepared runner scripts and RUNBOOK text, plus an artifact directory whose name contains 15:15:52Z and one log read from that directory. The process that executed steps 5–8 is not captured as an `exec` tool call in the Astra2 rollout files examined (`rollout-2026-09-17T10-13-07-...`, `rollout-2026-09-17T10-12-34-...`, `rollout-2026-09-17T20-20-16-...`). See `transcript-sources.md`.
 
 ---
 
@@ -95,7 +95,7 @@ HezLead's own retrospective note: the production DB password reset it had author
 
 Astra2's Codex session (`rollout-2026-09-17T10-13-07-01a0afed-baf5-72b1-a905-005a1d90240a.jsonl`) begins its working turn at **15:13:07Z**, reading the same prompt and scripts HezLead prepared (`ndb-rehearsal-prompt.md`, `ndb-steps-5-9.sh`, `RUNBOOK.md`).
 
-By **15:19:26Z**, Astra2 is reading files inside `/home/commonswarm/migration-artifacts/n-db-rehearsal-20260917T151552Z/` — i.e., an artifact directory whose name encodes a run that started at **15:15:52Z**, about 20 minutes after HezLead's gate-open message. This is the only evidence in these logs that steps 5–8 (dump-source, restore-target, prepare-target, restore-cron-jobs, seed-realtime-tenant ×2, setup-realtime, `verify-counts`, stack up, restart realtime, copy-storage forward, restore-storage-metadata, `verify-counts` again) actually ran. **No exec call in Astra2's session shows the runner script (`sudo bash /tmp/ndb-steps-5-8.sh`, or equivalent) being launched, so per-step exit codes and start/end times for steps 5–8 are not available from these logs.**
+By **15:19:26Z**, Astra2 is reading `logs/restore-cron-jobs-target.log` inside `/home/commonswarm/migration-artifacts/n-db-rehearsal-20260917T151552Z/`. The directory name contains **15:15:52Z**; it does not prove when or how the run executed. **No exec call in Astra2's session shows the runner script (`sudo bash /tmp/ndb-steps-5-8.sh`, or equivalent) being launched, so the run itself, per-step exit codes, and start/end times for steps 5–8 were not captured.**
 
 What Astra2 *does* show, working from the resulting artifacts (all exit 0 on the `python3` inspection commands used):
 
@@ -114,8 +114,8 @@ Conclusion Astra2 reaches from the artifact (not a fresh run, just analysis): th
 - No later exec call in any of the three examined Astra2 Codex session files shows `ndb-steps-9-13.sh` actually being invoked against the box, and no call shows a `steps-9-13/transcript.txt` being read back.
 - The RUNBOOK's "Recovery drill" section is referenced only by name (e.g., a Python snippet slicing the RUNBOOK text between "## Cutover window" and "## Recovery drill", and one line in `deploy/supabase-stack/RUNBOOK.md` itself: *"Run the rehearsal, the cutover window, and the recovery drill from one root shell started with `sudo -i`."*). **No recovery-drill execution, transcript, or result appears in either source log.**
 
-## What is NOT in these logs (see SOURCES.md for the full gap list)
+## What is NOT in these logs (see transcript-sources.md for the full gap list)
 
-- The raw per-step transcript for rehearsal steps 5–8 (start/end UTC times, individual exit codes) — only the artifact-directory timestamp (15:15:52Z) and Astra2's post-hoc reading of result files are present.
+- The raw per-step transcript for rehearsal steps 5–8 (start/end UTC times, individual exit codes) — only an artifact directory whose name contains 15:15:52Z and Astra2's later reading of `logs/restore-cron-jobs-target.log` are present.
 - Any execution of steps 9–13 or the recovery drill.
 - Anvil's own action log for the 14:53Z password reset (only HezLead's summary of Anvil's report is present).

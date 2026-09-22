@@ -5,7 +5,7 @@ The API cutover is done. `api.commonswarm.com` is Caddy on `yulan-vps-1`. The st
 ## NOT ESTABLISHED
 
 1. The API cutover is done. Do not deactivate a Supabase custom domain.
-   Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+   Future edge-function releases use `deploy/RELEASE-TO-BOX.md`.
 2. **NOT ESTABLISHED — the three 1Password items named below exist or contain the
    current material.** An operator must confirm them without printing values.
 3. **NOT ESTABLISHED — this lane did not inspect the box firewall, certificate
@@ -153,4 +153,4 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 
 The API cutover is done. Caddy sends Auth, REST, Storage, and Realtime to the local containers in `deploy/supabase-stack/commonswarm-api.caddy`.
 
-Not established: there is no written procedure yet for how a new edge-function version reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+Future edge-function releases use `deploy/RELEASE-TO-BOX.md`.

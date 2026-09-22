@@ -2,7 +2,7 @@
 
 Status: the database cutover is done. Do not run this file against a source project. The commands below are the record of the window.
 
-Not established: there is no written procedure yet for how a schema migration reaches the box. See `docs/org/2026-09-22-PRODUCTION-BOX-RESUME-HERE.md`.
+Future schema migrations use `deploy/RELEASE-TO-BOX.md`.
 
 ## Fixed design
 
