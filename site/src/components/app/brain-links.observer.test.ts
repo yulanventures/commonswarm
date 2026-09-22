@@ -252,8 +252,13 @@ test("neither the agent paragraph nor the design brief re-types the separator se
     join(componentDir, "..", "..", "..", "..", "AGENTS.md"),
     "utf8",
   );
-  const paragraph = agents.slice(agents.indexOf("**Save the durable object, then name it.**"));
-  const brainParagraph = paragraph.slice(0, paragraph.indexOf("\n\n"));
+  /* AGENTS.md was rewritten on 2026-09-22 (#23): the rule is now one bullet. indexOf is checked
+     because slice(-1) of a missing anchor would guard the file's last character, not the rule. */
+  const anchor = agents.indexOf("- Brain-link parsing uses");
+  assert.ok(anchor >= 0, "the paragraph must still be there to guard");
+  const paragraph = agents.slice(anchor);
+  const nextBullet = paragraph.indexOf("\n- ");
+  const brainParagraph = paragraph.slice(0, nextBullet >= 0 ? nextBullet : paragraph.indexOf("\n\n"));
   assert.ok(brainParagraph.length > 0, "the paragraph must still be there to guard");
   assert.match(
     brainParagraph,
