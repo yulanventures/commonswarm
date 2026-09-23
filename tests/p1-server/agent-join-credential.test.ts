@@ -17,6 +17,7 @@ import {
   H0_SEAT_TOKEN_TTL_MS,
 } from "../../src/protocol/index.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { REGISTRATION_SEAT_REVOKED } from "../../supabase/functions/command/registration-conflicts.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -1275,7 +1276,7 @@ test("registration refuses at the shared principal ceiling without a seat row", 
 });
 
 test("a revoked unused seat cannot be revived by retrying its attempt", async (t) => {
-  const expectedMessage = "This seat was revoked. Register again with a new attempt.";
+  const expectedMessage = REGISTRATION_SEAT_REVOKED.message;
 
   await t.test("revoked token", async () => {
     const g = await createFixture();

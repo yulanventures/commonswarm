@@ -54,6 +54,9 @@ export interface H0Field {
     };
   /** Stated only where the contract is not obvious from the two flags. */
   readonly note?: string;
+  readonly pattern?: string;
+  readonly minLength?: number;
+  readonly maxLength?: number;
 }
 
 export interface H0Verb {
@@ -99,6 +102,16 @@ export const H0_MAX_CONCURRENT_WAITS = 1;
  */
 export const H0_POLL_RETRY_AFTER_SECONDS = 5;
 
+/** Shared with the command envelope and H0 parser; rendered by the agent document. */
+export const H0_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
+export const H0_REGISTRATION_NAME_MAX = 80;
+
+const requestIdField = (): H0Field => ({
+  ...opt("requestId", false, `reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`),
+  pattern: H0_REQUEST_ID_RE.source,
+  wire: idempotencyKey,
+});
+
 export const H0_VERBS = [
   {
     name: "register",
@@ -107,9 +120,9 @@ export const H0_VERBS = [
       "Exchange the join credential from the paste for a seat token. Returned once, in this response body only.",
     fields: [
       req("joinCredential"),
-      req("attemptId", false, "client-generated; the discriminator that makes a retry the same attempt"),
-      req("name", false, "a display label, not an identity -- duplicates are allowed here"),
-      opt("icon"),
+      req("attemptId", false, "client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response"),
+      { ...req("name", false, `a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`), minLength: 1, maxLength: H0_REGISTRATION_NAME_MAX },
+      opt("icon", false, "accepted for link compatibility; this release does not store an icon"),
     ],
   },
   {
@@ -152,7 +165,7 @@ export const H0_VERBS = [
     fields: [
       req("body"),
       opt("to"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      requestIdField(),
     ],
   },
   {
@@ -162,7 +175,7 @@ export const H0_VERBS = [
     fields: [
       req("body"),
       opt("to"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      requestIdField(),
     ],
   },
   {
@@ -172,7 +185,7 @@ export const H0_VERBS = [
     fields: [
       { ...req("signal_id"), wire: signalRename("in_reply_to") },
       req("body"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      requestIdField(),
     ],
   },
   {
@@ -182,7 +195,7 @@ export const H0_VERBS = [
       "Say what you are working on so collaborators do not step on it. Claims nothing and blocks nobody.",
     fields: [
       req("body"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      requestIdField(),
     ],
   },
 ] as const satisfies readonly H0Verb[];

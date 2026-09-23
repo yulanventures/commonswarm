@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   FUNCTION_ENV_NAMES,
+  H0_COMMAND_ENV_EXCLUSIONS,
   FUNCTION_NAMES,
   functionNotFoundResponse,
   FUNCTIONS_BASE_PATH,
@@ -74,6 +75,16 @@ test("H0 source reads only environment names passed to its worker", async () => 
   const passed = new Set(FUNCTION_ENV_NAMES.h0);
   const missing = [...used].filter((name) => !passed.has(name)).sort();
   assert.deepEqual(missing, []);
+});
+
+test("H0 receives command environment without file-only service credentials", { timeout: 5_000 }, () => {
+  assert.deepEqual(H0_COMMAND_ENV_EXCLUSIONS, ["SUPABASE_SERVICE_ROLE_KEY"]);
+  const excluded = new Set<string>(H0_COMMAND_ENV_EXCLUSIONS);
+  assert.deepEqual(
+    FUNCTION_ENV_NAMES.h0,
+    FUNCTION_ENV_NAMES.command.filter((name) => !excluded.has(name)),
+  );
+  assert.equal(FUNCTION_ENV_NAMES.h0.includes("SUPABASE_SERVICE_ROLE_KEY"), false);
 });
 
 test("every database worker receives the optional private CA", () => {

@@ -37,8 +37,12 @@ the runtime's configured 70-second graceful worker-drain window.
 The database admits at most `H0_MAX_CONCURRENT_WAITS` waiting polls at a time,
 for the whole deployment (`src/h0/verbs.ts`). A waiting poll holds one worker.
 A poll that cannot take a waiting slot returns at once with `retryAfterSeconds`.
-`FUNCTION_ENV_NAMES.h0` lists the database environment names H0 reads:
-`SWARM_DATABASE_URL`, `SUPABASE_DB_URL`, and `SWARM_DATABASE_TLS_CA_B64`.
+`FUNCTION_ENV_NAMES.h0` includes the command function's environment names, except
+`SUPABASE_SERVICE_ROLE_KEY` (`H0_COMMAND_ENV_EXCLUSIONS`), which only file commands read,
+because forwarded verbs call its request handler inside the H0 worker. Poll and ack use
+their own one-connection pool; forwarded verbs share command's two-connection
+pool for their routing lookup and command work. A warm H0 worker can therefore
+hold at most three database connections.
 
 `h0-deno.json` supplies the bare `postgres` import mapping that H0 reaches through
 shared command types. `bootstrap.sh` copies the read-only mounted functions to an

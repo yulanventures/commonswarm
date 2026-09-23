@@ -21,11 +21,15 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 import {
-  H0_MAX_CONCURRENT_WAITS,
+  H0_MAX_CONCURRENT_WAITS, H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE,
   H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, h0Verb, h0AgentDocumentDescription,
   type H0Verb,
 } from "../../src/h0/verbs.js";
 import { H0_SEAT_TOKEN_TTL_MS } from "../../src/protocol/index.js";
+import {
+  REGISTRATION_SEAT_REVOKED,
+  REGISTRATION_TOKEN_ALREADY_USED,
+} from "../../supabase/functions/command/registration-conflicts.js";
 
 const repoFile = (rel: string) =>
   readFileSync(fileURLToPath(new URL(`../../${rel}`, import.meta.url)), "utf8");
@@ -351,9 +355,9 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
     "",
     "POST register — Exchange the join credential from the paste for a seat token. Returned once, in this response body only. (join credential in the body)",
     "    joinCredential (required)",
-    "    attemptId (required) — client-generated; the discriminator that makes a retry the same attempt",
-    "    name (required) — a display label, not an identity -- duplicates are allowed here",
-    "    icon (may be omitted)",
+    "    attemptId (required) — client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response",
+    `    name (required) — a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`,
+    "    icon (may be omitted) — accepted for link compatibility; this release does not store an icon",
     "POST poll — Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused. (seat token in Authorization: Bearer)",
     `    wait (may be omitted) — seconds, at most 50. At most ${H0_MAX_CONCURRENT_WAITS} poll may wait at a time across the whole deployment. If this poll cannot wait, it returns at once and includes retryAfterSeconds. Poll again after that many seconds`,
     "    ackBatch (may be omitted) — the previous batchId; a TRANSPORT ack that advances no delivery state",
@@ -367,20 +371,33 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
     "POST ask — Post a question to a person or agent. An ask wakes its recipient; a note does not. (seat token in Authorization: Bearer)",
     "    body (required)",
     "    to (may be omitted)",
-    "    requestId (may be omitted)",
+    `    requestId (may be omitted) — reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`,
     "POST note — Post a short signal of intent. Does not wake anyone. (seat token in Authorization: Bearer)",
     "    body (required)",
     "    to (may be omitted)",
-    "    requestId (may be omitted)",
+    `    requestId (may be omitted) — reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`,
     "POST reply — Reply to a message you received. Immutable, and addressed to the original author. (seat token in Authorization: Bearer)",
     "    signal_id (required)",
     "    body (required)",
-    "    requestId (may be omitted)",
+    `    requestId (may be omitted) — reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`,
     "POST working-on — Say what you are working on so collaborators do not step on it. Claims nothing and blocks nobody. (seat token in Authorization: Bearer)",
     "    body (required)",
-    "    requestId (may be omitted)",
+    `    requestId (may be omitted) — reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`,
   ].join("\n");
   assert.equal(h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS), GOLDEN);
+});
+
+test("the attemptId note defers to the command edge's 409 remedies", () => {
+  const note = H0_VERBS.find((verb) => verb.name === "register")!.fields
+    .find((field) => field.name === "attemptId")!.note;
+  assert.ok(note);
+  for (const response of [REGISTRATION_TOKEN_ALREADY_USED, REGISTRATION_SEAT_REVOKED]) {
+    assert.equal(response.status, 409);
+    assert.ok(response.message.length > 0);
+    assert.match(note, new RegExp(`used or revoked seat returns ${response.status}`));
+  }
+  assert.match(note, /follow the message in that response/);
+  assert.doesNotMatch(note, /ask the inviter for a new join credential/i);
 });
 
 test("the document contains none of the known join-credential assignment spellings", () => {

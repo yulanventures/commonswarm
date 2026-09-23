@@ -130,13 +130,6 @@ export function h0VerbFailure(): Response {
   return json(500, { error: "internal_error" });
 }
 
-export function h0RetryableDatabaseFailure(error: unknown): Response | null {
-  if (typeof error !== "object" || error === null || !("code" in error)) return null;
-  const code = error.code;
-  if (code !== "40P01" && code !== "40001") return null;
-  return json(503, { error: "h0_transaction_retryable" });
-}
-
 export class H0ClientAbort extends Error {
   constructor() {
     super("The poll client closed the request.");
