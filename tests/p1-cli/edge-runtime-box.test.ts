@@ -5,8 +5,8 @@ import { test } from "node:test";
 import {
   createWorkerObserver,
   EDGE_WORKER_EVENTS,
-  localMetricsResponse,
-  RUNTIME_METRICS_PATH,
+  logRuntimeMetrics,
+  RUNTIME_METRICS_EVENT,
 } from "../../deploy/edge-runtime/main/observability.js";
 import {
   FUNCTION_ENV_NAMES,
@@ -86,32 +86,21 @@ test("edge worker logs one safe start and one observed end per isolate key", { t
   for (const line of lines) assert.equal(line.includes("\n"), false);
 });
 
-test("runtime metric route accepts only a loopback socket peer", { timeout: 5_000 }, async () => {
+test("runtime metrics are logged as one JSON record per sample", { timeout: 5_000 }, async () => {
   const metrics = { activeUserWorkersCount: 1, retiredUserWorkersCount: 3 };
   let reads = 0;
   const getMetrics = async () => { reads += 1; return metrics; };
-  const request = new Request(`http://untrusted-host.test${RUNTIME_METRICS_PATH}`);
-  const denied = await localMetricsResponse(request, "172.18.0.1", getMetrics);
-  assert.equal(denied?.status, 404);
-  assert.equal(reads, 0);
-  const allowed = await localMetricsResponse(request, "127.0.0.1", getMetrics);
-  assert.equal(allowed?.status, 200);
-  assert.deepEqual(await allowed?.json(), metrics);
-  assert.equal(allowed?.headers.get("cache-control"), "no-store");
-  assert.equal(allowed?.headers.get("access-control-allow-origin"), null);
+  const lines: string[] = [];
+  await logRuntimeMetrics(getMetrics, (line) => lines.push(line));
   assert.equal(reads, 1);
-  assert.equal(
-    await localMetricsResponse(
-      new Request("http://localhost/functions/v1/command/_internal/metric"),
-      "127.0.0.1",
-      getMetrics,
-    ),
-    null,
-  );
-  assert.equal(reads, 1);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]!), { event: RUNTIME_METRICS_EVENT, metrics });
+  await logRuntimeMetrics(async () => { throw new Error("sample failed"); }, (line) => lines.push(line));
+  assert.equal(lines.length, 1);
 });
 
-test("public Caddy routes cannot forward the internal metric path", { timeout: 5_000 }, async () => {
+test("Caddy scopes edge proxy and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
+  const metricPath = "/_internal/metric";
   const caddyFiles = [
     "deploy/supabase-stack/commonswarm-api.caddy",
     "deploy/supabase-stack/commonswarm-api-maintenance.caddy",
@@ -121,10 +110,14 @@ test("public Caddy routes cannot forward the internal metric path", { timeout: 5
     const edgeRoute = caddy.match(/@edge_functions path ([^\n]+)\n\s*handle @edge_functions \{\s*reverse_proxy 127\.0\.0\.1:9000/);
     assert.ok(edgeRoute, `${path} must keep its scoped edge proxy`);
     assert.equal(edgeRoute[1]?.trim(), "/functions/v1 /functions/v1/*");
-    assert.equal(edgeRoute[1]?.includes(RUNTIME_METRICS_PATH), false);
+    assert.equal(edgeRoute[1]?.includes(metricPath), false);
     assert.equal((caddy.match(/reverse_proxy 127\.0\.0\.1:9000/g) ?? []).length, 1);
   }
-  assert.equal(resolveFunctionRoute(RUNTIME_METRICS_PATH), null);
+  assert.equal(resolveFunctionRoute(metricPath), null);
+  const response = resolveGatewayRequest(new Request(`http://localhost${metricPath}`)).response;
+  assert.equal(response?.status, 404);
+  assert.equal(await response?.text(), KONG_FUNCTION_NOT_FOUND_BODY);
+  assert.equal(response?.headers.get("access-control-allow-origin"), "*");
   for (const name of FUNCTION_NAMES) {
     assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
       functionName: name,

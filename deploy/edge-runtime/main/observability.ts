@@ -5,7 +5,7 @@ export const EDGE_WORKER_EVENTS = {
   ended: "edge_worker_ended",
 } as const;
 
-export const RUNTIME_METRICS_PATH = "/_internal/metric";
+export const RUNTIME_METRICS_EVENT = "edge_runtime_metrics";
 
 interface WorkerHandle {
   key: string;
@@ -69,20 +69,16 @@ export function createWorkerObserver<Options>(
   };
 }
 
-export async function localMetricsResponse(
-  request: Request,
-  peerHostname: string,
+export async function logRuntimeMetrics(
   getRuntimeMetrics: () => Promise<unknown>,
-): Promise<Response | null> {
-  if (new URL(request.url).pathname !== RUNTIME_METRICS_PATH) return null;
-  if (peerHostname !== "127.0.0.1" && peerHostname !== "::1") {
-    return new Response("Not Found", { status: 404 });
+  log: (line: string) => void,
+): Promise<void> {
+  try {
+    log(JSON.stringify({
+      event: RUNTIME_METRICS_EVENT,
+      metrics: await getRuntimeMetrics(),
+    }));
+  } catch {
+    // A failed sample is not a reason to interrupt function traffic.
   }
-  return new Response(JSON.stringify(await getRuntimeMetrics()), {
-    status: 200,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
 }

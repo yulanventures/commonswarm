@@ -1,0 +1,7 @@
+request matrix: 12/12 status, headers, body match origin/main
+origin/main stop: 0.3s
+worker starts: 4 unique keys, one line per key
+worker ends: 1 observed after retirement
+runtime metrics: 1 JSON record within one 60s period
+lane stop: 0.3s
+mutation (clearInterval removed) stop: 70.3s; 70s timeout diagnostic present
