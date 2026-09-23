@@ -469,3 +469,23 @@ Mutation controls were run with the source restored after each probe. Forcing `c
 This fold does not establish a green full-suite run on a host that permits `ps`, a bound on production clock skew, or the result of a real DNS failover. The rate tests use a 20 ms stub round trip and a fake clock. No release, merge, or production operation occurred.
 
 One intermediate `npm test` run also had four unrelated ACP held-close timing failures under load (945/951 passed); each of those four tests passed alone, and the subsequent full suite returned to 949/951 with only the two `ps` sandbox failures.
+
+## Fold 11
+
+The runtime and supervisor now cap a renewable session's waits at its renewal **due time** before renewal is due, then at the expiry margin deadline after it is due. `AgentCredentialSession.renewalAt` supplies that boundary only when an expiry and a usable store exist and renewal has not been latched off. The CLI passes it through its credential wrapper to both wait owners. Every cap retains the one-second floor. A null-store session retains its ordinary idle cadence. The push wake's `until` and the sustained restart delay now both end at the six-minute lead for a one-hour token; neither can sleep through it to roughly one minute before expiry.
+
+The push wake and sustained restart tests each begin before the due time, cross it, and record the first renewal request by due time plus at most the one-second floor. Removing only the due-time cap from the wake `until` made the push test fail (exit 1, 0/1 passed); restoring it made the focused test pass (exit 0, 1/1 passed). A claim retry inside a credential check window now logs its actual 30-second wait; a test compares the event delay with the subsequent sleep. Status text says it is retrying the credential check, which also describes a read-edge loss before renewal is due.
+
+A detached CLI listener on a loopback read fixture, with a temporary `--state-dir` and an isolated test HOME, reported `credential_check` with a future `nextAttemptAt` and `credentialCheckEdge: "read"`. The token-free [fold11-detached-credential-check-status.json](fold11-detached-credential-check-status.json) was saved while it was running; the fixture listener was then stopped. The existing detached renewal test passed with the same isolated HOME.
+
+### Fold 11 gates and limits
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | 0 tests; TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` with an isolated HOME | 1 | 955 tests: 953 passed, 2 failed, 0 skipped. Both failures invoke real `ps`, denied by this sandbox with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` with an isolated HOME | 1 | 838 tests: 835 passed, 3 failed, 0 skipped. All three invoke real `ps`, denied with `spawn EPERM` or `spawnSync ps EPERM`. |
+| `npm run check:tests` | 0 | 0 tests; source and test types passed. |
+| `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
+
+This fold does not establish a green full-suite run on a host that permits `ps`, a bound on production clock skew, or behavior under a real DNS failover. The due-time tests use a fake clock; the detached fixture uses loopback HTTP. No production host or real workspace was contacted, and no release or merge occurred.

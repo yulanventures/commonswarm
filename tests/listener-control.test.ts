@@ -74,9 +74,11 @@ import {
   AcpVersionError,
 } from "../src/host/types.js";
 import {
+  AgentCredentialSession,
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
+import { cloudTarget } from "../src/cloud/config.js";
 import { ListenerCapabilityError } from "../src/listener/runtime.js";
 import {
   listenerFailureMessage,
@@ -1477,7 +1479,7 @@ test("supervisor restarts keep the request floor after the renewal deadline", as
     paths: paths(root), profileId: "profile-restart-floor",
     workspaceId: randomUUID(), principalId: randomUUID(),
     now: () => current, getCredentialExpiryMs: () => expiry,
-    getCredentialRenewalDue: () => true,
+    getCredentialRenewalAt: () => start,
     restart: { maxAttempts: 4, random: () => 0, sleep: async (ms) => {
       assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
       current += ms;
@@ -1493,6 +1495,58 @@ test("supervisor restarts keep the request floor after the renewal deadline", as
   assert.equal(runs.length, 5);
   for (let i = 1; i < runs.length; i++) {
     assert.ok(runs[i]! - runs[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
+});
+
+test("a sustained supervisor restart that begins before renewal is due ends at the six-minute lead", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-renewal-due-"));
+  try {
+    const start = Date.parse("2026-07-30T00:00:00.000Z");
+    const expiry = start + 7 * 60_000;
+    const dueAt = expiry - 6 * 60_000;
+    let current = start;
+    const runs: number[] = [];
+    const waits: Array<{ startedAt: number; ms: number }> = [];
+    const renewalTimes: number[] = [];
+    const session = await AgentCredentialSession.open({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: randomUUID(),
+      presented: { token: "swm_agt_" + "A".repeat(43), tokenId: randomUUID(),
+        principalId: randomUUID(), runId: randomUUID(), expiresAt: expiry },
+      store: { location: "memory://restart-renewal", read: async () => null,
+        write: async () => {}, delete: async () => {},
+        withLock: async <T>(work: () => Promise<T>): Promise<T> => work() },
+      listenerMode: true, now: () => current, warn: () => {},
+      fetcher: (async () => {
+        renewalTimes.push(current);
+        return new Response('{"error":"internal_error"}', { status: 500 });
+      }) as typeof fetch,
+    });
+    assert.equal(session.renewalAt, dueAt);
+    const status = await runListenerSupervisor({
+      paths: paths(root), profileId: "profile-restart-renewal-due",
+      workspaceId: randomUUID(), principalId: randomUUID(),
+      now: () => current, getCredentialExpiryMs: () => session.expiry,
+      getCredentialRenewalAt: () => session.renewalAt,
+      restart: { random: () => 1, sleep: async (ms) => {
+        waits.push({ startedAt: current, ms });
+        current += ms;
+      } },
+      run: async () => {
+        runs.push(current);
+        if (runs.length <= 6) return { reason: "fatal", error: new SignalHttpError(500) };
+        await assert.rejects(() => session.bearer());
+        return { reason: "cancelled" };
+      },
+    });
+    assert.equal(status.state, "stopped");
+    assert.equal(runs.length, 7);
+    assert.equal(waits.length, 6);
+    assert.ok(waits[5]!.startedAt < dueAt);
+    assert.ok(waits[5]!.ms > LISTENER_REQUEST_WAIT_FLOOR_MS);
+    assert.ok(runs[6]! >= dueAt && runs[6]! <= dueAt + LISTENER_REQUEST_WAIT_FLOOR_MS);
+    assert.deepEqual(renewalTimes, [runs[6]]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -1724,7 +1778,15 @@ test("credential and claim status use the answering edge and current retry state
     renewalExpiresAt: "2026-09-22T00:03:00.000Z",
     nextAttemptAt: "2026-09-22T00:02:01.000Z",
   });
-  assert.match(expiring, /retrying renewal at 2026-09-22T00:02:01.000Z/);
+  assert.match(expiring, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
+  const readBeforeRenewal = renderListenerStatus({
+    ...statusFor(target, "credential_check"), credentialStopAt: "2026-09-22T00:11:00.000Z",
+    credentialCheckEdge: "read", lastErrorCode: "forbidden",
+    renewalExpiresAt: "2026-09-22T00:10:00.000Z",
+    nextAttemptAt: "2026-09-22T00:02:01.000Z",
+  });
+  assert.match(readBeforeRenewal, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
+  assert.doesNotMatch(readBeforeRenewal, /retrying renewal/);
   assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
   assert.doesNotMatch(expiring, /transient answer extends/);
   const stopped = renderListenerStatus({

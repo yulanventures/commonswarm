@@ -164,7 +164,8 @@ export interface ListenerSupervisorOptions {
   now?: () => number;
   /** Current credential expiry, including a successor adopted by a later attempt. */
   getCredentialExpiryMs?: () => number | null;
-  getCredentialRenewalDue?: () => boolean;
+  /** Null when renewal is unavailable; otherwise the next renewal due time. */
+  getCredentialRenewalAt?: () => number | null;
   /**
    * Runs under starting.lock after the live-socket rejection check, before
    * the socket can answer. Receives the one proposed UUID and selects the
@@ -1074,10 +1075,13 @@ export async function runListenerSupervisor(
       restarts += 1;
       const expiry = options.getCredentialExpiryMs?.() ?? null;
       const deadline = expiry === null ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      const renewalAt = options.getCredentialRenewalAt?.();
+      const boundary = renewalAt !== null && expiry !== null && now() < expiry
+        ? renewalAt !== undefined && now() < renewalAt ? renewalAt : deadline
+        : null;
       const proposedDelayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
-      const cappedDelayMs = deadline !== null && now() < expiry! &&
-        options.getCredentialRenewalDue?.() !== false
-        ? Math.min(proposedDelayMs, Math.max(0, deadline - now()))
+      const cappedDelayMs = boundary !== null
+        ? Math.min(proposedDelayMs, Math.max(0, boundary - now()))
         : proposedDelayMs;
       const delayMs = Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, cappedDelayMs);
       const restartCode = safeErrorCode(stop.error);

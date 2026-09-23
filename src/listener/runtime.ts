@@ -257,6 +257,8 @@ export interface ListenerCredentialSession {
   readonly expiry?: number | null;
   /** True only while this session has a store and is due to renew. */
   readonly renewalDue?: boolean;
+  /** Null if renewal is unavailable; otherwise the next due time. */
+  readonly renewalAt?: number | null;
 }
 
 /** A parsed delivery response contradicts the local lease or advertised lease bound. */
@@ -972,20 +974,23 @@ export async function runListenerRuntime(
     return expiry === null || expiry === undefined
       ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
   };
-  const capWaitMs = (ms: number): number => {
+  const renewalWaitBoundary = (): number | null => {
     const expiry = options.credentialSession.expiry;
-    const deadline = renewalDeadline();
-    const wait = expiry !== null && expiry !== undefined && now() < expiry &&
-      options.credentialSession.renewalDue !== false && deadline !== null
-      ? Math.min(ms, Math.max(0, deadline - now())) : ms;
+    if (expiry === null || expiry === undefined || now() >= expiry) return null;
+    const dueAt = options.credentialSession.renewalAt;
+    if (dueAt === null) return null;
+    if (dueAt !== undefined && now() < dueAt) return dueAt;
+    if (dueAt === undefined && options.credentialSession.renewalDue === false) return null;
+    return renewalDeadline();
+  };
+  const capWaitMs = (ms: number): number => {
+    const boundary = renewalWaitBoundary();
+    const wait = boundary === null ? ms : Math.min(ms, Math.max(0, boundary - now()));
     return Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, wait);
   };
   const mayWaitForWake = (): boolean => {
-    const expiry = options.credentialSession.expiry;
-    const deadline = renewalDeadline();
-    return options.credentialSession.renewalDue === false ||
-      expiry === null || expiry === undefined || now() >= expiry ||
-      deadline === null || now() < deadline;
+    const boundary = renewalWaitBoundary();
+    return boundary === null || now() < boundary;
   };
   const sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
     const capped = capWaitMs(ms);
@@ -1470,8 +1475,8 @@ export async function runListenerRuntime(
         wakeSubscriber !== null &&
         wakeSubscriber.hasTopic && mayWaitForWake()
       ) {
-        const until = Math.min(reconcileDueAt, now() + waitCapMs(),
-          options.credentialSession.renewalDue === false ? Infinity : renewalDeadline() ?? Infinity);
+        const until = Math.max(now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+          Math.min(reconcileDueAt, now() + waitCapMs(), renewalWaitBoundary() ?? Infinity));
         const wakeWaitStartedAt = now();
         const reason = await wakeSubscriber.next({
           until,
@@ -1876,7 +1881,7 @@ export async function runListenerRuntime(
             const retryableClaim = isRetryableDeliveryError(error);
             const delayMs = capWaitMs(retryableClaim
               ? credentialWindow !== null
-                ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS
+                ? RENEWAL_WINDOW_RETRY_MS
                 : deliveryRetryDelay(deliveryAttempt + 1, error, random)
               : 0);
             if (retryableClaim) {

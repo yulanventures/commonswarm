@@ -2254,3 +2254,57 @@ test("detached listener renews after a 401 and server error before the old token
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("detached listener records the next credential check attempt", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold11-credential-check-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const oldExpiry = Date.now() + 60 * 60_000;
+  const artifact = JSON.stringify({ message: AGENT_MESSAGE, status: "accepted", principal_id: principalId,
+    token_id: randomUUID(), run_id: randomUUID(), agent_token: `swm_agt_${"A".repeat(43)}`,
+    expires_at: new Date(oldExpiry).toISOString() });
+  const server = createServer(async (request, response) => {
+    let requestBody = "";
+    for await (const chunk of request) requestBody += String(chunk);
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end('{"error":"unauthenticated"}');
+      return;
+    }
+    const command = JSON.parse(requestBody) as { command?: { kind?: string } };
+    if (command.command?.kind !== "renew_agent_token") {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end('{"error":"invalid_request"}');
+      return;
+    }
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end('{"error":"unauthenticated"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId,
+    workspaceId, principalId, stateDirectory: root });
+  try {
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok",
+      "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+    assert.equal(start.code, 0, start.stderr);
+    const checking = await waitForListenerStatus(paths,
+      (status) => status.state === "credential_check" && status.nextAttemptAt !== null, 10_000);
+    assert.equal(checking.credentialCheckEdge, "read");
+    assert.ok(checking.nextAttemptAt && Date.parse(checking.nextAttemptAt) > Date.parse(checking.updatedAt));
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD11_CREDENTIAL_CHECK_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD11_CREDENTIAL_CHECK_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try { await stopAndWaitForDetachedListener(["listen", "stop", ...common,
+      "--principal-id", principalId, "--json"], paths); }
+    catch { /* The listener may already have exited after a failed assertion. */ }
+    await closeTestServer(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});

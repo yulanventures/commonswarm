@@ -3652,6 +3652,44 @@ test("claim-only delivery refusals force a read and expose revocation", { timeou
   assert.ok(events.some((event) => event.type === "credential_check"));
 });
 
+test("claim retry reports the actual wait during a credential check window", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let claims = 0;
+  let retryDelay: number | null = null;
+  let observedWait: number | null = null;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal, credentialSession: { expiry: start + 20 * 60_000,
+      async bearer() { return "token"; } }, store: new MemoryStore(), model: new FakeModel(),
+    signal: controller.signal, now: () => current,
+    onEvent: (event) => { if (event.type === "claim_retry") retryDelay = event.delayMs; },
+    readPage: async () => durablePage([], 1),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims++;
+        if (claims === 1) throw new DeliveryHttpError(401, "unauthenticated", "credential refused");
+        throw new DeliveryHttpError(503, "delivery_unavailable", "delivery unavailable");
+      },
+      async ackAgentDelivery() { throw new Error("ack must not run"); },
+    },
+    sleep: async (ms) => {
+      if (retryDelay !== null) {
+        observedWait = ms;
+        controller.abort();
+      }
+      current += ms;
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, 2);
+  assert.equal(retryDelay, RENEWAL_WINDOW_RETRY_MS);
+  assert.equal(observedWait, retryDelay);
+});
+
 test("claim backoff reaches its cap across successful forced reads", { timeout: 15_000 }, async () => {
   for (const [httpStatus, code] of [[503, "delivery_unavailable"], [403, "forbidden"]] as const) {
     const root = await mkdtemp(join(tmpdir(), "cswarm-claim-backoff-"));
@@ -4021,6 +4059,58 @@ test("push wake retries a foreign claim without a preceding read", { timeout: 15
     assert.ok(claimTimes[i]! - claimTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
   }
   assert.equal(events.find((event) => event.type === "claim_retry")?.code, "http_400");
+});
+
+test("a push wake that begins before renewal is due ends at the six-minute lead", { timeout: 15_000 }, async () => {
+  const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+  const dueAt = expiry - 6 * 60_000;
+  let current = dueAt - 5_000;
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const wakeWaits: Array<{ startedAt: number; until: number }> = [];
+  const renewalTimes: number[] = [];
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => {
+      renewalTimes.push(current);
+      controller.abort();
+      return new Response('{"error":"internal_error"}', { status: 500 });
+    }) as typeof fetch,
+  });
+  assert.equal(session.renewalAt, dueAt);
+  const wake = {
+    hasTopic: true,
+    snapshot: () => ({ mode: "push", subscribedAt: new Date(current).toISOString(), reconnects: 0,
+      lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+    next: async ({ until }: { until: number }) => {
+      wakeWaits.push({ startedAt: current, until });
+      current = until;
+      return "deadline";
+    },
+    coalescingRemainingMs: () => 0,
+    noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+    close: async () => {},
+  } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal, credentialSession: session, store: new MemoryStore(),
+    model: new FakeModel(), signal: controller.signal, now: () => current, wake,
+    readPage: async () => durablePage([], 1),
+    fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+      capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+      deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(wakeWaits.length, 1);
+  assert.ok(wakeWaits[0]!.startedAt < dueAt);
+  assert.equal(wakeWaits[0]!.until, dueAt);
+  assert.equal(renewalTimes.length, 1);
+  assert.ok(renewalTimes[0]! >= dueAt && renewalTimes[0]! <= dueAt + LISTENER_REQUEST_WAIT_FLOOR_MS);
 });
 
 test("malformed read overflow and delivery marker retry", { timeout: 15_000 }, async () => {

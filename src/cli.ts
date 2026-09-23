@@ -5713,7 +5713,7 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
   if (status.renewalExpiresAt &&
       Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
-    return `The server refused this credential (${codes}). The listener is still running and retrying renewal${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
   }
   return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
@@ -6573,6 +6573,7 @@ async function runConfiguredListener(options: {
   const credentialSession = {
     get expiry(): number | null { return liveCredentialSession.expiry; },
     get renewalDue(): boolean { return liveCredentialSession.renewalDue; },
+    get renewalAt(): number | null { return liveCredentialSession.renewalAt; },
     bearer: async (): Promise<string> => {
       const credential = await liveCredentialSession.bearer();
       if (credential !== storedCredential) {
@@ -6771,7 +6772,7 @@ async function runConfiguredListener(options: {
       routeMode,
       deferOverChars,
       getCredentialExpiryMs: () => credentialSession.expiry,
-      getCredentialRenewalDue: () => credentialSession.renewalDue,
+      getCredentialRenewalAt: () => credentialSession.renewalAt,
       // The bound a timeout event reports: the last turn's clamped budget when
       // one has run, else the configured cap.
       getTurnBudgetMs: () => lastAppliedTurnBudgetMs ?? turnBudgetMs,

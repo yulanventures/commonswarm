@@ -836,6 +836,12 @@ export class AgentCredentialSession {
     return this.due();
   }
 
+  /** Next renewal boundary, or null when this session cannot keep a successor. */
+  get renewalAt(): number | null {
+    if (this.unsupported || this.options.store === null || this.expiresAt === null) return null;
+    return renewalDueAt(this.issuedAt, this.expiresAt);
+  }
+
   /**
    * ★ RENEWAL REQUIRES SOMEWHERE TO KEEP THE SUCCESSOR, AND THAT IS A SAFETY RULE, NOT A
    * CONVENIENCE. A successful renewal SUPERSEDES the predecessor server-side — the fence
@@ -845,8 +851,6 @@ export class AgentCredentialSession {
    * bricked by the feature meant to keep it alive. So with no store, this never renews.
    */
   private due(): boolean {
-    if (this.unsupported) return false;
-    if (this.options.store === null) return false;
     /* ★ AN UNKNOWN EXPIRY MEANS NO RENEWAL, AND THE ALTERNATIVE IS WORSE THAN IT LOOKS.
      * The obvious move for a credential whose deadline is unknown is to renew on first use
      * and learn it. But a successful renewal SUPERSEDES the predecessor server-side, so
@@ -855,8 +859,8 @@ export class AgentCredentialSession {
      * use on two machines — brick the second one. A bare token or a pre-renewal artifact
      * therefore behaves exactly as it did before this file existed, and the fix is to
      * re-issue it: `cswarm token mint` and the connect page both state the expiry now. */
-    if (this.expiresAt === null) return false;
-    return this.clock() >= renewalDueAt(this.issuedAt, this.expiresAt);
+    const at = this.renewalAt;
+    return at !== null && this.clock() >= at;
   }
 
   private expired(): boolean {
