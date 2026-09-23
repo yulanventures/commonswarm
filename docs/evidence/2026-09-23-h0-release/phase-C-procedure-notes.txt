@@ -1,0 +1,9 @@
+Procedure problems:
+1. Section 6’s first code block always stops the recycle timer; prose and this brief say not to unless the window overlaps. Followed the brief (left it running).
+2. Section 1 proof tar left AppleDouble ._* files in PROOF_DIR. Removed them before copy-back.list. Mac extract does not set COPYFILE_DISABLE=1.
+3. From the box, python urllib to edge-staging.commonswarm.com got Cloudflare 1010. Same probes from the Mac succeeded. Staging evidence is Mac, not box.
+4. Hermes terminal refused a pasted preflight because the env-check Python uses bitwise and. Blocks were copied as files and run.
+5. grep FAILED on checksum output hit a filename that contains FAILED, not a failed checksum.
+6. copy-back.list was written by a root script with an explicit name list, not a protected editor. No find.
+7. Authenticated read skipped (no smoke credential on the box).
+8. Runbook log grep is only CONNECT_TIMEOUT; the extra h0-command-missing check was added for this brief.
