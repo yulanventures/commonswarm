@@ -7,10 +7,10 @@ import {
   RenewalCredentialCheckError,
   RenewalMalformedResponseError,
   RenewalOutcomeUnknown,
+  RenewalReauthorisationRequired,
   RenewalRetryError,
   RenewalRevoked,
-  RenewalRefused,
-  RenewalUnsupported,
+  RenewalSuspended,
   RenewalUpgradeRequiredError,
   requestSuccessor,
 } from "../../src/cloud/renewal.js";
@@ -102,29 +102,68 @@ test("listener retries foreign renewal until the known token expiry", { timeout:
   assert.equal(calls, 2);
 });
 
-test("named renewal domain refusals stay fatal before token expiry", { timeout: 10_000 }, async () => {
-  for (const [reason, expected] of [
-    ["renewal_unsupported", RenewalUnsupported],
-    ["renewal_device_mismatch", RenewalRefused],
-  ] as const) {
+test("named renewal domain refusals retry before token expiry", { timeout: 10_000 }, async () => {
+  for (const reason of ["renewal_unsupported", "renewal_device_mismatch"] as const) {
     const credential = await session(fetchAnswer(200, JSON.stringify({ status: "rejected", reason })), true);
-    await assert.rejects(() => credential.bearer(), (error: unknown) => {
-      assert.ok(error instanceof expected);
-      assert.ok(!(error instanceof RenewalRetryError));
-      assert.match((error as Error).message, /Ask whoever issued it|Ask a workspace owner/);
-      return true;
-    });
+    await assert.rejects(() => credential.bearer(), (error: unknown) =>
+      error instanceof RenewalRetryError && error.expiresAt === NOW + 60_000);
   }
 });
 
-test("426 gives a one-shot command its own next step", { timeout: 10_000 }, async () => {
-  const credential = await session(fetchAnswer(426, '{"error":"upgrade_required","min_client_version":"9.0.0"}'), false);
-  await assert.rejects(() => credential.bearer(), (error: unknown) => {
-    assert.ok(error instanceof RenewalUpgradeRequiredError);
-    assert.match(error.message, /run the command again/);
-    assert.doesNotMatch(error.message, /restart the listener/);
-    return true;
-  });
+test("one-shot bearer preserves a9846955 outcomes across renewal answers", { timeout: 15_000 }, async () => {
+  // Expected outcomes come from a9846955: requestSuccessor maps 400/404 to
+  // RenewalUnsupported; bearer latches it, warns and uses a live predecessor.
+  // Only revoked, reauthorisation and suspension throw with that predecessor.
+  const cases = [
+    { name: "unsupported", status: 200, body: '{"status":"rejected","reason":"renewal_unsupported"}', outcome: "latch", warning: "this credential was issued without a renewal window" },
+    { name: "missing grant", status: 200, body: '{"status":"rejected","reason":"renewal_grant_not_found"}', outcome: "latch" },
+    { name: "wrong device", status: 200, body: '{"status":"rejected","reason":"renewal_device_mismatch"}', outcome: "warn", warning: "The standing grant is bound to another device" },
+    { name: "missing device", status: 200, body: '{"status":"rejected","reason":"renewal_device_unavailable"}', outcome: "warn" },
+    { name: "upgrade", status: 426, body: '{"error":"upgrade_required","min_client_version":"9.0.0"}', outcome: "warn", warning: "This copy of cswarm is older than the deployment accepts (minimum 9.0.0)" },
+    { name: "http 400", status: 400, body: '{}', outcome: "latch", warning: "this deployment does not offer credential renewal yet" },
+    { name: "http 404", status: 404, body: '{}', outcome: "latch" },
+    { name: "http 500", status: 500, body: '{}', outcome: "warn" },
+    { name: "http 429", status: 429, body: '{"error":"rate_limited"}', outcome: "warn", warning: "The deployment did not renew this credential (HTTP 429)" },
+    { name: "http 418", status: 418, body: '{}', outcome: "warn" },
+    { name: "http 302", status: 302, body: '{}', outcome: "warn" },
+    { name: "unknown rejection", status: 200, body: '{"status":"rejected","reason":"new_reason"}', outcome: "warn" },
+    { name: "malformed successor", status: 200, body: '{"status":"accepted","agent_token":"bad"}', outcome: "warn" },
+    { name: "empty accepted answer", status: 200, body: '{"status":"accepted"}', outcome: "revoked" },
+    { name: "grant suspended", status: 200, body: '{"status":"rejected","reason":"renewal_grant_suspended"}', outcome: "suspended" },
+    { name: "horizon reached", status: 200, body: '{"status":"rejected","reason":"renewal_horizon_reached"}', outcome: "reauthorise" },
+    { name: "successors exhausted", status: 200, body: '{"status":"rejected","reason":"renewal_successors_exhausted"}', outcome: "reauthorise" },
+    { name: "foreign 401", status: 401, body: "<html>wrong edge</html>", outcome: "revoked" },
+    { name: "foreign 403", status: 403, body: "<html>wrong edge</html>", outcome: "revoked" },
+    { name: "revoked", status: 200, body: '{"status":"rejected","reason":"renewal_lineage_revoked"}', outcome: "revoked" },
+  ] as const;
+  let checked = 0;
+  for (const row of cases) {
+    let calls = 0;
+    const warnings: string[] = [];
+    const credential = await AgentCredentialSession.open({
+      target, workspaceId: randomUUID(),
+      presented: { token, tokenId: randomUUID(), principalId: randomUUID(), runId: randomUUID(), expiresAt: NOW + 60_000 },
+      store: store(), now: () => NOW, warn: (warning) => warnings.push(warning),
+      fetcher: (async () => { calls++; return new Response(row.body, { status: row.status }); }) as typeof fetch,
+    });
+    if (row.outcome === "revoked" || row.outcome === "suspended" || row.outcome === "reauthorise") {
+      const expected = row.outcome === "revoked" ? RenewalRevoked
+        : row.outcome === "suspended" ? RenewalSuspended : RenewalReauthorisationRequired;
+      await assert.rejects(() => credential.bearer(), expected, row.name);
+      assert.equal(warnings.length, 0, row.name);
+    } else {
+      assert.equal(await credential.bearer(), token, row.name);
+      assert.equal(warnings.length, 1, row.name);
+      if ("warning" in row) assert.ok(warnings[0]?.includes(row.warning), row.name);
+      assert.equal(calls, 1, row.name);
+      if (row.outcome === "latch") {
+        assert.equal(await credential.bearer(), token, row.name);
+        assert.equal(calls, 1, row.name);
+      }
+    }
+    checked++;
+  }
+  assert.equal(checked, cases.length);
 });
 
 test("one-shot 401 and 403 remain fatal even when the response body is foreign", { timeout: 10_000 }, async () => {

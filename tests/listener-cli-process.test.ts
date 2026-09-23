@@ -2187,7 +2187,7 @@ test("detached listener stops on upgrade_required with an update action", { time
   }
 });
 
-test("detached listener renews after a 401 before the old token expires", { timeout: 30_000 }, async () => {
+test("detached listener renews after a 401 and server error before the old token expires", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-fold8-renewal-"));
   const workspaceId = randomUUID();
   const principalId = randomUUID();
@@ -2214,6 +2214,9 @@ test("detached listener renews after a 401 before the old token expires", { time
       if (renewals === 1) {
         response.writeHead(401);
         response.end('{"error":"unauthenticated"}');
+      } else if (renewals === 2) {
+        response.writeHead(500);
+        response.end('{"error":"internal_error"}');
       } else {
         const issuedAt = Date.now();
         response.writeHead(200);
@@ -2235,12 +2238,13 @@ test("detached listener renews after a 401 before the old token expires", { time
   try {
     const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
     assert.equal(start.code, 0, start.stderr);
-    const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 2 && reads > 0, 20_000);
+    const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 3 && reads > 0, 20_000);
     assert.ok(Date.now() < oldExpiry, "the successor was accepted before the old token expired");
     assert.equal(ready.state, "ready");
     const safeStatus = await readFile(paths.statusPath, "utf8");
     assert.doesNotMatch(safeStatus, /swm_agt_/);
     if (process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH, safeStatus);
   } finally {
     try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
     catch { /* The listener may already have exited after a failed assertion. */ }

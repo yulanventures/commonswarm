@@ -435,13 +435,13 @@ export async function requestSuccessor(options: {
       body = parsed as Record<string, unknown>;
     }
   } catch {
-    if (!options.listenerMode && (response.status === 401 || response.status === 403)) {
+    if (!options.listenerMode) {
       body = {};
     } else {
       throw new RenewalMalformedResponseError("renewal response was not valid JSON");
     }
   }
-  if (response.status !== 401 && response.status !== 403 &&
+  if (options.listenerMode && response.status !== 401 && response.status !== 403 &&
       body.principal_id !== undefined && body.principal_id !== null &&
       (typeof body.principal_id !== "string" || !UUID_RE.test(body.principal_id))) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed principal_id");
@@ -467,19 +467,34 @@ export async function requestSuccessor(options: {
     throw new RenewalRevoked("forbidden", UNEXPLAINED_REFUSAL_MESSAGE);
   }
   if (response.status === 426) {
+    if (!options.listenerMode) {
+      const minimum = typeof body.min_client_version === "string" ? body.min_client_version : null;
+      throw new RenewalRefused(426, "upgrade_required",
+        `This copy of cswarm is older than the deployment accepts${minimum === null ? "" : ` (minimum ${minimum})`}. Update cswarm; until then this credential cannot renew itself.`);
+    }
     if (body.error !== "upgrade_required" || typeof body.min_client_version !== "string") {
       throw new RenewalOutcomeUnknown("renewal command answered an unrecognized HTTP 426");
     }
     throw new RenewalUpgradeRequiredError(body.min_client_version, options.listenerMode);
   }
+  if (!options.listenerMode && (response.status === 400 || response.status === 404)) {
+    throw new RenewalUnsupported(
+      "this deployment does not offer credential renewal yet, so a credential here still has to be re-issued by hand when it expires",
+    );
+  }
   if (!response.ok) {
+    if (!options.listenerMode) {
+      throw new RenewalRefused(response.status,
+        typeof body.error === "string" ? body.error : "unknown",
+        `The deployment did not renew this credential (HTTP ${response.status}).`);
+    }
     throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
   }
 
-  if (body.status !== "accepted" && body.status !== "rejected") {
+  if (options.listenerMode && body.status !== "accepted" && body.status !== "rejected") {
     throw new RenewalMalformedResponseError("renewal response did not carry a command status");
   }
-  if (body.status === "accepted" && body.ok !== true) {
+  if (options.listenerMode && body.status === "accepted" && body.ok !== true) {
     throw new RenewalMalformedResponseError("renewal response did not confirm acceptance");
   }
 
@@ -490,10 +505,10 @@ export async function requestSuccessor(options: {
    * the missing token with a shrug. The reason strings are the reducer's
    * RenewalRejectionReason union. */
   if (body.status === "rejected") {
-    if (typeof body.reason !== "string") {
+    if (options.listenerMode && typeof body.reason !== "string") {
       throw new RenewalMalformedResponseError("renewal rejection did not name a reason");
     }
-    const reason = body.reason;
+    const reason = typeof body.reason === "string" ? body.reason : "unknown";
     if (
       reason === "renewal_idle_suspended" ||
       reason === "renewal_grant_suspended"
@@ -548,14 +563,21 @@ export async function requestSuccessor(options: {
           : "The standing grant is bound to another device, so CommonSwarm refused renewal. Ask a workspace owner to revoke this grant and mint a new credential on the intended device.",
       );
     }
+    if (!options.listenerMode) {
+      throw new RenewalRefused(200, reason,
+        `The deployment refused to renew this credential (${reason}).`);
+    }
     throw new RenewalMalformedResponseError("renewal rejection named an unknown reason");
   }
 
-  if (body.agent_token !== undefined && typeof body.agent_token !== "string") {
+  if (options.listenerMode && body.agent_token !== undefined && typeof body.agent_token !== "string") {
     throw new RenewalMalformedResponseError("renewal response carried a malformed agent_token");
   }
   const token = typeof body.agent_token === "string" ? body.agent_token : "";
+  if (!options.listenerMode && !token) return null;
   if (token && !AGENT_TOKEN_RE.test(token)) {
+    if (!options.listenerMode) throw new RenewalRefused(response.status, "malformed_successor",
+      "The deployment returned a credential that is not shaped like one. It was not stored.");
     throw new RenewalMalformedResponseError(
       "The deployment returned a credential that is not shaped like one. It was not stored.",
     );
@@ -563,22 +585,28 @@ export async function requestSuccessor(options: {
   const tokenId = typeof body.token_id === "string" ? body.token_id : "";
   const runId = typeof body.run_id === "string" ? body.run_id : "";
   if (!UUID_RE.test(tokenId) || !UUID_RE.test(runId) || principalId === null) {
+    if (!options.listenerMode) throw new RenewalRefused(response.status, "incomplete_successor",
+      "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it.");
     throw new RenewalMalformedResponseError(
       "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it.",
     );
   }
   const parsedIssuedAt = timestamp(body.issued_at);
-  if (body.issued_at !== undefined && parsedIssuedAt === null) {
+  if (options.listenerMode && body.issued_at !== undefined && parsedIssuedAt === null) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed issued_at");
   }
   const issuedAt = parsedIssuedAt ?? now();
   const expiresAt = timestamp(body.expires_at);
   if (expiresAt === null) {
+    if (!options.listenerMode) throw new RenewalRefused(response.status, "successor_expiry_missing",
+      "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time.");
     throw new RenewalMalformedResponseError(
       "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time.",
     );
   }
   if (expiresAt - issuedAt > AGENT_TOKEN_MAX_TTL_MS) {
+    if (!options.listenerMode) throw new RenewalRefused(response.status, "successor_ttl_too_long",
+      "The deployment issued a successor credential that lasts longer than eight hours. cswarm refused to store it. Agent credentials stay short on purpose; renewal is what makes that survivable.");
     // The whole point of renewal is that the token stays short. A deployment offering a
     // long one is the failure this design exists to prevent, so refuse it here too.
     throw new RenewalMalformedResponseError(
@@ -586,17 +614,19 @@ export async function requestSuccessor(options: {
     );
   }
   const horizonExpiresAt = timestamp(body.horizon_expires_at);
-  if (body.horizon_expires_at !== undefined && body.horizon_expires_at !== null && horizonExpiresAt === null) {
+  if (options.listenerMode && body.horizon_expires_at !== undefined && body.horizon_expires_at !== null && horizonExpiresAt === null) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed horizon_expires_at");
   }
   const successorsRemaining = count(body.successors_remaining);
-  if (body.successors_remaining !== undefined && body.successors_remaining !== null && successorsRemaining === null) {
+  if (options.listenerMode && body.successors_remaining !== undefined && body.successors_remaining !== null && successorsRemaining === null) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed successors_remaining");
   }
   let wake: WakeHint | undefined;
   try {
     wake = parseOptionalWakeHint(body.wake);
   } catch {
+    if (!options.listenerMode) throw new RenewalRefused(response.status, "malformed_wake",
+      "The deployment returned a successor credential with a malformed wake hint. It was not stored.");
     throw new RenewalMalformedResponseError(
       "The deployment returned a successor credential with a malformed wake hint. It was not stored.",
     );
@@ -667,6 +697,7 @@ export class AgentCredentialSession {
   private successorsRemaining: number | null = null;
   private pending: PendingRenewal | null = null;
   private inFlight: Promise<void> | null = null;
+  private unsupported = false;
   private renewals = 0;
   /**
    * Whether `token` is a SUCCESSOR rather than the credential piped in.
@@ -810,6 +841,7 @@ export class AgentCredentialSession {
    * bricked by the feature meant to keep it alive. So with no store, this never renews.
    */
   private due(): boolean {
+    if (this.unsupported) return false;
     if (this.options.store === null) return false;
     /* ★ AN UNKNOWN EXPIRY MEANS NO RENEWAL, AND THE ALTERNATIVE IS WORSE THAN IT LOOKS.
      * The obvious move for a credential whose deadline is unknown is to renew on first use
@@ -853,14 +885,17 @@ export class AgentCredentialSession {
         }
         return this.token;
       }
+      if (error instanceof RenewalCredentialCheckError && this.expired()) {
+        throw new RenewalRevoked("predecessor_expired_local",
+          "The current credential expired while renewal was unavailable. Ask whoever set this agent up for a new credential.");
+      }
       if (error instanceof RenewalCredentialCheckError ||
-          error instanceof RenewalUpgradeRequiredError ||
           error instanceof RenewalReauthorisationRequired ||
           error instanceof RenewalSuspended ||
-          error instanceof RenewalRevoked ||
-          error instanceof RenewalUnsupported ||
-          error instanceof RenewalRefused) throw error;
-      const retryableRenewalOutcome = error instanceof RenewalOutcomeUnknown;
+          error instanceof RenewalRevoked) throw error;
+      if (this.options.listenerMode && error instanceof RenewalUpgradeRequiredError) throw error;
+      const retryableRenewalOutcome = error instanceof RenewalOutcomeUnknown ||
+        error instanceof RenewalUnsupported || error instanceof RenewalRefused;
       if (this.options.listenerMode && retryableRenewalOutcome && this.expired()) {
         throw new RenewalRevoked(
           "predecessor_expired_local",
@@ -872,7 +907,10 @@ export class AgentCredentialSession {
       }
       if (this.options.listenerMode) throw error;
       if (this.expired()) throw error;
-      this.warn(
+      if (error instanceof RenewalUnsupported) {
+        this.unsupported = true;
+        this.warn(`${error.message}.`);
+      } else this.warn(
         `${
           (error as Error).message
         }. The credential in hand is still valid, so this command went ahead; renewal is retried on the next one.`,

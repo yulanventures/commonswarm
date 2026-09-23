@@ -5711,6 +5711,10 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
   const codes = (status.credentialCheckEdge === "command"
     ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  if (status.renewalExpiresAt &&
+      Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
+    return `The server refused this credential (${codes}). The listener is still running. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+  }
   return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
 
@@ -6765,6 +6769,7 @@ async function runConfiguredListener(options: {
       permissionMode: options.permissionMode,
       routeMode,
       deferOverChars,
+      getCredentialExpiryMs: () => credentialSession.expiry,
       // The bound a timeout event reports: the last turn's clamped budget when
       // one has run, else the configured cap.
       getTurnBudgetMs: () => lastAppliedTurnBudgetMs ?? turnBudgetMs,

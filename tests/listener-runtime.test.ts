@@ -42,6 +42,7 @@ import {
   AgentCredentialSession,
   RenewalCredentialCheckError,
   RenewalReauthorisationRequired,
+  RenewalRetryError,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
 import type { AgentCredentialRecord, AgentCredentialStore } from "../src/cloud/agent-credential.js";
@@ -65,6 +66,7 @@ import {
   CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
   RENEWAL_WINDOW_RETRY_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
   ListenerLeaseResponseError,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   LISTENER_DELIVERY_RETRY_MAX_MS,
@@ -6212,6 +6214,7 @@ test("a lease that ends a little past the maximum is tolerated as clock skew; we
   );
   assert.equal(refused.reason, "fatal");
   assert.ok(refused.reason === "fatal" && refused.error instanceof ListenerLeaseResponseError);
+  assert.equal(isRestartableListenerStop(refused), true);
   assert.match(String((refused as { error?: Error }).error?.message), /lease deadline is invalid/);
 });
 
@@ -6237,6 +6240,7 @@ test("claim replay response contradictions carry the lease response tag", async 
     });
     assert.equal(stop.reason, "fatal");
     assert.ok(stop.reason === "fatal" && stop.error instanceof ListenerLeaseResponseError);
+    assert.equal(isRestartableListenerStop(stop), true);
     assert.match(stop.error.message, message);
   }
 });
@@ -6351,26 +6355,146 @@ test("renewal window retries before expiry and a successful successor keeps the 
   assert.ok(events.some((event) => event.type === "credential_check_cleared"));
 });
 
+test("generated renewal answer orderings never sleep past the renewal deadline and recover", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const failures = ["ours", "foreign", "network", "server"] as const;
+  type Answer = typeof failures[number] | "success";
+  const answerSequences: Answer[][] = [];
+  for (let code = 0; code < failures.length ** 3; code++) {
+    answerSequences.push([failures[code % 4]!, failures[Math.floor(code / 4) % 4]!,
+      failures[Math.floor(code / 16) % 4]!, "success"]);
+  }
+  const allAnswers: Answer[] = [...failures, "success"];
+  for (let a = 0; a < 5; a++) for (let b = 0; b < 5; b++) for (let c = 0; c < 5; c++) {
+    for (let d = 0; d < 5; d++) for (let e = 0; e < 5; e++) {
+      if (new Set([a, b, c, d, e]).size === 5) {
+        answerSequences.push([allAnswers[a]!, allAnswers[b]!, allAnswers[c]!, allAnswers[d]!, allAnswers[e]!]);
+      }
+    }
+  }
+  assert.equal(answerSequences.length, 184);
+  let sequences = 0;
+  for (const lifetimeMs of [35_000, 90_000, 180_000, 270_000]) {
+    for (const answers of answerSequences) {
+      let current = start;
+      const expiry = start + lifetimeMs;
+      const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      let calls = 0;
+      let reads = 0;
+      const controller = new AbortController();
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          const answer = answers[Math.min(calls++, answers.length - 1)];
+          if (answer === "network") throw new TypeError("network unavailable");
+          if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
+          if (answer === "foreign") return new Response("<html>wrong edge</html>", { status: 401 });
+          if (answer === "server") return new Response('{"error":"internal_error"}', { status: 500 });
+          return new Response(JSON.stringify({ status: "accepted", ok: true,
+            agent_token: "swm_agt_" + "B".repeat(43), token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            principal_id: PRINCIPAL_ID, run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            issued_at: new Date(current).toISOString(), expires_at: new Date(current + 60 * 60_000).toISOString() }), { status: 200 });
+        }) as typeof fetch,
+      });
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
+        model: new FakeModel(), signal: controller.signal, now: () => current,
+        readPage: async () => { reads++; controller.abort(); return page([]); },
+        sleep: async (ms) => {
+          if (session.expiry === expiry && current < expiry) {
+            assert.ok(current + ms <= Math.max(current, deadline),
+              `${answers.join(",")} at ${lifetimeMs}ms slept ${ms}ms past deadline`);
+            assert.ok(ms <= RENEWAL_WINDOW_RETRY_MS,
+              `${answers.join(",")} at ${lifetimeMs}ms delayed renewal ${ms}ms`);
+          }
+          current += ms;
+        },
+      });
+      assert.equal(stop.reason, "cancelled", answers.join(","));
+      assert.equal(calls, answers.indexOf("success") + 1, answers.join(","));
+      assert.ok(reads > 0, answers.join(","));
+      assert.ok(current < expiry, answers.join(","));
+      assert.ok((session.expiry ?? 0) > expiry, answers.join(","));
+      sequences++;
+    }
+  }
+  assert.equal(sequences, 736);
+});
+
+test("generated confirmation windows stop only after the full span of confirmed answers", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let sequences = 0;
+  for (let code = 0; code < 4 ** 3; code++) {
+    let current = start;
+    let calls = 0;
+    const events: ListenerRuntimeEvent[] = [];
+    const prefix = [code % 4, Math.floor(code / 4) % 4, Math.floor(code / 16) % 4];
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, store: new MemoryStore(), model: new FakeModel(),
+      now: () => current, random: () => 0, onEvent: (event) => events.push(event),
+      credentialSession: { expiry: start + 30 * 60_000, async bearer() {
+        const answer = prefix[calls++] ?? 0;
+        if (answer === 1) throw new RenewalRetryError(start + 30 * 60_000);
+        if (answer === 2) throw new SignalHttpError(500);
+        if (answer === 3) throw new SignalHttpError(401);
+        throw new RenewalCredentialCheckError(401, "unauthenticated");
+      } },
+      sleep: async (ms) => { current += ms; },
+    });
+    const checks = events.filter((event) => event.type === "credential_check");
+    assert.equal(stop.reason, "credential", prefix.join(","));
+    assert.ok(checks.length >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS, prefix.join(","));
+    assert.ok(current >= Date.parse(checks[0]!.ts) + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+      prefix.join(","));
+    sequences++;
+  }
+  assert.equal(sequences, 64);
+});
+
 test("renewal window stops only after confirmed samples span the full window", { timeout: 15_000 }, async () => {
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   let current = start;
   let renewals = 0;
-  const session = await AgentCredentialSession.open({
-    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
-    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: start + 3 * 60_000 },
-    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
-    fetcher: (async () => { renewals++; return new Response('{"error":"unauthenticated"}', { status: 401 }); }) as typeof fetch,
-  });
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
-    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), now: () => current,
+    credentialSession: { expiry: start + 20 * 60_000, async bearer() {
+      renewals++;
+      throw new RenewalCredentialCheckError(401, "unauthenticated");
+    } }, store: new MemoryStore(), model: new FakeModel(), now: () => current,
     sleep: async (ms) => { current += ms; },
   });
   assert.equal(stop.reason, "credential");
   assert.ok(renewals >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
   assert.ok(current - start >= CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
-  assert.ok(current > start + 3 * 60_000);
+  assert.ok(current < start + 20 * 60_000);
+});
+
+test("expired predecessor stops on the next confirmed renewal answer", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  const expiry = start + 90_000;
+  let renewals = 0;
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => { renewals++; current += 1_000; return new Response('{"error":"unauthenticated"}', { status: 401 }); }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(), model: new FakeModel(),
+    now: () => current, sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.ok(current >= expiry);
+  assert.ok(current < start + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  assert.ok(renewals >= 2);
 });
 
 test("a read with the still-valid token clears a renewal credential sample", { timeout: 15_000 }, async () => {

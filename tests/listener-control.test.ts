@@ -17,6 +17,7 @@ import {
   LISTENER_RESTART_MAX_ATTEMPTS,
   LISTENER_RESTART_MAX_MS,
   LISTENER_RESTART_SUSTAINED_MAX_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
   ackCommandId,
   appendListenerEvent,
   claimCommandId,
@@ -1442,6 +1443,29 @@ async function readEvents(
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+test("restart backoff ends by the live credential's renewal deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-deadline-"));
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let runs = 0;
+  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS + 500;
+  const status = await runListenerSupervisor({
+    paths: paths(root), profileId: "profile-restart-deadline",
+    workspaceId: randomUUID(), principalId: randomUUID(),
+    now: () => current, getCredentialExpiryMs: () => expiry,
+    restart: { maxAttempts: 1, sleep: async (ms) => {
+      assert.ok(current + ms <= expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS);
+      current += ms;
+    } },
+    run: async () => ++runs === 1
+      ? { reason: "fatal", error: new SignalHttpError(500) }
+      : { reason: "cancelled" },
+  });
+  assert.equal(status.state, "stopped");
+  assert.equal(runs, 2);
+  assert.equal(current, start + 500);
+});
+
 test("D-051: a transient stop restarts a bounded number of times, then stays down and says why", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
   const target = paths(root);
@@ -1664,6 +1688,13 @@ test("credential and claim status use the answering edge and current retry state
   assert.match(command, /if every check until then confirms the loss/);
   assert.match(command, /transient answer extends/);
   assert.match(command, /CONNECTED: no/);
+  const expiring = renderListenerStatus({
+    ...statusFor(target, "credential_check"), credentialStopAt: stopAt,
+    credentialCheckEdge: "command", lastErrorCode: "unauthenticated",
+    renewalExpiresAt: "2026-09-22T00:03:00.000Z",
+  });
+  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
+  assert.doesNotMatch(expiring, /transient answer extends/);
   const stopped = renderListenerStatus({
     ...statusFor(target, "failed"),
     lastErrorCode: "credential_stopped",

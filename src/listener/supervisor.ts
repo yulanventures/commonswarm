@@ -26,7 +26,7 @@ import {
   LISTENER_RUNNING_STATES,
   type ListenerStatus,
 } from "./control.js";
-import { isRestartableListenerStop } from "./runtime.js";
+import { isRestartableListenerStop, RENEWAL_WINDOW_EXPIRY_MARGIN_MS } from "./runtime.js";
 import type {
   ListenerRuntimeEvent,
   ListenerRuntimeStop,
@@ -162,6 +162,8 @@ export interface ListenerSupervisorOptions {
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
   now?: () => number;
+  /** Current credential expiry, including a successor adopted by a later attempt. */
+  getCredentialExpiryMs?: () => number | null;
   /**
    * Runs under starting.lock after the live-socket rejection check, before
    * the socket can answer. Receives the one proposed UUID and selects the
@@ -664,6 +666,7 @@ export async function runListenerSupervisor(
       transition("credential_check", {
         credentialStopAt: event.stopAt,
         credentialCheckEdge: event.edge,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
         lastErrorCode: event.code,
         lastErrorDetail: null,
         lastErrorReasonCode: null,
@@ -683,6 +686,7 @@ export async function runListenerSupervisor(
         status.readyAt === null ? "starting" : "ready", {
         credentialStopAt: null,
         credentialCheckEdge: null,
+        renewalExpiresAt: null,
         lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
           ? lastClaimRetryCode : null,
         lastRetryEdge: status.claimRetryCount && status.claimRetryCount > 0
@@ -1067,7 +1071,11 @@ export async function runListenerSupervisor(
         break;
       }
       restarts += 1;
-      const delayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
+      const expiry = options.getCredentialExpiryMs?.() ?? null;
+      const deadline = expiry === null ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      const delayMs = deadline !== null && now() < expiry!
+        ? Math.min(listenerRestartDelayMs(restarts, policy, restartRandom), Math.max(0, deadline - now()))
+        : listenerRestartDelayMs(restarts, policy, restartRandom);
       const restartCode = safeErrorCode(stop.error);
       const restartStderrTail = takeTail();
       const nextAttemptAt = new Date(now() + delayMs).toISOString();
@@ -1094,7 +1102,7 @@ export async function runListenerSupervisor(
         credentialCheckEdge: null,
         claimRetryCount: 0,
       });
-      await restartSleep(delayMs, controller.signal);
+      if (delayMs > 0) await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
         stop = { reason: "cancelled" };
         break;
