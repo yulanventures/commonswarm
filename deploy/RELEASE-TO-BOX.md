@@ -43,7 +43,7 @@ says this window stopped them.
 2. HezLead approves that SHA and an agreed maximum backup age in seconds when a
    database backup is required.
 3. Anvil runs these commands on the Mac mini from this repository. They prove
-   the archive came from the GitHub remote. The lead may have already written
+   the archive came from the GitHub remote. The lead must have already written
    `gate-evidence.txt` in the evidence directory. `git archive` reads tracked
    Git objects and has no `--no-xattrs` option; Mac `tar` commands below use
    both `COPYFILE_DISABLE=1` and `--no-xattrs`.
@@ -254,7 +254,7 @@ sudo -n -i
     test ! -e "$RELEASE_DIR"
     install -d -m "$RELEASE_MODE" -o commonswarm -g commonswarm "$RELEASE_DIR"
     tar -xf "$ARCHIVE" -C "$RELEASE_DIR"
-    find "$RELEASE_DIR" -type f -name '._*' -delete
+    test -z "$(find "$RELEASE_DIR" -name '._*' -print -quit)"
     printf '%s\n' "$SHA" >"$RELEASE_DIR/RELEASE_SHA"
     chown -R commonswarm:commonswarm "$RELEASE_DIR"
     chmod "$RELEASE_MODE" "$RELEASE_DIR"
@@ -347,7 +347,7 @@ HezLead confirms their list contains no secret:
     test ! -e "$RELEASE_DIR/.git"
     test "$(stat -c '%U:%G' "$RELEASE_DIR")" = 'commonswarm:commonswarm'
     stat -c '%a %n' "$RELEASE_DIR"
-    (cd "$RELEASE_DIR" && sha256sum --quiet --check "$PROOF_DIR/${KIND}.SHA256SUMS")
+    (cd "$RELEASE_DIR" && sha256sum --quiet --strict --check "$PROOF_DIR/${KIND}.SHA256SUMS")
   done
 )
 ```
@@ -1008,22 +1008,22 @@ mount. Complete one version before considering the next. After the last
 migration, save the cron job names and compare both snapshots with `LC_ALL=C`
 sorting. Set the two expected name lists from the reviewed release plan in
 bytewise order (one
-name per line; empty when none). H0 expects the one new job shown here.
+name per line; empty when none). The lead supplies both lists with the release; for H0 the new list was `swarm-purge-h0-poll-batches` and the removed list was empty.
 
 ```sh
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
-  EXPECTED_NEW_CRON_JOBS='swarm-purge-h0-poll-batches'
-  EXPECTED_REMOVED_CRON_JOBS=''
+  EXPECTED_NEW_CRON_JOBS='<newline-separated new job names, C-sorted, or empty>'
+  EXPECTED_REMOVED_CRON_JOBS='<newline-separated removed job names, C-sorted, or empty>'
   release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
     >"$PROOF_DIR/cron-after.txt"
   LC_ALL=C sort "$PROOF_DIR/cron-before.txt" >"$PROOF_DIR/cron-before-sorted.txt"
   LC_ALL=C sort "$PROOF_DIR/cron-after.txt" >"$PROOF_DIR/cron-after-sorted.txt"
-  comm -13 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
+  LC_ALL=C comm -13 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
     >"$PROOF_DIR/cron-added.txt"
-  comm -23 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
+  LC_ALL=C comm -23 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
     >"$PROOF_DIR/cron-removed.txt"
   test "$(cat "$PROOF_DIR/cron-added.txt")" = "$EXPECTED_NEW_CRON_JOBS"
   test "$(cat "$PROOF_DIR/cron-removed.txt")" = "$EXPECTED_REMOVED_CRON_JOBS"
@@ -1066,9 +1066,18 @@ after verification.
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
+    case "$T" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+      *) false ;;
+    esac
+  done
   START_EPOCH="$(date -u -d "$WINDOW_START_UTC" +%s)"
   END_EPOCH="$(date -u -d "$WINDOW_END_UTC" +%s)"
+  NOW_EPOCH="$(date -u +%s)"
   test "$START_EPOCH" -le "$END_EPOCH"
+  test "$START_EPOCH" -le "$NOW_EPOCH"
+  test "$NOW_EPOCH" -le "$END_EPOCH"
   DAY_EPOCH="$(date -u -d "@$START_EPOCH" +%Y-%m-%d)"
   DAY_EPOCH="$(date -u -d "$DAY_EPOCH 00:00:00" +%s)"
   OVERLAPS=0
@@ -1102,7 +1111,7 @@ approved times overlap a protected interval.
   test -f "$NEW_EDGE/deploy/edge-runtime/main/router.ts"
 
   # Prove the archive-derived manifest before adding the box-only override.
-  (cd "$NEW_EDGE" && sha256sum --quiet --check "$PROOF_DIR/edge.SHA256SUMS")
+  (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge.SHA256SUMS")
 
   # Observed by HezLead on 2026-09-22: the override lives in the current
   # edge release, whose container mounts use its exact releases/<sha> path.
@@ -1113,7 +1122,7 @@ approved times overlap a protected interval.
   (cd "$NEW_EDGE" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
     >"$PROOF_DIR/edge-with-override.SHA256SUMS"
   chmod 0600 "$PROOF_DIR/edge-with-override.SHA256SUMS"
-  (cd "$NEW_EDGE" && sha256sum --quiet --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
+  (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
 
   python3 - "$PROOF_DIR/required-edge-env.json" /home/commonswarm/.env <<'PY'
 import json, sys
@@ -1211,7 +1220,12 @@ existing positive controls from `deploy/edge-runtime/RUNBOOK.md`: H0 document,
 malformed command, authenticated read, unauthenticated activity, capability,
 unknown function, and preflight. If no smoke credential is provisioned on the box,
 record the authenticated read as NOT VERIFIED in `run.log` and tell HezLead, who decides
-whether that blocks the window (it did not for H0 on 2026-09-23). Also probe `/functions/v1/h0/note`
+whether that blocks the window (it did not for H0 on 2026-09-23). Without that
+read, no probe reaches the database, so the edge-to-database path and the later
+`CONNECT_TIMEOUT` log check are NOT VERIFIED too, unless the lead supplies a
+credential-free database probe: `h0/note` with a well-formed but unknown
+`Authorization: Bearer swm_agt_<43 characters>` must return 401 after the token
+lookup in `swarm.agent_tokens`. Record which of the two applied in `run.log`. Also probe `/functions/v1/h0/note`
 without authorization using a valid note body: it must return 401, never 500
 `h0_command_not_configured`. The authenticated read and H0 document are
 positive controls in the same probe run. Run this H0 note loopback probe on
@@ -1657,7 +1671,7 @@ Migration precedes code that needs it. Backfill precedes later migrations. A
 new edge must remain compatible with the verified database state at the moment
 it is recreated.
 
-**H0 (the first use of this procedure).** `KIND_LIST` is `edge stack`. The
+**H0 (the first use of this procedure, released 2026-09-23).** `KIND_LIST` is `edge stack`. The
 stack release directory is built for its migration files and helpers, and
 `stack/current` is switched, through the guarded switch in section 7, only if
 the section 1 runtime-file comparison shows changed stack runtime files.
@@ -1743,11 +1757,11 @@ database files. This does not remove release evidence:
 )
 ```
 
-## Open follow-ups (Opus Checker round 3, 2026-09-22)
+## Open follow-ups (Opus Checker round 3, 2026-09-22; still open after the H0 fold)
 
-These do not block H0. Fold them together with the findings from the first H0 run.
+These do not block a release. Fold them in a later change.
 
 - The guarded switch accepts a `failed` backup or restore service before it switches, but after the switch it requires `inactive` plus `success`. A drill that failed earlier therefore makes both apply and rollback report failure.
 - The stack runtime-file comparison ignores `deploy/supabase-stack/migrate/`, although the backup and the drill run helpers from it through `stack/current`.
-- The pasted Mac preflight can still end with exit 0 after a failed check (the window file is then absent, so later Mac blocks refuse), and a second run empties `run.log`. Not fixed yet.
+- A second run of the Mac preflight empties `run.log`. (A failed check now makes the pasted preflight exit 1 in bash and zsh.)
 - The test-hook environment names are typed by hand, and `SWARM_ENV=test` is accepted.
