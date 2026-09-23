@@ -125,11 +125,33 @@ async function stopAndWaitForDetachedListener(
   args: string[],
   paths: ListenerPaths,
 ): Promise<void> {
-  await runCli(args).catch(() => undefined);
   const status = await readListenerStatus(paths);
-  if (status) {
-    await waitForListenerProcessExit(status.pid, paths.instanceDirectory);
+  const wasAlive = status !== null && listenerProcessIsAlive(status.pid);
+  let stopFailure: unknown = null;
+  try {
+    const stopped = await runCli(args);
+    if (wasAlive) assert.equal(stopped.code, 0, stopped.stderr);
+  } catch (error) {
+    stopFailure = error;
   }
+  if (status) {
+    try {
+      await waitForListenerProcessExit(status.pid, paths.instanceDirectory);
+    } catch (error) {
+      stopFailure ??= error;
+      // A failed stop still must not leave the detached fixture running.
+      if (listenerProcessIsAlive(status.pid)) {
+        process.kill(status.pid, "SIGTERM");
+        try {
+          await waitForListenerProcessExit(status.pid, paths.instanceDirectory, 2_000);
+        } catch {
+          if (listenerProcessIsAlive(status.pid)) process.kill(status.pid, "SIGKILL");
+          await waitForListenerProcessExit(status.pid, paths.instanceDirectory, 2_000);
+        }
+      }
+    }
+  }
+  if (stopFailure) throw stopFailure;
 }
 
 async function closeTestServer(server: Server): Promise<void> {
@@ -2180,10 +2202,12 @@ test("detached listener stops on upgrade_required with an update action", { time
     assert.doesNotMatch(safeStatus, /swm_agt_/);
     if (process.env.CSWARM_FOLD7_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD7_STATUS_PATH, safeStatus);
   } finally {
-    try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
-    catch { /* A failed listener has already exited. */ }
-    await closeTestServer(server);
-    await rm(root, { recursive: true, force: true });
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -2236,7 +2260,8 @@ test("detached listener renews after a 401 and server error before the old token
   const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
   const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
   try {
-    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"],
+      { stdin: artifact, env: { XDG_STATE_HOME: root } });
     assert.equal(start.code, 0, start.stderr);
     const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 3 && reads > 0, 20_000)
       .catch((error: unknown) => { throw new Error(`renewals=${renewals} reads=${reads}: ${String(error)}`); });
@@ -2249,10 +2274,12 @@ test("detached listener renews after a 401 and server error before the old token
     if (process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH, safeStatus);
     if (process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH, safeStatus);
   } finally {
-    try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
-    catch { /* The listener may already have exited after a failed assertion. */ }
-    await closeTestServer(server);
-    await rm(root, { recursive: true, force: true });
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -2302,10 +2329,12 @@ test("detached listener records the next credential check attempt", { timeout: 2
       await writeFile(process.env.CSWARM_FOLD11_CREDENTIAL_CHECK_STATUS_PATH, safeStatus);
     }
   } finally {
-    try { await stopAndWaitForDetachedListener(["listen", "stop", ...common,
-      "--principal-id", principalId, "--json"], paths); }
-    catch { /* The listener may already have exited after a failed assertion. */ }
-    await closeTestServer(server);
-    await rm(root, { recursive: true, force: true });
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common,
+        "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });

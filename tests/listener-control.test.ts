@@ -23,6 +23,7 @@ import {
   appendListenerEvent,
   claimCommandId,
   effectiveListenerStatus,
+  emptyListenerWakeStatus,
   isRestartableListenerStop,
   listenerPaths,
   nextListenerRestartMs,
@@ -1685,6 +1686,55 @@ test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, asy
   });
   assert.equal(runs, 2);
   assert.equal(observed.state, "stopped");
+});
+
+test("busy push claims keep a five-minute reconcile cadence without a lapse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-push-cadence-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const start = Date.parse("2026-09-01T09:59:00.000Z");
+  const end = Date.parse("2026-09-01T11:00:30.000Z");
+  let current = start;
+  try {
+    const status = await runListenerSupervisor({
+      paths: paths(root), profileId: "profile-push-cadence", workspaceId, principalId,
+      now: () => current,
+      run: async (_signal, onEvent) => {
+        const wake = { ...emptyListenerWakeStatus(), mode: "push" as const,
+          subscribedAt: new Date(start).toISOString() };
+        onEvent({ type: "ready", workspaceId, principalId, ts: new Date(start).toISOString() });
+        onEvent({ type: "wake", wake, ts: new Date(start).toISOString() });
+        onEvent({ type: "idle_poll", intervalMs: 300_000, pushReconcileWait: true,
+          ts: new Date(start).toISOString() });
+        onEvent({ type: "delivery_claim", signalId: randomUUID(),
+          pendingDeliveryCount: 3, terminalDeliveryFailureCount: 0,
+          ts: new Date(start).toISOString() });
+        onEvent({ type: "idle_poll", intervalMs: 15_000,
+          ts: new Date(start).toISOString() });
+        for (let minute = 0; minute < 60; minute += 4) {
+          current = Date.parse(`2026-09-01T10:${String(minute).padStart(2, "0")}:00.000Z`);
+          const ts = new Date(current).toISOString();
+          onEvent({ type: "wake", wake: { ...wake, lastWakeAt: ts }, ts });
+          onEvent({ type: "delivery_claim", signalId: randomUUID(),
+            pendingDeliveryCount: 3, terminalDeliveryFailureCount: 0, ts });
+          onEvent({ type: "idle_poll", intervalMs: 15_000, ts });
+        }
+        current = end;
+        onEvent({ type: "wake", wake: { ...wake, lastWakeAt: new Date(end).toISOString() },
+          ts: new Date(end).toISOString() });
+        return { reason: "cancelled" };
+      },
+    });
+    const hour = status.readHealth?.claimHours.find((row) =>
+      row.hourStart === "2026-09-01T10:00:00.000Z");
+    assert.equal(hour?.claims, 15);
+    assert.equal(hour?.expectedClaims, 12);
+    const human = renderListenerStatus({ ...status, state: "ready" }, undefined, end);
+    assert.doesNotMatch(human, /Listener LAPSE|listener_claim_throughput_lapse/);
+    assert.match(human, /reconcile every 5m\./);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("D-051: the restart classifier separates what can clear from what cannot", () => {

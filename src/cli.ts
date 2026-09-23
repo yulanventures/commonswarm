@@ -341,6 +341,7 @@ import {
   summarizeListenerReadHealth,
   listenerWakeStatusSentence,
   LISTENER_RECONCILE_POLL_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
   LISTENER_WAKE_MODE_PUSH,
   emptyListenerWakeStatus,
   createWakeSubscriber,
@@ -3328,8 +3329,8 @@ export function listenerRouteConfiguration(
   return { routeMode, deferOverChars: null };
 }
 
-/** Post-turn work (the ack, the reply post, the renewal request itself) must fit between turn end and credential expiry. */
-export const TURN_BUDGET_CREDENTIAL_MARGIN_MS = 60_000;
+/** End a turn by the renewal deadline, leaving the full renewal margin. */
+export const TURN_BUDGET_CREDENTIAL_MARGIN_MS = RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
 
 /**
  * Bound one worker turn to the live credential's remaining lifetime.
@@ -5908,10 +5909,12 @@ export function renderListenerStatus(
       : idlePollStatusSentence(status.idlePollMs),
     listenerWakeStatusSentence(
       status.wake ?? emptyListenerWakeStatus(),
-      status.idlePollMs && status.idlePollMs > 0
-        ? status.idlePollMs
-        : status.wake?.mode === LISTENER_WAKE_MODE_PUSH
-          ? LISTENER_RECONCILE_POLL_MS
+      status.wake?.mode === LISTENER_WAKE_MODE_PUSH
+        ? status.pushReconcileWaitMs && status.pushReconcileWaitMs > 0
+          ? status.pushReconcileWaitMs
+          : LISTENER_RECONCILE_POLL_MS
+        : status.idlePollMs && status.idlePollMs > 0
+          ? status.idlePollMs
           : IDLE_POLL_DEFAULT_MS,
       status.wake?.lastWakeAt
         ? relativeAge(status.wake.lastWakeAt, nowMs)

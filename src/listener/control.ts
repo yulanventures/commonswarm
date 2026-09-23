@@ -200,6 +200,8 @@ export interface ListenerStatus {
    * status file written by a listener older than this field omits it.
    */
   idlePollMs?: number | null;
+  /** Next planned push reconcile wait, separate from delivery processing's idle poll interval. */
+  pushReconcileWaitMs?: number | null;
   /** How the listener learns there is work. Optional: older files omit it. */
   wake?: ListenerWakeStatus;
   /**
@@ -326,6 +328,7 @@ const STATUS_ALLOWED_KEYS = new Set([
   "activityPublishFailures",
   "activityLastErrorCode",
   "idlePollMs",
+  "pushReconcileWaitMs",
   "wake",
   "nextAttemptAt",
   "credentialStopAt",
@@ -659,6 +662,10 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
       row.idlePollMs === null ||
       (typeof row.idlePollMs === "number" &&
         Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
+    !(row.pushReconcileWaitMs === undefined ||
+      row.pushReconcileWaitMs === null ||
+      (typeof row.pushReconcileWaitMs === "number" &&
+        Number.isSafeInteger(row.pushReconcileWaitMs) && row.pushReconcileWaitMs >= 0)) ||
     !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt)) ||
     !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt)) ||
     !(row.renewalExpiresAt === undefined || nullableTimestamp(row.renewalExpiresAt)) ||
@@ -743,6 +750,9 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     ...(row.idlePollMs === undefined
       ? {}
       : { idlePollMs: (row.idlePollMs ?? null) as number | null }),
+    ...(row.pushReconcileWaitMs === undefined
+      ? {}
+      : { pushReconcileWaitMs: (row.pushReconcileWaitMs ?? null) as number | null }),
     ...(wake === undefined ? {} : { wake }),
   };
 }

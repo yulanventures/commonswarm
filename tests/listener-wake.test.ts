@@ -1154,7 +1154,7 @@ test("listen status JSON names mode from the same wake.mode constant set", () =>
   assert.equal(LISTENER_WAKE_MODE_SET.has(json.mode as string), true);
   const human = renderListenerStatus(status);
   assert.match(human, /^push \(Realtime\)|push \(Realtime\)/m);
-  const capped = { ...status, idlePollMs: 8_001 };
+  const capped = { ...status, idlePollMs: 8_001, pushReconcileWaitMs: 8_001 };
   assert.match(renderListenerStatus(capped), /reconcile every 9s\./);
   assert.match(renderListenerStatus(capped), /Current idle poll interval: 9s\./);
   assert.equal(listenerStatusJson(capped).idlePollMs, 8_001);

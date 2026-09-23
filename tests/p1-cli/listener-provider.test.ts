@@ -17,6 +17,7 @@ import {
   resolveTurnBudgetOrDefer,
   TURN_BUDGET_CREDENTIAL_MARGIN_MS,
 } from "../../src/cli.js";
+import { RENEWAL_WINDOW_EXPIRY_MARGIN_MS } from "../../src/listener/runtime.js";
 import {
   ListenerRenewalUnavailableError,
   type ListenerStatus,
@@ -317,6 +318,17 @@ test("--turn-budget rejects out-of-bounds and malformed durations before any cre
 test("a worker turn budget is clamped to the live credential's remaining lifetime", () => {
   const now = 1_000_000_000_000;
   const budget = 600_000; // the 10m default
+  assert.equal(TURN_BUDGET_CREDENTIAL_MARGIN_MS, RENEWAL_WINDOW_EXPIRY_MARGIN_MS);
+  // A turn begun just before renewal is due cannot occupy the renewal margin.
+  for (const remaining of [660_000, 500_000, 400_000, 361_000]) {
+    const applied = resolveTurnBudgetOrDefer(budget, now + remaining, now, false);
+    assert.ok(now + applied <= now + remaining - RENEWAL_WINDOW_EXPIRY_MARGIN_MS);
+  }
+  const expiry = now + 361_000;
+  const renewalDue = expiry - 6 * 60_000;
+  const crossingTurn = resolveTurnBudgetOrDefer(budget, expiry, now, false);
+  assert.ok(now < renewalDue && now + crossingTurn > renewalDue);
+  assert.equal(now + crossingTurn, expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS);
   // Plenty of credential left: the budget is untouched.
   assert.equal(
     clampTurnBudgetToCredential(budget, now + 3_600_000, now),

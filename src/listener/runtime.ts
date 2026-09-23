@@ -307,6 +307,8 @@ export type ListenerRuntimeEvent =
   | {
     type: "idle_poll";
     intervalMs: number;
+    /** Only an empty claim schedules the next push reconcile wait. */
+    pushReconcileWait?: boolean;
     ts: string;
   }
   | {
@@ -1600,6 +1602,7 @@ export async function runListenerRuntime(
             stop = decided;
             break;
           }
+          forceRead = true;
           continue;
         }
         const failure = classifySignalReadFailure(error);
@@ -1614,6 +1617,7 @@ export async function runListenerRuntime(
             stop = decided;
             break;
           }
+          forceRead = true;
           continue;
         }
         if (transientRead) {
@@ -1644,6 +1648,7 @@ export async function runListenerRuntime(
             ts: new Date(failedAtMs).toISOString(),
           });
           await sleep(delayMs, abort);
+          forceRead = true;
           continue;
         }
         stop = { reason: "fatal", error: asError(error) };
@@ -1903,7 +1908,10 @@ export async function runListenerRuntime(
                 type: "claim_retry",
                 code: deliveryRetryCode(error),
                 attempts: claimRefusals,
-                delayMs,
+                delayMs: credentialWindow !== null
+                  ? capWaitMs(options.credentialSession.expiry == null
+                    ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS : RENEWAL_WINDOW_RETRY_MS)
+                  : delayMs,
                 ...(error instanceof RenewalRetryError && error.expiresAt !== null
                   ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() } : {}),
                 ts: eventTime(now),
@@ -1999,6 +2007,7 @@ export async function runListenerRuntime(
             options.onEvent?.({
               type: "idle_poll",
               intervalMs,
+              pushReconcileWait: snap.mode === LISTENER_WAKE_MODE_PUSH,
               ts: eventTime(now),
             });
             emitWake();

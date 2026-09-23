@@ -3659,6 +3659,7 @@ test("claim-only delivery refusals force a read and expose revocation", { timeou
 });
 
 test("claim retry reports the actual wait during a credential check window", { timeout: 15_000 }, async () => {
+  for (const expiryKnown of [true, false]) {
   const controller = new AbortController();
   const journal = new MemoryDeliveryJournal();
   const start = Date.parse("2026-07-30T00:00:00.000Z");
@@ -3669,7 +3670,7 @@ test("claim retry reports the actual wait during a credential check window", { t
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
     principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
-    deliveryJournal: journal, credentialSession: { expiry: start + 20 * 60_000,
+    deliveryJournal: journal, credentialSession: { expiry: expiryKnown ? start + 20 * 60_000 : null,
       async bearer() { return "token"; } }, store: new MemoryStore(), model: new FakeModel(),
     signal: controller.signal, now: () => current,
     onEvent: (event) => { if (event.type === "claim_retry") retryDelay = event.delayMs; },
@@ -3692,8 +3693,9 @@ test("claim retry reports the actual wait during a credential check window", { t
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(claims, 2);
-  assert.equal(retryDelay, RENEWAL_WINDOW_RETRY_MS);
+  assert.equal(retryDelay, expiryKnown ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS);
   assert.equal(observedWait, retryDelay);
+  }
 });
 
 test("claim backoff reaches its cap across successful forced reads", { timeout: 15_000 }, async () => {
@@ -4170,6 +4172,115 @@ test("a due session reports the deadline-capped push wait it takes", { timeout: 
   assert.ok(intervals[0]!.ms < LISTENER_RECONCILE_POLL_MS);
   assert.equal(idlePollStatusSentence(intervals[0]!.ms),
     `Current idle poll interval: ${intervals[0]!.ms / 1_000}s.`);
+});
+
+test("read retry time is the next read with a wake subscriber in poll and push mode", async () => {
+  for (const mode of ["poll", "push"] as const) {
+    const controller = new AbortController();
+    const journal = new MemoryDeliveryJournal();
+    let current = Date.parse("2026-07-30T00:00:00.000Z");
+    let reads = 0;
+    let wakeWaits = 0;
+    let stated: number | null = null;
+    let actual: number | null = null;
+    const wake = {
+      hasTopic: true,
+      snapshot: () => ({ mode, subscribedAt: new Date(current).toISOString(), reconnects: 0,
+        lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+      next: async ({ until }: { until: number }) => { wakeWaits++; current = until; return "deadline"; },
+      coalescingRemainingMs: () => 0,
+      noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+      close: async () => {},
+    } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal, credentialSession: { expiry: null,
+        async bearer() { return "swm_agt_" + "A".repeat(43); } },
+      store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+      now: () => current, wake,
+      onEvent: (event) => { if (event.type === "read_retry") stated = Date.parse(event.ts) + event.delayMs; },
+      readPage: async () => {
+        reads++;
+        if (reads === 2) throw new SignalHttpError(500);
+        if (reads === 3) { actual = current; controller.abort(); }
+        return durablePage([], 1);
+      },
+      fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+        capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+      sleep: async (ms) => { current += ms; },
+    });
+    assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.stack : undefined);
+    assert.equal(reads, 3);
+    assert.equal(wakeWaits, 1, mode);
+    assert.equal(actual, stated, mode);
+  }
+});
+
+test("renewal retry time is the next renewal with a wake subscriber", async () => {
+  for (const mode of ["poll", "push"] as const) {
+    for (const httpStatus of [500, 401]) {
+      const controller = new AbortController();
+      const journal = new MemoryDeliveryJournal();
+      const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+      const due = expiry - 6 * 60_000;
+      let current = due - 60_000;
+      let wakeWaits = 0;
+      let wakeWaitsAtRetry: number | null = null;
+      let renewals = 0;
+      let stated: number | null = null;
+      let actual: number | null = null;
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: randomUUID(),
+          principalId: PRINCIPAL_ID, runId: randomUUID(), expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          renewals++;
+          if (renewals === 1) return new Response(httpStatus === 401
+            ? '{"error":"unauthenticated"}' : '{"error":"internal_error"}', { status: httpStatus });
+          actual = current;
+          controller.abort();
+          throw new TypeError("test stopped after the next renewal request");
+        }) as typeof fetch,
+      });
+      const wake = {
+        hasTopic: true,
+        snapshot: () => ({ mode, subscribedAt: new Date(current).toISOString(), reconnects: 0,
+          lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+        next: async ({ until }: { until: number }) => { wakeWaits++; current = until; return "deadline"; },
+        coalescingRemainingMs: () => 0,
+        noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+        close: async () => {},
+      } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+        deliveryJournal: journal, credentialSession: session, store: new MemoryStore(),
+        model: new FakeModel(), signal: controller.signal, now: () => current, wake,
+        onEvent: (event) => {
+          if (event.type === "read_retry") {
+            stated = Date.parse(event.ts) + event.delayMs;
+            wakeWaitsAtRetry = wakeWaits;
+          }
+          if (event.type === "credential_check") {
+            stated = Date.parse(event.nextAttemptAt!);
+            wakeWaitsAtRetry = wakeWaits;
+          }
+        },
+        readPage: async () => durablePage([], 1),
+        fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+          capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+          deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+        sleep: async (ms) => { current += ms; },
+      });
+      assert.equal(stop.reason, "cancelled", `${mode} HTTP ${httpStatus}`);
+      assert.equal(renewals, 2, `${mode} HTTP ${httpStatus}`);
+      assert.equal(wakeWaits, wakeWaitsAtRetry, `${mode} HTTP ${httpStatus}`);
+      assert.equal(actual, stated, `${mode} HTTP ${httpStatus}`);
+    }
+  }
 });
 
 test("malformed read overflow and delivery marker retry", { timeout: 15_000 }, async () => {

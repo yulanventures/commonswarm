@@ -510,3 +510,25 @@ This fold does not establish a green full-suite run on a host that permits `ps`,
 | `git diff --check a9846955...HEAD` | 0 | 0 tests; whitespace check passed after commit. |
 
 These tests use fake clocks or a local loopback fixture. The two full suites remain red only where this sandbox denies `ps`; they do not establish a green run on a host that permits it. No real DNS failover, production host, or real workspace was used, and no release or merge occurred.
+
+## Fold 13
+
+**Push cadence.** Push claim throughput is scored against the five-minute reconcile cadence, even when every claim returns a delivery and the delivery path reports a 15-second idle interval. Status keeps the next planned push reconcile wait in `pushReconcileWaitMs`, separate from `idlePollMs`. A fake-clock supervisor test emits 15 delivered claims across a complete hour: expected claims are 12, no lapse is reported, and the human line says `reconcile every 5m`. Restoring both old 15-second cadence paths made that test fail (exit 1, 0/1 passed); the fixed source passes (exit 0, 1/1).
+
+**Read retries.** A read 500 and read-path renewal 500/401 now force the next read after their backoff or credential-check wait. With a wake subscriber in poll and push mode, fake-clock tests compare the event's `nextAttemptAt` with the actual next read or renewal request. They pass in all six mode/failure cases (two read, four renewal). Removing the forced read after the transient backoff failed the read test (exit 1, 0/1); removing it after a confirmed credential check failed the renewal test on HTTP 401 (exit 1, 0/1). The fixed tests pass (exit 0, 2/2).
+
+**Turns and log timing.** The worker-turn budget now ends by `expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS`; a turn started one second before renewal is due crosses the due time but ends at the 110-second margin. Restoring the 60-second clamp failed the test (exit 1, 0/1); fixed source passes (exit 0, 1/1). With unknown expiry, `claim_retry` reports the five-minute credential-window wait. Restoring the 30-second report failed the known/unknown-expiry test (exit 1, 0/1); fixed source passes (exit 0, 1/1).
+
+**Detached fixture cleanup.** The fold-11 credential-check test and the adjacent detached tests no longer swallow stop failures. The shared stop helper waits for the child's exit and sends TERM/KILL if the CLI stop fails, then fails the test. The renewal fixture uses an isolated `XDG_STATE_HOME` that the detached child actually inherits; its 401/500/success test passes. A detached credential-check fixture was run on loopback with a temporary `--state-dir`; its token-free [fold13-detached-credential-check-status.json](fold13-detached-credential-check-status.json) was captured while it was running, and the fixture was stopped.
+
+### Fold 13 gates and limits
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | 0 tests; TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 960 tests: 958 passed, 2 failed. Both invoke `ps`, denied by this sandbox with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 838 tests: 820 passed, 18 failed. These invoke `ps` or try to write under `/Users/yulanbot/.cswarm`, which this sandbox denies. |
+| `npm run check:tests` | 0 | 0 tests; source and test types passed. |
+| `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
+
+The full suites are not green in this sandbox. The timing tests use fake clocks, and the detached fixture uses loopback HTTP. No production host or real workspace was contacted, and no release or merge occurred.

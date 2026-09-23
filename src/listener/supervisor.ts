@@ -404,6 +404,7 @@ export async function runListenerSupervisor(
     activityPublishFailures: 0,
     activityLastErrorCode: null,
     idlePollMs: null,
+    pushReconcileWaitMs: null,
     wake: emptyListenerWakeStatus(),
     nextAttemptAt: null,
     credentialStopAt: null,
@@ -527,9 +528,7 @@ export async function runListenerSupervisor(
         readHealth = recordListenerWakeModeChange(readHealth, event.ts);
       }
       const cadenceMs = event.wake.mode === LISTENER_WAKE_MODE_PUSH
-        ? (status.idlePollMs && status.idlePollMs > 0
-          ? status.idlePollMs
-          : LISTENER_RECONCILE_POLL_MS)
+        ? LISTENER_RECONCILE_POLL_MS
         : (status.idlePollMs && status.idlePollMs > 0
           ? status.idlePollMs
           : null);
@@ -573,9 +572,13 @@ export async function runListenerSupervisor(
       status = {
         ...status,
         idlePollMs: event.intervalMs,
+        pushReconcileWaitMs: event.pushReconcileWait
+          ? event.intervalMs : status.pushReconcileWaitMs,
         readHealth: recordListenerClaimCadence(
           status.readHealth ?? emptyListenerReadHealth(),
-          event.intervalMs > 0 ? event.intervalMs : 1,
+          status.wake?.mode === LISTENER_WAKE_MODE_PUSH
+            ? LISTENER_RECONCILE_POLL_MS
+            : event.intervalMs > 0 ? event.intervalMs : 1,
           event.ts,
         ),
         updatedAt: event.ts,
