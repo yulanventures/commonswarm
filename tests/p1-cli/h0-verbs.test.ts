@@ -355,7 +355,7 @@ test("the SERVED DOCUMENT equals its golden, line for line", () => {
     "",
     "POST register — Exchange the join credential from the paste for a seat token. Returned once, in this response body only. (join credential in the body)",
     "    joinCredential (required)",
-    `    attemptId (required) — ${H0_VERBS.find((verb) => verb.name === "register")!.fields.find((field) => field.name === "attemptId")!.note}`,
+    "    attemptId (required) — client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response",
     `    name (required) — a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`,
     "    icon (may be omitted) — accepted for link compatibility; this release does not store an icon",
     "POST poll — Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused. (seat token in Authorization: Bearer)",

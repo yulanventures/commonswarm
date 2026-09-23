@@ -5843,10 +5843,10 @@ async function replaceUnusedRegistrationToken(
       command,
       hash,
       minClientVersion,
-      409,
-      "registration_token_already_used",
-      "registration_token_already_used",
-      "Revoke that seat and register again.",
+      REGISTRATION_TOKEN_ALREADY_USED.status,
+      REGISTRATION_TOKEN_ALREADY_USED.code,
+      REGISTRATION_TOKEN_ALREADY_USED.code,
+      REGISTRATION_TOKEN_ALREADY_USED.message,
     );
   }
   await tx`
