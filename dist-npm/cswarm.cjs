@@ -1149,41 +1149,77 @@ async function requestSuccessor(options) {
   let body = {};
   try {
     const text = await response.text();
-    if (text) body = JSON.parse(text);
+    if (text) {
+      const parsed = JSON.parse(text);
+      if (options.listenerMode && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) {
+        throw new RenewalMalformedResponseError("renewal response was not an object");
+      }
+      body = parsed;
+    }
   } catch {
-    body = {};
+    if (!options.listenerMode) {
+      body = {};
+    } else {
+      throw new RenewalMalformedResponseError("renewal response was not valid JSON");
+    }
+  }
+  if (options.listenerMode && response.status !== 401 && response.status !== 403 && body.principal_id !== void 0 && body.principal_id !== null && (typeof body.principal_id !== "string" || !UUID_RE5.test(body.principal_id))) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed principal_id");
   }
   const principalId = typeof body.principal_id === "string" && UUID_RE5.test(body.principal_id) ? body.principal_id.toLowerCase() : null;
-  if (response.status === 400 || response.status === 404) {
-    throw new RenewalUnsupported(
-      "this deployment does not offer credential renewal yet, so a credential here still has to be re-issued by hand when it expires"
-    );
-  }
   if (response.status === 401 || response.status === 403) {
+    if (options.listenerMode) {
+      if (response.status === 401 && body.error === "unauthenticated") {
+        throw new RenewalCredentialCheckError(response.status, "unauthenticated");
+      }
+      throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
+    }
     const named = typeof body.reason === "string" && REVOCATION_REASONS.has(body.reason) ? body.reason : null;
     if (named !== null) throw new RenewalRevoked(named, REVOKED_MESSAGE);
-    const expiresAt2 = options.expiresAt ?? null;
-    if (expiresAt2 !== null && now() >= expiresAt2) {
+    if (options.expiresAt !== null && options.expiresAt !== void 0 && now() >= options.expiresAt) {
       throw new RenewalRevoked("predecessor_expired_local", LOCALLY_EXPIRED_MESSAGE);
     }
     throw new RenewalRevoked("forbidden", UNEXPLAINED_REFUSAL_MESSAGE);
   }
   if (response.status === 426) {
-    const minimum = typeof body.min_client_version === "string" ? body.min_client_version : null;
-    throw new RenewalRefused(
-      response.status,
-      "upgrade_required",
-      `This copy of cswarm is older than the deployment accepts${minimum === null ? "" : ` (minimum ${minimum})`}. Update cswarm; until then this credential cannot renew itself.`
+    if (!options.listenerMode) {
+      const minimum = typeof body.min_client_version === "string" ? body.min_client_version : null;
+      throw new RenewalRefused(
+        426,
+        "upgrade_required",
+        `This copy of cswarm is older than the deployment accepts${minimum === null ? "" : ` (minimum ${minimum})`}. Update cswarm; until then this credential cannot renew itself.`
+      );
+    }
+    if (body.error !== "upgrade_required" || typeof body.min_client_version !== "string") {
+      throw new RenewalOutcomeUnknown("renewal command answered an unrecognized HTTP 426");
+    }
+    throw new RenewalUpgradeRequiredError(body.min_client_version, options.listenerMode);
+  }
+  if (!options.listenerMode && (response.status === 400 || response.status === 404)) {
+    throw new RenewalUnsupported(
+      "this deployment does not offer credential renewal yet, so a credential here still has to be re-issued by hand when it expires"
     );
   }
   if (!response.ok) {
-    throw new RenewalRefused(
-      response.status,
-      typeof body.error === "string" ? body.error : "unknown",
-      `The deployment did not renew this credential (HTTP ${response.status}).`
-    );
+    if (!options.listenerMode) {
+      throw new RenewalRefused(
+        response.status,
+        typeof body.error === "string" ? body.error : "unknown",
+        `The deployment did not renew this credential (HTTP ${response.status}).`
+      );
+    }
+    throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
+  }
+  if (options.listenerMode && body.status !== "accepted" && body.status !== "rejected") {
+    throw new RenewalMalformedResponseError("renewal response did not carry a command status");
+  }
+  if (options.listenerMode && body.status === "accepted" && body.ok !== true) {
+    throw new RenewalMalformedResponseError("renewal response did not confirm acceptance");
   }
   if (body.status === "rejected") {
+    if (options.listenerMode && typeof body.reason !== "string") {
+      throw new RenewalMalformedResponseError("renewal rejection did not name a reason");
+    }
     const reason = typeof body.reason === "string" ? body.reason : "unknown";
     if (reason === "renewal_idle_suspended" || reason === "renewal_grant_suspended") {
       throw new RenewalSuspended(
@@ -1231,57 +1267,91 @@ async function requestSuccessor(options) {
         reason === "renewal_device_unavailable" ? "The standing grant is device-bound, but this renewal carried no device identity. Ask a workspace owner to revoke this grant and mint a new credential on the intended device." : "The standing grant is bound to another device, so CommonSwarm refused renewal. Ask a workspace owner to revoke this grant and mint a new credential on the intended device."
       );
     }
-    throw new RenewalRefused(
-      200,
-      reason,
-      `The deployment refused to renew this credential (${reason}).`
-    );
+    if (!options.listenerMode) {
+      throw new RenewalRefused(
+        200,
+        reason,
+        `The deployment refused to renew this credential (${reason}).`
+      );
+    }
+    throw new RenewalMalformedResponseError("renewal rejection named an unknown reason");
+  }
+  if (options.listenerMode && body.agent_token !== void 0 && typeof body.agent_token !== "string") {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed agent_token");
   }
   const token = typeof body.agent_token === "string" ? body.agent_token : "";
-  if (!token) {
-    return null;
-  }
-  if (!AGENT_TOKEN_RE3.test(token)) {
-    throw new RenewalRefused(
+  if (!options.listenerMode && !token) return null;
+  if (token && !AGENT_TOKEN_RE3.test(token)) {
+    if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "malformed_successor",
+      "The deployment returned a credential that is not shaped like one. It was not stored."
+    );
+    throw new RenewalMalformedResponseError(
       "The deployment returned a credential that is not shaped like one. It was not stored."
     );
   }
   const tokenId = typeof body.token_id === "string" ? body.token_id : "";
   const runId = typeof body.run_id === "string" ? body.run_id : "";
   if (!UUID_RE5.test(tokenId) || !UUID_RE5.test(runId) || principalId === null) {
-    throw new RenewalRefused(
+    if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "incomplete_successor",
       "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it."
     );
+    throw new RenewalMalformedResponseError(
+      "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it."
+    );
   }
-  const issuedAt = timestamp(body.issued_at) ?? now();
+  const parsedIssuedAt = timestamp(body.issued_at);
+  if (options.listenerMode && body.issued_at !== void 0 && parsedIssuedAt === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed issued_at");
+  }
+  const issuedAt = parsedIssuedAt ?? now();
   const expiresAt = timestamp(body.expires_at);
   if (expiresAt === null) {
-    throw new RenewalRefused(
+    if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "successor_expiry_missing",
       "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time."
     );
+    throw new RenewalMalformedResponseError(
+      "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time."
+    );
   }
   if (expiresAt - issuedAt > AGENT_TOKEN_MAX_TTL_MS) {
-    throw new RenewalRefused(
+    if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "successor_ttl_too_long",
       "The deployment issued a successor credential that lasts longer than eight hours. cswarm refused to store it. Agent credentials stay short on purpose; renewal is what makes that survivable."
     );
+    throw new RenewalMalformedResponseError(
+      "The deployment issued a successor credential that lasts longer than eight hours. cswarm refused to store it. Agent credentials stay short on purpose; renewal is what makes that survivable."
+    );
+  }
+  const horizonExpiresAt = timestamp(body.horizon_expires_at);
+  if (options.listenerMode && body.horizon_expires_at !== void 0 && body.horizon_expires_at !== null && horizonExpiresAt === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed horizon_expires_at");
+  }
+  const successorsRemaining = count(body.successors_remaining);
+  if (options.listenerMode && body.successors_remaining !== void 0 && body.successors_remaining !== null && successorsRemaining === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed successors_remaining");
   }
   let wake;
   try {
     wake = parseOptionalWakeHint(body.wake);
   } catch {
-    throw new RenewalRefused(
+    if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "malformed_wake",
       "The deployment returned a successor credential with a malformed wake hint. It was not stored."
     );
+    throw new RenewalMalformedResponseError(
+      "The deployment returned a successor credential with a malformed wake hint. It was not stored."
+    );
+  }
+  if (!token) {
+    return null;
   }
   return {
     token,
@@ -1290,12 +1360,12 @@ async function requestSuccessor(options) {
     runId: runId.toLowerCase(),
     issuedAt,
     expiresAt,
-    horizonExpiresAt: timestamp(body.horizon_expires_at),
-    successorsRemaining: count(body.successors_remaining),
+    horizonExpiresAt,
+    successorsRemaining,
     ...wake === void 0 ? {} : { wake }
   };
 }
-var import_node_crypto4, AGENT_TOKEN_DEFAULT_TTL_MS, AGENT_TOKEN_MAX_TTL_MS, RENEWAL_HORIZON_DEFAULT_MS, RENEWAL_HORIZON_MAX_MS, RENEWAL_LEAD_FRACTION, RENEWAL_LEAD_FLOOR_MS, RENEWAL_LEAD_CEILING_MS, RENEWAL_PENDING_RECOVERY_MS, RENEW_TIMEOUT_MS, UUID_RE5, AGENT_TOKEN_RE3, RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended, RenewalUnsupported, RenewalSuperseded, RenewalOutcomeUnknown, RenewalRefused, REVOCATION_REASONS_LIST, REVOCATION_REASONS, REVOKED_MESSAGE, LOCALLY_EXPIRED_MESSAGE, UNEXPLAINED_REFUSAL_MESSAGE, AgentCredentialSession;
+var import_node_crypto4, AGENT_TOKEN_DEFAULT_TTL_MS, AGENT_TOKEN_MAX_TTL_MS, RENEWAL_HORIZON_DEFAULT_MS, RENEWAL_HORIZON_MAX_MS, RENEWAL_LEAD_FRACTION, RENEWAL_LEAD_FLOOR_MS, RENEWAL_LEAD_CEILING_MS, RENEWAL_PENDING_RECOVERY_MS, RENEW_TIMEOUT_MS, UUID_RE5, AGENT_TOKEN_RE3, RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended, RenewalUnsupported, RenewalSuperseded, RenewalOutcomeUnknown, RenewalMalformedResponseError, RenewalCredentialCheckError, RenewalRetryError, RenewalRefused, RenewalUpgradeRequiredError, RENEWAL_UPGRADE_LISTENER_ACTION, RENEWAL_UPGRADE_COMMAND_ACTION, REVOCATION_REASONS_LIST, REVOCATION_REASONS, REVOKED_MESSAGE, LOCALLY_EXPIRED_MESSAGE, UNEXPLAINED_REFUSAL_MESSAGE, AgentCredentialSession;
 var init_renewal = __esm({
   "src/cloud/renewal.ts"() {
     "use strict";
@@ -1358,6 +1428,28 @@ var init_renewal = __esm({
         super(message);
       }
     };
+    RenewalMalformedResponseError = class extends RenewalOutcomeUnknown {
+      name = "RenewalMalformedResponseError";
+    };
+    RenewalCredentialCheckError = class extends Error {
+      constructor(status, code) {
+        super(`renewal command refused the credential (${code})`);
+        this.status = status;
+        this.code = code;
+      }
+      status;
+      code;
+      name = "RenewalCredentialCheckError";
+    };
+    RenewalRetryError = class extends Error {
+      constructor(expiresAt) {
+        super("credential renewal is retrying");
+        this.expiresAt = expiresAt;
+      }
+      expiresAt;
+      name = "RenewalRetryError";
+      code = "renewal_retry";
+    };
     RenewalRefused = class extends Error {
       constructor(status, code, message) {
         super(message);
@@ -1368,6 +1460,14 @@ var init_renewal = __esm({
       code;
       name = "RenewalRefused";
     };
+    RenewalUpgradeRequiredError = class extends RenewalRefused {
+      name = "RenewalUpgradeRequiredError";
+      constructor(minimum, listenerMode = false) {
+        super(426, "upgrade_required", `This copy of cswarm is older than the deployment accepts (minimum ${minimum}). ${listenerMode ? RENEWAL_UPGRADE_LISTENER_ACTION : RENEWAL_UPGRADE_COMMAND_ACTION}`);
+      }
+    };
+    RENEWAL_UPGRADE_LISTENER_ACTION = "Update cswarm, then restart the listener.";
+    RENEWAL_UPGRADE_COMMAND_ACTION = "Update cswarm, then run the command again.";
     REVOCATION_REASONS_LIST = [
       "renewal_lineage_revoked",
       "renewal_grant_revoked",
@@ -1476,6 +1576,14 @@ var init_renewal = __esm({
       get expiry() {
         return this.expiresAt;
       }
+      get renewalDue() {
+        return this.due();
+      }
+      /** Next renewal boundary, or null when this session cannot keep a successor. */
+      get renewalAt() {
+        if (this.unsupported || this.options.store === null || this.expiresAt === null) return null;
+        return renewalDueAt(this.issuedAt, this.expiresAt);
+      }
       /**
        * ★ RENEWAL REQUIRES SOMEWHERE TO KEEP THE SUCCESSOR, AND THAT IS A SAFETY RULE, NOT A
        * CONVENIENCE. A successful renewal SUPERSEDES the predecessor server-side — the fence
@@ -1485,10 +1593,8 @@ var init_renewal = __esm({
        * bricked by the feature meant to keep it alive. So with no store, this never renews.
        */
       due() {
-        if (this.unsupported) return false;
-        if (this.options.store === null) return false;
-        if (this.expiresAt === null) return false;
-        return this.clock() >= renewalDueAt(this.issuedAt, this.expiresAt);
+        const at = this.renewalAt;
+        return at !== null && this.clock() >= at;
       }
       expired() {
         return this.expiresAt !== null && this.clock() >= this.expiresAt;
@@ -1497,9 +1603,9 @@ var init_renewal = __esm({
        * The credential to present, renewed first if it is close to expiring.
        *
        * Renewal happens AHEAD of expiry rather than on a 401, so the common path never shows a
-       * person a failure. A refusal while the predecessor is still live is therefore a warning
-       * and the command proceeds; it becomes fatal only when there is nothing valid left to
-       * present, which is the one case where continuing would fail anyway.
+       * person a failure. A known one-shot 401/403 refusal is fatal with the D-004/D-011
+       * remedy; an unknown outcome may use a still-live predecessor. The listener retries
+       * unknown outcomes and samples recognized authentication refusals.
        */
       async bearer() {
         if (!this.due()) return this.token;
@@ -1516,17 +1622,32 @@ var init_renewal = __esm({
             }
             return this.token;
           }
-          if (this.expired() || error2 instanceof RenewalRevoked) throw error2;
+          if (error2 instanceof RenewalCredentialCheckError && this.expired()) {
+            throw new RenewalRevoked(
+              "predecessor_expired_local",
+              "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential."
+            );
+          }
+          if (error2 instanceof RenewalCredentialCheckError || error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalSuspended || error2 instanceof RenewalRevoked) throw error2;
+          if (this.options.listenerMode && error2 instanceof RenewalUpgradeRequiredError) throw error2;
+          const retryableRenewalOutcome = error2 instanceof RenewalOutcomeUnknown || error2 instanceof RenewalUnsupported || error2 instanceof RenewalRefused;
+          if (this.options.listenerMode && retryableRenewalOutcome && this.expired()) {
+            throw new RenewalRevoked(
+              "predecessor_expired_local",
+              "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential."
+            );
+          }
+          if (this.options.listenerMode && retryableRenewalOutcome) {
+            throw new RenewalRetryError(this.expiresAt);
+          }
+          if (this.options.listenerMode) throw error2;
+          if (this.expired()) throw error2;
           if (error2 instanceof RenewalUnsupported) {
             this.unsupported = true;
             this.warn(`${error2.message}.`);
-          } else if (error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalSuspended) {
-            throw error2;
-          } else {
-            this.warn(
-              `${error2.message}. The credential in hand is still valid, so this command went ahead; renewal is retried on the next one.`
-            );
-          }
+          } else this.warn(
+            `${error2.message}. The credential in hand is still valid, so this command went ahead; renewal is retried on the next one.`
+          );
         }
         return this.token;
       }
@@ -1568,9 +1689,8 @@ var init_renewal = __esm({
             workspaceId: this.options.workspaceId,
             predecessor: this.token,
             commandId,
-            // Only so a 401 on an already-expired credential is reported as expiry, not
-            // revocation (D-004). Never sent on the wire.
             expiresAt: this.expiresAt,
+            listenerMode: this.options.listenerMode === true,
             ...this.options.fetcher ? { fetcher: this.options.fetcher } : {},
             now: this.clock
           });
@@ -5109,22 +5229,22 @@ var init_error_envelope = __esm({
 function parseSignalAttachments(value, options = {}) {
   if (options.enabled === false || value === void 0) return [];
   if (!Array.isArray(value) || value.length > SIGNAL_ATTACHMENT_MAX) {
-    throw new Error("signal read returned malformed attachments");
+    throw new SignalAttachmentMalformedError("signal read returned malformed attachments");
   }
   const attachments = [];
   const seen = /* @__PURE__ */ new Set();
   for (const valueAtPosition of value) {
     if (!valueAtPosition || typeof valueAtPosition !== "object" || Array.isArray(valueAtPosition)) {
-      throw new Error("signal read returned a malformed attachment");
+      throw new SignalAttachmentMalformedError("signal read returned a malformed attachment");
     }
     const row = valueAtPosition;
     if (typeof row.file_id !== "string" || !UUID_RE9.test(row.file_id) || typeof row.version_n !== "number" || !Number.isSafeInteger(row.version_n) || row.version_n < 1 || typeof row.name !== "string" || row.name.length < 1 || row.name.length > 255 || typeof row.content_type !== "string" || row.content_type.length < 1 || typeof row.size_bytes !== "number" || !Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0) {
-      throw new Error("signal read returned malformed attachment metadata");
+      throw new SignalAttachmentMalformedError("signal read returned malformed attachment metadata");
     }
     const fileId = row.file_id.toLowerCase();
     const key2 = `${fileId}:${row.version_n}`;
     if (seen.has(key2)) {
-      throw new Error("signal read returned duplicate attachment metadata");
+      throw new SignalAttachmentMalformedError("signal read returned duplicate attachment metadata");
     }
     seen.add(key2);
     attachments.push({
@@ -5152,12 +5272,15 @@ function formatAttachmentSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-var SIGNAL_ATTACHMENT_MAX, UUID_RE9;
+var SIGNAL_ATTACHMENT_MAX, UUID_RE9, SignalAttachmentMalformedError;
 var init_attachments = __esm({
   "src/cloud/attachments.ts"() {
     "use strict";
     SIGNAL_ATTACHMENT_MAX = 8;
     UUID_RE9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    SignalAttachmentMalformedError = class extends Error {
+      name = "SignalAttachmentMalformedError";
+    };
   }
 });
 
@@ -5169,13 +5292,13 @@ function plainTransportError(failureCode = "no_response") {
   return error2;
 }
 function plainMalformedError(message) {
-  const error2 = new Error(message);
+  const error2 = new SignalMalformedError(message);
   plainMalformedErrors.add(error2);
   return error2;
 }
 function checkedUuid2(value, field) {
   if (typeof value !== "string" || !UUID_RE10.test(value)) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value.toLowerCase();
 }
@@ -5184,20 +5307,20 @@ function checkedNullableUuid(value, field) {
 }
 function checkedBoolean(value, field) {
   if (typeof value !== "boolean") {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
 function checkedTimestamp(value, field) {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
 function deliveryCapabilityMarker(row, key2) {
   if (row[key2] === void 0) return false;
   if (row[key2] !== 1) {
-    throw new Error("signal read returned a malformed delivery capability marker");
+    throw new SignalMalformedError("signal read returned a malformed delivery capability marker");
   }
   return true;
 }
@@ -5222,30 +5345,30 @@ function pendingDeliveryCountOf(body, capabilities) {
   if (!capabilities.deliveryClaim && !capabilities.deliveryAck) return null;
   const value = body.pending_delivery_count;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("signal read returned a malformed pending_delivery_count");
+    throw new SignalMalformedError("signal read returned a malformed pending_delivery_count");
   }
   return value;
 }
 function parseSignalRecipients(value) {
   if (value === void 0) return {};
   if (!Array.isArray(value)) {
-    throw new Error("signal read returned a malformed recipients list");
+    throw new SignalMalformedError("signal read returned a malformed recipients list");
   }
   const recipients = [];
   const seenPositions = /* @__PURE__ */ new Set();
   const seenIds = /* @__PURE__ */ new Set();
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const row = entry;
     const keys = Object.keys(row).sort();
     if (keys.length !== 3 || keys[0] !== "id" || keys[1] !== "kind" || keys[2] !== "position" || typeof row.kind !== "string" || !SIGNAL_RECIPIENT_KINDS.has(row.kind) || typeof row.position !== "number" || !Number.isSafeInteger(row.position) || row.position < 0) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const id = checkedUuid2(row.id, "recipients[].id");
     if (seenPositions.has(row.position) || seenIds.has(id)) {
-      throw new Error("signal read returned a repeated recipient");
+      throw new SignalMalformedError("signal read returned a repeated recipient");
     }
     seenPositions.add(row.position);
     seenIds.add(id);
@@ -5265,18 +5388,18 @@ function signalAddressesAgent(signal, principalId) {
 }
 function parseSignalRecord(value, options = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("signal read returned a malformed row");
+    throw new SignalMalformedError("signal read returned a malformed row");
   }
   const row = value;
   if (typeof row.from_kind !== "string" || !["user", "agent"].includes(row.from_kind) || typeof row.kind !== "string" || !SIGNAL_KINDS.has(row.kind) || typeof row.body !== "string" || row.body.length < 1 || !(row.about === null || typeof row.about === "string")) {
-    throw new Error("signal read returned malformed signal data");
+    throw new SignalMalformedError("signal read returned malformed signal data");
   }
   let senderOwnerRelation = "unknown";
   if (row.sender_owner_relation !== void 0) {
     if (typeof row.sender_owner_relation !== "string" || !SENDER_OWNER_RELATIONS.has(
       row.sender_owner_relation
     )) {
-      throw new Error(
+      throw new SignalMalformedError(
         "signal read returned a malformed sender_owner_relation"
       );
     }
@@ -5352,7 +5475,7 @@ function parseSignalRows(rows3, options) {
       const parsed = error2 instanceof Error ? error2 : new Error(String(error2));
       options.onMalformedRow?.(index, parsed);
       if (malformedRows > options.maxMalformedRows) {
-        throw new Error(
+        throw new SignalMalformedError(
           `signal read returned too many malformed rows (more than ${options.maxMalformedRows})`
         );
       }
@@ -5480,7 +5603,7 @@ function classifySignalReadFailure(error2) {
   if (error2 instanceof SignalTransportError) {
     return { code: "no_response", httpStatus: null, errorConstructor: null };
   }
-  if (error2 instanceof SignalMalformedError || error2 instanceof Error && plainMalformedErrors.has(error2)) {
+  if (error2 instanceof SignalMalformedError || error2 instanceof SignalAttachmentMalformedError || error2 instanceof Error && plainMalformedErrors.has(error2)) {
     return {
       code: "malformed_response",
       httpStatus: null,
@@ -5501,14 +5624,18 @@ function isRestartableReadError(error2) {
   if (isTransportFollowMessage(error2)) return true;
   const http = followHttpDetails(error2);
   if (http !== null) {
-    return http.status === 429 || http.status >= 500;
+    if (isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error2).error
+    )) {
+      return false;
+    }
+    return http.status === 429 || http.status >= 500 || http.status === 401 || http.status === 403;
   }
   return false;
 }
 function isMalformedFollowMessage(error2) {
-  if (error2 instanceof SignalMalformedError) return true;
-  if (!(error2 instanceof Error)) return false;
-  return error2.message.startsWith("signal read returned a malformed") || error2.message === "signal read returned malformed JSON" || error2.message === "signal read returned malformed signal data" || error2.message === "signal read returned a malformed row";
+  return error2 instanceof SignalMalformedError || error2 instanceof SignalAttachmentMalformedError || error2 instanceof Error && plainMalformedErrors.has(error2);
 }
 function checkedLimit(value) {
   const limit = value ?? 50;
@@ -5796,17 +5923,17 @@ async function agentSignalPage(target2, credential, query, options, allowLegacyC
 }
 function parseAgentMemberRow(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed agent row");
+    throw new SignalMalformedError("member read returned a malformed agent row");
   }
   const row = value;
   if (typeof row.name !== "string") {
-    throw new Error("member read returned a malformed agent name");
+    throw new SignalMalformedError("member read returned a malformed agent name");
   }
   if (row.model !== void 0 && row.model !== null && typeof row.model !== "string") {
-    throw new Error("member read returned a malformed agent model");
+    throw new SignalMalformedError("member read returned a malformed agent model");
   }
   if (row.generation !== void 0 && row.generation !== null && (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
-    throw new Error("member read returned a malformed agent generation");
+    throw new SignalMalformedError("member read returned a malformed agent generation");
   }
   return {
     ...row.model === void 0 ? {} : { model: row.model },
@@ -5818,11 +5945,11 @@ function parseAgentMemberRow(value) {
 }
 function parseMemberRow(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed row");
+    throw new SignalMalformedError("member read returned a malformed row");
   }
   const row = value;
   if (typeof row.display_name !== "string") {
-    throw new Error("member read returned a malformed display name");
+    throw new SignalMalformedError("member read returned a malformed display name");
   }
   return {
     user_id: checkedUuid2(row.user_id, "member user_id"),
@@ -5831,15 +5958,15 @@ function parseMemberRow(value) {
 }
 function parseAgentIdentity(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed credential identity");
+    throw new SignalMalformedError("member read returned a malformed credential identity");
   }
   const row = value;
   if (row.credential_valid !== true) {
-    throw new Error("member read returned a malformed credential validity");
+    throw new SignalMalformedError("member read returned a malformed credential validity");
   }
   const name = row.workspace_name;
   if (name !== void 0 && name !== null && typeof name !== "string") {
-    throw new Error("member read returned a malformed workspace name");
+    throw new SignalMalformedError("member read returned a malformed workspace name");
   }
   return {
     credential_valid: true,
@@ -5870,27 +5997,27 @@ async function readAgentSignalDirectory(target2, token, workspaceId2, fetcherOrO
   } catch (error2) {
     if (error2 instanceof SignalReadTimeoutError) {
       if (options.deadlineMs !== void 0) throw error2;
-      throw new Error("member read could not reach the cloud service");
+      throw new SignalTransportError("member read could not reach the cloud service");
     }
     throw error2;
   }
   if (result === null) {
-    throw new Error("member read could not reach the cloud service");
+    throw new SignalTransportError("member read could not reach the cloud service");
   }
   const { response, body } = result;
   if (!response.ok) {
     throwSignalHttp(response, body, "member read failed");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const payload = body;
   if (!Array.isArray(payload.members)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const agentsRaw = payload.agents;
   const agents = agentsRaw === void 0 ? [] : Array.isArray(agentsRaw) ? agentsRaw.map(parseAgentMemberRow) : (() => {
-    throw new Error("member read returned malformed agents");
+    throw new SignalMalformedError("member read returned malformed agents");
   })();
   return {
     members: payload.members.map(parseMemberRow),
@@ -6241,12 +6368,26 @@ function resolveRefusalToleranceMs(raw, warn = () => {
   }
   return parsed;
 }
+function isConfirmedCredentialLossCode(code, surface = "read") {
+  if (typeof code !== "string") return false;
+  const set = surface === "command" ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET : READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
+  return set.has(code);
+}
+function isConfirmedCredentialHttpFailure(status, code, surface = "read") {
+  return (status === 401 || status === 403) && isConfirmedCredentialLossCode(code, surface);
+}
 function isRetryableFollowError(error2) {
+  const http = followHttpDetails(error2);
+  if (http !== null && (http.status === 401 || http.status === 403) && !isConfirmedCredentialHttpFailure(
+    http.status,
+    followErrorEnvelope(error2).error
+  )) {
+    return true;
+  }
   if (serverRefusedRetry(followErrorEnvelope(error2))) return false;
   if (error2 instanceof SignalHostPortsExhaustedError) return true;
   if (error2 instanceof SignalReadTimeoutError) return true;
   if (isTransportFollowMessage(error2)) return true;
-  const http = followHttpDetails(error2);
   if (http) return http.status === 429 || http.status >= 500;
   return false;
 }
@@ -6254,18 +6395,27 @@ function isFatalFollowError(error2) {
   if (isMalformedFollowMessage(error2)) return true;
   const http = followHttpDetails(error2);
   if (!http) return false;
-  return http.status === 400 || http.status === 401 || http.status === 403 || http.status === 404 || http.status === 426 || http.status >= 400 && http.status < 500 && http.status !== 429;
+  if (http.status === 401 || http.status === 403) {
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error2).error
+    );
+  }
+  return http.status === 400 || http.status === 404 || http.status === 426 || http.status >= 400 && http.status < 500 && http.status !== 429;
 }
 function isFollowCredentialFailure(error2) {
   if (!(error2 instanceof Error)) return false;
   const http = followHttpDetails(error2);
   if (http !== null) {
-    return http.status === 401 || http.status === 403;
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error2).error
+    );
   }
   if (error2.name === "RenewalReauthorisationRequired" || error2.name === "RenewalRevoked" || error2.name === "RenewalSuspended") {
     return true;
   }
-  return /secret is absent/i.test(error2.message);
+  return error2 instanceof LocalCredentialSecretAbsentError;
 }
 function followRetryReason(error2) {
   if (error2 instanceof SignalReadTimeoutError) return "idle_deadline";
@@ -6472,7 +6622,7 @@ async function runInboxFollow(options) {
     }
   }
 }
-var UUID_RE10, SIGNAL_KINDS, SIGNAL_BODY_DISPLAY_MAX, SIGNAL_ABOUT_DISPLAY_MAX, SIGNAL_READ_TIMEOUT_MS, SignalReadTimeoutError, SignalHostPortsExhaustedError, SIGNAL_WAIT_MIN_SECONDS, SIGNAL_WAIT_MAX_SECONDS, SIGNAL_WAIT_POLL_MS, SIGNAL_FOLLOW_POLL_MS, SIGNAL_FOLLOW_BACKOFF_INITIAL_MS, SIGNAL_FOLLOW_BACKOFF_MAX_MS, SIGNAL_FOLLOW_SEEN_MAX, SIGNAL_FOLLOW_POST_EMIT_MS, SIGNAL_FOLLOW_PAGE_LIMIT, SignalHttpError, SignalTransportError, SignalMalformedError, plainHttpRetryAfterMs, plainHttpStatus, plainHttpEnvelope, plainTransportErrors, plainTransportFailureCodes, plainMalformedErrors, SENDER_OWNER_RELATIONS, SIGNAL_RECIPIENT_KINDS, READ_RETRY_ATTEMPTS, READ_RETRY_BASE_MS, SIGNAL_STATUS_UNAVAILABLE_MESSAGE, ASK_WAIT_TIMEOUT_MESSAGE, BoundedSignalIdSet, DEFAULT_REFUSAL_TOLERANCE_MS, MAX_REFUSAL_TOLERANCE_MS;
+var UUID_RE10, SIGNAL_KINDS, SIGNAL_BODY_DISPLAY_MAX, SIGNAL_ABOUT_DISPLAY_MAX, SIGNAL_READ_TIMEOUT_MS, SignalReadTimeoutError, SignalHostPortsExhaustedError, SIGNAL_WAIT_MIN_SECONDS, SIGNAL_WAIT_MAX_SECONDS, SIGNAL_WAIT_POLL_MS, SIGNAL_FOLLOW_POLL_MS, SIGNAL_FOLLOW_BACKOFF_INITIAL_MS, SIGNAL_FOLLOW_BACKOFF_MAX_MS, SIGNAL_FOLLOW_SEEN_MAX, SIGNAL_FOLLOW_POST_EMIT_MS, SIGNAL_FOLLOW_PAGE_LIMIT, SignalHttpError, SignalTransportError, LocalCredentialSecretAbsentError, ListenerCredentialStateMismatchError, SignalMalformedError, plainHttpRetryAfterMs, plainHttpStatus, plainHttpEnvelope, plainTransportErrors, plainTransportFailureCodes, plainMalformedErrors, SENDER_OWNER_RELATIONS, SIGNAL_RECIPIENT_KINDS, READ_RETRY_ATTEMPTS, READ_RETRY_BASE_MS, SIGNAL_STATUS_UNAVAILABLE_MESSAGE, ASK_WAIT_TIMEOUT_MESSAGE, BoundedSignalIdSet, DEFAULT_REFUSAL_TOLERANCE_MS, MAX_REFUSAL_TOLERANCE_MS, CONFIRMED_CREDENTIAL_LOSS_CODES, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES, READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
 var init_signals = __esm({
   "src/cloud/signals.ts"() {
     "use strict";
@@ -6527,6 +6677,19 @@ var init_signals = __esm({
       constructor(message = "signal read could not reach the cloud service") {
         super(message);
         this.name = "SignalTransportError";
+      }
+    };
+    LocalCredentialSecretAbsentError = class extends Error {
+      constructor(message = "agent credential secret is absent") {
+        super(message);
+        this.name = "LocalCredentialSecretAbsentError";
+      }
+    };
+    ListenerCredentialStateMismatchError = class extends LocalCredentialSecretAbsentError {
+      code = "local_credential_state_mismatch";
+      constructor() {
+        super("listener credential state did not preserve the live credential");
+        this.name = "ListenerCredentialStateMismatchError";
       }
     };
     SignalMalformedError = class extends Error {
@@ -6584,6 +6747,19 @@ var init_signals = __esm({
     };
     DEFAULT_REFUSAL_TOLERANCE_MS = 6e4;
     MAX_REFUSAL_TOLERANCE_MS = 10 * 6e4;
+    CONFIRMED_CREDENTIAL_LOSS_CODES = Object.freeze([
+      "unauthenticated",
+      "forbidden"
+    ]);
+    COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES = Object.freeze([
+      "unauthenticated"
+    ]);
+    READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET = new Set(
+      CONFIRMED_CREDENTIAL_LOSS_CODES
+    );
+    COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET = new Set(
+      COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
+    );
   }
 });
 
@@ -24589,7 +24765,7 @@ function observationCommandId(signalId) {
 }
 function checkedUuid3(value, field) {
   if (typeof value !== "string" || !UUID_RE11.test(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24621,13 +24797,13 @@ function daysInMonth(year, month) {
 }
 function checkedRfc3339Timestamp(value, field) {
   if (typeof value !== "string") {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
   const match = RFC3339_TIMESTAMP_RE.exec(value);
   if (!match) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24638,7 +24814,7 @@ function checkedRfc3339Timestamp(value, field) {
   const minute = parseInt(match[5], 10);
   const second = parseInt(match[6], 10);
   if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24646,13 +24822,13 @@ function checkedRfc3339Timestamp(value, field) {
     const offsetHour = Math.abs(parseInt(match[7], 10));
     const offsetMin = parseInt(match[8], 10);
     if (offsetHour > 23 || offsetMin < 0 || offsetMin > 59) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         `delivery response returned a malformed ${field}`
       );
     }
   }
   if (!Number.isFinite(Date.parse(value))) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24660,14 +24836,14 @@ function checkedRfc3339Timestamp(value, field) {
 }
 function checkedLiveLease(leasedUntil, now) {
   if (Date.parse(leasedUntil) <= now()) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned an already expired lease"
     );
   }
 }
 function checkedRelation(value) {
   if (typeof value !== "string" || !SENDER_OWNER_RELATIONS2.has(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery response returned a malformed sender_owner_relation"
     );
   }
@@ -24675,7 +24851,7 @@ function checkedRelation(value) {
 }
 function checkedNonNegativeCount(value, field) {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24683,14 +24859,14 @@ function checkedNonNegativeCount(value, field) {
 }
 function checkedClaimCapabilities(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response is missing delivery capabilities"
     );
   }
   const row = value;
   for (const marker of ["delivery_claim", "delivery_ack", "sender_owner_relation"]) {
     if (row[marker] !== 1) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         `delivery claim response is missing the ${marker} capability`
       );
     }
@@ -24700,7 +24876,7 @@ function checkedClaimCapabilities(value) {
 function checkedOptionalUuidArray(value, field) {
   if (value === void 0) return;
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !UUID_RE11.test(item))) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24708,7 +24884,7 @@ function checkedOptionalUuidArray(value, field) {
 function checkedOptionalArray(value, field) {
   if (value === void 0) return;
   if (!Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`
     );
   }
@@ -24718,7 +24894,7 @@ function checkedRecipientSlot(row) {
   const hasCount = Object.hasOwn(row, "recipient_count");
   if (!hasPosition && !hasCount) return { position: null, count: null };
   if (!hasPosition || !hasCount) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a recipient position without its count"
     );
   }
@@ -24728,7 +24904,7 @@ function checkedRecipientSlot(row) {
   );
   const count2 = checkedNonNegativeCount(row.recipient_count, "recipient_count");
   if (count2 < 1 || position >= count2) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a recipient position outside its set"
     );
   }
@@ -24736,7 +24912,7 @@ function checkedRecipientSlot(row) {
 }
 function parseDeliveryRow(value, expected, index, now) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a malformed delivery row"
     );
   }
@@ -24745,22 +24921,22 @@ function parseDeliveryRow(value, expected, index, now) {
   try {
     signal = parseSignalRecord(row.signal);
   } catch {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery claim response returned a malformed signal at ${index}`
     );
   }
   if (signal.workspace_id !== expected.workspaceId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a signal for another workspace"
     );
   }
   if (signal.to_agent !== expected.principalId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a signal addressed to another agent"
     );
   }
   if (!DELIVERY_KINDS.has(signal.kind)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a non-direct signal kind"
     );
   }
@@ -24781,11 +24957,11 @@ function parseDeliveryRow(value, expected, index, now) {
 }
 function parseClaimSuccess(body, expected, now) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new DeliveryProtocolError("delivery claim response was not an object");
+    throw new DeliveryMalformedResponseError("delivery claim response was not an object");
   }
   const row = body;
   if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response did not report accepted ok"
     );
   }
@@ -24793,7 +24969,7 @@ function parseClaimSuccess(body, expected, now) {
   checkedOptionalUuidArray(row.event_ids, "event_ids");
   checkedOptionalArray(row.events, "events");
   if (!Array.isArray(row.deliveries)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response is missing its deliveries array"
     );
   }
@@ -24804,20 +24980,20 @@ function parseClaimSuccess(body, expected, now) {
   const leaseIds = /* @__PURE__ */ new Set();
   for (const delivery of deliveries) {
     if (signalIds.has(delivery.signal.id)) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         "delivery claim response repeats a signal id"
       );
     }
     signalIds.add(delivery.signal.id);
     if (leaseIds.has(delivery.leaseId)) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         "delivery claim response repeats a lease id"
       );
     }
     leaseIds.add(delivery.leaseId);
   }
   if (deliveries.length > 1) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned more than one delivery"
     );
   }
@@ -24830,7 +25006,7 @@ function parseClaimSuccess(body, expected, now) {
     "terminal_delivery_failure_count"
   );
   if (deliveries.length > pendingDeliveryCount) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned more deliveries than its pending count"
     );
   }
@@ -24838,7 +25014,7 @@ function parseClaimSuccess(body, expected, now) {
   try {
     wake = parseOptionalWakeHint(row.wake);
   } catch {
-    throw new DeliveryProtocolError("delivery claim response wake field is malformed");
+    throw new DeliveryMalformedResponseError("delivery claim response wake field is malformed");
   }
   return {
     capabilities,
@@ -24850,25 +25026,25 @@ function parseClaimSuccess(body, expected, now) {
 }
 function parseAckSuccess(body, expected) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response was not an object"
     );
   }
   const row = body;
   if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response did not report accepted ok"
     );
   }
   checkedOptionalUuidArray(row.event_ids, "event_ids");
   checkedOptionalArray(row.events, "events");
   if (row.signal_id !== expected.signalId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response echoed a different signal id"
     );
   }
   if (row.outcome !== expected.outcome) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response echoed a different outcome"
     );
   }
@@ -24912,18 +25088,23 @@ function assertAckRequest(request) {
 }
 function boundedDeliveryErrorCode(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return DELIVERY_UNKNOWN_ERROR_CODE;
+    return null;
   }
   const error2 = body.error;
   if (typeof error2 === "string" && SERVER_ERROR_CODES_SET.has(error2)) {
     return error2;
   }
-  return DELIVERY_UNKNOWN_ERROR_CODE;
+  return null;
 }
 function refusal(response, text) {
   let code = DELIVERY_UNKNOWN_ERROR_CODE;
+  let recognizedEnvelope = false;
   try {
-    code = boundedDeliveryErrorCode(JSON.parse(text));
+    const recognizedCode = boundedDeliveryErrorCode(JSON.parse(text));
+    if (recognizedCode !== null) {
+      code = recognizedCode;
+      recognizedEnvelope = true;
+    }
   } catch {
   }
   const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
@@ -24931,19 +25112,25 @@ function refusal(response, text) {
     response.status,
     code,
     `delivery command failed (HTTP ${response.status}): ${code}`,
-    retryAfterMs
+    retryAfterMs,
+    recognizedEnvelope
   );
 }
 function successBody(response, text, verb) {
+  let body;
   try {
-    return JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
-    throw new DeliveryProtocolError(
+    throw new DeliveryResponseError(
       `${verb} response was not JSON (HTTP ${response.status})`
     );
   }
+  if (!body || typeof body !== "object" || Array.isArray(body) || body.status !== "accepted" || body.ok !== true) {
+    throw new DeliveryResponseError(`${verb} response did not carry an accepted envelope`);
+  }
+  return body;
 }
-var UUID_RE11, RFC3339_TIMESTAMP_RE, DELIVERY_KINDS, SENDER_OWNER_RELATIONS2, DELIVERY_ACK_OUTCOMES, DELIVERY_HANDLED_OUTCOMES, DELIVERY_PROVIDER_PROVEN_OUTCOMES, DELIVERY_REQUEST_TIMEOUT_MS, COMMAND_ID_VALIDATOR_RE, FAILED_TERMINAL_CODES_SET, SERVER_ERROR_CODES_SET, DELIVERY_FAILED_TERMINAL_CODES, DELIVERY_SERVER_ERROR_CODES, DELIVERY_UNKNOWN_ERROR_CODE, DeliveryTransportError, DeliveryHttpError, DeliveryProtocolError, DeliveryCommandClient;
+var UUID_RE11, RFC3339_TIMESTAMP_RE, DELIVERY_KINDS, SENDER_OWNER_RELATIONS2, DELIVERY_ACK_OUTCOMES, DELIVERY_HANDLED_OUTCOMES, DELIVERY_PROVIDER_PROVEN_OUTCOMES, DELIVERY_REQUEST_TIMEOUT_MS, COMMAND_ID_VALIDATOR_RE, FAILED_TERMINAL_CODES_SET, H0_SEAT_CLAIM_REFUSED_CODE, H0_SEAT_LISTENER_STOP_SENTENCE, DELIVERY_FAILED_TERMINAL_CODES, DELIVERY_SESSION_PROOF_CODES, DELIVERY_SERVER_ERROR_CODES, SERVER_ERROR_CODES_SET, DELIVERY_UNKNOWN_ERROR_CODE, DeliveryTransportError, DeliveryHttpError, DeliveryProtocolError, DeliveryResponseError, DeliveryMalformedResponseError, DeliveryCommandClient;
 var init_delivery = __esm({
   "src/cloud/delivery.ts"() {
     "use strict";
@@ -24984,25 +25171,19 @@ var init_delivery = __esm({
       "host_session_failed",
       "credential_unavailable"
     ]);
-    SERVER_ERROR_CODES_SET = /* @__PURE__ */ new Set([
-      "unauthenticated",
-      "fresh_auth_required",
-      "invalid_request",
-      "payload_too_large",
-      "forbidden",
-      "delivery_unavailable",
-      "delivery_ack_conflict",
-      "command_id_conflict",
-      "rate_limited",
-      "upgrade_required",
-      "temporarily_unavailable",
-      "internal_error"
-    ]);
+    H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
+    H0_SEAT_LISTENER_STOP_SENTENCE = "This seat receives messages through the h0 poll. The listener has stopped; no further listener action is needed for this seat";
     DELIVERY_FAILED_TERMINAL_CODES = Object.freeze([
       "provider_refused",
       "local_effect_failed",
       "host_session_failed",
       "credential_unavailable"
+    ]);
+    DELIVERY_SESSION_PROOF_CODES = Object.freeze([
+      "session_proof_missing",
+      "session_proof_invalid",
+      "session_expired",
+      "session_conflict"
     ]);
     DELIVERY_SERVER_ERROR_CODES = Object.freeze([
       "unauthenticated",
@@ -25012,12 +25193,18 @@ var init_delivery = __esm({
       "forbidden",
       "delivery_unavailable",
       "delivery_ack_conflict",
+      "delivery_not_surfaced",
       "command_id_conflict",
       "rate_limited",
       "upgrade_required",
       "temporarily_unavailable",
-      "internal_error"
+      "internal_error",
+      ...DELIVERY_SESSION_PROOF_CODES,
+      H0_SEAT_CLAIM_REFUSED_CODE
     ]);
+    SERVER_ERROR_CODES_SET = new Set(
+      DELIVERY_SERVER_ERROR_CODES
+    );
     DELIVERY_UNKNOWN_ERROR_CODE = "unknown_error";
     DeliveryTransportError = class extends Error {
       constructor(message) {
@@ -25026,21 +25213,35 @@ var init_delivery = __esm({
       }
     };
     DeliveryHttpError = class extends Error {
-      constructor(status, code, message, retryAfterMs = null) {
+      constructor(status, code, message, retryAfterMs = null, recognizedEnvelope = true) {
         super(message);
         this.status = status;
         this.code = code;
         this.retryAfterMs = retryAfterMs;
+        this.recognizedEnvelope = recognizedEnvelope;
         this.name = "DeliveryHttpError";
       }
       status;
       code;
       retryAfterMs;
+      recognizedEnvelope;
     };
     DeliveryProtocolError = class extends Error {
       constructor(message) {
         super(message);
         this.name = "DeliveryProtocolError";
+      }
+    };
+    DeliveryResponseError = class extends DeliveryProtocolError {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryResponseError";
+      }
+    };
+    DeliveryMalformedResponseError = class extends DeliveryResponseError {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryMalformedResponseError";
       }
     };
     DeliveryCommandClient = class {
@@ -46583,6 +46784,9 @@ function formatIdlePollDuration(ms) {
   if (ms % 1e3 === 0) return `${ms / 1e3}s`;
   throw new Error("idle poll duration must be a whole number of seconds");
 }
+function formatIdleWaitDuration(ms) {
+  return formatIdlePollDuration(Math.ceil(ms / 1e3) * 1e3);
+}
 function idlePollDurationExamples() {
   const midMs = Math.min(IDLE_POLL_MAX_MS, IDLE_POLL_DEFAULT_MS * 2);
   const labels = [];
@@ -46631,7 +46835,7 @@ function nextIdlePollMs(baseMs, emptyStreak, maxMs = IDLE_POLL_MAX_MS) {
   return Math.min(maxMs, grown);
 }
 function idlePollStatusSentence(currentMs) {
-  return `Current idle poll interval: ${formatIdlePollDuration(currentMs)}.`;
+  return `Current idle poll interval: ${formatIdleWaitDuration(currentMs)}.`;
 }
 function idlePollHelpSentence(defaultMs = IDLE_POLL_DEFAULT_MS) {
   return `listen start --poll-interval sets how long the listener waits after an empty claim (default ${formatIdlePollDuration(defaultMs)}). A whole number plus s or m (for example ${idlePollDurationHint()}), ${idlePollBoundSentence()}. Empty polls double that wait up to ${IDLE_POLL_MAX_LABEL}; any delivery resets it to the configured interval.`;
@@ -46699,13 +46903,13 @@ function listenerWakePersistWorthy(previous, next, lastPersistMs, nowMs) {
 function listenerWakeStatusSentence(wake, pollIntervalMs, lastWakeLabel) {
   if (wake.mode === LISTENER_WAKE_MODE_PUSH) {
     const last = lastWakeLabel === null ? "no wake yet" : `last wake ${lastWakeLabel}`;
-    return `${LISTENER_WAKE_MODE_PUSH} (Realtime), ${last}, reconcile every ${formatIdlePollDuration(LISTENER_RECONCILE_POLL_MS)}.`;
+    return `${LISTENER_WAKE_MODE_PUSH} (Realtime), ${last}, reconcile every ${formatIdleWaitDuration(pollIntervalMs)}.`;
   }
   if (wake.errorCode === WAKE_ERROR_CODE_WAKE_BUDGET) {
-    return `Subscribed; claims paused until the minute clears (${WAKE_ERROR_CODE_WAKE_BUDGET}); polling every ${formatIdlePollDuration(pollIntervalMs)} meanwhile.`;
+    return `Subscribed; claims paused until the minute clears (${WAKE_ERROR_CODE_WAKE_BUDGET}); polling every ${formatIdleWaitDuration(pollIntervalMs)} meanwhile.`;
   }
   const code = wake.errorCode ?? "disconnected";
-  return `${LISTENER_WAKE_MODE_POLL} every ${formatIdlePollDuration(pollIntervalMs)}. Realtime not connected (${code}).`;
+  return `${LISTENER_WAKE_MODE_POLL} every ${formatIdleWaitDuration(pollIntervalMs)}. Realtime not connected (${code}).`;
 }
 function createWakeSubscriber(options) {
   return new WakeSubscriber(options);
@@ -50845,12 +51049,15 @@ __export(cli_exports, {
   agentToolsForTransport: () => agentToolsForTransport,
   clampTurnBudgetToCredential: () => clampTurnBudgetToCredential,
   claudeUserPromptHookSnippet: () => claudeUserPromptHookSnippet,
+  collectListenerAttendanceEvidence: () => collectListenerAttendanceEvidence,
   describeAudience: () => describeAudience,
   formatBodySourceConflict: () => formatBodySourceConflict,
   formatBodySourceMissing: () => formatBodySourceMissing,
   formatBodyUsage: () => formatBodyUsage,
   formatOrList: () => formatOrList,
   isCliMain: () => isCliMain,
+  isFollowRenewalCredentialFailure: () => isFollowRenewalCredentialFailure,
+  listenerAttendanceProjectDirectory: () => listenerAttendanceProjectDirectory,
   listenerFailureMessage: () => listenerFailureMessage,
   listenerHostLimits: () => listenerHostLimits,
   listenerMainHostLimits: () => listenerMainHostLimits,
@@ -50858,6 +51065,8 @@ __export(cli_exports, {
   listenerPollIntervalMs: () => listenerPollIntervalMs,
   listenerProviderInstallEvidence: () => listenerProviderInstallEvidence,
   listenerRouteConfiguration: () => listenerRouteConfiguration,
+  listenerSettingsHookInstalled: () => listenerSettingsHookInstalled,
+  listenerStartPendingMessage: () => listenerStartPendingMessage,
   listenerStatusJson: () => listenerStatusJson,
   messageFormatAdvisory: () => messageFormatAdvisory,
   postSignalAllowedFlags: () => postSignalAllowedFlags,
@@ -57436,6 +57645,7 @@ function pendingMainEntry(signal, principalId, provenance, now, options = {}) {
 init_idle_poll();
 init_wake2();
 var LISTENER_PAGE_LIMIT = 100;
+var LISTENER_CLAIM_REFUSALS_BEFORE_READ = 3;
 var LISTENER_IDLE_POLL_MS = IDLE_POLL_DEFAULT_MS;
 var LISTENER_IDLE_POLL_MAX_MS = IDLE_POLL_MAX_MS;
 var LISTENER_DELIVERY_SAFETY_MARGIN_MS = 3e4;
@@ -57446,14 +57656,80 @@ var LISTENER_DELIVERY_HOLD_BUDGET_MS = LISTENER_PROMPT_TIMEOUT_MS;
 var LISTENER_DELIVERY_RETRY_INITIAL_MS = 500;
 var LISTENER_DELIVERY_RETRY_MAX_MS = 3e4;
 var LISTENER_HOST_PORTS_PROBE_MS = 6e4;
+var CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS = 3;
+var CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 6e4;
+var RENEWAL_WINDOW_RETRY_MS = 3e4;
+var LISTENER_REQUEST_WAIT_FLOOR_MS = 1e3;
+var RENEWAL_PENDING_WRITE_ALLOWANCE_MS = 5e3;
+var RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS = 3e4;
+var RENEWAL_EXPIRY_HEADROOM_MS = 8e3;
+var RENEWAL_WINDOW_EXPIRY_MARGIN_MS = 2 * RENEW_TIMEOUT_MS + RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS + 2 * LISTENER_REQUEST_WAIT_FLOOR_MS + 2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS + RENEWAL_EXPIRY_HEADROOM_MS;
+var CREDENTIAL_LOSS_CONFIRM_WINDOW_MS = (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+var READ_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: CONFIRMED_CREDENTIAL_LOSS_CODES,
+  configurationCode: "delivery_configuration_missing",
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [404, "channel_not_found"]
+  ])
+});
+var COMMAND_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+  h0FenceCode: H0_SEAT_CLAIM_REFUSED_CODE,
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [409, "command_id_conflict"],
+    [409, "delivery_ack_conflict"],
+    [409, "delivery_not_surfaced"],
+    [413, "payload_too_large"],
+    // command/index.ts version gate: the compiled client version cannot change on retry.
+    [426, "upgrade_required"],
+    [403, H0_SEAT_CLAIM_REFUSED_CODE]
+  ])
+});
+function exactRefusal(set, status, code) {
+  return code !== null && set.some(([s, c]) => s === status && c === code);
+}
+function fatalReadRefusal(error2) {
+  const http = followHttpDetails(error2);
+  return http !== null && exactRefusal(
+    READ_FATAL_ANSWERS.refusals,
+    http.status,
+    followErrorEnvelope(error2).error
+  );
+}
+function fatalCommandRefusal(error2) {
+  return error2.recognizedEnvelope && exactRefusal(
+    COMMAND_FATAL_ANSWERS.refusals,
+    error2.status,
+    error2.code
+  );
+}
+var ListenerH0SeatError = class extends Error {
+  code = H0_SEAT_CLAIM_REFUSED_CODE;
+  constructor() {
+    super(H0_SEAT_LISTENER_STOP_SENTENCE);
+    this.name = "ListenerH0SeatError";
+  }
+};
 var UUID_RE18 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var ListenerCapabilityError = class extends Error {
+var ListenerCapabilityError = class _ListenerCapabilityError extends Error {
+  static CODES = Object.freeze([
+    "sender_relation_capability_missing",
+    "cursor_capability_missing",
+    "delivery_capability_inconsistent",
+    "delivery_configuration_missing"
+  ]);
+  static READ_EDGE_CODES = _ListenerCapabilityError.CODES.filter((code) => code !== "delivery_configuration_missing");
   code;
   constructor(code, message) {
     super(message);
     this.name = "ListenerCapabilityError";
     this.code = code;
   }
+};
+var ListenerLeaseResponseError = class extends Error {
+  name = "ListenerLeaseResponseError";
 };
 var NullListenerModel = class {
   async start() {
@@ -57472,39 +57748,98 @@ function isRestartableListenerStop(stop) {
   return isRestartableRuntimeError(stop.error);
 }
 function isRestartableRuntimeError(error2) {
+  if (error2 instanceof ListenerH0SeatError || error2 instanceof DeliveryHttpError && error2.recognizedEnvelope && error2.code === COMMAND_FATAL_ANSWERS.h0FenceCode) {
+    return false;
+  }
   if (error2 instanceof DeliveryTransportError) return true;
   if (error2 instanceof DeliveryHttpError) {
-    return error2.status === 429 || error2.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error2.status, error2.code, "command")) {
+      return false;
+    }
+    return !fatalCommandRefusal(error2);
   }
+  if (error2 instanceof DeliveryResponseError) return true;
+  if (error2 instanceof DeliveryMalformedResponseError) return true;
+  if (error2 instanceof ListenerLeaseResponseError) return true;
   if (error2 instanceof DeliveryProtocolError) return false;
+  if (error2 instanceof RenewalRetryError) return true;
   if (error2 instanceof CommandTransportError) return true;
   if (error2 instanceof CommandHttpError) {
-    return error2.status === 429 || error2.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error2.status, error2.code, "command")) {
+      return false;
+    }
+    return error2.status === 429 || error2.status >= 500 || error2.status === 401 || error2.status === 403;
   }
   if (error2 instanceof AcpHostError) return TRANSIENT_ACP_CODES.has(error2.code);
-  if (error2 instanceof ListenerCapabilityError) return false;
+  if (error2 instanceof ListenerCapabilityError) {
+    return error2.code !== READ_FATAL_ANSWERS.configurationCode;
+  }
   if (error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalRevoked) {
     return false;
   }
-  return isRestartableReadError(error2);
+  return !fatalReadRefusal(error2) && (isRestartableReadError(error2) || isForeignReadResponseFailure(error2));
+}
+function isForeignReadResponseFailure(error2) {
+  if (error2 instanceof ListenerCapabilityError) {
+    return error2.code !== READ_FATAL_ANSWERS.configurationCode;
+  }
+  if (classifySignalReadFailure(error2).code === "malformed_response") return true;
+  const http = followHttpDetails(error2);
+  return http !== null && !fatalReadRefusal(error2) && !isConfirmedCredentialHttpFailure(http.status, followErrorEnvelope(error2).error, "read");
 }
 function isAbort(error2) {
   return error2 instanceof Error && error2.name === "AbortError";
 }
-function isCredentialLoss(error2) {
-  if (error2 instanceof CommandHttpError) {
-    return error2.status === 401 || error2.status === 403;
-  }
+function isLocalCredentialLoss(error2) {
   if (error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalRevoked) {
     return true;
   }
+  if (followHttpDetails(error2) !== null || error2 instanceof CommandHttpError || error2 instanceof DeliveryHttpError || error2 instanceof SignalHttpError) {
+    return false;
+  }
   return isFollowCredentialFailure(error2);
 }
-function isDeliveryCredentialLoss(error2) {
-  return isCredentialLoss(error2) || error2 instanceof DeliveryHttpError && (error2.status === 401 || error2.status === 403);
+function isServerConfirmedCredentialLoss(error2) {
+  if (error2 instanceof RenewalCredentialCheckError) {
+    return isConfirmedCredentialHttpFailure(error2.status, error2.code, "command");
+  }
+  if (error2 instanceof CommandHttpError || error2 instanceof DeliveryHttpError) {
+    return isConfirmedCredentialHttpFailure(error2.status, error2.code, "command");
+  }
+  if (error2 instanceof SignalHttpError) {
+    return isConfirmedCredentialHttpFailure(
+      error2.status,
+      error2.envelope.error,
+      "read"
+    );
+  }
+  return isFollowCredentialFailure(error2) && followErrorEnvelope(error2).error !== null;
+}
+function isH0SeatClaimRefusal(error2) {
+  return error2 instanceof DeliveryHttpError && error2.recognizedEnvelope && error2.status === 403 && error2.code === COMMAND_FATAL_ANSWERS.h0FenceCode;
+}
+function isForeignDeliveryHttpResponse(error2) {
+  return !error2.recognizedEnvelope;
+}
+function deliveryRetryCode(error2) {
+  if (error2 instanceof RenewalRetryError) return error2.code;
+  if (error2 instanceof DeliveryResponseError) return "malformed_response";
+  if (error2 instanceof DeliveryHttpError) {
+    return isForeignDeliveryHttpResponse(error2) ? `http_${error2.status}` : error2.code;
+  }
+  return "delivery_unreachable";
 }
 function isRetryableDeliveryError(error2) {
-  return error2 instanceof DeliveryTransportError || error2 instanceof DeliveryHttpError && (error2.status === 429 || error2.status >= 500);
+  if (error2 instanceof RenewalRetryError) return true;
+  if (error2 instanceof DeliveryTransportError) return true;
+  if (error2 instanceof DeliveryResponseError) return true;
+  if (error2 instanceof DeliveryMalformedResponseError) return true;
+  if (!(error2 instanceof DeliveryHttpError)) return false;
+  if (fatalCommandRefusal(error2)) return false;
+  if (isConfirmedCredentialHttpFailure(error2.status, error2.code, "command")) {
+    return false;
+  }
+  return true;
 }
 function deliveryRetryDelay(attempt, error2, random) {
   const exponent = Math.min(20, Math.max(0, attempt - 1));
@@ -57512,7 +57847,7 @@ function deliveryRetryDelay(attempt, error2, random) {
     LISTENER_DELIVERY_RETRY_MAX_MS,
     LISTENER_DELIVERY_RETRY_INITIAL_MS * 2 ** exponent
   );
-  const jitter = Math.floor(Math.max(0, Math.min(1, random())) * ceiling);
+  const jitter = Math.floor((0.5 + Math.max(0, Math.min(1, random())) * 0.5) * ceiling);
   const retryAfter = error2 instanceof DeliveryHttpError && error2.status === 429 ? error2.retryAfterMs ?? 0 : 0;
   return Math.max(jitter, retryAfter);
 }
@@ -57592,13 +57927,13 @@ async function defaultSleep(ms, signal) {
 function requireCapabilities(page) {
   if (!page.capabilities.senderOwnerRelation) {
     throw new ListenerCapabilityError(
-      "sender_relation_capability_missing",
+      ListenerCapabilityError.CODES[0],
       "the read service does not prove sender ownership; refusing to wake a model"
     );
   }
   if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
     throw new ListenerCapabilityError(
-      "cursor_capability_missing",
+      ListenerCapabilityError.CODES[1],
       "the read service does not support lossless ascending inbox pages; refusing to wake a model"
     );
   }
@@ -57607,13 +57942,13 @@ function classifyDeliveryMode(page, durableConfigured) {
   const { deliveryClaim, deliveryAck } = page.capabilities;
   if (deliveryClaim && !deliveryAck) {
     throw new ListenerCapabilityError(
-      "delivery_capability_inconsistent",
+      ListenerCapabilityError.CODES[2],
       "the read service delivery capability is inconsistent"
     );
   }
   if ((deliveryClaim || deliveryAck) && !durableConfigured) {
     throw new ListenerCapabilityError(
-      "delivery_configuration_missing",
+      ListenerCapabilityError.CODES[3],
       "durable delivery configuration is required by the read service"
     );
   }
@@ -57687,7 +58022,36 @@ async function closeBeforeStart(model, error2) {
 }
 async function runListenerRuntime(options) {
   const now = options.now ?? Date.now;
-  const sleep2 = options.sleep ?? defaultSleep;
+  const rawSleep = options.sleep ?? defaultSleep;
+  let waitGeneration = 0;
+  const renewalDeadline = () => {
+    const expiry = options.credentialSession.expiry;
+    return expiry === null || expiry === void 0 ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  };
+  const renewalWaitBoundary = () => {
+    const expiry = options.credentialSession.expiry;
+    if (expiry === null || expiry === void 0 || now() >= expiry) return null;
+    const dueAt = options.credentialSession.renewalAt;
+    if (dueAt === null) return null;
+    if (dueAt !== void 0 && now() < dueAt) return dueAt;
+    if (dueAt === void 0 && options.credentialSession.renewalDue === false) return null;
+    return renewalDeadline();
+  };
+  const capWaitMs = (ms) => {
+    const boundary = renewalWaitBoundary();
+    const wait = boundary === null ? ms : Math.min(ms, Math.max(0, boundary - now()));
+    return Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, wait);
+  };
+  const mayWaitForWake = () => {
+    const boundary = renewalWaitBoundary();
+    return boundary === null || now() < boundary;
+  };
+  const sleep2 = async (ms, signal) => {
+    const capped = capWaitMs(ms);
+    if (capped <= 0) return;
+    await rawSleep(capped, signal);
+    if (!signal?.aborted) waitGeneration += 1;
+  };
   const random = options.random ?? Math.random;
   const pageLimit = options.pageLimit ?? LISTENER_PAGE_LIMIT;
   const pollMs = options.pollMs ?? LISTENER_IDLE_POLL_MS;
@@ -57696,9 +58060,29 @@ async function runListenerRuntime(options) {
   const deferOverChars = options.deferOverChars ?? null;
   const deliveryHoldBudgetMs = options.deliveryHoldBudgetMs ?? LISTENER_DELIVERY_HOLD_BUDGET_MS;
   const abort = options.signal;
+  let lastRequestWaitGeneration = -1;
+  let requestGate = Promise.resolve();
+  const paceRequest = async () => {
+    const preceding = requestGate;
+    let release;
+    requestGate = new Promise((resolve7) => {
+      release = resolve7;
+    });
+    await preceding;
+    try {
+      if (lastRequestWaitGeneration === waitGeneration) {
+        await rawSleep(LISTENER_REQUEST_WAIT_FLOOR_MS, abort);
+        if (!abort?.aborted) waitGeneration += 1;
+      }
+      if (abort?.aborted) throw new DOMException("listener stopped", "AbortError");
+      lastRequestWaitGeneration = waitGeneration;
+    } finally {
+      release();
+    }
+  };
   const idleSleep = async (hadDelivery) => {
     if (hadDelivery) emptyIdleStreak = 0;
-    const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
+    const intervalMs = capWaitMs(nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS));
     if (!hadDelivery) emptyIdleStreak += 1;
     options.onEvent?.({
       type: "idle_poll",
@@ -57853,6 +58237,7 @@ async function runListenerRuntime(options) {
   let stop;
   let wakeSubscriber = options.wake ?? null;
   let reconcileDueAt = now();
+  let plannedWakeUntil = null;
   const ensureWake = () => {
     if (wakeSubscriber === null) {
       wakeSubscriber = options.createWake ? options.createWake(options.target) : createWakeSubscriber({ target: options.target, now });
@@ -57880,6 +58265,102 @@ async function runListenerRuntime(options) {
     }
     return nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
   };
+  const wakeWaitUntil = () => Math.max(
+    now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+    Math.min(reconcileDueAt, now() + waitCapMs(), renewalWaitBoundary() ?? Infinity)
+  );
+  let credentialWindow = null;
+  const confirmedLossCode = (error2) => {
+    if (error2 instanceof DeliveryHttpError || error2 instanceof CommandHttpError || error2 instanceof RenewalCredentialCheckError) {
+      const code2 = error2.code;
+      if (typeof code2 === "string" && /^[a-z0-9_-]{1,96}$/.test(code2)) return code2;
+    }
+    const code = followErrorEnvelope(error2).error;
+    if (typeof code === "string" && /^[a-z0-9_-]{1,96}$/.test(code)) return code;
+    return "unauthenticated";
+  };
+  const emitCredentialCheck = (delayMs) => {
+    if (credentialWindow === null) return;
+    options.onEvent?.({
+      type: "credential_check",
+      stopAt: new Date(credentialWindow.stopAtMs).toISOString(),
+      checks: credentialWindow.checks,
+      code: credentialWindow.code,
+      edge: credentialWindow.edge,
+      ...delayMs > 0 ? { nextAttemptAt: new Date(now() + delayMs).toISOString() } : {},
+      ...options.credentialSession.expiry == null ? {} : { renewalExpiresAt: new Date(options.credentialSession.expiry).toISOString() },
+      ts: eventTime(now)
+    });
+  };
+  const projectCredentialStopAt = (atMs) => {
+    if (credentialWindow === null) return atMs;
+    const remaining = Math.max(
+      0,
+      CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - credentialWindow.checks
+    );
+    return Math.max(
+      credentialWindow.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+      atMs + remaining * credentialCheckDelayMs(atMs)
+    );
+  };
+  const credentialCheckDelayMs = (atMs) => {
+    const expiry = options.credentialSession.expiry;
+    return expiry !== null && expiry !== void 0 && atMs < expiry ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+  };
+  const clearCredentialWindow = () => {
+    if (credentialWindow === null) return;
+    credentialWindow = null;
+    options.onEvent?.({
+      type: "credential_check_cleared",
+      ts: eventTime(now)
+    });
+  };
+  const holdCredentialWindow = async (kind, error2) => {
+    const atMs = now();
+    const currentExpiry = options.credentialSession.expiry;
+    if (currentExpiry !== null && currentExpiry !== void 0 && atMs >= currentExpiry) {
+      return { reason: "credential", error: new RenewalRevoked(
+        "predecessor_expired_local",
+        "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential."
+      ) };
+    }
+    if (kind === "confirmed") {
+      if (credentialWindow === null) {
+        credentialWindow = {
+          startedAtMs: atMs,
+          checks: 1,
+          stopAtMs: atMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+          code: confirmedLossCode(error2),
+          edge: error2 instanceof DeliveryHttpError || error2 instanceof CommandHttpError || error2 instanceof RenewalCredentialCheckError ? "command" : "read"
+        };
+      } else {
+        credentialWindow.checks += 1;
+        credentialWindow.code = confirmedLossCode(error2);
+        credentialWindow.edge = error2 instanceof DeliveryHttpError || error2 instanceof CommandHttpError || error2 instanceof RenewalCredentialCheckError ? "command" : "read";
+        credentialWindow.stopAtMs = projectCredentialStopAt(atMs);
+      }
+      const window2 = credentialWindow;
+      if (window2.checks >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS && atMs >= window2.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS) {
+        window2.stopAtMs = atMs;
+        emitCredentialCheck(0);
+        return { reason: "credential", error: asError(error2) };
+      }
+    } else if (credentialWindow !== null) {
+      credentialWindow.stopAtMs = Math.max(
+        credentialWindow.stopAtMs,
+        projectCredentialStopAt(atMs)
+      );
+    } else {
+      return "continue";
+    }
+    const delayMs = credentialCheckDelayMs(atMs);
+    emitCredentialCheck(capWaitMs(delayMs));
+    await sleep2(delayMs, abort);
+    if (abort?.aborted) return { reason: "cancelled" };
+    return "continue";
+  };
+  let ackAttempt = 0;
+  let ackReadDue = false;
   const sendPreparedAck = async (active) => {
     if (active.phase !== "ack_pending" || active.signalId === null || active.leaseId === null || active.leasedUntil === null || active.ack === null) {
       return {
@@ -57893,10 +58374,11 @@ async function runListenerRuntime(options) {
     } catch (error2) {
       return { reason: "fatal", error: asError(error2) };
     }
-    let attempt = 0;
     while (true) {
       try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const credential = await options.credentialSession.bearer();
+        await paceRequest();
         await deliveryClient.ackAgentDelivery({
           workspaceId: options.workspaceId,
           credential,
@@ -57909,6 +58391,9 @@ async function runListenerRuntime(options) {
         });
         await options.deliveryJournal.clearActive(eventTime(now));
         after = null;
+        ackAttempt = 0;
+        clearCredentialWindow();
+        options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
         options.onEvent?.({
           type: "delivery_ack",
           signalId: active.signalId,
@@ -57922,37 +58407,75 @@ async function runListenerRuntime(options) {
           try {
             await options.deliveryJournal.clearActive(eventTime(now));
             after = null;
+            options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
             return null;
           } catch (clearError) {
             return { reason: "fatal", error: asError(clearError) };
           }
         }
         if (abort?.aborted) return { reason: "cancelled" };
-        if (isDeliveryCredentialLoss(error2)) {
+        if (isH0SeatClaimRefusal(error2)) {
+          return { reason: "fatal", error: new ListenerH0SeatError() };
+        }
+        if (isLocalCredentialLoss(error2)) {
           return { reason: "credential", error: asError(error2) };
+        }
+        if (isServerConfirmedCredentialLoss(error2)) {
+          const decided = await holdCredentialWindow("confirmed", error2);
+          if (decided !== "continue") return decided;
+          continue;
+        }
+        if (credentialWindow !== null && isRetryableDeliveryError(error2)) {
+          const decided = await holdCredentialWindow("transient", error2);
+          if (decided !== "continue") return decided;
+          continue;
         }
         if (!isRetryableDeliveryError(error2)) {
           return { reason: "fatal", error: asError(error2) };
         }
-        attempt += 1;
-        await sleep2(deliveryRetryDelay(attempt, error2, random), abort);
+        ackAttempt += 1;
+        const delayMs = capWaitMs(deliveryRetryDelay(ackAttempt, error2, random));
+        options.onEvent?.({
+          type: "ack_retry",
+          code: deliveryRetryCode(error2),
+          attempt: ackAttempt,
+          delayMs,
+          ...error2 instanceof RenewalRetryError && error2.expiresAt !== null ? { renewalExpiresAt: new Date(error2.expiresAt).toISOString() } : {},
+          ts: eventTime(now)
+        });
+        await sleep2(delayMs, abort);
         if (abort?.aborted) return { reason: "cancelled" };
+        if (ackAttempt % LISTENER_CLAIM_REFUSALS_BEFORE_READ === 0) {
+          ackReadDue = true;
+          return null;
+        }
       }
     }
   };
   try {
+    let forceRead = false;
+    let claimRefusals = 0;
+    let deliveryAttempt = 0;
     while (true) {
       if (abort?.aborted) {
         stop = { reason: "cancelled" };
         break;
       }
       let skipRead = false;
-      if (ready && deliveryMode === "durable_claim" && wakeSubscriber !== null && wakeSubscriber.hasTopic) {
-        const until = Math.min(reconcileDueAt, now() + waitCapMs());
+      if (ready && !forceRead && deliveryMode === "durable_claim" && wakeSubscriber !== null && wakeSubscriber.hasTopic && mayWaitForWake()) {
+        const until = Math.max(
+          now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+          plannedWakeUntil ?? wakeWaitUntil()
+        );
+        plannedWakeUntil = null;
+        const wakeWaitStartedAt = now();
         const reason = await wakeSubscriber.next({
           until,
           ...abort ? { signal: abort } : {}
         });
+        const remainingFloorMs = LISTENER_REQUEST_WAIT_FLOOR_MS - (now() - wakeWaitStartedAt);
+        if (remainingFloorMs > 0 && !abort?.aborted) await rawSleep(remainingFloorMs, abort);
+        if (!abort?.aborted) waitGeneration += 1;
         emitWake();
         if (abort?.aborted) {
           stop = { reason: "cancelled" };
@@ -57969,11 +58492,17 @@ async function runListenerRuntime(options) {
             skipRead = true;
           }
         }
+      } else {
+        plannedWakeUntil = null;
       }
       let page = null;
+      forceRead = false;
+      ackReadDue = false;
       if (skipRead) {
       } else try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const token = await options.credentialSession.bearer();
+        await paceRequest();
         page = await readPage({
           token,
           after,
@@ -57990,9 +58519,14 @@ async function runListenerRuntime(options) {
           }
         });
         requireCapabilities(page);
+        if (page.rawCount >= pageLimit && page.nextCursor === null) {
+          throw new SignalMalformedError(
+            "the read service returned a full page without a safe cursor"
+          );
+        }
         applyWakeHint(page.wake);
         emitWake();
-        if (ready && readEpisodeStartedAtMs !== null) {
+        if (readEpisodeStartedAtMs !== null) {
           const recoveredAtMs = now();
           options.onEvent?.({
             type: "read_recovered",
@@ -58005,6 +58539,7 @@ async function runListenerRuntime(options) {
           readEpisodeAttempts = 0;
         }
         const nextMode = classifyDeliveryMode(page, durableConfigured);
+        clearCredentialWindow();
         if (nextMode !== deliveryMode) {
           deliveryMode = nextMode;
           options.onEvent?.({
@@ -58020,32 +58555,52 @@ async function runListenerRuntime(options) {
           stop = { reason: "cancelled" };
           break;
         }
-        if (isCredentialLoss(error2)) {
+        if (isLocalCredentialLoss(error2)) {
           stop = { reason: "credential", error: asError(error2) };
           break;
         }
-        const failure = classifySignalReadFailure(error2);
-        if (isRetryableFollowError(error2) || failure.code === "aborted" || failure.code === "host_ports_exhausted") {
-          readAttempt += 1;
-          const delayMs = failure.code === "host_ports_exhausted" ? LISTENER_HOST_PORTS_PROBE_MS : nextFollowBackoffMs(readAttempt, null, random);
-          if (ready) {
-            const failedAtMs = now();
-            if (readEpisodeStartedAtMs === null) {
-              readEpisodeStartedAtMs = failedAtMs;
-              readEpisodeAttempts = 0;
-            }
-            readEpisodeAttempts += 1;
-            options.onEvent?.({
-              type: "read_retry",
-              attempt: readAttempt,
-              episodeAttempt: readEpisodeAttempts,
-              episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
-              failure,
-              delayMs,
-              ts: new Date(failedAtMs).toISOString()
-            });
+        if (isServerConfirmedCredentialLoss(error2)) {
+          const decided = await holdCredentialWindow("confirmed", error2);
+          if (decided !== "continue") {
+            stop = decided;
+            break;
           }
+          forceRead = true;
+          continue;
+        }
+        const failure = classifySignalReadFailure(error2);
+        const transientRead = error2 instanceof RenewalRetryError || !fatalReadRefusal(error2) && (isRetryableFollowError(error2) || isForeignReadResponseFailure(error2) || failure.code === "aborted" || failure.code === "host_ports_exhausted");
+        if (credentialWindow !== null && transientRead) {
+          const decided = await holdCredentialWindow("transient", error2);
+          if (decided !== "continue") {
+            stop = decided;
+            break;
+          }
+          forceRead = true;
+          continue;
+        }
+        if (transientRead) {
+          readAttempt += 1;
+          const delayMs = capWaitMs(failure.code === "host_ports_exhausted" ? LISTENER_HOST_PORTS_PROBE_MS : nextFollowBackoffMs(readAttempt, null, random));
+          const failedAtMs = now();
+          if (readEpisodeStartedAtMs === null) {
+            readEpisodeStartedAtMs = failedAtMs;
+            readEpisodeAttempts = 0;
+          }
+          readEpisodeAttempts += 1;
+          options.onEvent?.({
+            type: "read_retry",
+            attempt: readAttempt,
+            episodeAttempt: readEpisodeAttempts,
+            episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
+            failure,
+            code: error2 instanceof RenewalRetryError ? error2.code : error2 instanceof ListenerCapabilityError ? error2.code : failure.code === "http_status" ? `http_${failure.httpStatus}` : failure.code,
+            ...error2 instanceof RenewalRetryError && error2.expiresAt !== null ? { renewalExpiresAt: new Date(error2.expiresAt).toISOString() } : {},
+            delayMs,
+            ts: new Date(failedAtMs).toISOString()
+          });
           await sleep2(delayMs, abort);
+          forceRead = true;
           continue;
         }
         stop = { reason: "fatal", error: asError(error2) };
@@ -58065,7 +58620,9 @@ async function runListenerRuntime(options) {
           void (async () => {
             let declared = false;
             try {
+              if (options.credentialSession.renewalDue === true) await paceRequest();
               const credential = await options.credentialSession.bearer();
+              await paceRequest();
               const outcome = await declareAgentModel(options.target, {
                 workspaceId: options.workspaceId,
                 model: declaredLabel,
@@ -58107,6 +58664,10 @@ async function runListenerRuntime(options) {
           if (abort?.aborted) {
             stop = { reason: "cancelled" };
             break;
+          }
+          if (ackReadDue) {
+            forceRead = true;
+            continue;
           }
           await idleSleep(true);
           continue;
@@ -58152,6 +58713,7 @@ async function runListenerRuntime(options) {
                 stop = ackStop;
                 break;
               }
+              if (ackReadDue) forceRead = true;
               continue;
             } catch (error2) {
               stop = { reason: "fatal", error: asError(error2) };
@@ -58216,11 +58778,12 @@ async function runListenerRuntime(options) {
           }
         }
         let result = null;
-        let deliveryAttempt = 0;
         while (result === null && !stop) {
           try {
             await journal.recordClaimAttempt(eventTime(now));
+            if (options.credentialSession.renewalDue === true) await paceRequest();
             const credential = await options.credentialSession.bearer();
+            await paceRequest();
             result = await deliveryClient.claimAgentInbox({
               workspaceId: options.workspaceId,
               credential,
@@ -58234,32 +58797,79 @@ async function runListenerRuntime(options) {
               stop = { reason: "cancelled" };
               break;
             }
-            if (isDeliveryCredentialLoss(error2)) {
+            if (isH0SeatClaimRefusal(error2)) {
+              stop = { reason: "fatal", error: new ListenerH0SeatError() };
+              break;
+            }
+            if (isLocalCredentialLoss(error2)) {
               stop = { reason: "credential", error: asError(error2) };
               break;
+            }
+            if (isServerConfirmedCredentialLoss(error2)) {
+              const decided = await holdCredentialWindow("confirmed", error2);
+              if (decided !== "continue") {
+                stop = decided;
+                break;
+              }
+              continue;
             }
             if (error2 instanceof DeliveryHttpError && error2.code === "rate_limited") {
               wakeSubscriber?.markRateLimited(now());
               emitWake();
             }
-            if (!isRetryableDeliveryError(error2)) {
+            const retryableClaim = isRetryableDeliveryError(error2);
+            const delayMs = capWaitMs(retryableClaim ? credentialWindow !== null ? RENEWAL_WINDOW_RETRY_MS : deliveryRetryDelay(deliveryAttempt + 1, error2, random) : 0);
+            if (retryableClaim) {
+              claimRefusals += 1;
+              options.onEvent?.({
+                type: "claim_retry",
+                code: deliveryRetryCode(error2),
+                attempts: claimRefusals,
+                delayMs: credentialWindow !== null ? capWaitMs(options.credentialSession.expiry == null ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS : RENEWAL_WINDOW_RETRY_MS) : delayMs,
+                ...error2 instanceof RenewalRetryError && error2.expiresAt !== null ? { renewalExpiresAt: new Date(error2.expiresAt).toISOString() } : {},
+                ts: eventTime(now)
+              });
+            }
+            if (credentialWindow !== null && retryableClaim) {
+              const decided = await holdCredentialWindow("transient", error2);
+              if (decided !== "continue") {
+                stop = decided;
+                break;
+              }
+              if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+                forceRead = true;
+                break;
+              }
+              continue;
+            }
+            if (!retryableClaim) {
               stop = { reason: "fatal", error: asError(error2) };
               break;
             }
             deliveryAttempt += 1;
-            const delayMs = deliveryRetryDelay(deliveryAttempt, error2, random);
             await sleep2(delayMs, abort);
             if (abort?.aborted) {
               stop = { reason: "cancelled" };
               break;
             }
+            if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+              forceRead = true;
+              break;
+            }
           }
         }
         if (stop) break;
+        if (forceRead) continue;
         if (result === null) {
           stop = { reason: "fatal", error: new Error("delivery claim did not settle") };
           break;
         }
+        if (claimRefusals > 0) {
+          claimRefusals = 0;
+          deliveryAttempt = 0;
+          options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
+        }
+        clearCredentialWindow();
         applyWakeHint(result.wake);
         if (!skipRead && wakeSubscriber !== null && wakeSubscriber.hasTopic) {
           wakeSubscriber.noteReconcile(now());
@@ -58288,7 +58898,7 @@ async function runListenerRuntime(options) {
           if (active.phase === "leased") {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay did not return the stored lease")
+              error: new ListenerLeaseResponseError("delivery claim replay did not return the stored lease")
             };
             break;
           }
@@ -58300,12 +58910,14 @@ async function runListenerRuntime(options) {
           }
           if (wakeSubscriber !== null && wakeSubscriber.hasTopic) {
             const snap = wakeSubscriber.snapshot(now());
-            const intervalMs = snap.mode === LISTENER_WAKE_MODE_PUSH ? LISTENER_RECONCILE_POLL_MS : nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
+            plannedWakeUntil = wakeWaitUntil();
+            const intervalMs = plannedWakeUntil - now();
             if (snap.mode === LISTENER_WAKE_MODE_PUSH) emptyIdleStreak = 0;
             else emptyIdleStreak += 1;
             options.onEvent?.({
               type: "idle_poll",
               intervalMs,
+              pushReconcileWait: snap.mode === LISTENER_WAKE_MODE_PUSH && !skipRead,
               ts: eventTime(now)
             });
             emitWake();
@@ -58322,14 +58934,14 @@ async function runListenerRuntime(options) {
         });
         const leasedUntilMs = Date.parse(claimed.leasedUntil);
         if (!Number.isFinite(leasedUntilMs) || leasedUntilMs > now() + LISTENER_DELIVERY_MAX_LEASE_MS + LISTENER_LEASE_CLOCK_SKEW_ALLOWANCE_MS) {
-          stop = { reason: "fatal", error: new Error("delivery lease deadline is invalid") };
+          stop = { reason: "fatal", error: new ListenerLeaseResponseError("delivery lease deadline is invalid") };
           break;
         }
         if (active.phase === "leased") {
           if (!exactRecoveredLease(active, claimed)) {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay does not match the stored lease")
+              error: new ListenerLeaseResponseError("delivery claim replay does not match the stored lease")
             };
             break;
           }
@@ -58401,8 +59013,20 @@ async function runListenerRuntime(options) {
         } catch (error2) {
           if (abort?.aborted) {
             stop = { reason: "cancelled" };
-          } else if (isCredentialLoss(error2)) {
+          } else if (isLocalCredentialLoss(error2)) {
             stop = { reason: "credential", error: asError(error2) };
+          } else if (isServerConfirmedCredentialLoss(error2)) {
+            const decided = await holdCredentialWindow("confirmed", error2);
+            if (decided !== "continue") stop = decided;
+            else {
+              continue;
+            }
+          } else if (credentialWindow !== null && (isRetryableFollowError(error2) || isRetryableDeliveryError(error2))) {
+            const decided = await holdCredentialWindow("transient", error2);
+            if (decided !== "continue") stop = decided;
+            else {
+              continue;
+            }
           } else if (isAbort(error2)) {
             stop = { reason: "cancelled" };
           } else {
@@ -58430,6 +59054,7 @@ async function runListenerRuntime(options) {
             stop = ackStop;
             break;
           }
+          if (ackReadDue) forceRead = true;
         } catch (error2) {
           stop = { reason: "fatal", error: asError(error2) };
           break;
@@ -58490,8 +59115,26 @@ async function runListenerRuntime(options) {
             stop = { reason: "cancelled" };
             break;
           }
-          if (isCredentialLoss(error2)) {
+          if (isLocalCredentialLoss(error2)) {
             stop = { reason: "credential", error: asError(error2) };
+            break;
+          }
+          if (isServerConfirmedCredentialLoss(error2)) {
+            const decided = await holdCredentialWindow("confirmed", error2);
+            if (decided !== "continue") {
+              stop = decided;
+              break;
+            }
+            stop = { reason: "cancelled" };
+            break;
+          }
+          if (credentialWindow !== null && (isRetryableFollowError(error2) || isRetryableDeliveryError(error2))) {
+            const decided = await holdCredentialWindow("transient", error2);
+            if (decided !== "continue") {
+              stop = decided;
+              break;
+            }
+            stop = { reason: "cancelled" };
             break;
           }
           if (isAbort(error2)) {
@@ -58502,18 +59145,13 @@ async function runListenerRuntime(options) {
           break;
         }
       }
+      if (stop?.reason === "cancelled" && abort?.aborted !== true && credentialWindow !== null) {
+        stop = void 0;
+        continue;
+      }
       if (stop) break;
       const fullPage = page.rawCount >= pageLimit;
       if (fullPage) {
-        if (page.nextCursor === null) {
-          stop = {
-            reason: "fatal",
-            error: new Error(
-              "the read service returned a full page without a safe cursor"
-            )
-          };
-          break;
-        }
         after = page.nextCursor;
         continue;
       }
@@ -58882,6 +59520,19 @@ var MAX_CONTROL_BYTES = 8 * 1024;
 var CONTROL_TIMEOUT_MS = 2e3;
 var START_LOCK_WAIT_MS = 2e3;
 var START_LOCK_STALE_MS = 1e4;
+var LISTENER_RUNNING_STATES = [
+  "starting",
+  "ready",
+  "credential_check",
+  "claim_retry",
+  "ack_retry",
+  "stopping"
+];
+var LISTENER_STATUS_STATES = [
+  ...LISTENER_RUNNING_STATES,
+  "stopped",
+  "failed"
+];
 var LISTENER_DELIVERY_FAILING_THRESHOLD = 3;
 var ListenerAlreadyRunningError = class extends Error {
   constructor() {
@@ -58962,7 +59613,16 @@ var STATUS_ALLOWED_KEYS = /* @__PURE__ */ new Set([
   "activityPublishFailures",
   "activityLastErrorCode",
   "idlePollMs",
-  "wake"
+  "pushReconcileWaitMs",
+  "wake",
+  "nextAttemptAt",
+  "credentialStopAt",
+  "renewalExpiresAt",
+  "credentialCheckEdge",
+  "claimRetryCount",
+  "projectDirectory",
+  "targetUrl",
+  "lastRetryEdge"
 ]);
 var STATUS_ACTIVITY_ERROR_CODES = /* @__PURE__ */ new Set([
   "activity_credential_failed",
@@ -59081,9 +59741,16 @@ function parseStatus(raw, rejectUnknownKeys = false) {
   const readHealth = row.readHealth === void 0 ? void 0 : parseListenerReadHealth(row.readHealth, rejectUnknownKeys);
   const heldBackDeliveries = row.heldBackDeliveries === void 0 ? void 0 : parseHeldBackDeliveries(row.heldBackDeliveries);
   const wake = row.wake === void 0 ? void 0 : parseListenerWake(row.wake, rejectUnknownKeys);
-  if (row.version !== 1 || typeof row.instanceId !== "string" || !UUID_RE19.test(row.instanceId) || row.provider !== "grok" && row.provider !== "opencode" && row.provider !== "claude" && row.provider !== "codex" || typeof row.profileId !== "string" || typeof row.workspaceId !== "string" || !UUID_RE19.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE19.test(row.principalId) || !Number.isSafeInteger(row.pid) || row.pid < 1 || typeof row.state !== "string" || !["starting", "ready", "stopping", "stopped", "failed"].includes(row.state) || typeof row.startedAt !== "string" || !Number.isFinite(Date.parse(row.startedAt)) || !(row.readyAt === null || typeof row.readyAt === "string" && Number.isFinite(Date.parse(row.readyAt))) || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) || !(row.stoppedAt === null || typeof row.stoppedAt === "string" && Number.isFinite(Date.parse(row.stoppedAt))) || !nullableUuid3(row.lastSignalId) || !(row.lastErrorCode === null || typeof row.lastErrorCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorCode)) || !(row.lastErrorDetail === void 0 || row.lastErrorDetail === null || typeof row.lastErrorDetail === "string" && row.lastErrorDetail.length > 0 && row.lastErrorDetail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastErrorDetail)) || !(row.lastErrorReasonCode === void 0 || row.lastErrorReasonCode === null || typeof row.lastErrorReasonCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorReasonCode)) || !(row.providerExecutable === void 0 || row.providerExecutable === null || typeof row.providerExecutable === "string" && (0, import_node_path15.isAbsolute)(row.providerExecutable)) || !(row.providerVersion === void 0 || row.providerVersion === null || typeof row.providerVersion === "string" && SEMVER_RE2.test(row.providerVersion)) || !(row.providerLastMeasuredVersion === void 0 || row.providerLastMeasuredVersion === null || typeof row.providerLastMeasuredVersion === "string" && SEMVER_RE2.test(row.providerLastMeasuredVersion)) || !(row.providerBundledAgentSdkVersion === void 0 || row.providerBundledAgentSdkVersion === null || typeof row.providerBundledAgentSdkVersion === "string" && SEMVER_RE2.test(row.providerBundledAgentSdkVersion)) || !(row.providerBundledClaudeCodeVersion === void 0 || row.providerBundledClaudeCodeVersion === null || typeof row.providerBundledClaudeCodeVersion === "string" && SEMVER_RE2.test(row.providerBundledClaudeCodeVersion)) || !(row.providerMinimumRequiredVersion === void 0 || row.providerMinimumRequiredVersion === null || typeof row.providerMinimumRequiredVersion === "string" && SEMVER_RE2.test(row.providerMinimumRequiredVersion)) || !(row.cswarmVersion === void 0 || row.cswarmVersion === null || typeof row.cswarmVersion === "string" && SEMVER_RE2.test(row.cswarmVersion)) || (row.providerVersion === null || row.providerVersion === void 0) !== (row.providerLastMeasuredVersion === null || row.providerLastMeasuredVersion === void 0) || !(row.lastWorkerStderrTail === void 0 || row.lastWorkerStderrTail === null || typeof row.lastWorkerStderrTail === "string" && row.lastWorkerStderrTail.length > 0 && row.lastWorkerStderrTail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastWorkerStderrTail)) || typeof row.logPath !== "string" || !(0, import_node_path15.isAbsolute)(row.logPath) || !(row.deliveryMode === void 0 || row.deliveryMode === null || typeof row.deliveryMode === "string" && STATUS_DELIVERY_MODES.has(row.deliveryMode)) || !(row.pendingDeliveryCount === void 0 || nullableCount(row.pendingDeliveryCount)) || !(row.lastTerminalDeliveryFailureCount === void 0 || nullableCount(row.lastTerminalDeliveryFailureCount)) || !(row.lastTerminalDeliveryFailureAt === void 0 || nullableTimestamp3(row.lastTerminalDeliveryFailureAt)) || !(row.lastClaimAt === void 0 || nullableTimestamp3(row.lastClaimAt)) || !(row.lastAckAt === void 0 || nullableTimestamp3(row.lastAckAt)) || !(row.lastAckOutcome === void 0 || row.lastAckOutcome === null || typeof row.lastAckOutcome === "string" && deliveryOutcomes.has(row.lastAckOutcome)) || !(row.consecutiveAckFailureCount === void 0 || nullableCount(row.consecutiveAckFailureCount)) || !(row.lastAckSignalId === void 0 || row.lastAckSignalId === null || typeof row.lastAckSignalId === "string" && UUID_RE19.test(row.lastAckSignalId)) || !(row.currentDeliverySignalId === void 0 || row.currentDeliverySignalId === null || typeof row.currentDeliverySignalId === "string" && UUID_RE19.test(row.currentDeliverySignalId)) || !(row.currentDeliverySince === void 0 || nullableTimestamp3(row.currentDeliverySince)) || heldBackDeliveries === null || !(row.pendingDeliveryCountAt === void 0 || nullableTimestamp3(row.pendingDeliveryCountAt)) || !(row.routeMode === void 0 || typeof row.routeMode === "string" && isStoredListenerRouteMode(row.routeMode)) || !(row.deferOverChars === void 0 || row.deferOverChars === null || typeof row.deferOverChars === "number" && Number.isSafeInteger(row.deferOverChars) && row.deferOverChars >= 1 && row.deferOverChars <= 1e4) || !(row.pendingForMainCount === void 0 || typeof row.pendingForMainCount === "number" && Number.isSafeInteger(row.pendingForMainCount) && row.pendingForMainCount >= 0) || !(row.droppedForMainCount === void 0 || typeof row.droppedForMainCount === "number" && Number.isSafeInteger(row.droppedForMainCount) && row.droppedForMainCount >= 0) || readHealth === null || wake === null || !(row.connectionsOpened === void 0 || typeof row.connectionsOpened === "number" && Number.isSafeInteger(row.connectionsOpened) && row.connectionsOpened >= 0) || !(row.connectionReuseRatio === void 0 || typeof row.connectionReuseRatio === "number" && Number.isFinite(row.connectionReuseRatio) && row.connectionReuseRatio >= 0) || !(row.activityPublishFailures === void 0 || typeof row.activityPublishFailures === "number" && Number.isSafeInteger(row.activityPublishFailures) && row.activityPublishFailures >= 0) || !(row.activityLastErrorCode === void 0 || row.activityLastErrorCode === null || typeof row.activityLastErrorCode === "string" && STATUS_ACTIVITY_ERROR_CODES.has(
+  if (row.version !== 1 || typeof row.instanceId !== "string" || !UUID_RE19.test(row.instanceId) || row.provider !== "grok" && row.provider !== "opencode" && row.provider !== "claude" && row.provider !== "codex" || typeof row.profileId !== "string" || typeof row.workspaceId !== "string" || !UUID_RE19.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE19.test(row.principalId) || !Number.isSafeInteger(row.pid) || row.pid < 1 || typeof row.state !== "string" || !LISTENER_STATUS_STATES.includes(row.state) || typeof row.startedAt !== "string" || !Number.isFinite(Date.parse(row.startedAt)) || !(row.readyAt === null || typeof row.readyAt === "string" && Number.isFinite(Date.parse(row.readyAt))) || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) || !(row.stoppedAt === null || typeof row.stoppedAt === "string" && Number.isFinite(Date.parse(row.stoppedAt))) || !nullableUuid3(row.lastSignalId) || !(row.lastErrorCode === null || typeof row.lastErrorCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorCode)) || !(row.lastErrorDetail === void 0 || row.lastErrorDetail === null || typeof row.lastErrorDetail === "string" && row.lastErrorDetail.length > 0 && row.lastErrorDetail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastErrorDetail)) || !(row.lastErrorReasonCode === void 0 || row.lastErrorReasonCode === null || typeof row.lastErrorReasonCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorReasonCode)) || !(row.providerExecutable === void 0 || row.providerExecutable === null || typeof row.providerExecutable === "string" && (0, import_node_path15.isAbsolute)(row.providerExecutable)) || !(row.providerVersion === void 0 || row.providerVersion === null || typeof row.providerVersion === "string" && SEMVER_RE2.test(row.providerVersion)) || !(row.providerLastMeasuredVersion === void 0 || row.providerLastMeasuredVersion === null || typeof row.providerLastMeasuredVersion === "string" && SEMVER_RE2.test(row.providerLastMeasuredVersion)) || !(row.providerBundledAgentSdkVersion === void 0 || row.providerBundledAgentSdkVersion === null || typeof row.providerBundledAgentSdkVersion === "string" && SEMVER_RE2.test(row.providerBundledAgentSdkVersion)) || !(row.providerBundledClaudeCodeVersion === void 0 || row.providerBundledClaudeCodeVersion === null || typeof row.providerBundledClaudeCodeVersion === "string" && SEMVER_RE2.test(row.providerBundledClaudeCodeVersion)) || !(row.providerMinimumRequiredVersion === void 0 || row.providerMinimumRequiredVersion === null || typeof row.providerMinimumRequiredVersion === "string" && SEMVER_RE2.test(row.providerMinimumRequiredVersion)) || !(row.cswarmVersion === void 0 || row.cswarmVersion === null || typeof row.cswarmVersion === "string" && SEMVER_RE2.test(row.cswarmVersion)) || (row.providerVersion === null || row.providerVersion === void 0) !== (row.providerLastMeasuredVersion === null || row.providerLastMeasuredVersion === void 0) || !(row.lastWorkerStderrTail === void 0 || row.lastWorkerStderrTail === null || typeof row.lastWorkerStderrTail === "string" && row.lastWorkerStderrTail.length > 0 && row.lastWorkerStderrTail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastWorkerStderrTail)) || typeof row.logPath !== "string" || !(0, import_node_path15.isAbsolute)(row.logPath) || !(row.deliveryMode === void 0 || row.deliveryMode === null || typeof row.deliveryMode === "string" && STATUS_DELIVERY_MODES.has(row.deliveryMode)) || !(row.pendingDeliveryCount === void 0 || nullableCount(row.pendingDeliveryCount)) || !(row.lastTerminalDeliveryFailureCount === void 0 || nullableCount(row.lastTerminalDeliveryFailureCount)) || !(row.lastTerminalDeliveryFailureAt === void 0 || nullableTimestamp3(row.lastTerminalDeliveryFailureAt)) || !(row.lastClaimAt === void 0 || nullableTimestamp3(row.lastClaimAt)) || !(row.lastAckAt === void 0 || nullableTimestamp3(row.lastAckAt)) || !(row.lastAckOutcome === void 0 || row.lastAckOutcome === null || typeof row.lastAckOutcome === "string" && deliveryOutcomes.has(row.lastAckOutcome)) || !(row.consecutiveAckFailureCount === void 0 || nullableCount(row.consecutiveAckFailureCount)) || !(row.lastAckSignalId === void 0 || row.lastAckSignalId === null || typeof row.lastAckSignalId === "string" && UUID_RE19.test(row.lastAckSignalId)) || !(row.currentDeliverySignalId === void 0 || row.currentDeliverySignalId === null || typeof row.currentDeliverySignalId === "string" && UUID_RE19.test(row.currentDeliverySignalId)) || !(row.currentDeliverySince === void 0 || nullableTimestamp3(row.currentDeliverySince)) || heldBackDeliveries === null || !(row.pendingDeliveryCountAt === void 0 || nullableTimestamp3(row.pendingDeliveryCountAt)) || !(row.routeMode === void 0 || typeof row.routeMode === "string" && isStoredListenerRouteMode(row.routeMode)) || !(row.deferOverChars === void 0 || row.deferOverChars === null || typeof row.deferOverChars === "number" && Number.isSafeInteger(row.deferOverChars) && row.deferOverChars >= 1 && row.deferOverChars <= 1e4) || !(row.pendingForMainCount === void 0 || typeof row.pendingForMainCount === "number" && Number.isSafeInteger(row.pendingForMainCount) && row.pendingForMainCount >= 0) || !(row.droppedForMainCount === void 0 || typeof row.droppedForMainCount === "number" && Number.isSafeInteger(row.droppedForMainCount) && row.droppedForMainCount >= 0) || readHealth === null || wake === null || !(row.connectionsOpened === void 0 || typeof row.connectionsOpened === "number" && Number.isSafeInteger(row.connectionsOpened) && row.connectionsOpened >= 0) || !(row.connectionReuseRatio === void 0 || typeof row.connectionReuseRatio === "number" && Number.isFinite(row.connectionReuseRatio) && row.connectionReuseRatio >= 0) || !(row.activityPublishFailures === void 0 || typeof row.activityPublishFailures === "number" && Number.isSafeInteger(row.activityPublishFailures) && row.activityPublishFailures >= 0) || !(row.activityLastErrorCode === void 0 || row.activityLastErrorCode === null || typeof row.activityLastErrorCode === "string" && STATUS_ACTIVITY_ERROR_CODES.has(
     row.activityLastErrorCode
-  )) || !(row.idlePollMs === void 0 || row.idlePollMs === null || typeof row.idlePollMs === "number" && Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) {
+  )) || !(row.idlePollMs === void 0 || row.idlePollMs === null || typeof row.idlePollMs === "number" && Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0) || !(row.pushReconcileWaitMs === void 0 || row.pushReconcileWaitMs === null || typeof row.pushReconcileWaitMs === "number" && Number.isSafeInteger(row.pushReconcileWaitMs) && row.pushReconcileWaitMs >= 0) || !(row.nextAttemptAt === void 0 || nullableTimestamp3(row.nextAttemptAt)) || !(row.credentialStopAt === void 0 || nullableTimestamp3(row.credentialStopAt)) || !(row.renewalExpiresAt === void 0 || nullableTimestamp3(row.renewalExpiresAt)) || !(row.credentialCheckEdge === void 0 || row.credentialCheckEdge === null || row.credentialCheckEdge === "read" || row.credentialCheckEdge === "command") || !(row.claimRetryCount === void 0 || typeof row.claimRetryCount === "number" && Number.isSafeInteger(row.claimRetryCount) && row.claimRetryCount >= 0) || !(row.projectDirectory === void 0 || typeof row.projectDirectory === "string" && (0, import_node_path15.isAbsolute)(row.projectDirectory)) || !(row.targetUrl === void 0 || typeof row.targetUrl === "string" && (() => {
+    try {
+      const url = new URL(row.targetUrl);
+      return (url.protocol === "https:" || url.protocol === "http:") && url.origin === row.targetUrl && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  })()) || !(row.lastRetryEdge === void 0 || row.lastRetryEdge === "read" || row.lastRetryEdge === "command" || row.lastRetryEdge === "local")) {
     throw new Error("stored listener status is malformed");
   }
   const routeMode = row.routeMode ?? "worker";
@@ -59122,12 +59789,14 @@ function parseStatus(raw, rejectUnknownKeys = false) {
     providerVersion: row.providerVersion ?? null,
     providerLastMeasuredVersion: row.providerLastMeasuredVersion ?? null,
     ...row.cswarmVersion === void 0 ? {} : { cswarmVersion: row.cswarmVersion },
+    ...row.renewalExpiresAt === void 0 ? {} : { renewalExpiresAt: row.renewalExpiresAt ?? null },
     routeMode,
     deferOverChars,
     pendingForMainCount: row.pendingForMainCount ?? 0,
     droppedForMainCount: row.droppedForMainCount ?? 0,
     ...readHealth === void 0 ? {} : { readHealth },
     ...row.idlePollMs === void 0 ? {} : { idlePollMs: row.idlePollMs ?? null },
+    ...row.pushReconcileWaitMs === void 0 ? {} : { pushReconcileWaitMs: row.pushReconcileWaitMs ?? null },
     ...wake === void 0 ? {} : { wake }
   };
 }
@@ -59540,7 +60209,9 @@ async function queryListenerControl(paths, command2, timeoutMs = CONTROL_TIMEOUT
 
 // src/listener/supervisor.ts
 var import_node_crypto20 = require("node:crypto");
+init_signals();
 init_delivery();
+init_command_client();
 init_credential_redaction();
 init_session_proof();
 init_types2();
@@ -59549,12 +60220,25 @@ var UUID_RE20 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 var LISTENER_RESTART_MAX_ATTEMPTS = 5;
 var LISTENER_RESTART_INITIAL_MS = 1e3;
 var LISTENER_RESTART_MAX_MS = 6e4;
+var LISTENER_RESTART_SUSTAINED_MAX_MS = 5 * 6e4;
+var LISTENER_RESTART_CLEAN_RUN_MS = 6e4;
 function nextListenerRestartMs(attempt, policy = {}, random = Math.random) {
   const initial = policy.initialMs ?? LISTENER_RESTART_INITIAL_MS;
   const max = policy.maxMs ?? LISTENER_RESTART_MAX_MS;
   const safeAttempt = Math.max(1, Math.min(attempt, 16));
   const exp = Math.min(max, initial * 2 ** (safeAttempt - 1));
   return Math.floor(exp * (0.5 + random() * 0.5));
+}
+function sustainedListenerRestartMs(policy = {}, random = Math.random) {
+  const requested = policy.sustainedMaxMs ?? LISTENER_RESTART_SUSTAINED_MAX_MS;
+  const cap = Math.min(Math.max(0, requested), 5 * 6e4);
+  return Math.floor(cap * (0.5 + random() * 0.5));
+}
+function listenerRestartDelayMs(attempt, policy = {}, random = Math.random) {
+  if (policy.maxAttempts === void 0 && attempt > LISTENER_RESTART_MAX_ATTEMPTS) {
+    return sustainedListenerRestartMs(policy, random);
+  }
+  return nextListenerRestartMs(attempt, policy, random);
 }
 async function defaultRestartSleep(ms, signal) {
   if (ms <= 0 || signal.aborted) return;
@@ -59585,8 +60269,17 @@ function safeErrorCode(error2) {
     const normalized = explicit.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
     if (normalized.length > 0) return normalized.slice(0, 96);
   }
+  const read = classifySignalReadFailure(error2);
+  if (read.code === "http_status") return `http_${read.httpStatus}`;
+  if (read.code === "malformed_response") return read.code;
+  if (error2 instanceof DeliveryResponseError) return "malformed_response";
   const name = error2.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
   return name.slice(0, 96) || "listener_error";
+}
+function retryEdgeOf(error2) {
+  if (error2 instanceof DeliveryHttpError || error2 instanceof DeliveryResponseError || error2 instanceof DeliveryTransportError || error2 instanceof CommandHttpError || error2 instanceof CommandTransportError) return "command";
+  if (classifySignalReadFailure(error2).code !== "unclassified") return "read";
+  return "local";
 }
 function localDiagnostic(message, maxChars) {
   const redacted = message.replace(
@@ -59658,6 +60351,8 @@ async function runListenerSupervisor(options) {
     profileId: options.profileId,
     workspaceId: options.workspaceId.toLowerCase(),
     principalId: options.principalId.toLowerCase(),
+    ...options.projectDirectory ? { projectDirectory: options.projectDirectory } : {},
+    ...options.targetUrl ? { targetUrl: options.targetUrl } : {},
     pid: process.pid,
     state: "starting",
     startedAt,
@@ -59704,9 +60399,16 @@ async function runListenerSupervisor(options) {
     activityPublishFailures: 0,
     activityLastErrorCode: null,
     idlePollMs: null,
+    pushReconcileWaitMs: null,
     wake: emptyListenerWakeStatus(),
+    nextAttemptAt: null,
+    credentialStopAt: null,
+    credentialCheckEdge: null,
+    claimRetryCount: 0,
     logPath: options.paths.logPath
   };
+  let lastClaimRetryCode = null;
+  let lastAckRetryCode = null;
   let writes = Promise.resolve();
   const chain = (work) => {
     writes = writes.then(work).catch(() => void 0);
@@ -59778,6 +60480,7 @@ async function runListenerSupervisor(options) {
     return fitted.length > 0 ? fitted : null;
   };
   let lastWakePersistMs = 0;
+  let attemptReadyAtMs = null;
   const onEvent = (event) => {
     if (event.type === "wake") {
       const previousWake = status.wake;
@@ -59825,9 +60528,10 @@ async function runListenerSupervisor(options) {
       status = {
         ...status,
         idlePollMs: event.intervalMs,
+        pushReconcileWaitMs: event.pushReconcileWait ? event.intervalMs : status.pushReconcileWaitMs,
         readHealth: recordListenerClaimCadence(
           status.readHealth ?? emptyListenerReadHealth(),
-          event.intervalMs > 0 ? event.intervalMs : 1,
+          status.wake?.mode === LISTENER_WAKE_MODE_PUSH ? LISTENER_RECONCILE_POLL_MS : event.intervalMs > 0 ? event.intervalMs : 1,
           event.ts
         ),
         updatedAt: event.ts
@@ -59841,9 +60545,13 @@ async function runListenerSupervisor(options) {
       return;
     }
     if (event.type === "ready") {
+      attemptReadyAtMs = now();
       const versionNotice = options.getProviderVersionNotice?.() ?? null;
       transition("ready", {
         readyAt: event.ts,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
         // Deliberately does NOT clear consecutiveAckFailureCount. Reaching
         // `ready` is not provider proof: the permission canary is its own
         // prompt, and a provider can answer it and fail every real one --
@@ -59908,9 +60616,97 @@ async function runListenerSupervisor(options) {
       });
       return;
     }
+    if (event.type === "credential_check") {
+      transition("credential_check", {
+        credentialStopAt: event.stopAt,
+        credentialCheckEdge: event.edge,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorCode: event.code,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: event.nextAttemptAt ?? null
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check",
+        failure_code: event.code,
+        attempt: event.checks,
+        reason: event.stopAt
+      });
+      return;
+    }
+    if (event.type === "credential_check_cleared") {
+      transition(status.claimRetryCount && status.claimRetryCount > 0 ? "claim_retry" : status.readyAt === null ? "starting" : "ready", {
+        credentialStopAt: null,
+        credentialCheckEdge: null,
+        renewalExpiresAt: null,
+        lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0 ? lastClaimRetryCode : null,
+        lastRetryEdge: status.claimRetryCount && status.claimRetryCount > 0 ? "command" : void 0,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: null
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check_cleared"
+      });
+      return;
+    }
+    if (event.type === "claim_retry") {
+      lastClaimRetryCode = event.code;
+      transition(status.credentialStopAt ? "credential_check" : "claim_retry", {
+        lastRetryEdge: "command",
+        claimRetryCount: event.attempts,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString()
+      });
+      log({ ts: event.ts, event: "listener_claim_retry", failure_code: event.code, attempt: event.attempts });
+      return;
+    }
+    if (event.type === "claim_retry_cleared") {
+      lastClaimRetryCode = null;
+      transition(status.credentialStopAt ? "credential_check" : status.readyAt === null ? "starting" : "ready", {
+        claimRetryCount: 0,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : null,
+        lastErrorDetail: null,
+        nextAttemptAt: null,
+        renewalExpiresAt: null
+      });
+      return;
+    }
+    if (event.type === "ack_retry") {
+      lastAckRetryCode = event.code;
+      transition(status.credentialStopAt ? "credential_check" : "ack_retry", {
+        lastRetryEdge: "command",
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString()
+      });
+      log({ ts: event.ts, event: "listener_ack_retry", failure_code: event.code, attempt: event.attempt });
+      return;
+    }
+    if (event.type === "ack_retry_cleared") {
+      lastAckRetryCode = null;
+      if (status.state === "ack_retry") {
+        transition(status.readyAt === null ? "starting" : "ready", {
+          lastErrorCode: null,
+          lastErrorDetail: null,
+          nextAttemptAt: null,
+          renewalExpiresAt: null
+        });
+      }
+      return;
+    }
     if (event.type === "read_retry") {
       status = {
         ...status,
+        lastErrorCode: event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastRetryEdge: "read",
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
         readHealth: recordListenerReadRetry(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -59929,6 +60725,7 @@ async function runListenerSupervisor(options) {
         attempt: event.attempt,
         episode_attempt: event.episodeAttempt,
         reason_code: event.failure.code,
+        failure_code: event.code,
         ...event.failure.httpStatus === null ? {} : { http_status: event.failure.httpStatus },
         ...event.failure.errorConstructor === null ? {} : { error_constructor: event.failure.errorConstructor },
         delay_ms: event.delayMs
@@ -59938,6 +60735,12 @@ async function runListenerSupervisor(options) {
     if (event.type === "read_recovered") {
       status = {
         ...status,
+        ...status.lastRetryEdge === "read" ? {
+          nextAttemptAt: null,
+          renewalExpiresAt: null,
+          lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0 ? lastClaimRetryCode : status.state === "ack_retry" ? lastAckRetryCode : null,
+          lastRetryEdge: status.claimRetryCount && status.claimRetryCount > 0 || status.state === "ack_retry" ? "command" : void 0
+        } : {},
         readHealth: recordListenerReadRecovery(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -60141,16 +60944,18 @@ async function runListenerSupervisor(options) {
     });
   };
   const policy = options.restart ?? {};
-  const maxAttempts = policy.maxAttempts ?? LISTENER_RESTART_MAX_ATTEMPTS;
+  const explicitCeiling = policy.maxAttempts;
   const isRestartable = policy.isRestartable ?? isRestartableListenerStop;
   const restartSleep = policy.sleep ?? defaultRestartSleep;
   const restartRandom = policy.random ?? Math.random;
+  const cleanRunMs = policy.cleanRunMs ?? LISTENER_RESTART_CLEAN_RUN_MS;
   try {
     let restarts = 0;
     let exhausted = false;
     let eligible = false;
     let stop;
     for (; ; ) {
+      attemptReadyAtMs = null;
       stop = await options.run(
         controller.signal,
         onEvent,
@@ -60159,14 +60964,23 @@ async function runListenerSupervisor(options) {
       if (stop.reason === "cancelled" || controller.signal.aborted) break;
       eligible = isRestartable(stop);
       if (!eligible) break;
-      if (restarts >= maxAttempts) {
+      const cleanForMs = attemptReadyAtMs === null ? 0 : Math.max(0, now() - attemptReadyAtMs);
+      if (cleanForMs >= cleanRunMs) restarts = 0;
+      if (explicitCeiling !== void 0 && restarts >= explicitCeiling) {
         exhausted = true;
         break;
       }
       restarts += 1;
-      const delayMs = nextListenerRestartMs(restarts, policy, restartRandom);
+      const expiry = options.getCredentialExpiryMs?.() ?? null;
+      const deadline = expiry === null ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      const renewalAt = options.getCredentialRenewalAt?.();
+      const boundary = renewalAt !== null && expiry !== null && now() < expiry ? renewalAt !== void 0 && now() < renewalAt ? renewalAt : deadline : null;
+      const proposedDelayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
+      const cappedDelayMs = boundary !== null ? Math.min(proposedDelayMs, Math.max(0, boundary - now())) : proposedDelayMs;
+      const delayMs = Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, cappedDelayMs);
       const restartCode = safeErrorCode(stop.error);
       const restartStderrTail = takeTail();
+      const nextAttemptAt = new Date(now() + delayMs).toISOString();
       log({
         ts: iso2(now),
         event: "listener_restarting",
@@ -60178,16 +60992,22 @@ async function runListenerSupervisor(options) {
       transition("starting", {
         readyAt: null,
         lastErrorCode: restartCode,
+        lastRetryEdge: retryEdgeOf(stop.error),
         lastErrorDetail: safeErrorDetail(stop.error),
         ...providerFailureFields(stop.error),
         lastWorkerStderrTail: restartStderrTail,
-        ...providerStatusFields(options.getProviderVersionNotice?.() ?? null)
+        ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
+        nextAttemptAt,
+        credentialStopAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0
       });
-      await restartSleep(delayMs, controller.signal);
+      if (delayMs > 0) await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
         stop = { reason: "cancelled" };
         break;
       }
+      transition("starting", { nextAttemptAt: null });
     }
     const stoppedAt = iso2(now);
     if (stop.reason === "cancelled") {
@@ -60197,11 +61017,16 @@ async function runListenerSupervisor(options) {
         lastErrorDetail: null,
         lastErrorReasonCode: null,
         lastWorkerStderrTail: null,
-        providerMinimumRequiredVersion: null
+        providerMinimumRequiredVersion: null,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0
       });
       log({ ts: stoppedAt, event: "listener_stopped" });
     } else {
-      const code = stop.reason === "credential" ? "credential_stopped" : safeErrorCode(stop.error);
+      const code = stop.reason === "credential" ? stop.error instanceof ListenerCredentialStateMismatchError ? stop.error.code : "credential_stopped" : safeErrorCode(stop.error);
       const failedStderrTail = takeTail();
       transition("failed", {
         stoppedAt,
@@ -60209,7 +61034,12 @@ async function runListenerSupervisor(options) {
         lastErrorDetail: safeErrorDetail(stop.error),
         ...providerFailureFields(stop.error),
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
-        lastWorkerStderrTail: failedStderrTail
+        lastWorkerStderrTail: failedStderrTail,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
+        credentialCheckEdge: stop.reason === "credential" && !(stop.error instanceof ListenerCredentialStateMismatchError) ? status.credentialCheckEdge ?? null : null,
+        claimRetryCount: 0
       });
       log({
         ts: stoppedAt,
@@ -60237,7 +61067,11 @@ async function runListenerSupervisor(options) {
         error2 instanceof Error ? error2 : new Error(String(error2))
       ),
       ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
-      lastWorkerStderrTail: failedStderrTail
+      lastWorkerStderrTail: failedStderrTail,
+      nextAttemptAt: null,
+      credentialStopAt: null,
+      credentialCheckEdge: null,
+      claimRetryCount: 0
     });
     log({
       ts: stoppedAt,
@@ -60256,7 +61090,7 @@ async function effectiveListenerStatus(paths) {
     return await queryListenerControl(paths, "status");
   } catch {
     const stored = await readListenerStatus(paths);
-    if (stored && (stored.state === "starting" || stored.state === "ready" || stored.state === "stopping")) {
+    if (stored && LISTENER_RUNNING_STATES.includes(stored.state)) {
       const failed = {
         ...stored,
         state: "failed",
@@ -60269,7 +61103,9 @@ async function effectiveListenerStatus(paths) {
            says it is what the service reported. */
         currentDeliverySignalId: null,
         currentDeliverySince: null,
-        heldBackDeliveries: []
+        heldBackDeliveries: [],
+        credentialStopAt: null,
+        nextAttemptAt: null
       };
       await writeListenerStatus(paths, failed);
       return failed;
@@ -60298,7 +61134,7 @@ async function waitForListenerReady(paths, options = {}) {
       if (options.expectedPid !== void 0 && last.pid !== options.expectedPid) {
         throw new ListenerAlreadyRunningError();
       }
-      if (last.state === "ready") return last;
+      if (LISTENER_RUNNING_STATES.includes(last.state) && last.state !== "starting" && last.state !== "stopping") return last;
       if (last.state === "failed" || last.state === "stopped") {
         throw new ListenerStartupError(last.lastErrorCode ?? last.state);
       }
@@ -60324,6 +61160,7 @@ async function waitForListenerReady(paths, options = {}) {
     }
     await sleep2(pollMs);
   }
+  if (last !== null && (options.expectedPid === void 0 || last.pid === options.expectedPid) && (!options.isProcessAlive || options.isProcessAlive()) && last.state === "starting") return last;
   throw new ListenerStartupError(last?.lastErrorCode ?? "ready_timeout");
 }
 
@@ -63873,8 +64710,8 @@ var BOOLEAN_FLAGS = /* @__PURE__ */ new Set([
 ]);
 var UUID_RE24 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function packageVersion() {
-  if ("0.1.72".length > 0) {
-    return "0.1.72";
+  if ("0.1.73".length > 0) {
+    return "0.1.73";
   }
   try {
     const value = JSON.parse(
@@ -65827,7 +66664,7 @@ function accepted(label, result) {
     );
   }
 }
-async function agentSession(cloud, workspaceId2, agent, fetcher) {
+async function agentSession(cloud, workspaceId2, agent, fetcher, listenerMode = false) {
   let store2 = null;
   try {
     const candidate = await agentCredentialStore({
@@ -65854,6 +66691,7 @@ async function agentSession(cloud, workspaceId2, agent, fetcher) {
       expiresAt: agent.expiresAt
     },
     store: store2,
+    listenerMode,
     ...fetcher ? { fetcher } : {}
   });
 }
@@ -65975,7 +66813,7 @@ function listenerRouteConfiguration(routeValue, deferOverValue) {
   }
   return { routeMode, deferOverChars: null };
 }
-var TURN_BUDGET_CREDENTIAL_MARGIN_MS = 6e4;
+var TURN_BUDGET_CREDENTIAL_MARGIN_MS = RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
 function clampTurnBudgetToCredential(budgetMs, credentialExpiresAt, nowMs) {
   if (credentialExpiresAt === null) return budgetMs;
   const horizonMs = credentialExpiresAt - nowMs - TURN_BUDGET_CREDENTIAL_MARGIN_MS;
@@ -67165,7 +68003,7 @@ async function runInboxFollowCommand(args) {
       signal: controller.signal,
       refusalToleranceMs,
       ...pageLimit === void 0 ? {} : { pageLimit },
-      isCredentialFailure: (error2) => isFollowCredentialFailure(error2) || error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalRevoked || error2 instanceof RenewalSuspended,
+      isCredentialFailure: isFollowRenewalCredentialFailure,
       arm: async ({ after, limit }) => {
         const credential = selected.session ? { kind: "agent", token: await selected.session.bearer() } : signalCredentialOf(selected);
         if (credential.kind === "agent") renderedBearer = credential.token;
@@ -67428,9 +68266,9 @@ function emptyAttendanceEvidence() {
 }
 function listenerAttendanceState(status, evidence) {
   const pending = status.pendingForMainCount ?? 0;
-  const connected = status.state === "ready";
+  const connected = LISTENER_RUNNING_STATES.includes(status.state) && status.state !== "starting" && status.state !== "stopping" && status.state !== "credential_check" && status.state !== "claim_retry" && status.state !== "ack_retry" && status.readHealth?.currentEpisodeStartedAt == null;
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
-  const hasSurface = attendingSurfaces.length > 0;
+  const hasSurface = evidence.hookSurfaceExists || attendingSurfaces.length > 0;
   const attendanceState = pending > 0 ? "unattended" : hasSurface && evidence.hookSurfaceAdvanced ? "attended" : hasSurface ? "unproven" : "unattended";
   const attended = attendanceState === "attended" ? true : attendanceState === "unattended" ? false : null;
   const lastAckOutcome = status.lastAckOutcome ?? null;
@@ -67455,26 +68293,25 @@ function listenerReadHealthSummary(status, nowMs) {
   );
 }
 function listenerLapseNotices(status, summary) {
+  const down = status.state === "stopped" || status.state === "failed";
   const health = status.readHealth ?? emptyListenerReadHealth();
   const notices = [];
-  if (health.currentReasonCode === "host_ports_exhausted") {
+  if (!down && health.currentReasonCode === "host_ports_exhausted") {
     notices.push({
       code: "listener_host_ports_exhausted",
       message: "This host has run out of outbound ports. The listener is probing only once per minute so it does not amplify the outage.",
       nextStep: "Find the consumer: lsof -nP -iTCP | awk '{print $1}' | sort | uniq -c | sort -rn"
     });
-  } else if (
-    // Reuse arrival-watch.ts's 60s loud-lapse transition. The listener keeps
-    // the episode in durable status instead of the monitor's process-local machine.
-    summary.currentEpisodeDurationMs !== null && summary.currentEpisodeDurationMs >= ARRIVAL_RETRY_NOTICE_THRESHOLD_MS
-  ) {
+  } else if (!down && // Reuse arrival-watch.ts's 60s loud-lapse transition. The listener keeps
+  // the episode in durable status instead of the monitor's process-local machine.
+  summary.currentEpisodeDurationMs !== null && summary.currentEpisodeDurationMs >= ARRIVAL_RETRY_NOTICE_THRESHOLD_MS) {
     notices.push({
       code: "listener_read_retry_persisting",
       message: `Listener reads have failed continuously for ${Math.floor(summary.currentEpisodeDurationMs / 1e3)}s. This is still in progress.`,
-      nextStep: "Check cswarm status and the CommonSwarm service. If both are healthy, restart the listener."
+      nextStep: "Leave the listener running while it waits for the read service; check the target URL and CommonSwarm service."
     });
   }
-  if (summary.throughputLapseHours.length > 0) {
+  if (!down && summary.throughputLapseHours.length > 0) {
     const latest = summary.throughputLapseHours.at(-1);
     const pending = status.pendingDeliveryCount;
     const pendingClause = pending === null ? " No pending count was recorded." : ` Pending deliveries now: ${pending}.`;
@@ -67635,6 +68472,75 @@ function listenerStatusJson(status, permissionMode, evidence = emptyAttendanceEv
     host_limits: isLiveListenerRouteMode(status.routeMode ?? "main") ? listenerMainHostLimits() : listenerHostLimits(status.provider)
   };
 }
+var CSWARM_UPDATE_INSTALLER = "curl -fsSL https://commonswarm.com/install.sh | sh";
+var CSWARM_UPDATE_NPM = "npm install -g commonswarm";
+var CSWARM_UPGRADE_STOP = `The command edge requires a newer cswarm (upgrade_required). Update with ${CSWARM_UPDATE_INSTALLER} or ${CSWARM_UPDATE_NPM}. ${RENEWAL_UPGRADE_LISTENER_ACTION}`;
+function credentialStoppedSentence(edge = null) {
+  const codes = (edge === "command" ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  return `the server refused this credential (${codes} means revoked, expired, or unknown), a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+}
+function credentialCheckSentence(status) {
+  if (status.state !== "credential_check") return null;
+  if (typeof status.credentialStopAt !== "string") return null;
+  const codes = (status.credentialCheckEdge === "command" ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  if (status.renewalExpiresAt && Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
+    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+  }
+  return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
+}
+function listenerRetrySentence(status) {
+  if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
+  }
+  if (!LISTENER_RUNNING_STATES.includes(status.state) || typeof status.nextAttemptAt !== "string" || status.state !== "starting" && status.lastRetryEdge !== "read") {
+    return null;
+  }
+  const code = status.lastErrorCode ?? "no code recorded";
+  if (status.lastRetryEdge === "read" && (status.readHealth?.currentEpisodeAttempts ?? 0) > 0) {
+    const failure = status.readHealth;
+    const detail = failure.currentHttpStatus === null ? "" : ` (HTTP ${failure.currentHttpStatus})`;
+    const next = ListenerCapabilityError.READ_EDGE_CODES.includes(code) ? `Check ${status.targetUrl ?? "the target URL"} and update the read edge before starting a model.` : `Check ${status.targetUrl ?? "the target URL"} and read edge version. Leave the listener running while the read service recovers.`;
+    return `The read edge failed (${code}${detail}). The listener is still running and will try again at ${status.nextAttemptAt}. ${next}`;
+  }
+  return `The ${status.lastRetryEdge === "command" ? "command edge" : "last attempt"} failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
+}
+function listenerDownSentence(status) {
+  if (status.state === "stopped") {
+    return `This listener is stopped and is not reading signals. Start it again by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+  }
+  if (status.state !== "failed") return null;
+  if (status.lastErrorCode === "credential_stopped") {
+    return `This listener stopped because ${credentialStoppedSentence(status.credentialCheckEdge ?? null)}.`;
+  }
+  if (status.lastErrorCode === "local_credential_state_mismatch") {
+    return "This listener stopped because its local credential state did not preserve the live credential. Check that its local state directory is writable and intact, then restart the listener with the credential.";
+  }
+  if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
+  }
+  if (status.lastErrorCode === "upgrade_required") return CSWARM_UPGRADE_STOP;
+  const code = status.lastErrorCode ?? "no code recorded";
+  return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+}
+function listenerDeliveryRetrySentence(status) {
+  if (status.lastErrorCode === "renewal_retry") return null;
+  if (status.lastRetryEdge === "read") return null;
+  const when = status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff";
+  const code = status.lastErrorCode ?? "no code recorded";
+  if (status.state === "claim_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The claim is refused (${code}); this managed seat needs a live session. CONNECTED is no while claims fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
+    return `The claim failed (${code}) ${status.claimRetryCount ?? 0} times. ${code === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${when}, reading signals after repeated failures.`;
+  }
+  if (status.state === "ack_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The delivery acknowledgement is refused (${code}); this managed seat needs a live session. CONNECTED is no while acknowledgements fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
+    return `The delivery acknowledgement failed (${code}). The inbox is waiting on this acknowledgement. The listener will try again${when} and read signals after repeated failures.`;
+  }
+  return null;
+}
 function renderListenerStatus(status, evidence = emptyAttendanceEvidence(), nowMs = Date.now(), installed = null) {
   const routeMode = status.routeMode ?? "main";
   const deliveryFailureRun = status.consecutiveAckFailureCount ?? 0;
@@ -67645,13 +68551,24 @@ function renderListenerStatus(status, evidence = emptyAttendanceEvidence(), nowM
   const readHealth = status.readHealth ?? emptyListenerReadHealth();
   const readSummary = listenerReadHealthSummary(status, nowMs);
   const lapseNotices = listenerLapseNotices(status, readSummary);
+  const down = status.state === "stopped" || status.state === "failed";
+  const retrying = LISTENER_RUNNING_STATES.includes(status.state) && (status.state === "starting" || status.lastRetryEdge === "read") && typeof status.nextAttemptAt === "string";
+  const credentialCheck = credentialCheckSentence(status);
+  const retrySentence = listenerRetrySentence(status);
+  const deliveryRetrySentence = listenerDeliveryRetrySentence(status);
+  const downSentence = listenerDownSentence(status);
   const lines = [
-    lapseNotices.length > 0 ? `Listener LAPSE for agent ${status.principalId}: ${lapseNotices.map((notice) => notice.code).join(", ")}.` : pendingForMainCount > 0 ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.` : `Listener ${status.state} for agent ${status.principalId}.`,
+    down ? `Listener ${status.state} for agent ${status.principalId}.` : credentialCheck !== null ? `Listener credential check for agent ${status.principalId}.` : retrying ? `Listener retrying for agent ${status.principalId}.` : lapseNotices.length > 0 ? `Listener LAPSE for agent ${status.principalId}: ${lapseNotices.map((notice) => notice.code).join(", ")}.` : pendingForMainCount > 0 ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.` : `Listener ${status.state} for agent ${status.principalId}.`,
+    ...credentialCheck === null ? [] : [credentialCheck],
+    ...deliveryRetrySentence === null ? [] : [deliveryRetrySentence],
+    ...retrySentence === null ? [] : [retrySentence],
+    ...downSentence === null ? [] : [downSentence],
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
     listenerAttendingSentence(evidence.attendingSurfaces ?? []),
     `ATTENDED: ${attendance.attendanceState === "attended" ? "yes. The session hook has surfaced messages on this host" : attendance.attendanceState === "unattended" ? (evidence.attendingSurfaces ?? []).length === 0 ? `no. ${LISTENER_NONE_ATTENDING_SENTENCE.replace(/\.$/, "")}` : "no. The main-session queue is not draining" : "not yet proven on this host"}.`,
     `HANDLED: ${attendance.handledState === "handled" ? `yes. The newest delivery acknowledgement was ${status.lastAckOutcome}` : attendance.handledState === "not_handled" ? routeMode === "worker" ? deliveryFailureRun >= LISTENER_DELIVERY_FAILING_THRESHOLD ? `no. ${deliveryFailureRun} ${deliveryFailureRun === 1 ? "delivery has" : "deliveries have"} failed since the last reply; the newest delivery acknowledgement was ${status.lastAckOutcome ?? "not recorded"}${status.lastErrorCode ? ` (${status.lastErrorCode})` : ""}` : `no. The newest delivery acknowledgement was ${status.lastAckOutcome ?? "not recorded"}${status.lastErrorCode ? ` (${status.lastErrorCode})` : ""}` : "no. Queued messages have not reached the session hook" : "not yet measured"}.`,
     `Provider: ${status.provider}; process: ${status.pid}; started: ${status.startedAt}.`,
+    `Target URL: ${status.targetUrl ?? "not recorded"}.`,
     `Provider executable: ${status.providerExecutable ?? "not measured"}.`,
     `Connections opened: ${status.connectionsOpened ?? "not measured"}.`,
     `Connection reuse ratio: ${status.connectionReuseRatio ?? "not measured"}.`,
@@ -67668,7 +68585,7 @@ function renderListenerStatus(status, evidence = emptyAttendanceEvidence(), nowM
     status.idlePollMs === void 0 || status.idlePollMs === null ? "Current idle poll interval has not been reported yet." : idlePollStatusSentence(status.idlePollMs),
     listenerWakeStatusSentence(
       status.wake ?? emptyListenerWakeStatus(),
-      status.idlePollMs && status.idlePollMs > 0 ? status.idlePollMs : IDLE_POLL_DEFAULT_MS,
+      status.wake?.mode === LISTENER_WAKE_MODE_PUSH ? status.pushReconcileWaitMs && status.pushReconcileWaitMs > 0 ? status.pushReconcileWaitMs : LISTENER_RECONCILE_POLL_MS : status.idlePollMs && status.idlePollMs > 0 ? status.idlePollMs : IDLE_POLL_DEFAULT_MS,
       status.wake?.lastWakeAt ? relativeAge(status.wake.lastWakeAt, nowMs) : null
     )
   ];
@@ -67704,7 +68621,7 @@ function renderListenerStatus(status, evidence = emptyAttendanceEvidence(), nowM
   }
   if (status.providerVersion && status.providerLastMeasuredVersion) {
     lines.push(
-      status.providerVersion === status.providerLastMeasuredVersion ? `Provider version: ${status.providerVersion} (last measured: ${status.providerLastMeasuredVersion}).` : status.state === "ready" ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is unverified but allowed because the startup permission canary passed. Next: verify this provider release with CommonSwarm and update the last-measured version.` : `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It was measured before startup failed; compatibility was not established. Next: resolve the startup failure before verifying this provider release.`
+      status.providerVersion === status.providerLastMeasuredVersion ? `Provider version: ${status.providerVersion} (last measured: ${status.providerLastMeasuredVersion}).` : LISTENER_RUNNING_STATES.includes(status.state) && status.readyAt !== null ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is unverified but allowed because the startup permission canary passed. Next: verify this provider release with CommonSwarm and update the last-measured version.` : status.state === "starting" ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is still starting; compatibility was not established. Next: check the listener status after it is ready.` : `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It was measured before startup failed; compatibility was not established. Next: resolve the startup failure before verifying this provider release.`
     );
   } else {
     lines.push("Provider version: not measured.");
@@ -67794,6 +68711,18 @@ function renderListenerStatus(status, evidence = emptyAttendanceEvidence(), nowM
   }
   return lines.join("\n");
 }
+function listenerStartPendingMessage(status) {
+  if (status.state === "starting" && status.lastErrorCode) {
+    const code = status.lastErrorCode;
+    const capability = ListenerCapabilityError.READ_EDGE_CODES.includes(code);
+    const target2 = status.targetUrl ?? "the target URL";
+    if (status.lastRetryEdge !== "read") {
+      return `Listener ${status.lastRetryEdge === "command" ? "command edge" : "startup"} failed (${code}); check ${target2}. Use cswarm listen status to follow retries.`;
+    }
+    return capability ? `Listener read edge failed (${code}); check ${target2}. ${listenerFailureMessage(code)}. Use cswarm listen status to follow retries.` : `Listener read edge failed (${code}); check ${target2} and read edge version. Use cswarm listen status to follow retries.`;
+  }
+  return "Listener is still starting or checking; use cswarm listen status to follow it.";
+}
 async function unsurfacedPendingMainStats(instanceDirectory, fallback) {
   try {
     const queue = new FilePendingMainQueue(instanceDirectory);
@@ -67841,7 +68770,8 @@ function listenerProviderIdentitySummary(status) {
   }
   return parts.join("; ");
 }
-function listenerFailureMessage(code, provider, detail, reasonCode, minimumRequiredVersion) {
+function listenerFailureMessage(code, provider, detail, reasonCode, minimumRequiredVersion, credentialEdge = null) {
+  if (code === "upgrade_required") return CSWARM_UPGRADE_STOP;
   if (code === "version_below_floor") {
     if (provider === "codex") {
       return "the Codex listener requires codex-acp 1.1.9 or newer; update the bridge, then retry";
@@ -67893,11 +68823,17 @@ function listenerFailureMessage(code, provider, detail, reasonCode, minimumRequi
   if (code.startsWith("opencode_auth_") || code === "opencode_project_config_active" || code === "opencode_config_probe_failed") {
     return `OpenCode host safety check failed (${code}); re-authenticate and ensure OPENCODE_DISABLE_PROJECT_CONFIG keeps project allow from merging`;
   }
-  if (code === "sender_relation_capability_missing" || code === "cursor_capability_missing") {
+  if (ListenerCapabilityError.READ_EDGE_CODES.includes(code)) {
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
-    return "the agent credential expired, was revoked, reached its renewal horizon, or its grant was suspended; run cswarm whoami with this credential to see the grant state, then follow its next step";
+    return credentialStoppedSentence(credentialEdge);
+  }
+  if (code === "local_credential_state_mismatch") {
+    return "the listener's local credential state did not preserve the live credential; check the local state directory, then restart with the credential";
+  }
+  if (code === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return H0_SEAT_LISTENER_STOP_SENTENCE;
   }
   if (code === "permission_canary_failed") {
     if (provider === "claude") {
@@ -68053,7 +68989,8 @@ async function runConfiguredListener(options) {
       options.cloud,
       options.workspaceId,
       options.agent,
-      boundFetch
+      boundFetch,
+      true
     );
   } catch (error2) {
     if (managedContextPath !== null) {
@@ -68064,6 +69001,15 @@ async function runConfiguredListener(options) {
   }
   let storedCredential = null;
   const credentialSession = {
+    get expiry() {
+      return liveCredentialSession.expiry;
+    },
+    get renewalDue() {
+      return liveCredentialSession.renewalDue;
+    },
+    get renewalAt() {
+      return liveCredentialSession.renewalAt;
+    },
     bearer: async () => {
       const credential = await liveCredentialSession.bearer();
       if (credential !== storedCredential) {
@@ -68078,7 +69024,7 @@ async function runConfiguredListener(options) {
       }
       const stored = await readListenerCredentialState(paths.instanceDirectory);
       if (stored === null || stored.credential !== credential) {
-        throw new Error("listener credential state did not preserve the live credential");
+        throw new ListenerCredentialStateMismatchError();
       }
       return stored.credential;
     }
@@ -68215,11 +69161,15 @@ async function runConfiguredListener(options) {
       profileId: options.cloud.profileId,
       workspaceId: options.workspaceId,
       principalId: options.principalId,
+      projectDirectory: options.cwd,
+      targetUrl: options.cloud.url,
       provider: options.provider,
       cswarmVersion: CLI_BUILD_VERSION,
       permissionMode: options.permissionMode,
       routeMode,
       deferOverChars,
+      getCredentialExpiryMs: () => credentialSession.expiry,
+      getCredentialRenewalAt: () => credentialSession.renewalAt,
       // The bound a timeout event reports: the last turn's clamped budget when
       // one has run, else the configured cap.
       getTurnBudgetMs: () => lastAppliedTurnBudgetMs ?? turnBudgetMs,
@@ -68389,7 +69339,7 @@ async function runListenStart(args) {
     ...stateDirectory2 ? { stateDirectory: stateDirectory2 } : {}
   });
   const existing = await effectiveListenerStatus(paths);
-  if (existing && (existing.state === "starting" || existing.state === "ready" || existing.state === "stopping")) {
+  if (existing && LISTENER_RUNNING_STATES.includes(existing.state)) {
     throw new Error(
       `a listener is already ${existing.state} for agent ${principalId}`
     );
@@ -68500,7 +69450,8 @@ async function runListenStart(args) {
           provider,
           detail,
           reasonCode,
-          failedStatus?.providerMinimumRequiredVersion
+          failedStatus?.providerMinimumRequiredVersion,
+          failedStatus?.credentialCheckEdge ?? null
         );
         throw new Error(
           failedStatus === null ? message : `${message}. ${listenerProviderIdentitySummary(failedStatus)}`
@@ -68516,7 +69467,8 @@ async function runListenStart(args) {
         provider,
         status.lastErrorDetail,
         status.lastErrorReasonCode,
-        status.providerMinimumRequiredVersion
+        status.providerMinimumRequiredVersion,
+        status.credentialCheckEdge ?? null
       )}. ${listenerProviderIdentitySummary(status)}`
     );
   }
@@ -68550,7 +69502,7 @@ async function runListenStart(args) {
   const hostNote = `--provider ${provider} names the attendance surface kind for this seat. ${workerAudience}
 `;
   process.stdout.write(
-    `${args.has("foreground") ? "Listener stopped." : (status.pendingForMainCount ?? 0) > 0 ? "Listener transport is connected, but queued messages are unattended." : "Listener is ready and will keep receiving after this command exits."}
+    `${args.has("foreground") ? "Listener stopped." : LISTENER_RUNNING_STATES.includes(status.state) && status.state !== "ready" ? listenerStartPendingMessage(status) : (status.pendingForMainCount ?? 0) > 0 ? "Listener transport is connected, but queued messages are unattended." : "Listener is ready and will keep receiving after this command exits."}
 ${renderListenerStatus(status, attendanceEvidence)}
 The short credential rotates while this process remains alive and secure local state is available. Run cswarm whoami with this credential to see whether its grant is timeboxed or standing.
 ` + routingNote + hostNote + `Use listen status/stop with the same agent credential, --workspace-id ${workspaceId2}, and the same Cloud target. --principal-id ${principalId} remains available when no credential is supplied.
@@ -68693,7 +69645,7 @@ async function runListenStatusOrStop(args, command2) {
   };
   const attendanceEvidence = await collectListenerAttendanceEvidence({
     instanceDirectory: paths.instanceDirectory,
-    cwd: process.cwd(),
+    cwd: listenerAttendanceProjectDirectory(status, process.cwd()),
     principalId,
     cloud,
     workspaceId: workspaceId2,
@@ -68995,21 +69947,24 @@ function settingsHaveScopedClaudeHook(settings, principalId) {
     );
   });
 }
-async function listenerHookSurfacePresent(instanceDirectory, cwd, principalId) {
-  const surface = await new FileHookSurfaceStore(instanceDirectory).evidence();
-  if (surface.exists) return true;
+async function listenerSettingsHookInstalled(cwd, principalId) {
   const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
-  const settingsPaths = /* @__PURE__ */ new Set([
+  const settingsPaths = [
     (0, import_node_path24.join)(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
     (0, import_node_path24.join)(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
     userClaudeSettingsTarget().path
-  ]);
+  ];
   for (const path of settingsPaths) {
     if (settingsHaveScopedClaudeHook(readClaudeSettings(path), principalId)) {
       return true;
     }
   }
   return false;
+}
+async function listenerHookSurfacePresent(instanceDirectory, cwd, principalId) {
+  const surface = await new FileHookSurfaceStore(instanceDirectory).evidence();
+  if (surface.exists) return true;
+  return await listenerSettingsHookInstalled(cwd, principalId);
 }
 async function listenerWatcherSurfacePresent(cloud, workspaceId2, principalId) {
   return await arrivalWatchLockHeld(
@@ -69029,9 +69984,11 @@ async function listenerHasAttendanceSurface(options) {
     options.principalId
   );
 }
+function listenerAttendanceProjectDirectory(status, callerDirectory) {
+  return status.projectDirectory ?? callerDirectory;
+}
 async function collectListenerAttendanceEvidence(options) {
-  const hook = options.hookSurfaceExists || await listenerHookSurfacePresent(
-    options.instanceDirectory,
+  const settingsHook = await listenerSettingsHookInstalled(
     options.cwd,
     options.principalId
   );
@@ -69042,10 +69999,10 @@ async function collectListenerAttendanceEvidence(options) {
   );
   return {
     pendingForMainOldestAt: options.pendingForMainOldestAt,
-    hookSurfaceExists: hook,
+    hookSurfaceExists: options.hookSurfaceExists,
     hookSurfaceAdvanced: options.hookSurfaceAdvanced,
     watcherLockHeld: watcher,
-    attendingSurfaces: listenerAttendingSurfaces(hook, watcher)
+    attendingSurfaces: listenerAttendingSurfaces(settingsHook, watcher)
   };
 }
 function claudeUserPromptHookSnippet(principalId) {
@@ -70678,6 +71635,9 @@ ${usage()}
     process.exitCode = exitCodeFor(error2);
   });
 }
+function isFollowRenewalCredentialFailure(error2) {
+  return isFollowCredentialFailure(error2) || error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalCredentialCheckError || error2 instanceof RenewalRevoked || error2 instanceof RenewalSuspended;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   AGENT_COMMANDS,
@@ -70711,12 +71671,15 @@ ${usage()}
   agentToolsForTransport,
   clampTurnBudgetToCredential,
   claudeUserPromptHookSnippet,
+  collectListenerAttendanceEvidence,
   describeAudience,
   formatBodySourceConflict,
   formatBodySourceMissing,
   formatBodyUsage,
   formatOrList,
   isCliMain,
+  isFollowRenewalCredentialFailure,
+  listenerAttendanceProjectDirectory,
   listenerFailureMessage,
   listenerHostLimits,
   listenerMainHostLimits,
@@ -70724,6 +71687,8 @@ ${usage()}
   listenerPollIntervalMs,
   listenerProviderInstallEvidence,
   listenerRouteConfiguration,
+  listenerSettingsHookInstalled,
+  listenerStartPendingMessage,
   listenerStatusJson,
   messageFormatAdvisory,
   postSignalAllowedFlags,
