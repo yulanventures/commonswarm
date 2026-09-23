@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import { withDatabaseTls } from "../_shared/database-options.ts";
+import { H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE } from "../../../src/h0/verbs.ts";
 import {
   agentCredentialRevoked,
   enforceAgentSessionProof,
@@ -137,7 +138,6 @@ import {
   requestHash,
   SCHEMA_VERSION,
 } from "../_shared/protocol.js";
-
 interface Actor {
   user: string | null;
   agent_principal: string | null;
@@ -646,7 +646,7 @@ const SIGNAL_DEFAULT_UNTIL_MS: Record<SignalKind, number> = {
 };
 const SIGNAL_CREDENTIAL_LIMIT = 120;
 const SIGNAL_WORKSPACE_LIMIT = 1000;
-const COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
+const COMMAND_ID_RE = H0_REQUEST_ID_RE;
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
 const AGENT_JOIN_CREDENTIAL_RE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const AGENT_JOIN_LOCATOR_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -1063,7 +1063,7 @@ if (
   throw new Error("command test hooks refuse to run unless SWARM_ENV=test");
 }
 
-const db = postgres(databaseUrl, withDatabaseTls({
+export const db = postgres(databaseUrl, withDatabaseTls({
   /* Session-mode pooling measured EXHAUSTED (EMAXCONNSESSION, pool_size 38,
    * 2026-08-31): warm isolates pinning max*idle slots ate the pool and every
    * "episodic 500" this month was this. Keep the per-isolate footprint minimal;
@@ -2258,7 +2258,7 @@ function validateCommand(
   if (cmd.kind === REGISTER_AGENT_SEAT_KIND) {
     const valid = exactKeys(cmd, ["kind", "attempt_id", "name"]) &&
       typeof cmd.attempt_id === "string" && UUID_RE.test(cmd.attempt_id) &&
-      boundedText(cmd.name, 80);
+      boundedText(cmd.name, H0_REGISTRATION_NAME_MAX);
     return valid
       ? {
         ok: true,
@@ -11388,7 +11388,7 @@ async function handlePostRequest(request: Request): Promise<Response> {
   }
 }
 
-async function handleRequest(request: Request): Promise<Response> {
+export async function handleRequest(request: Request): Promise<Response> {
   // Browser command calls carry Authorization, apikey and JSON headers, so they
   // are preflighted. OPTIONS must terminate before parsing, auth or database work.
   if (request.method === "OPTIONS") {
@@ -11402,7 +11402,7 @@ async function handleRequest(request: Request): Promise<Response> {
   );
 }
 
-Deno.serve(handleRequest);
+if (import.meta.main) Deno.serve(handleRequest);
 
 function sessionError(error: AgentSessionErrorCode): HttpResult {
   return { status: agentSessionErrorStatus(error), body: { error } };

@@ -1,12 +1,10 @@
-/** H0's thin HTTP adapter to the command edge. Authority stays in command/index.ts. */
-import postgres from "npm:postgres@3.4.9";
-import { withDatabaseTls } from "../_shared/database-options.ts";
+/** H0's in-process request adapter to the command edge. Authority stays in command/index.ts. */
+import type postgres from "npm:postgres@3.4.9";
 import { CLIENT_PROTOCOL_VERSION } from "../../../src/cloud/config.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
 import {
   H0_BEARER_QUERY_REFUSED,
   H0_BEARER_QUERY_REFUSED_MESSAGE,
-  H0_INVALID_REQUEST,
   h0BearerInQuery,
   parseH0ForwardBody,
   type H0ForwardVerb,
@@ -16,7 +14,7 @@ const MAX_BODY_BYTES = 16 * 1024;
 const MAX_COMMAND_RESPONSE_BYTES = 128 * 1024;
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
 const BEARER_RE = /^Bearer +([^\s]+)$/i;
-let database: postgres.Sql | null = null;
+const BODY_TOO_LARGE = Symbol("h0_body_too_large");
 
 function json(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
@@ -35,7 +33,7 @@ function unreadable(): Response {
 
 async function readJson(request: Request): Promise<unknown> {
   const declared = Number(request.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return BODY_TOO_LARGE;
   const reader = request.body?.getReader();
   if (!reader) return null;
   const chunks: Uint8Array[] = [];
@@ -46,7 +44,7 @@ async function readJson(request: Request): Promise<unknown> {
     count += value.byteLength;
     if (count > MAX_BODY_BYTES) {
       await reader.cancel();
-      return null;
+      return BODY_TOO_LARGE;
     }
     chunks.push(value);
   }
@@ -63,23 +61,13 @@ async function readJson(request: Request): Promise<unknown> {
   }
 }
 
-function h0Database(): postgres.Sql {
-  if (database !== null) return database;
-  const url = Deno.env.get("SWARM_DATABASE_URL") ?? Deno.env.get("SUPABASE_DB_URL");
-  if (!url) throw new Error("h0 forwarding requires a database URL");
-  database = postgres(url, withDatabaseTls({
-    max: 1, prepare: false, idle_timeout: 3, connect_timeout: 10,
-  }, Deno.env.get("SWARM_DATABASE_TLS_CA_B64")));
-  return database;
-}
-
 /** Routing hint only; the command edge authenticates and checks it again. */
-async function workspaceForToken(token: string | null): Promise<string> {
+async function workspaceForToken(token: string | null, database: postgres.Sql): Promise<string> {
   if (token === null || !AGENT_TOKEN_RE.test(token)) return crypto.randomUUID();
   const hash = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)),
   );
-  const rows = await h0Database()<[{ workspace_id: string }]>`
+  const rows = await database<[{ workspace_id: string }]>`
     SELECT p.workspace_id::text
     FROM swarm.agent_tokens AS t
     JOIN swarm.agent_principals AS p ON p.principal_id = t.principal_id
@@ -131,15 +119,25 @@ export async function handleH0ForwardRequest(
       message: H0_BEARER_QUERY_REFUSED_MESSAGE,
     });
   }
-  const parsed = parseH0ForwardBody(verb, await readJson(request));
+  const received = await readJson(request);
+  if (received === BODY_TOO_LARGE) return json(413, { error: "payload_too_large" });
+  const parsed = parseH0ForwardBody(verb, received);
   if (!parsed.ok) return json(400, { error: parsed.error, message: parsed.message });
   const body = parsed.body;
   const presented = request.headers.get("authorization");
   const token = presented === null ? null : BEARER_RE.exec(presented)?.[1] ?? null;
   const credential = verb === "register" ? body.joinCredential as string : token;
+  // Import only for a forwarded verb. Poll and ack stay available if command is misconfigured.
+  // Importing command/index.ts initializes its pool but does not start its HTTP server.
+  if (!(Deno.env.get("SWARM_DATABASE_URL") ?? Deno.env.get("SUPABASE_DB_URL")) ||
+      !Deno.env.get("SUPABASE_URL") || !Deno.env.get("SUPABASE_ANON_KEY")) {
+    console.error("h0 command configuration missing");
+    return json(500, { error: "h0_command_not_configured" });
+  }
+  const { db: commandDatabase, handleRequest } = await import("../command/index.ts");
   const workspaceId = verb === "register"
     ? crypto.randomUUID()
-    : await workspaceForToken(token);
+    : await workspaceForToken(token, commandDatabase);
   const command = verb === "register"
     ? { kind: "register_agent_seat", attempt_id: body.attemptId, name: body.name }
     : {
@@ -155,28 +153,24 @@ export async function handleH0ForwardRequest(
   const commandId = verb === "register"
     ? crypto.randomUUID()
     : typeof body.requestId === "string" ? body.requestId : crypto.randomUUID();
-  const base = Deno.env.get("SUPABASE_URL");
-  if (!base) return unreadable();
-  let upstream: Response;
-  try {
-    upstream = await fetch(new URL("/functions/v1/command", base), {
-      method: "POST",
-      redirect: "manual",
-      headers: {
-        "content-type": "application/json",
-        ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
-      },
-      body: JSON.stringify({
-        command_id: commandId,
-        client_version: CLIENT_PROTOCOL_VERSION,
-        workspace_id: workspaceId,
-        stream: { kind: "workspace" },
-        command,
-      }),
-      signal: request.signal,
-    });
-  } catch {
-    return unreadable();
-  }
+  // A fresh Request enters the exact handler served by the command worker. Only the
+  // caller credential crosses this boundary; no URL, cookie or forwarding headers do.
+  // No fetch occurs, so an upstream redirect cannot receive the credential.
+  const commandRequest = new Request("https://command.internal/functions/v1/command", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(credential === null ? {} : { authorization: `Bearer ${credential}` }),
+    },
+    body: JSON.stringify({
+      command_id: commandId,
+      client_version: CLIENT_PROTOCOL_VERSION,
+      workspace_id: workspaceId,
+      stream: { kind: "workspace" },
+      command,
+    }),
+    signal: request.signal,
+  });
+  const upstream = await handleRequest(commandRequest);
   return await commandResponse(upstream, verb);
 }

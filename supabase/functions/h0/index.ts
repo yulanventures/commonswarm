@@ -4,11 +4,11 @@ import {
   H0_ROBOTS_TAG,
   handleH0Request,
   internalErrorResponse,
+  h0RetryableDatabaseFailure,
 } from "./core.ts";
 import {
   H0ClientAbort,
   h0VerbFailure,
-  h0RetryableDatabaseFailure,
   handleH0AckRequest,
   handleH0PollRequest,
 } from "./poll-ack.ts";
@@ -71,7 +71,9 @@ Deno.serve((request) => {
     }
     if (verb === "register" || verb === "ask" || verb === "note" ||
       verb === "reply" || verb === "working-on") {
-      return handleH0ForwardRequest(request, verb).catch(() => {
+      return handleH0ForwardRequest(request, verb).catch((error: unknown) => {
+        const retryable = h0RetryableDatabaseFailure(error);
+        if (retryable !== null) return retryable;
         console.error("h0 forwarding failed");
         return internalErrorResponse();
       });

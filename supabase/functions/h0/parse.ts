@@ -1,13 +1,15 @@
 /**
  * Parsers for the H0 poll and ack bodies.
  *
- * This file is a leaf: no imports. The poll key list lives HERE, and the verb
+ * The poll key list lives HERE, and the verb
  * table lives in src/h0/verbs.ts. A test calls this parser and compares the
  * keys it accepts to the poll row. Neither side is rendered from the other.
  *
  * The ack key list is the same shape. Outcomes and error codes are passed in
  * by the caller from the delivery constants, so this file does not retype them.
  */
+// @ts-ignore TS5097: Deno executes the source extension; the Node test gate follows this source.
+import { H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE } from "../../../src/h0/verbs.ts";
 
 export const H0_POLL_MAX_WAIT_SECONDS = 50;
 /** Time after the wait for the handler to release the lock. */
@@ -126,14 +128,14 @@ export function parseH0ForwardBody(
   if (verb === "register") {
     if (typeof body.joinCredential !== "string" ||
       !isUuid(body.attemptId) ||
-      typeof body.name !== "string" || body.name.length < 1 || body.name.length > 80 ||
+      typeof body.name !== "string" || body.name.length < 1 || body.name.length > H0_REGISTRATION_NAME_MAX ||
       (Object.hasOwn(body, "icon") && typeof body.icon !== "string")) {
       return fail(H0_INVALID_REQUEST, "Registration fields are malformed.");
     }
   } else {
     if (typeof body.body !== "string" || body.body.length < 1 ||
       (Object.hasOwn(body, "requestId") &&
-        (typeof body.requestId !== "string" || !/^[A-Za-z0-9_-]{8,72}$/.test(body.requestId))) ||
+        (typeof body.requestId !== "string" || !H0_REQUEST_ID_RE.test(body.requestId))) ||
       ((verb === "ask" || verb === "note") && Object.hasOwn(body, "to") &&
         (!Array.isArray(body.to) || body.to.length === 0)) ||
       (verb === "reply" && !isUuid(body.signal_id))) {

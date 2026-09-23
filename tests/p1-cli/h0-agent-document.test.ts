@@ -12,9 +12,11 @@ import {
   buildH0AgentDocument,
   handleH0Request,
   internalErrorResponse,
+  h0RetryableDatabaseFailure,
   fieldJsonTypeNames,
   stringFieldNames,
 } from "../../supabase/functions/h0/core.js";
+
 import {
   SIGNAL_RECIPIENT_KINDS,
   SIGNAL_RECIPIENT_MAX,
@@ -24,6 +26,20 @@ import {
   DELIVERY_CLIENT_ERROR_CODES,
 } from "../../supabase/functions/command/durable-delivery.js";
 import { H0_SEAT_TOKEN_TTL_MS } from "../../src/protocol/index.js";
+
+test("H0 transient database SQLSTATEs return the shared retryable response", { timeout: 5_000 }, async () => {
+  for (const code of ["40001", "40P01"]) {
+    const response = h0RetryableDatabaseFailure({ code });
+    assert.ok(response);
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: "h0_transaction_retryable" });
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow, noarchive");
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+  }
+  assert.equal(h0RetryableDatabaseFailure({ code: "42501" }), null);
+  assert.equal(h0RetryableDatabaseFailure(new Error("database unavailable")), null);
+});
 
 /* The enforcement's own constants — the same four index.ts passes. */
 const WIRE = {

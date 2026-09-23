@@ -178,6 +178,15 @@ test("register retries one attempt on one seat, a new attempt takes another, and
   const retry = await register(join.secret, attempt, "First");
   assert.equal(retry.principalId, first.principalId);
   assert.notEqual(retry.token, first.token, "unused token recovery must replace its secret");
+  const replaced = await h0("note", { body: "replaced token must be refused" }, first.token);
+  assert.equal(replaced.status, 403);
+  assert.equal(replaced.body.error, "forbidden");
+  signalId(await h0("note", { body: "live recovered token" }, retry.token));
+  const usedRetry = await h0("register", {
+    joinCredential: join.secret, attemptId: attempt, name: "First",
+  }, null);
+  assert.equal(usedRetry.status, 409);
+  assert.equal(usedRetry.body.error, "registration_token_already_used");
   const second = await register(join.secret, randomUUID(), "Second");
   assert.notEqual(second.principalId, first.principalId);
   const attempts = await sql<{ n: number }[]>`
@@ -211,10 +220,10 @@ test("ask, note, reply and working-on store the same signal fields as a CLI comm
   }));
   const cases = [
     { verb: "ask", h0: { body: "Compare ask", to: addressed }, direct: {
-      signal_kind: "ask", body: "Compare ask", to: addressed,
+      signal_kind: "ask", body: "Compare ask", to_agent_principal_id: recipient.principalId,
     } },
     { verb: "note", h0: { body: "Compare note", to: addressed }, direct: {
-      signal_kind: "note", body: "Compare note", to: addressed,
+      signal_kind: "note", body: "Compare note", to_agent_principal_id: recipient.principalId,
     } },
     { verb: "reply", h0: { signal_id: sourceAsk, body: "Compare reply" }, direct: {
       signal_kind: "note", body: "Compare reply", in_reply_to: sourceAsk,
@@ -227,10 +236,9 @@ test("ask, note, reply and working-on store the same signal fields as a CLI comm
     const h0Id = signalId(await h0(item.verb, { ...item.h0, requestId: randomUUID() }, sender.token));
     const directId = signalId(await command(sender.token, {
       kind: "post_signal", signal_kind: item.direct.signal_kind, body: item.direct.body,
-      to_user_id: null, to_agent_principal_id: null,
+      to_user_id: null, to_agent_principal_id: "to_agent_principal_id" in item.direct ? item.direct.to_agent_principal_id : null,
       in_reply_to: "in_reply_to" in item.direct ? item.direct.in_reply_to : null,
       about: null,
-      ...( "to" in item.direct ? { to: item.direct.to } : {}),
     }));
     assert.deepEqual(await signalRow(h0Id), await signalRow(directId), item.verb);
   }
@@ -253,6 +261,10 @@ test("unknown fields, query bearers and missing bearer are refused", { timeout: 
   const unknown = await h0("note", { body: "reject", surprise: true }, seat.token);
   assert.equal(unknown.status, 400);
   assertHeaders(unknown);
+  const tooLarge = await h0("note", { body: "x".repeat(16 * 1024) }, seat.token);
+  assert.equal(tooLarge.status, 413);
+  assert.equal(tooLarge.body.error, "payload_too_large");
+  assertHeaders(tooLarge);
   const missing = await h0("note", { body: "reject" }, null);
   assert.equal(missing.status, 401);
   assert.equal(missing.body.error, "unauthenticated");
@@ -283,6 +295,10 @@ test("three seats: ask, poll, ack and reply complete through H0", { timeout: 80_
   const deliveries = polled.body.deliveries as Array<{ signal: { id: string }; lease_id: string }>;
   const message = deliveries.find((row) => row.signal.id === asked);
   assert.ok(message);
+  const thirdPoll = await h0("poll", { wait: 0 }, third.token);
+  assert.equal(thirdPoll.status, 200);
+  assertHeaders(thirdPoll);
+  assert.equal((thirdPoll.body.deliveries as Array<{ signal: { id: string } }>).some((row) => row.signal.id === asked), false);
   const acked = await h0("ack", {
     signal_id: asked, lease_id: message.lease_id,
     listener_instance_id: polled.body.listener_instance_id,

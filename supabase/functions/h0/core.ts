@@ -27,6 +27,9 @@ interface DocumentField {
   readonly presence: "required" | "omittable";
   readonly nullable: boolean;
   readonly note?: string;
+  readonly pattern?: string;
+  readonly minLength?: number;
+  readonly maxLength?: number;
 }
 
 interface DocumentVerb {
@@ -144,6 +147,9 @@ function fieldSchema(field: DocumentField, wire: WireRule): JsonSchema {
   if (field.note !== undefined) {
     base.description = field.note;
   }
+  if (field.pattern !== undefined) base.pattern = field.pattern;
+  if (field.minLength !== undefined) base.minLength = field.minLength;
+  if (field.maxLength !== undefined) base.maxLength = field.maxLength;
   return base;
 }
 
@@ -290,4 +296,19 @@ export function handleH0Request(
 
 export function internalErrorResponse(): Response {
   return json(500, { error: "internal_error" });
+}
+
+/** Used by poll, ack, and the forwarding lookup before their generic failure path. */
+export function h0RetryableDatabaseFailure(error: unknown): Response | null {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null;
+  const code = error.code;
+  if (code !== "40P01" && code !== "40001") return null;
+  return new Response(JSON.stringify({ error: "h0_transaction_retryable" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": H0_CACHE_CONTROL,
+      "x-robots-tag": H0_ROBOTS_TAG,
+    },
+  });
 }

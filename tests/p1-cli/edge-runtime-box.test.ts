@@ -76,6 +76,10 @@ test("H0 source reads only environment names passed to its worker", async () => 
   assert.deepEqual(missing, []);
 });
 
+test("H0 in-process command receives the command worker environment", { timeout: 5_000 }, () => {
+  assert.deepEqual(FUNCTION_ENV_NAMES.h0, FUNCTION_ENV_NAMES.command);
+});
+
 test("every database worker receives the optional private CA", () => {
   for (const functionName of ["command", "read", "capability", "activity", "h0"] as const) {
     assert.ok(

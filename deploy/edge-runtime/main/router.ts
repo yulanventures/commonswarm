@@ -184,8 +184,7 @@ const DATABASE_ENV = [
   "SWARM_DATABASE_TLS_CA_B64",
 ] as const;
 
-export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
-  command: [
+const COMMAND_ENV = [
     ...DATABASE_ENV,
     "SUPABASE_URL",
     "SUPABASE_ANON_KEY",
@@ -196,7 +195,10 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SWARM_SELF_SERVE",
     "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
     "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
-  ],
+  ] as const;
+
+export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
+  command: COMMAND_ENV,
   read: [
     ...DATABASE_ENV,
     "SUPABASE_URL",
@@ -211,8 +213,8 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
     "SWARM_CAPABILITY_ALLOWED_ORIGINS",
   ],
   activity: DATABASE_ENV,
-  // Poll and ack read the same database environment names as command.
-  h0: DATABASE_ENV,
+  // Forwarded verbs call command's handler in the H0 worker.
+  h0: COMMAND_ENV,
 };
 
 export const COMMAND_TEST_HOOKS = new Set([
