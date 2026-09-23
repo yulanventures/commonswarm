@@ -11,28 +11,42 @@ import {
   DeliveryCommandClient,
   DeliveryHttpError,
   DeliveryProtocolError,
+  DeliveryMalformedResponseError,
+  DeliveryResponseError,
   DeliveryTransportError,
   DELIVERY_REQUEST_TIMEOUT_MS,
+  H0_SEAT_CLAIM_REFUSED_CODE,
+  H0_SEAT_LISTENER_STOP_SENTENCE,
   type DeliveryClaimResult,
   type DeliveryRow,
   type DeliveryOutcome,
 } from "../cloud/delivery.js";
 import {
   classifySignalReadFailure,
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
   decayFollowAttempt,
+  followErrorEnvelope,
+  followHttpDetails,
+  isConfirmedCredentialHttpFailure,
   isFollowCredentialFailure,
   isRestartableReadError,
   isRetryableFollowError,
   nextFollowBackoffMs,
   readAgentSignalPage,
   SIGNAL_READ_TIMEOUT_MS,
+  SignalHttpError,
+  SignalMalformedError,
   type AgentSignalPage,
   type SignalReadFailureClassification,
   type SignalCursor,
 } from "../cloud/signals.js";
 import {
+  RenewalCredentialCheckError,
+  RenewalRetryError,
   RenewalReauthorisationRequired,
   RenewalRevoked,
+  RENEW_TIMEOUT_MS,
 } from "../cloud/renewal.js";
 import { ACP_DEFAULT_REQUEST_TIMEOUT_MS } from "../host/bounds.js";
 import { AcpHostError, TRANSIENT_ACP_CODES } from "../host/types.js";
@@ -88,6 +102,8 @@ import {
 } from "./wake.js";
 
 export const LISTENER_PAGE_LIMIT = 100;
+/** Force a read after this many consecutive claim refusals. */
+export const LISTENER_CLAIM_REFUSALS_BEFORE_READ = 3;
 export const LISTENER_IDLE_POLL_MS = IDLE_POLL_DEFAULT_MS;
 export const LISTENER_IDLE_POLL_MAX_MS = IDLE_POLL_MAX_MS;
 /** Server-fixed maximum delivery lease (§ frozen runtime budgets). */
@@ -122,6 +138,89 @@ export const LISTENER_DELIVERY_RETRY_INITIAL_MS = 500;
 export const LISTENER_DELIVERY_RETRY_MAX_MS = 30_000;
 /** EADDRNOTAVAIL probes slowly so the listener does not amplify port exhaustion. */
 export const LISTENER_HOST_PORTS_PROBE_MS = 60_000;
+/**
+ * Confirmed-loss answers required before a permanent credential stop, counting
+ * the answer that opened the window. Three checks are the floor.
+ */
+export const CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS = 3;
+/** Wait between credential re-checks. The listener stays up during this wait. */
+export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
+/** A renewal check must leave more than one attempt before a live token expires. */
+export const RENEWAL_WINDOW_RETRY_MS = 30_000;
+/** A failed request may retry at most once per second, even at or after expiry. */
+export const LISTENER_REQUEST_WAIT_FLOOR_MS = 1_000;
+/** Two renewal timeouts and pending writes, clock lead, two floors, and headroom. */
+export const RENEWAL_PENDING_WRITE_ALLOWANCE_MS = 5_000;
+export const RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS = 30_000;
+export const RENEWAL_EXPIRY_HEADROOM_MS = 8_000;
+export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS =
+  2 * RENEW_TIMEOUT_MS + RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS +
+  2 * LISTENER_REQUEST_WAIT_FLOOR_MS + 2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS +
+  RENEWAL_EXPIRY_HEADROOM_MS;
+/**
+ * Earliest permanent stop, measured from the first confirmed-loss answer.
+ * `(MIN_CHECKS - 1)` intervals, so the last check lands on this window.
+ * Ten minutes is the floor: a few minutes of a wrong backend must not stop
+ * the listener.
+ */
+export const CREDENTIAL_LOSS_CONFIRM_WINDOW_MS =
+  (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+
+/** Read-edge fatal answers. Credential codes require the confirmation window. */
+export const READ_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: CONFIRMED_CREDENTIAL_LOSS_CODES,
+  configurationCode: "delivery_configuration_missing",
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [404, "channel_not_found"],
+  ] as const),
+});
+
+/** Command-edge fatal answers. Credential codes require the confirmation window. */
+export const COMMAND_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+  h0FenceCode: H0_SEAT_CLAIM_REFUSED_CODE,
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [409, "command_id_conflict"],
+    [409, "delivery_ack_conflict"],
+    [409, "delivery_not_surfaced"],
+    [413, "payload_too_large"],
+    // command/index.ts version gate: the compiled client version cannot change on retry.
+    [426, "upgrade_required"],
+    [403, H0_SEAT_CLAIM_REFUSED_CODE],
+  ] as const),
+});
+
+function exactRefusal(
+  set: readonly (readonly [number, string])[],
+  status: number,
+  code: string | null,
+): boolean {
+  return code !== null && set.some(([s, c]) => s === status && c === code);
+}
+
+function fatalReadRefusal(error: unknown): boolean {
+  const http = followHttpDetails(error);
+  return http !== null && exactRefusal(
+    READ_FATAL_ANSWERS.refusals, http.status, followErrorEnvelope(error).error,
+  );
+}
+
+function fatalCommandRefusal(error: DeliveryHttpError): boolean {
+  return error.recognizedEnvelope && exactRefusal(
+    COMMAND_FATAL_ANSWERS.refusals, error.status, error.code,
+  );
+}
+
+/** A claim refused because this seat is served by the h0 poll, not by `cswarm listen`. */
+export class ListenerH0SeatError extends Error {
+  readonly code = H0_SEAT_CLAIM_REFUSED_CODE;
+  constructor() {
+    super(H0_SEAT_LISTENER_STOP_SENTENCE);
+    this.name = "ListenerH0SeatError";
+  }
+}
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -144,6 +243,14 @@ export type ListenerDeliveryJournalClient = Pick<
 >;
 
 export class ListenerCapabilityError extends Error {
+  static readonly CODES = Object.freeze([
+    "sender_relation_capability_missing",
+    "cursor_capability_missing",
+    "delivery_capability_inconsistent",
+    "delivery_configuration_missing",
+  ] as const);
+  static readonly READ_EDGE_CODES: readonly string[] =
+    ListenerCapabilityError.CODES.filter((code) => code !== "delivery_configuration_missing");
   readonly code: string;
   constructor(code: string, message: string) {
     super(message);
@@ -154,6 +261,16 @@ export class ListenerCapabilityError extends Error {
 
 export interface ListenerCredentialSession {
   bearer(): Promise<string>;
+  readonly expiry?: number | null;
+  /** True only while this session has a store and is due to renew. */
+  readonly renewalDue?: boolean;
+  /** Null if renewal is unavailable; otherwise the next due time. */
+  readonly renewalAt?: number | null;
+}
+
+/** A parsed delivery response contradicts the local lease or advertised lease bound. */
+export class ListenerLeaseResponseError extends Error {
+  override name = "ListenerLeaseResponseError";
 }
 
 export interface ListenerRuntimeModel extends ListenerModel {
@@ -190,6 +307,8 @@ export type ListenerRuntimeEvent =
   | {
     type: "idle_poll";
     intervalMs: number;
+    /** Only an empty claim schedules the next push reconcile wait. */
+    pushReconcileWait?: boolean;
     ts: string;
   }
   | {
@@ -214,6 +333,8 @@ export type ListenerRuntimeEvent =
     episodeAttempt: number;
     episodeStartedAt: string;
     failure: SignalReadFailureClassification;
+    code: string;
+    renewalExpiresAt?: string;
     delayMs: number;
     ts: string;
   }
@@ -225,6 +346,10 @@ export type ListenerRuntimeEvent =
     ts: string;
   }
   | { type: "malformed_row"; index: number; ts: string }
+  | { type: "claim_retry"; code: string; attempts: number; delayMs: number; renewalExpiresAt?: string; ts: string }
+  | { type: "claim_retry_cleared"; ts: string }
+  | { type: "ack_retry"; code: string; attempt: number; delayMs: number; renewalExpiresAt?: string; ts: string }
+  | { type: "ack_retry_cleared"; ts: string }
   | {
     type: "activity_publish_failure";
     code: ActivityPublishErrorCode;
@@ -281,6 +406,25 @@ export type ListenerRuntimeEvent =
   | {
     type: "wake";
     wake: ListenerWakeStatus;
+    ts: string;
+  }
+  | {
+    /**
+     * A confirmed credential-loss answer started or continued the confirmation
+     * window. The listener is still running. `stopAt` is when it will stop if
+     * every remaining check also confirms the loss.
+     */
+    type: "credential_check";
+    stopAt: string;
+    checks: number;
+    code: string;
+    edge: "read" | "command";
+    renewalExpiresAt?: string;
+    nextAttemptAt?: string;
+    ts: string;
+  }
+  | {
+    type: "credential_check_cleared";
     ts: string;
   };
 
@@ -399,26 +543,49 @@ export function isRestartableListenerStop(stop: ListenerRuntimeStop): boolean {
  * operator can see, while a wrong restart is work repeated against a server.
  */
 function isRestartableRuntimeError(error: unknown): boolean {
-  // Delivery: status decides, exactly as on the read path.
+  // An H0 seat will refuse claim on every retry. Restarting does not change the seat.
+  if (
+    error instanceof ListenerH0SeatError ||
+    (error instanceof DeliveryHttpError &&
+      error.recognizedEnvelope &&
+      error.code === COMMAND_FATAL_ANSWERS.h0FenceCode)
+  ) {
+    return false;
+  }
+  // Delivery: command-surface codes only. `forbidden` on this edge is not a
+  // credential check, so it stays restartable like any other unconfirmed 403.
   if (error instanceof DeliveryTransportError) return true;
   if (error instanceof DeliveryHttpError) {
-    return error.status === 429 || error.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
+      return false;
+    }
+    return !fatalCommandRefusal(error);
   }
-  // A malformed 2xx is a protocol defect; repeating it repeats the defect.
+  if (error instanceof DeliveryResponseError) return true;
+  if (error instanceof DeliveryMalformedResponseError) return true;
+  if (error instanceof ListenerLeaseResponseError) return true;
+  // Locally detected claim and ACK inconsistencies remain fatal.
   if (error instanceof DeliveryProtocolError) return false;
+  if (error instanceof RenewalRetryError) return true;
 
-  // Command posts: same status rule.
+  // Command posts: same command-surface rule.
   if (error instanceof CommandTransportError) return true;
   if (error instanceof CommandHttpError) {
-    return error.status === 429 || error.status >= 500;
+    if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
+      return false;
+    }
+    return error.status === 429 || error.status >= 500 ||
+      error.status === 401 || error.status === 403;
   }
 
   // ACP: only codes we assigned at the boundary, never the peer's words.
   if (error instanceof AcpHostError) return TRANSIENT_ACP_CODES.has(error.code);
 
-  // A capability the read service does not advertise will not appear because
-  // we asked again.
-  if (error instanceof ListenerCapabilityError) return false;
+  // A foreign read service can omit wire capabilities. Local configuration
+  // errors remain fatal.
+  if (error instanceof ListenerCapabilityError) {
+    return error.code !== READ_FATAL_ANSWERS.configurationCode;
+  }
 
   // Credential horizons are a human checkpoint, never a restart.
   if (
@@ -429,7 +596,18 @@ function isRestartableRuntimeError(error: unknown): boolean {
   }
 
   // Read-path failures, themselves closed.
-  return isRestartableReadError(error);
+  return !fatalReadRefusal(error) &&
+    (isRestartableReadError(error) || isForeignReadResponseFailure(error));
+}
+
+function isForeignReadResponseFailure(error: unknown): boolean {
+  if (error instanceof ListenerCapabilityError) {
+    return error.code !== READ_FATAL_ANSWERS.configurationCode;
+  }
+  if (classifySignalReadFailure(error).code === "malformed_response") return true;
+  const http = followHttpDetails(error);
+  return http !== null && !fatalReadRefusal(error) &&
+    !isConfirmedCredentialHttpFailure(http.status, followErrorEnvelope(error).error, "read");
 }
 
 /**
@@ -443,35 +621,79 @@ function isAbort(error: unknown): boolean {
 }
 
 /**
- * Closed credential-loss predicate shared by the read and engine catches and
- * injected into the engine seam; runtime exposes no override. Typed HTTP is
- * decided by status alone (401/403), renewal errors by their exact classes,
- * and every other non-HTTP value delegates to the established fleet predicate,
- * so typed HTTP 5xx/409 text can never fall through to wording.
+ * Local renewal horizon and missing-secret failures stop at once. A renewal
+ * HTTP credential answer is a server sample and enters the confirmation window.
  */
-function isCredentialLoss(error: unknown): boolean {
-  if (error instanceof CommandHttpError) {
-    return error.status === 401 || error.status === 403;
-  }
+function isLocalCredentialLoss(error: unknown): boolean {
   if (
     error instanceof RenewalReauthorisationRequired ||
     error instanceof RenewalRevoked
   ) {
     return true;
   }
+  if (followHttpDetails(error) !== null ||
+    error instanceof CommandHttpError ||
+    error instanceof DeliveryHttpError ||
+    error instanceof SignalHttpError
+  ) {
+    return false;
+  }
   return isFollowCredentialFailure(error);
 }
 
-function isDeliveryCredentialLoss(error: unknown): boolean {
-  return isCredentialLoss(error) ||
-    (error instanceof DeliveryHttpError &&
-      (error.status === 401 || error.status === 403));
+/**
+ * A server answer whose code, on that edge, means the credential is dead.
+ * Command-edge `forbidden` is not in this set. One answer opens the
+ * confirmation window; it does not stop the listener.
+ */
+function isServerConfirmedCredentialLoss(error: unknown): boolean {
+  if (error instanceof RenewalCredentialCheckError) {
+    return isConfirmedCredentialHttpFailure(error.status, error.code, "command");
+  }
+  if (error instanceof CommandHttpError || error instanceof DeliveryHttpError) {
+    return isConfirmedCredentialHttpFailure(error.status, error.code, "command");
+  }
+  if (error instanceof SignalHttpError) {
+    return isConfirmedCredentialHttpFailure(
+      error.status,
+      error.envelope.error,
+      "read",
+    );
+  }
+  return isFollowCredentialFailure(error) && followErrorEnvelope(error).error !== null;
+}
+
+function isH0SeatClaimRefusal(error: unknown): boolean {
+  return error instanceof DeliveryHttpError &&
+    error.recognizedEnvelope &&
+    error.status === 403 &&
+    error.code === COMMAND_FATAL_ANSWERS.h0FenceCode;
+}
+
+function isForeignDeliveryHttpResponse(error: DeliveryHttpError): boolean {
+  return !error.recognizedEnvelope;
+}
+
+function deliveryRetryCode(error: unknown): string {
+  if (error instanceof RenewalRetryError) return error.code;
+  if (error instanceof DeliveryResponseError) return "malformed_response";
+  if (error instanceof DeliveryHttpError) {
+    return isForeignDeliveryHttpResponse(error) ? `http_${error.status}` : error.code;
+  }
+  return "delivery_unreachable";
 }
 
 function isRetryableDeliveryError(error: unknown): boolean {
-  return error instanceof DeliveryTransportError ||
-    (error instanceof DeliveryHttpError &&
-      (error.status === 429 || error.status >= 500));
+  if (error instanceof RenewalRetryError) return true;
+  if (error instanceof DeliveryTransportError) return true;
+  if (error instanceof DeliveryResponseError) return true;
+  if (error instanceof DeliveryMalformedResponseError) return true;
+  if (!(error instanceof DeliveryHttpError)) return false;
+  if (fatalCommandRefusal(error)) return false;
+  if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
+    return false;
+  }
+  return true;
 }
 
 function deliveryRetryDelay(
@@ -484,7 +706,7 @@ function deliveryRetryDelay(
     LISTENER_DELIVERY_RETRY_MAX_MS,
     LISTENER_DELIVERY_RETRY_INITIAL_MS * (2 ** exponent),
   );
-  const jitter = Math.floor(Math.max(0, Math.min(1, random())) * ceiling);
+  const jitter = Math.floor((0.5 + Math.max(0, Math.min(1, random())) * 0.5) * ceiling);
   const retryAfter = error instanceof DeliveryHttpError && error.status === 429
     ? error.retryAfterMs ?? 0
     : 0;
@@ -610,13 +832,13 @@ async function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
 function requireCapabilities(page: AgentSignalPage): void {
   if (!page.capabilities.senderOwnerRelation) {
     throw new ListenerCapabilityError(
-      "sender_relation_capability_missing",
+      ListenerCapabilityError.CODES[0],
       "the read service does not prove sender ownership; refusing to wake a model",
     );
   }
   if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
     throw new ListenerCapabilityError(
-      "cursor_capability_missing",
+      ListenerCapabilityError.CODES[1],
       "the read service does not support lossless ascending inbox pages; refusing to wake a model",
     );
   }
@@ -629,13 +851,13 @@ function classifyDeliveryMode(
   const { deliveryClaim, deliveryAck } = page.capabilities;
   if (deliveryClaim && !deliveryAck) {
     throw new ListenerCapabilityError(
-      "delivery_capability_inconsistent",
+      ListenerCapabilityError.CODES[2],
       "the read service delivery capability is inconsistent",
     );
   }
   if ((deliveryClaim || deliveryAck) && !durableConfigured) {
     throw new ListenerCapabilityError(
-      "delivery_configuration_missing",
+      ListenerCapabilityError.CODES[3],
       "durable delivery configuration is required by the read service",
     );
   }
@@ -754,7 +976,37 @@ export async function runListenerRuntime(
   options: ListenerRuntimeOptions,
 ): Promise<ListenerRuntimeStop> {
   const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? defaultSleep;
+  const rawSleep = options.sleep ?? defaultSleep;
+  let waitGeneration = 0;
+  const renewalDeadline = (): number | null => {
+    const expiry = options.credentialSession.expiry;
+    return expiry === null || expiry === undefined
+      ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  };
+  const renewalWaitBoundary = (): number | null => {
+    const expiry = options.credentialSession.expiry;
+    if (expiry === null || expiry === undefined || now() >= expiry) return null;
+    const dueAt = options.credentialSession.renewalAt;
+    if (dueAt === null) return null;
+    if (dueAt !== undefined && now() < dueAt) return dueAt;
+    if (dueAt === undefined && options.credentialSession.renewalDue === false) return null;
+    return renewalDeadline();
+  };
+  const capWaitMs = (ms: number): number => {
+    const boundary = renewalWaitBoundary();
+    const wait = boundary === null ? ms : Math.min(ms, Math.max(0, boundary - now()));
+    return Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, wait);
+  };
+  const mayWaitForWake = (): boolean => {
+    const boundary = renewalWaitBoundary();
+    return boundary === null || now() < boundary;
+  };
+  const sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
+    const capped = capWaitMs(ms);
+    if (capped <= 0) return;
+    await rawSleep(capped, signal);
+    if (!signal?.aborted) waitGeneration += 1;
+  };
   const random = options.random ?? Math.random;
   const pageLimit = options.pageLimit ?? LISTENER_PAGE_LIMIT;
   const pollMs = options.pollMs ?? LISTENER_IDLE_POLL_MS;
@@ -764,9 +1016,27 @@ export async function runListenerRuntime(
   const deliveryHoldBudgetMs = options.deliveryHoldBudgetMs ??
     LISTENER_DELIVERY_HOLD_BUDGET_MS;
   const abort = options.signal;
+  let lastRequestWaitGeneration = -1;
+  let requestGate: Promise<void> = Promise.resolve();
+  const paceRequest = async (): Promise<void> => {
+    const preceding = requestGate;
+    let release!: () => void;
+    requestGate = new Promise<void>((resolve) => { release = resolve; });
+    await preceding;
+    try {
+      if (lastRequestWaitGeneration === waitGeneration) {
+        await rawSleep(LISTENER_REQUEST_WAIT_FLOOR_MS, abort);
+        if (!abort?.aborted) waitGeneration += 1;
+      }
+      if (abort?.aborted) throw new DOMException("listener stopped", "AbortError");
+      lastRequestWaitGeneration = waitGeneration;
+    } finally {
+      release();
+    }
+  };
   const idleSleep = async (hadDelivery: boolean): Promise<void> => {
     if (hadDelivery) emptyIdleStreak = 0;
-    const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
+    const intervalMs = capWaitMs(nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS));
     if (!hadDelivery) emptyIdleStreak += 1;
     options.onEvent?.({
       type: "idle_poll",
@@ -943,6 +1213,7 @@ export async function runListenerRuntime(
   let stop: ListenerRuntimeStop | undefined;
   let wakeSubscriber: WakeHandle | null = options.wake ?? null;
   let reconcileDueAt = now();
+  let plannedWakeUntil: number | null = null;
 
   const ensureWake = (): WakeHandle => {
     if (wakeSubscriber === null) {
@@ -980,7 +1251,135 @@ export async function runListenerRuntime(
     }
     return nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
   };
+  const wakeWaitUntil = (): number => Math.max(now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+    Math.min(reconcileDueAt, now() + waitCapMs(), renewalWaitBoundary() ?? Infinity));
 
+  /**
+   * Confirmation window for a server credential-loss answer. `checks` counts
+   * confirmed-loss answers only. A transient failure does not count and does
+   * not clear the window; it pushes `stopAt` out by the remaining intervals.
+   */
+  let credentialWindow: {
+    startedAtMs: number;
+    checks: number;
+    stopAtMs: number;
+    code: string;
+    edge: "read" | "command";
+  } | null = null;
+
+  const confirmedLossCode = (error: unknown): string => {
+    if (error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+        error instanceof RenewalCredentialCheckError) {
+      const code = error.code;
+      if (typeof code === "string" && /^[a-z0-9_-]{1,96}$/.test(code)) return code;
+    }
+    const code = followErrorEnvelope(error).error;
+    if (typeof code === "string" && /^[a-z0-9_-]{1,96}$/.test(code)) return code;
+    return "unauthenticated";
+  };
+
+  const emitCredentialCheck = (delayMs: number): void => {
+    if (credentialWindow === null) return;
+    options.onEvent?.({
+      type: "credential_check",
+      stopAt: new Date(credentialWindow.stopAtMs).toISOString(),
+      checks: credentialWindow.checks,
+      code: credentialWindow.code,
+      edge: credentialWindow.edge,
+      ...(delayMs > 0 ? { nextAttemptAt: new Date(now() + delayMs).toISOString() } : {}),
+      ...(options.credentialSession.expiry == null ? {}
+        : { renewalExpiresAt: new Date(options.credentialSession.expiry).toISOString() }),
+      ts: eventTime(now),
+    });
+  };
+
+  const projectCredentialStopAt = (atMs: number): number => {
+    if (credentialWindow === null) return atMs;
+    const remaining = Math.max(
+      0,
+      CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - credentialWindow.checks,
+    );
+    return Math.max(
+      credentialWindow.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+      atMs + remaining * credentialCheckDelayMs(atMs),
+    );
+  };
+
+  const credentialCheckDelayMs = (atMs: number): number => {
+    const expiry = options.credentialSession.expiry;
+    return expiry !== null && expiry !== undefined && atMs < expiry
+      ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+  };
+
+  const clearCredentialWindow = (): void => {
+    if (credentialWindow === null) return;
+    credentialWindow = null;
+    options.onEvent?.({
+      type: "credential_check_cleared",
+      ts: eventTime(now),
+    });
+  };
+
+  /**
+   * Record one sample in the confirmation window and wait for the next.
+   * Returns a stop when the window is complete or the caller aborted.
+   * `"continue"` means the listener should try the same check again.
+   */
+  const holdCredentialWindow = async (
+    kind: "confirmed" | "transient",
+    error: unknown,
+  ): Promise<ListenerRuntimeStop | "continue"> => {
+    const atMs = now();
+    const currentExpiry = options.credentialSession.expiry;
+    if (currentExpiry !== null && currentExpiry !== undefined && atMs >= currentExpiry) {
+      return { reason: "credential", error: new RenewalRevoked("predecessor_expired_local",
+        "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential.") };
+    }
+    if (kind === "confirmed") {
+      if (credentialWindow === null) {
+        credentialWindow = {
+          startedAtMs: atMs,
+          checks: 1,
+          stopAtMs: atMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+          code: confirmedLossCode(error),
+          edge: error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+              error instanceof RenewalCredentialCheckError
+            ? "command" : "read",
+        };
+      } else {
+        credentialWindow.checks += 1;
+        credentialWindow.code = confirmedLossCode(error);
+        credentialWindow.edge = error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+          error instanceof RenewalCredentialCheckError
+          ? "command" : "read";
+        credentialWindow.stopAtMs = projectCredentialStopAt(atMs);
+      }
+      const window = credentialWindow;
+      if (
+        window.checks >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS &&
+        atMs >= window.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS
+      ) {
+        window.stopAtMs = atMs;
+        emitCredentialCheck(0);
+        return { reason: "credential", error: asError(error) };
+      }
+    } else if (credentialWindow !== null) {
+      credentialWindow.stopAtMs = Math.max(
+        credentialWindow.stopAtMs,
+        projectCredentialStopAt(atMs),
+      );
+    } else {
+      return "continue";
+    }
+    const delayMs = credentialCheckDelayMs(atMs);
+    emitCredentialCheck(capWaitMs(delayMs));
+    await sleep(delayMs, abort);
+    if (abort?.aborted) return { reason: "cancelled" };
+    return "continue";
+  };
+
+  let ackAttempt = 0;
+  let ackReadDue = false;
   const sendPreparedAck = async (
     active: NonNullable<ListenerDeliveryJournalRecord["active"]>,
   ): Promise<ListenerRuntimeStop | null> => {
@@ -1002,10 +1401,11 @@ export async function runListenerRuntime(
     } catch (error) {
       return { reason: "fatal", error: asError(error) };
     }
-    let attempt = 0;
     while (true) {
       try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const credential = await options.credentialSession.bearer();
+        await paceRequest();
         await deliveryClient!.ackAgentDelivery({
           workspaceId: options.workspaceId,
           credential,
@@ -1018,6 +1418,9 @@ export async function runListenerRuntime(
         });
         await options.deliveryJournal!.clearActive(eventTime(now));
         after = null;
+        ackAttempt = 0;
+        clearCredentialWindow();
+        options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
         options.onEvent?.({
           type: "delivery_ack",
           signalId: active.signalId,
@@ -1034,25 +1437,50 @@ export async function runListenerRuntime(
           try {
             await options.deliveryJournal!.clearActive(eventTime(now));
             after = null;
+            options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
             return null;
           } catch (clearError) {
             return { reason: "fatal", error: asError(clearError) };
           }
         }
         if (abort?.aborted) return { reason: "cancelled" };
-        if (isDeliveryCredentialLoss(error)) {
+        if (isH0SeatClaimRefusal(error)) {
+          return { reason: "fatal", error: new ListenerH0SeatError() };
+        }
+        if (isLocalCredentialLoss(error)) {
           return { reason: "credential", error: asError(error) };
+        }
+        if (isServerConfirmedCredentialLoss(error)) {
+          const decided = await holdCredentialWindow("confirmed", error);
+          if (decided !== "continue") return decided;
+          continue;
+        }
+        if (credentialWindow !== null && isRetryableDeliveryError(error)) {
+          const decided = await holdCredentialWindow("transient", error);
+          if (decided !== "continue") return decided;
+          continue;
         }
         if (!isRetryableDeliveryError(error)) {
           return { reason: "fatal", error: asError(error) };
         }
-        attempt += 1;
-        await sleep(deliveryRetryDelay(attempt, error, random), abort);
+        ackAttempt += 1;
+        const delayMs = capWaitMs(deliveryRetryDelay(ackAttempt, error, random));
+        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt: ackAttempt, delayMs,
+          ...(error instanceof RenewalRetryError && error.expiresAt !== null
+            ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() } : {}), ts: eventTime(now) });
+        await sleep(delayMs, abort);
         if (abort?.aborted) return { reason: "cancelled" };
+        if (ackAttempt % LISTENER_CLAIM_REFUSALS_BEFORE_READ === 0) {
+          ackReadDue = true;
+          return null;
+        }
       }
     }
   };
   try {
+    let forceRead = false;
+    let claimRefusals = 0;
+    let deliveryAttempt = 0;
     while (true) {
       if (abort?.aborted) {
         stop = { reason: "cancelled" };
@@ -1060,16 +1488,22 @@ export async function runListenerRuntime(
       }
       let skipRead = false;
       if (
-        ready &&
+        ready && !forceRead &&
         deliveryMode === "durable_claim" &&
         wakeSubscriber !== null &&
-        wakeSubscriber.hasTopic
+        wakeSubscriber.hasTopic && mayWaitForWake()
       ) {
-        const until = Math.min(reconcileDueAt, now() + waitCapMs());
+        const until = Math.max(now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+          plannedWakeUntil ?? wakeWaitUntil());
+        plannedWakeUntil = null;
+        const wakeWaitStartedAt = now();
         const reason = await wakeSubscriber.next({
           until,
           ...(abort ? { signal: abort } : {}),
         });
+        const remainingFloorMs = LISTENER_REQUEST_WAIT_FLOOR_MS - (now() - wakeWaitStartedAt);
+        if (remainingFloorMs > 0 && !abort?.aborted) await rawSleep(remainingFloorMs, abort);
+        if (!abort?.aborted) waitGeneration += 1;
         emitWake();
         if (abort?.aborted) {
           stop = { reason: "cancelled" };
@@ -1089,14 +1523,20 @@ export async function runListenerRuntime(
             skipRead = true;
           }
         }
+      } else {
+        plannedWakeUntil = null;
       }
       let page: AgentSignalPage | null = null;
+      forceRead = false;
+      ackReadDue = false;
       if (skipRead) {
         /* Wake tick: claim without a read. */
       } else try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const token = await options.credentialSession.bearer();
         /* Same idle wait as the claim: idleSleep is the only pause in this
          * loop, so the read POST and the claim POST share the back-off. */
+        await paceRequest();
         page = await readPage({
           token,
           after,
@@ -1113,9 +1553,14 @@ export async function runListenerRuntime(
           },
         });
         requireCapabilities(page);
+        if (page.rawCount >= pageLimit && page.nextCursor === null) {
+          throw new SignalMalformedError(
+            "the read service returned a full page without a safe cursor",
+          );
+        }
         applyWakeHint(page.wake);
         emitWake();
-        if (ready && readEpisodeStartedAtMs !== null) {
+        if (readEpisodeStartedAtMs !== null) {
           const recoveredAtMs = now();
           options.onEvent?.({
             type: "read_recovered",
@@ -1128,6 +1573,7 @@ export async function runListenerRuntime(
           readEpisodeAttempts = 0;
         }
         const nextMode = classifyDeliveryMode(page, durableConfigured);
+        clearCredentialWindow();
         if (nextMode !== deliveryMode) {
           deliveryMode = nextMode;
           options.onEvent?.({
@@ -1152,38 +1598,63 @@ export async function runListenerRuntime(
           stop = { reason: "cancelled" };
           break;
         }
-        if (isCredentialLoss(error)) {
+        if (isLocalCredentialLoss(error)) {
           stop = { reason: "credential", error: asError(error) };
           break;
         }
-        const failure = classifySignalReadFailure(error);
-        if (
-          isRetryableFollowError(error) ||
-          failure.code === "aborted" ||
-          failure.code === "host_ports_exhausted"
-        ) {
-          readAttempt += 1;
-          const delayMs = failure.code === "host_ports_exhausted"
-            ? LISTENER_HOST_PORTS_PROBE_MS
-            : nextFollowBackoffMs(readAttempt, null, random);
-          if (ready) {
-            const failedAtMs = now();
-            if (readEpisodeStartedAtMs === null) {
-              readEpisodeStartedAtMs = failedAtMs;
-              readEpisodeAttempts = 0;
-            }
-            readEpisodeAttempts += 1;
-            options.onEvent?.({
-              type: "read_retry",
-              attempt: readAttempt,
-              episodeAttempt: readEpisodeAttempts,
-              episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
-              failure,
-              delayMs,
-              ts: new Date(failedAtMs).toISOString(),
-            });
+        if (isServerConfirmedCredentialLoss(error)) {
+          const decided = await holdCredentialWindow("confirmed", error);
+          if (decided !== "continue") {
+            stop = decided;
+            break;
           }
+          forceRead = true;
+          continue;
+        }
+        const failure = classifySignalReadFailure(error);
+        const transientRead = error instanceof RenewalRetryError ||
+          (!fatalReadRefusal(error) && (isRetryableFollowError(error) ||
+          isForeignReadResponseFailure(error) ||
+          failure.code === "aborted" ||
+          failure.code === "host_ports_exhausted"));
+        if (credentialWindow !== null && transientRead) {
+          const decided = await holdCredentialWindow("transient", error);
+          if (decided !== "continue") {
+            stop = decided;
+            break;
+          }
+          forceRead = true;
+          continue;
+        }
+        if (transientRead) {
+          readAttempt += 1;
+          const delayMs = capWaitMs(failure.code === "host_ports_exhausted"
+            ? LISTENER_HOST_PORTS_PROBE_MS
+            : nextFollowBackoffMs(readAttempt, null, random));
+          const failedAtMs = now();
+          if (readEpisodeStartedAtMs === null) {
+            readEpisodeStartedAtMs = failedAtMs;
+            readEpisodeAttempts = 0;
+          }
+          readEpisodeAttempts += 1;
+          options.onEvent?.({
+            type: "read_retry",
+            attempt: readAttempt,
+            episodeAttempt: readEpisodeAttempts,
+            episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
+            failure,
+            code: error instanceof RenewalRetryError ? error.code
+              : error instanceof ListenerCapabilityError ? error.code
+              : failure.code === "http_status" ? `http_${failure.httpStatus}`
+              : failure.code,
+            ...(error instanceof RenewalRetryError && error.expiresAt !== null
+              ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() }
+              : {}),
+            delayMs,
+            ts: new Date(failedAtMs).toISOString(),
+          });
           await sleep(delayMs, abort);
+          forceRead = true;
           continue;
         }
         stop = { reason: "fatal", error: asError(error) };
@@ -1210,7 +1681,9 @@ export async function runListenerRuntime(
           void (async () => {
             let declared = false;
             try {
+              if (options.credentialSession.renewalDue === true) await paceRequest();
               const credential = await options.credentialSession.bearer();
+              await paceRequest();
               const outcome = await declareAgentModel(options.target, {
                 workspaceId: options.workspaceId,
                 model: declaredLabel,
@@ -1258,6 +1731,10 @@ export async function runListenerRuntime(
           if (abort?.aborted) {
             stop = { reason: "cancelled" };
             break;
+          }
+          if (ackReadDue) {
+            forceRead = true;
+            continue;
           }
           await idleSleep(true);
           continue;
@@ -1310,6 +1787,7 @@ export async function runListenerRuntime(
                 stop = ackStop;
                 break;
               }
+              if (ackReadDue) forceRead = true;
               continue;
             } catch (error) {
               stop = { reason: "fatal", error: asError(error) };
@@ -1382,11 +1860,12 @@ export async function runListenerRuntime(
         }
 
         let result: DeliveryClaimResult | null = null;
-        let deliveryAttempt = 0;
         while (result === null && !stop) {
           try {
             await journal.recordClaimAttempt(eventTime(now));
+            if (options.credentialSession.renewalDue === true) await paceRequest();
             const credential = await options.credentialSession.bearer();
+            await paceRequest();
             result = await deliveryClient!.claimAgentInbox({
               workspaceId: options.workspaceId,
               credential,
@@ -1400,9 +1879,21 @@ export async function runListenerRuntime(
               stop = { reason: "cancelled" };
               break;
             }
-            if (isDeliveryCredentialLoss(error)) {
+            if (isH0SeatClaimRefusal(error)) {
+              stop = { reason: "fatal", error: new ListenerH0SeatError() };
+              break;
+            }
+            if (isLocalCredentialLoss(error)) {
               stop = { reason: "credential", error: asError(error) };
               break;
+            }
+            if (isServerConfirmedCredentialLoss(error)) {
+              const decided = await holdCredentialWindow("confirmed", error);
+              if (decided !== "continue") {
+                stop = decided;
+                break;
+              }
+              continue;
             }
             if (
               error instanceof DeliveryHttpError &&
@@ -1411,24 +1902,67 @@ export async function runListenerRuntime(
               wakeSubscriber?.markRateLimited(now());
               emitWake();
             }
-            if (!isRetryableDeliveryError(error)) {
+            const retryableClaim = isRetryableDeliveryError(error);
+            const delayMs = capWaitMs(retryableClaim
+              ? credentialWindow !== null
+                ? RENEWAL_WINDOW_RETRY_MS
+                : deliveryRetryDelay(deliveryAttempt + 1, error, random)
+              : 0);
+            if (retryableClaim) {
+              claimRefusals += 1;
+              options.onEvent?.({
+                type: "claim_retry",
+                code: deliveryRetryCode(error),
+                attempts: claimRefusals,
+                delayMs: credentialWindow !== null
+                  ? capWaitMs(options.credentialSession.expiry == null
+                    ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS : RENEWAL_WINDOW_RETRY_MS)
+                  : delayMs,
+                ...(error instanceof RenewalRetryError && error.expiresAt !== null
+                  ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() } : {}),
+                ts: eventTime(now),
+              });
+            }
+            if (credentialWindow !== null && retryableClaim) {
+              const decided = await holdCredentialWindow("transient", error);
+              if (decided !== "continue") {
+                stop = decided;
+                break;
+              }
+              if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+                forceRead = true;
+                break;
+              }
+              continue;
+            }
+            if (!retryableClaim) {
               stop = { reason: "fatal", error: asError(error) };
               break;
             }
             deliveryAttempt += 1;
-            const delayMs = deliveryRetryDelay(deliveryAttempt, error, random);
             await sleep(delayMs, abort);
             if (abort?.aborted) {
               stop = { reason: "cancelled" };
               break;
             }
+            if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+              forceRead = true;
+              break;
+            }
           }
         }
         if (stop) break;
+        if (forceRead) continue;
         if (result === null) {
           stop = { reason: "fatal", error: new Error("delivery claim did not settle") };
           break;
         }
+        if (claimRefusals > 0) {
+          claimRefusals = 0;
+          deliveryAttempt = 0;
+          options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
+        }
+        clearCredentialWindow();
         applyWakeHint(result.wake);
         if (!skipRead && wakeSubscriber !== null && wakeSubscriber.hasTopic) {
           wakeSubscriber.noteReconcile(now());
@@ -1460,7 +1994,7 @@ export async function runListenerRuntime(
           if (active.phase === "leased") {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay did not return the stored lease"),
+              error: new ListenerLeaseResponseError("delivery claim replay did not return the stored lease"),
             };
             break;
           }
@@ -1472,14 +2006,14 @@ export async function runListenerRuntime(
           }
           if (wakeSubscriber !== null && wakeSubscriber.hasTopic) {
             const snap = wakeSubscriber.snapshot(now());
-            const intervalMs = snap.mode === LISTENER_WAKE_MODE_PUSH
-              ? LISTENER_RECONCILE_POLL_MS
-              : nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
+            plannedWakeUntil = wakeWaitUntil();
+            const intervalMs = plannedWakeUntil - now();
             if (snap.mode === LISTENER_WAKE_MODE_PUSH) emptyIdleStreak = 0;
             else emptyIdleStreak += 1;
             options.onEvent?.({
               type: "idle_poll",
               intervalMs,
+              pushReconcileWait: snap.mode === LISTENER_WAKE_MODE_PUSH && !skipRead,
               ts: eventTime(now),
             });
             emitWake();
@@ -1501,14 +2035,14 @@ export async function runListenerRuntime(
           leasedUntilMs >
             now() + LISTENER_DELIVERY_MAX_LEASE_MS + LISTENER_LEASE_CLOCK_SKEW_ALLOWANCE_MS
         ) {
-          stop = { reason: "fatal", error: new Error("delivery lease deadline is invalid") };
+          stop = { reason: "fatal", error: new ListenerLeaseResponseError("delivery lease deadline is invalid") };
           break;
         }
         if (active.phase === "leased") {
           if (!exactRecoveredLease(active, claimed)) {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay does not match the stored lease"),
+              error: new ListenerLeaseResponseError("delivery claim replay does not match the stored lease"),
             };
             break;
           }
@@ -1585,8 +2119,23 @@ export async function runListenerRuntime(
         } catch (error) {
           if (abort?.aborted) {
             stop = { reason: "cancelled" };
-          } else if (isCredentialLoss(error)) {
+          } else if (isLocalCredentialLoss(error)) {
             stop = { reason: "credential", error: asError(error) };
+          } else if (isServerConfirmedCredentialLoss(error)) {
+            const decided = await holdCredentialWindow("confirmed", error);
+            if (decided !== "continue") stop = decided;
+            else {
+              continue;
+            }
+          } else if (
+            credentialWindow !== null &&
+            (isRetryableFollowError(error) || isRetryableDeliveryError(error))
+          ) {
+            const decided = await holdCredentialWindow("transient", error);
+            if (decided !== "continue") stop = decided;
+            else {
+              continue;
+            }
           } else if (isAbort(error)) {
             stop = { reason: "cancelled" };
           } else {
@@ -1617,6 +2166,7 @@ export async function runListenerRuntime(
             stop = ackStop;
             break;
           }
+          if (ackReadDue) forceRead = true;
         } catch (error) {
           stop = { reason: "fatal", error: asError(error) };
           break;
@@ -1684,8 +2234,29 @@ export async function runListenerRuntime(
             stop = { reason: "cancelled" };
             break;
           }
-          if (isCredentialLoss(error)) {
+          if (isLocalCredentialLoss(error)) {
             stop = { reason: "credential", error: asError(error) };
+            break;
+          }
+          if (isServerConfirmedCredentialLoss(error)) {
+            const decided = await holdCredentialWindow("confirmed", error);
+            if (decided !== "continue") {
+              stop = decided;
+              break;
+            }
+            stop = { reason: "cancelled" };
+            break;
+          }
+          if (
+            credentialWindow !== null &&
+            (isRetryableFollowError(error) || isRetryableDeliveryError(error))
+          ) {
+            const decided = await holdCredentialWindow("transient", error);
+            if (decided !== "continue") {
+              stop = decided;
+              break;
+            }
+            stop = { reason: "cancelled" };
             break;
           }
           if (isAbort(error)) {
@@ -1696,20 +2267,15 @@ export async function runListenerRuntime(
           break;
         }
       }
+      if (stop?.reason === "cancelled" && abort?.aborted !== true && credentialWindow !== null) {
+        stop = undefined;
+        continue;
+      }
       if (stop) break;
 
       const fullPage = page.rawCount >= pageLimit;
       if (fullPage) {
-        if (page.nextCursor === null) {
-          stop = {
-            reason: "fatal",
-            error: new Error(
-              "the read service returned a full page without a safe cursor",
-            ),
-          };
-          break;
-        }
-        after = page.nextCursor;
+        after = page.nextCursor!;
         continue;
       }
       // Full scan complete. Reset so late commits with older timestamps appear.

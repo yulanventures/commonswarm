@@ -136,7 +136,9 @@ import {
   RENEWAL_HORIZON_DEFAULT_MS,
   RENEWAL_HORIZON_MAX_MS,
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
+  RENEWAL_UPGRADE_LISTENER_ACTION,
   RenewalReauthorisationRequired,
+  RenewalCredentialCheckError,
   RenewalRevoked,
   RenewalSuspended,
 } from "./cloud/renewal.js";
@@ -213,6 +215,9 @@ import {
   askWaitJsonPayload,
   followStopFrame,
   formatFollowFrame,
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+  ListenerCredentialStateMismatchError,
   isFollowCredentialFailure,
   isRestartableReadError,
   parseWaitSeconds,
@@ -274,7 +279,12 @@ import {
   DeliveryReceiptReadError,
   readAgentDeliveryReceipts,
 } from "./cloud/delivery-receipts.js";
-import { DELIVERY_HANDLED_OUTCOMES } from "./cloud/delivery.js";
+import {
+  DELIVERY_HANDLED_OUTCOMES,
+  H0_SEAT_CLAIM_REFUSED_CODE,
+  DELIVERY_SESSION_PROOF_CODES,
+  H0_SEAT_LISTENER_STOP_SENTENCE,
+} from "./cloud/delivery.js";
 import {
   renderedBroadcastIds,
   reportRenderedBroadcasts,
@@ -311,6 +321,8 @@ import {
   runListenerAttendanceCanary,
   writeListenerCredentialState,
   LISTENER_DELIVERY_FAILING_THRESHOLD,
+  LISTENER_RUNNING_STATES,
+  ListenerCapabilityError,
   LISTENER_THROUGHPUT_LAPSE_RATIO,
   LISTENER_ROUTE_MODES,
   listenerRouteUsage,
@@ -328,6 +340,9 @@ import {
   emptyListenerReadHealth,
   summarizeListenerReadHealth,
   listenerWakeStatusSentence,
+  LISTENER_RECONCILE_POLL_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  LISTENER_WAKE_MODE_PUSH,
   emptyListenerWakeStatus,
   createWakeSubscriber,
   LISTENER_DELIVERY_HOLD_RELEASE_CLAUSES,
@@ -3090,6 +3105,7 @@ async function agentSession(
   workspaceId: string,
   agent: AgentCredentialInput,
   fetcher?: typeof fetch,
+  listenerMode = false,
 ): Promise<AgentCredentialSession> {
   let store: Awaited<ReturnType<typeof agentCredentialStore>> | null = null;
   try {
@@ -3121,6 +3137,7 @@ async function agentSession(
       expiresAt: agent.expiresAt,
     },
     store,
+    listenerMode,
     ...(fetcher ? { fetcher } : {}),
   });
 }
@@ -3312,8 +3329,8 @@ export function listenerRouteConfiguration(
   return { routeMode, deferOverChars: null };
 }
 
-/** Post-turn work (the ack, the reply post, the renewal request itself) must fit between turn end and credential expiry. */
-export const TURN_BUDGET_CREDENTIAL_MARGIN_MS = 60_000;
+/** End a turn by the renewal deadline, leaving the full renewal margin. */
+export const TURN_BUDGET_CREDENTIAL_MARGIN_MS = RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
 
 /**
  * Bound one worker turn to the live credential's remaining lifetime.
@@ -4935,11 +4952,7 @@ async function runInboxFollowCommand(args: Arguments): Promise<void> {
       signal: controller.signal,
       refusalToleranceMs,
       ...(pageLimit === undefined ? {} : { pageLimit }),
-      isCredentialFailure: (error) =>
-        isFollowCredentialFailure(error) ||
-        error instanceof RenewalReauthorisationRequired ||
-        error instanceof RenewalRevoked ||
-        error instanceof RenewalSuspended,
+      isCredentialFailure: isFollowRenewalCredentialFailure,
       arm: async ({ after, limit }) => {
         // Renewal is checked on every arm for agent credentials; humans reuse
         // the session bearer already resolved for this process.
@@ -5311,9 +5324,15 @@ function listenerAttendanceState(
   handledState: "handled" | "not_handled" | "not_yet_measured";
 } {
   const pending = status.pendingForMainCount ?? 0;
-  const connected = status.state === "ready";
+  const connected = LISTENER_RUNNING_STATES.includes(status.state) &&
+    status.state !== "starting" && status.state !== "stopping" &&
+    status.state !== "credential_check" &&
+    status.state !== "claim_retry" && status.state !== "ack_retry" &&
+    status.readHealth?.currentEpisodeStartedAt == null;
+  // A leftover hook-surface file still proves a message was surfaced.
+  // attendingSurfaces does not include that file; it is the hook installed now.
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
-  const hasSurface = attendingSurfaces.length > 0;
+  const hasSurface = evidence.hookSurfaceExists || attendingSurfaces.length > 0;
   const attendanceState = pending > 0
     ? "unattended"
     : hasSurface && evidence.hookSurfaceAdvanced
@@ -5392,9 +5411,13 @@ function listenerLapseNotices(
   status: ListenerStatus,
   summary: ListenerReadHealthSummary,
 ): ListenerLapseNotice[] {
+  // A stopped or failed listener is not in a live read or claim lapse. Those
+  // notices speak about what it is doing now. The stop is the status. A recorded
+  // run of delivery failures still prints, because that alarm is why it is down.
+  const down = status.state === "stopped" || status.state === "failed";
   const health = status.readHealth ?? emptyListenerReadHealth();
   const notices: ListenerLapseNotice[] = [];
-  if (health.currentReasonCode === "host_ports_exhausted") {
+  if (!down && health.currentReasonCode === "host_ports_exhausted") {
     notices.push({
       code: "listener_host_ports_exhausted",
       message: "This host has run out of outbound ports. The listener is probing only once per minute so it does not amplify the outage.",
@@ -5402,6 +5425,7 @@ function listenerLapseNotices(
         "Find the consumer: lsof -nP -iTCP | awk '{print $1}' | sort | uniq -c | sort -rn",
     });
   } else if (
+    !down &&
     // Reuse arrival-watch.ts's 60s loud-lapse transition. The listener keeps
     // the episode in durable status instead of the monitor's process-local machine.
     summary.currentEpisodeDurationMs !== null &&
@@ -5411,10 +5435,10 @@ function listenerLapseNotices(
       code: "listener_read_retry_persisting",
       message: `Listener reads have failed continuously for ${Math.floor(summary.currentEpisodeDurationMs / 1_000)}s. This is still in progress.`,
       nextStep:
-        "Check cswarm status and the CommonSwarm service. If both are healthy, restart the listener.",
+        "Leave the listener running while it waits for the read service; check the target URL and CommonSwarm service.",
     });
   }
-  if (summary.throughputLapseHours.length > 0) {
+  if (!down && summary.throughputLapseHours.length > 0) {
     const latest = summary.throughputLapseHours.at(-1)!;
     /* What is pending belongs on the warning line, not several lines below it: a lapse with an
      * empty queue reads completely differently from one with work waiting, and a reader triaging
@@ -5673,6 +5697,91 @@ export function listenerStatusJson(
   };
 }
 
+const CSWARM_UPDATE_INSTALLER = "curl -fsSL https://commonswarm.com/install.sh | sh";
+const CSWARM_UPDATE_NPM = "npm install -g commonswarm";
+const CSWARM_UPGRADE_STOP = `The command edge requires a newer cswarm (upgrade_required). Update with ${CSWARM_UPDATE_INSTALLER} or ${CSWARM_UPDATE_NPM}. ${RENEWAL_UPGRADE_LISTENER_ACTION}`;
+
+function credentialStoppedSentence(edge: "read" | "command" | null = null): string {
+  const codes = (edge === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
+    : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  return `the server refused this credential (${codes} means revoked, expired, or unknown), a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+}
+
+function credentialCheckSentence(status: ListenerStatus): string | null {
+  if (status.state !== "credential_check") return null;
+  if (typeof status.credentialStopAt !== "string") return null;
+  const codes = (status.credentialCheckEdge === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
+    : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
+  if (status.renewalExpiresAt &&
+      Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
+    return `The server refused this credential (${codes}). The listener is still running and retrying the credential check${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+  }
+  return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
+}
+
+function listenerRetrySentence(status: ListenerStatus): string | null {
+  if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
+  }
+  if (!LISTENER_RUNNING_STATES.includes(status.state) ||
+      typeof status.nextAttemptAt !== "string" ||
+      (status.state !== "starting" && status.lastRetryEdge !== "read")) {
+    return null;
+  }
+  const code = status.lastErrorCode ?? "no code recorded";
+  if (status.lastRetryEdge === "read" &&
+      (status.readHealth?.currentEpisodeAttempts ?? 0) > 0) {
+    const failure = status.readHealth!;
+    const detail = failure.currentHttpStatus === null ? "" : ` (HTTP ${failure.currentHttpStatus})`;
+    const next = ListenerCapabilityError.READ_EDGE_CODES.includes(code)
+      ? `Check ${status.targetUrl ?? "the target URL"} and update the read edge before starting a model.`
+      : `Check ${status.targetUrl ?? "the target URL"} and read edge version. Leave the listener running while the read service recovers.`;
+    return `The read edge failed (${code}${detail}). The listener is still running and will try again at ${status.nextAttemptAt}. ${next}`;
+  }
+  return `The ${status.lastRetryEdge === "command" ? "command edge" : "last attempt"} failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
+}
+
+function listenerDownSentence(status: ListenerStatus): string | null {
+  if (status.state === "stopped") {
+    return `This listener is stopped and is not reading signals. Start it again by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+  }
+  if (status.state !== "failed") return null;
+  if (status.lastErrorCode === "credential_stopped") {
+    return `This listener stopped because ${credentialStoppedSentence(status.credentialCheckEdge ?? null)}.`;
+  }
+  if (status.lastErrorCode === "local_credential_state_mismatch") {
+    return "This listener stopped because its local credential state did not preserve the live credential. Check that its local state directory is writable and intact, then restart the listener with the credential.";
+  }
+  if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
+  }
+  if (status.lastErrorCode === "upgrade_required") return CSWARM_UPGRADE_STOP;
+  const code = status.lastErrorCode ?? "no code recorded";
+  return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
+}
+
+function listenerDeliveryRetrySentence(status: ListenerStatus): string | null {
+  if (status.lastErrorCode === "renewal_retry") return null;
+  if (status.lastRetryEdge === "read") return null;
+  const when = status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff";
+  const code = status.lastErrorCode ?? "no code recorded";
+  if (status.state === "claim_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The claim is refused (${code}); this managed seat needs a live session. CONNECTED is no while claims fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
+    return `The claim failed (${code}) ${status.claimRetryCount ?? 0} times. ${code === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${when}, reading signals after repeated failures.`;
+  }
+  if (status.state === "ack_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The delivery acknowledgement is refused (${code}); this managed seat needs a live session. CONNECTED is no while acknowledgements fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
+    return `The delivery acknowledgement failed (${code}). The inbox is waiting on this acknowledgement. The listener will try again${when} and read signals after repeated failures.`;
+  }
+  return null;
+}
+
 export function renderListenerStatus(
   status: ListenerStatus,
   evidence: ListenerAttendanceEvidence = emptyAttendanceEvidence(),
@@ -5690,12 +5799,30 @@ export function renderListenerStatus(
   const readHealth = status.readHealth ?? emptyListenerReadHealth();
   const readSummary = listenerReadHealthSummary(status, nowMs);
   const lapseNotices = listenerLapseNotices(status, readSummary);
+  const down = status.state === "stopped" || status.state === "failed";
+  const retrying = LISTENER_RUNNING_STATES.includes(status.state) &&
+    (status.state === "starting" || status.lastRetryEdge === "read") &&
+    typeof status.nextAttemptAt === "string";
+  const credentialCheck = credentialCheckSentence(status);
+  const retrySentence = listenerRetrySentence(status);
+  const deliveryRetrySentence = listenerDeliveryRetrySentence(status);
+  const downSentence = listenerDownSentence(status);
   const lines = [
-    lapseNotices.length > 0
+    down
+      ? `Listener ${status.state} for agent ${status.principalId}.`
+      : credentialCheck !== null
+      ? `Listener credential check for agent ${status.principalId}.`
+      : retrying
+      ? `Listener retrying for agent ${status.principalId}.`
+      : lapseNotices.length > 0
       ? `Listener LAPSE for agent ${status.principalId}: ${lapseNotices.map((notice) => notice.code).join(", ")}.`
       : pendingForMainCount > 0
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
+    ...(credentialCheck === null ? [] : [credentialCheck]),
+    ...(deliveryRetrySentence === null ? [] : [deliveryRetrySentence]),
+    ...(retrySentence === null ? [] : [retrySentence]),
+    ...(downSentence === null ? [] : [downSentence]),
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
     listenerAttendingSentence(evidence.attendingSurfaces ?? []),
     `ATTENDED: ${
@@ -5723,6 +5850,7 @@ export function renderListenerStatus(
         : "not yet measured"
     }.`,
     `Provider: ${status.provider}; process: ${status.pid}; started: ${status.startedAt}.`,
+    `Target URL: ${status.targetUrl ?? "not recorded"}.`,
     `Provider executable: ${status.providerExecutable ?? "not measured"}.`,
     `Connections opened: ${status.connectionsOpened ?? "not measured"}.`,
     `Connection reuse ratio: ${status.connectionReuseRatio ?? "not measured"}.`,
@@ -5781,9 +5909,13 @@ export function renderListenerStatus(
       : idlePollStatusSentence(status.idlePollMs),
     listenerWakeStatusSentence(
       status.wake ?? emptyListenerWakeStatus(),
-      status.idlePollMs && status.idlePollMs > 0
-        ? status.idlePollMs
-        : IDLE_POLL_DEFAULT_MS,
+      status.wake?.mode === LISTENER_WAKE_MODE_PUSH
+        ? status.pushReconcileWaitMs && status.pushReconcileWaitMs > 0
+          ? status.pushReconcileWaitMs
+          : LISTENER_RECONCILE_POLL_MS
+        : status.idlePollMs && status.idlePollMs > 0
+          ? status.idlePollMs
+          : IDLE_POLL_DEFAULT_MS,
       status.wake?.lastWakeAt
         ? relativeAge(status.wake.lastWakeAt, nowMs)
         : null,
@@ -5830,8 +5962,10 @@ export function renderListenerStatus(
     lines.push(
       status.providerVersion === status.providerLastMeasuredVersion
         ? `Provider version: ${status.providerVersion} (last measured: ${status.providerLastMeasuredVersion}).`
-        : status.state === "ready"
+        : LISTENER_RUNNING_STATES.includes(status.state) && status.readyAt !== null
         ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is unverified but allowed because the startup permission canary passed. Next: verify this provider release with CommonSwarm and update the last-measured version.`
+        : status.state === "starting"
+        ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is still starting; compatibility was not established. Next: check the listener status after it is ready.`
         : `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It was measured before startup failed; compatibility was not established. Next: resolve the startup failure before verifying this provider release.`,
     );
   } else {
@@ -6008,6 +6142,21 @@ export function renderListenerStatus(
   return lines.join("\n");
 }
 
+export function listenerStartPendingMessage(status: ListenerStatus): string {
+  if (status.state === "starting" && status.lastErrorCode) {
+    const code = status.lastErrorCode;
+    const capability = ListenerCapabilityError.READ_EDGE_CODES.includes(code);
+    const target = status.targetUrl ?? "the target URL";
+    if (status.lastRetryEdge !== "read") {
+      return `Listener ${status.lastRetryEdge === "command" ? "command edge" : "startup"} failed (${code}); check ${target}. Use cswarm listen status to follow retries.`;
+    }
+    return capability
+      ? `Listener read edge failed (${code}); check ${target}. ${listenerFailureMessage(code)}. Use cswarm listen status to follow retries.`
+      : `Listener read edge failed (${code}); check ${target} and read edge version. Use cswarm listen status to follow retries.`;
+  }
+  return "Listener is still starting or checking; use cswarm listen status to follow it.";
+}
+
 async function unsurfacedPendingMainStats(
   instanceDirectory: string,
   fallback: { count: number; droppedCount: number },
@@ -6078,7 +6227,9 @@ export function listenerFailureMessage(
   detail?: string | null,
   reasonCode?: string | null,
   minimumRequiredVersion?: string | null,
+  credentialEdge: "read" | "command" | null = null,
 ): string {
+  if (code === "upgrade_required") return CSWARM_UPGRADE_STOP;
   if (code === "version_below_floor") {
     if (provider === "codex") {
       return "the Codex listener requires codex-acp 1.1.9 or newer; update the bridge, then retry";
@@ -6144,14 +6295,17 @@ export function listenerFailureMessage(
   ) {
     return `OpenCode host safety check failed (${code}); re-authenticate and ensure OPENCODE_DISABLE_PROJECT_CONFIG keeps project allow from merging`;
   }
-  if (
-    code === "sender_relation_capability_missing" ||
-    code === "cursor_capability_missing"
-  ) {
+  if (ListenerCapabilityError.READ_EDGE_CODES.includes(code)) {
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
-    return "the agent credential expired, was revoked, reached its renewal horizon, or its grant was suspended; run cswarm whoami with this credential to see the grant state, then follow its next step";
+    return credentialStoppedSentence(credentialEdge);
+  }
+  if (code === "local_credential_state_mismatch") {
+    return "the listener's local credential state did not preserve the live credential; check the local state directory, then restart with the credential";
+  }
+  if (code === H0_SEAT_CLAIM_REFUSED_CODE) {
+    return H0_SEAT_LISTENER_STOP_SENTENCE;
   }
   if (code === "permission_canary_failed") {
     if (provider === "claude") {
@@ -6413,6 +6567,7 @@ async function runConfiguredListener(options: {
       options.workspaceId,
       options.agent,
       boundFetch,
+      true,
     );
   } catch (error) {
     if (managedContextPath !== null) {
@@ -6423,6 +6578,9 @@ async function runConfiguredListener(options: {
   }
   let storedCredential: string | null = null;
   const credentialSession = {
+    get expiry(): number | null { return liveCredentialSession.expiry; },
+    get renewalDue(): boolean { return liveCredentialSession.renewalDue; },
+    get renewalAt(): number | null { return liveCredentialSession.renewalAt; },
     bearer: async (): Promise<string> => {
       const credential = await liveCredentialSession.bearer();
       if (credential !== storedCredential) {
@@ -6437,7 +6595,7 @@ async function runConfiguredListener(options: {
       }
       const stored = await readListenerCredentialState(paths.instanceDirectory);
       if (stored === null || stored.credential !== credential) {
-        throw new Error("listener credential state did not preserve the live credential");
+        throw new ListenerCredentialStateMismatchError();
       }
       return stored.credential;
     },
@@ -6613,11 +6771,15 @@ async function runConfiguredListener(options: {
       profileId: options.cloud.profileId,
       workspaceId: options.workspaceId,
       principalId: options.principalId,
+      projectDirectory: options.cwd,
+      targetUrl: options.cloud.url,
       provider: options.provider,
       cswarmVersion: CLI_BUILD_VERSION,
       permissionMode: options.permissionMode,
       routeMode,
       deferOverChars,
+      getCredentialExpiryMs: () => credentialSession.expiry,
+      getCredentialRenewalAt: () => credentialSession.renewalAt,
       // The bound a timeout event reports: the last turn's clamped budget when
       // one has run, else the configured cap.
       getTurnBudgetMs: () => lastAppliedTurnBudgetMs ?? turnBudgetMs,
@@ -6808,9 +6970,7 @@ async function runListenStart(args: Arguments): Promise<void> {
   const existing = await effectiveListenerStatus(paths);
   if (
     existing &&
-    (existing.state === "starting" ||
-      existing.state === "ready" ||
-      existing.state === "stopping")
+    LISTENER_RUNNING_STATES.includes(existing.state)
   ) {
     throw new Error(
       `a listener is already ${existing.state} for agent ${principalId}`,
@@ -6961,6 +7121,7 @@ async function runListenStart(args: Arguments): Promise<void> {
           detail,
           reasonCode,
           failedStatus?.providerMinimumRequiredVersion,
+          failedStatus?.credentialCheckEdge ?? null,
         );
         throw new Error(
           failedStatus === null
@@ -6980,6 +7141,7 @@ async function runListenStart(args: Arguments): Promise<void> {
         status.lastErrorDetail,
         status.lastErrorReasonCode,
         status.providerMinimumRequiredVersion,
+        status.credentialCheckEdge ?? null,
       )}. ${listenerProviderIdentitySummary(status)}`,
     );
   }
@@ -7016,6 +7178,8 @@ async function runListenStart(args: Arguments): Promise<void> {
     `${
       args.has("foreground")
         ? "Listener stopped."
+        : LISTENER_RUNNING_STATES.includes(status.state) && status.state !== "ready"
+        ? listenerStartPendingMessage(status)
         : (status.pendingForMainCount ?? 0) > 0
         ? "Listener transport is connected, but queued messages are unattended."
         : "Listener is ready and will keep receiving after this command exits."
@@ -7185,7 +7349,7 @@ async function runListenStatusOrStop(
   };
   const attendanceEvidence = await collectListenerAttendanceEvidence({
     instanceDirectory: paths.instanceDirectory,
-    cwd: process.cwd(),
+    cwd: listenerAttendanceProjectDirectory(status, process.cwd()),
     principalId,
     cloud,
     workspaceId,
@@ -7509,6 +7673,28 @@ function settingsHaveScopedClaudeHook(
   });
 }
 
+/**
+ * True only when a Claude settings file currently contains this principal's hook.
+ * A leftover hook-surface file is not an installed hook.
+ */
+export async function listenerSettingsHookInstalled(
+  cwd: string,
+  principalId: string,
+): Promise<boolean> {
+  const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
+  const settingsPaths = [
+    join(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
+    join(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
+    userClaudeSettingsTarget().path,
+  ];
+  for (const path of settingsPaths) {
+    if (settingsHaveScopedClaudeHook(readClaudeSettings(path), principalId)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function listenerHookSurfacePresent(
   instanceDirectory: string,
   cwd: string,
@@ -7516,18 +7702,7 @@ async function listenerHookSurfacePresent(
 ): Promise<boolean> {
   const surface = await new FileHookSurfaceStore(instanceDirectory).evidence();
   if (surface.exists) return true;
-  const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
-  const settingsPaths = new Set([
-    join(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
-    join(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
-    userClaudeSettingsTarget().path,
-  ]);
-  for (const path of settingsPaths) {
-    if (settingsHaveScopedClaudeHook(readClaudeSettings(path), principalId)) {
-      return true;
-    }
-  }
-  return false;
+  return await listenerSettingsHookInstalled(cwd, principalId);
 }
 
 async function listenerWatcherSurfacePresent(
@@ -7560,7 +7735,14 @@ async function listenerHasAttendanceSurface(options: {
   );
 }
 
-async function collectListenerAttendanceEvidence(options: {
+export function listenerAttendanceProjectDirectory(
+  status: ListenerStatus,
+  callerDirectory: string,
+): string {
+  return status.projectDirectory ?? callerDirectory;
+}
+
+export async function collectListenerAttendanceEvidence(options: {
   instanceDirectory: string;
   cwd: string;
   principalId: string;
@@ -7570,12 +7752,12 @@ async function collectListenerAttendanceEvidence(options: {
   hookSurfaceExists: boolean;
   hookSurfaceAdvanced: boolean;
 }): Promise<ListenerAttendanceEvidence> {
-  const hook = options.hookSurfaceExists ||
-    await listenerHookSurfacePresent(
-      options.instanceDirectory,
-      options.cwd,
-      options.principalId,
-    );
+  // ATTENDING: hook follows a settings file that contains the hook now.
+  // hookSurfaceExists is the local surface file, which stays after uninstall.
+  const settingsHook = await listenerSettingsHookInstalled(
+    options.cwd,
+    options.principalId,
+  );
   const watcher = await listenerWatcherSurfacePresent(
     options.cloud,
     options.workspaceId,
@@ -7583,10 +7765,10 @@ async function collectListenerAttendanceEvidence(options: {
   );
   return {
     pendingForMainOldestAt: options.pendingForMainOldestAt,
-    hookSurfaceExists: hook,
+    hookSurfaceExists: options.hookSurfaceExists,
     hookSurfaceAdvanced: options.hookSurfaceAdvanced,
     watcherLockHeld: watcher,
-    attendingSurfaces: listenerAttendingSurfaces(hook, watcher),
+    attendingSurfaces: listenerAttendingSurfaces(settingsHook, watcher),
   };
 }
 
@@ -9668,4 +9850,13 @@ if (isCliMain()) {
     process.stderr.write(`cswarm: ${safeError(error)}\n`);
     process.exitCode = exitCodeFor(error);
   });
+}
+
+/** The follow receiver shares the CLI's renewal credential-stop classification. */
+export function isFollowRenewalCredentialFailure(error: unknown): boolean {
+  return isFollowCredentialFailure(error) ||
+    error instanceof RenewalReauthorisationRequired ||
+    error instanceof RenewalCredentialCheckError ||
+    error instanceof RenewalRevoked ||
+    error instanceof RenewalSuspended;
 }

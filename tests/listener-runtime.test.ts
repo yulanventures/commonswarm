@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeSecureJsonFile } from "../src/cloud/storage.js";
 import test from "node:test";
+import ts from "typescript";
 import {
   CommandHttpError,
   SIGNAL_REQUEST_TIMEOUT_MS,
@@ -16,35 +18,69 @@ import {
   DeliveryProtocolError,
   DeliveryTransportError,
   DELIVERY_REQUEST_TIMEOUT_MS,
+  H0_SEAT_CLAIM_REFUSED_CODE,
+  H0_SEAT_LISTENER_STOP_SENTENCE,
   DELIVERY_ACK_OUTCOMES,
+  DELIVERY_SESSION_PROOF_CODES,
   type DeliveryClaimResult,
   type DeliveryOutcome,
   type DeliveryRow,
 } from "../src/cloud/delivery.js";
-import { listenerStatusJson, renderListenerStatus, usage } from "../src/cli.js";
+import {
+  listenerFailureMessage,
+  listenerStartPendingMessage,
+  listenerStatusJson,
+  renderListenerStatus,
+  usage,
+} from "../src/cli.js";
 import {
   idlePollStatusSentence,
   IDLE_POLL_DEFAULT_MS,
   nextIdlePollMs,
 } from "../src/cloud/idle-poll.js";
 import {
+  AgentCredentialSession,
+  RenewalCredentialCheckError,
   RenewalReauthorisationRequired,
+  RenewalRetryError,
   RenewalRevoked,
+  RENEW_TIMEOUT_MS,
 } from "../src/cloud/renewal.js";
+import type { AgentCredentialRecord, AgentCredentialStore } from "../src/cloud/agent-credential.js";
 import type {
   AgentSignalPage,
   SignalCursor,
 } from "../src/cloud/signals.js";
 import {
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+  isConfirmedCredentialHttpFailure,
   SIGNAL_READ_TIMEOUT_MS,
   SignalHttpError,
+  LocalCredentialSecretAbsentError,
   SignalTransportError,
 } from "../src/cloud/signals.js";
 import { ACP_DEFAULT_REQUEST_TIMEOUT_MS } from "../src/host/bounds.js";
 import { AcpHostError } from "../src/host/types.js";
 import {
   runListenerRuntime as runListenerRuntimeActual,
+  CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
+  CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
+  CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+  RENEWAL_WINDOW_RETRY_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  RENEWAL_PENDING_WRITE_ALLOWANCE_MS,
+  RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS,
+  RENEWAL_EXPIRY_HEADROOM_MS,
+  LISTENER_REQUEST_WAIT_FLOOR_MS,
+  ListenerLeaseResponseError,
+  LISTENER_CLAIM_REFUSALS_BEFORE_READ,
+  LISTENER_DELIVERY_RETRY_MAX_MS,
+  READ_FATAL_ANSWERS,
+  COMMAND_FATAL_ANSWERS,
+  ListenerH0SeatError,
+  isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
+  LISTENER_IDLE_POLL_MAX_MS,
   LISTENER_DELIVERY_SAFETY_MARGIN_MS,
   LISTENER_HOST_PORTS_PROBE_MS,
   LISTENER_PROMPT_START_MINIMUM_MS,
@@ -71,10 +107,87 @@ import {
   type ListenerStatus,
   type ListenerRuntimeModel,
 } from "../src/listener/index.js";
+import { LISTENER_RECONCILE_POLL_MS } from "../src/listener/wake.js";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL_ID = "22222222-2222-4222-8222-222222222222";
 const SENDER_OPERATOR_ID = "44444444-4444-4444-8444-444444444444";
+
+test("network response parser call graphs cannot throw an untagged Error", { timeout: 10_000 }, () => {
+  const roots: Record<string, string[]> = {
+    "src/cloud/signals.ts": ["agentSignalPage", "readAgentSignalDirectory"],
+    "src/cloud/delivery.ts": ["parseClaimSuccess", "parseAckSuccess", "successBody"],
+    "src/cloud/renewal.ts": ["requestSuccessor"],
+  };
+  const paths = [...Object.keys(roots), "src/cloud/attachments.ts"];
+  const sources = new Map(paths.map((path) => [path,
+    ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)]));
+  const callable = new Map<string, ts.Node[]>();
+  const imports = new Map<string, string>();
+  for (const [path, source] of sources) {
+    const register = (name: string, node: ts.Node): void => {
+      const key = `${path}:${name}`;
+      callable.set(key, [...(callable.get(key) ?? []), node]);
+    };
+    const collect = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name) register(node.name.text, node);
+      if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) register(node.name.text, node);
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+          (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        register(node.name.text, node.initializer);
+      }
+      ts.forEachChild(node, collect);
+    };
+    collect(source);
+    source.forEachChild((node) => {
+      if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier) ||
+          !node.moduleSpecifier.text.startsWith("./")) return;
+      const importedPath = join("src/cloud", node.moduleSpecifier.text.replace(/\.js$/, ".ts"));
+      if (!sources.has(importedPath)) return;
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const element of named.elements) {
+          imports.set(`${path}:${element.name.text}`, `${importedPath}:${element.propertyName?.text ?? element.name.text}`);
+        }
+      }
+    });
+  }
+  const visited = new Set<string>();
+  const failures: string[] = [];
+  const taggedOrCallbackOnly = new Set([
+    "src/cloud/signals.ts:plainTransportError", // WeakSet and failure-code map
+    "src/cloud/signals.ts:throwSignalHttp", // HTTP status/envelope WeakMaps
+    "src/cloud/signals.ts:parseSignalRows", // callback diagnostic for a caught row
+  ]);
+  const visitFunction = (key: string): void => {
+    if (visited.has(key)) return;
+    const nodes = callable.get(key);
+    assert.ok(nodes?.length, `${key}: parser root exists`);
+    visited.add(key);
+    const path = key.slice(0, key.lastIndexOf(":"));
+    const source = sources.get(path)!;
+    const walk = (node: ts.Node): void => {
+      // A factory can return an Error for its caller to throw, so inspect all construction.
+      if (!taggedOrCallbackOnly.has(key) && ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+          (node.expression.text === "Error" ||
+            (path.endsWith("delivery.ts") && node.expression.text === "DeliveryProtocolError"))) {
+        failures.push(`${key}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`);
+      }
+      if (ts.isCallExpression(node)) {
+        const name = ts.isIdentifier(node.expression) ? node.expression.text
+          : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : null;
+        if (name !== null && name !== "renewalCommand") {
+          const next = imports.get(`${path}:${name}`) ?? `${path}:${name}`;
+          if (callable.has(next)) visitFunction(next);
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    for (const node of nodes!) walk(node);
+  };
+  for (const [path, entries] of Object.entries(roots)) entries.forEach((name) => visitFunction(`${path}:${name}`));
+  assert.deepEqual(failures, [], "plain Error construction in a response parser graph");
+});
 
 const defaultPendingMainQueue = {
   async enqueue() {
@@ -173,16 +286,17 @@ test("empty durable claims back off the idle wait and reset on a delivery", asyn
     reads >= 4,
     "the read edge POSTs on the same loop as the claim, after idleSleep",
   );
+  const idleSleeps = sleeps.filter((ms) => ms > LISTENER_REQUEST_WAIT_FLOOR_MS);
   assert.deepEqual(
-    sleeps.slice(0, 3),
+    idleSleeps.slice(0, 3),
     [
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 0),
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 1),
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 2),
     ],
   );
-  assert.deepEqual(sleeps.slice(0, 3), [15_000, 30_000, 60_000]);
-  const resetSleep = sleeps.find((ms, index) => index >= 3 && ms === IDLE_POLL_DEFAULT_MS);
+  assert.deepEqual(idleSleeps.slice(0, 3), [15_000, 30_000, 60_000]);
+  const resetSleep = idleSleeps.find((ms, index) => index >= 3 && ms === IDLE_POLL_DEFAULT_MS);
   assert.equal(resetSleep, IDLE_POLL_DEFAULT_MS, "a delivery must reset the idle wait to the base");
   assert.ok(idleEvents.includes(15_000));
   assert.ok(idleEvents.includes(30_000));
@@ -607,10 +721,8 @@ async function productionReadRetry(
     fetcher,
     pollMs: 0,
     random: () => 0,
-    onEvent: (event) => events.push(event),
-    sleep: async (ms) => {
-      if (ms > 0) controller.abort();
-    },
+    onEvent: (event) => { events.push(event); if (event.type === "read_retry") controller.abort(); },
+    sleep: async () => {},
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(fetchCalls, 2, "the failure reached the production signal fetch");
@@ -682,12 +794,10 @@ test("listener body-stall retry is classified through the production signal dead
     fetcher,
     pollMs: 0,
     random: () => 0,
-    onEvent: (event) => events.push(event),
-    sleep: async (ms) => {
-      if (ms > 0) controller.abort();
-    },
+    onEvent: (event) => { events.push(event); if (event.type === "read_retry") controller.abort(); },
+    sleep: async () => {},
   });
-  for (let turn = 0; turn < 20 && !bodyStarted; turn += 1) {
+  for (let turn = 0; turn < 100 && !bodyStarted; turn += 1) {
     await Promise.resolve();
   }
   assert.equal(fetchCalls, 2, "the ready read and stalled read both reached fetch");
@@ -836,7 +946,7 @@ test("durable markers select durable mode before probe rows can be cursor-proces
   });
 });
 
-test("claim without ACK capability fails before provider work", async () => {
+test("claim without ACK capability retries before provider work", { timeout: 15_000 }, async () => {
   const model = new FakeModel();
   const controller = new AbortController();
   let reads = 0;
@@ -850,7 +960,7 @@ test("claim without ACK capability fails before provider work", async () => {
     store: new MemoryStore(),
     model,
     signal: controller.signal,
-    sleep: async () => undefined,
+    sleep: async () => { controller.abort(); },
     readPage: async () => {
       reads += 1;
       if (reads > 1) controller.abort();
@@ -865,11 +975,8 @@ test("claim without ACK capability fails before provider work", async () => {
       });
     },
   });
-  assert.equal(stop.reason, "fatal");
-  assert.match(
-    stop.reason === "fatal" ? stop.error.message : "",
-    /delivery capability is inconsistent/,
-  );
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 1);
   assert.equal(model.starts, 0);
 });
 
@@ -1102,7 +1209,7 @@ test("durable claim persists one command id across retries, uses fresh bearers, 
   for (const [index, value] of callOrder.entries()) {
     if (value === "claim") assert.equal(callOrder[index - 1], "bearer");
   }
-  assert.ok(delays.includes(750));
+  assert.ok(delays.includes(LISTENER_REQUEST_WAIT_FLOOR_MS));
   assert.equal(journal.record.active, null);
   assert.equal(model.prompts.length, 0);
 });
@@ -1906,7 +2013,7 @@ test("C-1 composition: an expired leased claim with a resumable effect re-claims
   assert.equal(journal.record.active, null);
 });
 
-test("C-1 composition: a live leased claim with a resumable effect replays immediately", async () => {
+test("C-1 composition: a live leased claim with a resumable effect replays after request spacing", async () => {
   const claimedAsk = ask(
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaad5",
     "2026-07-30T00:00:01.000Z",
@@ -1968,9 +2075,7 @@ test("C-1 composition: a live leased claim with a resumable effect replays immed
     model,
     signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:02:31.000Z"),
-    sleep: async () => {
-      controller.abort();
-    },
+    sleep: async () => {},
     readPage: async () => durablePage([], 1),
     poster: {
       async post() {
@@ -1982,7 +2087,7 @@ test("C-1 composition: a live leased claim with a resumable effect replays immed
   assert.deepEqual(
     claimIds,
     [active.claimCommandId],
-    "C-1 live durable recovery must replay the stored claim immediately",
+    "C-1 live durable recovery must replay the stored claim",
   );
   assert.equal(ackCalls, 1);
   assert.equal(model.prompts.length, 0);
@@ -2784,7 +2889,7 @@ test("MAJOR-4: delivery_unavailable at exact lease expiry clears stale state", a
   assert.equal(journal.record.active, null);
 });
 
-test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss", async () => {
+test("MAJOR-4: delivery_unavailable before lease expiry is retried, not a credential stop", async () => {
   const directNote = note(
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaad4",
     "2026-07-30T00:00:01.000Z",
@@ -2804,6 +2909,8 @@ test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss"
     senderOwnerRelation: "same_owner",
     updatedAt: "2026-07-30T00:00:02.000Z",
   }));
+  const controller = new AbortController();
+  let ackAttempts = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -2813,17 +2920,23 @@ test("MAJOR-4: delivery_unavailable before lease expiry remains credential loss"
     deliveryClient: {
       async claimAgentInbox() { throw new Error("claim must not run"); },
       async ackAgentDelivery() {
+        ackAttempts += 1;
         throw new DeliveryHttpError(403, "delivery_unavailable", "unavailable");
       },
     },
     credentialSession: { async bearer() { return "token"; } },
     store,
     model: new FakeModel(),
+    signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:02:00.000Z"),
-    sleep: async () => undefined,
+    sleep: async () => {
+      if (ackAttempts >= 2) controller.abort();
+    },
     readPage: async () => durablePage([], 1),
   });
-  assert.equal(stop.reason, "credential");
+  assert.equal(stop.reason, "cancelled");
+  assert.notEqual(stop.reason, "credential");
+  assert.ok(ackAttempts >= 2);
   assert.equal(journal.record.active?.phase, "ack_pending");
 });
 
@@ -2883,6 +2996,7 @@ test("caller abort during claim retry sleep starts no later delivery request", a
   const journal = new MemoryDeliveryJournal();
   const controller = new AbortController();
   let claimCalls = 0;
+  let claimRetryPending = false;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -2900,8 +3014,9 @@ test("caller abort during claim retry sleep starts no later delivery request", a
     store: new MemoryStore(),
     model: new FakeModel(),
     signal: controller.signal,
+    onEvent: (event) => { if (event.type === "claim_retry") claimRetryPending = true; },
     sleep: async () => {
-      controller.abort();
+      if (claimRetryPending) controller.abort();
     },
     readPage: async () => durablePage(),
   });
@@ -2927,6 +3042,7 @@ test("caller abort during ACK retry sleep starts no later ACK request", async ()
   }));
   const controller = new AbortController();
   let ackCalls = 0;
+  let ackRetryPending = false;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -2945,8 +3061,9 @@ test("caller abort during ACK retry sleep starts no later ACK request", async ()
     model: new FakeModel(),
     signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+    onEvent: (event) => { if (event.type === "ack_retry") ackRetryPending = true; },
     sleep: async () => {
-      controller.abort();
+      if (ackRetryPending) controller.abort();
     },
     readPage: async () => page([], {
       capabilities: {
@@ -3093,8 +3210,10 @@ test("MAJOR-4: a mid-run expired lease 403 clears stale state without credential
   assert.equal(journal.record.active, null);
 });
 
-test("runtime refuses old edges before starting or prompting a model", async () => {
+test("runtime retries an old read edge without starting or prompting a model", { timeout: 15_000 }, async () => {
   const model = new FakeModel();
+  const controller = new AbortController();
+  let reads = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3102,28 +3221,31 @@ test("runtime refuses old edges before starting or prompting a model", async () 
     credentialSession: { async bearer() { return "token"; } },
     store: new MemoryStore(),
     model,
-    readPage: async () =>
-      page([], {
+    signal: controller.signal,
+    sleep: async () => { controller.abort(); },
+    readPage: async () => {
+      reads += 1;
+      return page([], {
         capabilities: {
           senderOwnerRelation: false,
           cursorAfter: true,
           deliveryClaim: false,
           deliveryAck: false,
         },
-      }),
+      });
+    },
   });
-  assert.equal(stop.reason, "fatal");
-  assert.match(
-    stop.reason === "fatal" ? stop.error.message : "",
-    /does not prove sender ownership/,
-  );
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 1);
   assert.equal(model.starts, 0);
   assert.equal(model.prompts.length, 0);
   assert.equal(model.closes, 1);
 });
 
-test("runtime reports agent read revocation as a credential stop", async () => {
+test("unconfirmed HTTP 403 retries and recovers when the read succeeds", async () => {
   const model = new FakeModel();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3131,13 +3253,1419 @@ test("runtime reports agent read revocation as a credential stop", async () => {
     credentialSession: { async bearer() { return "token"; } },
     store: new MemoryStore(),
     model,
+    sleep: async () => undefined,
+    onEvent: (event) => events.push(event),
     readPage: async () => {
-      throw new SignalHttpError(403);
+      reads += 1;
+      if (reads < 3) throw new SignalHttpError(403);
+      return page([]);
     },
   });
+  assert.ok(reads >= 3, "the read must be attempted again after the bare 403");
+  assert.notEqual(stop.reason, "credential");
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(events.some((event) => event.type === "ready"));
+  assert.equal(model.starts, 0);
+});
+
+function forbiddenRead(): SignalHttpError {
+  return new SignalHttpError(403, null, {
+    error: "forbidden",
+    requestId: null,
+    retryable: null,
+  });
+}
+
+function advancingClock(start = "2026-09-22T22:00:00.000Z") {
+  const startMs = Date.parse(start);
+  let clock = startMs;
+  return {
+    startMs,
+    now: () => clock,
+    elapsed: () => clock - startMs,
+    sleep: async (ms: number, signal?: AbortSignal) => {
+      if (signal?.aborted) return;
+      clock += ms;
+    },
+  };
+}
+
+test("the credential confirmation window is at least ten minutes and three checks", () => {
+  assert.ok(CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS >= 3);
+  assert.ok(CREDENTIAL_LOSS_CONFIRM_WINDOW_MS >= 10 * 60_000);
+  assert.equal(
+    CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+    (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(403, "forbidden", "read"),
+    true,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(403, "forbidden", "command"),
+    false,
+  );
+  assert.equal(
+    isConfirmedCredentialHttpFailure(401, "unauthenticated", "command"),
+    true,
+  );
+});
+
+test("runtime reports agent read revocation as a credential stop after the confirmation window", async () => {
+  const model = new FakeModel();
+  const clock = advancingClock();
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model,
+    now: clock.now,
+    sleep: clock.sleep,
+    readPage: async () => {
+      reads += 1;
+      throw forbiddenRead();
+    },
+  });
+  assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+  assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
   assert.equal(stop.reason, "credential");
   assert.equal(model.starts, 0);
   assert.equal(model.closes, 1);
+});
+
+test("HTTP 403 forbidden across the confirmation window stops the listener with credential_stopped", async () => {
+  const clock = advancingClock();
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-stop",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    const during: ListenerStatus[] = [];
+    let reads = 0;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-stop",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      now: clock.now,
+      restart: { maxAttempts: 3, sleep: async () => undefined, random: () => 0 },
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          during.push(await queryListenerControl(target, "status"));
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          throw forbiddenRead();
+        },
+      }),
+    });
+    assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+    assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+    assert.ok(during.length >= 1);
+    assert.equal(during[0]?.state, "credential_check");
+    assert.equal(
+      during[0]?.credentialStopAt,
+      new Date(clock.startMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS).toISOString(),
+    );
+    const checking = renderListenerStatus(during[0]!);
+    assert.match(checking, /^Listener credential check /);
+    assert.match(checking, /The server refused this credential/);
+    assert.match(checking, new RegExp(CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")));
+    assert.match(checking, /will stop at /);
+    assert.match(checking, /a transient answer extends the check window/);
+    assert.match(checking, /Run cswarm whoami with this credential/);
+    assert.equal(status.state, "failed");
+    assert.equal(status.lastErrorCode, "credential_stopped");
+    assert.equal(status.credentialCheckEdge, "read");
+    const rendered = renderListenerStatus(status);
+    assert.match(rendered, /^Listener failed /);
+    assert.match(rendered, /will not retry/);
+    assert.match(rendered, /server refused this credential/);
+    assert.match(rendered, /unauthenticated or forbidden/);
+    assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a confirmed credential loss then a successful read keeps the listener running", async () => {
+  const clock = advancingClock();
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-recover-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-recover",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let reads = 0;
+    let running: ListenerStatus | null = null;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-recover",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      now: clock.now,
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          if (reads >= 2 && running === null) {
+            running = await queryListenerControl(target, "status");
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          if (reads === 1) throw forbiddenRead();
+          return page([]);
+        },
+      }),
+    });
+    assert.ok(reads >= 2);
+    const observed = running as ListenerStatus | null;
+    assert.ok(observed, "the listener did not become ready again");
+    assert.equal(observed.state, "ready");
+    assert.equal(observed.credentialStopAt ?? null, null);
+    assert.equal(status.state, "stopped");
+    assert.notEqual(status.lastErrorCode, "credential_stopped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a transient failure during a credential check keeps the window going", async () => {
+  const clock = advancingClock();
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    now: clock.now,
+    sleep: clock.sleep,
+    readPage: async () => {
+      reads += 1;
+      if (reads === 2) throw new SignalHttpError(500);
+      throw forbiddenRead();
+    },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.equal(reads, CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS + 1);
+  assert.ok(clock.elapsed() > CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+});
+
+test("a live token's stated credential stop matches the stopping sample after a transient", async () => {
+  const clock = advancingClock();
+  const events: ListenerRuntimeEvent[] = [];
+  const sleeps: number[] = [];
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { expiry: clock.startMs + 30 * 60_000, async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    now: clock.now,
+    onEvent: (event) => events.push(event),
+    sleep: async (ms, signal) => {
+      sleeps.push(ms);
+      await clock.sleep(sleeps.length === 1 ? 9 * 60_000 : ms, signal);
+    },
+    readPage: async () => {
+      reads += 1;
+      if (reads === 2) throw new SignalHttpError(500);
+      throw forbiddenRead();
+    },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.equal(reads, 4);
+  assert.deepEqual(sleeps, Array(3).fill(RENEWAL_WINDOW_RETRY_MS));
+  assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  const checks = events.filter((event) => event.type === "credential_check");
+  assert.equal(checks.length, 4, "the stopping sample must be published");
+  const actualStop = clock.now();
+  for (const check of checks) {
+    assert.ok(Date.parse(check.stopAt) <= actualStop,
+      `sample ${check.checks} stated a stop after the actual stop`);
+  }
+  assert.equal(Date.parse(checks.at(-1)!.stopAt), actualStop);
+  assert.equal(Date.parse(checks.at(-1)!.ts), actualStop);
+  assert.equal(checks.at(-1)!.nextAttemptAt, undefined);
+});
+
+test("cswarm listen stop ends a credential check at once", async () => {
+  const clock = advancingClock();
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-now-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-credential-stop-now",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let reads = 0;
+    let asked = false;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-credential-stop-now",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      now: clock.now,
+      run: async (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(),
+        model: new FakeModel(),
+        signal,
+        onEvent,
+        now: clock.now,
+        sleep: async (ms, sleepSignal) => {
+          if (!asked) {
+            asked = true;
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+        readPage: async () => {
+          reads += 1;
+          throw forbiddenRead();
+        },
+      }),
+    });
+    assert.equal(reads, 1);
+    assert.equal(status.state, "stopped");
+    assert.notEqual(status.lastErrorCode, "credential_stopped");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("command-edge forbidden is not a confirmed credential loss", async () => {
+  const clock = advancingClock();
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    now: clock.now,
+    sleep: async (ms, sleepSignal) => {
+      await clock.sleep(ms, sleepSignal);
+    },
+    readPage: async () => durablePage([], 0),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        if (claims >= 4) controller.abort();
+        throw new DeliveryHttpError(
+          403,
+          "forbidden",
+          "delivery command failed (HTTP 403): forbidden",
+        );
+      },
+      async ackAgentDelivery() {
+        throw new Error("ack must not run");
+      },
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(claims >= 4);
+  assert.ok(clock.elapsed() < CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+});
+
+test("real signal read HTTP codes enter the listener confirmation window", { timeout: 15_000 }, async () => {
+  for (const [status, code] of [[401, "unauthenticated"], [403, "forbidden"]] as const) {
+    const controller = new AbortController();
+    const events: ListenerRuntimeEvent[] = [];
+    let reads = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(),
+      model: new FakeModel(),
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+      fetcher: (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ error: code }), {
+          status, headers: { "content-type": "application/json" },
+        });
+      }) as typeof fetch,
+      sleep: async () => { controller.abort(); },
+    });
+    assert.equal(stop.reason, "cancelled", `${status} must not stop at once`);
+    assert.equal(reads, 1);
+    assert.equal(events.filter((event) => event.type === "credential_check").length, 1);
+  }
+  const controller = new AbortController();
+  let reads = 0;
+  const bare = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    fetcher: (async () => {
+      reads += 1;
+      if (reads === 2) controller.abort();
+      return new Response("{}", { status: 403, headers: { "content-type": "application/json" } });
+    }) as typeof fetch,
+    sleep: async () => {},
+  });
+  assert.equal(bare.reason, "cancelled");
+  assert.equal(reads, 2, "bare 403 retries");
+});
+
+test("claim-only delivery refusals force a read and expose revocation", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads += 1;
+      if (reads === 1) return durablePage([], 1);
+      throw new SignalHttpError(403, null, { error: "forbidden", requestId: null, retryable: null });
+    },
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        throw new DeliveryHttpError(403, "delivery_unavailable", "delivery unavailable");
+      },
+      async ackAgentDelivery() { throw new Error("ack must not run"); },
+    },
+    sleep: async (_ms, signal) => {
+      if (events.some((event) => event.type === "credential_check")) controller.abort();
+      if (signal?.aborted) return;
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, LISTENER_CLAIM_REFUSALS_BEFORE_READ);
+  assert.equal(reads, 2);
+  assert.equal(events.filter((event) => event.type === "claim_retry").length, claims);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+});
+
+test("claim retry reports the actual wait during a credential check window", { timeout: 15_000 }, async () => {
+  for (const expiryKnown of [true, false]) {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let claims = 0;
+  let retryDelay: number | null = null;
+  let observedWait: number | null = null;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal, credentialSession: { expiry: expiryKnown ? start + 20 * 60_000 : null,
+      async bearer() { return "token"; } }, store: new MemoryStore(), model: new FakeModel(),
+    signal: controller.signal, now: () => current,
+    onEvent: (event) => { if (event.type === "claim_retry") retryDelay = event.delayMs; },
+    readPage: async () => durablePage([], 1),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims++;
+        if (claims === 1) throw new DeliveryHttpError(401, "unauthenticated", "credential refused");
+        throw new DeliveryHttpError(503, "delivery_unavailable", "delivery unavailable");
+      },
+      async ackAgentDelivery() { throw new Error("ack must not run"); },
+    },
+    sleep: async (ms) => {
+      if (retryDelay !== null) {
+        observedWait = ms;
+        controller.abort();
+      }
+      current += ms;
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, 2);
+  assert.equal(retryDelay, expiryKnown ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS);
+  assert.equal(observedWait, retryDelay);
+  }
+});
+
+test("claim backoff reaches its cap across successful forced reads", { timeout: 15_000 }, async () => {
+  for (const [httpStatus, code] of [[503, "delivery_unavailable"], [403, "forbidden"]] as const) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-claim-backoff-"));
+    try {
+      const target = listenerPaths({
+        profileId: `profile-claim-${httpStatus}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        stateDirectory: root,
+      });
+      const clock = advancingClock();
+      const journal = new MemoryDeliveryJournal();
+      const delays: number[] = [];
+      const during: ListenerStatus[] = [];
+      const events: ListenerRuntimeEvent[] = [];
+      let pendingRetryDelay: number | null = null;
+      let reads = 0;
+      let lastReadAt: number | null = null;
+      const final = await runListenerSupervisor({
+        paths: target,
+        profileId: `profile-claim-${httpStatus}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          listenerInstanceId: journal.record.listenerInstanceId,
+          deliveryJournal: journal,
+          credentialSession: { async bearer() { return "token"; } },
+          store: new MemoryStore(),
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          random: () => 1,
+          onEvent: (event) => {
+            events.push(event);
+            if (event.type === "claim_retry") pendingRetryDelay = event.delayMs;
+            onEvent(event);
+          },
+          readPage: async () => { reads += 1; lastReadAt = clock.now(); return durablePage([], 1); },
+          deliveryClient: {
+            async claimAgentInbox() {
+              assert.ok(lastReadAt !== null && clock.now() - lastReadAt >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+              throw new DeliveryHttpError(httpStatus, code, code);
+            },
+            async ackAgentDelivery() { throw new Error("ack must not run"); },
+          },
+          sleep: async (ms, sleepSignal) => {
+            if (pendingRetryDelay !== null) {
+              assert.equal(ms, pendingRetryDelay);
+              pendingRetryDelay = null;
+              delays.push(ms);
+              during.push(await queryListenerControl(target, "status"));
+            } else {
+              assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+            }
+            await clock.sleep(ms, sleepSignal);
+            if (delays.length === 8) await queryListenerControl(target, "stop");
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      assert.ok(reads >= 3, "forced reads must continue to succeed");
+      assert.deepEqual(delays, [1_000, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+      assert.equal(Math.max(...delays), LISTENER_DELIVERY_RETRY_MAX_MS);
+      assert.ok(during.every((status) => status.state === "claim_retry"));
+      assert.deepEqual(during.map((status) => status.claimRetryCount), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.equal(events.filter((event) => event.type === "claim_retry_cleared").length, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a failed forced read replaces the stale claim retry time", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-forced-read-status-"));
+  try {
+    const target = listenerPaths({ profileId: "forced-read-status", workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, stateDirectory: root });
+    const clock = advancingClock();
+    const journal = new MemoryDeliveryJournal();
+    let reads = 0;
+    let observed: ListenerStatus | null = null;
+    const final = await runListenerSupervisor({
+      paths: target, profileId: "forced-read-status", workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, targetUrl: "https://cloud.example.test", now: clock.now,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(), model: new FakeModel(), signal, now: clock.now,
+        random: () => 1, onEvent,
+        readPage: async () => {
+          reads += 1;
+          if (reads === 1) return durablePage([], 1);
+          throw new SignalHttpError(503);
+        },
+        deliveryClient: {
+          async claimAgentInbox() { throw new DeliveryHttpError(503, "temporarily_unavailable", "outage"); },
+          async ackAgentDelivery() { throw new Error("ack must not run"); },
+        },
+        sleep: async (ms, sleepSignal) => {
+          const status = await queryListenerControl(target, "status");
+          if (status.lastRetryEdge === "read") {
+            observed = status;
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+      }),
+    });
+    assert.equal(final.state, "stopped");
+    assert.ok(observed);
+    const status = observed as ListenerStatus;
+    assert.equal(status.state, "claim_retry");
+    assert.equal(status.lastErrorCode, "http_503");
+    assert.ok(Date.parse(status.nextAttemptAt!) > Date.parse(status.updatedAt));
+    assert.match(renderListenerStatus(status), /^Listener retrying /);
+    assert.match(renderListenerStatus(status), /https:\/\/cloud\.example\.test/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup read failures name the cause and next attempt while retrying", { timeout: 15_000 }, async () => {
+  for (const scenario of [
+    { code: "http_400", status: 400 },
+    { code: "http_404", status: 404 },
+    { code: "http_426", status: 426 },
+    { code: "malformed_response", status: 200 },
+    { code: "sender_relation_capability_missing", status: null },
+  ] as const) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-start-read-"));
+    try {
+      const target = listenerPaths({
+        profileId: `profile-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        stateDirectory: root,
+      });
+      const clock = advancingClock();
+      let retry: ListenerStatus | null = null;
+      const final = await runListenerSupervisor({
+        paths: target,
+        profileId: `profile-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          credentialSession: { async bearer() { return "token"; } },
+          store: new MemoryStore(),
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          onEvent,
+          random: () => 1,
+          ...(scenario.status === null
+            ? { readPage: async () => page([], { capabilities: {
+              senderOwnerRelation: false, cursorAfter: true,
+              deliveryClaim: false, deliveryAck: false,
+            } }) }
+            : { fetcher: (async () => new Response(
+              scenario.status === 200 ? "<html>wrong backend</html>" : "{}",
+              { status: scenario.status, headers: {
+                "content-type": scenario.status === 200 ? "text/html" : "application/json",
+              } },
+            )) as typeof fetch }),
+          sleep: async (ms) => {
+            retry = await queryListenerControl(target, "status");
+            assert.ok(ms > 0);
+            await queryListenerControl(target, "stop");
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      const observed = retry as ListenerStatus | null;
+      assert.ok(observed);
+      assert.equal(observed.state, "starting");
+      assert.equal(observed.lastErrorCode, scenario.code);
+      assert.ok(observed.nextAttemptAt);
+      assert.equal(observed.readHealth?.currentEpisodeAttempts, 1);
+      assert.match(renderListenerStatus(observed), new RegExp(scenario.code));
+      assert.match(renderListenerStatus(observed), /Check the target URL and|Leave the listener running/);
+      assert.match(listenerStartPendingMessage(observed), new RegExp(scenario.code));
+      assert.match(listenerStartPendingMessage(observed), /target URL/);
+      if (scenario.code === "sender_relation_capability_missing") {
+        assert.match(listenerStartPendingMessage(observed), /update\/deploy the read edge before starting a model/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("foreign read responses retry with bounded sleep instead of a permanent stop", { timeout: 15_000 }, async () => {
+  for (const [status, body] of [
+    [400, "{}"], [404, "{}"], [405, "<html>wrong backend</html>"],
+    [408, "{}"], [409, "{}"], [413, "{}"], [421, "{}"],
+    [422, "{}"], [426, "{}"], [200, "<html>wrong backend</html>"],
+  ] as const) {
+    const controller = new AbortController();
+    let requests = 0;
+    let sleeps = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(),
+      model: new FakeModel(),
+      signal: controller.signal,
+      fetcher: (async () => {
+        requests += 1;
+        return new Response(body, { status, headers: { "content-type": status === 200 ? "text/html" : "application/json" } });
+      }) as typeof fetch,
+      sleep: async (ms) => {
+        assert.ok(ms > 0 && ms <= 30_000);
+        sleeps += 1;
+        controller.abort();
+      },
+    });
+    assert.equal(stop.reason, "cancelled", `HTTP ${status}`);
+    assert.equal(requests, 1);
+    assert.equal(sleeps, 1);
+  }
+});
+
+test("foreign claim answers retry with a named next attempt and recover", { timeout: 15_000 }, async () => {
+  for (const scenario of [
+    { status: 200, body: "<html>wrong host</html>", code: "malformed_response" },
+    { status: 404, body: '{"error":"missing_route"}', code: "http_404" },
+    { status: 401, body: '{"error":"session_expired"}', code: "session_expired" },
+    { status: 409, body: '{"error":"session_conflict"}', code: "session_conflict" },
+    { status: 401, body: '{"error":"session_proof_missing"}', code: "session_proof_missing" },
+    { status: 401, body: '{"error":"session_proof_invalid"}', code: "session_proof_invalid" },
+    { status: 400, body: '{"error":"missing_route"}', code: "http_400" },
+    ...[405, 408, 409, 413, 421, 422].map((status) => ({
+      status, body: "<html>wrong host</html>", code: `http_${status}`,
+    })),
+    ...["session_proof_missing", "session_proof_invalid", "session_expired"].map((code) => ({
+      status: 401, body: JSON.stringify({ error: code }), code,
+    })),
+    { status: 409, body: '{"error":"session_conflict"}', code: "session_conflict" },
+    { status: 200, body: '{"status":"other","ok":true}', code: "malformed_response" },
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-foreign-claim-"));
+    try {
+      const paths = listenerPaths({ profileId: `foreign-${scenario.status}-${scenario.code}`, workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+      const journal = new MemoryDeliveryJournal();
+      const clock = advancingClock();
+      const observed: ListenerStatus[] = [];
+      let retryPending = false;
+      let stopRequest: Promise<unknown> | null = null;
+      const events: ListenerRuntimeEvent[] = [];
+      let claims = 0;
+      let reads = 0;
+      const final = await runListenerSupervisor({
+        paths,
+        profileId: `foreign-${scenario.status}-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          listenerInstanceId: journal.record.listenerInstanceId,
+          deliveryJournal: journal,
+          credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+          store: new MemoryStore(),
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          random: () => 1,
+          onEvent: (event) => {
+            events.push(event);
+            if (event.type === "claim_retry") retryPending = true;
+            onEvent(event);
+            if (event.type === "delivery_claim" && claims === 2) stopRequest = queryListenerControl(paths, "stop");
+          },
+          readPage: async () => { reads += 1; return durablePage([], 1); },
+          fetcher: (async () => {
+            claims += 1;
+            return claims === 1
+              ? new Response(scenario.body, { status: scenario.status })
+              : new Response(JSON.stringify({ status: "accepted", ok: true, capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 }, deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 });
+          }) as typeof fetch,
+          sleep: async (ms, sleepSignal) => {
+            if (stopRequest !== null) await stopRequest;
+            if (retryPending) {
+              observed.push(await queryListenerControl(paths, "status"));
+              retryPending = false;
+            }
+            await clock.sleep(ms, sleepSignal);
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      assert.equal(claims, 2);
+      assert.ok(reads >= 1);
+      assert.equal(events.filter((event) => event.type === "claim_retry").length, 1);
+      assert.equal(observed[0]?.state, "claim_retry");
+      assert.equal(observed[0]?.lastErrorCode, scenario.code);
+      assert.ok(observed[0]?.nextAttemptAt);
+      assert.match(renderListenerStatus(observed[0]!), /will try again at/);
+      if (scenario.code.startsWith("session_")) {
+        assert.match(renderListenerStatus(observed[0]!), /Start or renew the seat's session, or stop the listener/);
+        assert.match(renderListenerStatus(observed[0]!), /CONNECTED: no/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("push wake retries a foreign claim without a preceding read", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  let current = Date.parse("2026-09-22T22:00:00.000Z");
+  const claimTimes: number[] = [];
+  const journal = new MemoryDeliveryJournal();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  let claims = 0;
+  const wake = {
+    hasTopic: true,
+    snapshot: () => ({ mode: "push", subscribedAt: "2026-09-22T22:00:00.000Z", reconnects: 0, lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+    next: async () => "wake",
+    coalescingRemainingMs: () => 0,
+    noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+    close: async () => {},
+  } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    now: () => current,
+    wake,
+    random: () => 1,
+    readPage: async () => { reads += 1; return durablePage([], 1); },
+    onEvent: (event) => { events.push(event); if (event.type === "delivery_claim" && claims === 3) controller.abort(); },
+    fetcher: (async () => {
+      claimTimes.push(current);
+      current += 20;
+      claims += 1;
+      return claims === 2
+        ? new Response('{"error":"missing_route"}', { status: 400 })
+        : new Response(JSON.stringify({ status: "accepted", ok: true, capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 }, deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS && ms <= LISTENER_DELIVERY_RETRY_MAX_MS); current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 1);
+  assert.equal(claims, 3);
+  for (let i = 1; i < claimTimes.length; i++) {
+    assert.ok(claimTimes[i]! - claimTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
+  assert.equal(events.find((event) => event.type === "claim_retry")?.code, "http_400");
+});
+
+test("a push wake that begins before renewal is due ends at the six-minute lead", { timeout: 15_000 }, async () => {
+  const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+  const dueAt = expiry - 6 * 60_000;
+  let current = dueAt - 5_000;
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const wakeWaits: Array<{ startedAt: number; until: number }> = [];
+  const renewalTimes: number[] = [];
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => {
+      renewalTimes.push(current);
+      controller.abort();
+      return new Response('{"error":"internal_error"}', { status: 500 });
+    }) as typeof fetch,
+  });
+  assert.equal(session.renewalAt, dueAt);
+  const wake = {
+    hasTopic: true,
+    snapshot: () => ({ mode: "push", subscribedAt: new Date(current).toISOString(), reconnects: 0,
+      lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+    next: async ({ until }: { until: number }) => {
+      wakeWaits.push({ startedAt: current, until });
+      current = until;
+      return "deadline";
+    },
+    coalescingRemainingMs: () => 0,
+    noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+    close: async () => {},
+  } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal, credentialSession: session, store: new MemoryStore(),
+    model: new FakeModel(), signal: controller.signal, now: () => current, wake,
+    readPage: async () => durablePage([], 1),
+    fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+      capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+      deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(wakeWaits.length, 1);
+  assert.ok(wakeWaits[0]!.startedAt < dueAt);
+  assert.equal(wakeWaits[0]!.until, dueAt);
+  assert.equal(renewalTimes.length, 1);
+  assert.ok(renewalTimes[0]! >= dueAt && renewalTimes[0]! <= dueAt + LISTENER_REQUEST_WAIT_FLOOR_MS);
+});
+
+test("a due session reports the deadline-capped push wait it takes", { timeout: 15_000 }, async () => {
+  const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+  const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  let current = deadline - 10_000;
+  let reads = 0;
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const intervals: Array<{ at: number; ms: number }> = [];
+  const wakeWaits: Array<{ startedAt: number; until: number }> = [];
+  const wake = {
+    hasTopic: true,
+    snapshot: () => ({ mode: "push", subscribedAt: new Date(current).toISOString(), reconnects: 0,
+      lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+    next: async ({ until }: { until: number }) => {
+      wakeWaits.push({ startedAt: current, until });
+      current = until;
+      return "deadline";
+    },
+    coalescingRemainingMs: () => 0,
+    noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+    close: async () => {},
+  } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { expiry, renewalAt: expiry - 6 * 60_000, renewalDue: true,
+      async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, wake,
+    onEvent: (event) => {
+      if (event.type === "idle_poll") intervals.push({ at: Date.parse(event.ts), ms: event.intervalMs });
+    },
+    readPage: async () => {
+      if (++reads === 2) controller.abort();
+      return durablePage([], 1);
+    },
+    fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+      capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+      deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : undefined);
+  assert.equal(wakeWaits.length, 1);
+  assert.equal(wakeWaits[0]!.until, deadline);
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0]!.at, wakeWaits[0]!.startedAt);
+  assert.equal(intervals[0]!.ms, wakeWaits[0]!.until - wakeWaits[0]!.startedAt);
+  assert.ok(intervals[0]!.ms < LISTENER_RECONCILE_POLL_MS);
+  assert.equal(idlePollStatusSentence(intervals[0]!.ms),
+    `Current idle poll interval: ${intervals[0]!.ms / 1_000}s.`);
+});
+
+test("read retry time is the next read with a wake subscriber in poll and push mode", async () => {
+  for (const mode of ["poll", "push"] as const) {
+    const controller = new AbortController();
+    const journal = new MemoryDeliveryJournal();
+    let current = Date.parse("2026-07-30T00:00:00.000Z");
+    let reads = 0;
+    let wakeWaits = 0;
+    let stated: number | null = null;
+    let actual: number | null = null;
+    const wake = {
+      hasTopic: true,
+      snapshot: () => ({ mode, subscribedAt: new Date(current).toISOString(), reconnects: 0,
+        lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+      next: async ({ until }: { until: number }) => { wakeWaits++; current = until; return "deadline"; },
+      coalescingRemainingMs: () => 0,
+      noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+      close: async () => {},
+    } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal, credentialSession: { expiry: null,
+        async bearer() { return "swm_agt_" + "A".repeat(43); } },
+      store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+      now: () => current, wake,
+      onEvent: (event) => { if (event.type === "read_retry") stated = Date.parse(event.ts) + event.delayMs; },
+      readPage: async () => {
+        reads++;
+        if (reads === 2) throw new SignalHttpError(500);
+        if (reads === 3) { actual = current; controller.abort(); }
+        return durablePage([], 1);
+      },
+      fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+        capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+      sleep: async (ms) => { current += ms; },
+    });
+    assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.stack : undefined);
+    assert.equal(reads, 3);
+    assert.equal(wakeWaits, 1, mode);
+    assert.equal(actual, stated, mode);
+  }
+});
+
+test("renewal retry time is the next renewal with a wake subscriber", async () => {
+  for (const mode of ["poll", "push"] as const) {
+    for (const httpStatus of [500, 401]) {
+      const controller = new AbortController();
+      const journal = new MemoryDeliveryJournal();
+      const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+      const due = expiry - 6 * 60_000;
+      let current = due - 60_000;
+      let wakeWaits = 0;
+      let wakeWaitsAtRetry: number | null = null;
+      let renewals = 0;
+      let stated: number | null = null;
+      let actual: number | null = null;
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: randomUUID(),
+          principalId: PRINCIPAL_ID, runId: randomUUID(), expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          renewals++;
+          if (renewals === 1) return new Response(httpStatus === 401
+            ? '{"error":"unauthenticated"}' : '{"error":"internal_error"}', { status: httpStatus });
+          actual = current;
+          controller.abort();
+          throw new TypeError("test stopped after the next renewal request");
+        }) as typeof fetch,
+      });
+      const wake = {
+        hasTopic: true,
+        snapshot: () => ({ mode, subscribedAt: new Date(current).toISOString(), reconnects: 0,
+          lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+        next: async ({ until }: { until: number }) => { wakeWaits++; current = until; return "deadline"; },
+        coalescingRemainingMs: () => 0,
+        noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+        close: async () => {},
+      } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+        deliveryJournal: journal, credentialSession: session, store: new MemoryStore(),
+        model: new FakeModel(), signal: controller.signal, now: () => current, wake,
+        onEvent: (event) => {
+          if (event.type === "read_retry") {
+            stated = Date.parse(event.ts) + event.delayMs;
+            wakeWaitsAtRetry = wakeWaits;
+          }
+          if (event.type === "credential_check") {
+            stated = Date.parse(event.nextAttemptAt!);
+            wakeWaitsAtRetry = wakeWaits;
+          }
+        },
+        readPage: async () => durablePage([], 1),
+        fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+          capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+          deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+        sleep: async (ms) => { current += ms; },
+      });
+      assert.equal(stop.reason, "cancelled", `${mode} HTTP ${httpStatus}`);
+      assert.equal(renewals, 2, `${mode} HTTP ${httpStatus}`);
+      assert.equal(wakeWaits, wakeWaitsAtRetry, `${mode} HTTP ${httpStatus}`);
+      assert.equal(actual, stated, `${mode} HTTP ${httpStatus}`);
+    }
+  }
+});
+
+test("malformed read overflow and delivery marker retry", { timeout: 15_000 }, async () => {
+  for (const body of [
+    { signals: [{}, {}, {}, {}], capabilities: { sender_owner_relation: 1, cursor_after: 1 } },
+    { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 2 } },
+    { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: "bad" },
+  ]) {
+    const controller = new AbortController();
+    const events: ListenerRuntimeEvent[] = [];
+    let reads = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(),
+      model: new FakeModel(),
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+      fetcher: (async () => {
+        reads += 1;
+        if (reads === 2) controller.abort();
+        return new Response(JSON.stringify(body), { status: 200 });
+      }) as typeof fetch,
+      sleep: async (ms) => { assert.ok(ms > 0 && ms <= 30_000); },
+    });
+    assert.equal(stop.reason, "cancelled");
+    assert.equal(reads, 2);
+    assert.equal(events.find((event) => event.type === "read_retry")?.code, "malformed_response");
+  }
+});
+
+test("foreign ACK answers retry and recover with a named next attempt", { timeout: 15_000 }, async () => {
+  for (const scenario of [
+    { status: 200, body: "<html>wrong host</html>", code: "malformed_response" },
+    { status: 404, body: '{"error":"missing_route"}', code: "http_404" },
+    ...DELIVERY_SESSION_PROOF_CODES.map((code) => ({
+      status: code === "session_conflict" ? 409 : 401,
+      body: JSON.stringify({ error: code }), code,
+    })),
+  ]) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-foreign-ack-"));
+    try {
+      const paths = listenerPaths({ profileId: `ack-${scenario.code}`, workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+      const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa18", "2026-07-30T00:00:01.000Z");
+      const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+      const journal = new MemoryDeliveryJournal(active);
+      const store = new MemoryStore();
+      await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+      const clock = advancingClock("2026-07-30T00:00:30.000Z");
+      const observed: ListenerStatus[] = [];
+      let retryPending = false;
+      let stopRequest: Promise<unknown> | null = null;
+      let acks = 0;
+      const final = await runListenerSupervisor({
+        paths,
+        profileId: `ack-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          listenerInstanceId: journal.record.listenerInstanceId,
+          deliveryJournal: journal,
+          credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+          store,
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          random: () => 1,
+          onEvent: (event) => {
+            if (event.type === "ack_retry") retryPending = true;
+            onEvent(event);
+            if (event.type === "delivery_ack") stopRequest = queryListenerControl(paths, "stop");
+          },
+          readPage: async () => durablePage([], 1),
+          fetcher: (async () => {
+            acks += 1;
+            return acks === 1
+              ? new Response(scenario.body, { status: scenario.status })
+              : new Response(JSON.stringify({ status: "accepted", ok: true, signal_id: directNote.id, outcome: "observed" }), { status: 200 });
+          }) as typeof fetch,
+          sleep: async (ms, sleepSignal) => {
+            if (stopRequest !== null) await stopRequest;
+            if (retryPending) {
+              observed.push(await queryListenerControl(paths, "status"));
+              retryPending = false;
+            }
+            await clock.sleep(ms, sleepSignal);
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      assert.equal(acks, 2);
+      assert.equal(journal.record.active, null);
+      assert.equal(observed[0]?.state, "ack_retry");
+      assert.equal(observed[0]?.lastErrorCode, scenario.code);
+      assert.ok(observed[0]?.nextAttemptAt);
+      const sentence = renderListenerStatus(observed[0]!);
+      if (scenario.code.startsWith("session_")) {
+        assert.match(sentence, new RegExp(`${scenario.code}.*Start or renew the seat's session, or stop the listener`));
+      } else {
+        assert.match(sentence, /delivery acknowledgement failed.*will try again at/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("repeated ACK failures force a read without resetting ACK backoff", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa19", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  const controller = new AbortController();
+  const clock = advancingClock("2026-07-30T00:00:30.000Z");
+  const sleeps: number[] = [];
+  let pendingAckRetryDelay: number | null = null;
+  let reads = 0;
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store, model: new FakeModel(), signal: controller.signal,
+    now: clock.now, random: () => 1,
+    onEvent: (event) => { if (event.type === "ack_retry") pendingAckRetryDelay = event.delayMs; },
+    readPage: async () => { reads += 1; return durablePage([], 1); },
+    deliveryClient: {
+      async claimAgentInbox() { throw new Error("claim must not run"); },
+      async ackAgentDelivery() {
+        acks += 1;
+        throw new DeliveryHttpError(503, "temporarily_unavailable", "outage");
+      },
+    },
+    sleep: async (ms, signal) => {
+      if (pendingAckRetryDelay !== null) {
+        assert.equal(ms, pendingAckRetryDelay);
+        pendingAckRetryDelay = null;
+        sleeps.push(ms);
+        if (sleeps.length === 4) controller.abort();
+      } else {
+        assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      }
+      await clock.sleep(ms, signal);
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(acks, 4);
+  assert.ok(reads >= 2, `reads=${reads}`);
+  assert.deepEqual(sleeps.slice(0, 4), [1_000, 1_000, 2_000, 4_000]);
+});
+
+test("repeated ACK failures let the read edge open the credential window", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa20", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  const controller = new AbortController();
+  const clock = advancingClock("2026-07-30T00:00:30.000Z");
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store, model: new FakeModel(), signal: controller.signal,
+    now: clock.now, random: () => 1,
+    onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads += 1;
+      if (reads === 1) return durablePage([], 1);
+      throw new SignalHttpError(403, null, { error: "forbidden", requestId: null, retryable: null });
+    },
+    deliveryClient: {
+      async claimAgentInbox() { throw new Error("claim must not run"); },
+      async ackAgentDelivery() {
+        acks += 1;
+        throw new DeliveryHttpError(503, "temporarily_unavailable", "outage");
+      },
+    },
+    sleep: async (ms, signal) => {
+      if (events.some((event) => event.type === "credential_check")) controller.abort();
+      await clock.sleep(ms, signal);
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(acks, 3);
+  assert.equal(reads, 2);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+});
+
+test("a well-formed command refusal stays fatal", { timeout: 15_000 }, async () => {
+  const journal = new MemoryDeliveryJournal();
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    readPage: async () => durablePage([], 1),
+    fetcher: (async () => {
+      claims += 1;
+      return new Response('{"error":"invalid_request"}', { status: 400 });
+    }) as typeof fetch,
+  });
+  assert.equal(stop.reason, "fatal");
+  assert.equal(claims, 1);
+  assert.equal(isRestartableListenerStop(stop), false);
+});
+
+test("each recognized read and command refusal is fatal while foreign answers retry", { timeout: 15_000 }, async () => {
+  // Independently transcribed from the read and command edge producers. A
+  // missing member in the runtime constant must fail before the behavior loop.
+  const readPairs = [[400, "invalid_request"], [404, "channel_not_found"]] as const;
+  const commandPairs = [[400, "invalid_request"], [403, H0_SEAT_CLAIM_REFUSED_CODE],
+    [409, "command_id_conflict"], [409, "delivery_ack_conflict"],
+    [409, "delivery_not_surfaced"], [413, "payload_too_large"],
+    [426, "upgrade_required"]] as const;
+  const pairKey = ([status, code]: readonly [number, string]) => `${status}:${code}`;
+  assert.deepEqual(READ_FATAL_ANSWERS.refusals.map(pairKey).sort(), readPairs.map(pairKey).sort());
+  assert.deepEqual(COMMAND_FATAL_ANSWERS.refusals.map(pairKey).sort(), commandPairs.map(pairKey).sort());
+  for (const [status, code] of readPairs) {
+    let reads = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(), model: new FakeModel(),
+      fetcher: (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ error: code }), { status });
+      }) as typeof fetch,
+    });
+    assert.equal(stop.reason, "fatal", `read ${status} ${code}`);
+    assert.equal(reads, 1);
+    assert.equal(isRestartableListenerStop(stop), false);
+  }
+  for (const [status, code] of commandPairs) {
+    const journal = new MemoryDeliveryJournal();
+    let claims = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal,
+      credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+      store: new MemoryStore(), model: new FakeModel(),
+      readPage: async () => durablePage([], 1),
+      fetcher: (async () => {
+        claims += 1;
+        return new Response(JSON.stringify({ error: code }), { status });
+      }) as typeof fetch,
+    });
+    assert.equal(stop.reason, "fatal", `command ${status} ${code}`);
+    assert.equal(claims, 1);
+    assert.equal(isRestartableListenerStop(stop), false);
+  }
+});
+
+test("an H0 seat claim stops with its own code and is not retried", async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    signal: controller.signal,
+    sleep: async () => undefined,
+    readPage: async () => durablePage([], 1),
+    deliveryClient: {
+      async claimAgentInbox() {
+        claims += 1;
+        if (claims >= 3) controller.abort();
+        throw new DeliveryHttpError(
+          403,
+          H0_SEAT_CLAIM_REFUSED_CODE,
+          `delivery command failed (HTTP 403): ${H0_SEAT_CLAIM_REFUSED_CODE}`,
+        );
+      },
+      async ackAgentDelivery() {
+        throw new Error("ack must not run");
+      },
+    },
+  });
+  assert.equal(claims, 1);
+  assert.equal(stop.reason, "fatal");
+  if (stop.reason !== "fatal") return;
+  assert.ok(stop.error instanceof ListenerH0SeatError);
+  assert.equal(stop.error.code, H0_SEAT_CLAIM_REFUSED_CODE);
+  assert.equal(isRestartableListenerStop(stop), false);
+  const root = await mkdtemp(join(tmpdir(), "cswarm-h0-seat-"));
+  try {
+    const target = listenerPaths({
+      profileId: "profile-h0-seat",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      stateDirectory: root,
+    });
+    let runs = 0;
+    const status = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-h0-seat",
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      restart: { maxAttempts: 2, sleep: async () => undefined, random: () => 0 },
+      run: async () => {
+        runs += 1;
+        return stop;
+      },
+    });
+    assert.equal(runs, 1);
+    assert.equal(status.state, "failed");
+    assert.equal(status.lastErrorCode, H0_SEAT_CLAIM_REFUSED_CODE);
+    const rendered = renderListenerStatus(status);
+    assert.match(rendered, new RegExp(H0_SEAT_LISTENER_STOP_SENTENCE.replace(/[()]/g, "\\$&")));
+    assert.doesNotMatch(rendered, /credential_stopped/);
+    assert.equal(
+      listenerFailureMessage(H0_SEAT_CLAIM_REFUSED_CODE),
+      H0_SEAT_LISTENER_STOP_SENTENCE,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("runtime drains pages, resets scan cursor, and posts stable replies", async () => {
@@ -3352,7 +4880,7 @@ test("default poster credential failures stop as credential with the identical e
       "renewal reauthorisation required",
     ),
     new RenewalRevoked("forbidden", "credential revoked"),
-    new Error("reply credential secret is absent from the store"),
+    new LocalCredentialSecretAbsentError("reply credential secret is absent from the store"),
   ] as const;
   for (const [index, thrown] of families.entries()) {
     const model = new FakeModel();
@@ -5037,5 +6565,577 @@ test("a lease that ends a little past the maximum is tolerated as clock skew; we
     fixedNow + LISTENER_DELIVERY_MAX_LEASE_MS + LISTENER_LEASE_CLOCK_SKEW_ALLOWANCE_MS + 1,
   );
   assert.equal(refused.reason, "fatal");
+  assert.ok(refused.reason === "fatal" && refused.error instanceof ListenerLeaseResponseError);
+  assert.equal(isRestartableListenerStop(refused), true);
   assert.match(String((refused as { error?: Error }).error?.message), /lease deadline is invalid/);
+});
+
+test("claim replay response contradictions carry the lease response tag", async () => {
+  const stored = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa87", "2026-07-30T00:00:01.000Z");
+  for (const [answer, message] of [
+    [claimResult([], 0), /did not return the stored lease/],
+    [claimResult([{ signal: stored, leaseId: "55555555-5555-4555-8555-555555555599",
+      leasedUntil: "2026-07-30T00:15:00.000Z", senderOwnerRelation: "same_owner",
+      recipientPosition: null, recipientCount: null }], 1), /does not match the stored lease/],
+  ] as const) {
+    const journal = new MemoryDeliveryJournal(leasedActive({ signalId: stored.id, signal: stored }));
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal,
+      deliveryClient: { async claimAgentInbox() { return answer; },
+        async ackAgentDelivery() { throw new Error("ACK must not run"); } },
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(), model: new FakeModel(),
+      now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+      readPage: async () => durablePage([], 1), sleep: async () => {},
+    });
+    assert.equal(stop.reason, "fatal");
+    assert.ok(stop.reason === "fatal" && stop.error instanceof ListenerLeaseResponseError);
+    assert.equal(isRestartableListenerStop(stop), true);
+    assert.match(stop.error.message, message);
+  }
+});
+
+test("accepted claim with malformed pending count retries as a network response", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const events: ListenerRuntimeEvent[] = [];
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    readPage: async () => durablePage([], 1), onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      claims++;
+      if (claims === 2) controller.abort();
+      return new Response(JSON.stringify({ status: "accepted", ok: true,
+        capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        deliveries: [], pending_delivery_count: "bad", terminal_delivery_failure_count: 0 }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= LISTENER_DELIVERY_RETRY_MAX_MS); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, 2);
+  assert.equal(events.find((event) => event.type === "claim_retry")?.code, "malformed_response");
+});
+
+test("a full read page with malformed last row retries instead of stopping", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  const valid = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa18", "2026-07-30T00:00:01.000Z");
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal, pageLimit: 100,
+    onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      reads++;
+      if (reads === 2) controller.abort();
+      return new Response(JSON.stringify({ signals: [...Array(99).fill(valid), { id: "bad" }],
+        capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= 30_000); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 2);
+  assert.equal(events.find((event) => event.type === "read_retry")?.code, "malformed_response");
+});
+
+function renewalMemoryStore(): AgentCredentialStore {
+  let record: AgentCredentialRecord | null = null;
+  return {
+    location: "memory://listener-renewal",
+    read: async () => record,
+    write: async (next) => { record = next; },
+    delete: async () => { record = null; },
+    withLock: async (work) => work(),
+  };
+}
+
+async function renewingListenerSession(now: number, fetcher: typeof fetch): Promise<AgentCredentialSession> {
+  return AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: now + 3 * 60_000 },
+    store: renewalMemoryStore(), fetcher, listenerMode: true, now: () => now, warn: () => {},
+  });
+}
+
+test("renewal deadline fits two timed attempts after a late start and two pending writes", () => {
+  assert.ok(RENEWAL_PENDING_WRITE_ALLOWANCE_MS >= 5_000);
+  assert.ok(RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS >= 30_000);
+  const worstCaseMs = RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS +
+    2 * RENEW_TIMEOUT_MS + 2 * LISTENER_REQUEST_WAIT_FLOOR_MS +
+    2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS;
+  assert.ok(RENEWAL_EXPIRY_HEADROOM_MS >= 8_000);
+  assert.ok(RENEWAL_WINDOW_EXPIRY_MARGIN_MS - worstCaseMs >= 8_000,
+    "two timeouts, a late start, both pending writes, and server clock lead need spare time");
+});
+
+test("renewal window retries before expiry and a successful successor keeps the listener alive past it", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const oldExpiry = start + 3 * 60_000;
+  let current = start;
+  let renewals = 0;
+  let reads = 0;
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: oldExpiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => {
+      renewals++;
+      if (renewals < 3) return new Response('{"error":"unauthenticated"}', { status: 401 });
+      return new Response(JSON.stringify({ status: "accepted", ok: true,
+        agent_token: "swm_agt_" + "B".repeat(43), token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        principal_id: PRINCIPAL_ID, run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        issued_at: new Date(current).toISOString(), expires_at: new Date(current + 60 * 60_000).toISOString() }), { status: 200 });
+    }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads++;
+      if (reads === 1) current = oldExpiry + 1_000;
+      else controller.abort();
+      return page([]);
+    },
+    sleep: async (ms) => { assert.ok(ms <= 30_000, `renewal waited ${ms}ms`); current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : undefined);
+  assert.equal(renewals, 3);
+  assert.ok(reads >= 2);
+  assert.ok(current > oldExpiry);
+  assert.ok((session.expiry ?? 0) > oldExpiry);
+  assert.ok(events.some((event) => event.type === "credential_check_cleared"));
+});
+
+test("generated renewal answer orderings keep a request floor and recover", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const failures = ["ours", "foreign", "network", "server"] as const;
+  type Answer = typeof failures[number] | "success";
+  const answerSequences: Answer[][] = [];
+  for (let code = 0; code < failures.length ** 3; code++) {
+    answerSequences.push([failures[code % 4]!, failures[Math.floor(code / 4) % 4]!,
+      failures[Math.floor(code / 16) % 4]!, "success"]);
+  }
+  const allAnswers: Answer[] = [...failures, "success"];
+  for (let a = 0; a < 5; a++) for (let b = 0; b < 5; b++) for (let c = 0; c < 5; c++) {
+    for (let d = 0; d < 5; d++) for (let e = 0; e < 5; e++) {
+      if (new Set([a, b, c, d, e]).size === 5) {
+        answerSequences.push([allAnswers[a]!, allAnswers[b]!, allAnswers[c]!, allAnswers[d]!, allAnswers[e]!]);
+      }
+    }
+  }
+  assert.equal(answerSequences.length, 184);
+  let sequences = 0;
+  for (const lifetimeMs of [180_000, 210_000, 240_000, 270_000]) {
+    for (const answers of answerSequences) {
+      let current = start;
+      const expiry = start + lifetimeMs;
+      const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      let calls = 0;
+      const requestTimes: number[] = [];
+      let reads = 0;
+      const controller = new AbortController();
+      const session = await AgentCredentialSession.open({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+        store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+        fetcher: (async () => {
+          requestTimes.push(current);
+          current += 20; // A fast but nonzero round trip exposes a zero-wait retry.
+          const answer = answers[Math.min(calls++, answers.length - 1)];
+          if (answer === "network") throw new TypeError("network unavailable");
+          if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
+          if (answer === "foreign") return new Response("<html>wrong edge</html>", { status: 401 });
+          if (answer === "server") return new Response('{"error":"internal_error"}', { status: 500 });
+          return new Response(JSON.stringify({ status: "accepted", ok: true,
+            agent_token: "swm_agt_" + "B".repeat(43), token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            principal_id: PRINCIPAL_ID, run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            issued_at: new Date(current).toISOString(), expires_at: new Date(current + 60 * 60_000).toISOString() }), { status: 200 });
+        }) as typeof fetch,
+      });
+      const stop = await runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
+        model: new FakeModel(), signal: controller.signal, now: () => current,
+        onEvent: (event) => {
+          if (event.type === "credential_check") {
+            assert.ok(event.nextAttemptAt && Date.parse(event.nextAttemptAt) - Date.parse(event.ts) >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+          }
+          if (event.type === "read_retry") assert.ok(event.delayMs >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+        },
+        readPage: async () => {
+          assert.ok(current - requestTimes[requestTimes.length - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+          reads++;
+          controller.abort();
+          return page([]);
+        },
+        sleep: async (ms) => {
+          if (session.expiry === expiry && current < deadline - LISTENER_REQUEST_WAIT_FLOOR_MS) {
+            assert.ok(current + ms <= deadline,
+              `${answers.join(",")} at ${lifetimeMs}ms slept ${ms}ms past deadline`);
+            assert.ok(ms <= RENEWAL_WINDOW_RETRY_MS,
+              `${answers.join(",")} at ${lifetimeMs}ms delayed renewal ${ms}ms`);
+          }
+          assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+          current += ms;
+        },
+      });
+      assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : answers.join(","));
+      assert.equal(calls, answers.indexOf("success") + 1, answers.join(","));
+      assert.ok(reads > 0, answers.join(","));
+      assert.ok(current < expiry, answers.join(","));
+      assert.ok((session.expiry ?? 0) > expiry, answers.join(","));
+      for (let i = 1; i < requestTimes.length; i++) {
+        assert.ok(requestTimes[i]! - requestTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS,
+          `${answers.join(",")} issued requests ${requestTimes[i]! - requestTimes[i - 1]!}ms apart`);
+      }
+      const marginCalls = requestTimes.filter((time) => time >= deadline && time < expiry);
+      assert.ok(marginCalls.length <= Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
+      sequences++;
+    }
+  }
+  assert.equal(sequences, 736);
+});
+
+test("generated failing renewals and a healthy null-store listener stay rate bounded through expiry", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const expiry = start + 120_000;
+  const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  const failures = ["ours", "foreign", "network", "unsupported"] as const;
+  let sequences = 0;
+  for (let code = 0; code < failures.length ** 3; code++) {
+    let current = start;
+    const requestTimes: number[] = [];
+    let calls = 0;
+    const session = await AgentCredentialSession.open({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+      store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+      fetcher: (async () => {
+        requestTimes.push(current);
+        current += 20; // Every request costs 20 ms, including failures.
+        assert.ok(++calls <= 130, `unbounded renewal sequence ${code}`);
+        const answer = failures[Math.min(calls - 1, 2)]!;
+        if (answer === "network") throw new TypeError("network unavailable");
+        if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
+        if (answer === "foreign") return new Response("<html>wrong edge</html>", { status: 401 });
+        return new Response('{"status":"rejected","reason":"renewal_unsupported"}', { status: 200 });
+      }) as typeof fetch,
+    });
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
+      model: new FakeModel(), now: () => current,
+      onEvent: (event) => {
+        if (event.type === "credential_check") {
+          assert.ok(event.nextAttemptAt && Date.parse(event.nextAttemptAt) - Date.parse(event.ts) >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+        }
+        if (event.type === "read_retry") assert.ok(event.delayMs >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      },
+      sleep: async (ms) => { current += ms; },
+    });
+    assert.equal(stop.reason, "credential", `sequence ${code}`);
+    assert.ok(requestTimes.some((time) => time >= deadline && time < expiry), `sequence ${code} missed margin`);
+    assert.ok(requestTimes.some((time) => time >= expiry), `sequence ${code} missed expiry`);
+    for (let i = 1; i < requestTimes.length; i++) {
+      assert.ok(requestTimes[i]! - requestTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS,
+        `sequence ${code}: ${requestTimes[i]! - requestTimes[i - 1]!}ms apart`);
+    }
+    assert.ok(requestTimes.filter((time) => time >= deadline && time < expiry).length <=
+      Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
+    assert.equal(requestTimes.filter((time) => time >= expiry).length, 1);
+    sequences++;
+  }
+
+  let current = start;
+  const reads: number[] = [];
+  const controller = new AbortController();
+  const nullStore = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: null, listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => { assert.fail("a null store must not renew"); }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, credentialSession: nullStore, store: new MemoryStore(),
+    model: new FakeModel(), signal: controller.signal, now: () => current,
+    readPage: async () => {
+      reads.push(current);
+      current += 20;
+      assert.ok(reads.length <= 130, "unbounded healthy null-store reads");
+      if (current > expiry + 60_000) controller.abort();
+      return page([]);
+    },
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(reads.some((time) => time >= deadline && time < expiry));
+  assert.ok(reads.some((time) => time >= expiry));
+  for (let i = 1; i < reads.length; i++) {
+    assert.equal(reads[i]! - reads[i - 1]!,
+      nextIdlePollMs(IDLE_POLL_DEFAULT_MS, i - 1, LISTENER_IDLE_POLL_MAX_MS) + 20,
+      `null-store read ${i + 1} left the 15s, 30s, 60s idle curve`);
+  }
+  assert.equal(reads.filter((time) => time >= deadline && time < expiry).length, 3);
+  assert.equal(sequences, 64);
+});
+
+test("generated confirmation windows stop only after the full span of confirmed answers", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let sequences = 0;
+  for (let code = 0; code < 4 ** 3; code++) {
+    let current = start;
+    let calls = 0;
+    const events: ListenerRuntimeEvent[] = [];
+    const prefix = [code % 4, Math.floor(code / 4) % 4, Math.floor(code / 16) % 4];
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, store: new MemoryStore(), model: new FakeModel(),
+      now: () => current, random: () => 0, onEvent: (event) => events.push(event),
+      credentialSession: { expiry: start + 30 * 60_000, async bearer() {
+        const answer = prefix[calls++] ?? 0;
+        if (answer === 1) throw new RenewalRetryError(start + 30 * 60_000);
+        if (answer === 2) throw new SignalHttpError(500);
+        if (answer === 3) throw new SignalHttpError(401);
+        throw new RenewalCredentialCheckError(401, "unauthenticated");
+      } },
+      sleep: async (ms) => { current += ms; },
+    });
+    const checks = events.filter((event) => event.type === "credential_check");
+    assert.equal(stop.reason, "credential", prefix.join(","));
+    assert.ok(checks.length >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS, prefix.join(","));
+    assert.ok(current >= Date.parse(checks[0]!.ts) + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+      prefix.join(","));
+    sequences++;
+  }
+  assert.equal(sequences, 64);
+});
+
+test("renewal window stops only after confirmed samples span the full window", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let renewals = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: { expiry: start + 20 * 60_000, async bearer() {
+      renewals++;
+      throw new RenewalCredentialCheckError(401, "unauthenticated");
+    } }, store: new MemoryStore(), model: new FakeModel(), now: () => current,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.ok(renewals >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+  assert.ok(current - start >= CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  assert.ok(current < start + 20 * 60_000);
+});
+
+test("expired predecessor stops on the next confirmed renewal answer", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  const expiry = start + 90_000;
+  let renewals = 0;
+  const events: ListenerRuntimeEvent[] = [];
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => { renewals++; current += 1_000; return new Response('{"error":"unauthenticated"}', { status: 401 }); }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(), model: new FakeModel(),
+    now: () => current, onEvent: (event) => events.push(event), sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.ok(current >= expiry);
+  assert.ok(current < start + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  assert.ok(renewals >= 2);
+  const check = events.find((event) => event.type === "credential_check");
+  assert.ok(check?.nextAttemptAt);
+  assert.ok(Date.parse(check.nextAttemptAt) > Date.parse(check.ts));
+});
+
+test("a read with the still-valid token clears a renewal credential sample", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let calls = 0;
+  let reads = 0;
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { expiry: start + 3 * 60_000, async bearer() {
+      calls++;
+      if (calls === 1) throw new RenewalCredentialCheckError(401, "unauthenticated");
+      return "token";
+    } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, onEvent: (event) => events.push(event),
+    readPage: async () => { reads++; return page([]); },
+    sleep: async (ms) => { current += ms; if (reads > 0) controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(reads > 0);
+  assert.ok(current < start + 3 * 60_000);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+  assert.ok(events.some((event) => event.type === "credential_check_cleared"));
+});
+
+test("renewal 401 unauthenticated opens the listener credential window", { timeout: 15_000 }, async () => {
+  const now = Date.parse("2026-07-30T00:00:00.000Z");
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let renewals = 0;
+  const session = await renewingListenerSession(now, (async () => {
+    renewals++;
+    return new Response('{"error":"unauthenticated"}', { status: 401 });
+  }) as typeof fetch);
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => now, onEvent: (event) => events.push(event),
+    sleep: async (ms) => { assert.equal(ms, RENEWAL_WINDOW_RETRY_MS); controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(renewals, 1);
+  assert.equal(events.find((event) => event.type === "credential_check")?.edge, "command");
+  await assert.rejects(() => session.bearer(), RenewalCredentialCheckError);
+});
+
+test("foreign renewal 404 keeps retrying with expiry named in status", { timeout: 15_000 }, async () => {
+  const now = Date.parse("2026-07-30T00:00:00.000Z");
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let renewals = 0;
+  const session = await renewingListenerSession(now, (async () => {
+    renewals++;
+    return new Response("<html>wrong host</html>", { status: 404 });
+  }) as typeof fetch);
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => now, onEvent: (event) => events.push(event),
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= 30_000); if (renewals >= 2) controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(renewals, 2);
+  assert.equal(session.expiry, now + 3 * 60_000);
+  const retry = events.find((event) => event.type === "read_retry");
+  assert.equal(retry?.code, "renewal_retry");
+  assert.equal(retry?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
+});
+
+test("renewal retry status names state and token expiry", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-renewal-status-"));
+  try {
+    const now = Date.parse("2026-07-30T00:00:00.000Z");
+    const paths = listenerPaths({ profileId: "renewal-status", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+    const session = await renewingListenerSession(now, (async () => new Response("<html>wrong host</html>", { status: 404 })) as typeof fetch);
+    let observed: ListenerStatus | null = null;
+    const final = await runListenerSupervisor({
+      paths, profileId: "renewal-status", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      now: () => now,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal, now: () => now,
+        onEvent, sleep: async () => { observed = await queryListenerControl(paths, "status"); await queryListenerControl(paths, "stop"); },
+      }),
+    });
+    assert.equal(final.state, "stopped");
+    const retryStatus = observed as ListenerStatus | null;
+    assert.equal(retryStatus?.lastErrorCode, "renewal_retry");
+    assert.equal(retryStatus?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
+    assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*backoff of at least one second/);
+    assert.match(renderListenerStatus(retryStatus!), /Reads and claims pause.*stops and needs a new credential/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("upgrade_required stops claim with an install and restart action", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-listener-upgrade-"));
+  try {
+    const paths = listenerPaths({ profileId: "upgrade", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+    const journal = new MemoryDeliveryJournal();
+    let claims = 0;
+    const final = await runListenerSupervisor({
+      paths, profileId: "upgrade", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+        credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+        store: new MemoryStore(), model: new FakeModel(), signal, onEvent,
+        readPage: async () => durablePage([], 1),
+        fetcher: (async () => { claims++; return new Response('{"error":"upgrade_required"}', { status: 426 }); }) as typeof fetch,
+      }),
+    });
+    assert.equal(claims, 1);
+    assert.equal(final.state, "failed");
+    assert.equal(final.lastErrorCode, "upgrade_required");
+    assert.match(renderListenerStatus(final), /npm install -g commonswarm.*restart the listener/);
+    assert.match(listenerFailureMessage("upgrade_required"), /curl -fsSL https:\/\/commonswarm.com\/install.sh \| sh/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recognized read 405 can recover after a redirect changes POST to GET", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  const events: ListenerRuntimeEvent[] = [];
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      reads++;
+      if (reads === 1) return new Response('{"error":"method_not_allowed"}', { status: 405 });
+      controller.abort();
+      return new Response(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async () => {},
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 2);
+  assert.equal(events.find((event) => event.type === "read_retry")?.code, "http_405");
+});
+
+test("upgrade_required also stops a prepared acknowledgement", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa28", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body,
+    until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store, model: new FakeModel(), now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+    readPage: async () => durablePage([], 1),
+    fetcher: (async () => { acks++; return new Response('{"error":"upgrade_required"}', { status: 426 }); }) as typeof fetch,
+  });
+  assert.equal(acks, 1);
+  assert.equal(stop.reason, "fatal");
+  if (stop.reason === "fatal") assert.equal((stop.error as DeliveryHttpError).code, "upgrade_required");
+  assert.equal(isRestartableListenerStop(stop), false);
 });

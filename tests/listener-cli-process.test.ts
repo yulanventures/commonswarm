@@ -125,11 +125,33 @@ async function stopAndWaitForDetachedListener(
   args: string[],
   paths: ListenerPaths,
 ): Promise<void> {
-  await runCli(args).catch(() => undefined);
   const status = await readListenerStatus(paths);
-  if (status) {
-    await waitForListenerProcessExit(status.pid, paths.instanceDirectory);
+  const wasAlive = status !== null && listenerProcessIsAlive(status.pid);
+  let stopFailure: unknown = null;
+  try {
+    const stopped = await runCli(args);
+    if (wasAlive) assert.equal(stopped.code, 0, stopped.stderr);
+  } catch (error) {
+    stopFailure = error;
   }
+  if (status) {
+    try {
+      await waitForListenerProcessExit(status.pid, paths.instanceDirectory);
+    } catch (error) {
+      stopFailure ??= error;
+      // A failed stop still must not leave the detached fixture running.
+      if (listenerProcessIsAlive(status.pid)) {
+        process.kill(status.pid, "SIGTERM");
+        try {
+          await waitForListenerProcessExit(status.pid, paths.instanceDirectory, 2_000);
+        } catch {
+          if (listenerProcessIsAlive(status.pid)) process.kill(status.pid, "SIGKILL");
+          await waitForListenerProcessExit(status.pid, paths.instanceDirectory, 2_000);
+        }
+      }
+    }
+  }
+  if (stopFailure) throw stopFailure;
 }
 
 async function closeTestServer(server: Server): Promise<void> {
@@ -1700,6 +1722,185 @@ test("listen status distinguishes delivery modes and null zero positive counts",
   }
 });
 
+test("detached listener names startup read failure while it keeps retrying", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold4-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const token = `swm_agt_${"B".repeat(43)}`;
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE,
+    status: "accepted",
+    principal_id: principalId,
+    token_id: randomUUID(),
+    run_id: randomUUID(),
+    agent_token: token,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the local fixture request. */ }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId,
+    "--state-dir", root];
+  const paths = listenerPaths({
+    profileId: cloudTarget(url, "public-anon").profileId,
+    workspaceId,
+    principalId,
+    stateDirectory: root,
+  });
+  const startPromise = runCli([
+    "listen", "start", "--allow-unattended", "--provider", "grok",
+    "--agent-token-stdin", ...common, "--json",
+  ], { stdin: artifact });
+  try {
+    const retry = await waitForListenerStatus(paths,
+      (status) => status.state === "starting" && status.lastErrorCode === "http_404");
+    assert.ok(retry.nextAttemptAt);
+    assert.equal(retry.readHealth?.currentEpisodeAttempts, 1);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /http_404/);
+    assert.ok(human.stdout.includes(`Check ${url} and read edge version`));
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD4_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD4_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener([
+        "listen", "stop", ...common, "--principal-id", principalId, "--json",
+      ], paths);
+      await startPromise;
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("detached listener keeps retrying a foreign claim answer", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold5-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const token = `swm_agt_${"B".repeat(43)}`;
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE,
+    status: "accepted",
+    principal_id: principalId,
+    token_id: randomUUID(),
+    run_id: randomUUID(),
+    agent_token: token,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  let claims = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the local fixture request. */ }
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: 1 }));
+      return;
+    }
+    claims += 1;
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end('{"error":"missing_route"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  const startPromise = runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+  try {
+    const retry = await waitForListenerStatus(paths,
+      (status) => status.state === "claim_retry" && status.lastErrorCode === "http_404");
+    assert.ok(claims >= 1);
+    assert.ok(retry.nextAttemptAt);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /claim failed \(http_404\).*will try again at/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD5_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD5_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+      await startPromise;
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("detached listener retries a foreign 405 claim and records its target", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold6-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const token = `swm_agt_${"B".repeat(43)}`;
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE,
+    status: "accepted",
+    principal_id: principalId,
+    token_id: randomUUID(),
+    run_id: randomUUID(),
+    agent_token: token,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  let claims = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the local fixture request. */ }
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: 1 }));
+      return;
+    }
+    claims += 1;
+    response.writeHead(405, { "content-type": "text/html" });
+    response.end("<html>wrong host</html>");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  const startPromise = runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+  try {
+    const retry = await waitForListenerStatus(paths,
+      (status) => status.state === "claim_retry" && status.lastErrorCode === "http_405");
+    assert.ok(claims >= 1);
+    assert.ok(retry.nextAttemptAt);
+    assert.equal(retry.targetUrl, url);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /claim failed \(http_405\).*will try again at/);
+    assert.match(human.stdout, /CONNECTED: no/);
+    assert.match(human.stdout, /Target URL: http:\/\/127\.0\.0\.1:/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD6_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD6_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+      await startPromise;
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("detached CLI reports missing Grok login without starting a model", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-cli-missing-auth-"));
   const emptyProviderHome = join(root, "empty-provider-home");
@@ -1955,5 +2156,185 @@ test("detached Claude supervisor persists runtime evidence and status remeasures
     }
     await rm(root, { recursive: true, force: true });
     await rm(workerCwd, { recursive: true, force: true });
+  }
+});
+
+test("detached listener stops on upgrade_required with an update action", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold7-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE, status: "accepted", principal_id: principalId,
+    token_id: randomUUID(), run_id: randomUUID(), agent_token: `swm_agt_${"B".repeat(43)}`,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  let claims = 0;
+  const server = createServer(async (request, response) => {
+    let requestBody = "";
+    for await (const chunk of request) requestBody += String(chunk);
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200);
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: 1 }));
+      return;
+    }
+    const command = JSON.parse(requestBody) as { command?: { kind?: string } };
+    if (command.command?.kind === "claim_agent_inbox") claims++;
+    response.writeHead(426);
+    response.end('{"error":"upgrade_required","min_client_version":"999.0.0"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  try {
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+    assert.ok(start.code === 0 || (start.code === 1 && start.stderr.includes("upgrade_required")), start.stderr);
+    const failed = await waitForListenerStatus(paths, (status) => status.state === "failed");
+    assert.equal(failed.lastErrorCode, "upgrade_required");
+    assert.equal(claims, 1);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /npm install -g commonswarm.*restart the listener/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD7_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD7_STATUS_PATH, safeStatus);
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("detached listener renews after a 401 and server error before the old token expires", { timeout: 30_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold8-renewal-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const runId = randomUUID();
+  const oldExpiry = Date.now() + 8_000;
+  const artifact = JSON.stringify({ message: AGENT_MESSAGE, status: "accepted", principal_id: principalId,
+    token_id: randomUUID(), run_id: runId, agent_token: `swm_agt_${"A".repeat(43)}`,
+    expires_at: new Date(oldExpiry).toISOString() });
+  let renewals = 0;
+  let reads = 0;
+  const server = createServer(async (request, response) => {
+    let requestBody = "";
+    for await (const chunk of request) requestBody += String(chunk);
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/functions/v1/read") {
+      reads++;
+      response.writeHead(200);
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }));
+      return;
+    }
+    const command = JSON.parse(requestBody) as { command?: { kind?: string } };
+    if (command.command?.kind === "renew_agent_token") {
+      renewals++;
+      if (renewals === 1) {
+        response.writeHead(401);
+        response.end('{"error":"unauthenticated"}');
+      } else if (renewals === 2) {
+        response.writeHead(500);
+        response.end('{"error":"internal_error"}');
+      } else {
+        const issuedAt = Date.now();
+        response.writeHead(200);
+        response.end(JSON.stringify({ status: "accepted", ok: true, principal_id: principalId,
+          token_id: randomUUID(), run_id: runId, agent_token: `swm_agt_${"B".repeat(43)}`,
+          issued_at: new Date(issuedAt).toISOString(), expires_at: new Date(issuedAt + 60 * 60_000).toISOString() }));
+      }
+      return;
+    }
+    response.writeHead(400);
+    response.end('{"error":"invalid_request"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  try {
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"],
+      { stdin: artifact, env: { XDG_STATE_HOME: root } });
+    assert.equal(start.code, 0, start.stderr);
+    const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 3 && reads > 0, 20_000)
+      .catch((error: unknown) => { throw new Error(`renewals=${renewals} reads=${reads}: ${String(error)}`); });
+    assert.ok(Date.now() < oldExpiry, "the successor was accepted before the old token expired");
+    assert.equal(ready.state, "ready");
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH, safeStatus);
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("detached listener records the next credential check attempt", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold11-credential-check-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const oldExpiry = Date.now() + 60 * 60_000;
+  const artifact = JSON.stringify({ message: AGENT_MESSAGE, status: "accepted", principal_id: principalId,
+    token_id: randomUUID(), run_id: randomUUID(), agent_token: `swm_agt_${"A".repeat(43)}`,
+    expires_at: new Date(oldExpiry).toISOString() });
+  const server = createServer(async (request, response) => {
+    let requestBody = "";
+    for await (const chunk of request) requestBody += String(chunk);
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end('{"error":"unauthenticated"}');
+      return;
+    }
+    const command = JSON.parse(requestBody) as { command?: { kind?: string } };
+    if (command.command?.kind !== "renew_agent_token") {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end('{"error":"invalid_request"}');
+      return;
+    }
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end('{"error":"unauthenticated"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId,
+    workspaceId, principalId, stateDirectory: root });
+  try {
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok",
+      "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+    assert.equal(start.code, 0, start.stderr);
+    const checking = await waitForListenerStatus(paths,
+      (status) => status.state === "credential_check" && status.nextAttemptAt !== null, 10_000);
+    assert.equal(checking.credentialCheckEdge, "read");
+    assert.ok(checking.nextAttemptAt && Date.parse(checking.nextAttemptAt) > Date.parse(checking.updatedAt));
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD11_CREDENTIAL_CHECK_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD11_CREDENTIAL_CHECK_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common,
+        "--principal-id", principalId, "--json"], paths);
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
   }
 });

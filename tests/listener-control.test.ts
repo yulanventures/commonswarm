@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdtemp,
+  rm,
   readFile,
   stat,
 } from "node:fs/promises";
@@ -12,11 +13,17 @@ import test from "node:test";
 import { GrokListenerModel } from "../src/listener/grok-model.js";
 import {
   ListenerAlreadyRunningError,
+  LISTENER_RESTART_CLEAN_RUN_MS,
+  LISTENER_RESTART_MAX_ATTEMPTS,
   LISTENER_RESTART_MAX_MS,
+  LISTENER_RESTART_SUSTAINED_MAX_MS,
+  RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  LISTENER_REQUEST_WAIT_FLOOR_MS,
   ackCommandId,
   appendListenerEvent,
   claimCommandId,
   effectiveListenerStatus,
+  emptyListenerWakeStatus,
   isRestartableListenerStop,
   listenerPaths,
   nextListenerRestartMs,
@@ -45,11 +52,13 @@ import {
   SignalMalformedError,
   SignalReadTimeoutError,
   SignalTransportError,
+  ListenerCredentialStateMismatchError,
 } from "../src/cloud/signals.js";
 import {
   DeliveryHttpError,
   DeliveryProtocolError,
   DeliveryTransportError,
+  H0_SEAT_CLAIM_REFUSED_CODE,
 } from "../src/cloud/delivery.js";
 import {
   CommandHttpError,
@@ -66,11 +75,15 @@ import {
   AcpVersionError,
 } from "../src/host/types.js";
 import {
+  AgentCredentialSession,
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
+import { cloudTarget } from "../src/cloud/config.js";
 import { ListenerCapabilityError } from "../src/listener/runtime.js";
 import {
+  listenerFailureMessage,
+  listenerStartPendingMessage,
   listenerStatusJson,
   renderListenerStatus,
 } from "../src/cli.js";
@@ -1434,6 +1447,110 @@ async function readEvents(
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+test("restart backoff ends by the live credential's renewal deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-deadline-"));
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let runs = 0;
+  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS + 1_500;
+  const status = await runListenerSupervisor({
+    paths: paths(root), profileId: "profile-restart-deadline",
+    workspaceId: randomUUID(), principalId: randomUUID(),
+    now: () => current, getCredentialExpiryMs: () => expiry,
+    restart: { maxAttempts: 1, sleep: async (ms) => {
+      assert.ok(current + ms <= expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS);
+      current += ms;
+    } },
+    run: async () => ++runs === 1
+      ? { reason: "fatal", error: new SignalHttpError(500) }
+      : { reason: "cancelled" },
+  });
+  assert.equal(status.state, "stopped");
+  assert.equal(runs, 2);
+  assert.equal(current, start + LISTENER_REQUEST_WAIT_FLOOR_MS);
+});
+
+test("supervisor restarts keep the request floor after the renewal deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-floor-"));
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  const runs: number[] = [];
+  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS - 1_000;
+  const status = await runListenerSupervisor({
+    paths: paths(root), profileId: "profile-restart-floor",
+    workspaceId: randomUUID(), principalId: randomUUID(),
+    now: () => current, getCredentialExpiryMs: () => expiry,
+    getCredentialRenewalAt: () => start,
+    restart: { maxAttempts: 4, random: () => 0, sleep: async (ms) => {
+      assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      current += ms;
+    } },
+    run: async () => {
+      runs.push(current); // Each attempt stands in for a fast failed request.
+      return runs.length < 5
+        ? { reason: "fatal", error: new SignalHttpError(500) }
+        : { reason: "cancelled" };
+    },
+  });
+  assert.equal(status.state, "stopped");
+  assert.equal(runs.length, 5);
+  for (let i = 1; i < runs.length; i++) {
+    assert.ok(runs[i]! - runs[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
+});
+
+test("a sustained supervisor restart that begins before renewal is due ends at the six-minute lead", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-renewal-due-"));
+  try {
+    const start = Date.parse("2026-07-30T00:00:00.000Z");
+    const expiry = start + 7 * 60_000;
+    const dueAt = expiry - 6 * 60_000;
+    let current = start;
+    const runs: number[] = [];
+    const waits: Array<{ startedAt: number; ms: number }> = [];
+    const renewalTimes: number[] = [];
+    const session = await AgentCredentialSession.open({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: randomUUID(),
+      presented: { token: "swm_agt_" + "A".repeat(43), tokenId: randomUUID(),
+        principalId: randomUUID(), runId: randomUUID(), expiresAt: expiry },
+      store: { location: "memory://restart-renewal", read: async () => null,
+        write: async () => {}, delete: async () => {},
+        withLock: async <T>(work: () => Promise<T>): Promise<T> => work() },
+      listenerMode: true, now: () => current, warn: () => {},
+      fetcher: (async () => {
+        renewalTimes.push(current);
+        return new Response('{"error":"internal_error"}', { status: 500 });
+      }) as typeof fetch,
+    });
+    assert.equal(session.renewalAt, dueAt);
+    const status = await runListenerSupervisor({
+      paths: paths(root), profileId: "profile-restart-renewal-due",
+      workspaceId: randomUUID(), principalId: randomUUID(),
+      now: () => current, getCredentialExpiryMs: () => session.expiry,
+      getCredentialRenewalAt: () => session.renewalAt,
+      restart: { random: () => 1, sleep: async (ms) => {
+        waits.push({ startedAt: current, ms });
+        current += ms;
+      } },
+      run: async () => {
+        runs.push(current);
+        if (runs.length <= 6) return { reason: "fatal", error: new SignalHttpError(500) };
+        await assert.rejects(() => session.bearer());
+        return { reason: "cancelled" };
+      },
+    });
+    assert.equal(status.state, "stopped");
+    assert.equal(runs.length, 7);
+    assert.equal(waits.length, 6);
+    assert.ok(waits[5]!.startedAt < dueAt);
+    assert.ok(waits[5]!.ms > LISTENER_REQUEST_WAIT_FLOOR_MS);
+    assert.ok(runs[6]! >= dueAt && runs[6]! <= dueAt + LISTENER_REQUEST_WAIT_FLOOR_MS);
+    assert.deepEqual(renewalTimes, [runs[6]]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("D-051: a transient stop restarts a bounded number of times, then stays down and says why", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
   const target = paths(root);
@@ -1462,7 +1579,7 @@ test("D-051: a transient stop restarts a bounded number of times, then stays dow
   assert.equal(status.state, "failed");
   assert.equal(delays.length, 3);
   // Full jitter with random() === 0 is exactly half the exponential.
-  assert.deepEqual(delays, [500, 1_000, 2_000]);
+  assert.deepEqual(delays, [1_000, 1_000, 2_000]);
 
   const events = await readEvents(target);
   const restarting = events.filter((e) => e.event === "listener_restarting");
@@ -1500,7 +1617,8 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
   assert.equal(credentialStatus.state, "failed");
   assert.equal(credentialStatus.lastErrorCode, "credential_stopped");
 
-  // A 4xx refusal will refuse identically forever; restarting cannot help.
+  // A misrouted read endpoint can return 400 during a DNS switch.
+  // A bare 403 is not in this set: it has no confirmed credential code.
   const fatalTarget = paths(root);
   let fatalRuns = 0;
   await runListenerSupervisor({
@@ -1511,19 +1629,19 @@ test("D-051: a cause that cannot clear stops permanently and is never restarted"
     restart: { maxAttempts: 3, sleep: async () => {}, random: () => 0 },
     run: async () => {
       fatalRuns += 1;
-      return { reason: "fatal", error: new SignalHttpError(403) };
+      return { reason: "fatal", error: new SignalHttpError(400) };
     },
   });
-  assert.equal(fatalRuns, 1);
+  assert.equal(fatalRuns, 4);
 
   const events = await readEvents(fatalTarget);
-  assert.equal(events.some((e) => e.event === "listener_restarting"), false);
+  assert.equal(events.some((e) => e.event === "listener_restarting"), true);
   const failed = events.find((e) => e.event === "listener_failed");
   assert.ok(failed);
   // Down because it was never eligible, NOT because it ran out of attempts.
-  assert.equal(failed.restartable, false);
-  assert.equal(failed.restarts_exhausted, false);
-  assert.equal(failed.restart_attempts, 0);
+  assert.equal(failed.restartable, true);
+  assert.equal(failed.restarts_exhausted, true);
+  assert.equal(failed.restart_attempts, 3);
 });
 
 test("D-051: a listener that recovers on a restart is not reported as failed", async () => {
@@ -1545,6 +1663,78 @@ test("D-051: a listener that recovers on a restart is not reported as failed", a
   assert.equal(runs, 3);
   assert.equal(status.state, "stopped");
   assert.equal(status.lastErrorCode, null);
+});
+
+test("nextAttemptAt clears as the next attempt begins", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-attempt-"));
+  const target = paths(root);
+  let runs = 0;
+  const observed = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-restart",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: { maxAttempts: 2, sleep: async () => {}, random: () => 0 },
+    run: async () => {
+      runs += 1;
+      if (runs === 1) return saturationStop();
+      const live = await queryListenerControl(target, "status");
+      assert.equal(live.state, "starting");
+      assert.equal(live.nextAttemptAt, null);
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, 2);
+  assert.equal(observed.state, "stopped");
+});
+
+test("busy push claims keep a five-minute reconcile cadence without a lapse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-push-cadence-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const start = Date.parse("2026-09-01T09:59:00.000Z");
+  const end = Date.parse("2026-09-01T11:00:30.000Z");
+  let current = start;
+  try {
+    const status = await runListenerSupervisor({
+      paths: paths(root), profileId: "profile-push-cadence", workspaceId, principalId,
+      now: () => current,
+      run: async (_signal, onEvent) => {
+        const wake = { ...emptyListenerWakeStatus(), mode: "push" as const,
+          subscribedAt: new Date(start).toISOString() };
+        onEvent({ type: "ready", workspaceId, principalId, ts: new Date(start).toISOString() });
+        onEvent({ type: "wake", wake, ts: new Date(start).toISOString() });
+        onEvent({ type: "idle_poll", intervalMs: 300_000, pushReconcileWait: true,
+          ts: new Date(start).toISOString() });
+        onEvent({ type: "delivery_claim", signalId: randomUUID(),
+          pendingDeliveryCount: 3, terminalDeliveryFailureCount: 0,
+          ts: new Date(start).toISOString() });
+        onEvent({ type: "idle_poll", intervalMs: 15_000,
+          ts: new Date(start).toISOString() });
+        for (let minute = 0; minute < 60; minute += 4) {
+          current = Date.parse(`2026-09-01T10:${String(minute).padStart(2, "0")}:00.000Z`);
+          const ts = new Date(current).toISOString();
+          onEvent({ type: "wake", wake: { ...wake, lastWakeAt: ts }, ts });
+          onEvent({ type: "delivery_claim", signalId: randomUUID(),
+            pendingDeliveryCount: 3, terminalDeliveryFailureCount: 0, ts });
+          onEvent({ type: "idle_poll", intervalMs: 15_000, ts });
+        }
+        current = end;
+        onEvent({ type: "wake", wake: { ...wake, lastWakeAt: new Date(end).toISOString() },
+          ts: new Date(end).toISOString() });
+        return { reason: "cancelled" };
+      },
+    });
+    const hour = status.readHealth?.claimHours.find((row) =>
+      row.hourStart === "2026-09-01T10:00:00.000Z");
+    assert.equal(hour?.claims, 15);
+    assert.equal(hour?.expectedClaims, 12);
+    const human = renderListenerStatus({ ...status, state: "ready" }, undefined, end);
+    assert.doesNotMatch(human, /Listener LAPSE|listener_claim_throughput_lapse/);
+    assert.match(human, /reconcile every 5m\./);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("D-051: the restart classifier separates what can clear from what cannot", () => {
@@ -1572,8 +1762,7 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
     false,
   );
 
-  // Never: the operator's own stop, a credential that will refuse forever,
-  // a 4xx that will refuse identically, and a protocol defect.
+  // Never: the operator's own stop and a confirmed local credential stop.
   assert.equal(isRestartableListenerStop({ reason: "cancelled" }), false);
   assert.equal(
     isRestartableListenerStop({
@@ -1582,23 +1771,165 @@ test("D-051: the restart classifier separates what can clear from what cannot", 
     }),
     false,
   );
-  for (const status of [400, 401, 403, 404, 426]) {
+  for (const status of [400, 404, 426]) {
     assert.equal(
       isRestartableListenerStop({
         reason: "fatal",
         error: new SignalHttpError(status),
       }),
-      false,
-      `HTTP ${status} must not restart`,
+      true,
+      `HTTP ${status} can be a foreign backend`,
     );
   }
   assert.equal(
     isRestartableListenerStop({
       reason: "fatal",
-      error: new SignalMalformedError("signal read returned a malformed row"),
+      error: new SignalHttpError(403),
+    }),
+    true,
+  );
+  assert.equal(
+    isRestartableListenerStop({
+      reason: "fatal",
+      error: new SignalHttpError(403, null, {
+        error: "forbidden",
+        requestId: null,
+        retryable: null,
+      }),
     }),
     false,
   );
+  assert.equal(
+    isRestartableListenerStop({
+      reason: "fatal",
+      error: new SignalMalformedError("signal read returned a malformed row"),
+    }),
+    true,
+  );
+});
+
+test("credential and claim status use the answering edge and current retry state", { timeout: 15_000 }, () => {
+  const target = paths(join(tmpdir(), "listener-status-copy"));
+  const stopAt = "2026-09-22T00:10:00.000Z";
+  const command = renderListenerStatus({
+    ...statusFor(target, "credential_check"),
+    credentialStopAt: stopAt,
+    credentialCheckEdge: "command",
+    lastErrorCode: "unauthenticated",
+  });
+  assert.match(command, /credential \(unauthenticated\)/);
+  assert.doesNotMatch(command, /unauthenticated or forbidden/);
+  assert.match(command, /if every check until then confirms the loss/);
+  assert.match(command, /transient answer extends/);
+  assert.match(command, /CONNECTED: no/);
+  const expiring = renderListenerStatus({
+    ...statusFor(target, "credential_check"), credentialStopAt: stopAt,
+    credentialCheckEdge: "command", lastErrorCode: "unauthenticated",
+    renewalExpiresAt: "2026-09-22T00:03:00.000Z",
+    nextAttemptAt: "2026-09-22T00:02:01.000Z",
+  });
+  assert.match(expiring, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
+  const readBeforeRenewal = renderListenerStatus({
+    ...statusFor(target, "credential_check"), credentialStopAt: "2026-09-22T00:11:00.000Z",
+    credentialCheckEdge: "read", lastErrorCode: "forbidden",
+    renewalExpiresAt: "2026-09-22T00:10:00.000Z",
+    nextAttemptAt: "2026-09-22T00:02:01.000Z",
+  });
+  assert.match(readBeforeRenewal, /retrying the credential check at 2026-09-22T00:02:01.000Z/);
+  assert.doesNotMatch(readBeforeRenewal, /retrying renewal/);
+  assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
+  assert.doesNotMatch(expiring, /transient answer extends/);
+  const stopped = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: "credential_stopped",
+    credentialCheckEdge: "command",
+  });
+  assert.match(stopped, /server refused this credential \(unauthenticated means/);
+  assert.doesNotMatch(stopped, /unauthenticated or forbidden/);
+  const claim = renderListenerStatus({
+    ...statusFor(target, "claim_retry"),
+    claimRetryCount: 2,
+    lastErrorCode: "delivery_unavailable",
+  });
+  assert.match(claim, /Listener claim_retry/);
+  assert.match(claim, /claim failed \(delivery_unavailable\) 2 times/);
+  const unreachable = renderListenerStatus({
+    ...statusFor(target, "claim_retry"),
+    claimRetryCount: 7,
+    lastErrorCode: "delivery_unreachable",
+  });
+  assert.match(unreachable, /server could not be reached/);
+  assert.doesNotMatch(unreachable, /check the credential/);
+  const localState = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: "local_credential_state_mismatch",
+  });
+  assert.match(localState, /local state directory is writable and intact/);
+  assert.doesNotMatch(localState, /cswarm whoami/);
+  assert.match(listenerFailureMessage("local_credential_state_mismatch"), /local state directory/);
+  const h0 = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: H0_SEAT_CLAIM_REFUSED_CODE,
+  });
+  assert.match(h0, /receives messages through the h0 poll/);
+  assert.match(h0, /listener has stopped; no further listener action is needed/);
+});
+
+test("restart and terminal transitions clear claim and credential check fields", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-retry-fields-"));
+  try {
+    const target = paths(root);
+    const ts = new Date().toISOString();
+    const emitFailure = (onEvent: (event: ListenerRuntimeEvent) => void) => {
+      onEvent({ type: "credential_check", code: "forbidden", edge: "read", checks: 1,
+        stopAt: new Date(Date.now() + 600_000).toISOString(), ts });
+      onEvent({ type: "claim_retry", code: "delivery_unreachable", attempts: 4, delayMs: 500, ts });
+    };
+    let runs = 0;
+    let restarting: ListenerStatus | null = null;
+    const stopped = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-retry-fields",
+      workspaceId: randomUUID(),
+      principalId: randomUUID(),
+      restart: { maxAttempts: 1, sleep: async () => {
+        restarting = await queryListenerControl(target, "status");
+      }, random: () => 0 },
+      run: async (_signal, onEvent) => {
+        runs += 1;
+        if (runs === 1) {
+          emitFailure(onEvent);
+          return { reason: "fatal", error: new SignalHttpError(503) };
+        }
+        return { reason: "cancelled" };
+      },
+    });
+    assert.equal(runs, 2);
+    const observed = restarting as ListenerStatus | null;
+    assert.ok(observed);
+    assert.equal(observed.state, "starting");
+    assert.equal(observed.credentialCheckEdge, null);
+    assert.equal(observed.claimRetryCount, 0);
+    assert.equal(stopped.credentialCheckEdge, null);
+    assert.equal(stopped.claimRetryCount, 0);
+
+    const failed = await runListenerSupervisor({
+      paths: paths(root),
+      profileId: "profile-state-mismatch",
+      workspaceId: randomUUID(),
+      principalId: randomUUID(),
+      run: async (_signal, onEvent) => {
+        emitFailure(onEvent);
+        return { reason: "credential", error: new ListenerCredentialStateMismatchError() };
+      },
+    });
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.lastErrorCode, "local_credential_state_mismatch");
+    assert.equal(failed.credentialCheckEdge, null);
+    assert.equal(failed.claimRetryCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("D-051: the restart delay is bounded by its own cap, not the read backoff cap", () => {
@@ -1610,9 +1941,152 @@ test("D-051: the restart delay is bounded by its own cap, not the read backoff c
     LISTENER_RESTART_MAX_MS,
   );
   assert.ok(nextListenerRestartMs(12, {}, () => 0) <= LISTENER_RESTART_MAX_MS);
+  assert.ok(LISTENER_RESTART_SUSTAINED_MAX_MS <= 5 * 60_000);
+  assert.ok(LISTENER_RESTART_SUSTAINED_MAX_MS > LISTENER_RESTART_MAX_MS);
 });
 
-test("D-051: one rejected write does not poison the rest of the supervisor's writes", async () => {
+test("a 500 past the fast attempts keeps retrying and recovers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-sustain-"));
+  const target = paths(root);
+  let runs = 0;
+  const delays: number[] = [];
+  const captured: { status: ListenerStatus | null } = { status: null };
+  const status = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-sustain",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: {
+      sleep: async (ms) => {
+        delays.push(ms);
+        if (delays.length === LISTENER_RESTART_MAX_ATTEMPTS + 1) {
+          captured.status = await queryListenerControl(target, "status");
+        }
+      },
+      random: () => 0,
+    },
+    run: async () => {
+      runs += 1;
+      if (runs <= LISTENER_RESTART_MAX_ATTEMPTS + 1) return saturationStop();
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, LISTENER_RESTART_MAX_ATTEMPTS + 2);
+  assert.equal(status.state, "stopped");
+  assert.notEqual(status.state, "failed");
+  assert.equal(delays.length, LISTENER_RESTART_MAX_ATTEMPTS + 1);
+  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS - 1], 8_000);
+  assert.equal(
+    delays[LISTENER_RESTART_MAX_ATTEMPTS],
+    LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
+  );
+  if (captured.status === null) {
+    assert.fail("status during the sustained wait was not captured");
+  }
+  const waitingStatus = captured.status;
+  assert.equal(waitingStatus.state, "starting");
+  assert.notEqual(waitingStatus.state, "failed");
+  const rendered = renderListenerStatus(waitingStatus);
+  assert.match(rendered, /^Listener retrying /);
+  assert.match(rendered, /will try again at/);
+  assert.match(rendered, /Leave it running/);
+  assert.match(rendered, /cswarm listen stop --workspace-id/);
+  const events = await readEvents(target);
+  assert.equal(events.some((event) => event.event === "listener_failed"), false);
+});
+
+test("cswarm listen stop ends a backoff sleep at once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-backoff-"));
+  const target = paths(root);
+  let runs = 0;
+  const started = Date.now();
+  const pending = runListenerSupervisor({
+    paths: target,
+    profileId: "profile-stop-backoff",
+    workspaceId: randomUUID(),
+    principalId: randomUUID(),
+    restart: {
+      sleep: (_ms, signal) => new Promise((resolve) => {
+        const timer = setTimeout(resolve, 60_000);
+        const finish = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        if (signal.aborted) finish();
+        else signal.addEventListener("abort", finish, { once: true });
+      }),
+      random: () => 0,
+    },
+    run: async () => {
+      runs += 1;
+      return saturationStop();
+    },
+  });
+  let waiting: ListenerStatus | null = null;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && waiting === null) {
+    try {
+      const live = await queryListenerControl(target, "status", 200);
+      if (typeof live.nextAttemptAt === "string") waiting = live;
+    } catch {
+      // The control socket is not up yet.
+    }
+  }
+  assert.ok(waiting, "the listener must be waiting to try again");
+  assert.notEqual(waiting.state, "failed");
+  await stopListener(target);
+  const final = await pending;
+  assert.equal(final.state, "stopped");
+  assert.equal(runs, 1);
+  assert.ok(Date.now() - started < 5_000, "stop must not wait out the backoff");
+});
+
+test("the restart attempt count resets after a clean run", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-clean-run-"));
+  const target = paths(root);
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  let clock = Date.parse("2026-09-22T00:00:00.000Z");
+  let runs = 0;
+  const delays: number[] = [];
+  const status = await runListenerSupervisor({
+    paths: target,
+    profileId: "profile-clean",
+    workspaceId,
+    principalId,
+    now: () => clock,
+    restart: {
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      random: () => 0,
+    },
+    run: async (_signal, onEvent) => {
+      runs += 1;
+      if (runs <= LISTENER_RESTART_MAX_ATTEMPTS + 1) return saturationStop();
+      if (runs === LISTENER_RESTART_MAX_ATTEMPTS + 2) {
+        onEvent({
+          type: "ready",
+          workspaceId,
+          principalId,
+          ts: new Date(clock).toISOString(),
+        });
+        clock += LISTENER_RESTART_CLEAN_RUN_MS;
+        return saturationStop();
+      }
+      return { reason: "cancelled" };
+    },
+  });
+  assert.equal(runs, LISTENER_RESTART_MAX_ATTEMPTS + 3);
+  assert.equal(status.state, "stopped");
+  assert.equal(
+    delays[LISTENER_RESTART_MAX_ATTEMPTS],
+    LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
+  );
+  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], LISTENER_REQUEST_WAIT_FLOOR_MS);
+});
+
+test("D-051: one rejected write does not poison the rest of the supervisor's writes", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-test-"));
   const target = paths(root);
   const workspaceId = randomUUID();
@@ -1633,7 +2107,7 @@ test("D-051: one rejected write does not poison the rest of the supervisor's wri
       // only itself: the terminal lines after it still have to land, because
       // they are the ones that say why the listener is down.
       onEvent({ type: "unknown_event_kind" } as unknown as ListenerRuntimeEvent);
-      return { reason: "fatal", error: new SignalHttpError(403) };
+      return { reason: "fatal", error: new AcpProtocolError("bad frame", "malformed_frame") };
     },
   });
 
@@ -1687,14 +2161,24 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
     requestId: "9d1f4b2c-0000-4000-8000-abcdefabcdef",
     retryable: false,
   }), true],
-  ["read 400", new SignalHttpError(400), false],
-  ["read 401", new SignalHttpError(401), false],
-  ["read 403", new SignalHttpError(403), false],
-  ["read 404", new SignalHttpError(404), false],
-  ["read 426", new SignalHttpError(426), false],
+  ["read 400", new SignalHttpError(400), true],
+  ["read 401", new SignalHttpError(401), true],
+  ["read 403", new SignalHttpError(403), true],
+  ["read 403 forbidden", new SignalHttpError(403, null, {
+    error: "forbidden",
+    requestId: null,
+    retryable: null,
+  }), false],
+  ["read 401 unauthenticated", new SignalHttpError(401, null, {
+    error: "unauthenticated",
+    requestId: null,
+    retryable: null,
+  }), false],
+  ["read 404", new SignalHttpError(404), true],
+  ["read 426", new SignalHttpError(426), true],
   ["read timeout", new SignalReadTimeoutError(), true],
   ["read transport", new SignalTransportError(), true],
-  ["read malformed", new SignalMalformedError("signal read returned a malformed row"), false],
+  ["read malformed", new SignalMalformedError("signal read returned a malformed row"), true],
   ["secret absent", new Error("agent credential secret is absent"), false],
 
   // --- delivery ------------------------------------------------------------
@@ -1702,10 +2186,14 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["delivery 500", new DeliveryHttpError(500, "delivery_500", "delivery failed (HTTP 500)"), true],
   ["delivery 503", new DeliveryHttpError(503, "delivery_503", "delivery failed (HTTP 503)"), true],
   ["delivery 429", new DeliveryHttpError(429, "delivery_429", "delivery failed (HTTP 429)"), true],
-  ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), false],
-  ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), false],
-  ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), false],
-  ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), false],
+  ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), true],
+  ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), true],
+  ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), true],
+  // Command-edge `forbidden` is not a credential check, so a delivery 403
+  // with that slug stays restartable. Read-edge `forbidden` does not.
+  ["delivery 403 forbidden", new DeliveryHttpError(403, "forbidden", "delivery failed (HTTP 403)"), true],
+  ["delivery 401 unauthenticated", new DeliveryHttpError(401, "unauthenticated", "delivery failed (HTTP 401)"), false],
+  ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), true],
   ["delivery protocol", new DeliveryProtocolError("delivery claim returned more than one row"), false],
 
   // --- command posts -------------------------------------------------------
@@ -1713,7 +2201,8 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["command 500", new CommandHttpError(500), true],
   ["command 429", new CommandHttpError(429), true],
   ["command 400", new CommandHttpError(400), false],
-  ["command 403", new CommandHttpError(403), false],
+  ["command 403", new CommandHttpError(403), true],
+  ["command 403 forbidden", new CommandHttpError(403, "command failed (HTTP 403)", "forbidden"), true],
 
   // --- ACP host ------------------------------------------------------------
   ["acp timeout", new AcpTimeoutError("ACP request timed out"), true],
@@ -1729,6 +2218,9 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["capability missing", new ListenerCapabilityError(
     "cursor_capability_missing",
     "the read service does not support lossless ascending inbox pages",
+  ), true],
+  ["local delivery configuration missing", new ListenerCapabilityError(
+    "delivery_configuration_missing", "local durable delivery configuration is required",
   ), false],
   ["claim did not settle", new Error("delivery claim did not settle"), false],
   ["lease deadline invalid", new Error("delivery lease deadline is invalid"), false],
@@ -1894,7 +2386,7 @@ test("D-057: a non-restartable delivery failure is not restarted by the supervis
       runs += 1;
       // Before D-057 this restarted 3 times, repeating a delivery command that
       // the server had already rejected as invalid.
-      return { reason: "fatal", error: new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)") };
+      return { reason: "fatal", error: new DeliveryHttpError(400, "invalid_request", "delivery failed (HTTP 400)") };
     },
   });
   assert.equal(runs, 1);
@@ -2408,6 +2900,7 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
           httpStatus: 503,
           errorConstructor: null,
         },
+        code: "http_503",
         delayMs: 20_000,
         ts: startedAt,
       });
@@ -2421,6 +2914,7 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
           httpStatus: null,
           errorConstructor: null,
         },
+        code: "no_response",
         delayMs: 30_000,
         ts: secondAt,
       });
@@ -2462,4 +2956,78 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
   assert.equal(recovered.length, 1, "one episode emits one recovery line");
   assert.equal(recovered[0]!.attempts, 2);
   assert.equal(recovered[0]!.duration_ms, 65_000);
+});
+
+test("a ready listener names a read retry, target URL, and next attempt", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-ready-read-retry-"));
+  try {
+    const target = paths(root);
+    const workspaceId = randomUUID();
+    const principalId = randomUUID();
+    const ts = "2026-09-22T12:00:00.000Z";
+    let snapshot: ListenerStatus | null = null;
+    await runListenerSupervisor({
+      paths: target, profileId: "ready-read-retry", workspaceId, principalId,
+      targetUrl: "https://cloud.example.test",
+      run: async (_signal, onEvent) => {
+        onEvent({ type: "ready", workspaceId, principalId, cadenceMs: 15_000, ts });
+        onEvent({ type: "read_retry", attempt: 1, episodeAttempt: 1,
+          episodeStartedAt: ts,
+          failure: { code: "http_status", httpStatus: 503, errorConstructor: null },
+          code: "http_503", delayMs: 20_000, ts });
+        snapshot = await queryListenerControl(target, "status");
+        return { reason: "cancelled" };
+      },
+    });
+    assert.ok(snapshot);
+    const observed = snapshot as ListenerStatus;
+    assert.equal(observed.state, "ready");
+    assert.equal(observed.lastErrorCode, "http_503");
+    assert.equal(observed.nextAttemptAt, "2026-09-22T12:00:20.000Z");
+    const human = renderListenerStatus(observed, undefined, Date.parse(ts) + 61_000);
+    assert.match(human, /^Listener retrying /);
+    assert.match(human, /Target URL: https:\/\/cloud\.example\.test/);
+    assert.match(human, /CONNECTED: no/);
+    assert.match(human, /Leave the listener running/);
+    assert.doesNotMatch(human, /restart the listener/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clearing a credential check preserves a failing claim and start names its edge", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-claim-check-status-"));
+  try {
+    const target = paths(root);
+    const workspaceId = randomUUID();
+    const principalId = randomUUID();
+    const ts = "2026-09-22T12:00:00.000Z";
+    let snapshot: ListenerStatus | null = null;
+    await runListenerSupervisor({
+      paths: target, profileId: "claim-check-status", workspaceId, principalId,
+      targetUrl: "https://cloud.example.test",
+      run: async (_signal, onEvent) => {
+        onEvent({ type: "ready", workspaceId, principalId, cadenceMs: 15_000, ts });
+        onEvent({ type: "claim_retry", code: "session_proof_missing", attempts: 1,
+          delayMs: 1_000, ts });
+        onEvent({ type: "credential_check", edge: "read", code: "forbidden",
+          checks: 1, stopAt: "2026-09-22T12:10:00.000Z", ts });
+        onEvent({ type: "credential_check_cleared", ts });
+        snapshot = await queryListenerControl(target, "status");
+        return { reason: "cancelled" };
+      },
+    });
+    assert.ok(snapshot);
+    const observed = snapshot as ListenerStatus;
+    assert.equal(observed.state, "claim_retry");
+    assert.equal(observed.claimRetryCount, 1);
+    assert.equal(observed.lastErrorCode, "session_proof_missing");
+    assert.match(renderListenerStatus(observed), /CONNECTED: no/);
+    const restarting = { ...observed, state: "starting" as const };
+    assert.match(listenerStartPendingMessage(restarting), /Listener command edge failed/);
+    assert.match(listenerStartPendingMessage(restarting), /https:\/\/cloud\.example\.test/);
+    assert.doesNotMatch(listenerStartPendingMessage(restarting), /Listener read edge failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

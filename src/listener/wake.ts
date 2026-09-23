@@ -9,7 +9,7 @@ import {
   WAKE_TOPIC_PREFIX,
   isWakeTopic,
 } from "../cloud/wake.js";
-import { formatIdlePollDuration } from "../cloud/idle-poll.js";
+import { formatIdleWaitDuration } from "../cloud/idle-poll.js";
 
 export const LISTENER_RECONCILE_POLL_MS = 300_000;
 export const WAKE_COALESCE_MS = 1_000;
@@ -210,13 +210,13 @@ export function listenerWakeStatusSentence(
 ): string {
   if (wake.mode === LISTENER_WAKE_MODE_PUSH) {
     const last = lastWakeLabel === null ? "no wake yet" : `last wake ${lastWakeLabel}`;
-    return `${LISTENER_WAKE_MODE_PUSH} (Realtime), ${last}, reconcile every ${formatIdlePollDuration(LISTENER_RECONCILE_POLL_MS)}.`;
+    return `${LISTENER_WAKE_MODE_PUSH} (Realtime), ${last}, reconcile every ${formatIdleWaitDuration(pollIntervalMs)}.`;
   }
   if (wake.errorCode === WAKE_ERROR_CODE_WAKE_BUDGET) {
-    return `Subscribed; claims paused until the minute clears (${WAKE_ERROR_CODE_WAKE_BUDGET}); polling every ${formatIdlePollDuration(pollIntervalMs)} meanwhile.`;
+    return `Subscribed; claims paused until the minute clears (${WAKE_ERROR_CODE_WAKE_BUDGET}); polling every ${formatIdleWaitDuration(pollIntervalMs)} meanwhile.`;
   }
   const code = wake.errorCode ?? "disconnected";
-  return `${LISTENER_WAKE_MODE_POLL} every ${formatIdlePollDuration(pollIntervalMs)}. Realtime not connected (${code}).`;
+  return `${LISTENER_WAKE_MODE_POLL} every ${formatIdleWaitDuration(pollIntervalMs)}. Realtime not connected (${code}).`;
 }
 
 type Waiter = {

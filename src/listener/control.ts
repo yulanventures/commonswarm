@@ -63,9 +63,19 @@ import type { ActivityPublishErrorCode } from "./activity.js";
 export type ListenerStatusState =
   | "starting"
   | "ready"
+  | "credential_check"
+  | "claim_retry"
+  | "ack_retry"
   | "stopping"
   | "stopped"
   | "failed";
+
+export const LISTENER_RUNNING_STATES: readonly ListenerStatusState[] = [
+  "starting", "ready", "credential_check", "claim_retry", "ack_retry", "stopping",
+];
+const LISTENER_STATUS_STATES: readonly string[] = [
+  ...LISTENER_RUNNING_STATES, "stopped", "failed",
+];
 
 export type ListenerProviderId = "grok" | "opencode" | "claude" | "codex";
 
@@ -80,6 +90,12 @@ export interface ListenerStatus {
   profileId: string;
   workspaceId: string;
   principalId: string;
+  /** Absolute project directory selected when this listener was started. */
+  projectDirectory?: string;
+  /** Validated service base URL, with no credential, query, or path. */
+  targetUrl?: string;
+  /** Edge that produced the last retry, when known. */
+  lastRetryEdge?: "read" | "command" | "local";
   pid: number;
   state: ListenerStatusState;
   startedAt: string;
@@ -184,8 +200,26 @@ export interface ListenerStatus {
    * status file written by a listener older than this field omits it.
    */
   idlePollMs?: number | null;
+  /** Next planned push reconcile wait, separate from delivery processing's idle poll interval. */
+  pushReconcileWaitMs?: number | null;
   /** How the listener learns there is work. Optional: older files omit it. */
   wake?: ListenerWakeStatus;
+  /**
+   * When the supervisor will start the next attempt. Present while it is
+   * waiting through a transient failure; cleared once that attempt starts,
+   * the listener is ready, or it has stopped. Optional: older files omit it.
+   */
+  nextAttemptAt?: string | null;
+  /**
+   * When a credential-check listener will stop if every remaining check
+   * confirms the loss. Present only in `credential_check`. Optional: older
+   * files omit it.
+   */
+  credentialStopAt?: string | null;
+  /** Expiry of the current token while a renewal retry is in progress. */
+  renewalExpiresAt?: string | null;
+  credentialCheckEdge?: "read" | "command" | null;
+  claimRetryCount?: number;
   logPath: string;
 }
 
@@ -294,7 +328,16 @@ const STATUS_ALLOWED_KEYS = new Set([
   "activityPublishFailures",
   "activityLastErrorCode",
   "idlePollMs",
+  "pushReconcileWaitMs",
   "wake",
+  "nextAttemptAt",
+  "credentialStopAt",
+  "renewalExpiresAt",
+  "credentialCheckEdge",
+  "claimRetryCount",
+  "projectDirectory",
+  "targetUrl",
+  "lastRetryEdge",
 ]);
 const STATUS_ACTIVITY_ERROR_CODES = new Set<ActivityPublishErrorCode>([
   "activity_credential_failed",
@@ -496,7 +539,7 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !Number.isSafeInteger(row.pid) ||
     (row.pid as number) < 1 ||
     typeof row.state !== "string" ||
-    !["starting", "ready", "stopping", "stopped", "failed"].includes(row.state) ||
+    !LISTENER_STATUS_STATES.includes(row.state) ||
     typeof row.startedAt !== "string" ||
     !Number.isFinite(Date.parse(row.startedAt)) ||
     !(row.readyAt === null ||
@@ -618,7 +661,30 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !(row.idlePollMs === undefined ||
       row.idlePollMs === null ||
       (typeof row.idlePollMs === "number" &&
-        Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0))
+        Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
+    !(row.pushReconcileWaitMs === undefined ||
+      row.pushReconcileWaitMs === null ||
+      (typeof row.pushReconcileWaitMs === "number" &&
+        Number.isSafeInteger(row.pushReconcileWaitMs) && row.pushReconcileWaitMs >= 0)) ||
+    !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt)) ||
+    !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt)) ||
+    !(row.renewalExpiresAt === undefined || nullableTimestamp(row.renewalExpiresAt)) ||
+    !(row.credentialCheckEdge === undefined || row.credentialCheckEdge === null ||
+      row.credentialCheckEdge === "read" || row.credentialCheckEdge === "command") ||
+    !(row.claimRetryCount === undefined ||
+      (typeof row.claimRetryCount === "number" && Number.isSafeInteger(row.claimRetryCount) && row.claimRetryCount >= 0)) ||
+    !(row.projectDirectory === undefined ||
+      (typeof row.projectDirectory === "string" && isAbsolute(row.projectDirectory))) ||
+    !(row.targetUrl === undefined ||
+      (typeof row.targetUrl === "string" && (() => {
+        try {
+          const url = new URL(row.targetUrl as string);
+          return (url.protocol === "https:" || url.protocol === "http:") &&
+            url.origin === row.targetUrl && !url.username && !url.password;
+        } catch { return false; }
+      })())) ||
+    !(row.lastRetryEdge === undefined || row.lastRetryEdge === "read" ||
+      row.lastRetryEdge === "command" || row.lastRetryEdge === "local")
   ) {
     throw new Error("stored listener status is malformed");
   }
@@ -674,6 +740,8 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     ...(row.cswarmVersion === undefined
       ? {}
       : { cswarmVersion: row.cswarmVersion as string | null }),
+    ...(row.renewalExpiresAt === undefined ? {}
+      : { renewalExpiresAt: (row.renewalExpiresAt ?? null) as string | null }),
     routeMode,
     deferOverChars,
     pendingForMainCount: (row.pendingForMainCount ?? 0) as number,
@@ -682,6 +750,9 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     ...(row.idlePollMs === undefined
       ? {}
       : { idlePollMs: (row.idlePollMs ?? null) as number | null }),
+    ...(row.pushReconcileWaitMs === undefined
+      ? {}
+      : { pushReconcileWaitMs: (row.pushReconcileWaitMs ?? null) as number | null }),
     ...(wake === undefined ? {} : { wake }),
   };
 }

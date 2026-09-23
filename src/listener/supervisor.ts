@@ -1,5 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { DELIVERY_PROVIDER_PROVEN_OUTCOMES } from "../cloud/delivery.js";
+import {
+  ListenerCredentialStateMismatchError,
+  classifySignalReadFailure,
+} from "../cloud/signals.js";
+import {
+  DELIVERY_PROVIDER_PROVEN_OUTCOMES,
+  DeliveryHttpError,
+  DeliveryResponseError,
+  DeliveryTransportError,
+} from "../cloud/delivery.js";
+import { CommandHttpError, CommandTransportError } from "../cloud/command-client.js";
 import { SECRET_SHAPE_RE } from "../host/credential-redaction.js";
 import { redactSessionText } from "../cloud/session-proof.js";
 import { AcpPermissionCanaryError } from "../host/types.js";
@@ -13,9 +23,10 @@ import {
   type ListenerPaths,
   type ListenerProviderId,
   LISTENER_HELD_BACK_MAX,
+  LISTENER_RUNNING_STATES,
   type ListenerStatus,
 } from "./control.js";
-import { isRestartableListenerStop } from "./runtime.js";
+import { isRestartableListenerStop, LISTENER_REQUEST_WAIT_FLOOR_MS, RENEWAL_WINDOW_EXPIRY_MARGIN_MS } from "./runtime.js";
 import type {
   ListenerRuntimeEvent,
   ListenerRuntimeStop,
@@ -41,22 +52,39 @@ import {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-/** Attempts before a repeatedly-failing listener is left down and diagnosable. */
+/**
+ * Fast restarts before the sustained backoff. Not a give-up: after these, the
+ * process keeps trying at `LISTENER_RESTART_SUSTAINED_MAX_MS` until it is stopped.
+ */
 export const LISTENER_RESTART_MAX_ATTEMPTS = 5;
 /** First restart delay. */
 export const LISTENER_RESTART_INITIAL_MS = 1_000;
-/** Ceiling on the restart delay; wider than the read backoff cap on purpose. */
+/** Ceiling on the fast restart delay; wider than the read backoff cap on purpose. */
 export const LISTENER_RESTART_MAX_MS = 60_000;
+/**
+ * Backoff ceiling after the fast attempts, for as long as the process lives.
+ * Five minutes is the maximum this wait is allowed to be.
+ */
+export const LISTENER_RESTART_SUSTAINED_MAX_MS = 5 * 60_000;
+/**
+ * A runtime that reached ready and then kept running this long clears the
+ * fast-attempt count, so the next outage starts at the short delay again.
+ */
+export const LISTENER_RESTART_CLEAN_RUN_MS = 60_000;
 
 /**
- * Bounded restart policy. Bounded is the load-bearing word: an unbounded
- * restart would recreate the amplification D-051 removed, one process at a
- * time instead of one request at a time.
+ * Restart policy. Production leaves `maxAttempts` unset, so a transient stop
+ * keeps retrying for the life of the process. An explicit `maxAttempts` is a
+ * hard ceiling, used by tests to bound a crash loop.
  */
 export interface ListenerRestartPolicy {
   maxAttempts?: number;
   initialMs?: number;
   maxMs?: number;
+  /** Override for `LISTENER_RESTART_SUSTAINED_MAX_MS`. Clamped to five minutes. */
+  sustainedMaxMs?: number;
+  /** Override for `LISTENER_RESTART_CLEAN_RUN_MS`. */
+  cleanRunMs?: number;
   isRestartable?: (stop: ListenerRuntimeStop) => boolean;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
@@ -73,6 +101,34 @@ export function nextListenerRestartMs(
   const safeAttempt = Math.max(1, Math.min(attempt, 16));
   const exp = Math.min(max, initial * (2 ** (safeAttempt - 1)));
   return Math.floor(exp * (0.5 + random() * 0.5));
+}
+
+/** Delay after the fast attempts. Never longer than five minutes. */
+export function sustainedListenerRestartMs(
+  policy: ListenerRestartPolicy = {},
+  random: () => number = Math.random,
+): number {
+  const requested = policy.sustainedMaxMs ?? LISTENER_RESTART_SUSTAINED_MAX_MS;
+  const cap = Math.min(Math.max(0, requested), 5 * 60_000);
+  return Math.floor(cap * (0.5 + random() * 0.5));
+}
+
+/**
+ * Fast exponential delay for the first `LISTENER_RESTART_MAX_ATTEMPTS` when
+ * the caller did not set a hard ceiling; the sustained cap after that.
+ */
+export function listenerRestartDelayMs(
+  attempt: number,
+  policy: ListenerRestartPolicy = {},
+  random: () => number = Math.random,
+): number {
+  if (
+    policy.maxAttempts === undefined &&
+    attempt > LISTENER_RESTART_MAX_ATTEMPTS
+  ) {
+    return sustainedListenerRestartMs(policy, random);
+  }
+  return nextListenerRestartMs(attempt, policy, random);
 }
 
 async function defaultRestartSleep(
@@ -96,6 +152,8 @@ export interface ListenerSupervisorOptions {
   profileId: string;
   workspaceId: string;
   principalId: string;
+  projectDirectory?: string;
+  targetUrl?: string;
   /** Host adapter id recorded in status metadata only. Default: grok. */
   provider?: ListenerProviderId;
   /** Build version this supervisor can report while its control socket is live. */
@@ -104,6 +162,10 @@ export interface ListenerSupervisorOptions {
   routeMode?: ListenerRouteMode;
   deferOverChars?: number | null;
   now?: () => number;
+  /** Current credential expiry, including a successor adopted by a later attempt. */
+  getCredentialExpiryMs?: () => number | null;
+  /** Null when renewal is unavailable; otherwise the next renewal due time. */
+  getCredentialRenewalAt?: () => number | null;
   /**
    * Runs under starting.lock after the live-socket rejection check, before
    * the socket can answer. Receives the one proposed UUID and selects the
@@ -171,8 +233,20 @@ function safeErrorCode(error: Error): string {
     const normalized = explicit.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
     if (normalized.length > 0) return normalized.slice(0, 96);
   }
+  const read = classifySignalReadFailure(error);
+  if (read.code === "http_status") return `http_${read.httpStatus}`;
+  if (read.code === "malformed_response") return read.code;
+  if (error instanceof DeliveryResponseError) return "malformed_response";
   const name = error.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
   return name.slice(0, 96) || "listener_error";
+}
+
+function retryEdgeOf(error: Error): "read" | "command" | "local" {
+  if (error instanceof DeliveryHttpError || error instanceof DeliveryResponseError ||
+      error instanceof DeliveryTransportError || error instanceof CommandHttpError ||
+      error instanceof CommandTransportError) return "command";
+  if (classifySignalReadFailure(error).code !== "unclassified") return "read";
+  return "local";
 }
 
 /** Keep provider messages local, bounded, and free of credential-shaped text. */
@@ -282,6 +356,8 @@ export async function runListenerSupervisor(
     profileId: options.profileId,
     workspaceId: options.workspaceId.toLowerCase(),
     principalId: options.principalId.toLowerCase(),
+    ...(options.projectDirectory ? { projectDirectory: options.projectDirectory } : {}),
+    ...(options.targetUrl ? { targetUrl: options.targetUrl } : {}),
     pid: process.pid,
     state: "starting",
     startedAt,
@@ -328,9 +404,16 @@ export async function runListenerSupervisor(
     activityPublishFailures: 0,
     activityLastErrorCode: null,
     idlePollMs: null,
+    pushReconcileWaitMs: null,
     wake: emptyListenerWakeStatus(),
+    nextAttemptAt: null,
+    credentialStopAt: null,
+    credentialCheckEdge: null,
+    claimRetryCount: 0,
     logPath: options.paths.logPath,
   };
+  let lastClaimRetryCode: string | null = null;
+  let lastAckRetryCode: string | null = null;
   let writes = Promise.resolve();
   // Each link swallows its own failure. Without this a single rejected write
   // poisons the shared chain, so every LATER status persist and event append
@@ -434,6 +517,8 @@ export async function runListenerSupervisor(
   };
 
   let lastWakePersistMs = 0;
+  /** Set when this attempt emits ready; cleared at the start of the next attempt. */
+  let attemptReadyAtMs: number | null = null;
   const onEvent = (event: ListenerRuntimeEvent) => {
     if (event.type === "wake") {
       const previousWake = status.wake;
@@ -487,9 +572,13 @@ export async function runListenerSupervisor(
       status = {
         ...status,
         idlePollMs: event.intervalMs,
+        pushReconcileWaitMs: event.pushReconcileWait
+          ? event.intervalMs : status.pushReconcileWaitMs,
         readHealth: recordListenerClaimCadence(
           status.readHealth ?? emptyListenerReadHealth(),
-          event.intervalMs > 0 ? event.intervalMs : 1,
+          status.wake?.mode === LISTENER_WAKE_MODE_PUSH
+            ? LISTENER_RECONCILE_POLL_MS
+            : event.intervalMs > 0 ? event.intervalMs : 1,
           event.ts,
         ),
         updatedAt: event.ts,
@@ -503,9 +592,13 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "ready") {
+      attemptReadyAtMs = now();
       const versionNotice = options.getProviderVersionNotice?.() ?? null;
       transition("ready", {
         readyAt: event.ts,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
         // Deliberately does NOT clear consecutiveAckFailureCount. Reaching
         // `ready` is not provider proof: the permission canary is its own
         // prompt, and a provider can answer it and fail every real one --
@@ -576,9 +669,101 @@ export async function runListenerSupervisor(
       });
       return;
     }
+    if (event.type === "credential_check") {
+      transition("credential_check", {
+        credentialStopAt: event.stopAt,
+        credentialCheckEdge: event.edge,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorCode: event.code,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: event.nextAttemptAt ?? null,
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check",
+        failure_code: event.code,
+        attempt: event.checks,
+        reason: event.stopAt,
+      });
+      return;
+    }
+    if (event.type === "credential_check_cleared") {
+      transition(status.claimRetryCount && status.claimRetryCount > 0 ? "claim_retry" :
+        status.readyAt === null ? "starting" : "ready", {
+        credentialStopAt: null,
+        credentialCheckEdge: null,
+        renewalExpiresAt: null,
+        lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
+          ? lastClaimRetryCode : null,
+        lastRetryEdge: status.claimRetryCount && status.claimRetryCount > 0
+          ? "command" : undefined,
+        lastErrorDetail: null,
+        lastErrorReasonCode: null,
+        nextAttemptAt: null,
+      });
+      log({
+        ts: event.ts,
+        event: "listener_credential_check_cleared",
+      });
+      return;
+    }
+    if (event.type === "claim_retry") {
+      lastClaimRetryCode = event.code;
+      transition(status.credentialStopAt ? "credential_check" : "claim_retry", {
+        lastRetryEdge: "command",
+        claimRetryCount: event.attempts,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
+      });
+      log({ ts: event.ts, event: "listener_claim_retry", failure_code: event.code, attempt: event.attempts });
+      return;
+    }
+    if (event.type === "claim_retry_cleared") {
+      lastClaimRetryCode = null;
+      transition(status.credentialStopAt ? "credential_check" :
+        status.readyAt === null ? "starting" : "ready", {
+        claimRetryCount: 0,
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : null,
+        lastErrorDetail: null,
+        nextAttemptAt: null,
+        renewalExpiresAt: null,
+      });
+      return;
+    }
+    if (event.type === "ack_retry") {
+      lastAckRetryCode = event.code;
+      transition(status.credentialStopAt ? "credential_check" : "ack_retry", {
+        lastRetryEdge: "command",
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
+      });
+      log({ ts: event.ts, event: "listener_ack_retry", failure_code: event.code, attempt: event.attempt });
+      return;
+    }
+    if (event.type === "ack_retry_cleared") {
+      lastAckRetryCode = null;
+      if (status.state === "ack_retry") {
+        transition(status.readyAt === null ? "starting" : "ready", {
+          lastErrorCode: null,
+          lastErrorDetail: null,
+          nextAttemptAt: null,
+          renewalExpiresAt: null,
+        });
+      }
+      return;
+    }
     if (event.type === "read_retry") {
       status = {
         ...status,
+        lastErrorCode: event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
+        lastRetryEdge: "read",
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
         readHealth: recordListenerReadRetry(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -597,6 +782,7 @@ export async function runListenerSupervisor(
         attempt: event.attempt,
         episode_attempt: event.episodeAttempt,
         reason_code: event.failure.code,
+        failure_code: event.code,
         ...(event.failure.httpStatus === null
           ? {}
           : { http_status: event.failure.httpStatus }),
@@ -610,6 +796,15 @@ export async function runListenerSupervisor(
     if (event.type === "read_recovered") {
       status = {
         ...status,
+        ...(status.lastRetryEdge === "read" ? {
+          nextAttemptAt: null,
+          renewalExpiresAt: null,
+          lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
+            ? lastClaimRetryCode : status.state === "ack_retry" ? lastAckRetryCode : null,
+          lastRetryEdge: (status.claimRetryCount && status.claimRetryCount > 0) ||
+            status.state === "ack_retry"
+            ? "command" as const : undefined,
+        } : {}),
         readHealth: recordListenerReadRecovery(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -847,10 +1042,11 @@ export async function runListenerSupervisor(
   };
 
   const policy = options.restart ?? {};
-  const maxAttempts = policy.maxAttempts ?? LISTENER_RESTART_MAX_ATTEMPTS;
+  const explicitCeiling = policy.maxAttempts;
   const isRestartable = policy.isRestartable ?? isRestartableListenerStop;
   const restartSleep = policy.sleep ?? defaultRestartSleep;
   const restartRandom = policy.random ?? Math.random;
+  const cleanRunMs = policy.cleanRunMs ?? LISTENER_RESTART_CLEAN_RUN_MS;
 
   try {
     let restarts = 0;
@@ -861,8 +1057,10 @@ export async function runListenerSupervisor(
     // prepare() ran once, so the delivery journal keeps its identity across a
     // restart. options.run must build its own per-attempt resources — a
     // listener model is single-use, because runListenerRuntime closes it on
-    // every exit.
+    // every exit. A transient stop does not end the process: after the fast
+    // attempts the delay stays at the sustained cap until stop aborts this sleep.
     for (;;) {
+      attemptReadyAtMs = null;
       stop = await options.run(
         controller.signal,
         onEvent,
@@ -871,14 +1069,29 @@ export async function runListenerSupervisor(
       if (stop.reason === "cancelled" || controller.signal.aborted) break;
       eligible = isRestartable(stop);
       if (!eligible) break;
-      if (restarts >= maxAttempts) {
+      const cleanForMs = attemptReadyAtMs === null
+        ? 0
+        : Math.max(0, now() - attemptReadyAtMs);
+      if (cleanForMs >= cleanRunMs) restarts = 0;
+      if (explicitCeiling !== undefined && restarts >= explicitCeiling) {
         exhausted = true;
         break;
       }
       restarts += 1;
-      const delayMs = nextListenerRestartMs(restarts, policy, restartRandom);
+      const expiry = options.getCredentialExpiryMs?.() ?? null;
+      const deadline = expiry === null ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+      const renewalAt = options.getCredentialRenewalAt?.();
+      const boundary = renewalAt !== null && expiry !== null && now() < expiry
+        ? renewalAt !== undefined && now() < renewalAt ? renewalAt : deadline
+        : null;
+      const proposedDelayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
+      const cappedDelayMs = boundary !== null
+        ? Math.min(proposedDelayMs, Math.max(0, boundary - now()))
+        : proposedDelayMs;
+      const delayMs = Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, cappedDelayMs);
       const restartCode = safeErrorCode(stop.error);
       const restartStderrTail = takeTail();
+      const nextAttemptAt = new Date(now() + delayMs).toISOString();
       log({
         ts: iso(now),
         event: "listener_restarting",
@@ -892,16 +1105,22 @@ export async function runListenerSupervisor(
       transition("starting", {
         readyAt: null,
         lastErrorCode: restartCode,
+        lastRetryEdge: retryEdgeOf(stop.error),
         lastErrorDetail: safeErrorDetail(stop.error),
         ...providerFailureFields(stop.error),
         lastWorkerStderrTail: restartStderrTail,
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
+        nextAttemptAt,
+        credentialStopAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0,
       });
-      await restartSleep(delayMs, controller.signal);
+      if (delayMs > 0) await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
         stop = { reason: "cancelled" };
         break;
       }
+      transition("starting", { nextAttemptAt: null });
     }
 
     const stoppedAt = iso(now);
@@ -913,11 +1132,18 @@ export async function runListenerSupervisor(
         lastErrorReasonCode: null,
         lastWorkerStderrTail: null,
         providerMinimumRequiredVersion: null,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0,
       });
       log({ ts: stoppedAt, event: "listener_stopped" });
     } else {
       const code = stop.reason === "credential"
-        ? "credential_stopped"
+        ? stop.error instanceof ListenerCredentialStateMismatchError
+          ? stop.error.code
+          : "credential_stopped"
         : safeErrorCode(stop.error);
       const failedStderrTail = takeTail();
       transition("failed", {
@@ -927,6 +1153,13 @@ export async function runListenerSupervisor(
         ...providerFailureFields(stop.error),
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
         lastWorkerStderrTail: failedStderrTail,
+        nextAttemptAt: null,
+        credentialStopAt: null,
+        renewalExpiresAt: null,
+        credentialCheckEdge: stop.reason === "credential" &&
+            !(stop.error instanceof ListenerCredentialStateMismatchError)
+          ? status.credentialCheckEdge ?? null : null,
+        claimRetryCount: 0,
       });
       // Record why it is down and why it stopped trying — a listener left down
       // after exhausting restarts must be distinguishable from one that was
@@ -960,6 +1193,10 @@ export async function runListenerSupervisor(
       ),
       ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
       lastWorkerStderrTail: failedStderrTail,
+      nextAttemptAt: null,
+      credentialStopAt: null,
+      credentialCheckEdge: null,
+      claimRetryCount: 0,
     });
     log({
       ts: stoppedAt,
@@ -989,9 +1226,7 @@ export async function effectiveListenerStatus(
     const stored = await readListenerStatus(paths);
     if (
       stored &&
-      (stored.state === "starting" ||
-        stored.state === "ready" ||
-        stored.state === "stopping")
+      LISTENER_RUNNING_STATES.includes(stored.state)
     ) {
       const failed: ListenerStatus = {
         ...stored,
@@ -1006,6 +1241,8 @@ export async function effectiveListenerStatus(
         currentDeliverySignalId: null,
         currentDeliverySince: null,
         heldBackDeliveries: [],
+        credentialStopAt: null,
+        nextAttemptAt: null,
       };
       await writeListenerStatus(paths, failed);
       return failed;
@@ -1059,7 +1296,8 @@ export async function waitForListenerReady(
       ) {
         throw new ListenerAlreadyRunningError();
       }
-      if (last.state === "ready") return last;
+      if (LISTENER_RUNNING_STATES.includes(last.state) &&
+        last.state !== "starting" && last.state !== "stopping") return last;
       if (last.state === "failed" || last.state === "stopped") {
         throw new ListenerStartupError(last.lastErrorCode ?? last.state);
       }
@@ -1119,5 +1357,9 @@ export async function waitForListenerReady(
     }
     await sleep(pollMs);
   }
+  if (last !== null &&
+    (options.expectedPid === undefined || last.pid === options.expectedPid) &&
+    (!options.isProcessAlive || options.isProcessAlive()) &&
+    last.state === "starting") return last;
   throw new ListenerStartupError(last?.lastErrorCode ?? "ready_timeout");
 }

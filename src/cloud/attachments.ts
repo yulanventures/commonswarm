@@ -15,6 +15,11 @@ export interface SignalAttachment extends SignalAttachmentRef {
   size_bytes: number;
 }
 
+/** Invalid attachment metadata received from the read or command edge. */
+export class SignalAttachmentMalformedError extends Error {
+  override name = "SignalAttachmentMalformedError";
+}
+
 /** Parses optional attachment metadata while ignoring additive fields from newer servers. */
 export function parseSignalAttachments(
   value: unknown,
@@ -22,7 +27,7 @@ export function parseSignalAttachments(
 ): SignalAttachment[] {
   if (options.enabled === false || value === undefined) return [];
   if (!Array.isArray(value) || value.length > SIGNAL_ATTACHMENT_MAX) {
-    throw new Error("signal read returned malformed attachments");
+    throw new SignalAttachmentMalformedError("signal read returned malformed attachments");
   }
   const attachments: SignalAttachment[] = [];
   const seen = new Set<string>();
@@ -31,7 +36,7 @@ export function parseSignalAttachments(
       !valueAtPosition || typeof valueAtPosition !== "object" ||
       Array.isArray(valueAtPosition)
     ) {
-      throw new Error("signal read returned a malformed attachment");
+      throw new SignalAttachmentMalformedError("signal read returned a malformed attachment");
     }
     const row = valueAtPosition as Record<string, unknown>;
     if (
@@ -43,12 +48,12 @@ export function parseSignalAttachments(
       typeof row.size_bytes !== "number" ||
       !Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0
     ) {
-      throw new Error("signal read returned malformed attachment metadata");
+      throw new SignalAttachmentMalformedError("signal read returned malformed attachment metadata");
     }
     const fileId = row.file_id.toLowerCase();
     const key = `${fileId}:${row.version_n}`;
     if (seen.has(key)) {
-      throw new Error("signal read returned duplicate attachment metadata");
+      throw new SignalAttachmentMalformedError("signal read returned duplicate attachment metadata");
     }
     seen.add(key);
     attachments.push({

@@ -206,7 +206,7 @@ test("listen status warns at a 60s current read lapse, not below it", () => {
   assert.match(warning, /^Listener LAPSE /);
   assert.match(warning, /WARNING \[listener_read_retry_persisting\]/);
   assert.match(warning, /This is still in progress/);
-  assert.match(warning, /Next: Check cswarm status.*restart the listener/);
+  assert.match(warning, /Next: Leave the listener running.*read service/);
   const json = listenerStatusJson(status, undefined, undefined, thresholdMs);
   assert.equal(json.listenerLapse, true);
   assert.deepEqual(json.listenerLapseCodes, ["listener_read_retry_persisting"]);
@@ -390,6 +390,38 @@ test("an hour idled at 60s does not lapse after a delivery resets cadence to 15s
   );
   assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
   assert.match(rendered, /^Listener ready /);
+});
+
+test("a stopped listener reports the stop and does not report a claim lapse", () => {
+  const health = healthHourThenReset(
+    IDLE_POLL_DEFAULT_MS,
+    CLAIMS_HEALTHY_AT_60S_LAPSE_AT_15S,
+    IDLE_POLL_MAX_MS,
+  );
+  const stopped = {
+    ...readHealthStatus(health),
+    state: "stopped" as const,
+    readyAt: "2026-09-01T10:00:00.000Z",
+    stoppedAt: "2026-09-16T22:14:10.000Z",
+    lastErrorCode: "credential_stopped",
+  };
+  const at = Date.parse(NEXT_HOUR);
+  const rendered = renderListenerStatus(stopped, undefined, at);
+  const json = listenerStatusJson(stopped, undefined, {
+    pendingForMainOldestAt: null,
+    hookSurfaceExists: false,
+    hookSurfaceAdvanced: false,
+  }, at);
+  assert.match(rendered, /^Listener stopped /);
+  assert.match(rendered, /is stopped and is not reading signals/);
+  assert.match(rendered, /cswarm listen start --agent-token-stdin/);
+  assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
+  assert.doesNotMatch(rendered, /^Listener LAPSE /);
+  assert.equal(json.listenerLapse, false);
+  assert.deepEqual(json.listenerLapseCodes, []);
+
+  const ready = renderListenerStatus(readHealthStatus(health), undefined, at);
+  assert.match(ready, /listener_claim_throughput_lapse/);
 });
 
 test("an hour wedged at 15s still lapses after cadence is later 60s", () => {

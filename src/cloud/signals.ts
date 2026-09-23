@@ -25,6 +25,7 @@ import {
   attachmentRetrievalCommand,
   formatAttachmentSize,
   parseSignalAttachments,
+  SignalAttachmentMalformedError,
 } from "./attachments.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 
@@ -210,6 +211,23 @@ export class SignalTransportError extends Error {
   }
 }
 
+/** A credential required by this local process is missing from its own store. */
+export class LocalCredentialSecretAbsentError extends Error {
+  constructor(message = "agent credential secret is absent") {
+    super(message);
+    this.name = "LocalCredentialSecretAbsentError";
+  }
+}
+
+/** The listener's own credential file failed its write/read consistency check. */
+export class ListenerCredentialStateMismatchError extends LocalCredentialSecretAbsentError {
+  readonly code = "local_credential_state_mismatch";
+  constructor() {
+    super("listener credential state did not preserve the live credential");
+    this.name = "ListenerCredentialStateMismatchError";
+  }
+}
+
 /** Malformed body for follow classification tests/helpers. */
 export class SignalMalformedError extends Error {
   constructor(message: string) {
@@ -248,14 +266,14 @@ function plainTransportError(
 }
 
 function plainMalformedError(message: string): Error {
-  const error = new Error(message);
+  const error = new SignalMalformedError(message);
   plainMalformedErrors.add(error);
   return error;
 }
 
 function checkedUuid(value: unknown, field: string): string {
   if (typeof value !== "string" || !UUID_RE.test(value)) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value.toLowerCase();
 }
@@ -266,14 +284,14 @@ function checkedNullableUuid(value: unknown, field: string): string | null {
 
 function checkedBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
 
 function checkedTimestamp(value: unknown, field: string): string {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
@@ -289,7 +307,7 @@ function deliveryCapabilityMarker(
 ): boolean {
   if (row[key] === undefined) return false;
   if (row[key] !== 1) {
-    throw new Error("signal read returned a malformed delivery capability marker");
+    throw new SignalMalformedError("signal read returned a malformed delivery capability marker");
   }
   return true;
 }
@@ -324,7 +342,7 @@ function pendingDeliveryCountOf(
   if (!capabilities.deliveryClaim && !capabilities.deliveryAck) return null;
   const value = body.pending_delivery_count;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("signal read returned a malformed pending_delivery_count");
+    throw new SignalMalformedError("signal read returned a malformed pending_delivery_count");
   }
   return value;
 }
@@ -383,14 +401,14 @@ function parseSignalRecipients(
 ): { recipients?: SignalRecipientRef[] } {
   if (value === undefined) return {};
   if (!Array.isArray(value)) {
-    throw new Error("signal read returned a malformed recipients list");
+    throw new SignalMalformedError("signal read returned a malformed recipients list");
   }
   const recipients: SignalRecipientRef[] = [];
   const seenPositions = new Set<number>();
   const seenIds = new Set<string>();
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const row = entry as Record<string, unknown>;
     const keys = Object.keys(row).sort();
@@ -403,11 +421,11 @@ function parseSignalRecipients(
       !Number.isSafeInteger(row.position) ||
       row.position < 0
     ) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const id = checkedUuid(row.id, "recipients[].id");
     if (seenPositions.has(row.position) || seenIds.has(id)) {
-      throw new Error("signal read returned a repeated recipient");
+      throw new SignalMalformedError("signal read returned a repeated recipient");
     }
     seenPositions.add(row.position);
     seenIds.add(id);
@@ -456,7 +474,7 @@ export function parseSignalRecord(
   options: { attachmentsEnabled?: boolean } = {},
 ): SignalRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("signal read returned a malformed row");
+    throw new SignalMalformedError("signal read returned a malformed row");
   }
   const row = value as Record<string, unknown>;
   if (
@@ -469,7 +487,7 @@ export function parseSignalRecord(
     !(row.about === null ||
       typeof row.about === "string")
   ) {
-    throw new Error("signal read returned malformed signal data");
+    throw new SignalMalformedError("signal read returned malformed signal data");
   }
   let senderOwnerRelation: SenderOwnerRelation = "unknown";
   if (row.sender_owner_relation !== undefined) {
@@ -479,7 +497,7 @@ export function parseSignalRecord(
         row.sender_owner_relation as SenderOwnerRelation,
       )
     ) {
-      throw new Error(
+      throw new SignalMalformedError(
         "signal read returned a malformed sender_owner_relation",
       );
     }
@@ -572,7 +590,7 @@ function parseSignalRows(
       const parsed = error instanceof Error ? error : new Error(String(error));
       options.onMalformedRow?.(index, parsed);
       if (malformedRows > options.maxMalformedRows) {
-        throw new Error(
+        throw new SignalMalformedError(
           `signal read returned too many malformed rows (more than ${options.maxMalformedRows})`,
         );
       }
@@ -770,6 +788,7 @@ export function classifySignalReadFailure(
   }
   if (
     error instanceof SignalMalformedError ||
+    error instanceof SignalAttachmentMalformedError ||
     (error instanceof Error && plainMalformedErrors.has(error))
   ) {
     return {
@@ -813,10 +832,18 @@ export function isRestartableReadError(error: unknown): boolean {
   if (isTransportFollowMessage(error)) return true;
   const http = followHttpDetails(error);
   if (http !== null) {
-    // Status alone. The `retryable: false` veto governs an IMMEDIATE retry of
-    // the same request; it does not assert that a later run cannot work, and a
-    // later run is the judgement a restart needs.
-    return http.status === 429 || http.status >= 500;
+    // A confirmed credential refusal will not succeed later. A 401/403 that
+    // does not carry one of those codes can be a foreign backend or a blip.
+    if (isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    )) {
+      return false;
+    }
+    // Status plus code. The `retryable: false` veto governs an IMMEDIATE retry
+    // of the same request; it does not assert that a later run cannot work.
+    return http.status === 429 || http.status >= 500 ||
+      http.status === 401 || http.status === 403;
   }
   // D-057: CLOSED. An unrecognised failure acquires no decision. This used to
   // exclude three known types and return true for everything else, so a plain
@@ -827,12 +854,9 @@ export function isRestartableReadError(error: unknown): boolean {
 
 /** A malformed body/row: a protocol defect, so repeating the read cannot help. */
 export function isMalformedFollowMessage(error: unknown): boolean {
-  if (error instanceof SignalMalformedError) return true;
-  if (!(error instanceof Error)) return false;
-  return error.message.startsWith("signal read returned a malformed") ||
-    error.message === "signal read returned malformed JSON" ||
-    error.message === "signal read returned malformed signal data" ||
-    error.message === "signal read returned a malformed row";
+  return error instanceof SignalMalformedError ||
+    error instanceof SignalAttachmentMalformedError ||
+    (error instanceof Error && plainMalformedErrors.has(error));
 }
 
 function checkedLimit(value: number | undefined): number {
@@ -1298,18 +1322,18 @@ export type ResolvedSignalRecipient =
 
 function parseAgentMemberRow(value: unknown): SignalAgent {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed agent row");
+    throw new SignalMalformedError("member read returned a malformed agent row");
   }
   const row = value as Record<string, unknown>;
   if (typeof row.name !== "string") {
-    throw new Error("member read returned a malformed agent name");
+    throw new SignalMalformedError("member read returned a malformed agent name");
   }
   if (row.model !== undefined && row.model !== null && typeof row.model !== "string") {
-    throw new Error("member read returned a malformed agent model");
+    throw new SignalMalformedError("member read returned a malformed agent model");
   }
   if (row.generation !== undefined && row.generation !== null &&
     (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
-    throw new Error("member read returned a malformed agent generation");
+    throw new SignalMalformedError("member read returned a malformed agent generation");
   }
   return {
     ...(row.model === undefined ? {} : { model: row.model as string | null }),
@@ -1324,11 +1348,11 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
 
 function parseMemberRow(value: unknown): SignalMember {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed row");
+    throw new SignalMalformedError("member read returned a malformed row");
   }
   const row = value as Record<string, unknown>;
   if (typeof row.display_name !== "string") {
-    throw new Error("member read returned a malformed display name");
+    throw new SignalMalformedError("member read returned a malformed display name");
   }
   return {
     user_id: checkedUuid(row.user_id, "member user_id"),
@@ -1338,18 +1362,18 @@ function parseMemberRow(value: unknown): SignalMember {
 
 function parseAgentIdentity(value: unknown): SignalAgentIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed credential identity");
+    throw new SignalMalformedError("member read returned a malformed credential identity");
   }
   const row = value as Record<string, unknown>;
   if (row.credential_valid !== true) {
-    throw new Error("member read returned a malformed credential validity");
+    throw new SignalMalformedError("member read returned a malformed credential validity");
   }
   /* Absent on an older deployment, null when the row carries no name. Neither is an error:
    * the caller renders the id alone rather than inventing a name. A present value is bounded
    * and sanitised at the point of display, like every other server-supplied label. */
   const name = row.workspace_name;
   if (name !== undefined && name !== null && typeof name !== "string") {
-    throw new Error("member read returned a malformed workspace name");
+    throw new SignalMalformedError("member read returned a malformed workspace name");
   }
   return {
     credential_valid: true,
@@ -1386,23 +1410,23 @@ export async function readAgentSignalDirectory(
   } catch (error) {
     if (error instanceof SignalReadTimeoutError) {
       if (options.deadlineMs !== undefined) throw error;
-      throw new Error("member read could not reach the cloud service");
+      throw new SignalTransportError("member read could not reach the cloud service");
     }
     throw error;
   }
   if (result === null) {
-    throw new Error("member read could not reach the cloud service");
+    throw new SignalTransportError("member read could not reach the cloud service");
   }
   const { response, body } = result;
   if (!response.ok) {
     throwSignalHttp(response, body, "member read failed");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const payload = body as Record<string, unknown>;
   if (!Array.isArray(payload.members)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const agentsRaw = payload.agents;
   // Agents are additive; an older members response without agents[] still works.
@@ -1411,7 +1435,7 @@ export async function readAgentSignalDirectory(
     : Array.isArray(agentsRaw)
     ? agentsRaw.map(parseAgentMemberRow)
     : (() => {
-      throw new Error("member read returned malformed agents");
+      throw new SignalMalformedError("member read returned malformed agents");
     })();
   return {
     members: payload.members.map(parseMemberRow),
@@ -2313,12 +2337,96 @@ export function resolveRefusalToleranceMs(
   return parsed;
 }
 
+/**
+ * Which edge produced the HTTP refusal. The same slug does not mean the same
+ * thing on both.
+ */
+export type CredentialCheckSurface = "read" | "command";
+
+/**
+ * Read-edge `error` slugs that mean this credential is revoked, expired, or
+ * unknown. The read edge assigns them; this client does not invent them.
+ *
+ * Unknown or expired is `unauthenticated`: 401 when `agent_delivery_read_context`
+ * yields no row, which is also what an expired token yields. Revoked is
+ * `forbidden`: the read edge's only 403 `forbidden` is `agent.is_revoked`.
+ *
+ * Status copy joins this list. It is the read surface, not every 403 the
+ * command edge can return.
+ */
+export const CONFIRMED_CREDENTIAL_LOSS_CODES: readonly string[] = Object.freeze([
+  "unauthenticated",
+  "forbidden",
+]);
+
+/**
+ * Command-edge slugs that confirm the credential itself is dead.
+ *
+ * `unauthenticated` is the auth failure: missing bearer, a token
+ * `authenticateAgent` cannot load, or an expired token. `forbidden` is not in
+ * this set. The command edge returns that slug for refusals that are not a
+ * credential check (role, scope, target eligibility, and the rest of the list
+ * in the outage lane record). A revoked delivery command is
+ * `delivery_unavailable`, which is also absent: that slug is shared with a
+ * route failure.
+ */
+export const COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES: readonly string[] =
+  Object.freeze([
+    "unauthenticated",
+  ]);
+
+const READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+);
+const COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET: ReadonlySet<string> = new Set(
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+);
+
+/** True when `code` confirms a dead credential on `surface`. Default is the read edge. */
+export function isConfirmedCredentialLossCode(
+  code: string | null | undefined,
+  surface: CredentialCheckSurface = "read",
+): boolean {
+  if (typeof code !== "string") return false;
+  const set = surface === "command"
+    ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET
+    : READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
+  return set.has(code);
+}
+
+/**
+ * A confirmed credential-loss answer is HTTP 401 or 403 plus a code that
+ * surface assigns to a dead credential. Status alone is not enough: a foreign
+ * backend can answer 403 with HTML or another body's JSON during a DNS cut,
+ * and that credential is still good. One such answer is still not a permanent
+ * listener stop; the listener re-checks it across a window of at least ten
+ * minutes and three checks before it stops.
+ */
+export function isConfirmedCredentialHttpFailure(
+  status: number,
+  code: string | null | undefined,
+  surface: CredentialCheckSurface = "read",
+): boolean {
+  return (status === 401 || status === 403) &&
+    isConfirmedCredentialLossCode(code, surface);
+}
+
 export function isRetryableFollowError(error: unknown): boolean {
+  const http = followHttpDetails(error);
+  if (
+    http !== null &&
+    (http.status === 401 || http.status === 403) &&
+    !isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    )
+  ) {
+    return true;
+  }
   if (serverRefusedRetry(followErrorEnvelope(error))) return false;
   if (error instanceof SignalHostPortsExhaustedError) return true;
   if (error instanceof SignalReadTimeoutError) return true;
   if (isTransportFollowMessage(error)) return true;
-  const http = followHttpDetails(error);
   if (http) return http.status === 429 || http.status >= 500;
   return false;
 }
@@ -2327,9 +2435,13 @@ export function isFatalFollowError(error: unknown): boolean {
   if (isMalformedFollowMessage(error)) return true;
   const http = followHttpDetails(error);
   if (!http) return false;
+  if (http.status === 401 || http.status === 403) {
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    );
+  }
   return http.status === 400 ||
-    http.status === 401 ||
-    http.status === 403 ||
     http.status === 404 ||
     http.status === 426 ||
     (http.status >= 400 && http.status < 500 && http.status !== 429);
@@ -2338,18 +2450,22 @@ export function isFatalFollowError(error: unknown): boolean {
 /**
  * Credential refusal/horizon/secret-absence stop classifier used by the CLI
  * and pure tests. Matches Renewal* by name to avoid coupling this module to
- * renewal.ts, plus explicit secret-absence wording.
+ * renewal.ts, and uses a named local error for secret absence.
  */
 export function isFollowCredentialFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const http = followHttpDetails(error);
   if (http !== null) {
-    // It came off the wire, so the status decides and nothing else does.
+    // It came off the wire, so status plus the server's own error slug decide.
     // Returning here keeps the wording check below out of reach of response
     // text: since D-051 the message can carry server-supplied fields, and an
     // unanchored phrase test over a message that contains external text is
-    // the same defect as the `/aborted/i` one this sweep removed.
-    return http.status === 401 || http.status === 403;
+    // the same defect as the `/aborted/i` one this sweep removed. A 401 or
+    // 403 with no confirmed slug is not this failure.
+    return isConfirmedCredentialHttpFailure(
+      http.status,
+      followErrorEnvelope(error).error,
+    );
   }
   if (
     error.name === "RenewalReauthorisationRequired" ||
@@ -2358,8 +2474,7 @@ export function isFollowCredentialFailure(error: unknown): boolean {
   ) {
     return true;
   }
-  // Locally-thrown secret absence only; these errors never cross the network.
-  return /secret is absent/i.test(error.message);
+  return error instanceof LocalCredentialSecretAbsentError;
 }
 
 function followRetryReason(error: unknown): string {

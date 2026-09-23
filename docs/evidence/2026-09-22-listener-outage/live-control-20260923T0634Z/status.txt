@@ -1,0 +1,30 @@
+Listener WARNING for agent 4989ea3b-af59-4c74-a9a6-eeaf51154b5d: 2 messages are unattended.
+CONNECTED: yes. Transport state is ready.
+ATTENDING: none. Signals queue and nothing wakes the session.
+ATTENDED: no. Signals queue and nothing wakes the session.
+HANDLED: no. Queued messages have not reached the session hook.
+Provider: claude; process: 51701; started: 2026-09-23T06:34:46.795Z.
+Target URL: http://127.0.0.1:47052.
+Provider executable: not measured.
+Connections opened: 8.
+Connection reuse ratio: 2.875.
+Ready since: 2026-09-23T06:34:49.526Z.
+Last claimed and queued signal: c59d26e8-7a11-4463-9197-1e8648e5a44a. It is not handled yet.
+No listener process error is recorded.
+Current read retry episode: none.
+Read retry episodes in the last 24h: 1; retries in the rolling hour: 2.
+Longest read retry episode in the last 24h: 2 attempts over 2s.
+Read retries by hour in the last 24h: 2026-09-23T06:00:00.000Z=2.
+Claim throughput by full hour: no complete listener hour is available yet.
+Current idle poll interval: 5s.
+push (Realtime), no wake yet, reconcile every 5m.
+Provider version: not measured.
+Bundled Claude Code version: not measured.
+Bundled Claude agent SDK version: not measured.
+Delivery mode: durable claim and acknowledgement.
+No delivery is being worked on right now.
+Ask route: main; directed asks wait for this interactive session.
+Asks waiting for this session: 2.
+Routed asks dropped from the overflow queue: 0.
+WARNING [listener_unattended_main_queue]: 2 messages are unattended. The oldest was queued 2m ago (queued at 2026-09-23T06:34:52.718Z).
+Next: cswarm hook install claude --principal-id 4989ea3b-af59-4c74-a9a6-eeaf51154b5d --write, then start a fresh session; or cswarm inbox --notify for agent 4989ea3b-af59-4c74-a9a6-eeaf51154b5d on this host

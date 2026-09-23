@@ -1,0 +1,46 @@
+version: cswarm 0.1.72 (protocol 0.1.0)
+start exit 0
+status exit 0
+{
+  "state": "ready",
+  "lastErrorCode": null,
+  "nextAttemptAt": null,
+  "readHealth": {
+    "currentEpisodeStartedAt": null,
+    "currentEpisodeAttempts": 0,
+    "currentReasonCode": null,
+    "currentHttpStatus": null,
+    "currentErrorConstructor": null,
+    "retryHours": [
+      {
+        "hourStart": "2026-09-23T06:00:00.000Z",
+        "retries": 2,
+        "episodes": 1,
+        "longestEpisodeAttempts": 2,
+        "longestEpisodeDurationMs": 2687
+      }
+    ],
+    "retryMinutes": [
+      {
+        "minuteStart": "2026-09-23T06:34:00.000Z",
+        "retries": 2
+      }
+    ],
+    "claimCadenceMs": 300000,
+    "claimHours": [
+      {
+        "hourStart": "2026-09-23T06:00:00.000Z",
+        "claims": 2,
+        "cadenceMs": 300000,
+        "modeChanged": true
+      }
+    ]
+  },
+  "restarts": null,
+  "cswarmVersion": "0.1.72",
+  "pid": 51701
+}
+injected: 2
+passed reads: 4
+stop exit 0
+LEFTOVER PROCESS under /private/tmp/cswarm-live-hlGo5S
