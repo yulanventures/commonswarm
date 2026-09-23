@@ -307,9 +307,17 @@ export class DeliveryResponseError extends DeliveryProtocolError {
   }
 }
 
+/** A parsed network answer whose fields violate the delivery wire contract. */
+export class DeliveryMalformedResponseError extends DeliveryResponseError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryMalformedResponseError";
+  }
+}
+
 function checkedUuid(value: unknown, field: string): string {
   if (typeof value !== "string" || !UUID_RE.test(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -341,13 +349,13 @@ function daysInMonth(year: number, month: number): number {
  */
 function checkedRfc3339Timestamp(value: unknown, field: string): string {
   if (typeof value !== "string") {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
   const match = RFC3339_TIMESTAMP_RE.exec(value);
   if (!match) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -365,7 +373,7 @@ function checkedRfc3339Timestamp(value: unknown, field: string): string {
     minute < 0 || minute > 59 ||
     second < 0 || second > 59
   ) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -374,14 +382,14 @@ function checkedRfc3339Timestamp(value: unknown, field: string): string {
     const offsetHour = Math.abs(parseInt(match[7], 10));
     const offsetMin = parseInt(match[8], 10);
     if (offsetHour > 23 || offsetMin < 0 || offsetMin > 59) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         `delivery response returned a malformed ${field}`,
       );
     }
   }
 
   if (!Number.isFinite(Date.parse(value))) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -391,7 +399,7 @@ function checkedRfc3339Timestamp(value: unknown, field: string): string {
 /** A lease that has already elapsed cannot be claimed; the value stays out of the error. */
 function checkedLiveLease(leasedUntil: string, now: () => number): void {
   if (Date.parse(leasedUntil) <= now()) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned an already expired lease",
     );
   }
@@ -402,7 +410,7 @@ function checkedRelation(value: unknown): SenderOwnerRelation {
     typeof value !== "string" ||
     !SENDER_OWNER_RELATIONS.has(value as SenderOwnerRelation)
   ) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery response returned a malformed sender_owner_relation",
     );
   }
@@ -412,7 +420,7 @@ function checkedRelation(value: unknown): SenderOwnerRelation {
 /** Non-negative safe integer whose value is never embedded in the error. */
 function checkedNonNegativeCount(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -422,14 +430,14 @@ function checkedNonNegativeCount(value: unknown, field: string): number {
 /** Claim success requires every capability marker exactly 1. */
 function checkedClaimCapabilities(value: unknown): DeliveryClaimCapabilities {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response is missing delivery capabilities",
     );
   }
   const row = value as Record<string, unknown>;
   for (const marker of ["delivery_claim", "delivery_ack", "sender_owner_relation"] as const) {
     if (row[marker] !== 1) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         `delivery claim response is missing the ${marker} capability`,
       );
     }
@@ -444,7 +452,7 @@ function checkedOptionalUuidArray(value: unknown, field: string): void {
     !Array.isArray(value) ||
     value.some((item) => typeof item !== "string" || !UUID_RE.test(item))
   ) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -454,7 +462,7 @@ function checkedOptionalUuidArray(value: unknown, field: string): void {
 function checkedOptionalArray(value: unknown, field: string): void {
   if (value === undefined) return;
   if (!Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery response returned a malformed ${field}`,
     );
   }
@@ -477,7 +485,7 @@ function checkedRecipientSlot(
   const hasCount = Object.hasOwn(row, "recipient_count");
   if (!hasPosition && !hasCount) return { position: null, count: null };
   if (!hasPosition || !hasCount) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a recipient position without its count",
     );
   }
@@ -487,7 +495,7 @@ function checkedRecipientSlot(
   );
   const count = checkedNonNegativeCount(row.recipient_count, "recipient_count");
   if (count < 1 || position >= count) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a recipient position outside its set",
     );
   }
@@ -501,7 +509,7 @@ function parseDeliveryRow(
   now: () => number,
 ): DeliveryRow {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a malformed delivery row",
     );
   }
@@ -510,12 +518,12 @@ function parseDeliveryRow(
   try {
     signal = parseSignalRecord(row.signal);
   } catch {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       `delivery claim response returned a malformed signal at ${index}`,
     );
   }
   if (signal.workspace_id !== expected.workspaceId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a signal for another workspace",
     );
   }
@@ -529,12 +537,12 @@ function parseDeliveryRow(
    * same signal still reports the scalar column, which is a different question
    * with a different answer. */
   if (signal.to_agent !== expected.principalId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a signal addressed to another agent",
     );
   }
   if (!DELIVERY_KINDS.has(signal.kind)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned a non-direct signal kind",
     );
   }
@@ -568,11 +576,11 @@ function parseClaimSuccess(
   wake?: WakeHint;
 } {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new DeliveryProtocolError("delivery claim response was not an object");
+    throw new DeliveryMalformedResponseError("delivery claim response was not an object");
   }
   const row = body as Record<string, unknown>;
   if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response did not report accepted ok",
     );
   }
@@ -580,7 +588,7 @@ function parseClaimSuccess(
   checkedOptionalUuidArray(row.event_ids, "event_ids");
   checkedOptionalArray(row.events, "events");
   if (!Array.isArray(row.deliveries)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response is missing its deliveries array",
     );
   }
@@ -591,20 +599,20 @@ function parseClaimSuccess(
   const leaseIds = new Set<string>();
   for (const delivery of deliveries) {
     if (signalIds.has(delivery.signal.id)) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         "delivery claim response repeats a signal id",
       );
     }
     signalIds.add(delivery.signal.id);
     if (leaseIds.has(delivery.leaseId)) {
-      throw new DeliveryProtocolError(
+      throw new DeliveryMalformedResponseError(
         "delivery claim response repeats a lease id",
       );
     }
     leaseIds.add(delivery.leaseId);
   }
   if (deliveries.length > 1) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned more than one delivery",
     );
   }
@@ -617,7 +625,7 @@ function parseClaimSuccess(
     "terminal_delivery_failure_count",
   );
   if (deliveries.length > pendingDeliveryCount) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery claim response returned more deliveries than its pending count",
     );
   }
@@ -625,7 +633,7 @@ function parseClaimSuccess(
   try {
     wake = parseOptionalWakeHint(row.wake);
   } catch {
-    throw new DeliveryProtocolError("delivery claim response wake field is malformed");
+    throw new DeliveryMalformedResponseError("delivery claim response wake field is malformed");
   }
   return {
     capabilities,
@@ -641,25 +649,25 @@ function parseAckSuccess(
   expected: { signalId: string; outcome: DeliveryOutcome },
 ): void {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response was not an object",
     );
   }
   const row = body as Record<string, unknown>;
   if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response did not report accepted ok",
     );
   }
   checkedOptionalUuidArray(row.event_ids, "event_ids");
   checkedOptionalArray(row.events, "events");
   if (row.signal_id !== expected.signalId) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response echoed a different signal id",
     );
   }
   if (row.outcome !== expected.outcome) {
-    throw new DeliveryProtocolError(
+    throw new DeliveryMalformedResponseError(
       "delivery acknowledgement response echoed a different outcome",
     );
   }

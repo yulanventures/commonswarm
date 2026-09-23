@@ -2136,3 +2136,53 @@ test("detached Claude supervisor persists runtime evidence and status remeasures
     await rm(workerCwd, { recursive: true, force: true });
   }
 });
+
+test("detached listener stops on upgrade_required with an update action", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold7-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE, status: "accepted", principal_id: principalId,
+    token_id: randomUUID(), run_id: randomUUID(), agent_token: `swm_agt_${"B".repeat(43)}`,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  let claims = 0;
+  const server = createServer(async (request, response) => {
+    let requestBody = "";
+    for await (const chunk of request) requestBody += String(chunk);
+    response.setHeader("content-type", "application/json");
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200);
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: 1 }));
+      return;
+    }
+    const command = JSON.parse(requestBody) as { command?: { kind?: string } };
+    if (command.command?.kind === "claim_agent_inbox") claims++;
+    response.writeHead(426);
+    response.end('{"error":"upgrade_required","min_client_version":"999.0.0"}');
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  try {
+    const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+    assert.ok(start.code === 0 || (start.code === 1 && start.stderr.includes("upgrade_required")), start.stderr);
+    const failed = await waitForListenerStatus(paths, (status) => status.state === "failed");
+    assert.equal(failed.lastErrorCode, "upgrade_required");
+    assert.equal(claims, 1);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /npm install -g commonswarm.*restart the listener/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD7_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD7_STATUS_PATH, safeStatus);
+  } finally {
+    try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
+    catch { /* A failed listener has already exited. */ }
+    await closeTestServer(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});

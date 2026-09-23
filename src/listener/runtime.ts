@@ -11,6 +11,7 @@ import {
   DeliveryCommandClient,
   DeliveryHttpError,
   DeliveryProtocolError,
+  DeliveryMalformedResponseError,
   DeliveryResponseError,
   DeliveryTransportError,
   DELIVERY_REQUEST_TIMEOUT_MS,
@@ -35,11 +36,14 @@ import {
   readAgentSignalPage,
   SIGNAL_READ_TIMEOUT_MS,
   SignalHttpError,
+  SignalMalformedError,
   type AgentSignalPage,
   type SignalReadFailureClassification,
   type SignalCursor,
 } from "../cloud/signals.js";
 import {
+  RenewalCredentialCheckError,
+  RenewalRetryError,
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../cloud/renewal.js";
@@ -156,7 +160,6 @@ export const READ_FATAL_ANSWERS = Object.freeze({
   refusals: Object.freeze([
     [400, "invalid_request"],
     [404, "channel_not_found"],
-    [405, "method_not_allowed"],
   ] as const),
 });
 
@@ -170,6 +173,8 @@ export const COMMAND_FATAL_ANSWERS = Object.freeze({
     [409, "delivery_ack_conflict"],
     [409, "delivery_not_surfaced"],
     [413, "payload_too_large"],
+    // command/index.ts version gate: the compiled client version cannot change on retry.
+    [426, "upgrade_required"],
     [403, H0_SEAT_CLAIM_REFUSED_CODE],
   ] as const),
 });
@@ -304,6 +309,7 @@ export type ListenerRuntimeEvent =
     episodeStartedAt: string;
     failure: SignalReadFailureClassification;
     code: string;
+    renewalExpiresAt?: string;
     delayMs: number;
     ts: string;
   }
@@ -315,9 +321,9 @@ export type ListenerRuntimeEvent =
     ts: string;
   }
   | { type: "malformed_row"; index: number; ts: string }
-  | { type: "claim_retry"; code: string; attempts: number; delayMs: number; ts: string }
+  | { type: "claim_retry"; code: string; attempts: number; delayMs: number; renewalExpiresAt?: string; ts: string }
   | { type: "claim_retry_cleared"; ts: string }
-  | { type: "ack_retry"; code: string; attempt: number; delayMs: number; ts: string }
+  | { type: "ack_retry"; code: string; attempt: number; delayMs: number; renewalExpiresAt?: string; ts: string }
   | { type: "ack_retry_cleared"; ts: string }
   | {
     type: "activity_publish_failure";
@@ -529,8 +535,10 @@ function isRestartableRuntimeError(error: unknown): boolean {
     return !fatalCommandRefusal(error);
   }
   if (error instanceof DeliveryResponseError) return true;
+  if (error instanceof DeliveryMalformedResponseError) return true;
   // Locally detected claim and ACK inconsistencies remain fatal.
   if (error instanceof DeliveryProtocolError) return false;
+  if (error instanceof RenewalRetryError) return true;
 
   // Command posts: same command-surface rule.
   if (error instanceof CommandTransportError) return true;
@@ -585,9 +593,8 @@ function isAbort(error: unknown): boolean {
 }
 
 /**
- * A local credential stop: renewal horizon, revocation the renewal client
- * already decided, or a missing local secret. These are not a server answer a
- * foreign backend can forge, so they do not enter the confirmation window.
+ * Local renewal horizon and missing-secret failures stop at once. A renewal
+ * HTTP credential answer is a server sample and enters the confirmation window.
  */
 function isLocalCredentialLoss(error: unknown): boolean {
   if (
@@ -612,6 +619,9 @@ function isLocalCredentialLoss(error: unknown): boolean {
  * confirmation window; it does not stop the listener.
  */
 function isServerConfirmedCredentialLoss(error: unknown): boolean {
+  if (error instanceof RenewalCredentialCheckError) {
+    return isConfirmedCredentialHttpFailure(error.status, error.code, "command");
+  }
   if (error instanceof CommandHttpError || error instanceof DeliveryHttpError) {
     return isConfirmedCredentialHttpFailure(error.status, error.code, "command");
   }
@@ -637,6 +647,7 @@ function isForeignDeliveryHttpResponse(error: DeliveryHttpError): boolean {
 }
 
 function deliveryRetryCode(error: unknown): string {
+  if (error instanceof RenewalRetryError) return error.code;
   if (error instanceof DeliveryResponseError) return "malformed_response";
   if (error instanceof DeliveryHttpError) {
     return isForeignDeliveryHttpResponse(error) ? `http_${error.status}` : error.code;
@@ -645,8 +656,10 @@ function deliveryRetryCode(error: unknown): string {
 }
 
 function isRetryableDeliveryError(error: unknown): boolean {
+  if (error instanceof RenewalRetryError) return true;
   if (error instanceof DeliveryTransportError) return true;
   if (error instanceof DeliveryResponseError) return true;
+  if (error instanceof DeliveryMalformedResponseError) return true;
   if (!(error instanceof DeliveryHttpError)) return false;
   if (fatalCommandRefusal(error)) return false;
   if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
@@ -1176,7 +1189,8 @@ export async function runListenerRuntime(
   } | null = null;
 
   const confirmedLossCode = (error: unknown): string => {
-    if (error instanceof DeliveryHttpError || error instanceof CommandHttpError) {
+    if (error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+        error instanceof RenewalCredentialCheckError) {
       const code = error.code;
       if (typeof code === "string" && /^[a-z0-9_-]{1,96}$/.test(code)) return code;
     }
@@ -1235,13 +1249,15 @@ export async function runListenerRuntime(
           checks: 1,
           stopAtMs: atMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
           code: confirmedLossCode(error),
-          edge: error instanceof DeliveryHttpError || error instanceof CommandHttpError
+          edge: error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+              error instanceof RenewalCredentialCheckError
             ? "command" : "read",
         };
       } else {
         credentialWindow.checks += 1;
         credentialWindow.code = confirmedLossCode(error);
-        credentialWindow.edge = error instanceof DeliveryHttpError || error instanceof CommandHttpError
+        credentialWindow.edge = error instanceof DeliveryHttpError || error instanceof CommandHttpError ||
+          error instanceof RenewalCredentialCheckError
           ? "command" : "read";
         credentialWindow.stopAtMs = projectCredentialStopAt(atMs);
       }
@@ -1351,7 +1367,9 @@ export async function runListenerRuntime(
         }
         ackAttempt += 1;
         const delayMs = deliveryRetryDelay(ackAttempt, error, random);
-        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt: ackAttempt, delayMs, ts: eventTime(now) });
+        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt: ackAttempt, delayMs,
+          ...(error instanceof RenewalRetryError && error.expiresAt !== null
+            ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() } : {}), ts: eventTime(now) });
         await sleep(delayMs, abort);
         if (abort?.aborted) return { reason: "cancelled" };
         if (ackAttempt % LISTENER_CLAIM_REFUSALS_BEFORE_READ === 0) {
@@ -1427,6 +1445,11 @@ export async function runListenerRuntime(
           },
         });
         requireCapabilities(page);
+        if (page.rawCount >= pageLimit && page.nextCursor === null) {
+          throw new SignalMalformedError(
+            "the read service returned a full page without a safe cursor",
+          );
+        }
         applyWakeHint(page.wake);
         emitWake();
         if (readEpisodeStartedAtMs !== null) {
@@ -1480,10 +1503,11 @@ export async function runListenerRuntime(
           continue;
         }
         const failure = classifySignalReadFailure(error);
-        const transientRead = !fatalReadRefusal(error) && (isRetryableFollowError(error) ||
+        const transientRead = error instanceof RenewalRetryError ||
+          (!fatalReadRefusal(error) && (isRetryableFollowError(error) ||
           isForeignReadResponseFailure(error) ||
           failure.code === "aborted" ||
-          failure.code === "host_ports_exhausted");
+          failure.code === "host_ports_exhausted"));
         if (credentialWindow !== null && transientRead) {
           const decided = await holdCredentialWindow("transient", error);
           if (decided !== "continue") {
@@ -1509,9 +1533,13 @@ export async function runListenerRuntime(
             episodeAttempt: readEpisodeAttempts,
             episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
             failure,
-            code: error instanceof ListenerCapabilityError ? error.code
+            code: error instanceof RenewalRetryError ? error.code
+              : error instanceof ListenerCapabilityError ? error.code
               : failure.code === "http_status" ? `http_${failure.httpStatus}`
               : failure.code,
+            ...(error instanceof RenewalRetryError && error.expiresAt !== null
+              ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() }
+              : {}),
             delayMs,
             ts: new Date(failedAtMs).toISOString(),
           });
@@ -1772,6 +1800,8 @@ export async function runListenerRuntime(
                 code: deliveryRetryCode(error),
                 attempts: claimRefusals,
                 delayMs,
+                ...(error instanceof RenewalRetryError && error.expiresAt !== null
+                  ? { renewalExpiresAt: new Date(error.expiresAt).toISOString() } : {}),
                 ts: eventTime(now),
               });
             }
@@ -2127,16 +2157,7 @@ export async function runListenerRuntime(
 
       const fullPage = page.rawCount >= pageLimit;
       if (fullPage) {
-        if (page.nextCursor === null) {
-          stop = {
-            reason: "fatal",
-            error: new Error(
-              "the read service returned a full page without a safe cursor",
-            ),
-          };
-          break;
-        }
-        after = page.nextCursor;
+        after = page.nextCursor!;
         continue;
       }
       // Full scan complete. Reset so late commits with older timestamps appear.

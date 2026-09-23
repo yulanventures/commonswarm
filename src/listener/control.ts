@@ -214,6 +214,8 @@ export interface ListenerStatus {
    * files omit it.
    */
   credentialStopAt?: string | null;
+  /** Expiry of the current token while a renewal retry is in progress. */
+  renewalExpiresAt?: string | null;
   credentialCheckEdge?: "read" | "command" | null;
   claimRetryCount?: number;
   logPath: string;
@@ -327,6 +329,7 @@ const STATUS_ALLOWED_KEYS = new Set([
   "wake",
   "nextAttemptAt",
   "credentialStopAt",
+  "renewalExpiresAt",
   "credentialCheckEdge",
   "claimRetryCount",
   "projectDirectory",
@@ -658,6 +661,7 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
         Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0)) ||
     !(row.nextAttemptAt === undefined || nullableTimestamp(row.nextAttemptAt)) ||
     !(row.credentialStopAt === undefined || nullableTimestamp(row.credentialStopAt)) ||
+    !(row.renewalExpiresAt === undefined || nullableTimestamp(row.renewalExpiresAt)) ||
     !(row.credentialCheckEdge === undefined || row.credentialCheckEdge === null ||
       row.credentialCheckEdge === "read" || row.credentialCheckEdge === "command") ||
     !(row.claimRetryCount === undefined ||
@@ -729,6 +733,8 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     ...(row.cswarmVersion === undefined
       ? {}
       : { cswarmVersion: row.cswarmVersion as string | null }),
+    ...(row.renewalExpiresAt === undefined ? {}
+      : { renewalExpiresAt: (row.renewalExpiresAt ?? null) as string | null }),
     routeMode,
     deferOverChars,
     pendingForMainCount: (row.pendingForMainCount ?? 0) as number,

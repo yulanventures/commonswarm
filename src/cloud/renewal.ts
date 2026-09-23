@@ -37,11 +37,10 @@
  *   ambiguity    the command id is PERSISTED before the request and kept on a 5xx or a
  *                transport failure, so the next attempt is a replay and not a second mint.
  *
- * WHEN RENEWAL FAILS, THE COMMAND STILL RUNS. Renewal happens ahead of expiry, so a
- * refusal usually arrives while the predecessor is still perfectly good. Turning that into
- * a user-visible failure would trade a silent success for a loud one. So a failed renewal
- * on a live predecessor is a warning; it is fatal only once the predecessor is actually
- * unusable, and then it is a sentence naming the command a person should run.
+ * WHEN RENEWAL FAILS, a one-shot command may use its still-live predecessor.
+ * The listener instead retries renewal with capped backoff and publishes the
+ * current token expiry. A recognized authentication answer enters its normal
+ * credential confirmation window.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -212,11 +211,41 @@ export class RenewalOutcomeUnknown extends Error {
   }
 }
 
+/** A network answer whose renewal envelope or successor fields are malformed. */
+export class RenewalMalformedResponseError extends RenewalOutcomeUnknown {
+  override name = "RenewalMalformedResponseError";
+}
+
+/** Only a recognized command-edge authentication code is a credential sample. */
+export class RenewalCredentialCheckError extends Error {
+  override name = "RenewalCredentialCheckError";
+  constructor(readonly status: number, readonly code: string) {
+    super(`renewal command refused the credential (${code})`);
+  }
+}
+
+/** The listener retries renewal before using its current token again. */
+export class RenewalRetryError extends Error {
+  override name = "RenewalRetryError";
+  readonly code = "renewal_retry";
+  constructor(readonly expiresAt: number | null) {
+    super("credential renewal is retrying");
+  }
+}
+
 /** Anything else the deployment said. */
 export class RenewalRefused extends Error {
   override name = "RenewalRefused";
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
+  }
+}
+
+/** The command edge's version gate cannot clear until this binary is updated. */
+export class RenewalUpgradeRequiredError extends RenewalRefused {
+  override name = "RenewalUpgradeRequiredError";
+  constructor(minimum: string) {
+    super(426, "upgrade_required", `This copy of cswarm is older than the deployment accepts (minimum ${minimum}). Update cswarm, then restart the listener.`);
   }
 }
 
@@ -300,28 +329,8 @@ function reauthorisationMessage(
 /**
  * The reasons the deployment names when a lineage, grant, or predecessor was really revoked.
  *
- * ★ EXPORTED AS A TUPLE SO THE TEST CANNOT FALL BEHIND IT (D-011 review, Mica).
- *
- * This was a private Set, mirrored by hand in the test's code-to-cause map. I claimed the
- * mirror was safe because an unknown code would trip the test's unclassified-code guard.
- * That claim was FALSE, and Mica proved it: the class test only ever sends the reasons its
- * own fixture lists, so a sixth reason added here is never presented, never observed, and
- * never rejected — the suite stayed 15/15 green with the production set silently wider than
- * the test's understanding of it.
- *
- * The tuple is the fix, and the enforcement is at RUNTIME: the test imports this same tuple
- * and DERIVES its input space from it, so a reason added here is presented automatically,
- * comes back as an unclassified refusal code, and fails the class test. Nobody has to
- * remember to add a fixture.
- *
- * The test also maps this tuple through `Record<RefusalCode, …>`, which would be a second,
- * compile-time line of defence — except that `tsconfig.json` is `include: ["src/**\/*.ts"]`
- * and no script typechecks `tests/`, so that annotation is inert here today. Measured, not
- * assumed: adding a sixth reason leaves `npx tsc --noEmit` at exit 0. Treat it as editor help
- * and as something that becomes real if tests are ever typechecked — not as what catches this.
- *
- * Exporting a private constant is a real cost; a guard that cannot see the thing it guards
- * is a bigger one.
+ * This tuple remains the source of recognized named revocations in a successful
+ * command envelope. A bare HTTP refusal cannot establish one of these causes.
  */
 export const REVOCATION_REASONS_LIST = [
   "renewal_lineage_revoked",
@@ -335,13 +344,8 @@ export const REVOCATION_REASONS_LIST = [
 export type RevocationReason = (typeof REVOCATION_REASONS_LIST)[number];
 
 /**
- * Every code the 401/403 branch can attach to a `RenewalRevoked`. Exported so a test can key
- * an exhaustive `Record<…>` on the real set rather than on a hand-copied one.
- *
- * That exhaustiveness is a TYPE-LEVEL claim, and type-level claims are not checked in this
- * repo's `tests/` — see the note on REVOCATION_REASONS_LIST above. What actually enforces the
- * set today is the tuple-derived input space in
- * `tests/p1-cli/renewal-refusal-cause.test.ts`, at runtime.
+ * Retained for callers that name the old refusal-code type. Bare HTTP 401/403
+ * no longer assigns these causes; only a recognized command response can.
  */
 export type RefusalCode =
   | RevocationReason
@@ -355,40 +359,6 @@ const REVOKED_MESSAGE =
   "This agent credential is no longer accepted, and renewal cannot bring it back — that is deliberate: revoking a credential, a device, or a person's membership revokes everything descended from it. Ask whoever runs this workspace what was revoked and why, then get a new credential from them.";
 
 /**
- * ★ SAID WHERE THE CLIENT MEASURED EXPIRY AND THE DEPLOYMENT NAMED NOTHING, SO IT MUST STAY
- * TRUE IF A REVOCATION ALSO HAPPENED.
- *
- * A 401 does not distinguish the two — the deployment answers a uniform `forbidden` on
- * purpose, so that a caller cannot enumerate which credentials exist. The one thing that IS
- * known here is local and checkable: this credential is past the expiry it carries. So the
- * message claims exactly that and nothing more. It does not say "nothing was revoked", which
- * would be an assertion about the thing we cannot see, and it does not promise a re-issue
- * will work — if the lineage was revoked, a fresh credential from the same principal fails
- * too, so the last sentence sends them on to the revocation question instead of leaving
- * them to discover it a second time.
- */
-const LOCALLY_EXPIRED_MESSAGE =
-  "This agent credential is past its own expiry, so renewal cannot bring it back. Ask whoever set this agent up for a new one. The deployment does not say why a credential was refused, so if a fresh one is refused too, ask them whether this agent's access was revoked as well.";
-
-/**
- * ★ SAID WHERE NOTHING AT ALL WAS ESTABLISHED, WHICH IS MOST OF THE TIME (D-011).
- *
- * No reason came back and the credential is not measurably past its expiry — often because
- * it carries no expiry the client can read. Until D-011 this fell to REVOKED_MESSAGE, so the
- * client named revocation on no evidence whatever: the same defect as D-004, reached by a
- * different input, and it is the one the operator hits by default.
- *
- * The honest sentence is the short one. The deployment refused and will not say why — that
- * is not evasion, it is the no-enumeration rule doing its job, so it is worth saying out
- * loud rather than leaving the silence to look like a bug. Naming neither cause costs the
- * reader nothing, because the remedy is identical either way: go to the person who can
- * actually see the answer. The last clause asks about access without asserting anything
- * about it, which is the whole difference between this and what it replaces.
- */
-const UNEXPLAINED_REFUSAL_MESSAGE =
-  "This agent credential was refused, and the deployment does not say why — it answers every refusal identically on purpose, so that nobody can discover which credentials exist by asking. Renewal cannot get past that. Ask whoever runs this workspace for a new credential, and whether this agent's access was changed.";
-
-/**
  * One successor request. Does no storage and no scheduling — the caller owns both, so this
  * stays a reviewable statement of what goes on the wire and what comes back.
  */
@@ -399,9 +369,8 @@ export async function requestSuccessor(options: {
   predecessor: string;
   commandId: string;
   /**
-   * The predecessor's own expiry, when it is known. Read ONLY to tell an expired credential
-   * apart from a revoked one at 401/403, where the deployment says neither. Null means the
-   * client cannot tell, and the generic message stands.
+   * Retained for existing callers. A single HTTP answer never infers a cause
+   * from this local expiry; the listener confirms server credential answers.
    */
   expiresAt?: number | null;
   fetcher?: typeof fetch;
@@ -451,67 +420,46 @@ export async function requestSuccessor(options: {
   let body: Record<string, unknown> = {};
   try {
     const text = await response.text();
-    if (text) body = JSON.parse(text) as Record<string, unknown>;
+    if (text) {
+      const parsed: unknown = JSON.parse(text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new RenewalMalformedResponseError("renewal response was not an object");
+      }
+      body = parsed as Record<string, unknown>;
+    }
   } catch {
-    body = {};
+    throw new RenewalMalformedResponseError("renewal response was not valid JSON");
+  }
+  if (body.principal_id !== undefined && body.principal_id !== null &&
+      (typeof body.principal_id !== "string" || !UUID_RE.test(body.principal_id))) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed principal_id");
   }
   const principalId = typeof body.principal_id === "string" &&
       UUID_RE.test(body.principal_id)
     ? body.principal_id.toLowerCase()
     : null;
 
-  if (response.status === 400 || response.status === 404) {
-    // A deployment that predates renewal refuses `renew_agent_token` as an unknown
-    // command kind. That is the state of every deployment until this ships, so it is a
-    // supported outcome and not a failure: the credential keeps working for its hour.
-    throw new RenewalUnsupported(
-      "this deployment does not offer credential renewal yet, so a credential here still has to be re-issued by hand when it expires",
-    );
-  }
   if (response.status === 401 || response.status === 403) {
-    /* PRECEDENCE, AND WHY IT IS THIS WAY ROUND (D-004).
-     *
-     * 1. A named revocation wins, if one is ever present. It is not today — the command
-     *    function answers 401/403 with a bare `{ error }` and no reason, by design — but the
-     *    consequences differ enough that the order has to be written down rather than left
-     *    to whichever branch happens to come first. Revocation ends the whole lineage, so
-     *    re-issuing from the same principal fails again; expiry just needs a fresh
-     *    credential. Calling a revocation "expiry" sends someone down a path that dead-ends.
-     * 2. Otherwise, a credential past its own expiry reports expiry. That is the case this
-     *    branch used to get wrong: the credential timed out, nothing was revoked, and the
-     *    operator was sent looking for a revocation that never happened.
-     * 3. Otherwise, NAME NOTHING (D-011). Nothing was sent and nothing was measured, so the
-     *    refusal itself is the only fact in hand and it is the only thing said. This used to
-     *    reach for the revocation message, which is how the default path came to assert a
-     *    cause on no evidence at all. */
-    const named = typeof body.reason === "string" && REVOCATION_REASONS.has(body.reason)
-      ? body.reason
-      : null;
-    if (named !== null) throw new RenewalRevoked(named, REVOKED_MESSAGE);
-    const expiresAt = options.expiresAt ?? null;
-    if (expiresAt !== null && now() >= expiresAt) {
-      throw new RenewalRevoked("predecessor_expired_local", LOCALLY_EXPIRED_MESSAGE);
+    if (response.status === 401 && body.error === "unauthenticated") {
+      throw new RenewalCredentialCheckError(response.status, "unauthenticated");
     }
-    throw new RenewalRevoked("forbidden", UNEXPLAINED_REFUSAL_MESSAGE);
+    throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
   }
   if (response.status === 426) {
-    const minimum = typeof body.min_client_version === "string"
-      ? body.min_client_version
-      : null;
-    throw new RenewalRefused(
-      response.status,
-      "upgrade_required",
-      `This copy of cswarm is older than the deployment accepts${
-        minimum === null ? "" : ` (minimum ${minimum})`
-      }. Update cswarm; until then this credential cannot renew itself.`,
-    );
+    if (body.error !== "upgrade_required" || typeof body.min_client_version !== "string") {
+      throw new RenewalOutcomeUnknown("renewal command answered an unrecognized HTTP 426");
+    }
+    throw new RenewalUpgradeRequiredError(body.min_client_version);
   }
   if (!response.ok) {
-    throw new RenewalRefused(
-      response.status,
-      typeof body.error === "string" ? body.error : "unknown",
-      `The deployment did not renew this credential (HTTP ${response.status}).`,
-    );
+    throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
+  }
+
+  if (body.status !== "accepted" && body.status !== "rejected") {
+    throw new RenewalMalformedResponseError("renewal response did not carry a command status");
+  }
+  if (body.status === "accepted" && body.ok !== true) {
+    throw new RenewalMalformedResponseError("renewal response did not confirm acceptance");
   }
 
   /* A REFUSED RENEWAL ARRIVES AS HTTP 200. The command function answers a domain refusal
@@ -521,7 +469,10 @@ export async function requestSuccessor(options: {
    * the missing token with a shrug. The reason strings are the reducer's
    * RenewalRejectionReason union. */
   if (body.status === "rejected") {
-    const reason = typeof body.reason === "string" ? body.reason : "unknown";
+    if (typeof body.reason !== "string") {
+      throw new RenewalMalformedResponseError("renewal rejection did not name a reason");
+    }
+    const reason = body.reason;
     if (
       reason === "renewal_idle_suspended" ||
       reason === "renewal_grant_suspended"
@@ -576,62 +527,62 @@ export async function requestSuccessor(options: {
           : "The standing grant is bound to another device, so CommonSwarm refused renewal. Ask a workspace owner to revoke this grant and mint a new credential on the intended device.",
       );
     }
-    throw new RenewalRefused(
-      200,
-      reason,
-      `The deployment refused to renew this credential (${reason}).`,
-    );
+    throw new RenewalMalformedResponseError("renewal rejection named an unknown reason");
   }
 
-  const token = typeof body.agent_token === "string" ? body.agent_token : "";
-  if (!token) {
-    // A replay. The server keeps only a hash, so the successor it already issued cannot
-    // be handed over a second time. Not an error here — the caller decides.
-    return null;
+  if (body.agent_token !== undefined && typeof body.agent_token !== "string") {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed agent_token");
   }
-  if (!AGENT_TOKEN_RE.test(token)) {
-    throw new RenewalRefused(
-      response.status,
-      "malformed_successor",
+  const token = typeof body.agent_token === "string" ? body.agent_token : "";
+  if (token && !AGENT_TOKEN_RE.test(token)) {
+    throw new RenewalMalformedResponseError(
       "The deployment returned a credential that is not shaped like one. It was not stored.",
     );
   }
   const tokenId = typeof body.token_id === "string" ? body.token_id : "";
   const runId = typeof body.run_id === "string" ? body.run_id : "";
   if (!UUID_RE.test(tokenId) || !UUID_RE.test(runId) || principalId === null) {
-    throw new RenewalRefused(
-      response.status,
-      "incomplete_successor",
+    throw new RenewalMalformedResponseError(
       "A successor credential was issued but the deployment did not name its principal, run, or token. It was not stored; ask an owner to revoke it.",
     );
   }
-  const issuedAt = timestamp(body.issued_at) ?? now();
+  const parsedIssuedAt = timestamp(body.issued_at);
+  if (body.issued_at !== undefined && parsedIssuedAt === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed issued_at");
+  }
+  const issuedAt = parsedIssuedAt ?? now();
   const expiresAt = timestamp(body.expires_at);
   if (expiresAt === null) {
-    throw new RenewalRefused(
-      response.status,
-      "successor_expiry_missing",
+    throw new RenewalMalformedResponseError(
       "A successor credential was issued without an expiry. It was not stored, because a credential whose lifetime is unknown cannot be renewed on time.",
     );
   }
   if (expiresAt - issuedAt > AGENT_TOKEN_MAX_TTL_MS) {
     // The whole point of renewal is that the token stays short. A deployment offering a
     // long one is the failure this design exists to prevent, so refuse it here too.
-    throw new RenewalRefused(
-      response.status,
-      "successor_ttl_too_long",
+    throw new RenewalMalformedResponseError(
       "The deployment issued a successor credential that lasts longer than eight hours. cswarm refused to store it. Agent credentials stay short on purpose; renewal is what makes that survivable.",
     );
+  }
+  const horizonExpiresAt = timestamp(body.horizon_expires_at);
+  if (body.horizon_expires_at !== undefined && body.horizon_expires_at !== null && horizonExpiresAt === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed horizon_expires_at");
+  }
+  const successorsRemaining = count(body.successors_remaining);
+  if (body.successors_remaining !== undefined && body.successors_remaining !== null && successorsRemaining === null) {
+    throw new RenewalMalformedResponseError("renewal response carried a malformed successors_remaining");
   }
   let wake: WakeHint | undefined;
   try {
     wake = parseOptionalWakeHint(body.wake);
   } catch {
-    throw new RenewalRefused(
-      response.status,
-      "malformed_wake",
+    throw new RenewalMalformedResponseError(
       "The deployment returned a successor credential with a malformed wake hint. It was not stored.",
     );
+  }
+  if (!token) {
+    // A replay identifies its successor and expiry, but never repeats its secret.
+    return null;
   }
   return {
     token,
@@ -640,8 +591,8 @@ export async function requestSuccessor(options: {
     runId: runId.toLowerCase(),
     issuedAt,
     expiresAt,
-    horizonExpiresAt: timestamp(body.horizon_expires_at),
-    successorsRemaining: count(body.successors_remaining),
+    horizonExpiresAt,
+    successorsRemaining,
     ...(wake === undefined ? {} : { wake }),
   };
 }
@@ -670,6 +621,8 @@ export interface AgentCredentialSessionOptions {
   fetcher?: typeof fetch;
   now?: () => number;
   warn?: (message: string) => void;
+  /** Listener retries expose renewal failures to its capped runtime backoff. */
+  listenerMode?: boolean;
 }
 
 interface PendingRenewal {
@@ -693,7 +646,6 @@ export class AgentCredentialSession {
   private successorsRemaining: number | null = null;
   private pending: PendingRenewal | null = null;
   private inFlight: Promise<void> | null = null;
-  private unsupported = false;
   private renewals = 0;
   /**
    * Whether `token` is a SUCCESSOR rather than the credential piped in.
@@ -837,7 +789,6 @@ export class AgentCredentialSession {
    * bricked by the feature meant to keep it alive. So with no store, this never renews.
    */
   private due(): boolean {
-    if (this.unsupported) return false;
     if (this.options.store === null) return false;
     /* ★ AN UNKNOWN EXPIRY MEANS NO RENEWAL, AND THE ALTERNATIVE IS WORSE THAN IT LOOKS.
      * The obvious move for a credential whose deadline is unknown is to renew on first use
@@ -881,22 +832,29 @@ export class AgentCredentialSession {
         }
         return this.token;
       }
-      if (this.expired() || error instanceof RenewalRevoked) throw error;
-      if (error instanceof RenewalUnsupported) {
-        this.unsupported = true;
-        this.warn(`${(error as Error).message}.`);
-      } else if (
-        error instanceof RenewalReauthorisationRequired ||
-        error instanceof RenewalSuspended
-      ) {
-        throw error;
-      } else {
-        this.warn(
-          `${
-            (error as Error).message
-          }. The credential in hand is still valid, so this command went ahead; renewal is retried on the next one.`,
+      if (error instanceof RenewalCredentialCheckError ||
+          error instanceof RenewalUpgradeRequiredError ||
+          error instanceof RenewalReauthorisationRequired ||
+          error instanceof RenewalSuspended ||
+          error instanceof RenewalRevoked) throw error;
+      const retryableRenewalOutcome = error instanceof RenewalOutcomeUnknown ||
+        error instanceof RenewalRefused || error instanceof RenewalUnsupported;
+      if (this.options.listenerMode && retryableRenewalOutcome && this.expired()) {
+        throw new RenewalRevoked(
+          "predecessor_expired_local",
+          "The current credential expired while renewal was unavailable. Ask whoever set this agent up for a new credential.",
         );
       }
+      if (this.options.listenerMode && retryableRenewalOutcome) {
+        throw new RenewalRetryError(this.expiresAt);
+      }
+      if (this.options.listenerMode) throw error;
+      if (this.expired()) throw error;
+      this.warn(
+        `${
+          (error as Error).message
+        }. The credential in hand is still valid, so this command went ahead; renewal is retried on the next one.`,
+      );
     }
     return this.token;
   }
@@ -954,8 +912,7 @@ export class AgentCredentialSession {
         workspaceId: this.options.workspaceId,
         predecessor: this.token,
         commandId,
-        // Only so a 401 on an already-expired credential is reported as expiry, not
-        // revocation (D-004). Never sent on the wire.
+        // Kept for callers that still pass expiry; no HTTP answer alone proves loss.
         expiresAt: this.expiresAt,
         ...(this.options.fetcher ? { fetcher: this.options.fetcher } : {}),
         now: this.clock,

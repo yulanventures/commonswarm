@@ -95,7 +95,7 @@ Constants in `src/listener/runtime.ts`:
 | `CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS` | 300000 (five minutes) |
 | `CREDENTIAL_LOSS_CONFIRM_WINDOW_MS` | 600000 (ten minutes), `(MIN_CHECKS - 1) * INTERVAL` |
 
-A successful read or claim clears the window and the listener is `ready` again. A transient failure (network, timeout, 5xx, or a 401/403 that is not a confirmed code) does not count as a check and does not clear the window. The stated stop time moves out by the remaining intervals. `cswarm listen stop` aborts the wait and the listener ends `stopped`. A local renewal stop or a missing local secret still stops at once: those are not a server answer.
+A successful read or claim clears the window and the listener is `ready` again. A transient failure (network, timeout, 5xx, or a 401/403 that is not a confirmed code) does not count as a check and does not clear the window. The stated stop time moves out by the remaining intervals. `cswarm listen stop` aborts the wait and the listener ends `stopped`. A locally known renewal horizon or a missing local secret still stops at once. A renewal HTTP credential answer enters the confirmation window; Fold 7 supersedes the earlier statement about all renewal stops.
 
 `forbidden` confirms a lost credential only on the read edge. On the command edge the only confirmed code is `unauthenticated`. `COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES` is that one-element list. `CONFIRMED_CREDENTIAL_LOSS_CODES` stays the read-edge list (`unauthenticated`, `forbidden`).
 
@@ -334,3 +334,39 @@ Mutation control: forcing HTTP 405 into the command fatal check made the foreign
 | `bash scripts/build-release.sh` | 0 | Single-file CLI built and execute-checked at version 0.1.72. |
 
 The requested range `git diff --check a9846955...HEAD` is recorded after the fold commit. No hosted edge or production box was contacted. No live workspace behavior was established. The H0 edge producer is absent from this checkout, so its live refusal was not established here.
+
+## Fold 7
+
+This fold closes the response-parser class of failures. A network answer with malformed content now produces a tagged, retryable malformed error. Local request validation and journal/effect inconsistencies retain their local fatal classes. A full read page with no safe cursor is checked inside the read retry handler, before effects from that page run. A recognized renewal `401 unauthenticated` is a command-edge credential sample and enters the three-check window. Foreign renewal answers, including HTML 404, retry with capped backoff and leave the credential session able to renew later. While retrying, status records `renewal_retry`, the current token's expiry, and the next attempt. After that known expiry, a still-unknown renewal outcome becomes a local expiry stop; a recognized credential answer still goes through the window. The listener only retries that renewal in listener mode; one-shot CLI commands may use a still-live predecessor. A recognized command `426 upgrade_required` is fatal with installer and npm update commands and a restart action, including on renewal. Read `405 method_not_allowed` now retries because an intervening redirect can turn the client's POST into GET. All four ACK session-proof codes name the session action in status. The failed credential state retains the answering edge and keeps the credential code names in its sentence.
+
+### Response throw-site audit
+
+The locations below are line numbers in this fold's sources. Each listed throw is in a network-response parser or its validating helper. The structural AST test starts at the read-page and directory parsers, claim and ACK parsers, accepted-envelope parser, and renewal response parser, follows their same-file helper calls, and fails on `throw new Error` or a delivery parser's `throw new DeliveryProtocolError`. Local caller-input checks are outside those parser roots. The tagged classes are:
+
+| Surface | Response throw sites | Class and retry route |
+|---|---|---|
+| Signal page | `checkedUuid` 275; `checkedBoolean` 286; `checkedTimestamp` 293; `deliveryCapabilityMarker` 309; `pendingDeliveryCountOf` 344; `parseSignalRecipients` 403, 410, 423, 427; `parseSignalRecord` 476, 489, 499; `parseSignalRows` 592; `plainMalformedError` 266 (returned and thrown by callers) | `SignalMalformedError`; `malformed_response` read retry. |
+| Signal directory | `parseAgentMemberRow` 1322, 1326, 1329, 1333; `parseMemberRow` 1348, 1352; `parseAgentIdentity` 1362, 1366, 1373; `readAgentSignalDirectory` malformed body 1422, 1426, malformed agents 1435 | `SignalMalformedError`; tagged malformed response. The directory's transport sites 1410, 1415 use `SignalTransportError`. |
+| Full page cursor | `runtime.ts` after `requireCapabilities` | `SignalMalformedError`; caught before effects, then `malformed_response` read retry. |
+| Claim/ACK | `checkedUuid` 320; `checkedRfc3339Timestamp` 352, 358, 376, 385, 392; `checkedLiveLease` 402; `checkedRelation` 413; `checkedNonNegativeCount` 423; `checkedClaimCapabilities` 433, 440; `checkedOptionalUuidArray` 455; `checkedOptionalArray` 465; `checkedRecipientSlot` 488, 498; `parseDeliveryRow` 512, 521, 526, 540, 545; `parseClaimSuccess` 579, 583, 591, 602, 608, 615, 628, 636; `parseAckSuccess` 652, 658, 665, 670 | `DeliveryMalformedResponseError` (subclass of `DeliveryResponseError`); `malformed_response` claim/ACK retry. `successBody` 767, 774 already throws `DeliveryResponseError` and retries. |
+| Renewal | `requestSuccessor` malformed JSON/object and principal 426, 431, 435; command status/reason 459, 462, 473, 530; accepted successor fields 534, 538, 545, 551, 556, 563, 569, 573, 579 | `RenewalMalformedResponseError` (subclass of `RenewalOutcomeUnknown`); listener `RenewalRetryError` and capped retry. Transport/unknown outcome 403, 407, 415, 446, 450, 455 uses `RenewalOutcomeUnknown`. Recognized credential answer 444 uses `RenewalCredentialCheckError`; the recognized version gate 452 uses `RenewalUpgradeRequiredError`. Known domain rejections use their distinct refusal classes; locally established grant and lineage stops retain their existing classes. |
+
+The independent fatal-pair test lists expected edge answers separately from `READ_FATAL_ANSWERS` and `COMMAND_FATAL_ANSWERS`. It includes `426 upgrade_required` from `supabase/functions/command/index.ts:9122-9135`. The H0 fence producer now exists on `origin/main` at `supabase/functions/command/h0-seat.ts` (`H0_SEAT_CLAIM_REFUSED`); this branch has not merged main, so Fold 6's no-producer observation describes only that older checkout.
+
+Proving tests: `tests/listener-runtime.test.ts` exercises malformed claim pending count, a full read page with a malformed last row, real `AgentCredentialSession` renewal 401 and foreign 404 through the runtime, renewal status and expiry through the supervisor, the independent fatal-pair set and `426` stop sentence, read 405 recovery, and ACK status for each session code. `tests/p1-cli/renewal-refusal-cause.test.ts` exercises recognized and foreign renewal answers, continued renewal attempts, and tagged malformed successors. `tests/listener-cli-process.test.ts` starts a detached listener against a loopback read/command fixture, records [fold7-detached-status.json](fold7-detached-status.json) with `failed` and `upgrade_required`, and stops it. It started no model and contacted no real workspace. Every new test has a timeout.
+
+Mutation controls, each in one invocation with a positive control: changing the recognized renewal 401 branch to `RenewalRevoked` failed the window test while the foreign 404 test passed (exit 1, 1 pass/1 fail); changing a delivery parser throw to plain `Error` failed the AST test while the read 405 test passed (exit 1, 1 pass/1 fail); removing the 426 fatal member failed the independent pair test while the ACK test passed (exit 1, 1 pass/1 fail). Source bytes were restored after each mutation.
+
+### Fold 7 gates and limits
+
+The final source state was checked with an isolated temporary home and `FORCE_COLOR` unset for the test suites. The required gates returned these real exit codes:
+
+| Gate | Exit | Result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 940 tests: 938 passed, 2 failed, 0 skipped. The failures were the real `ps` and real resume process-table checks; this sandbox denies `ps` with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 818 tests: 815 passed, 3 failed, 0 skipped. The failures were real `ps`, real resume, and whoami's `ps` check; this sandbox denies `ps` with `spawn EPERM` or `spawnSync ps EPERM`. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file CLI built and execute-checked at version 0.1.72. |
+
+The isolated home prevented tests from reading or writing the real `~/.cswarm` and `~/.config/cswarm` paths. An earlier unisolated suite invocation failed on protected-home `EPERM` writes and the resulting credential-store warnings; the final suite above is the isolated measurement. The detached product test used a temporary `--state-dir`, wrote the redacted status artifact linked above, and stopped its local fixture listener. This fold did not establish a green full-suite result where `ps` is available, a production release, or behavior against a real workspace or hosted edge. No production host or real workspace was contacted, and no merge from main was made.

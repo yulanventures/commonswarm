@@ -3100,6 +3100,7 @@ async function agentSession(
   workspaceId: string,
   agent: AgentCredentialInput,
   fetcher?: typeof fetch,
+  listenerMode = false,
 ): Promise<AgentCredentialSession> {
   let store: Awaited<ReturnType<typeof agentCredentialStore>> | null = null;
   try {
@@ -3131,6 +3132,7 @@ async function agentSession(
       expiresAt: agent.expiresAt,
     },
     store,
+    listenerMode,
     ...(fetcher ? { fetcher } : {}),
   });
 }
@@ -5694,11 +5696,15 @@ export function listenerStatusJson(
   };
 }
 
+const CSWARM_UPDATE_INSTALLER = "curl -fsSL https://commonswarm.com/install.sh | sh";
+const CSWARM_UPDATE_NPM = "npm install -g commonswarm";
+const CSWARM_UPGRADE_STOP = `The command edge requires a newer cswarm (upgrade_required). Update with ${CSWARM_UPDATE_INSTALLER} or ${CSWARM_UPDATE_NPM}, then restart the listener.`;
+
 function credentialStoppedSentence(edge: "read" | "command" | null = null): string {
   const codes = (edge === "command"
     ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
-  return `the server refused this credential${edge === null ? "" : ` (${codes} means revoked, expired, or unknown)`}, a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+  return `the server refused this credential (${codes} means revoked, expired, or unknown), a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
 }
 
 function credentialCheckSentence(status: ListenerStatus): string | null {
@@ -5711,6 +5717,9 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
+  if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with capped backoff; leave it running and check the command edge if renewal does not recover.`;
+  }
   if (!LISTENER_RUNNING_STATES.includes(status.state) ||
       typeof status.nextAttemptAt !== "string" ||
       (status.state !== "starting" && status.lastRetryEdge !== "read")) {
@@ -5743,11 +5752,13 @@ function listenerDownSentence(status: ListenerStatus): string | null {
   if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
     return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
   }
+  if (status.lastErrorCode === "upgrade_required") return CSWARM_UPGRADE_STOP;
   const code = status.lastErrorCode ?? "no code recorded";
   return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
 }
 
 function listenerDeliveryRetrySentence(status: ListenerStatus): string | null {
+  if (status.lastErrorCode === "renewal_retry") return null;
   if (status.lastRetryEdge === "read") return null;
   const when = status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff";
   const code = status.lastErrorCode ?? "no code recorded";
@@ -5758,6 +5769,9 @@ function listenerDeliveryRetrySentence(status: ListenerStatus): string | null {
     return `The claim failed (${code}) ${status.claimRetryCount ?? 0} times. ${code === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${when}, reading signals after repeated failures.`;
   }
   if (status.state === "ack_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The delivery acknowledgement is refused (${code}); this managed seat needs a live session. CONNECTED is no while acknowledgements fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
     return `The delivery acknowledgement failed (${code}). The inbox is waiting on this acknowledgement. The listener will try again${when} and read signals after repeated failures.`;
   }
   return null;
@@ -6206,6 +6220,7 @@ export function listenerFailureMessage(
   minimumRequiredVersion?: string | null,
   credentialEdge: "read" | "command" | null = null,
 ): string {
+  if (code === "upgrade_required") return CSWARM_UPGRADE_STOP;
   if (code === "version_below_floor") {
     if (provider === "codex") {
       return "the Codex listener requires codex-acp 1.1.9 or newer; update the bridge, then retry";
@@ -6543,6 +6558,7 @@ async function runConfiguredListener(options: {
       options.workspaceId,
       options.agent,
       boundFetch,
+      true,
     );
   } catch (error) {
     if (managedContextPath !== null) {

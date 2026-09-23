@@ -589,6 +589,7 @@ export async function runListenerSupervisor(
         readyAt: event.ts,
         nextAttemptAt: null,
         credentialStopAt: null,
+        renewalExpiresAt: null,
         // Deliberately does NOT clear consecutiveAckFailureCount. Reaching
         // `ready` is not provider proof: the permission canary is its own
         // prompt, and a provider can answer it and fail every real one --
@@ -702,6 +703,7 @@ export async function runListenerSupervisor(
         lastRetryEdge: "command",
         claimRetryCount: event.attempts,
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
         lastErrorDetail: null,
         nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
       });
@@ -716,6 +718,7 @@ export async function runListenerSupervisor(
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : null,
         lastErrorDetail: null,
         nextAttemptAt: null,
+        renewalExpiresAt: null,
       });
       return;
     }
@@ -724,6 +727,7 @@ export async function runListenerSupervisor(
       transition(status.credentialStopAt ? "credential_check" : "ack_retry", {
         lastRetryEdge: "command",
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
         lastErrorDetail: null,
         nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
       });
@@ -737,6 +741,7 @@ export async function runListenerSupervisor(
           lastErrorCode: null,
           lastErrorDetail: null,
           nextAttemptAt: null,
+          renewalExpiresAt: null,
         });
       }
       return;
@@ -745,6 +750,7 @@ export async function runListenerSupervisor(
       status = {
         ...status,
         lastErrorCode: event.code,
+        renewalExpiresAt: event.renewalExpiresAt ?? null,
         lastRetryEdge: "read",
         nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
         readHealth: recordListenerReadRetry(
@@ -781,6 +787,7 @@ export async function runListenerSupervisor(
         ...status,
         ...(status.lastRetryEdge === "read" ? {
           nextAttemptAt: null,
+          renewalExpiresAt: null,
           lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
             ? lastClaimRetryCode : status.state === "ack_retry" ? lastAckRetryCode : null,
           lastRetryEdge: (status.claimRetryCount && status.claimRetryCount > 0) ||
@@ -1106,6 +1113,7 @@ export async function runListenerSupervisor(
         providerMinimumRequiredVersion: null,
         nextAttemptAt: null,
         credentialStopAt: null,
+        renewalExpiresAt: null,
         credentialCheckEdge: null,
         claimRetryCount: 0,
       });
@@ -1126,7 +1134,10 @@ export async function runListenerSupervisor(
         lastWorkerStderrTail: failedStderrTail,
         nextAttemptAt: null,
         credentialStopAt: null,
-        credentialCheckEdge: null,
+        renewalExpiresAt: null,
+        credentialCheckEdge: stop.reason === "credential" &&
+            !(stop.error instanceof ListenerCredentialStateMismatchError)
+          ? status.credentialCheckEdge ?? null : null,
         claimRetryCount: 0,
       });
       // Record why it is down and why it stopped trying — a listener left down

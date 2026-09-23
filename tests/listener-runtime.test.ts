@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeSecureJsonFile } from "../src/cloud/storage.js";
 import test from "node:test";
+import ts from "typescript";
 import {
   CommandHttpError,
   SIGNAL_REQUEST_TIMEOUT_MS,
@@ -36,9 +38,12 @@ import {
   nextIdlePollMs,
 } from "../src/cloud/idle-poll.js";
 import {
+  AgentCredentialSession,
+  RenewalCredentialCheckError,
   RenewalReauthorisationRequired,
   RenewalRevoked,
 } from "../src/cloud/renewal.js";
+import type { AgentCredentialRecord, AgentCredentialStore } from "../src/cloud/agent-credential.js";
 import type {
   AgentSignalPage,
   SignalCursor,
@@ -95,6 +100,46 @@ import {
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL_ID = "22222222-2222-4222-8222-222222222222";
 const SENDER_OPERATOR_ID = "44444444-4444-4444-8444-444444444444";
+
+test("network response parser call graphs cannot throw an untagged Error", { timeout: 10_000 }, () => {
+  const roots: Record<string, string[]> = {
+    "src/cloud/signals.ts": ["agentSignalPage", "readAgentSignalDirectory"],
+    "src/cloud/delivery.ts": ["parseClaimSuccess", "parseAckSuccess", "successBody"],
+    "src/cloud/renewal.ts": ["requestSuccessor"],
+  };
+  for (const [path, entries] of Object.entries(roots)) {
+    const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
+    const functions = new Map<string, ts.FunctionDeclaration>();
+    source.forEachChild((node) => {
+      if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node);
+    });
+    const visited = new Set<string>();
+    const failures: string[] = [];
+    const visitFunction = (name: string): void => {
+      if (visited.has(name)) return;
+      const fn = functions.get(name);
+      assert.ok(fn, `${path}: parser root ${name} exists`);
+      visited.add(name);
+      const walk = (node: ts.Node): void => {
+        if (ts.isThrowStatement(node) && node.expression && ts.isNewExpression(node.expression) &&
+            ts.isIdentifier(node.expression.expression) &&
+            (node.expression.expression.text === "Error" ||
+              (path.endsWith("delivery.ts") && node.expression.expression.text === "DeliveryProtocolError"))) {
+          failures.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`);
+        }
+        // Request construction validates local caller input, not a network answer.
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+            node.expression.text !== "renewalCommand" && functions.has(node.expression.text)) {
+          visitFunction(node.expression.text);
+        }
+        ts.forEachChild(node, walk);
+      };
+      if (fn.body) walk(fn.body);
+    };
+    entries.forEach(visitFunction);
+    assert.deepEqual(failures, [], `${path} has plain Error throws in its response parser graph`);
+  }
+});
 
 const defaultPendingMainQueue = {
   async enqueue() {
@@ -3300,11 +3345,12 @@ test("HTTP 403 forbidden across the confirmation window stops the listener with 
     assert.match(checking, /Run cswarm whoami with this credential/);
     assert.equal(status.state, "failed");
     assert.equal(status.lastErrorCode, "credential_stopped");
+    assert.equal(status.credentialCheckEdge, "read");
     const rendered = renderListenerStatus(status);
     assert.match(rendered, /^Listener failed /);
     assert.match(rendered, /will not retry/);
     assert.match(rendered, /server refused this credential/);
-    assert.doesNotMatch(rendered, /unauthenticated or forbidden/);
+    assert.match(rendered, /unauthenticated or forbidden/);
     assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -3787,6 +3833,10 @@ test("foreign claim answers retry with a named next attempt and recover", { time
   for (const scenario of [
     { status: 200, body: "<html>wrong host</html>", code: "malformed_response" },
     { status: 404, body: '{"error":"missing_route"}', code: "http_404" },
+    { status: 401, body: '{"error":"session_expired"}', code: "session_expired" },
+    { status: 409, body: '{"error":"session_conflict"}', code: "session_conflict" },
+    { status: 401, body: '{"error":"session_proof_missing"}', code: "session_proof_missing" },
+    { status: 401, body: '{"error":"session_proof_invalid"}', code: "session_proof_invalid" },
     { status: 400, body: '{"error":"missing_route"}', code: "http_400" },
     ...[405, 408, 409, 413, 421, 422].map((status) => ({
       status, body: "<html>wrong host</html>", code: `http_${status}`,
@@ -3983,7 +4033,12 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
       assert.equal(observed[0]?.state, "ack_retry");
       assert.equal(observed[0]?.lastErrorCode, scenario.code);
       assert.ok(observed[0]?.nextAttemptAt);
-      assert.match(renderListenerStatus(observed[0]!), /delivery acknowledgement failed.*will try again at/);
+      const sentence = renderListenerStatus(observed[0]!);
+      if (scenario.code.startsWith("session_")) {
+        assert.match(sentence, new RegExp(`${scenario.code}.*Start or renew the seat's session, or stop the listener`));
+      } else {
+        assert.match(sentence, /delivery acknowledgement failed.*will try again at/);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -4095,7 +4150,17 @@ test("a well-formed command refusal stays fatal", { timeout: 15_000 }, async () 
 });
 
 test("each recognized read and command refusal is fatal while foreign answers retry", { timeout: 15_000 }, async () => {
-  for (const [status, code] of READ_FATAL_ANSWERS.refusals) {
+  // Independently transcribed from the read and command edge producers. A
+  // missing member in the runtime constant must fail before the behavior loop.
+  const readPairs = [[400, "invalid_request"], [404, "channel_not_found"]] as const;
+  const commandPairs = [[400, "invalid_request"], [403, H0_SEAT_CLAIM_REFUSED_CODE],
+    [409, "command_id_conflict"], [409, "delivery_ack_conflict"],
+    [409, "delivery_not_surfaced"], [413, "payload_too_large"],
+    [426, "upgrade_required"]] as const;
+  const pairKey = ([status, code]: readonly [number, string]) => `${status}:${code}`;
+  assert.deepEqual(READ_FATAL_ANSWERS.refusals.map(pairKey).sort(), readPairs.map(pairKey).sort());
+  assert.deepEqual(COMMAND_FATAL_ANSWERS.refusals.map(pairKey).sort(), commandPairs.map(pairKey).sort());
+  for (const [status, code] of readPairs) {
     let reads = 0;
     const stop = await runListenerRuntime({
       target: cloudTarget("https://cloud.example.test", "anon"),
@@ -4112,7 +4177,7 @@ test("each recognized read and command refusal is fatal while foreign answers re
     assert.equal(reads, 1);
     assert.equal(isRestartableListenerStop(stop), false);
   }
-  for (const [status, code] of COMMAND_FATAL_ANSWERS.refusals) {
+  for (const [status, code] of commandPairs) {
     const journal = new MemoryDeliveryJournal();
     let claims = 0;
     const stop = await runListenerRuntime({
@@ -6104,4 +6169,213 @@ test("a lease that ends a little past the maximum is tolerated as clock skew; we
   );
   assert.equal(refused.reason, "fatal");
   assert.match(String((refused as { error?: Error }).error?.message), /lease deadline is invalid/);
+});
+
+test("accepted claim with malformed pending count retries as a network response", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const events: ListenerRuntimeEvent[] = [];
+  let claims = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    readPage: async () => durablePage([], 1), onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      claims++;
+      if (claims === 2) controller.abort();
+      return new Response(JSON.stringify({ status: "accepted", ok: true,
+        capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+        deliveries: [], pending_delivery_count: "bad", terminal_delivery_failure_count: 0 }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= LISTENER_DELIVERY_RETRY_MAX_MS); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(claims, 2);
+  assert.equal(events.find((event) => event.type === "claim_retry")?.code, "malformed_response");
+});
+
+test("a full read page with malformed last row retries instead of stopping", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  const valid = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa18", "2026-07-30T00:00:01.000Z");
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal, pageLimit: 100,
+    onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      reads++;
+      if (reads === 2) controller.abort();
+      return new Response(JSON.stringify({ signals: [...Array(99).fill(valid), { id: "bad" }],
+        capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= 30_000); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 2);
+  assert.equal(events.find((event) => event.type === "read_retry")?.code, "malformed_response");
+});
+
+function renewalMemoryStore(): AgentCredentialStore {
+  let record: AgentCredentialRecord | null = null;
+  return {
+    location: "memory://listener-renewal",
+    read: async () => record,
+    write: async (next) => { record = next; },
+    delete: async () => { record = null; },
+    withLock: async (work) => work(),
+  };
+}
+
+async function renewingListenerSession(now: number, fetcher: typeof fetch): Promise<AgentCredentialSession> {
+  return AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: now + 3 * 60_000 },
+    store: renewalMemoryStore(), fetcher, listenerMode: true, now: () => now, warn: () => {},
+  });
+}
+
+test("renewal 401 unauthenticated opens the listener credential window", { timeout: 15_000 }, async () => {
+  const now = Date.parse("2026-07-30T00:00:00.000Z");
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let renewals = 0;
+  const session = await renewingListenerSession(now, (async () => {
+    renewals++;
+    return new Response('{"error":"unauthenticated"}', { status: 401 });
+  }) as typeof fetch);
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => now, onEvent: (event) => events.push(event),
+    sleep: async (ms) => { assert.equal(ms, CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS); controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(renewals, 1);
+  assert.equal(events.find((event) => event.type === "credential_check")?.edge, "command");
+  await assert.rejects(() => session.bearer(), RenewalCredentialCheckError);
+});
+
+test("foreign renewal 404 keeps retrying with expiry named in status", { timeout: 15_000 }, async () => {
+  const now = Date.parse("2026-07-30T00:00:00.000Z");
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  let renewals = 0;
+  const session = await renewingListenerSession(now, (async () => {
+    renewals++;
+    return new Response("<html>wrong host</html>", { status: 404 });
+  }) as typeof fetch);
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => now, onEvent: (event) => events.push(event),
+    sleep: async (ms) => { assert.ok(ms > 0 && ms <= 30_000); if (renewals >= 2) controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(renewals, 2);
+  assert.equal(session.expiry, now + 3 * 60_000);
+  const retry = events.find((event) => event.type === "read_retry");
+  assert.equal(retry?.code, "renewal_retry");
+  assert.equal(retry?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
+});
+
+test("renewal retry status names state and token expiry", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-renewal-status-"));
+  try {
+    const now = Date.parse("2026-07-30T00:00:00.000Z");
+    const paths = listenerPaths({ profileId: "renewal-status", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+    const session = await renewingListenerSession(now, (async () => new Response("<html>wrong host</html>", { status: 404 })) as typeof fetch);
+    let observed: ListenerStatus | null = null;
+    const final = await runListenerSupervisor({
+      paths, profileId: "renewal-status", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      now: () => now,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal, now: () => now,
+        onEvent, sleep: async () => { observed = await queryListenerControl(paths, "status"); await queryListenerControl(paths, "stop"); },
+      }),
+    });
+    assert.equal(final.state, "stopped");
+    const retryStatus = observed as ListenerStatus | null;
+    assert.equal(retryStatus?.lastErrorCode, "renewal_retry");
+    assert.equal(retryStatus?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
+    assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*capped backoff/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("upgrade_required stops claim with an install and restart action", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-listener-upgrade-"));
+  try {
+    const paths = listenerPaths({ profileId: "upgrade", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID, stateDirectory: root });
+    const journal = new MemoryDeliveryJournal();
+    let claims = 0;
+    const final = await runListenerSupervisor({
+      paths, profileId: "upgrade", workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+        credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+        store: new MemoryStore(), model: new FakeModel(), signal, onEvent,
+        readPage: async () => durablePage([], 1),
+        fetcher: (async () => { claims++; return new Response('{"error":"upgrade_required"}', { status: 426 }); }) as typeof fetch,
+      }),
+    });
+    assert.equal(claims, 1);
+    assert.equal(final.state, "failed");
+    assert.equal(final.lastErrorCode, "upgrade_required");
+    assert.match(renderListenerStatus(final), /npm install -g commonswarm.*restart the listener/);
+    assert.match(listenerFailureMessage("upgrade_required"), /curl -fsSL https:\/\/commonswarm.com\/install.sh \| sh/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("recognized read 405 can recover after a redirect changes POST to GET", { timeout: 15_000 }, async () => {
+  const controller = new AbortController();
+  let reads = 0;
+  const events: ListenerRuntimeEvent[] = [];
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: { async bearer() { return "token"; } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    onEvent: (event) => events.push(event),
+    fetcher: (async () => {
+      reads++;
+      if (reads === 1) return new Response('{"error":"method_not_allowed"}', { status: 405 });
+      controller.abort();
+      return new Response(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+    }) as typeof fetch,
+    sleep: async () => {},
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(reads, 2);
+  assert.equal(events.find((event) => event.type === "read_retry")?.code, "http_405");
+});
+
+test("upgrade_required also stops a prepared acknowledgement", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa28", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body,
+    until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store, model: new FakeModel(), now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+    readPage: async () => durablePage([], 1),
+    fetcher: (async () => { acks++; return new Response('{"error":"upgrade_required"}', { status: 426 }); }) as typeof fetch,
+  });
+  assert.equal(acks, 1);
+  assert.equal(stop.reason, "fatal");
+  if (stop.reason === "fatal") assert.equal((stop.error as DeliveryHttpError).code, "upgrade_required");
+  assert.equal(isRestartableListenerStop(stop), false);
 });

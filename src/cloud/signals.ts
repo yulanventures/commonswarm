@@ -265,7 +265,7 @@ function plainTransportError(
 }
 
 function plainMalformedError(message: string): Error {
-  const error = new Error(message);
+  const error = new SignalMalformedError(message);
   plainMalformedErrors.add(error);
   return error;
 }
@@ -852,12 +852,8 @@ export function isRestartableReadError(error: unknown): boolean {
 
 /** A malformed body/row: a protocol defect, so repeating the read cannot help. */
 export function isMalformedFollowMessage(error: unknown): boolean {
-  if (error instanceof SignalMalformedError) return true;
-  if (!(error instanceof Error)) return false;
-  return error.message.startsWith("signal read returned a malformed") ||
-    error.message === "signal read returned malformed JSON" ||
-    error.message === "signal read returned malformed signal data" ||
-    error.message === "signal read returned a malformed row";
+  return error instanceof SignalMalformedError ||
+    (error instanceof Error && plainMalformedErrors.has(error));
 }
 
 function checkedLimit(value: number | undefined): number {
@@ -1323,18 +1319,18 @@ export type ResolvedSignalRecipient =
 
 function parseAgentMemberRow(value: unknown): SignalAgent {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed agent row");
+    throw new SignalMalformedError("member read returned a malformed agent row");
   }
   const row = value as Record<string, unknown>;
   if (typeof row.name !== "string") {
-    throw new Error("member read returned a malformed agent name");
+    throw new SignalMalformedError("member read returned a malformed agent name");
   }
   if (row.model !== undefined && row.model !== null && typeof row.model !== "string") {
-    throw new Error("member read returned a malformed agent model");
+    throw new SignalMalformedError("member read returned a malformed agent model");
   }
   if (row.generation !== undefined && row.generation !== null &&
     (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
-    throw new Error("member read returned a malformed agent generation");
+    throw new SignalMalformedError("member read returned a malformed agent generation");
   }
   return {
     ...(row.model === undefined ? {} : { model: row.model as string | null }),
@@ -1349,11 +1345,11 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
 
 function parseMemberRow(value: unknown): SignalMember {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed row");
+    throw new SignalMalformedError("member read returned a malformed row");
   }
   const row = value as Record<string, unknown>;
   if (typeof row.display_name !== "string") {
-    throw new Error("member read returned a malformed display name");
+    throw new SignalMalformedError("member read returned a malformed display name");
   }
   return {
     user_id: checkedUuid(row.user_id, "member user_id"),
@@ -1363,18 +1359,18 @@ function parseMemberRow(value: unknown): SignalMember {
 
 function parseAgentIdentity(value: unknown): SignalAgentIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("member read returned a malformed credential identity");
+    throw new SignalMalformedError("member read returned a malformed credential identity");
   }
   const row = value as Record<string, unknown>;
   if (row.credential_valid !== true) {
-    throw new Error("member read returned a malformed credential validity");
+    throw new SignalMalformedError("member read returned a malformed credential validity");
   }
   /* Absent on an older deployment, null when the row carries no name. Neither is an error:
    * the caller renders the id alone rather than inventing a name. A present value is bounded
    * and sanitised at the point of display, like every other server-supplied label. */
   const name = row.workspace_name;
   if (name !== undefined && name !== null && typeof name !== "string") {
-    throw new Error("member read returned a malformed workspace name");
+    throw new SignalMalformedError("member read returned a malformed workspace name");
   }
   return {
     credential_valid: true,
@@ -1411,23 +1407,23 @@ export async function readAgentSignalDirectory(
   } catch (error) {
     if (error instanceof SignalReadTimeoutError) {
       if (options.deadlineMs !== undefined) throw error;
-      throw new Error("member read could not reach the cloud service");
+      throw new SignalTransportError("member read could not reach the cloud service");
     }
     throw error;
   }
   if (result === null) {
-    throw new Error("member read could not reach the cloud service");
+    throw new SignalTransportError("member read could not reach the cloud service");
   }
   const { response, body } = result;
   if (!response.ok) {
     throwSignalHttp(response, body, "member read failed");
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const payload = body as Record<string, unknown>;
   if (!Array.isArray(payload.members)) {
-    throw new Error("member read returned malformed JSON");
+    throw new SignalMalformedError("member read returned malformed JSON");
   }
   const agentsRaw = payload.agents;
   // Agents are additive; an older members response without agents[] still works.
@@ -1436,7 +1432,7 @@ export async function readAgentSignalDirectory(
     : Array.isArray(agentsRaw)
     ? agentsRaw.map(parseAgentMemberRow)
     : (() => {
-      throw new Error("member read returned malformed agents");
+      throw new SignalMalformedError("member read returned malformed agents");
     })();
   return {
     members: payload.members.map(parseMemberRow),
