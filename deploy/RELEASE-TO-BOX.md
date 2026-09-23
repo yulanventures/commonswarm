@@ -10,9 +10,8 @@ input SHA and rollback decision, and reads the evidence. **CSwarmDevLead** gets
 the reviewed SHA onto `main` and supplies migration catalog checks and function
 verification requests. No other seat deploys. CI never deploys.
 
-No section below has yet been run end to end exactly as written. H0 is the
-first use. HezLead must fold the first run's findings back into this procedure
-before its next use.
+H0 was the first live use of this procedure on 2026-09-23. Its operator findings
+are incorporated below.
 
 The box stays up. Never stop the host, run `docker prune`, use a linked Supabase
 command, or use `/home/commonswarm/migration.env` or
@@ -22,7 +21,9 @@ hosted-project cutover; the only exception is the one-time copy of the
 
 Every box command block is a self-contained Bash subshell of the form
 `( set -euo pipefail; ... )`. Paste the whole block into the interactive root
-shell, or save its contents as a `bash -euo pipefail` script. A failed command
+shell, pass it with `sudo -n -i bash -s`, or save it as a `bash -euo pipefail`
+script. Use a script file when a terminal refuses pasted content (including
+Python bitwise operators). A failed command
 stops only that block, not the root shell. Values needed by another block live
 in root-only files, never only in shell memory. On every stop, refusal, or abort,
 run the "Abort cleanup" block at the end of section 1 before closing the
@@ -42,7 +43,11 @@ says this window stopped them.
 2. HezLead approves that SHA and an agreed maximum backup age in seconds when a
    database backup is required.
 3. Anvil runs these commands on the Mac mini from this repository. They prove
-   the archive came from the GitHub remote and create the evidence directory.
+   the archive came from the GitHub remote. The lead must have already written
+   `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
+   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>/`). `git archive` reads tracked
+   Git objects and has no `--no-xattrs` option; Mac `tar` commands below use
+   both `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
 ```sh
 rm -f "$HOME/.commonswarm-release-window.env"
@@ -71,16 +76,17 @@ SHA=<sha>
   RUN_LOG="$EVIDENCE_DIR/run.log"
   ARCHIVE="/tmp/commonswarm-${SHA}.tar"
   GATE_EVIDENCE="$EVIDENCE_DIR/gate-evidence.txt"
-  install -d -m 0700 "$EVIDENCE_DIR"
+  mkdir -p -m 0700 "$EVIDENCE_DIR"
+  chmod 0700 "$EVIDENCE_DIR"
   install -m 0600 /dev/null "$RUN_LOG"
-  check 'exact-SHA archive' git archive --format=tar --output "$ARCHIVE" "$SHA"
+  check 'exact-SHA archive' env COPYFILE_DISABLE=1 git archive --format=tar --output "$ARCHIVE" "$SHA"
   shasum -a 256 "$ARCHIVE" >"$EVIDENCE_DIR/archive.sha256"
   cat "$EVIDENCE_DIR/archive.sha256"
 
   check 'gate evidence file' test -f "$GATE_EVIDENCE"
-  check 'gate evidence SHA' grep -Fx "SHA=$SHA" "$GATE_EVIDENCE"
-  check 'command-core gate' grep -Fx 'npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS' "$GATE_EVIDENCE"
-  check 'edge check gate' grep -Fx 'npm run check:edge: PASS' "$GATE_EVIDENCE"
+  check 'gate evidence SHA' grep -qFx "SHA=$SHA" "$GATE_EVIDENCE"
+  check 'command-core gate' grep -qFx 'npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS' "$GATE_EVIDENCE"
+  check 'edge check gate' grep -qFx 'npm run check:edge: PASS' "$GATE_EVIDENCE"
   check 'archive commit id' test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
 
   # Written only after every check passed, so a failed preflight leaves no file.
@@ -104,7 +110,8 @@ file, credential, curl authorization file, or secret value.
 For a database release, CSwarmDevLead places the reviewed catalog and functional
 verification SQL in `EVIDENCE_DIR` before Anvil continues. Derive the
 environment-name inventory from the same exact-SHA archive on the Mac.
-The router's required main names and database alias rule are the base; the lead
+The archived router's `REQUIRED_MAIN_ENV` (which includes the service-role
+key) and database alias rule are the base; the lead
 reviews strict checks in each changed function at that SHA and adds any further
 required name. Forwarded names without a strict requirement are optional. This
 inventory records only names, never values. Set `CHANGED_FUNCTIONS` from the
@@ -162,26 +169,6 @@ them before transfer. The current command, read, capability, activity, and H0
 checks add no requirement beyond that base. Optional forwarded names such as
 `SWARM_CAPABILITY_ALLOWED_ORIGINS` and `SWARM_CAPABILITY_URLS` stay off the
 required list.
-
-After creating `PROOF_DIR` below, Anvil transfers the reviewed proof files
-without adding credentials. For a database release, include the SQL files;
-for an edge release, include the name-only inventory:
-
-```sh
-(
-  set -euo pipefail
-  . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
-  test -d "$EVIDENCE_DIR"
-  PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
-  PROOF_LIST="$(mktemp /tmp/commonswarm-proof-list-XXXXXX)"
-  (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
-  printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
-  (cd "$EVIDENCE_DIR" && tar -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
-  rm -f "$PROOF_LIST"
-  scp "$PROOF_ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release-proofs.tar
-)
-```
 
 ### Apply — Anvil
 
@@ -268,6 +255,8 @@ sudo -n -i
     test ! -e "$RELEASE_DIR"
     install -d -m "$RELEASE_MODE" -o commonswarm -g commonswarm "$RELEASE_DIR"
     tar -xf "$ARCHIVE" -C "$RELEASE_DIR"
+    APPLEDOUBLE="$(find "$RELEASE_DIR" -name '._*' -print -quit)"
+    test -z "$APPLEDOUBLE"
     printf '%s\n' "$SHA" >"$RELEASE_DIR/RELEASE_SHA"
     chown -R commonswarm:commonswarm "$RELEASE_DIR"
     chmod "$RELEASE_MODE" "$RELEASE_DIR"
@@ -293,8 +282,43 @@ sudo -n -i
 )
 ```
 
-Unpack the transferred proof files only after HezLead confirms their list
-contains no secret:
+After the apply block has created `PROOF_DIR`, exit the box root shell and SSH
+session. Back on the Mac mini, Anvil prepares the proof list. For a database
+release, include the SQL files; for an edge release, include the name-only
+inventory. HezLead reviews this exact list for secrets before transfer:
+
+```sh
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  test -d "$EVIDENCE_DIR"
+  PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
+  (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
+  printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
+  chmod 0600 "$PROOF_LIST"
+  cat "$PROOF_LIST"
+)
+```
+
+After HezLead confirms that list, Anvil transfers exactly those files from the
+Mac mini:
+
+```sh
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
+  PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
+  test -s "$PROOF_LIST"
+  (cd "$EVIDENCE_DIR" && COPYFILE_DISABLE=1 tar --no-xattrs -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
+  scp "$PROOF_ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release-proofs.tar
+)
+```
+
+Reconnect to the box as root. Unpack the transferred proof files only after
+HezLead confirms their list contains no secret:
 
 ```sh
 (
@@ -302,6 +326,7 @@ contains no secret:
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   tar -xf /tmp/commonswarm-release-proofs.tar -C "$PROOF_DIR"
+  find "$PROOF_DIR" -type f -name '._*' -delete
   chown -R root:root "$PROOF_DIR"
   find "$PROOF_DIR" -type f -exec chmod 0600 {} +
   if compgen -G "$PROOF_DIR/*.sql" >/dev/null; then
@@ -324,7 +349,7 @@ contains no secret:
     test ! -e "$RELEASE_DIR/.git"
     test "$(stat -c '%U:%G' "$RELEASE_DIR")" = 'commonswarm:commonswarm'
     stat -c '%a %n' "$RELEASE_DIR"
-    (cd "$RELEASE_DIR" && sha256sum --check "$PROOF_DIR/${KIND}.SHA256SUMS")
+    (cd "$RELEASE_DIR" && sha256sum --quiet --strict --check "$PROOF_DIR/${KIND}.SHA256SUMS")
   done
 )
 ```
@@ -348,7 +373,8 @@ relative paths, one per line, to `$PROOF_DIR/copy-back.list`; it must include
 itself. Logs are never copied because they may contain request data. The list
 must not contain `window.env`, anything under `database/logs/`, or any name
 ending in `.log`. Create the list with a protected editor as root and mode
-`0600`; do not generate it from `find`.
+`0600` (a protected editor or a root-owned script is fine); do not generate it
+from `find`.
 
 ```sh
 (
@@ -356,7 +382,7 @@ ending in `.log`. Create the list with a protected editor as root and mode
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = <sha>
   test -d "$EVIDENCE_DIR"
-  ssh ops@100.115.66.74 'sudo -n -i bash -s' <<'BOX' | tar -xf - -C "$EVIDENCE_DIR"
+  ssh ops@100.115.66.74 'sudo -n -i bash -s' <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -738,8 +764,10 @@ PY
 )
 ```
 
-If that fails, run and wait for the existing backup service, then repeat the
-same check. Do not proceed merely because the service command returned.
+If that fails, **STOP** and ask HezLead. Starting a backup is an explicit
+option HezLead may choose; it is not the default. If approved, run and wait for
+the existing backup service, then repeat the same freshness check. Do not
+proceed merely because the service command returned.
 
 ```sh
 (
@@ -786,7 +814,21 @@ same check. Do not proceed merely because the service command returned.
 )
 ```
 
-4. For each version in `pending-versions.txt`, in order, set only `VERSION` to
+4. Before the first migration, save the current pg_cron job names. Keep the
+   database's order in the evidence; the comparison after the last migration
+   sorts both sides bytewise.
+
+```sh
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
+    >"$PROOF_DIR/cron-before.txt"
+)
+```
+
+5. For each version in `pending-versions.txt`, in order, set only `VERSION` to
    the next HezLead-approved value. The block generates `MIGRATION_FILE` from
    `migration-files.txt`; never type a migration filename by hand. It persists
    the pair for the apply and verify blocks.
@@ -964,7 +1006,31 @@ SQL
 
 That last command is the exact invocation of the lead-supplied host file
 `$PROOF_DIR/<version>-functional.sql`; `/proof` is its read-only container
-mount. Complete one version before considering the next.
+mount. Complete one version before considering the next. After the last
+migration, save the cron job names and compare both snapshots with `LC_ALL=C`
+sorting. Set the two expected name lists from the reviewed release plan in
+bytewise order (one
+name per line; empty when none). The lead supplies both lists with the release; for H0 the new list was `swarm-purge-h0-poll-batches` and the removed list was empty.
+
+```sh
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  EXPECTED_NEW_CRON_JOBS='<newline-separated new job names, C-sorted, or empty>'
+  EXPECTED_REMOVED_CRON_JOBS='<newline-separated removed job names, C-sorted, or empty>'
+  release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
+    >"$PROOF_DIR/cron-after.txt"
+  LC_ALL=C sort "$PROOF_DIR/cron-before.txt" >"$PROOF_DIR/cron-before-sorted.txt"
+  LC_ALL=C sort "$PROOF_DIR/cron-after.txt" >"$PROOF_DIR/cron-after-sorted.txt"
+  LC_ALL=C comm -13 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
+    >"$PROOF_DIR/cron-added.txt"
+  LC_ALL=C comm -23 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
+    >"$PROOF_DIR/cron-removed.txt"
+  test "$(cat "$PROOF_DIR/cron-added.txt")" = "$EXPECTED_NEW_CRON_JOBS"
+  test "$(cat "$PROOF_DIR/cron-removed.txt")" = "$EXPECTED_REMOVED_CRON_JOBS"
+)
+```
 
 ### Rollback — HezLead decides; Anvil executes
 
@@ -990,24 +1056,52 @@ the exact `/home/commonswarm/edge/releases/<sha>/` directory, not through the
 installed by HezLead on 2026-09-22: `OnCalendar=*-*-* 03,09,15,21:30:00 UTC`,
 `Persistent=false`; its service runs `docker restart --time 30
 commonswarm-edge-edge-runtime-1`. Check it with `systemctl cat
-commonswarm-edge-recycle.timer` before the window. Do not start within ten
-minutes either side of 03:30, 09:30, 15:30, or 21:30 UTC. If the window overlaps, stop `commonswarm-edge-recycle.timer` for the
-release and start it after verification.
+commonswarm-edge-recycle.timer` before the window. Set the approved window's
+UTC start and end in the block below. Only if it overlaps the ten minutes on
+either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the timer and start it
+after verification.
 
 ```sh
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  systemctl is-active --quiet commonswarm-edge-recycle.timer
-  sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=1/' "$PROOF_DIR/window.env"
-  systemctl stop commonswarm-edge-recycle.timer
-  printf '%s\n' 'release window stopped commonswarm-edge-recycle.timer' >>"$PROOF_DIR/box-run.log"
+  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
+    case "$T" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+      *) false ;;
+    esac
+  done
+  START_EPOCH="$(date -u -d "$WINDOW_START_UTC" +%s)"
+  END_EPOCH="$(date -u -d "$WINDOW_END_UTC" +%s)"
+  NOW_EPOCH="$(date -u +%s)"
+  test "$START_EPOCH" -le "$END_EPOCH"
+  test "$START_EPOCH" -le "$NOW_EPOCH"
+  test "$NOW_EPOCH" -le "$END_EPOCH"
+  DAY_EPOCH="$(date -u -d "@$START_EPOCH" +%Y-%m-%d)"
+  DAY_EPOCH="$(date -u -d "$DAY_EPOCH 00:00:00" +%s)"
+  OVERLAPS=0
+  while [ "$DAY_EPOCH" -le "$END_EPOCH" ]; do
+    for HOUR in 3 9 15 21; do
+      RECYCLE_EPOCH=$((DAY_EPOCH + HOUR * 3600 + 1800))
+      if [ "$START_EPOCH" -le "$((RECYCLE_EPOCH + 600))" ] &&
+         [ "$END_EPOCH" -ge "$((RECYCLE_EPOCH - 600))" ]; then OVERLAPS=1; fi
+    done
+    DAY_EPOCH=$((DAY_EPOCH + 86400))
+  done
+  if [ "$OVERLAPS" = 1 ]; then
+    systemctl is-active --quiet commonswarm-edge-recycle.timer
+    sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=1/' "$PROOF_DIR/window.env"
+    systemctl stop commonswarm-edge-recycle.timer
+    printf '%s\n' 'release window stopped commonswarm-edge-recycle.timer' >>"$PROOF_DIR/box-run.log"
+  fi
 )
 ```
 
-Run that command only when the window overlaps the protected interval; record
-that it must be restarted before closing the window.
+Run that block for every window; it records a stopped timer only when the
+approved times overlap a protected interval.
 
 ```sh
 (
@@ -1019,7 +1113,7 @@ that it must be restarted before closing the window.
   test -f "$NEW_EDGE/deploy/edge-runtime/main/router.ts"
 
   # Prove the archive-derived manifest before adding the box-only override.
-  (cd "$NEW_EDGE" && sha256sum --check "$PROOF_DIR/edge.SHA256SUMS")
+  (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge.SHA256SUMS")
 
   # Observed by HezLead on 2026-09-22: the override lives in the current
   # edge release, whose container mounts use its exact releases/<sha> path.
@@ -1030,7 +1124,7 @@ that it must be restarted before closing the window.
   (cd "$NEW_EDGE" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
     >"$PROOF_DIR/edge-with-override.SHA256SUMS"
   chmod 0600 "$PROOF_DIR/edge-with-override.SHA256SUMS"
-  (cd "$NEW_EDGE" && sha256sum --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
+  (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
 
   python3 - "$PROOF_DIR/required-edge-env.json" /home/commonswarm/.env <<'PY'
 import json, sys
@@ -1123,14 +1217,44 @@ runtime cannot reach `db.commonswarm.internal`.
 )
 ```
 
-Then run the lead-supplied loopback probes for every changed function, plus the
+On the box, run the lead-supplied loopback probes for every changed function, plus the
 existing positive controls from `deploy/edge-runtime/RUNBOOK.md`: H0 document,
 malformed command, authenticated read, unauthenticated activity, capability,
-unknown function, and preflight. Put authorization in a root-owned mode-`0600`
-curl config file and remove it after use. Repeat changed-function probes through
-`edge-staging.commonswarm.com`; remember it is production-backed. Only after
+unknown function, and preflight. If no smoke credential is provisioned on the box,
+record the authenticated read as NOT VERIFIED in `run.log` and tell HezLead, who decides
+whether that blocks the window (it did not for H0 on 2026-09-23). Without that
+read, no probe reaches the database, so the edge-to-database path and the later
+`CONNECT_TIMEOUT` log check are NOT VERIFIED too, unless the lead supplies a
+credential-free database probe: `h0/note` with a well-formed but unknown
+`Authorization: Bearer swm_agt_` followed by 43 base64url characters that match no
+real token (for example 43 times `A`; do not use `+`, `/` or `=`, which are refused
+before any database work) must return 401 after the token
+lookup in `swarm.agent_tokens`. Record which of the two applied in `run.log`. Also probe `/functions/v1/h0/note`
+without authorization using a valid note body: it must return 401, never 500
+`h0_command_not_configured`. The authenticated read and H0 document are
+positive controls in the same probe run. Run this H0 note loopback probe on
+the box:
+
+```sh
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  STATUS="$(curl -sS -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
+    -H 'content-type: application/json' --data-binary '{"body":"release probe"}' \
+    http://127.0.0.1:9000/functions/v1/h0/note)"
+  test "$STATUS" = 401
+)
+```
+
+Put authorization in a root-owned mode-`0600` curl config file and remove it
+after use. Repeat changed-function probes through
+`edge-staging.commonswarm.com` **from the Mac mini**, and retain their status
+evidence in `EVIDENCE_DIR`. Cloudflare returns 1010 for that hostname from the box; do not
+run staging probes there. Staging is production-backed. Only after
 both loopback and staging probes finish, capture the log window that began at
-`edge-probe-start.txt` and reject `CONNECT_TIMEOUT`:
+`edge-probe-start.txt` and reject `CONNECT_TIMEOUT` or
+`h0 command configuration missing`:
 
 ```sh
 (
@@ -1139,7 +1263,7 @@ both loopback and staging probes finish, capture the log window that began at
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   docker logs --since "$(cat "$PROOF_DIR/edge-probe-start.txt")" commonswarm-edge-edge-runtime-1 \
     >"$PROOF_DIR/edge-probe-window.log" 2>&1
-  if grep -q CONNECT_TIMEOUT "$PROOF_DIR/edge-probe-window.log"; then false; fi
+  if grep -qE 'CONNECT_TIMEOUT|h0 command configuration missing' "$PROOF_DIR/edge-probe-window.log"; then false; fi
 )
 ```
 
@@ -1183,7 +1307,7 @@ successful release:
 )
 ```
 
-Wait for Docker health and repeat the no-`CONNECT_TIMEOUT` and function probes.
+Wait for Docker health and repeat the log and function probes above.
 Restart `commonswarm-edge-recycle.timer` if it was stopped:
 
 ```sh
@@ -1551,7 +1675,7 @@ Migration precedes code that needs it. Backfill precedes later migrations. A
 new edge must remain compatible with the verified database state at the moment
 it is recreated.
 
-**H0 (the first use of this procedure).** `KIND_LIST` is `edge stack`. The
+**H0 (the first use of this procedure, released 2026-09-23).** `KIND_LIST` is `edge stack`. The
 stack release directory is built for its migration files and helpers, and
 `stack/current` is switched, through the guarded switch in section 7, only if
 the section 1 runtime-file comparison shows changed stack runtime files.
@@ -1601,7 +1725,8 @@ Stop the window immediately on any of these:
   or a migration transaction, timeout, or verification fails;
 - the edge override is missing, Compose validation fails, the edge is not on
   `commonswarm-net`, Docker health is not `healthy`, or logs show
-  `CONNECT_TIMEOUT`;
+  `CONNECT_TIMEOUT` or `h0 command configuration missing`, or the h0/note
+  probe returns anything other than 401;
 - a service becomes unhealthy, a functional probe fails, or the previous
   release path is unknown;
 - either backup/restore service is still active when a unit rollout would
@@ -1636,11 +1761,11 @@ database files. This does not remove release evidence:
 )
 ```
 
-## Open follow-ups (Opus Checker round 3, 2026-09-22)
+## Open follow-ups (Opus Checker round 3, 2026-09-22; still open after the H0 fold)
 
-These do not block H0. Fold them together with the findings from the first H0 run.
+These do not block a release. Fold them in a later change.
 
 - The guarded switch accepts a `failed` backup or restore service before it switches, but after the switch it requires `inactive` plus `success`. A drill that failed earlier therefore makes both apply and rollback report failure.
 - The stack runtime-file comparison ignores `deploy/supabase-stack/migrate/`, although the backup and the drill run helpers from it through `stack/current`.
-- The pasted Mac preflight can still end with exit 0 after a failed check (the window file is then absent, so later Mac blocks refuse), and a second run empties `run.log`. Not fixed yet.
+- A second run of the Mac preflight empties `run.log`. (A failed check now makes the pasted preflight exit 1 in bash and zsh.)
 - The test-hook environment names are typed by hand, and `SWARM_ENV=test` is accepted.
