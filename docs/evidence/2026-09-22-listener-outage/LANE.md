@@ -370,3 +370,51 @@ The final source state was checked with an isolated temporary home and `FORCE_CO
 | `bash scripts/build-release.sh` | 0 | Single-file CLI built and execute-checked at version 0.1.72. |
 
 The isolated home prevented tests from reading or writing the real `~/.cswarm` and `~/.config/cswarm` paths. An earlier unisolated suite invocation failed on protected-home `EPERM` writes and the resulting credential-store warnings; the final suite above is the isolated measurement. The detached product test used a temporary `--state-dir`, wrote the redacted status artifact linked above, and stopped its local fixture listener. This fold did not establish a green full-suite result where `ps` is available, a production release, or behavior against a real workspace or hosted edge. No production host or real workspace was contacted, and no merge from main was made.
+
+## Fold 8
+
+Fold 7's renewal classification applies only when `listenerMode` is true. One-shot `requestSuccessor` and `AgentCredentialSession.bearer()` again distinguish a locally expired predecessor (D-004) from an unexplained live 401/403 refusal (D-011), and give the original remedy verbatim. A named revocation still outranks local expiry. A one-shot 426 says to update cswarm and run the command again; the listener's 426 says to update and restart the listener. `inbox --follow` recognizes `RenewalCredentialCheckError` as a credential failure. Named `renewal_unsupported` and device refusals retain their own fatal classes and actionable sentences in listener mode.
+
+The renewal credential window now retries every `RENEWAL_WINDOW_RETRY_MS` (30 seconds) while the predecessor is live, with `RENEWAL_WINDOW_EXPIRY_MARGIN_MS` (five seconds), instead of taking its five-minute confirmation sleep before another renewal attempt. The stop still requires at least three confirmed samples spanning `CREDENTIAL_LOSS_CONFIRM_WINDOW_MS` (ten minutes). A successful read or claim clears the window; it is evidence that the current credential works. While renewal is unresolved, reads and claims pause because a successor may already have been issued. The renewal retry status states that pause and says the listener ends at expiry if renewal does not succeed. This supersedes the Fold 7 sleep assertion: old wording expected exactly `CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS` after the first renewal 401; new wording expects `RENEWAL_WINDOW_RETRY_MS` while the token remains live, so a recovering edge can renew before expiry.
+
+The detached-process test exposed the missing production link: `src/cli.ts` wraps the live `AgentCredentialSession` to persist its token, and that wrapper originally exposed `bearer()` but not `expiry`. The runtime therefore could not select the short retry, and its first 401 stayed in `credential_check` past the eight-second test token's expiry. The wrapper now forwards the live expiry. The same detached fixture then accepted a successor on its second renewal answer before the old token expired, returned to `ready`, and was stopped. Its redacted [fold8-detached-renewal-status.json](fold8-detached-renewal-status.json) records `ready` with no error or credential stop.
+
+Lease deadline and replay contradictions now carry `ListenerLeaseResponseError`, rather than plain `Error`. Attachment parsing carries `SignalAttachmentMalformedError`, classified as a malformed read response. The parser graph test now walks returned error factories, arrow functions, methods, and the imported attachment parser. It explicitly exempts three already-tagged or callback-only constructions in `signals.ts`.
+
+### Renewal refusal test inventory at `a9846955`
+
+All 15 tests below were restored from `4bd26f53` into `tests/p1-cli/renewal-refusal-cause.test.ts`. Their old and new operator wording is identical; no original assertion was deleted or weakened. Fold 7's six newer tests remain in `tests/p1-cli/renewal-listener-samples.test.ts`, with five more cases added there, including foreign one-shot 401/403 bodies and the follow predicate.
+
+| Test at `a9846955` | Fold 8 state | Wording |
+|---|---|---|
+| D-004: a credential past its own expiry is reported as expired, not revoked | Restored | Old = new: “past its own expiry”. |
+| D-004: the expiry message does not deny a revocation it cannot see | Restored | Old = new: “revoked as well”. |
+| a named revocation outranks local expiry, because re-issuing would fail again | Restored | Old = new: “what was revoked”. |
+| D-011: an unexpired credential refused at 401 names neither cause | Restored | Old = new: “does not say why”. |
+| D-011: a null expiry names neither cause rather than guessing | Restored | Old = new: “does not say why”. |
+| D-011: the unexplained refusal still gives a remedy, and asks without asserting | Restored | Old = new: “Ask whoever runs this workspace … whether this agent's access was changed.” |
+| a server-named revocation at HTTP 200 still reports revocation | Restored | Old = new: named revocation remedy. |
+| a server-named expiry at HTTP 200 keeps its own stronger message | Restored | Old = new: “expired before it could renew itself”. |
+| 403 is treated exactly as 401 | Restored | Old = new: local expiry sentence. |
+| D-004 reaches production: bearer() on an expired credential reports expiry | Restored | Old = new: local expiry sentence through `bearer()`. |
+| D-011 reaches production: bearer() on a live credential names no cause | Restored | Old = new: unexplained refusal through `bearer()`. |
+| class: the client asserts no cause it did not measure at 401/403 | Restored | Old = new: cause selection and exhaustive code map. |
+| prose pin: the expired locally message is exactly the approved wording | Restored | Old = new: exact D-004 paragraph. |
+| prose pin: the unexplained refusal message is exactly the approved wording | Restored | Old = new: exact D-011 paragraph. |
+| prose pin: the named revocation message is exactly the approved wording | Restored | Old = new: exact revocation paragraph. |
+
+The ACK retry test now sends every member of `DELIVERY_SESSION_PROOF_CODES` through the ACK path and checks the session action. The lease tests cover all three response contradictions, including both replay shapes. The near-expiry tests use a fake clock: one edge returns 401 twice, accepts renewal before the old expiry, and the listener reads after that expiry; another returns 401 throughout and stops only after the complete confirmation window. A third runtime test makes the first `bearer()` call return a confirmed renewal sample, then makes the still-valid token complete a read and verifies the window clears. Replacing the 30-second renewal retry constant with five minutes made the recovery test fail while the full-window stop test passed (exit 1, one pass and one fail); the source was restored and both passed (exit 0). Replacing one attachment parser throw with plain `Error` made the AST test fail while the full-window stop control passed (exit 1, one pass and one fail); restoring the source made the parser and both renewal-window tests pass (exit 0, three pass).
+
+The citation drift test's seven `src/cli.ts` coordinates moved with this fold's imports. Its exact source-content assertions remain the same; only the line numbers were updated.
+
+### Fold 8 gates and limits
+
+| Gate | Exit | Result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` with an isolated `HOME` | 1 | 945 tests: 943 passed, 2 failed, 0 skipped. Both failures call real `ps`, denied with `spawn EPERM` in this sandbox. |
+| `env -u FORCE_COLOR npm run test:p1-cli` with an isolated `HOME` | 1 | 838 tests: 835 passed, 3 failed, 0 skipped. All three failures call real `ps`, denied with `spawn EPERM` or `spawnSync ps EPERM`. This is 11 above fold 6's 827. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file CLI built and execute-checked. |
+
+The first suite runs used the ordinary home and had additional protected-home `EPERM` failures; the isolated-home results above are the final measurements. A detached fixture listener used a temporary `--state-dir`, stopped on an exact `426 upgrade_required`, and wrote [fold8-detached-status.json](fold8-detached-status.json): `state=failed`, `lastErrorCode=upgrade_required`, no pending attempt or credential stop. The renewed detached fixture also used a temporary state directory, wrote the ready status linked above, and stopped its local process. Both tests asserted that their status contains no agent token. No production host or real workspace was contacted. The fake-clock and detached recovery prove scheduling and successor adoption against a loopback edge, not a real DNS failover. These gates do not establish a fully green run on a host where `ps` is permitted.

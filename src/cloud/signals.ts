@@ -25,6 +25,7 @@ import {
   attachmentRetrievalCommand,
   formatAttachmentSize,
   parseSignalAttachments,
+  SignalAttachmentMalformedError,
 } from "./attachments.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 
@@ -787,6 +788,7 @@ export function classifySignalReadFailure(
   }
   if (
     error instanceof SignalMalformedError ||
+    error instanceof SignalAttachmentMalformedError ||
     (error instanceof Error && plainMalformedErrors.has(error))
   ) {
     return {
@@ -853,6 +855,7 @@ export function isRestartableReadError(error: unknown): boolean {
 /** A malformed body/row: a protocol defect, so repeating the read cannot help. */
 export function isMalformedFollowMessage(error: unknown): boolean {
   return error instanceof SignalMalformedError ||
+    error instanceof SignalAttachmentMalformedError ||
     (error instanceof Error && plainMalformedErrors.has(error));
 }
 

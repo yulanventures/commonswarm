@@ -136,7 +136,9 @@ import {
   RENEWAL_HORIZON_DEFAULT_MS,
   RENEWAL_HORIZON_MAX_MS,
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
+  RENEWAL_UPGRADE_LISTENER_ACTION,
   RenewalReauthorisationRequired,
+  RenewalCredentialCheckError,
   RenewalRevoked,
   RenewalSuspended,
 } from "./cloud/renewal.js";
@@ -4947,11 +4949,7 @@ async function runInboxFollowCommand(args: Arguments): Promise<void> {
       signal: controller.signal,
       refusalToleranceMs,
       ...(pageLimit === undefined ? {} : { pageLimit }),
-      isCredentialFailure: (error) =>
-        isFollowCredentialFailure(error) ||
-        error instanceof RenewalReauthorisationRequired ||
-        error instanceof RenewalRevoked ||
-        error instanceof RenewalSuspended,
+      isCredentialFailure: isFollowRenewalCredentialFailure,
       arm: async ({ after, limit }) => {
         // Renewal is checked on every arm for agent credentials; humans reuse
         // the session bearer already resolved for this process.
@@ -5698,7 +5696,7 @@ export function listenerStatusJson(
 
 const CSWARM_UPDATE_INSTALLER = "curl -fsSL https://commonswarm.com/install.sh | sh";
 const CSWARM_UPDATE_NPM = "npm install -g commonswarm";
-const CSWARM_UPGRADE_STOP = `The command edge requires a newer cswarm (upgrade_required). Update with ${CSWARM_UPDATE_INSTALLER} or ${CSWARM_UPDATE_NPM}, then restart the listener.`;
+const CSWARM_UPGRADE_STOP = `The command edge requires a newer cswarm (upgrade_required). Update with ${CSWARM_UPDATE_INSTALLER} or ${CSWARM_UPDATE_NPM}. ${RENEWAL_UPGRADE_LISTENER_ACTION}`;
 
 function credentialStoppedSentence(edge: "read" | "command" | null = null): string {
   const codes = (edge === "command"
@@ -5718,7 +5716,7 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
   if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
-    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with capped backoff; leave it running and check the command edge if renewal does not recover.`;
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with capped backoff. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
   }
   if (!LISTENER_RUNNING_STATES.includes(status.state) ||
       typeof status.nextAttemptAt !== "string" ||
@@ -6569,6 +6567,7 @@ async function runConfiguredListener(options: {
   }
   let storedCredential: string | null = null;
   const credentialSession = {
+    get expiry(): number | null { return liveCredentialSession.expiry; },
     bearer: async (): Promise<string> => {
       const credential = await liveCredentialSession.bearer();
       if (credential !== storedCredential) {
@@ -9836,4 +9835,13 @@ if (isCliMain()) {
     process.stderr.write(`cswarm: ${safeError(error)}\n`);
     process.exitCode = exitCodeFor(error);
   });
+}
+
+/** The follow receiver shares the CLI's renewal credential-stop classification. */
+export function isFollowRenewalCredentialFailure(error: unknown): boolean {
+  return isFollowCredentialFailure(error) ||
+    error instanceof RenewalReauthorisationRequired ||
+    error instanceof RenewalCredentialCheckError ||
+    error instanceof RenewalRevoked ||
+    error instanceof RenewalSuspended;
 }

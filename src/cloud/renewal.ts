@@ -37,10 +37,10 @@
  *   ambiguity    the command id is PERSISTED before the request and kept on a 5xx or a
  *                transport failure, so the next attempt is a replay and not a second mint.
  *
- * WHEN RENEWAL FAILS, a one-shot command may use its still-live predecessor.
- * The listener instead retries renewal with capped backoff and publishes the
- * current token expiry. A recognized authentication answer enters its normal
- * credential confirmation window.
+ * WHEN RENEWAL FAILS, a one-shot command may use its still-live predecessor
+ * after an unknown outcome, but a 401/403 refusal uses the D-004/D-011 fatal
+ * message. The listener retries unknown outcomes with capped backoff and
+ * treats a recognized authentication answer as a confirmation-window sample.
  */
 import { randomBytes } from "node:crypto";
 import {
@@ -244,10 +244,13 @@ export class RenewalRefused extends Error {
 /** The command edge's version gate cannot clear until this binary is updated. */
 export class RenewalUpgradeRequiredError extends RenewalRefused {
   override name = "RenewalUpgradeRequiredError";
-  constructor(minimum: string) {
-    super(426, "upgrade_required", `This copy of cswarm is older than the deployment accepts (minimum ${minimum}). Update cswarm, then restart the listener.`);
+  constructor(minimum: string, listenerMode = false) {
+    super(426, "upgrade_required", `This copy of cswarm is older than the deployment accepts (minimum ${minimum}). ${listenerMode ? RENEWAL_UPGRADE_LISTENER_ACTION : RENEWAL_UPGRADE_COMMAND_ACTION}`);
   }
 }
+
+export const RENEWAL_UPGRADE_LISTENER_ACTION = "Update cswarm, then restart the listener.";
+export const RENEWAL_UPGRADE_COMMAND_ACTION = "Update cswarm, then run the command again.";
 
 export interface SuccessorCredential {
   token: string;
@@ -358,6 +361,12 @@ const REVOCATION_REASONS: ReadonlySet<string> = new Set(REVOCATION_REASONS_LIST)
 const REVOKED_MESSAGE =
   "This agent credential is no longer accepted, and renewal cannot bring it back — that is deliberate: revoking a credential, a device, or a person's membership revokes everything descended from it. Ask whoever runs this workspace what was revoked and why, then get a new credential from them.";
 
+const LOCALLY_EXPIRED_MESSAGE =
+  "This agent credential is past its own expiry, so renewal cannot bring it back. Ask whoever set this agent up for a new one. The deployment does not say why a credential was refused, so if a fresh one is refused too, ask them whether this agent's access was revoked as well.";
+
+const UNEXPLAINED_REFUSAL_MESSAGE =
+  "This agent credential was refused, and the deployment does not say why — it answers every refusal identically on purpose, so that nobody can discover which credentials exist by asking. Renewal cannot get past that. Ask whoever runs this workspace for a new credential, and whether this agent's access was changed.";
+
 /**
  * One successor request. Does no storage and no scheduling — the caller owns both, so this
  * stays a reviewable statement of what goes on the wire and what comes back.
@@ -368,11 +377,9 @@ export async function requestSuccessor(options: {
   /** The active predecessor. Presented as a bearer, never placed in the body. */
   predecessor: string;
   commandId: string;
-  /**
-   * Retained for existing callers. A single HTTP answer never infers a cause
-   * from this local expiry; the listener confirms server credential answers.
-   */
+  /** Locally measured expiry distinguishes D-004 from D-011 for one-shot callers. */
   expiresAt?: number | null;
+  listenerMode?: boolean;
   fetcher?: typeof fetch;
   now?: () => number;
 }): Promise<SuccessorCredential | null> {
@@ -428,9 +435,14 @@ export async function requestSuccessor(options: {
       body = parsed as Record<string, unknown>;
     }
   } catch {
-    throw new RenewalMalformedResponseError("renewal response was not valid JSON");
+    if (!options.listenerMode && (response.status === 401 || response.status === 403)) {
+      body = {};
+    } else {
+      throw new RenewalMalformedResponseError("renewal response was not valid JSON");
+    }
   }
-  if (body.principal_id !== undefined && body.principal_id !== null &&
+  if (response.status !== 401 && response.status !== 403 &&
+      body.principal_id !== undefined && body.principal_id !== null &&
       (typeof body.principal_id !== "string" || !UUID_RE.test(body.principal_id))) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed principal_id");
   }
@@ -440,16 +452,25 @@ export async function requestSuccessor(options: {
     : null;
 
   if (response.status === 401 || response.status === 403) {
-    if (response.status === 401 && body.error === "unauthenticated") {
-      throw new RenewalCredentialCheckError(response.status, "unauthenticated");
+    if (options.listenerMode) {
+      if (response.status === 401 && body.error === "unauthenticated") {
+        throw new RenewalCredentialCheckError(response.status, "unauthenticated");
+      }
+      throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
     }
-    throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
+    const named = typeof body.reason === "string" && REVOCATION_REASONS.has(body.reason)
+      ? body.reason : null;
+    if (named !== null) throw new RenewalRevoked(named, REVOKED_MESSAGE);
+    if (options.expiresAt !== null && options.expiresAt !== undefined && now() >= options.expiresAt) {
+      throw new RenewalRevoked("predecessor_expired_local", LOCALLY_EXPIRED_MESSAGE);
+    }
+    throw new RenewalRevoked("forbidden", UNEXPLAINED_REFUSAL_MESSAGE);
   }
   if (response.status === 426) {
     if (body.error !== "upgrade_required" || typeof body.min_client_version !== "string") {
       throw new RenewalOutcomeUnknown("renewal command answered an unrecognized HTTP 426");
     }
-    throw new RenewalUpgradeRequiredError(body.min_client_version);
+    throw new RenewalUpgradeRequiredError(body.min_client_version, options.listenerMode);
   }
   if (!response.ok) {
     throw new RenewalOutcomeUnknown(`renewal command answered HTTP ${response.status}`);
@@ -810,9 +831,9 @@ export class AgentCredentialSession {
    * The credential to present, renewed first if it is close to expiring.
    *
    * Renewal happens AHEAD of expiry rather than on a 401, so the common path never shows a
-   * person a failure. A refusal while the predecessor is still live is therefore a warning
-   * and the command proceeds; it becomes fatal only when there is nothing valid left to
-   * present, which is the one case where continuing would fail anyway.
+   * person a failure. A known one-shot 401/403 refusal is fatal with the D-004/D-011
+   * remedy; an unknown outcome may use a still-live predecessor. The listener retries
+   * unknown outcomes and samples recognized authentication refusals.
    */
   async bearer(): Promise<string> {
     if (!this.due()) return this.token;
@@ -836,9 +857,10 @@ export class AgentCredentialSession {
           error instanceof RenewalUpgradeRequiredError ||
           error instanceof RenewalReauthorisationRequired ||
           error instanceof RenewalSuspended ||
-          error instanceof RenewalRevoked) throw error;
-      const retryableRenewalOutcome = error instanceof RenewalOutcomeUnknown ||
-        error instanceof RenewalRefused || error instanceof RenewalUnsupported;
+          error instanceof RenewalRevoked ||
+          error instanceof RenewalUnsupported ||
+          error instanceof RenewalRefused) throw error;
+      const retryableRenewalOutcome = error instanceof RenewalOutcomeUnknown;
       if (this.options.listenerMode && retryableRenewalOutcome && this.expired()) {
         throw new RenewalRevoked(
           "predecessor_expired_local",
@@ -912,8 +934,8 @@ export class AgentCredentialSession {
         workspaceId: this.options.workspaceId,
         predecessor: this.token,
         commandId,
-        // Kept for callers that still pass expiry; no HTTP answer alone proves loss.
         expiresAt: this.expiresAt,
+        listenerMode: this.options.listenerMode === true,
         ...(this.options.fetcher ? { fetcher: this.options.fetcher } : {}),
         now: this.clock,
       });

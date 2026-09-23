@@ -21,6 +21,7 @@ import {
   H0_SEAT_CLAIM_REFUSED_CODE,
   H0_SEAT_LISTENER_STOP_SENTENCE,
   DELIVERY_ACK_OUTCOMES,
+  DELIVERY_SESSION_PROOF_CODES,
   type DeliveryClaimResult,
   type DeliveryOutcome,
   type DeliveryRow,
@@ -63,6 +64,8 @@ import {
   CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
   CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
+  RENEWAL_WINDOW_RETRY_MS,
+  ListenerLeaseResponseError,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   LISTENER_DELIVERY_RETRY_MAX_MS,
   READ_FATAL_ANSWERS,
@@ -107,38 +110,74 @@ test("network response parser call graphs cannot throw an untagged Error", { tim
     "src/cloud/delivery.ts": ["parseClaimSuccess", "parseAckSuccess", "successBody"],
     "src/cloud/renewal.ts": ["requestSuccessor"],
   };
-  for (const [path, entries] of Object.entries(roots)) {
-    const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
-    const functions = new Map<string, ts.FunctionDeclaration>();
-    source.forEachChild((node) => {
-      if (ts.isFunctionDeclaration(node) && node.name) functions.set(node.name.text, node);
-    });
-    const visited = new Set<string>();
-    const failures: string[] = [];
-    const visitFunction = (name: string): void => {
-      if (visited.has(name)) return;
-      const fn = functions.get(name);
-      assert.ok(fn, `${path}: parser root ${name} exists`);
-      visited.add(name);
-      const walk = (node: ts.Node): void => {
-        if (ts.isThrowStatement(node) && node.expression && ts.isNewExpression(node.expression) &&
-            ts.isIdentifier(node.expression.expression) &&
-            (node.expression.expression.text === "Error" ||
-              (path.endsWith("delivery.ts") && node.expression.expression.text === "DeliveryProtocolError"))) {
-          failures.push(`${name}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`);
-        }
-        // Request construction validates local caller input, not a network answer.
-        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
-            node.expression.text !== "renewalCommand" && functions.has(node.expression.text)) {
-          visitFunction(node.expression.text);
-        }
-        ts.forEachChild(node, walk);
-      };
-      if (fn.body) walk(fn.body);
+  const paths = [...Object.keys(roots), "src/cloud/attachments.ts"];
+  const sources = new Map(paths.map((path) => [path,
+    ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true)]));
+  const callable = new Map<string, ts.Node[]>();
+  const imports = new Map<string, string>();
+  for (const [path, source] of sources) {
+    const register = (name: string, node: ts.Node): void => {
+      const key = `${path}:${name}`;
+      callable.set(key, [...(callable.get(key) ?? []), node]);
     };
-    entries.forEach(visitFunction);
-    assert.deepEqual(failures, [], `${path} has plain Error throws in its response parser graph`);
+    const collect = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name) register(node.name.text, node);
+      if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) register(node.name.text, node);
+      if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer &&
+          (ts.isArrowFunction(node.initializer) || ts.isFunctionExpression(node.initializer))) {
+        register(node.name.text, node.initializer);
+      }
+      ts.forEachChild(node, collect);
+    };
+    collect(source);
+    source.forEachChild((node) => {
+      if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier) ||
+          !node.moduleSpecifier.text.startsWith("./")) return;
+      const importedPath = join("src/cloud", node.moduleSpecifier.text.replace(/\.js$/, ".ts"));
+      if (!sources.has(importedPath)) return;
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const element of named.elements) {
+          imports.set(`${path}:${element.name.text}`, `${importedPath}:${element.propertyName?.text ?? element.name.text}`);
+        }
+      }
+    });
   }
+  const visited = new Set<string>();
+  const failures: string[] = [];
+  const taggedOrCallbackOnly = new Set([
+    "src/cloud/signals.ts:plainTransportError", // WeakSet and failure-code map
+    "src/cloud/signals.ts:throwSignalHttp", // HTTP status/envelope WeakMaps
+    "src/cloud/signals.ts:parseSignalRows", // callback diagnostic for a caught row
+  ]);
+  const visitFunction = (key: string): void => {
+    if (visited.has(key)) return;
+    const nodes = callable.get(key);
+    assert.ok(nodes?.length, `${key}: parser root exists`);
+    visited.add(key);
+    const path = key.slice(0, key.lastIndexOf(":"));
+    const source = sources.get(path)!;
+    const walk = (node: ts.Node): void => {
+      // A factory can return an Error for its caller to throw, so inspect all construction.
+      if (!taggedOrCallbackOnly.has(key) && ts.isNewExpression(node) && ts.isIdentifier(node.expression) &&
+          (node.expression.text === "Error" ||
+            (path.endsWith("delivery.ts") && node.expression.text === "DeliveryProtocolError"))) {
+        failures.push(`${key}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1}`);
+      }
+      if (ts.isCallExpression(node)) {
+        const name = ts.isIdentifier(node.expression) ? node.expression.text
+          : ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : null;
+        if (name !== null && name !== "renewalCommand") {
+          const next = imports.get(`${path}:${name}`) ?? `${path}:${name}`;
+          if (callable.has(next)) visitFunction(next);
+        }
+      }
+      ts.forEachChild(node, walk);
+    };
+    for (const node of nodes!) walk(node);
+  };
+  for (const [path, entries] of Object.entries(roots)) entries.forEach((name) => visitFunction(`${path}:${name}`));
+  assert.deepEqual(failures, [], "plain Error construction in a response parser graph");
 });
 
 const defaultPendingMainQueue = {
@@ -3983,6 +4022,10 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
   for (const scenario of [
     { status: 200, body: "<html>wrong host</html>", code: "malformed_response" },
     { status: 404, body: '{"error":"missing_route"}', code: "http_404" },
+    ...DELIVERY_SESSION_PROOF_CODES.map((code) => ({
+      status: code === "session_conflict" ? 409 : 401,
+      body: JSON.stringify({ error: code }), code,
+    })),
   ]) {
     const root = await mkdtemp(join(tmpdir(), "cswarm-foreign-ack-"));
     try {
@@ -6168,7 +6211,34 @@ test("a lease that ends a little past the maximum is tolerated as clock skew; we
     fixedNow + LISTENER_DELIVERY_MAX_LEASE_MS + LISTENER_LEASE_CLOCK_SKEW_ALLOWANCE_MS + 1,
   );
   assert.equal(refused.reason, "fatal");
+  assert.ok(refused.reason === "fatal" && refused.error instanceof ListenerLeaseResponseError);
   assert.match(String((refused as { error?: Error }).error?.message), /lease deadline is invalid/);
+});
+
+test("claim replay response contradictions carry the lease response tag", async () => {
+  const stored = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa87", "2026-07-30T00:00:01.000Z");
+  for (const [answer, message] of [
+    [claimResult([], 0), /did not return the stored lease/],
+    [claimResult([{ signal: stored, leaseId: "55555555-5555-4555-8555-555555555599",
+      leasedUntil: "2026-07-30T00:15:00.000Z", senderOwnerRelation: "same_owner",
+      recipientPosition: null, recipientCount: null }], 1), /does not match the stored lease/],
+  ] as const) {
+    const journal = new MemoryDeliveryJournal(leasedActive({ signalId: stored.id, signal: stored }));
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal,
+      deliveryClient: { async claimAgentInbox() { return answer; },
+        async ackAgentDelivery() { throw new Error("ACK must not run"); } },
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(), model: new FakeModel(),
+      now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+      readPage: async () => durablePage([], 1), sleep: async () => {},
+    });
+    assert.equal(stop.reason, "fatal");
+    assert.ok(stop.reason === "fatal" && stop.error instanceof ListenerLeaseResponseError);
+    assert.match(stop.error.message, message);
+  }
 });
 
 test("accepted claim with malformed pending count retries as a network response", { timeout: 15_000 }, async () => {
@@ -6239,6 +6309,97 @@ async function renewingListenerSession(now: number, fetcher: typeof fetch): Prom
   });
 }
 
+test("renewal window retries before expiry and a successful successor keeps the listener alive past it", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const oldExpiry = start + 3 * 60_000;
+  let current = start;
+  let renewals = 0;
+  let reads = 0;
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: oldExpiry },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => {
+      renewals++;
+      if (renewals < 3) return new Response('{"error":"unauthenticated"}', { status: 401 });
+      return new Response(JSON.stringify({ status: "accepted", ok: true,
+        agent_token: "swm_agt_" + "B".repeat(43), token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        principal_id: PRINCIPAL_ID, run_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        issued_at: new Date(current).toISOString(), expires_at: new Date(current + 60 * 60_000).toISOString() }), { status: 200 });
+    }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads++;
+      if (reads === 1) current = oldExpiry + 1_000;
+      else controller.abort();
+      return page([]);
+    },
+    sleep: async (ms) => { assert.ok(ms <= 30_000, `renewal waited ${ms}ms`); current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : undefined);
+  assert.equal(renewals, 3);
+  assert.ok(reads >= 2);
+  assert.ok(current > oldExpiry);
+  assert.ok((session.expiry ?? 0) > oldExpiry);
+  assert.ok(events.some((event) => event.type === "credential_check_cleared"));
+});
+
+test("renewal window stops only after confirmed samples span the full window", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let renewals = 0;
+  const session = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: start + 3 * 60_000 },
+    store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => { renewals++; return new Response('{"error":"unauthenticated"}', { status: 401 }); }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    credentialSession: session, store: new MemoryStore(), model: new FakeModel(), now: () => current,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.ok(renewals >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS);
+  assert.ok(current - start >= CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  assert.ok(current > start + 3 * 60_000);
+});
+
+test("a read with the still-valid token clears a renewal credential sample", { timeout: 15_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  let calls = 0;
+  let reads = 0;
+  const controller = new AbortController();
+  const events: ListenerRuntimeEvent[] = [];
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { expiry: start + 3 * 60_000, async bearer() {
+      calls++;
+      if (calls === 1) throw new RenewalCredentialCheckError(401, "unauthenticated");
+      return "token";
+    } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, onEvent: (event) => events.push(event),
+    readPage: async () => { reads++; return page([]); },
+    sleep: async (ms) => { current += ms; if (reads > 0) controller.abort(); },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(reads > 0);
+  assert.ok(current < start + 3 * 60_000);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+  assert.ok(events.some((event) => event.type === "credential_check_cleared"));
+});
+
 test("renewal 401 unauthenticated opens the listener credential window", { timeout: 15_000 }, async () => {
   const now = Date.parse("2026-07-30T00:00:00.000Z");
   const controller = new AbortController();
@@ -6252,7 +6413,7 @@ test("renewal 401 unauthenticated opens the listener credential window", { timeo
     target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
     credentialSession: session, store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
     now: () => now, onEvent: (event) => events.push(event),
-    sleep: async (ms) => { assert.equal(ms, CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS); controller.abort(); },
+    sleep: async (ms) => { assert.equal(ms, RENEWAL_WINDOW_RETRY_MS); controller.abort(); },
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(renewals, 1);
@@ -6304,6 +6465,7 @@ test("renewal retry status names state and token expiry", { timeout: 15_000 }, a
     assert.equal(retryStatus?.lastErrorCode, "renewal_retry");
     assert.equal(retryStatus?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
     assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*capped backoff/);
+    assert.match(renderListenerStatus(retryStatus!), /Reads and claims pause.*stops and needs a new credential/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

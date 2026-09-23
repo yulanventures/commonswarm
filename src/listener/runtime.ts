@@ -144,6 +144,9 @@ export const LISTENER_HOST_PORTS_PROBE_MS = 60_000;
 export const CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS = 3;
 /** Wait between credential re-checks. The listener stays up during this wait. */
 export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
+/** A renewal check must leave more than one attempt before a live token expires. */
+export const RENEWAL_WINDOW_RETRY_MS = 30_000;
+export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS = 5_000;
 /**
  * Earliest permanent stop, measured from the first confirmed-loss answer.
  * `(MIN_CHECKS - 1)` intervals, so the last check lands on this window.
@@ -248,6 +251,12 @@ export class ListenerCapabilityError extends Error {
 
 export interface ListenerCredentialSession {
   bearer(): Promise<string>;
+  readonly expiry?: number | null;
+}
+
+/** A parsed delivery response contradicts the local lease or advertised lease bound. */
+export class ListenerLeaseResponseError extends Error {
+  override name = "ListenerLeaseResponseError";
 }
 
 export interface ListenerRuntimeModel extends ListenerModel {
@@ -1277,7 +1286,17 @@ export async function runListenerRuntime(
       return "continue";
     }
     emitCredentialCheck();
-    await sleep(CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS, abort);
+    const expiry = options.credentialSession.expiry;
+    const beforeExpiry = error instanceof RenewalCredentialCheckError &&
+      expiry !== null && expiry !== undefined &&
+      expiry - atMs > RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+    const delayMs = beforeExpiry
+      ? Math.min(
+          RENEWAL_WINDOW_RETRY_MS,
+          expiry - atMs - RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+        )
+      : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+    await sleep(delayMs, abort);
     if (abort?.aborted) return { reason: "cancelled" };
     return "continue";
   };
@@ -1876,7 +1895,7 @@ export async function runListenerRuntime(
           if (active.phase === "leased") {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay did not return the stored lease"),
+              error: new ListenerLeaseResponseError("delivery claim replay did not return the stored lease"),
             };
             break;
           }
@@ -1917,14 +1936,14 @@ export async function runListenerRuntime(
           leasedUntilMs >
             now() + LISTENER_DELIVERY_MAX_LEASE_MS + LISTENER_LEASE_CLOCK_SKEW_ALLOWANCE_MS
         ) {
-          stop = { reason: "fatal", error: new Error("delivery lease deadline is invalid") };
+          stop = { reason: "fatal", error: new ListenerLeaseResponseError("delivery lease deadline is invalid") };
           break;
         }
         if (active.phase === "leased") {
           if (!exactRecoveredLease(active, claimed)) {
             stop = {
               reason: "fatal",
-              error: new Error("delivery claim replay does not match the stored lease"),
+              error: new ListenerLeaseResponseError("delivery claim replay does not match the stored lease"),
             };
             break;
           }
