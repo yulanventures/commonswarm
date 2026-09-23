@@ -489,3 +489,24 @@ A detached CLI listener on a loopback read fixture, with a temporary `--state-di
 | `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
 
 This fold does not establish a green full-suite run on a host that permits `ps`, a bound on production clock skew, or behavior under a real DNS failover. The due-time tests use a fake clock; the detached fixture uses loopback HTTP. No production host or real workspace was contacted, and no release or merge occurred.
+
+## Fold 12
+
+**Renewal margin.** The margin is now **110 seconds**. Allow a server clock up to 30 seconds ahead of the client, two complete 30-second `requestSuccessor` timeouts, one 1-second floor before the first attempt (so it may start up to one floor after the deadline), one 1-second floor between attempts, and 5 seconds for each of the two pending-command store writes that happen before their request timeouts start. The worst-case sum is `30 + 2 × 30 + 2 × 1 + 2 × 5 = 102 seconds`; `110 - 102 = 8 seconds` of headroom remains before server expiry. The 5-second write and 30-second clock lead are engineering allowances, not measured bounds on every disk or client clock. The runtime margin derives from the renewal timeout constant, and a test requires at least the stated write and clock allowances plus 8 seconds of headroom. Replacing the computed margin with 92 seconds failed that test (exit 1, 0/1 passed); restored code passed (exit 0, 1/1).
+
+**Status wait.** An empty durable claim now records the deadline-capped wait scheduled for its next wake. The wake takes that recorded deadline, and `idlePollMs` reports its interval. Human status uses that interval for both the idle and Realtime reconcile lines; waits between whole seconds round up in prose while JSON keeps the exact milliseconds. A due-session fake-clock test compares the status event with the actual wake deadline. The detached CLI loopback renewal test reached `ready` after a 401, a 500, and a successor before the old token expired; its token-free [fold12-detached-renewal-status.json](fold12-detached-renewal-status.json) was retained before the fixture stopped.
+
+**Null store.** The healthy null-store test now requires its successive read gaps to follow the 15-second, 30-second, then 60-second idle curve (plus its 20 ms stub request time). It permits exactly three reads in the 110-second margin of its 120-second test token. Forcing a one-second null-store idle sleep failed this test (exit 1, 0/1 passed); restoring the source passed (exit 0, 1/1). The recognized `426 upgrade_required` version stop is unchanged.
+
+### Fold 12 gates and limits
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | 0 tests; TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` with an isolated HOME | 1 | 957 tests: 955 passed, 2 failed, 0 skipped. Both failures invoke real `ps`, denied by this sandbox with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` with an isolated HOME | 1 | 838 tests: 835 passed, 3 failed, 0 skipped. All three invoke real `ps`, denied with `spawn EPERM` or `spawnSync ps EPERM`. |
+| `npm run check:tests` | 0 | 0 tests; source and test types passed. |
+| `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
+| `git diff --check a9846955...HEAD` | 0 | 0 tests; whitespace check passed after commit. |
+
+These tests use fake clocks or a local loopback fixture. The two full suites remain red only where this sandbox denies `ps`; they do not establish a green run on a host that permits it. No real DNS failover, production host, or real workspace was used, and no release or merge occurred.

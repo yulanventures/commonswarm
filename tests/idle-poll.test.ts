@@ -103,6 +103,7 @@ test("user-facing idle poll lists and bounds are generated from the constants th
   assert.equal(idlePollStatusSentence(15_000), "Current idle poll interval: 15s.");
   assert.equal(idlePollStatusSentence(30_000), "Current idle poll interval: 30s.");
   assert.equal(idlePollStatusSentence(60_000), "Current idle poll interval: 1m.");
+  assert.equal(idlePollStatusSentence(8_001), "Current idle poll interval: 9s.");
   const usageText = usage();
   assert.match(usageText, /--poll-interval <duration>/);
   assert.ok(usageText.includes(help));

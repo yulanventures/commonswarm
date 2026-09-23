@@ -44,6 +44,7 @@ import {
   RenewalReauthorisationRequired,
   RenewalRetryError,
   RenewalRevoked,
+  RENEW_TIMEOUT_MS,
 } from "../src/cloud/renewal.js";
 import type { AgentCredentialRecord, AgentCredentialStore } from "../src/cloud/agent-credential.js";
 import type {
@@ -67,6 +68,9 @@ import {
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
   RENEWAL_WINDOW_RETRY_MS,
   RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  RENEWAL_PENDING_WRITE_ALLOWANCE_MS,
+  RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS,
+  RENEWAL_EXPIRY_HEADROOM_MS,
   LISTENER_REQUEST_WAIT_FLOOR_MS,
   ListenerLeaseResponseError,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
@@ -76,6 +80,7 @@ import {
   ListenerH0SeatError,
   isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
+  LISTENER_IDLE_POLL_MAX_MS,
   LISTENER_DELIVERY_SAFETY_MARGIN_MS,
   LISTENER_HOST_PORTS_PROBE_MS,
   LISTENER_PROMPT_START_MINIMUM_MS,
@@ -102,6 +107,7 @@ import {
   type ListenerStatus,
   type ListenerRuntimeModel,
 } from "../src/listener/index.js";
+import { LISTENER_RECONCILE_POLL_MS } from "../src/listener/wake.js";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL_ID = "22222222-2222-4222-8222-222222222222";
@@ -4113,6 +4119,59 @@ test("a push wake that begins before renewal is due ends at the six-minute lead"
   assert.ok(renewalTimes[0]! >= dueAt && renewalTimes[0]! <= dueAt + LISTENER_REQUEST_WAIT_FLOOR_MS);
 });
 
+test("a due session reports the deadline-capped push wait it takes", { timeout: 15_000 }, async () => {
+  const expiry = Date.parse("2026-07-30T01:00:00.000Z");
+  const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  let current = deadline - 10_000;
+  let reads = 0;
+  const controller = new AbortController();
+  const journal = new MemoryDeliveryJournal();
+  const intervals: Array<{ at: number; ms: number }> = [];
+  const wakeWaits: Array<{ startedAt: number; until: number }> = [];
+  const wake = {
+    hasTopic: true,
+    snapshot: () => ({ mode: "push", subscribedAt: new Date(current).toISOString(), reconnects: 0,
+      lastWakeAt: null, lastReconcileAt: null, errorCode: null, topicRotatedAt: null, rateLimited: false }),
+    next: async ({ until }: { until: number }) => {
+      wakeWaits.push({ startedAt: current, until });
+      current = until;
+      return "deadline";
+    },
+    coalescingRemainingMs: () => 0,
+    noteClaim() {}, noteWakeClaim() {}, noteReconcile() {}, markRateLimited() {},
+    close: async () => {},
+  } as unknown as NonNullable<Parameters<typeof runListenerRuntimeActual>[0]["wake"]>;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { expiry, renewalAt: expiry - 6 * 60_000, renewalDue: true,
+      async bearer() { return "swm_agt_" + "A".repeat(43); } },
+    store: new MemoryStore(), model: new FakeModel(), signal: controller.signal,
+    now: () => current, wake,
+    onEvent: (event) => {
+      if (event.type === "idle_poll") intervals.push({ at: Date.parse(event.ts), ms: event.intervalMs });
+    },
+    readPage: async () => {
+      if (++reads === 2) controller.abort();
+      return durablePage([], 1);
+    },
+    fetcher: (async () => new Response(JSON.stringify({ status: "accepted", ok: true,
+      capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
+      deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 })) as typeof fetch,
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : undefined);
+  assert.equal(wakeWaits.length, 1);
+  assert.equal(wakeWaits[0]!.until, deadline);
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0]!.at, wakeWaits[0]!.startedAt);
+  assert.equal(intervals[0]!.ms, wakeWaits[0]!.until - wakeWaits[0]!.startedAt);
+  assert.ok(intervals[0]!.ms < LISTENER_RECONCILE_POLL_MS);
+  assert.equal(idlePollStatusSentence(intervals[0]!.ms),
+    `Current idle poll interval: ${intervals[0]!.ms / 1_000}s.`);
+});
+
 test("malformed read overflow and delivery marker retry", { timeout: 15_000 }, async () => {
   for (const body of [
     { signals: [{}, {}, {}, {}], capabilities: { sender_owner_relation: 1, cursor_after: 1 } },
@@ -6455,6 +6514,17 @@ async function renewingListenerSession(now: number, fetcher: typeof fetch): Prom
   });
 }
 
+test("renewal deadline fits two timed attempts after a late start and two pending writes", () => {
+  assert.ok(RENEWAL_PENDING_WRITE_ALLOWANCE_MS >= 5_000);
+  assert.ok(RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS >= 30_000);
+  const worstCaseMs = RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS +
+    2 * RENEW_TIMEOUT_MS + 2 * LISTENER_REQUEST_WAIT_FLOOR_MS +
+    2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS;
+  assert.ok(RENEWAL_EXPIRY_HEADROOM_MS >= 8_000);
+  assert.ok(RENEWAL_WINDOW_EXPIRY_MARGIN_MS - worstCaseMs >= 8_000,
+    "two timeouts, a late start, both pending writes, and server clock lead need spare time");
+});
+
 test("renewal window retries before expiry and a successful successor keeps the listener alive past it", { timeout: 15_000 }, async () => {
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   const oldExpiry = start + 3 * 60_000;
@@ -6666,10 +6736,11 @@ test("generated failing renewals and a healthy null-store listener stay rate bou
   assert.ok(reads.some((time) => time >= deadline && time < expiry));
   assert.ok(reads.some((time) => time >= expiry));
   for (let i = 1; i < reads.length; i++) {
-    assert.ok(reads[i]! - reads[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+    assert.equal(reads[i]! - reads[i - 1]!,
+      nextIdlePollMs(IDLE_POLL_DEFAULT_MS, i - 1, LISTENER_IDLE_POLL_MAX_MS) + 20,
+      `null-store read ${i + 1} left the 15s, 30s, 60s idle curve`);
   }
-  assert.ok(reads.filter((time) => time >= deadline && time < expiry).length <=
-    Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
+  assert.equal(reads.filter((time) => time >= deadline && time < expiry).length, 3);
   assert.equal(sequences, 64);
 });
 

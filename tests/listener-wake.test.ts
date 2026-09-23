@@ -782,7 +782,7 @@ test("status sentence never says push unless mode is push; lists come from const
     mode: LISTENER_WAKE_MODE_POLL,
     errorCode: "channel_error",
   };
-  const pushLine = listenerWakeStatusSentence(push, IDLE_POLL_DEFAULT_MS, "12s ago");
+  const pushLine = listenerWakeStatusSentence(push, LISTENER_RECONCILE_POLL_MS, "12s ago");
   const pollLine = listenerWakeStatusSentence(
     poll,
     IDLE_POLL_DEFAULT_MS,
@@ -790,6 +790,7 @@ test("status sentence never says push unless mode is push; lists come from const
   );
   assert.match(pushLine, new RegExp(`^${LISTENER_WAKE_MODE_PUSH} \\(Realtime\\)`));
   assert.match(pushLine, new RegExp(formatIdlePollDuration(LISTENER_RECONCILE_POLL_MS)));
+  assert.match(listenerWakeStatusSentence(push, 8_001, null), /reconcile every 9s\./);
   assert.doesNotMatch(pollLine, new RegExp(`\\b${LISTENER_WAKE_MODE_PUSH}\\b`));
   assert.match(pollLine, new RegExp(`^${LISTENER_WAKE_MODE_POLL} every`));
   assert.match(pollLine, new RegExp(formatIdlePollDuration(IDLE_POLL_DEFAULT_MS)));
@@ -1153,6 +1154,10 @@ test("listen status JSON names mode from the same wake.mode constant set", () =>
   assert.equal(LISTENER_WAKE_MODE_SET.has(json.mode as string), true);
   const human = renderListenerStatus(status);
   assert.match(human, /^push \(Realtime\)|push \(Realtime\)/m);
+  const capped = { ...status, idlePollMs: 8_001 };
+  assert.match(renderListenerStatus(capped), /reconcile every 9s\./);
+  assert.match(renderListenerStatus(capped), /Current idle poll interval: 9s\./);
+  assert.equal(listenerStatusJson(capped).idlePollMs, 8_001);
   assert.doesNotMatch(human, /cswarm-wake:/);
   assert.equal(JSON.stringify(json).includes("cswarm-wake:"), false);
 });

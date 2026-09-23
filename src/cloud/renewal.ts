@@ -127,7 +127,7 @@ export const RENEWAL_LEAD_CEILING_MS = 15 * 60_000;
 /** How long an interrupted renewal stays replayable before its command id is abandoned. */
 export const RENEWAL_PENDING_RECOVERY_MS = 60 * 60_000;
 
-const RENEW_TIMEOUT_MS = 30_000;
+export const RENEW_TIMEOUT_MS = 30_000;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;

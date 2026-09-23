@@ -340,6 +340,8 @@ import {
   emptyListenerReadHealth,
   summarizeListenerReadHealth,
   listenerWakeStatusSentence,
+  LISTENER_RECONCILE_POLL_MS,
+  LISTENER_WAKE_MODE_PUSH,
   emptyListenerWakeStatus,
   createWakeSubscriber,
   LISTENER_DELIVERY_HOLD_RELEASE_CLAUSES,
@@ -5908,7 +5910,9 @@ export function renderListenerStatus(
       status.wake ?? emptyListenerWakeStatus(),
       status.idlePollMs && status.idlePollMs > 0
         ? status.idlePollMs
-        : IDLE_POLL_DEFAULT_MS,
+        : status.wake?.mode === LISTENER_WAKE_MODE_PUSH
+          ? LISTENER_RECONCILE_POLL_MS
+          : IDLE_POLL_DEFAULT_MS,
       status.wake?.lastWakeAt
         ? relativeAge(status.wake.lastWakeAt, nowMs)
         : null,

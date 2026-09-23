@@ -2247,6 +2247,7 @@ test("detached listener renews after a 401 and server error before the old token
     if (process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH, safeStatus);
     if (process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH, safeStatus);
     if (process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD12_RENEWAL_STATUS_PATH, safeStatus);
   } finally {
     try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
     catch { /* The listener may already have exited after a failed assertion. */ }

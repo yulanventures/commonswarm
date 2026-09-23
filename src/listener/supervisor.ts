@@ -527,7 +527,9 @@ export async function runListenerSupervisor(
         readHealth = recordListenerWakeModeChange(readHealth, event.ts);
       }
       const cadenceMs = event.wake.mode === LISTENER_WAKE_MODE_PUSH
-        ? LISTENER_RECONCILE_POLL_MS
+        ? (status.idlePollMs && status.idlePollMs > 0
+          ? status.idlePollMs
+          : LISTENER_RECONCILE_POLL_MS)
         : (status.idlePollMs && status.idlePollMs > 0
           ? status.idlePollMs
           : null);

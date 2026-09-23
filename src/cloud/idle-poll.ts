@@ -23,6 +23,11 @@ export function formatIdlePollDuration(ms: number): string {
   throw new Error("idle poll duration must be a whole number of seconds");
 }
 
+/** A deadline can fall between whole seconds; status rounds its remaining wait up. */
+export function formatIdleWaitDuration(ms: number): string {
+  return formatIdlePollDuration(Math.ceil(ms / 1_000) * 1_000);
+}
+
 export const IDLE_POLL_MIN_LABEL = formatIdlePollDuration(IDLE_POLL_MIN_MS);
 export const IDLE_POLL_DEFAULT_LABEL = formatIdlePollDuration(IDLE_POLL_DEFAULT_MS);
 export const IDLE_POLL_MAX_LABEL = formatIdlePollDuration(IDLE_POLL_MAX_MS);
@@ -108,7 +113,7 @@ export function nextIdlePollMs(
 
 /** Status sentence. Names the interval in force right now, from the same constants. */
 export function idlePollStatusSentence(currentMs: number): string {
-  return `Current idle poll interval: ${formatIdlePollDuration(currentMs)}.`;
+  return `Current idle poll interval: ${formatIdleWaitDuration(currentMs)}.`;
 }
 
 export function idlePollHelpSentence(defaultMs: number = IDLE_POLL_DEFAULT_MS): string {

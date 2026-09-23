@@ -46,6 +46,7 @@ import {
   RenewalRetryError,
   RenewalReauthorisationRequired,
   RenewalRevoked,
+  RENEW_TIMEOUT_MS,
 } from "../cloud/renewal.js";
 import { ACP_DEFAULT_REQUEST_TIMEOUT_MS } from "../host/bounds.js";
 import { AcpHostError, TRANSIENT_ACP_CODES } from "../host/types.js";
@@ -148,8 +149,14 @@ export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
 export const RENEWAL_WINDOW_RETRY_MS = 30_000;
 /** A failed request may retry at most once per second, even at or after expiry. */
 export const LISTENER_REQUEST_WAIT_FLOOR_MS = 1_000;
-/** Two 30 s renewal timeouts, 30 s server clock lead, and two wait floors. */
-export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS = 92_000;
+/** Two renewal timeouts and pending writes, clock lead, two floors, and headroom. */
+export const RENEWAL_PENDING_WRITE_ALLOWANCE_MS = 5_000;
+export const RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS = 30_000;
+export const RENEWAL_EXPIRY_HEADROOM_MS = 8_000;
+export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS =
+  2 * RENEW_TIMEOUT_MS + RENEWAL_SERVER_CLOCK_LEAD_ALLOWANCE_MS +
+  2 * LISTENER_REQUEST_WAIT_FLOOR_MS + 2 * RENEWAL_PENDING_WRITE_ALLOWANCE_MS +
+  RENEWAL_EXPIRY_HEADROOM_MS;
 /**
  * Earliest permanent stop, measured from the first confirmed-loss answer.
  * `(MIN_CHECKS - 1)` intervals, so the last check lands on this window.
@@ -1204,6 +1211,7 @@ export async function runListenerRuntime(
   let stop: ListenerRuntimeStop | undefined;
   let wakeSubscriber: WakeHandle | null = options.wake ?? null;
   let reconcileDueAt = now();
+  let plannedWakeUntil: number | null = null;
 
   const ensureWake = (): WakeHandle => {
     if (wakeSubscriber === null) {
@@ -1241,6 +1249,8 @@ export async function runListenerRuntime(
     }
     return nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
   };
+  const wakeWaitUntil = (): number => Math.max(now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
+    Math.min(reconcileDueAt, now() + waitCapMs(), renewalWaitBoundary() ?? Infinity));
 
   /**
    * Confirmation window for a server credential-loss answer. `checks` counts
@@ -1476,7 +1486,8 @@ export async function runListenerRuntime(
         wakeSubscriber.hasTopic && mayWaitForWake()
       ) {
         const until = Math.max(now() + LISTENER_REQUEST_WAIT_FLOOR_MS,
-          Math.min(reconcileDueAt, now() + waitCapMs(), renewalWaitBoundary() ?? Infinity));
+          plannedWakeUntil ?? wakeWaitUntil());
+        plannedWakeUntil = null;
         const wakeWaitStartedAt = now();
         const reason = await wakeSubscriber.next({
           until,
@@ -1504,6 +1515,8 @@ export async function runListenerRuntime(
             skipRead = true;
           }
         }
+      } else {
+        plannedWakeUntil = null;
       }
       let page: AgentSignalPage | null = null;
       forceRead = false;
@@ -1979,9 +1992,8 @@ export async function runListenerRuntime(
           }
           if (wakeSubscriber !== null && wakeSubscriber.hasTopic) {
             const snap = wakeSubscriber.snapshot(now());
-            const intervalMs = snap.mode === LISTENER_WAKE_MODE_PUSH
-              ? LISTENER_RECONCILE_POLL_MS
-              : nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS);
+            plannedWakeUntil = wakeWaitUntil();
+            const intervalMs = plannedWakeUntil - now();
             if (snap.mode === LISTENER_WAKE_MODE_PUSH) emptyIdleStreak = 0;
             else emptyIdleStreak += 1;
             options.onEvent?.({
