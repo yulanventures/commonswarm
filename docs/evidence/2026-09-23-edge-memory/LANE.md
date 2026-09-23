@@ -25,8 +25,8 @@
 `deploy/edge-runtime/RUNBOOK.md` has the exact `docker logs | jq` filters.
 Compare `retiredUserWorkersCount` and
 `activeUserWorkersCount` with those keyed log records and container RSS over
-time. The pinned upstream image does not install `curl`; the runbook also gives
-an installed-Bash `/dev/tcp` read. This lane did not contact the box.
+time. The metrics are in the log; there is no HTTP read. This lane did not
+contact the box.
 
 ## What this does not change
 

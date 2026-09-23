@@ -122,6 +122,11 @@ All of the below are **read-only additions to `deploy/edge-runtime/main/index.ts
 
 ## Ranked fix list, with risk
 
+> **Correction (lead, 2026-09-23):** recommendation 1 was implemented as a one-minute `edge_runtime_metrics` log
+> line, not an HTTP route: in edge-runtime v1.73.13 the main service's `Deno.serve` handler gets `0.0.0.0` as the
+> peer for every request, so a loopback guard cannot work (see LANE.md Fold 1). Mentions of `/_internal/metric` below
+> are the research as written.
+
 1. **Add a read-only `/_internal/metric` (+ `systemMemoryInfo()`) route to the box's own main service and watch it for a full day (including daytime traffic), before changing anything else.** Risk: **near zero** — additive, read-only, no behavior change to request handling. This turns "we think it's retirement-count-driven" into a measured fact matching (or not) the #719/#740 shape, and is the one step that removes the most guesswork per dollar spent. Do this first.
 
 2. **Explicitly set `cpuTimeSoftLimitMs`/`cpuTimeHardLimitMs` and `forceCreate: false` in the `userWorkers.create()` call**, instead of relying on an unread, unverified compile-time default. Risk: **low** — pure config, makes today's actual behavior legible and tunable instead of implicit; does not by itself change the leak.

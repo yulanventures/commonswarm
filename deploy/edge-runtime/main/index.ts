@@ -61,8 +61,8 @@ const runtimeMetricsTimer = setInterval(() => {
   void logRuntimeMetrics(() => EdgeRuntime.getRuntimeMetrics(), console.log);
 }, RUNTIME_METRICS_INTERVAL_MS);
 
-// The pinned runtime's Deno.serve shim dispatches beforeunload to the main
-// worker on SIGTERM. Live intervals otherwise delay shutdown to 70 seconds.
+// On SIGTERM the pinned runtime sends beforeunload to the main worker; its
+// Deno.serve shim listens for it. Live intervals otherwise delay shutdown to 70 seconds.
 addEventListener("beforeunload", () => {
   clearInterval(workerInventoryTimer);
   clearInterval(runtimeMetricsTimer);
