@@ -11,9 +11,11 @@ import {
   WORKER_LIMIT_STATUS,
   withWorkerRetiredRetry,
 } from "./router.ts";
+import { createWorkerObserver, localMetricsResponse } from "./observability.ts";
 
 declare const EdgeRuntime: {
   applySupabaseTag(original: Request, cloned: Request): void;
+  getRuntimeMetrics(): Promise<unknown>;
   userWorkers: {
     create(options: {
       servicePath: string;
@@ -21,7 +23,8 @@ declare const EdgeRuntime: {
       workerTimeoutMs: number;
       noModuleCache: boolean;
       envVars: Array<[string, string]>;
-    }): Promise<{ fetch(request: Request): Promise<Response> }>;
+    }): Promise<{ key: string; fetch(request: Request): Promise<Response> }>;
+    memStats(): Promise<Map<string, unknown> | Record<string, unknown>>;
   };
 };
 
@@ -34,6 +37,22 @@ const USER_WORKER_MEMORY_MB = 96;
 // The hosted free-plan wall-clock limit is 150 seconds. This is long enough for
 // the planned 50-second H0 poll while still ending stuck work.
 const USER_WORKER_TIMEOUT_MS = 150_000;
+const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
+
+// The runtime has no main-worker lifecycle callback. Its worker inventory lets
+// us observe ended isolate keys without changing user workers or their limits.
+let observingWorkers = false;
+setInterval(async () => {
+  if (observingWorkers) return;
+  observingWorkers = true;
+  try {
+    await workerObserver.observeEnded();
+  } catch {
+    // A failed inventory is not evidence that any worker ended.
+  } finally {
+    observingWorkers = false;
+  }
+}, 5_000);
 
 function assertRequiredEnvironment(): void {
   const problems = mainEnvironmentProblems((name) => Deno.env.get(name));
@@ -59,11 +78,17 @@ function environmentFor(functionName: FunctionName): Array<[string, string]> {
   return entries;
 }
 
-async function handle(request: Request): Promise<Response> {
+async function handle(request: Request, peerHostname: string): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname === "/health") {
     return mainJsonResponse(200, { status: "ok" });
   }
+  const metrics = await localMetricsResponse(
+    request,
+    peerHostname,
+    () => EdgeRuntime.getRuntimeMetrics(),
+  );
+  if (metrics !== null) return metrics;
   // This keeps bare-path, unknown-function, and preflight behavior in one pure
   // resolver. Kong answers a known function's preflight before the worker;
   // unknown names keep its normal 404. Non-OPTIONS preserve function CORS.
@@ -79,7 +104,7 @@ async function handle(request: Request): Promise<Response> {
   const attemptRequests = [request, request.clone()] as const;
   return await withWorkerRetiredRetry(async (attemptNumber) => {
     const original = attemptRequests[attemptNumber];
-    const worker = await EdgeRuntime.userWorkers.create({
+    const worker = await workerObserver.create(route.functionName, {
       servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
       memoryLimitMb: USER_WORKER_MEMORY_MB,
       workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
@@ -92,8 +117,8 @@ async function handle(request: Request): Promise<Response> {
   });
 }
 
-Deno.serve((request) =>
-  handle(request).catch((error: unknown) => {
+Deno.serve((request, info) =>
+  handle(request, info.remoteAddr.hostname).catch((error: unknown) => {
     if (isWorkerLimitError(error)) {
       return mainJsonResponse(WORKER_LIMIT_STATUS, WORKER_LIMIT_BODY);
     }

@@ -154,3 +154,41 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 The API cutover is done. Caddy sends Auth, REST, Storage, and Realtime to the local containers in `deploy/supabase-stack/commonswarm-api.caddy`.
 
 Future edge-function releases use `deploy/RELEASE-TO-BOX.md`.
+
+## Worker observation after a reviewed edge release
+
+The main service emits one-line JSON records with events `edge_worker_started`
+and `edge_worker_ended`. `functionName` names one of the five functions;
+`workerKey` is the isolate UUID printed by the runtime's wall-clock and
+early-termination messages. `ageMs` measures from the first create result seen
+by the main service to the five-second inventory poll that noticed the key was
+gone. `reason` is `null` because this runtime does not pass its shutdown reason
+to the main worker. An end record is an observed disappearance, not proof of the
+specific retirement cause. Read records without exposing function request data:
+
+```sh
+docker logs commonswarm-edge-edge-runtime-1 2>&1 |
+  jq -R 'fromjson? | select(.event == "edge_worker_started" or .event == "edge_worker_ended") | {event, functionName, workerKey, reason, ageMs}'
+```
+
+The route below accepts only a loopback socket peer **inside** the container.
+Caddy has no matching public route, and the main service rejects a non-loopback
+peer even if its Host header says localhost. If `curl` is installed in the
+container, read the runtime counters and heap statistics with:
+
+```sh
+docker exec commonswarm-edge-edge-runtime-1 \
+  curl --fail --silent --show-error http://127.0.0.1:9000/_internal/metric
+```
+
+The pinned upstream image's Dockerfile does not install `curl`. On that image,
+use its installed Bash and loopback TCP socket instead:
+
+```sh
+docker exec commonswarm-edge-edge-runtime-1 bash -c \
+  'exec 3<>/dev/tcp/127.0.0.1/9000; printf "GET /_internal/metric HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; cat <&3'
+```
+
+Compare `retiredUserWorkersCount` and `activeUserWorkersCount` with the worker
+records and container RSS over time. No such comparison has been made on the box
+for this change yet.

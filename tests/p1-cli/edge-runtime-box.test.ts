@@ -3,6 +3,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
+  createWorkerObserver,
+  EDGE_WORKER_EVENTS,
+  localMetricsResponse,
+  RUNTIME_METRICS_PATH,
+} from "../../deploy/edge-runtime/main/observability.js";
+import {
   FUNCTION_ENV_NAMES,
   H0_COMMAND_ENV_EXCLUSIONS,
   FUNCTION_NAMES,
@@ -28,6 +34,104 @@ import {
 } from "../../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
+
+test("edge worker logs one safe start and one observed end per isolate key", { timeout: 5_000 }, async () => {
+  let time = 1_000;
+  let key = "isolate-1";
+  let present: Map<string, unknown> | Record<string, unknown> =
+    new Map([[key, {}]]);
+  const lines: string[] = [];
+  const observer = createWorkerObserver(
+    {
+      async create() {
+        return { key, async fetch() { return new Response("ok"); } };
+      },
+      async memStats() { return present; },
+    },
+    (line) => lines.push(line),
+    () => time,
+  );
+  await observer.create("command", {});
+  await observer.create("command", {});
+  assert.equal(lines.length, 1, "reuse does not create a second start");
+  assert.deepEqual(JSON.parse(lines[0]!), {
+    event: EDGE_WORKER_EVENTS.started,
+    functionName: "command",
+    workerKey: "isolate-1",
+    reason: null,
+    ageMs: 0,
+  });
+  time = 76_000;
+  present = new Map();
+  await observer.observeEnded();
+  await observer.observeEnded();
+  assert.equal(lines.length, 2);
+  assert.deepEqual(JSON.parse(lines[1]!), {
+    event: EDGE_WORKER_EVENTS.ended,
+    functionName: "command",
+    workerKey: "isolate-1",
+    reason: null,
+    ageMs: 75_000,
+  });
+  key = "isolate-2";
+  await observer.create("read", {});
+  assert.equal(JSON.parse(lines[2]!).functionName, "read");
+  present = new Map([[key, {}]]);
+  await observer.observeEnded();
+  assert.equal(lines.length, 3);
+  // The runtime's inventory may deserialize as a plain key-value object.
+  present = {};
+  await observer.observeEnded();
+  assert.equal(JSON.parse(lines[3]!).workerKey, "isolate-2");
+  for (const line of lines) assert.equal(line.includes("\n"), false);
+});
+
+test("runtime metric route accepts only a loopback socket peer", { timeout: 5_000 }, async () => {
+  const metrics = { activeUserWorkersCount: 1, retiredUserWorkersCount: 3 };
+  let reads = 0;
+  const getMetrics = async () => { reads += 1; return metrics; };
+  const request = new Request(`http://untrusted-host.test${RUNTIME_METRICS_PATH}`);
+  const denied = await localMetricsResponse(request, "172.18.0.1", getMetrics);
+  assert.equal(denied?.status, 404);
+  assert.equal(reads, 0);
+  const allowed = await localMetricsResponse(request, "127.0.0.1", getMetrics);
+  assert.equal(allowed?.status, 200);
+  assert.deepEqual(await allowed?.json(), metrics);
+  assert.equal(allowed?.headers.get("cache-control"), "no-store");
+  assert.equal(allowed?.headers.get("access-control-allow-origin"), null);
+  assert.equal(reads, 1);
+  assert.equal(
+    await localMetricsResponse(
+      new Request("http://localhost/functions/v1/command/_internal/metric"),
+      "127.0.0.1",
+      getMetrics,
+    ),
+    null,
+  );
+  assert.equal(reads, 1);
+});
+
+test("public Caddy routes cannot forward the internal metric path", { timeout: 5_000 }, async () => {
+  const caddyFiles = [
+    "deploy/supabase-stack/commonswarm-api.caddy",
+    "deploy/supabase-stack/commonswarm-api-maintenance.caddy",
+  ];
+  for (const path of caddyFiles) {
+    const caddy = await readFile(resolve(repoRoot, path), "utf8");
+    const edgeRoute = caddy.match(/@edge_functions path ([^\n]+)\n\s*handle @edge_functions \{\s*reverse_proxy 127\.0\.0\.1:9000/);
+    assert.ok(edgeRoute, `${path} must keep its scoped edge proxy`);
+    assert.equal(edgeRoute[1]?.trim(), "/functions/v1 /functions/v1/*");
+    assert.equal(edgeRoute[1]?.includes(RUNTIME_METRICS_PATH), false);
+    assert.equal((caddy.match(/reverse_proxy 127\.0\.0\.1:9000/g) ?? []).length, 1);
+  }
+  assert.equal(resolveFunctionRoute(RUNTIME_METRICS_PATH), null);
+  for (const name of FUNCTION_NAMES) {
+    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
+      functionName: name,
+      pathname: `/${name}`,
+    });
+  }
+});
 
 async function filesBelow(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

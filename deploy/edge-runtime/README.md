@@ -3,7 +3,21 @@
 This package runs the five existing Supabase Edge Functions in
 `public.ecr.aws/supabase/edge-runtime:v1.73.13`. It does not change their source.
 
-The main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
+The main service logs one JSON line when it first receives a new worker isolate
+key and one when that key disappears from the runtime's worker inventory. Each
+line has `event`, `functionName`, `workerKey`, `reason`, and `ageMs`. Reused workers
+do not generate another start line. The v1.73.13 main-worker API does not expose
+a shutdown callback or reason, so `reason` is `null`; the end time and age are
+observed at the next five-second inventory check. The worker key is the isolate
+UUID used by the runtime's wall-clock and early-termination logs.
+
+`GET /_internal/metric` returns `EdgeRuntime.getRuntimeMetrics()` only when the
+socket peer is `127.0.0.1` or `::1` inside the container. It has no public Caddy
+route: both API route sets proxy only `/functions/v1` and `/functions/v1/*` to
+the edge runtime, and Compose publishes port 9000 on host loopback. A Host
+header cannot satisfy the peer check. See `RUNBOOK.md` for local reads.
+
+For function traffic, the main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
 `capability`, `activity`, and `h0` to separate user workers, and gives each worker
 the path Supabase Kong gives it: `/<name>/...`. An unknown name returns 404 before
 a worker starts. A known function's `OPTIONS` request gets the hosted gateway's
