@@ -11,9 +11,11 @@ import {
   WORKER_LIMIT_STATUS,
   withWorkerRetiredRetry,
 } from "./router.ts";
+import { createWorkerObserver, logRuntimeMetrics } from "./observability.ts";
 
 declare const EdgeRuntime: {
   applySupabaseTag(original: Request, cloned: Request): void;
+  getRuntimeMetrics(): Promise<unknown>;
   userWorkers: {
     create(options: {
       servicePath: string;
@@ -21,7 +23,8 @@ declare const EdgeRuntime: {
       workerTimeoutMs: number;
       noModuleCache: boolean;
       envVars: Array<[string, string]>;
-    }): Promise<{ fetch(request: Request): Promise<Response> }>;
+    }): Promise<{ key: string; fetch(request: Request): Promise<Response> }>;
+    memStats(): Promise<Map<string, unknown> | Record<string, unknown>>;
   };
 };
 
@@ -34,6 +37,36 @@ const USER_WORKER_MEMORY_MB = 96;
 // The hosted free-plan wall-clock limit is 150 seconds. This is long enough for
 // the planned 50-second H0 poll while still ending stuck work.
 const USER_WORKER_TIMEOUT_MS = 150_000;
+const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
+
+// The runtime has no user-worker retirement callback. Its worker inventory lets
+// us observe ended isolate keys without changing user workers or their limits.
+let observingWorkers = false;
+const workerInventoryTimer = setInterval(async () => {
+  if (observingWorkers) return;
+  observingWorkers = true;
+  try {
+    await workerObserver.observeEnded();
+  } catch {
+    // A failed inventory is not evidence that any worker ended.
+  } finally {
+    observingWorkers = false;
+  }
+}, 5_000);
+
+// One sample per minute is 1,440 small records per day, enough to compare
+// worker counts with container RSS without logging on the request path.
+const RUNTIME_METRICS_INTERVAL_MS = 60_000;
+const runtimeMetricsTimer = setInterval(() => {
+  void logRuntimeMetrics(() => EdgeRuntime.getRuntimeMetrics(), console.log);
+}, RUNTIME_METRICS_INTERVAL_MS);
+
+// On SIGTERM the pinned runtime sends beforeunload to the main worker; its
+// Deno.serve shim listens for it. Live intervals otherwise delay shutdown to 70 seconds.
+addEventListener("beforeunload", () => {
+  clearInterval(workerInventoryTimer);
+  clearInterval(runtimeMetricsTimer);
+});
 
 function assertRequiredEnvironment(): void {
   const problems = mainEnvironmentProblems((name) => Deno.env.get(name));
@@ -79,7 +112,7 @@ async function handle(request: Request): Promise<Response> {
   const attemptRequests = [request, request.clone()] as const;
   return await withWorkerRetiredRetry(async (attemptNumber) => {
     const original = attemptRequests[attemptNumber];
-    const worker = await EdgeRuntime.userWorkers.create({
+    const worker = await workerObserver.create(route.functionName, {
       servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
       memoryLimitMb: USER_WORKER_MEMORY_MB,
       workerTimeoutMs: USER_WORKER_TIMEOUT_MS,

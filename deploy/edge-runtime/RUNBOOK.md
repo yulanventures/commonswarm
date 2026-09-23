@@ -154,3 +154,34 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 The API cutover is done. Caddy sends Auth, REST, Storage, and Realtime to the local containers in `deploy/supabase-stack/commonswarm-api.caddy`.
 
 Future edge-function releases use `deploy/RELEASE-TO-BOX.md`.
+
+## Worker observation after a reviewed edge release
+
+The main service emits one-line JSON records with events `edge_worker_started`
+and `edge_worker_ended`. `functionName` names one of the five functions;
+`workerKey` is the isolate UUID printed by the runtime's wall-clock and
+early-termination messages. `ageMs` measures from the first create result seen
+by the main service to the five-second inventory poll that noticed the key was
+gone. `reason` is `null` because this runtime does not pass the user worker's
+retirement reason to the main worker. An end record is an observed
+disappearance, not proof of the specific retirement cause. Read records
+without exposing function request data:
+
+```sh
+docker logs commonswarm-edge-edge-runtime-1 2>&1 |
+  jq -R 'fromjson? | select(.event == "edge_worker_started" or .event == "edge_worker_ended") | {event, functionName, workerKey, reason, ageMs}'
+```
+
+The pinned runtime's main-service `Deno.serve` shim reports its own listener
+address for every request, so it cannot enforce a client-peer metrics route.
+The main service instead logs one `edge_runtime_metrics` record per minute.
+Read the runtime counters and heap statistics with:
+
+```sh
+docker logs commonswarm-edge-edge-runtime-1 2>&1 |
+  jq -R 'fromjson? | select(.event == "edge_runtime_metrics") | .metrics'
+```
+
+Compare `retiredUserWorkersCount` and `activeUserWorkersCount` with the worker
+records and container RSS over time. No such comparison has been made on the box
+for this change yet.

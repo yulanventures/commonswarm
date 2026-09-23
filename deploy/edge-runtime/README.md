@@ -3,7 +3,23 @@
 This package runs the five existing Supabase Edge Functions in
 `public.ecr.aws/supabase/edge-runtime:v1.73.13`. It does not change their source.
 
-The main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
+The main service logs one JSON line when it first receives a new worker isolate
+key and one when that key disappears from the runtime's worker inventory. Each
+line has `event`, `functionName`, `workerKey`, `reason`, and `ageMs`. Reused workers
+do not generate another start line. The v1.73.13 main-worker API does not expose
+a user-worker retirement callback or reason, so `reason` is `null`; the end
+time and age are observed at the next five-second inventory check. The worker key is the isolate
+UUID used by the runtime's wall-clock and early-termination logs.
+
+Once a minute the main service logs one `edge_runtime_metrics` JSON record from
+`EdgeRuntime.getRuntimeMetrics()`. That is 1,440 samples per day, enough to
+compare worker counts with container RSS without logging per request. Both
+observation timers are cleared when the main worker receives `beforeunload`,
+so they do not delay a graceful restart. `/_internal/metric` follows the normal
+unknown-function 404 path; there is no metrics HTTP route. See `RUNBOOK.md` for
+the log filter.
+
+For function traffic, the main service accepts only `/functions/v1/<name>/...`, maps `command`, `read`,
 `capability`, `activity`, and `h0` to separate user workers, and gives each worker
 the path Supabase Kong gives it: `/<name>/...`. An unknown name returns 404 before
 a worker starts. A known function's `OPTIONS` request gets the hosted gateway's

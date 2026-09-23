@@ -3,6 +3,12 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
+  createWorkerObserver,
+  EDGE_WORKER_EVENTS,
+  logRuntimeMetrics,
+  RUNTIME_METRICS_EVENT,
+} from "../../deploy/edge-runtime/main/observability.js";
+import {
   FUNCTION_ENV_NAMES,
   H0_COMMAND_ENV_EXCLUSIONS,
   FUNCTION_NAMES,
@@ -28,6 +34,97 @@ import {
 } from "../../deploy/edge-runtime/main/router.js";
 
 const repoRoot = process.cwd();
+
+test("edge worker logs one safe start and one observed end per isolate key", { timeout: 5_000 }, async () => {
+  let time = 1_000;
+  let key = "isolate-1";
+  let present: Map<string, unknown> | Record<string, unknown> =
+    new Map([[key, {}]]);
+  const lines: string[] = [];
+  const observer = createWorkerObserver(
+    {
+      async create() {
+        return { key, async fetch() { return new Response("ok"); } };
+      },
+      async memStats() { return present; },
+    },
+    (line) => lines.push(line),
+    () => time,
+  );
+  await observer.create("command", {});
+  await observer.create("command", {});
+  assert.equal(lines.length, 1, "reuse does not create a second start");
+  assert.deepEqual(JSON.parse(lines[0]!), {
+    event: EDGE_WORKER_EVENTS.started,
+    functionName: "command",
+    workerKey: "isolate-1",
+    reason: null,
+    ageMs: 0,
+  });
+  time = 76_000;
+  present = new Map();
+  await observer.observeEnded();
+  await observer.observeEnded();
+  assert.equal(lines.length, 2);
+  assert.deepEqual(JSON.parse(lines[1]!), {
+    event: EDGE_WORKER_EVENTS.ended,
+    functionName: "command",
+    workerKey: "isolate-1",
+    reason: null,
+    ageMs: 75_000,
+  });
+  key = "isolate-2";
+  await observer.create("read", {});
+  assert.equal(JSON.parse(lines[2]!).functionName, "read");
+  present = new Map([[key, {}]]);
+  await observer.observeEnded();
+  assert.equal(lines.length, 3);
+  // The runtime's inventory may deserialize as a plain key-value object.
+  present = {};
+  await observer.observeEnded();
+  assert.equal(JSON.parse(lines[3]!).workerKey, "isolate-2");
+  for (const line of lines) assert.equal(line.includes("\n"), false);
+});
+
+test("runtime metrics are logged as one JSON record per sample", { timeout: 5_000 }, async () => {
+  const metrics = { activeUserWorkersCount: 1, retiredUserWorkersCount: 3 };
+  let reads = 0;
+  const getMetrics = async () => { reads += 1; return metrics; };
+  const lines: string[] = [];
+  await logRuntimeMetrics(getMetrics, (line) => lines.push(line));
+  assert.equal(reads, 1);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]!), { event: RUNTIME_METRICS_EVENT, metrics });
+  await logRuntimeMetrics(async () => { throw new Error("sample failed"); }, (line) => lines.push(line));
+  assert.equal(lines.length, 1);
+});
+
+test("Caddy scopes edge proxy and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
+  const metricPath = "/_internal/metric";
+  const caddyFiles = [
+    "deploy/supabase-stack/commonswarm-api.caddy",
+    "deploy/supabase-stack/commonswarm-api-maintenance.caddy",
+  ];
+  for (const path of caddyFiles) {
+    const caddy = await readFile(resolve(repoRoot, path), "utf8");
+    const edgeRoute = caddy.match(/@edge_functions path ([^\n]+)\n\s*handle @edge_functions \{\s*reverse_proxy 127\.0\.0\.1:9000/);
+    assert.ok(edgeRoute, `${path} must keep its scoped edge proxy`);
+    assert.equal(edgeRoute[1]?.trim(), "/functions/v1 /functions/v1/*");
+    assert.equal(edgeRoute[1]?.includes(metricPath), false);
+    assert.equal((caddy.match(/reverse_proxy 127\.0\.0\.1:9000/g) ?? []).length, 1);
+  }
+  assert.equal(resolveFunctionRoute(metricPath), null);
+  const response = resolveGatewayRequest(new Request(`http://localhost${metricPath}`)).response;
+  assert.equal(response?.status, 404);
+  assert.equal(await response?.text(), KONG_FUNCTION_NOT_FOUND_BODY);
+  assert.equal(response?.headers.get("access-control-allow-origin"), "*");
+  for (const name of FUNCTION_NAMES) {
+    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
+      functionName: name,
+      pathname: `/${name}`,
+    });
+  }
+});
 
 async function filesBelow(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -429,10 +526,11 @@ test("main service retries WorkerAlreadyRetired around create and fetch", async 
     retryStart,
   );
   assert.ok(fetchInsideRetry > retryStart);
-  assert.ok(
-    main.indexOf("EdgeRuntime.userWorkers.create", retryStart) <
-      fetchInsideRetry,
-  );
+  // The create call sits inside the retry callback, before the fetch. indexOf is checked
+  // against -1 so a renamed or moved call cannot pass by returning -1.
+  const createInsideRetry = main.indexOf("await workerObserver.create(", retryStart);
+  assert.ok(createInsideRetry > retryStart, "create is not inside the retry callback");
+  assert.ok(createInsideRetry < fetchInsideRetry, "create is not before the fetch");
   assert.ok(
     main.slice(fetchInsideRetry).startsWith(
       "return await worker.fetch(forwarded);\n  });",
