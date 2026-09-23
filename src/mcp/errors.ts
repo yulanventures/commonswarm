@@ -107,8 +107,11 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : error instanceof StoredRecordOversizedError ? "stored_record_oversized"
     : error instanceof LocalCredentialSecretAbsentError ? "local_credential_absent"
     : "mcp_call_failed";
-  const safeCode = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "mcp_call_failed";
-  const sentence = MCP_ERROR_SENTENCES[safeCode] ?? entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`, RETRY);
+  const safeCode = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) && !code.includes("--") ? code : "mcp_call_failed";
+  const sentence = Object.hasOwn(MCP_ERROR_SENTENCES, safeCode)
+    ? MCP_ERROR_SENTENCES[safeCode]!
+    : entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`,
+      error instanceof CommandHttpError && error.status >= 500 ? RETRY : PERSON);
   const status = error instanceof CommandHttpError ? error.status : readHttp?.status ?? (error instanceof RenewalRefused || error instanceof RenewalCredentialCheckError ? error.status : undefined);
   return { code: safeCode, ...sentence, ...(status !== undefined && status >= 400 ? { status } : {}) };
 }

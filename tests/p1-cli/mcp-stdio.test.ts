@@ -365,6 +365,11 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
     const unknownCode = mapMcpError(new CommandHttpError(418, "producer shell command", "new_code"));
     assert.equal(unknownCode.message, "The service returned new_code with status 418.");
     assert.equal(unknownCode.status, 418);
+    assert.equal(unknownCode.next_step, "a person must restore this agent's access outside this session");
+    assert.equal(mapMcpError(new CommandHttpError(418, "producer shell command", "new-code")).message,
+      "The service returned new-code with status 418.");
+    assert.equal(mapMcpError(new CommandHttpError(418, "producer shell command", "constructor")).message,
+      "The service returned constructor with status 418.");
     assert.equal(mapMcpError(new AgentSetupError("profile_missing", "cswarm setup --profile /private")).message, MCP_ERROR_SENTENCES.profile_missing!.message);
   } finally { await f.close(); }
 });
