@@ -13,3 +13,8 @@ Required by the Strategist: "a listener given one transient 500 and one 403 with
   `lastErrorCode: null`, one read-retry episode with 2 retries lasting 2.7 s, claim cadence 5 min (push). The
   listener was stopped (`stop.json`: stopping; the process was gone seconds later) and the temporary HOME removed.
 - Not established: behaviour during a real DNS switch; a renewal-path fault (the token was far from its renewal time).
+
+Process check (lead, 2026-09-23 06:38Z, after the run): `stop.json` records `state: stopping` and `summary.txt` a
+"LEFTOVER PROCESS" line because the script checked for processes while the stop was still in progress. A check a few
+seconds later found the listener pid 51701 gone (`ps -p 51701` returned no process), no process whose command line
+contained the temporary HOME, and the temporary HOME removed.
