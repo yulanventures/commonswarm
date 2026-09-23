@@ -45,7 +45,8 @@ for the seat was lost.
 ## Gates
 
 At `e1a94363` (lead): build 0; npm test 961; test:p1-cli 838; check:tests 0; build-release 0; diff-check 0; no
-leftover process. The merged tree is gated before the push.
+leftover process. Merged tree (lead): build 0; npm test 962; test:p1-cli 854; check:tests 0; check:edge 0;
+test:p1-server 242; build-release 0; site build 0; site test 567 (1 skipped); diff-check 0; no leftover process.
 
 ## Not established
 
