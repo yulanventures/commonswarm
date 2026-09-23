@@ -32,7 +32,9 @@ Maker: Codex gpt-6-sol (lane and folds 1-2); the lead made the last three one-li
 
 At `2453ec6b` (lead): build 0; npm test 897; test:p1-cli 839; check:tests 0; check:edge 0; test:p1-server 242;
 build-release 0; diff-check 0. After `90da2b93`: the three touched pure test files 45 pass; check:edge 0;
-`agent-join-credential` + `h0-forward` server files 39 pass. The merged tree is gated before the push.
+`agent-join-credential` + `h0-forward` server files 39 pass. Merged tree (lead): build 0; npm test 897; test:p1-cli
+839; check:tests 0; check:edge 0; test:p1-server 242; test:h0-counts 16; test:h0-upgrade:local 0; build-release 0;
+site build 0; site test 567; diff-check 0.
 
 ## Not established
 
