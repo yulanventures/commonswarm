@@ -526,10 +526,11 @@ test("main service retries WorkerAlreadyRetired around create and fetch", async 
     retryStart,
   );
   assert.ok(fetchInsideRetry > retryStart);
-  assert.ok(
-    main.indexOf("EdgeRuntime.userWorkers.create", retryStart) <
-      fetchInsideRetry,
-  );
+  // The create call sits inside the retry callback, before the fetch. indexOf is checked
+  // against -1 so a renamed or moved call cannot pass by returning -1.
+  const createInsideRetry = main.indexOf("await workerObserver.create(", retryStart);
+  assert.ok(createInsideRetry > retryStart, "create is not inside the retry callback");
+  assert.ok(createInsideRetry < fetchInsideRetry, "create is not before the fetch");
   assert.ok(
     main.slice(fetchInsideRetry).startsWith(
       "return await worker.fetch(forwarded);\n  });",
