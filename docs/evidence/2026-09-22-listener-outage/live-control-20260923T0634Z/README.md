@@ -18,3 +18,9 @@ Process check (lead, 2026-09-23 06:38Z, after the run): `stop.json` records `sta
 "LEFTOVER PROCESS" line because the script checked for processes while the stop was still in progress. A check a few
 seconds later found the listener pid 51701 gone (`ps -p 51701` returned no process), no process whose command line
 contained the temporary HOME, and the temporary HOME removed.
+
+Deliveries (lead, 2026-09-23 ~20:10Z; question from the Grok round-10 arm): the run made 5 command calls (claims and
+acks, all 200). `cswarm inbox` for the seat lists no signal created between 05:53:37Z and 09:53:26Z, so no message sent
+during or shortly before the run could be lost. The newest earlier signal (`001f95ac`, 05:53:37Z) had already reached
+the seat's session through its hook before the run; any delivery row of it that the test listener acked as queued into
+the deleted temporary HOME did not lose the message, which stays readable in the inbox.
