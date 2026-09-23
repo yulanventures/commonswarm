@@ -26,28 +26,18 @@ updates them).
    hub workspace (4f63d2b0). Ready: a watch that logs each new agent seat in the hub (lead scratchpad `h0watch/`),
    and a fence check (`claim_agent_inbox` with the H0 seat's token must return 403 `h0_seat_uses_poll`; a control
    with a fake token returned 401). If the done-test fails, redeploy the site with the flag off at once.
-2. **Listener lane (`lane/listener-outage`, target 0.1.73), Strategist priority.** Found 2026-09-22: no listener on
-   the mini was running; one stopped for good on a single 403 during the 09-16 DNS switch, one on a single 500. The
-   lane has had 13 folds and 9 review rounds (Opus Checker + Grok); every round found a real case. The design now
-   rests on stated invariants in its `LANE.md`: A (listener mode: no wait crosses the renewal deadline; a permanent
-   credential stop needs a full window of confirmed samples from our edge), B (one-shot commands behave exactly as at
-   `a9846955`), C (a 1 s floor between requests and on every wait), an explicit fatal-answer set per edge, and tagged
-   malformed-response errors guarded by an AST test. Fold 13 (busy push listener false lapse; the stated retry time;
-   turns end by the margin) is being made. **Blocker for the pair:** the Grok balance was exhausted (HTTP 402) until
-   about 19:30Z on 2026-09-23; Codex made folds 2-13, so it cannot be the second arm. After the pair: the live
-   control (script and fault proxy in the lead scratchpad `live/`: a detached listener on a temporary HOME, route
-   main, through a local proxy that injects one 500 and one foreign 403 on the read path, against production), then
-   release 0.1.73, then restart the stopped listeners one seat at a time, proving one wake round trip before the
-   next, and tell each owning seat.
-3. **`deploy/RELEASE-TO-BOX.md` fold (PR #26, HezLead):** the first run's procedure notes. Opus PASS on the delta;
-   the Grok arm runs after its reset; merge after both.
-4. **Edge memory (queue item after the listener release).** A one-minute series across 21:29Z-03:31Z
-   (`/Users/yulanbot/Developer/Ridge.io/evidence/2026-09-23-commonswarm-edge-mem-series/`, HezLead): 192 MiB after a
-   recycle to 896 MiB at 03:29Z (peak 920 of 2048); growth is not linear (+399 MiB in the first hour, then +20-104
-   MiB/h); about 4.1 wall-clock early terminations per minute all night with almost no traffic; CPU 0.1-0.25%. The
-   runtime logs only isolate ids on those lines. First step: log the function name for each worker in
-   `deploy/edge-runtime/main/index.ts`, then find which function runs to the wall clock. Goal: remove the 6-hourly
-   recycle timer and the 2 GB cap.
+2. **Listener lane: RELEASED as cswarm 0.1.73** (2026-09-23 20:38Z; records
+   `docs/evidence/2026-09-22-listener-outage/LANDING.md`, `docs/evidence/2026-09-23-v0.1.73-release/RELEASE.md`). The site
+   was redeployed with `PUBLIC_H0_LINK_JOIN=1` (keep the flag on every site deploy while the link-join is on). OPEN:
+   the listeners stopped by the outages belong to seats in workspace 292be0f9 (05f7ac37, a9c1a7fb, 214fa712,
+   023fd46b); restarting them is the owners' (handed over through the Strategist).
+3. **`deploy/RELEASE-TO-BOX.md` fold (PR #26): MERGED** (ae99df60, Opus + Grok).
+4. **Edge memory: step 1 LANDED** (1200ebb1; `docs/evidence/2026-09-23-edge-memory/LANDING.md`): per-worker start/end
+   logs with the function name and a one-minute runtime-metrics line. HezLead releases it to the box (~21:45Z
+   2026-09-23) and captures 26 h of logs. Research (same folder): per_worker retires idle workers at
+   workerTimeoutMs/2 and each retirement leaks a few MiB (upstream #719, #740; partial fix `EdgeRuntime.miCollect()`
+   in v1.74.0). Step 2 after the data: explicit cpuTime limits, a longer workerTimeoutMs, the image bump; then remove
+   the recycle timer and the 2 GB cap if the growth stops.
 5. Then the queue the Strategist set: H, G, L, M, I, J, K, E, F.
 6. **Cleanup of merged branches and worktrees:** still BLOCKED on the operator (rejected 2026-09-17, not answered).
 
