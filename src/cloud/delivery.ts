@@ -274,6 +274,8 @@ export class DeliveryHttpError extends Error {
     message: string,
     /** Parsed with the signal Retry-After semantics; bounded, never the raw header. */
     readonly retryAfterMs: number | null = null,
+    /** False when the refusal did not carry a recognized command error envelope. */
+    readonly recognizedEnvelope = true,
   ) {
     super(message);
     this.name = "DeliveryHttpError";
@@ -285,6 +287,14 @@ export class DeliveryProtocolError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "DeliveryProtocolError";
+  }
+}
+
+/** A successful HTTP answer that did not carry the command response envelope. */
+export class DeliveryResponseError extends DeliveryProtocolError {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeliveryResponseError";
   }
 }
 
@@ -691,10 +701,10 @@ function assertAckRequest(request: DeliveryAckRequest): void {
   }
 }
 
-/** Collapse an unknown server error to the bounded unknown code. */
-function boundedDeliveryErrorCode(body: unknown): string {
+/** Recognize only the bounded server error vocabulary. */
+function boundedDeliveryErrorCode(body: unknown): string | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return DELIVERY_UNKNOWN_ERROR_CODE;
+    return null;
   }
   const error = (body as Record<string, unknown>).error;
   if (
@@ -703,7 +713,7 @@ function boundedDeliveryErrorCode(body: unknown): string {
   ) {
     return error;
   }
-  return DELIVERY_UNKNOWN_ERROR_CODE;
+  return null;
 }
 
 /** Refusal body parsed against the allowlist; Retry-After via signal semantics. */
@@ -712,8 +722,13 @@ function refusal(
   text: string,
 ): DeliveryHttpError {
   let code = DELIVERY_UNKNOWN_ERROR_CODE;
+  let recognizedEnvelope = false;
   try {
-    code = boundedDeliveryErrorCode(JSON.parse(text));
+    const recognizedCode = boundedDeliveryErrorCode(JSON.parse(text));
+    if (recognizedCode !== null) {
+      code = recognizedCode;
+      recognizedEnvelope = true;
+    }
   } catch {
     // An unreadable refusal body is still a refusal; nothing to extract.
   }
@@ -723,17 +738,25 @@ function refusal(
     code,
     `delivery command failed (HTTP ${response.status}): ${code}`,
     retryAfterMs,
+    recognizedEnvelope,
   );
 }
 
 function successBody(response: Response, text: string, verb: string): unknown {
+  let body: unknown;
   try {
-    return JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
-    throw new DeliveryProtocolError(
+    throw new DeliveryResponseError(
       `${verb} response was not JSON (HTTP ${response.status})`,
     );
   }
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+    (body as Record<string, unknown>).status !== "accepted" ||
+    (body as Record<string, unknown>).ok !== true) {
+    throw new DeliveryResponseError(`${verb} response did not carry an accepted envelope`);
+  }
+  return body;
 }
 
 /**

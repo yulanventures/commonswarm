@@ -672,6 +672,7 @@ export async function runListenerSupervisor(
         claimRetryCount: event.attempts,
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
         lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
       });
       log({ ts: event.ts, event: "listener_claim_retry", failure_code: event.code, attempt: event.attempts });
       return;
@@ -682,7 +683,27 @@ export async function runListenerSupervisor(
         claimRetryCount: 0,
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : null,
         lastErrorDetail: null,
+        nextAttemptAt: null,
       });
+      return;
+    }
+    if (event.type === "ack_retry") {
+      transition(status.credentialStopAt ? "credential_check" : "ack_retry", {
+        lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
+        lastErrorDetail: null,
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
+      });
+      log({ ts: event.ts, event: "listener_ack_retry", failure_code: event.code, attempt: event.attempt });
+      return;
+    }
+    if (event.type === "ack_retry_cleared") {
+      if (status.state === "ack_retry") {
+        transition(status.readyAt === null ? "starting" : "ready", {
+          lastErrorCode: null,
+          lastErrorDetail: null,
+          nextAttemptAt: null,
+        });
+      }
       return;
     }
     if (event.type === "read_retry") {

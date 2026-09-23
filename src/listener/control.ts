@@ -65,12 +65,13 @@ export type ListenerStatusState =
   | "ready"
   | "credential_check"
   | "claim_retry"
+  | "ack_retry"
   | "stopping"
   | "stopped"
   | "failed";
 
 export const LISTENER_RUNNING_STATES: readonly ListenerStatusState[] = [
-  "starting", "ready", "credential_check", "claim_retry", "stopping",
+  "starting", "ready", "credential_check", "claim_retry", "ack_retry", "stopping",
 ];
 const LISTENER_STATUS_STATES: readonly string[] = [
   ...LISTENER_RUNNING_STATES, "stopped", "failed",

@@ -254,3 +254,44 @@ Final gates used a temporary HOME. `FORCE_COLOR` was unset for both test suites.
 | `bash scripts/build-release.sh` | 0 | Single-file CLI bundle built and execute-checked. |
 
 The two `npm test` failures were `resume-process-table.test.ts` and `resume.test.ts`. The CLI suite also failed `unknown-flag-message.test.ts`. Each failure came from this sandbox denying `ps` with `spawn EPERM` or `spawnSync ps EPERM`. The isolated listener runtime and control files passed 135/135; the detached 404 product test passed with a temporary HOME and state directory. This fold did not establish green full suites where `ps` is permitted, behavior against a real command or read edge, or production behavior. No production host, Supabase service, Vercel service, or real workspace was contacted.
+
+## Fold 5
+
+The delivery client now distinguishes a recognized command refusal from a response without a recognized error envelope. HTTP 400, 404, and 426 with an unrecognized envelope retry with capped delivery backoff. A 2xx non-JSON body or JSON without the accepted command envelope raises `DeliveryResponseError` and takes the same retry path. A recognized, well-formed `invalid_request` refusal remains fatal. Deeper accepted-envelope validation and local claim validation still raise `DeliveryProtocolError` and remain fatal. Claim status records `malformed_response` or `http_<status>` and the next attempt time; ACK status uses `ack_retry` with the same code and next attempt time. Both clear when the command succeeds.
+
+### Claim and ACK stop paths
+
+| Path | Class now |
+|---|---|
+| Caller stop during command or wait | `cancelled` immediately. |
+| Missing or invalid local credential, or local renewal stop | `credential` immediately. |
+| Confirmed command-edge `unauthenticated` | Credential confirmation window; `credential` only after its checks and time window. |
+| H0 seat refusal | Fatal `ListenerH0SeatError` immediately. |
+| Transport, 429, 5xx, or unconfirmed 401/403 | Capped retry. Claim forces a read after three refusals; ACK retains the prepared idempotent command. |
+| HTTP 400/404/426 without a recognized command error envelope | Capped retry with `http_<status>` in status. |
+| HTTP 2xx with non-JSON or a JSON body outside the accepted envelope | Capped retry with `malformed_response` in status. |
+| HTTP 400/404/426 with a recognized, well-formed refusal code | Fatal, as before. A recognized 409 is likewise fatal. |
+| Accepted envelope with malformed delivery row, count, capability, echoed ACK fields, or more than one claimed row | Fatal `DeliveryProtocolError`, as before. |
+| Local request validation, journal reservation or write failure, incomplete prepared ACK, terminal-effect mismatch, or journal clear failure | Fatal local error, as before. |
+| Unknown, untyped exception | Fatal, as before. |
+| ACK `delivery_unavailable` after its lease has expired | Clear the stale prepared ACK and return to reads, as before. |
+
+The read parser now raises `SignalMalformedError` when tolerated malformed rows exceed the limit or a present delivery capability marker is not exactly `1`. Both are classified as `malformed_response` and retry with capped read backoff. Invalid local `maxMalformedRows` configuration remains an ordinary fatal error.
+
+The tests in `tests/listener-runtime.test.ts` cover HTML 200, foreign 404 and 400, and a JSON body without our envelope on claim, with persisted status and recovery; a foreign 400 after a push wake without an intervening read; HTML 200 and foreign 404 on ACK, with persisted status and recovery; the two malformed read cases; and a recognized 400 mutation control. Every new runtime test has a 15-second timeout. `tests/listener-control.test.ts` supplies the new retry-delay event field. A detached CLI listener against a loopback fixture read a durable-capability page, then received foreign 404 claim answers. Its `claim_retry` status named `http_404` and the next attempt; the status JSON is [fold5-detached-status.json](fold5-detached-status.json). The fixture listener was stopped. That product test has a 20-second timeout. All three files run in `npm test`.
+
+Mutation: forcing `isForeignDeliveryHttpResponse` false made the foreign-claim recovery test fail (`failed` instead of `stopped`, exit 1), while the recognized-400 control passed in the same invocation. Restoring the condition made both pass (exit 0).
+
+Final gates used a temporary HOME and unset `FORCE_COLOR` for both test suites:
+
+| Gate | Exit | Result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 923 tests: 921 passed, 2 failed, 0 skipped. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 827 tests: 824 passed, 3 failed, 0 skipped. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file CLI bundle built and execute-checked. |
+
+The two `npm test` failures were `resume-process-table.test.ts` and `resume.test.ts`. The CLI suite also failed `unknown-flag-message.test.ts`. Each failure came from this sandbox denying `ps` with `spawn EPERM` or `spawnSync ps EPERM`. The isolated listener runtime, control, and delivery-client files passed 169/169. The detached foreign-claim product test passed separately (1/1).
+
+No live workspace or production edge was contacted. This fold did not establish behavior against a deployed command or read edge.

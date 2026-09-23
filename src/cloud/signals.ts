@@ -306,7 +306,7 @@ function deliveryCapabilityMarker(
 ): boolean {
   if (row[key] === undefined) return false;
   if (row[key] !== 1) {
-    throw new Error("signal read returned a malformed delivery capability marker");
+    throw new SignalMalformedError("signal read returned a malformed delivery capability marker");
   }
   return true;
 }
@@ -589,7 +589,7 @@ function parseSignalRows(
       const parsed = error instanceof Error ? error : new Error(String(error));
       options.onMalformedRow?.(index, parsed);
       if (malformedRows > options.maxMalformedRows) {
-        throw new Error(
+        throw new SignalMalformedError(
           `signal read returned too many malformed rows (more than ${options.maxMalformedRows})`,
         );
       }

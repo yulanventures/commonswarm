@@ -1708,7 +1708,7 @@ test("restart and terminal transitions clear claim and credential check fields",
     const emitFailure = (onEvent: (event: ListenerRuntimeEvent) => void) => {
       onEvent({ type: "credential_check", code: "forbidden", edge: "read", checks: 1,
         stopAt: new Date(Date.now() + 600_000).toISOString(), ts });
-      onEvent({ type: "claim_retry", code: "delivery_unreachable", attempts: 4, ts });
+      onEvent({ type: "claim_retry", code: "delivery_unreachable", attempts: 4, delayMs: 500, ts });
     };
     let runs = 0;
     let restarting: ListenerStatus | null = null;

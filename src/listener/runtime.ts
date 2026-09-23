@@ -11,6 +11,7 @@ import {
   DeliveryCommandClient,
   DeliveryHttpError,
   DeliveryProtocolError,
+  DeliveryResponseError,
   DeliveryTransportError,
   DELIVERY_REQUEST_TIMEOUT_MS,
   H0_SEAT_CLAIM_REFUSED_CODE,
@@ -258,8 +259,10 @@ export type ListenerRuntimeEvent =
     ts: string;
   }
   | { type: "malformed_row"; index: number; ts: string }
-  | { type: "claim_retry"; code: string; attempts: number; ts: string }
+  | { type: "claim_retry"; code: string; attempts: number; delayMs: number; ts: string }
   | { type: "claim_retry_cleared"; ts: string }
+  | { type: "ack_retry"; code: string; attempt: number; delayMs: number; ts: string }
+  | { type: "ack_retry_cleared"; ts: string }
   | {
     type: "activity_publish_failure";
     code: ActivityPublishErrorCode;
@@ -467,9 +470,11 @@ function isRestartableRuntimeError(error: unknown): boolean {
       return false;
     }
     return error.status === 429 || error.status >= 500 ||
-      error.status === 401 || error.status === 403;
+      error.status === 401 || error.status === 403 ||
+      isForeignDeliveryHttpResponse(error);
   }
-  // A malformed 2xx is a protocol defect; repeating it repeats the defect.
+  if (error instanceof DeliveryResponseError) return true;
+  // Locally detected claim and ACK inconsistencies remain fatal.
   if (error instanceof DeliveryProtocolError) return false;
 
   // Command posts: same command-surface rule.
@@ -570,15 +575,30 @@ function isH0SeatClaimRefusal(error: unknown): boolean {
     error.code === H0_SEAT_CLAIM_REFUSED_CODE;
 }
 
+function isForeignDeliveryHttpResponse(error: DeliveryHttpError): boolean {
+  return !error.recognizedEnvelope &&
+    (error.status === 400 || error.status === 404 || error.status === 426);
+}
+
+function deliveryRetryCode(error: unknown): string {
+  if (error instanceof DeliveryResponseError) return "malformed_response";
+  if (error instanceof DeliveryHttpError) {
+    return isForeignDeliveryHttpResponse(error) ? `http_${error.status}` : error.code;
+  }
+  return "delivery_unreachable";
+}
+
 function isRetryableDeliveryError(error: unknown): boolean {
   if (error instanceof DeliveryTransportError) return true;
+  if (error instanceof DeliveryResponseError) return true;
   if (!(error instanceof DeliveryHttpError)) return false;
   if (error.code === H0_SEAT_CLAIM_REFUSED_CODE) return false;
   if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
     return false;
   }
   return error.status === 429 || error.status >= 500 ||
-    error.status === 401 || error.status === 403;
+    error.status === 401 || error.status === 403 ||
+    isForeignDeliveryHttpResponse(error);
 }
 
 function deliveryRetryDelay(
@@ -1230,6 +1250,7 @@ export async function runListenerRuntime(
         await options.deliveryJournal!.clearActive(eventTime(now));
         after = null;
         clearCredentialWindow();
+        options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
         options.onEvent?.({
           type: "delivery_ack",
           signalId: active.signalId,
@@ -1246,6 +1267,7 @@ export async function runListenerRuntime(
           try {
             await options.deliveryJournal!.clearActive(eventTime(now));
             after = null;
+            options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
             return null;
           } catch (clearError) {
             return { reason: "fatal", error: asError(clearError) };
@@ -1272,7 +1294,9 @@ export async function runListenerRuntime(
           return { reason: "fatal", error: asError(error) };
         }
         attempt += 1;
-        await sleep(deliveryRetryDelay(attempt, error, random), abort);
+        const delayMs = deliveryRetryDelay(attempt, error, random);
+        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt, delayMs, ts: eventTime(now) });
+        await sleep(delayMs, abort);
         if (abort?.aborted) return { reason: "cancelled" };
       }
     }
@@ -1670,12 +1694,18 @@ export async function runListenerRuntime(
               emitWake();
             }
             const retryableClaim = isRetryableDeliveryError(error);
+            const delayMs = retryableClaim
+              ? credentialWindow !== null
+                ? CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS
+                : deliveryRetryDelay(deliveryAttempt + 1, error, random)
+              : 0;
             if (retryableClaim) {
               claimRefusals += 1;
               options.onEvent?.({
                 type: "claim_retry",
-                code: error instanceof DeliveryHttpError ? error.code : "delivery_unreachable",
+                code: deliveryRetryCode(error),
                 attempts: claimRefusals,
+                delayMs,
                 ts: eventTime(now),
               });
             }
@@ -1696,7 +1726,6 @@ export async function runListenerRuntime(
               break;
             }
             deliveryAttempt += 1;
-            const delayMs = deliveryRetryDelay(deliveryAttempt, error, random);
             await sleep(delayMs, abort);
             if (abort?.aborted) {
               stop = { reason: "cancelled" };

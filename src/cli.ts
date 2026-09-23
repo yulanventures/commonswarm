@@ -5778,8 +5778,8 @@ export function renderListenerStatus(
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
     ...(credentialCheck === null ? [] : [credentialCheck]),
-    ...(status.state === "claim_retry"
-      ? [`The claim failed (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. ${status.lastErrorCode === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and retries with backoff, reading signals after repeated failures.`]
+    ...(status.state === "claim_retry" || status.state === "ack_retry"
+      ? [status.state === "claim_retry" ? `The claim failed (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. ${status.lastErrorCode === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff"}, reading signals after repeated failures.` : `The delivery acknowledgement failed (${status.lastErrorCode ?? "no code recorded"}). The listener is running and will try again${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff"}.`]
       : []),
     ...(retrySentence === null ? [] : [retrySentence]),
     ...(downSentence === null ? [] : [downSentence]),
