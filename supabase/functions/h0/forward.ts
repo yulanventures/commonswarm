@@ -1,6 +1,7 @@
 /** H0's in-process request adapter to the command edge. Authority stays in command/index.ts. */
 import type postgres from "npm:postgres@3.4.9";
 import { CLIENT_PROTOCOL_VERSION } from "../../../src/cloud/config.ts";
+import { commandRequiredConfig } from "../command/required-config.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
 import {
   H0_BEARER_QUERY_REFUSED,
@@ -129,8 +130,7 @@ export async function handleH0ForwardRequest(
   const credential = verb === "register" ? body.joinCredential as string : token;
   // Import only for a forwarded verb. Poll and ack stay available if command is misconfigured.
   // Importing command/index.ts initializes its pool but does not start its HTTP server.
-  if (!(Deno.env.get("SWARM_DATABASE_URL") ?? Deno.env.get("SUPABASE_DB_URL")) ||
-      !Deno.env.get("SUPABASE_URL") || !Deno.env.get("SUPABASE_ANON_KEY")) {
+  if (commandRequiredConfig((name) => Deno.env.get(name)) === null) {
     console.error("h0 command configuration missing");
     return json(500, { error: "h0_command_not_configured" });
   }

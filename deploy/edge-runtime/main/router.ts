@@ -185,17 +185,23 @@ const DATABASE_ENV = [
 ] as const;
 
 const COMMAND_ENV = [
-    ...DATABASE_ENV,
-    "SUPABASE_URL",
-    "SUPABASE_ANON_KEY",
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "SWARM_ENV",
-    "SWARM_COMMAND_ALLOWED_ORIGINS",
-    "SWARM_CAPABILITY_URLS",
-    "SWARM_SELF_SERVE",
-    "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
-    "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
-  ] as const;
+  ...DATABASE_ENV,
+  "SUPABASE_URL",
+  "SUPABASE_ANON_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SWARM_ENV",
+  "SWARM_COMMAND_ALLOWED_ORIGINS",
+  "SWARM_CAPABILITY_URLS",
+  "SWARM_SELF_SERVE",
+  "SWARM_CMD_TEST_SLEEP_AFTER_STEP",
+  "SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP",
+] as const;
+
+// H0 forwards only register_agent_seat and post_signal. File storage is unreachable.
+export const H0_COMMAND_ENV_EXCLUSIONS = ["SUPABASE_SERVICE_ROLE_KEY"] as const;
+const H0_COMMAND_ENV = COMMAND_ENV.filter(
+  (name) => !H0_COMMAND_ENV_EXCLUSIONS.some((excluded) => excluded === name),
+);
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   command: COMMAND_ENV,
@@ -214,7 +220,7 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   ],
   activity: DATABASE_ENV,
   // Forwarded verbs call command's handler in the H0 worker.
-  h0: COMMAND_ENV,
+  h0: H0_COMMAND_ENV,
 };
 
 export const COMMAND_TEST_HOOKS = new Set([

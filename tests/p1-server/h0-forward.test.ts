@@ -10,6 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { REGISTRATION_TOKEN_ALREADY_USED } from "../../supabase/functions/command/registration-conflicts.js";
 
 interface Local { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string }
 interface Result { status: number; body: Record<string, unknown>; headers: Headers }
@@ -185,8 +186,9 @@ test("register retries one attempt on one seat, a new attempt takes another, and
   const usedRetry = await h0("register", {
     joinCredential: join.secret, attemptId: attempt, name: "First",
   }, null);
-  assert.equal(usedRetry.status, 409);
-  assert.equal(usedRetry.body.error, "registration_token_already_used");
+  assert.equal(usedRetry.status, REGISTRATION_TOKEN_ALREADY_USED.status);
+  assert.equal(usedRetry.body.error, REGISTRATION_TOKEN_ALREADY_USED.code);
+  assert.equal(usedRetry.body.message, REGISTRATION_TOKEN_ALREADY_USED.message);
   const second = await register(join.secret, randomUUID(), "Second");
   assert.notEqual(second.principalId, first.principalId);
   const attempts = await sql<{ n: number }[]>`

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { H0_VERBS } from "../../src/h0/verbs.js";
+import { COMMAND_REQUIRED_ENV, commandRequiredConfig } from "../../supabase/functions/command/required-config.js";
 import { parseH0ForwardBody } from "../../supabase/functions/h0/parse.js";
 
 const UUID = "12345678-1234-4123-8123-123456789abc";
@@ -103,4 +104,51 @@ test("missing command configuration has its own fixed code and safe log", { time
     if (prior) Object.defineProperty(globalThis, "Deno", prior);
     else Reflect.deleteProperty(globalThis, "Deno");
   }
+});
+
+test("H0 and command share the required configuration names", () => {
+  assert.deepEqual(COMMAND_REQUIRED_ENV, [
+    ["SWARM_DATABASE_URL", "SUPABASE_DB_URL"],
+    ["SUPABASE_URL"],
+    ["SUPABASE_ANON_KEY"],
+  ]);
+  const values = new Map([
+    ["SUPABASE_DB_URL", "postgres://local-test"],
+    ["SUPABASE_URL", "https://example.test"],
+    ["SUPABASE_ANON_KEY", "test-anon-key"],
+  ]);
+  assert.deepEqual(commandRequiredConfig((name) => values.get(name)), {
+    databaseUrl: "postgres://local-test",
+    supabaseUrl: "https://example.test",
+    supabaseAnonKey: "test-anon-key",
+  });
+  values.delete("SUPABASE_ANON_KEY");
+  assert.equal(commandRequiredConfig((name) => values.get(name)), null);
+});
+
+test("H0's sealed command builder reaches only registration and signals", () => {
+  const source = readFileSync(fileURLToPath(new URL("../../supabase/functions/h0/forward.ts", import.meta.url)), "utf8");
+  const ast = ts.createSourceFile("forward.ts", source, ts.ScriptTarget.Latest, true);
+  const commandDeclarations: ts.VariableDeclaration[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === "command") {
+      commandDeclarations.push(node);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(commandDeclarations.length, 1);
+  const builder = commandDeclarations[0]!.initializer;
+  assert.ok(builder && ts.isConditionalExpression(builder));
+  const kinds = [builder.whenTrue, builder.whenFalse].map((branch) => {
+    assert.ok(ts.isObjectLiteralExpression(branch));
+    const kindFields = branch.properties.filter((property) =>
+      ts.isPropertyAssignment(property) && ts.isIdentifier(property.name) && property.name.text === "kind"
+    );
+    assert.equal(kindFields.length, 1);
+    const value = (kindFields[0] as ts.PropertyAssignment).initializer;
+    assert.ok(ts.isStringLiteral(value));
+    return value.text;
+  });
+  assert.deepEqual(kinds, ["register_agent_seat", "post_signal"]);
 });

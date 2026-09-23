@@ -1,5 +1,10 @@
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import { commandRequiredConfig } from "./required-config.ts";
+import {
+  REGISTRATION_SEAT_REVOKED,
+  REGISTRATION_TOKEN_ALREADY_USED,
+} from "./registration-conflicts.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import { H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE } from "../../../src/h0/verbs.ts";
 import {
@@ -1038,19 +1043,17 @@ const P0_AGENT_SCOPES = [
   "post_signal",
 ] as const;
 
-const databaseUrl =
-  Deno.env.get("SWARM_DATABASE_URL") ?? Deno.env.get("SUPABASE_DB_URL");
-const supabaseUrl = Deno.env.get("SUPABASE_URL");
-const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
+const requiredConfig = commandRequiredConfig((name) => Deno.env.get(name));
 const commandEnvironment = Deno.env.get("SWARM_ENV");
 const allowedCommandOrigins = commandAllowedOrigins(
   Deno.env.get("SWARM_COMMAND_ALLOWED_ORIGINS"),
 );
-if (!databaseUrl || !supabaseUrl || !supabaseAnonKey) {
+if (requiredConfig === null) {
   throw new Error(
     "command function requires SWARM_DATABASE_URL/SUPABASE_DB_URL, SUPABASE_URL, and SUPABASE_ANON_KEY",
   );
 }
+const { databaseUrl, supabaseUrl, supabaseAnonKey } = requiredConfig;
 
 const hookSleep = parseStepSleep(
   Deno.env.get("SWARM_CMD_TEST_SLEEP_AFTER_STEP"),
@@ -6140,10 +6143,10 @@ async function registerAgentSeat(
         command,
         hash,
         minClientVersion,
-        409,
-        "registration_token_already_used",
-        "registration_token_already_used",
-        "Revoke that seat and register again.",
+        REGISTRATION_TOKEN_ALREADY_USED.status,
+        REGISTRATION_TOKEN_ALREADY_USED.code,
+        REGISTRATION_TOKEN_ALREADY_USED.code,
+        REGISTRATION_TOKEN_ALREADY_USED.message,
       );
     }
     if (
@@ -6164,10 +6167,10 @@ async function registerAgentSeat(
         command,
         hash,
         minClientVersion,
-        409,
-        "registration_seat_revoked",
-        "registration_seat_revoked",
-        "This seat was revoked. Register again with a new attempt.",
+        REGISTRATION_SEAT_REVOKED.status,
+        REGISTRATION_SEAT_REVOKED.code,
+        REGISTRATION_SEAT_REVOKED.code,
+        REGISTRATION_SEAT_REVOKED.message,
       );
     }
     return await replaceUnusedRegistrationToken(
@@ -7677,7 +7680,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3666 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3669 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is

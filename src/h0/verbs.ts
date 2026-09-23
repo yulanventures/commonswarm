@@ -120,7 +120,7 @@ export const H0_VERBS = [
       "Exchange the join credential from the paste for a seat token. Returned once, in this response body only.",
     fields: [
       req("joinCredential"),
-      req("attemptId", false, "client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used token returns 409, so ask the inviter for a new join credential"),
+      req("attemptId", false, "client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response"),
       { ...req("name", false, `a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`), minLength: 1, maxLength: H0_REGISTRATION_NAME_MAX },
       opt("icon", false, "accepted for link compatibility; this release does not store an icon"),
     ],
