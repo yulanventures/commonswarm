@@ -25,6 +25,7 @@ import {
 } from "../src/cloud/delivery.js";
 import {
   listenerFailureMessage,
+  listenerStartPendingMessage,
   listenerStatusJson,
   renderListenerStatus,
   usage,
@@ -58,6 +59,7 @@ import {
   CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS,
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
+  LISTENER_DELIVERY_RETRY_MAX_MS,
   ListenerH0SeatError,
   isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
@@ -3290,6 +3292,7 @@ test("HTTP 403 forbidden across the confirmation window stops the listener with 
     const checking = renderListenerStatus(during[0]!);
     assert.match(checking, /^Listener credential check /);
     assert.match(checking, /The server refused this credential/);
+    assert.match(checking, new RegExp(CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")));
     assert.match(checking, /will stop at /);
     assert.match(checking, /a transient answer extends the check window/);
     assert.match(checking, /Run cswarm whoami with this credential/);
@@ -3298,10 +3301,8 @@ test("HTTP 403 forbidden across the confirmation window stops the listener with 
     const rendered = renderListenerStatus(status);
     assert.match(rendered, /^Listener failed /);
     assert.match(rendered, /will not retry/);
-    assert.match(
-      rendered,
-      new RegExp(CONFIRMED_CREDENTIAL_LOSS_CODES.join(" or ")),
-    );
+    assert.match(rendered, /server refused this credential/);
+    assert.doesNotMatch(rendered, /unauthenticated or forbidden/);
     assert.doesNotMatch(rendered, /listener_claim_throughput_lapse/);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -3560,6 +3561,140 @@ test("claim-only delivery refusals force a read and expose revocation", { timeou
   assert.equal(reads, 2);
   assert.equal(events.filter((event) => event.type === "claim_retry").length, claims);
   assert.ok(events.some((event) => event.type === "credential_check"));
+});
+
+test("claim backoff reaches its cap across successful forced reads", { timeout: 15_000 }, async () => {
+  for (const [httpStatus, code] of [[503, "delivery_unavailable"], [403, "forbidden"]] as const) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-claim-backoff-"));
+    try {
+      const target = listenerPaths({
+        profileId: `profile-claim-${httpStatus}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        stateDirectory: root,
+      });
+      const clock = advancingClock();
+      const journal = new MemoryDeliveryJournal();
+      const delays: number[] = [];
+      const during: ListenerStatus[] = [];
+      const events: ListenerRuntimeEvent[] = [];
+      let reads = 0;
+      const final = await runListenerSupervisor({
+        paths: target,
+        profileId: `profile-claim-${httpStatus}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          listenerInstanceId: journal.record.listenerInstanceId,
+          deliveryJournal: journal,
+          credentialSession: { async bearer() { return "token"; } },
+          store: new MemoryStore(),
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          random: () => 1,
+          onEvent: (event) => { events.push(event); onEvent(event); },
+          readPage: async () => { reads += 1; return durablePage([], 1); },
+          deliveryClient: {
+            async claimAgentInbox() { throw new DeliveryHttpError(httpStatus, code, code); },
+            async ackAgentDelivery() { throw new Error("ack must not run"); },
+          },
+          sleep: async (ms, sleepSignal) => {
+            delays.push(ms);
+            during.push(await queryListenerControl(target, "status"));
+            await clock.sleep(ms, sleepSignal);
+            if (delays.length === 8) await queryListenerControl(target, "stop");
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      assert.ok(reads >= 3, "forced reads must continue to succeed");
+      assert.deepEqual(delays, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+      assert.equal(Math.max(...delays), LISTENER_DELIVERY_RETRY_MAX_MS);
+      assert.ok(during.every((status) => status.state === "claim_retry"));
+      assert.deepEqual(during.map((status) => status.claimRetryCount), [1, 2, 3, 4, 5, 6, 7, 8]);
+      assert.equal(events.filter((event) => event.type === "claim_retry_cleared").length, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("startup read failures name the cause and next attempt while retrying", { timeout: 15_000 }, async () => {
+  for (const scenario of [
+    { code: "http_400", status: 400 },
+    { code: "http_404", status: 404 },
+    { code: "http_426", status: 426 },
+    { code: "malformed_response", status: 200 },
+    { code: "sender_relation_capability_missing", status: null },
+  ] as const) {
+    const root = await mkdtemp(join(tmpdir(), "cswarm-start-read-"));
+    try {
+      const target = listenerPaths({
+        profileId: `profile-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        stateDirectory: root,
+      });
+      const clock = advancingClock();
+      let retry: ListenerStatus | null = null;
+      const final = await runListenerSupervisor({
+        paths: target,
+        profileId: `profile-${scenario.code}`,
+        workspaceId: WORKSPACE_ID,
+        principalId: PRINCIPAL_ID,
+        now: clock.now,
+        run: (signal, onEvent) => runListenerRuntime({
+          target: cloudTarget("https://cloud.example.test", "anon"),
+          workspaceId: WORKSPACE_ID,
+          principalId: PRINCIPAL_ID,
+          credentialSession: { async bearer() { return "token"; } },
+          store: new MemoryStore(),
+          model: new FakeModel(),
+          signal,
+          now: clock.now,
+          onEvent,
+          random: () => 1,
+          ...(scenario.status === null
+            ? { readPage: async () => page([], { capabilities: {
+              senderOwnerRelation: false, cursorAfter: true,
+              deliveryClaim: false, deliveryAck: false,
+            } }) }
+            : { fetcher: (async () => new Response(
+              scenario.status === 200 ? "<html>wrong backend</html>" : "{}",
+              { status: scenario.status, headers: {
+                "content-type": scenario.status === 200 ? "text/html" : "application/json",
+              } },
+            )) as typeof fetch }),
+          sleep: async (ms) => {
+            retry = await queryListenerControl(target, "status");
+            assert.ok(ms > 0);
+            await queryListenerControl(target, "stop");
+          },
+        }),
+      });
+      assert.equal(final.state, "stopped");
+      const observed = retry as ListenerStatus | null;
+      assert.ok(observed);
+      assert.equal(observed.state, "starting");
+      assert.equal(observed.lastErrorCode, scenario.code);
+      assert.ok(observed.nextAttemptAt);
+      assert.equal(observed.readHealth?.currentEpisodeAttempts, 1);
+      assert.match(renderListenerStatus(observed), new RegExp(scenario.code));
+      assert.match(renderListenerStatus(observed), /Check the target URL and/);
+      assert.match(listenerStartPendingMessage(observed), new RegExp(scenario.code));
+      assert.match(listenerStartPendingMessage(observed), /target URL/);
+      if (scenario.code === "sender_relation_capability_missing") {
+        assert.match(listenerStartPendingMessage(observed), /update\/deploy the read edge before starting a model/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
 });
 
 test("foreign read responses retry with bounded sleep instead of a permanent stop", { timeout: 15_000 }, async () => {

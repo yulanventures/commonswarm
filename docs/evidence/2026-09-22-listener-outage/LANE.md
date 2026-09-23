@@ -234,3 +234,23 @@ Gates with a temporary HOME and `FORCE_COLOR` unset:
 | `git diff --check a9846955...HEAD` | 0 | No whitespace errors. |
 
 Both full suites' failures are confined to process-table checks: `tests/p1-cli/resume-process-table.test.ts` and `tests/p1-cli/resume.test.ts` in both suites, plus `tests/p1-cli/unknown-flag-message.test.ts` in the CLI suite. This environment rejects `ps` with `spawn EPERM` or `spawnSync ps EPERM`; a direct `ps` probe returned `operation not permitted`. The listener tests passed in the full `npm test` gate. This fold did not establish green full-suite gates in an environment that permits `ps`, a detached listener with a temporary state directory, or behavior on a hosted workspace. No production host or real workspace was contacted.
+
+## Fold 4
+
+The claim retry attempt and refusal count now survive a successful forced signal read. A retryable claim failure sleeps before the next forced read, and only a successful claim clears the count and resets the delivery backoff. This supersedes Fold 2's statement that a successful read clears claim retry state. The regression test runs healthy reads against permanent command-edge 503 and 403 `forbidden` responses. For both, the eight observed sleeps were 0.5, 1, 2, 4, 8, 16, 30, and 30 seconds; live status stayed `claim_retry` with counts 1 through 8, and no clear event occurred. Restoring the old forced-read reset made that test fail (1 failed, exit 1); restoring the exact source bytes made it pass (1 passed, exit 0).
+
+Read retries now emit their code and next attempt before the first ready event. The supervisor persists the startup cause and retry time; `listen status` and `listen start` name the target URL and read edge version, and capability failures reach the specific read-edge update message. A test covers HTTP 400, 404, 426, HTML 200, and a missing sender-relation capability. A detached CLI listener against a loopback 404 fixture stayed in `starting` with `http_404`, a next attempt time, and one current read retry. Its status JSON was retained in [fold4-detached-status.json](fold4-detached-status.json). The fixture listener was stopped. It did not start a model or contact a real workspace.
+
+One exported running-state constant now drives status parsing and the running checks in the CLI and supervisor. A local credential file mismatch has its own stop code and a local state-directory remedy. The H0 stop sentence says the listener has already stopped. Restart, stop, and fail transitions clear stale credential-check edge and claim retry count. A terminal credential sentence no longer guesses the answering edge after that field is cleared. Status reports `CONNECTED: no` during credential checks, distinguishes an unreachable server from a claim refusal, and does not point a 5xx claim failure toward credential checking. The status and transition tests pin these behaviors.
+
+Final gates used a temporary HOME. `FORCE_COLOR` was unset for both test suites.
+
+| Gate | Exit | Result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 917 tests: 915 passed, 2 failed, 0 skipped. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 827 tests: 824 passed, 3 failed, 0 skipped. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file CLI bundle built and execute-checked. |
+
+The two `npm test` failures were `resume-process-table.test.ts` and `resume.test.ts`. The CLI suite also failed `unknown-flag-message.test.ts`. Each failure came from this sandbox denying `ps` with `spawn EPERM` or `spawnSync ps EPERM`. The isolated listener runtime and control files passed 135/135; the detached 404 product test passed with a temporary HOME and state directory. This fold did not establish green full suites where `ps` is permitted, behavior against a real command or read edge, or production behavior. No production host, Supabase service, Vercel service, or real workspace was contacted.

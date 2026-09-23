@@ -215,7 +215,7 @@ import {
   formatFollowFrame,
   CONFIRMED_CREDENTIAL_LOSS_CODES,
   COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
-  LocalCredentialSecretAbsentError,
+  ListenerCredentialStateMismatchError,
   isFollowCredentialFailure,
   isRestartableReadError,
   parseWaitSeconds,
@@ -310,7 +310,6 @@ import {
   stopListener,
   waitForListenerReady,
   LISTENER_PROMPT_TIMEOUT_MS,
-  LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   ListenerRenewalUnavailableError,
   listenerRestartCommand,
   readListenerCredentialState,
@@ -319,6 +318,7 @@ import {
   runListenerAttendanceCanary,
   writeListenerCredentialState,
   LISTENER_DELIVERY_FAILING_THRESHOLD,
+  LISTENER_RUNNING_STATES,
   LISTENER_THROUGHPUT_LAPSE_RATIO,
   LISTENER_ROUTE_MODES,
   listenerRouteUsage,
@@ -5319,8 +5319,9 @@ function listenerAttendanceState(
   handledState: "handled" | "not_handled" | "not_yet_measured";
 } {
   const pending = status.pendingForMainCount ?? 0;
-  const connected = status.state === "ready" || status.state === "claim_retry" ||
-    status.state === "credential_check";
+  const connected = LISTENER_RUNNING_STATES.includes(status.state) &&
+    status.state !== "starting" && status.state !== "stopping" &&
+    status.state !== "credential_check";
   // A leftover hook-surface file still proves a message was surfaced.
   // attendingSurfaces does not include that file; it is the hook installed now.
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
@@ -5689,11 +5690,11 @@ export function listenerStatusJson(
   };
 }
 
-function credentialStoppedSentence(edge: "read" | "command" = "read"): string {
+function credentialStoppedSentence(edge: "read" | "command" | null = null): string {
   const codes = (edge === "command"
     ? COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
-  return `the server refused this credential (${codes} means revoked, expired, or unknown), a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
+  return `the server refused this credential${edge === null ? "" : ` (${codes} means revoked, expired, or unknown)`}, a local renewal stop fired, or local credential state is missing. The listener has stopped and will not retry. Run cswarm whoami with this credential to see the grant state, then follow its next step`;
 }
 
 function credentialCheckSentence(status: ListenerStatus): string | null {
@@ -5710,6 +5711,16 @@ function listenerRetrySentence(status: ListenerStatus): string | null {
     return null;
   }
   const code = status.lastErrorCode ?? "no code recorded";
+  if ((status.readHealth?.currentEpisodeAttempts ?? 0) > 0) {
+    const failure = status.readHealth!;
+    const detail = failure.currentHttpStatus === null ? "" : ` (HTTP ${failure.currentHttpStatus})`;
+    const next = code === "sender_relation_capability_missing" ||
+      code === "cursor_capability_missing" ||
+      code === "delivery_capability_inconsistent"
+      ? "Check the target URL and update the read edge before starting a model."
+      : "Check the target URL and read edge version.";
+    return `The read edge failed (${code}${detail}). The listener is still running and will try again at ${status.nextAttemptAt}. ${next}`;
+  }
   return `The last attempt failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
 }
 
@@ -5719,7 +5730,10 @@ function listenerDownSentence(status: ListenerStatus): string | null {
   }
   if (status.state !== "failed") return null;
   if (status.lastErrorCode === "credential_stopped") {
-    return `This listener stopped because ${credentialStoppedSentence(status.credentialCheckEdge ?? "read")}.`;
+    return `This listener stopped because ${credentialStoppedSentence(status.credentialCheckEdge ?? null)}.`;
+  }
+  if (status.lastErrorCode === "local_credential_state_mismatch") {
+    return "This listener stopped because its local credential state did not preserve the live credential. Check that its local state directory is writable and intact, then restart the listener with the credential.";
   }
   if (status.lastErrorCode === H0_SEAT_CLAIM_REFUSED_CODE) {
     return `${H0_SEAT_LISTENER_STOP_SENTENCE}.`;
@@ -5765,7 +5779,7 @@ export function renderListenerStatus(
       : `Listener ${status.state} for agent ${status.principalId}.`,
     ...(credentialCheck === null ? [] : [credentialCheck]),
     ...(status.state === "claim_retry"
-      ? [`The last claim was refused (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. The listener is running and will read signals to check the credential after ${LISTENER_CLAIM_REFUSALS_BEFORE_READ} consecutive refusals.`]
+      ? [`The claim failed (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. ${status.lastErrorCode === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and retries with backoff, reading signals after repeated failures.`]
       : []),
     ...(retrySentence === null ? [] : [retrySentence]),
     ...(downSentence === null ? [] : [downSentence]),
@@ -5903,8 +5917,10 @@ export function renderListenerStatus(
     lines.push(
       status.providerVersion === status.providerLastMeasuredVersion
         ? `Provider version: ${status.providerVersion} (last measured: ${status.providerLastMeasuredVersion}).`
-        : status.state === "ready"
+        : LISTENER_RUNNING_STATES.includes(status.state) && status.readyAt !== null
         ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is unverified but allowed because the startup permission canary passed. Next: verify this provider release with CommonSwarm and update the last-measured version.`
+        : status.state === "starting"
+        ? `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It is still starting; compatibility was not established. Next: check the listener status after it is ready.`
         : `Provider version ${status.providerVersion} is newer than the last measured version ${status.providerLastMeasuredVersion}. It was measured before startup failed; compatibility was not established. Next: resolve the startup failure before verifying this provider release.`,
     );
   } else {
@@ -6081,6 +6097,19 @@ export function renderListenerStatus(
   return lines.join("\n");
 }
 
+export function listenerStartPendingMessage(status: ListenerStatus): string {
+  if (status.state === "starting" && status.lastErrorCode) {
+    const code = status.lastErrorCode;
+    const capability = code === "sender_relation_capability_missing" ||
+      code === "cursor_capability_missing" ||
+      code === "delivery_capability_inconsistent";
+    return capability
+      ? `Listener read edge failed (${code}); check the target URL. ${listenerFailureMessage(code)}. Use cswarm listen status to follow retries.`
+      : `Listener read edge failed (${code}); check the target URL and read edge version. Use cswarm listen status to follow retries.`;
+  }
+  return "Listener is still starting or checking; use cswarm listen status to follow it.";
+}
+
 async function unsurfacedPendingMainStats(
   instanceDirectory: string,
   fallback: { count: number; droppedCount: number },
@@ -6151,7 +6180,7 @@ export function listenerFailureMessage(
   detail?: string | null,
   reasonCode?: string | null,
   minimumRequiredVersion?: string | null,
-  credentialEdge: "read" | "command" = "read",
+  credentialEdge: "read" | "command" | null = null,
 ): string {
   if (code === "version_below_floor") {
     if (provider === "codex") {
@@ -6220,12 +6249,16 @@ export function listenerFailureMessage(
   }
   if (
     code === "sender_relation_capability_missing" ||
-    code === "cursor_capability_missing"
+    code === "cursor_capability_missing" ||
+    code === "delivery_capability_inconsistent"
   ) {
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
     return credentialStoppedSentence(credentialEdge);
+  }
+  if (code === "local_credential_state_mismatch") {
+    return "the listener's local credential state did not preserve the live credential; check the local state directory, then restart with the credential";
   }
   if (code === H0_SEAT_CLAIM_REFUSED_CODE) {
     return H0_SEAT_LISTENER_STOP_SENTENCE;
@@ -6514,7 +6547,7 @@ async function runConfiguredListener(options: {
       }
       const stored = await readListenerCredentialState(paths.instanceDirectory);
       if (stored === null || stored.credential !== credential) {
-        throw new LocalCredentialSecretAbsentError("listener credential state did not preserve the live credential");
+        throw new ListenerCredentialStateMismatchError();
       }
       return stored.credential;
     },
@@ -6886,11 +6919,7 @@ async function runListenStart(args: Arguments): Promise<void> {
   const existing = await effectiveListenerStatus(paths);
   if (
     existing &&
-    (existing.state === "starting" ||
-      existing.state === "ready" ||
-      existing.state === "credential_check" ||
-      existing.state === "claim_retry" ||
-      existing.state === "stopping")
+    LISTENER_RUNNING_STATES.includes(existing.state)
   ) {
     throw new Error(
       `a listener is already ${existing.state} for agent ${principalId}`,
@@ -7041,7 +7070,7 @@ async function runListenStart(args: Arguments): Promise<void> {
           detail,
           reasonCode,
           failedStatus?.providerMinimumRequiredVersion,
-          failedStatus?.credentialCheckEdge ?? "read",
+          failedStatus?.credentialCheckEdge ?? null,
         );
         throw new Error(
           failedStatus === null
@@ -7061,7 +7090,7 @@ async function runListenStart(args: Arguments): Promise<void> {
         status.lastErrorDetail,
         status.lastErrorReasonCode,
         status.providerMinimumRequiredVersion,
-        status.credentialCheckEdge ?? "read",
+        status.credentialCheckEdge ?? null,
       )}. ${listenerProviderIdentitySummary(status)}`,
     );
   }
@@ -7098,9 +7127,8 @@ async function runListenStart(args: Arguments): Promise<void> {
     `${
       args.has("foreground")
         ? "Listener stopped."
-        : status.state === "credential_check" || status.state === "claim_retry" ||
-          status.state === "starting"
-        ? "Listener is still starting or checking; use cswarm listen status to follow it."
+        : LISTENER_RUNNING_STATES.includes(status.state) && status.state !== "ready"
+        ? listenerStartPendingMessage(status)
         : (status.pendingForMainCount ?? 0) > 0
         ? "Listener transport is connected, but queued messages are unattended."
         : "Listener is ready and will keep receiving after this command exits."

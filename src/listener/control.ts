@@ -69,6 +69,13 @@ export type ListenerStatusState =
   | "stopped"
   | "failed";
 
+export const LISTENER_RUNNING_STATES: readonly ListenerStatusState[] = [
+  "starting", "ready", "credential_check", "claim_retry", "stopping",
+];
+const LISTENER_STATUS_STATES: readonly string[] = [
+  ...LISTENER_RUNNING_STATES, "stopped", "failed",
+];
+
 export type ListenerProviderId = "grok" | "opencode" | "claude" | "codex";
 
 /** Consecutive terminal ack failures that make a listener hard-down. */
@@ -519,7 +526,7 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !Number.isSafeInteger(row.pid) ||
     (row.pid as number) < 1 ||
     typeof row.state !== "string" ||
-    !["starting", "ready", "credential_check", "claim_retry", "stopping", "stopped", "failed"].includes(row.state) ||
+    !LISTENER_STATUS_STATES.includes(row.state) ||
     typeof row.startedAt !== "string" ||
     !Number.isFinite(Date.parse(row.startedAt)) ||
     !(row.readyAt === null ||

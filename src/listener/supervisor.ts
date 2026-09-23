@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ListenerCredentialStateMismatchError } from "../cloud/signals.js";
 import { DELIVERY_PROVIDER_PROVEN_OUTCOMES } from "../cloud/delivery.js";
 import { SECRET_SHAPE_RE } from "../host/credential-redaction.js";
 import { redactSessionText } from "../cloud/session-proof.js";
@@ -13,6 +14,7 @@ import {
   type ListenerPaths,
   type ListenerProviderId,
   LISTENER_HELD_BACK_MAX,
+  LISTENER_RUNNING_STATES,
   type ListenerStatus,
 } from "./control.js";
 import { isRestartableListenerStop } from "./runtime.js";
@@ -686,6 +688,10 @@ export async function runListenerSupervisor(
     if (event.type === "read_retry") {
       status = {
         ...status,
+        ...(status.state === "starting" ? {
+          lastErrorCode: event.code,
+          nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
+        } : {}),
         readHealth: recordListenerReadRetry(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -704,6 +710,7 @@ export async function runListenerSupervisor(
         attempt: event.attempt,
         episode_attempt: event.episodeAttempt,
         reason_code: event.failure.code,
+        failure_code: event.code,
         ...(event.failure.httpStatus === null
           ? {}
           : { http_status: event.failure.httpStatus }),
@@ -1013,6 +1020,8 @@ export async function runListenerSupervisor(
         ...providerStatusFields(options.getProviderVersionNotice?.() ?? null),
         nextAttemptAt,
         credentialStopAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0,
       });
       await restartSleep(delayMs, controller.signal);
       if (controller.signal.aborted) {
@@ -1033,11 +1042,15 @@ export async function runListenerSupervisor(
         providerMinimumRequiredVersion: null,
         nextAttemptAt: null,
         credentialStopAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0,
       });
       log({ ts: stoppedAt, event: "listener_stopped" });
     } else {
       const code = stop.reason === "credential"
-        ? "credential_stopped"
+        ? stop.error instanceof ListenerCredentialStateMismatchError
+          ? stop.error.code
+          : "credential_stopped"
         : safeErrorCode(stop.error);
       const failedStderrTail = takeTail();
       transition("failed", {
@@ -1049,6 +1062,8 @@ export async function runListenerSupervisor(
         lastWorkerStderrTail: failedStderrTail,
         nextAttemptAt: null,
         credentialStopAt: null,
+        credentialCheckEdge: null,
+        claimRetryCount: 0,
       });
       // Record why it is down and why it stopped trying — a listener left down
       // after exhausting restarts must be distinguishable from one that was
@@ -1084,6 +1099,8 @@ export async function runListenerSupervisor(
       lastWorkerStderrTail: failedStderrTail,
       nextAttemptAt: null,
       credentialStopAt: null,
+      credentialCheckEdge: null,
+      claimRetryCount: 0,
     });
     log({
       ts: stoppedAt,
@@ -1113,11 +1130,7 @@ export async function effectiveListenerStatus(
     const stored = await readListenerStatus(paths);
     if (
       stored &&
-      (stored.state === "starting" ||
-        stored.state === "ready" ||
-        stored.state === "credential_check" ||
-        stored.state === "claim_retry" ||
-        stored.state === "stopping")
+      LISTENER_RUNNING_STATES.includes(stored.state)
     ) {
       const failed: ListenerStatus = {
         ...stored,
@@ -1187,8 +1200,8 @@ export async function waitForListenerReady(
       ) {
         throw new ListenerAlreadyRunningError();
       }
-      if (last.state === "ready" || last.state === "credential_check" ||
-        last.state === "claim_retry") return last;
+      if (LISTENER_RUNNING_STATES.includes(last.state) &&
+        last.state !== "starting" && last.state !== "stopping") return last;
       if (last.state === "failed" || last.state === "stopped") {
         throw new ListenerStartupError(last.lastErrorCode ?? last.state);
       }

@@ -218,6 +218,15 @@ export class LocalCredentialSecretAbsentError extends Error {
   }
 }
 
+/** The listener's own credential file failed its write/read consistency check. */
+export class ListenerCredentialStateMismatchError extends LocalCredentialSecretAbsentError {
+  readonly code = "local_credential_state_mismatch";
+  constructor() {
+    super("listener credential state did not preserve the live credential");
+    this.name = "ListenerCredentialStateMismatchError";
+  }
+}
+
 /** Malformed body for follow classification tests/helpers. */
 export class SignalMalformedError extends Error {
   constructor(message: string) {

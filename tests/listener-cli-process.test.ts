@@ -1700,6 +1700,68 @@ test("listen status distinguishes delivery modes and null zero positive counts",
   }
 });
 
+test("detached listener names startup read failure while it keeps retrying", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold4-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const token = `swm_agt_${"B".repeat(43)}`;
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE,
+    status: "accepted",
+    principal_id: principalId,
+    token_id: randomUUID(),
+    run_id: randomUUID(),
+    agent_token: token,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the local fixture request. */ }
+    response.writeHead(404, { "content-type": "application/json" });
+    response.end("{}");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId,
+    "--state-dir", root];
+  const paths = listenerPaths({
+    profileId: cloudTarget(url, "public-anon").profileId,
+    workspaceId,
+    principalId,
+    stateDirectory: root,
+  });
+  const startPromise = runCli([
+    "listen", "start", "--allow-unattended", "--provider", "grok",
+    "--agent-token-stdin", ...common, "--json",
+  ], { stdin: artifact });
+  try {
+    const retry = await waitForListenerStatus(paths,
+      (status) => status.state === "starting" && status.lastErrorCode === "http_404");
+    assert.ok(retry.nextAttemptAt);
+    assert.equal(retry.readHealth?.currentEpisodeAttempts, 1);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /http_404/);
+    assert.match(human.stdout, /Check the target URL and read edge version/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD4_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD4_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener([
+        "listen", "stop", ...common, "--principal-id", principalId, "--json",
+      ], paths);
+      await startPromise;
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("detached CLI reports missing Grok login without starting a model", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-cli-missing-auth-"));
   const emptyProviderHome = join(root, "empty-provider-home");

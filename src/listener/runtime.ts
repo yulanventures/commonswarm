@@ -246,6 +246,7 @@ export type ListenerRuntimeEvent =
     episodeAttempt: number;
     episodeStartedAt: string;
     failure: SignalReadFailureClassification;
+    code: string;
     delayMs: number;
     ts: string;
   }
@@ -1279,6 +1280,7 @@ export async function runListenerRuntime(
   try {
     let forceRead = false;
     let claimRefusals = 0;
+    let deliveryAttempt = 0;
     while (true) {
       if (abort?.aborted) {
         stop = { reason: "cancelled" };
@@ -1340,13 +1342,9 @@ export async function runListenerRuntime(
           },
         });
         requireCapabilities(page);
-        if (claimRefusals > 0) {
-          claimRefusals = 0;
-          options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
-        }
         applyWakeHint(page.wake);
         emitWake();
-        if (ready && readEpisodeStartedAtMs !== null) {
+        if (readEpisodeStartedAtMs !== null) {
           const recoveredAtMs = now();
           options.onEvent?.({
             type: "read_recovered",
@@ -1414,23 +1412,24 @@ export async function runListenerRuntime(
           const delayMs = failure.code === "host_ports_exhausted"
             ? LISTENER_HOST_PORTS_PROBE_MS
             : nextFollowBackoffMs(readAttempt, null, random);
-          if (ready) {
-            const failedAtMs = now();
-            if (readEpisodeStartedAtMs === null) {
-              readEpisodeStartedAtMs = failedAtMs;
-              readEpisodeAttempts = 0;
-            }
-            readEpisodeAttempts += 1;
-            options.onEvent?.({
-              type: "read_retry",
-              attempt: readAttempt,
-              episodeAttempt: readEpisodeAttempts,
-              episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
-              failure,
-              delayMs,
-              ts: new Date(failedAtMs).toISOString(),
-            });
+          const failedAtMs = now();
+          if (readEpisodeStartedAtMs === null) {
+            readEpisodeStartedAtMs = failedAtMs;
+            readEpisodeAttempts = 0;
           }
+          readEpisodeAttempts += 1;
+          options.onEvent?.({
+            type: "read_retry",
+            attempt: readAttempt,
+            episodeAttempt: readEpisodeAttempts,
+            episodeStartedAt: new Date(readEpisodeStartedAtMs).toISOString(),
+            failure,
+            code: error instanceof ListenerCapabilityError ? error.code
+              : failure.code === "http_status" ? `http_${failure.httpStatus}`
+              : failure.code,
+            delayMs,
+            ts: new Date(failedAtMs).toISOString(),
+          });
           await sleep(delayMs, abort);
           continue;
         }
@@ -1630,7 +1629,6 @@ export async function runListenerRuntime(
         }
 
         let result: DeliveryClaimResult | null = null;
-        let deliveryAttempt = 0;
         while (result === null && !stop) {
           try {
             await journal.recordClaimAttempt(eventTime(now));
@@ -1697,15 +1695,15 @@ export async function runListenerRuntime(
               stop = { reason: "fatal", error: asError(error) };
               break;
             }
-            if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
-              forceRead = true;
-              break;
-            }
             deliveryAttempt += 1;
             const delayMs = deliveryRetryDelay(deliveryAttempt, error, random);
             await sleep(delayMs, abort);
             if (abort?.aborted) {
               stop = { reason: "cancelled" };
+              break;
+            }
+            if (claimRefusals >= LISTENER_CLAIM_REFUSALS_BEFORE_READ) {
+              forceRead = true;
               break;
             }
           }
@@ -1718,6 +1716,7 @@ export async function runListenerRuntime(
         }
         if (claimRefusals > 0) {
           claimRefusals = 0;
+          deliveryAttempt = 0;
           options.onEvent?.({ type: "claim_retry_cleared", ts: eventTime(now) });
         }
         clearCredentialWindow();

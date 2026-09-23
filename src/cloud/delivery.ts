@@ -83,7 +83,7 @@ export const H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
 
 /** Status sentence for a listener that cannot serve an H0 seat. */
 export const H0_SEAT_LISTENER_STOP_SENTENCE =
-  "This seat receives messages through the h0 poll. Stop this listener; nothing else is needed for this seat";
+  "This seat receives messages through the h0 poll. The listener has stopped; no further listener action is needed for this seat";
 
 /** Allowed client failure codes for failed_terminal outcomes. */
 export const DELIVERY_FAILED_TERMINAL_CODES: readonly string[] = Object.freeze([

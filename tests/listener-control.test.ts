@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdtemp,
+  rm,
   readFile,
   stat,
 } from "node:fs/promises";
@@ -48,6 +49,7 @@ import {
   SignalMalformedError,
   SignalReadTimeoutError,
   SignalTransportError,
+  ListenerCredentialStateMismatchError,
 } from "../src/cloud/signals.js";
 import {
   DeliveryHttpError,
@@ -75,6 +77,8 @@ import {
 } from "../src/cloud/renewal.js";
 import { ListenerCapabilityError } from "../src/listener/runtime.js";
 import {
+  listenerFailureMessage,
+  listenerStartPendingMessage,
   listenerStatusJson,
   renderListenerStatus,
 } from "../src/cli.js";
@@ -1659,6 +1663,7 @@ test("credential and claim status use the answering edge and current retry state
   assert.doesNotMatch(command, /unauthenticated or forbidden/);
   assert.match(command, /if every check until then confirms the loss/);
   assert.match(command, /transient answer extends/);
+  assert.match(command, /CONNECTED: no/);
   const stopped = renderListenerStatus({
     ...statusFor(target, "failed"),
     lastErrorCode: "credential_stopped",
@@ -1672,13 +1677,84 @@ test("credential and claim status use the answering edge and current retry state
     lastErrorCode: "delivery_unavailable",
   });
   assert.match(claim, /Listener claim_retry/);
-  assert.match(claim, /last claim was refused \(delivery_unavailable\) 2 times/);
+  assert.match(claim, /claim failed \(delivery_unavailable\) 2 times/);
+  const unreachable = renderListenerStatus({
+    ...statusFor(target, "claim_retry"),
+    claimRetryCount: 7,
+    lastErrorCode: "delivery_unreachable",
+  });
+  assert.match(unreachable, /server could not be reached/);
+  assert.doesNotMatch(unreachable, /check the credential/);
+  const localState = renderListenerStatus({
+    ...statusFor(target, "failed"),
+    lastErrorCode: "local_credential_state_mismatch",
+  });
+  assert.match(localState, /local state directory is writable and intact/);
+  assert.doesNotMatch(localState, /cswarm whoami/);
+  assert.match(listenerFailureMessage("local_credential_state_mismatch"), /local state directory/);
   const h0 = renderListenerStatus({
     ...statusFor(target, "failed"),
     lastErrorCode: H0_SEAT_CLAIM_REFUSED_CODE,
   });
   assert.match(h0, /receives messages through the h0 poll/);
-  assert.match(h0, /Stop this listener; nothing else is needed/);
+  assert.match(h0, /listener has stopped; no further listener action is needed/);
+});
+
+test("restart and terminal transitions clear claim and credential check fields", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-retry-fields-"));
+  try {
+    const target = paths(root);
+    const ts = new Date().toISOString();
+    const emitFailure = (onEvent: (event: ListenerRuntimeEvent) => void) => {
+      onEvent({ type: "credential_check", code: "forbidden", edge: "read", checks: 1,
+        stopAt: new Date(Date.now() + 600_000).toISOString(), ts });
+      onEvent({ type: "claim_retry", code: "delivery_unreachable", attempts: 4, ts });
+    };
+    let runs = 0;
+    let restarting: ListenerStatus | null = null;
+    const stopped = await runListenerSupervisor({
+      paths: target,
+      profileId: "profile-retry-fields",
+      workspaceId: randomUUID(),
+      principalId: randomUUID(),
+      restart: { maxAttempts: 1, sleep: async () => {
+        restarting = await queryListenerControl(target, "status");
+      }, random: () => 0 },
+      run: async (_signal, onEvent) => {
+        runs += 1;
+        if (runs === 1) {
+          emitFailure(onEvent);
+          return { reason: "fatal", error: new SignalHttpError(503) };
+        }
+        return { reason: "cancelled" };
+      },
+    });
+    assert.equal(runs, 2);
+    const observed = restarting as ListenerStatus | null;
+    assert.ok(observed);
+    assert.equal(observed.state, "starting");
+    assert.equal(observed.credentialCheckEdge, null);
+    assert.equal(observed.claimRetryCount, 0);
+    assert.equal(stopped.credentialCheckEdge, null);
+    assert.equal(stopped.claimRetryCount, 0);
+
+    const failed = await runListenerSupervisor({
+      paths: paths(root),
+      profileId: "profile-state-mismatch",
+      workspaceId: randomUUID(),
+      principalId: randomUUID(),
+      run: async (_signal, onEvent) => {
+        emitFailure(onEvent);
+        return { reason: "credential", error: new ListenerCredentialStateMismatchError() };
+      },
+    });
+    assert.equal(failed.state, "failed");
+    assert.equal(failed.lastErrorCode, "local_credential_state_mismatch");
+    assert.equal(failed.credentialCheckEdge, null);
+    assert.equal(failed.claimRetryCount, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("D-051: the restart delay is bounded by its own cap, not the read backoff cap", () => {
@@ -2649,6 +2725,7 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
           httpStatus: 503,
           errorConstructor: null,
         },
+        code: "http_503",
         delayMs: 20_000,
         ts: startedAt,
       });
@@ -2662,6 +2739,7 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
           httpStatus: null,
           errorConstructor: null,
         },
+        code: "no_response",
         delayMs: 30_000,
         ts: secondAt,
       });
