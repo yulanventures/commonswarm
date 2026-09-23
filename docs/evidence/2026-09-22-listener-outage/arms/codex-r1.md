@@ -1,0 +1,11 @@
+1. **PRODUCTION — A revoked listener can remain in the claim loop indefinitely.** `src/listener/runtime.ts:1602-1661` retries a command refusal with `await sleep(...)` and never returns to the signal read while the claim keeps failing. The command edge returns `delivery_unavailable` for a revoked delivery command (`supabase/functions/command/index.ts:9034-9044`), which is deliberately not a confirmed credential code. A revocation after a successful read can therefore leave the listener running without ever reaching the read-edge confirmation window. The test at `tests/listener-runtime.test.ts:3435-3472` aborts after four claims; it does not establish recovery or eventual confirmation.
+
+2. **PRODUCTION — Retry status can report a wait that has already ended.** The supervisor writes `nextAttemptAt` before sleeping (`src/listener/supervisor.ts:969-993`) but does not clear it when the next attempt starts (`:950-956`). Until that attempt emits `ready` or another state change, status says it “will try again at” the old time (`src/cli.ts:5700-5705`), even though it is already trying.
+
+3. **PRODUCTION — The credential-check deadline sentence overpromises.** Status says the listener “will stop at” `credentialStopAt` “unless the credential works again” (`src/cli.ts:5693-5697`). A transient response does not prove the credential works, yet it moves that stop time later (`src/listener/runtime.ts:1156-1160`). The sentence needs to make continued confirmed-loss checks a condition.
+
+4. **RIGOUR — Credential classification still branches on message text.** `src/cloud/signals.ts:2462` returns `/secret is absent/i.test(error.message)`, and `src/listener/runtime.ts:512-526` uses that result for an immediate local credential stop. This violates the stated D-053 rule and leaves an untyped error’s wording able to choose a permanent stop.
+
+The read edge’s `forbidden` response is tied to `agent.is_revoked` (`supabase/functions/read/index.ts:469-475`). `cswarm follow` still stops on one confirmed read code (`src/cloud/signals.ts:2713-2724`); it is a separate receive path and does not explain the reported **listener** stops, though it retains that exposure for `follow` users. The targeted pure suites passed: runtime 80, control 47, delivery client 29. No files were changed.
+
+VERDICT: FAIL
