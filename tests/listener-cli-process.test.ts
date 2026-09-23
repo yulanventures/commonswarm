@@ -2238,13 +2238,15 @@ test("detached listener renews after a 401 and server error before the old token
   try {
     const start = await runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
     assert.equal(start.code, 0, start.stderr);
-    const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 3 && reads > 0, 20_000);
+    const ready = await waitForListenerStatus(paths, (status) => status.state === "ready" && renewals >= 3 && reads > 0, 20_000)
+      .catch((error: unknown) => { throw new Error(`renewals=${renewals} reads=${reads}: ${String(error)}`); });
     assert.ok(Date.now() < oldExpiry, "the successor was accepted before the old token expired");
     assert.equal(ready.state, "ready");
     const safeStatus = await readFile(paths.statusPath, "utf8");
     assert.doesNotMatch(safeStatus, /swm_agt_/);
     if (process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD8_RENEWAL_STATUS_PATH, safeStatus);
     if (process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD9_RENEWAL_STATUS_PATH, safeStatus);
+    if (process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH) await writeFile(process.env.CSWARM_FOLD10_RENEWAL_STATUS_PATH, safeStatus);
   } finally {
     try { await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths); }
     catch { /* The listener may already have exited after a failed assertion. */ }

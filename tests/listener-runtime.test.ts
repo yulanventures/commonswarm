@@ -67,6 +67,7 @@ import {
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
   RENEWAL_WINDOW_RETRY_MS,
   RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  LISTENER_REQUEST_WAIT_FLOOR_MS,
   ListenerLeaseResponseError,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   LISTENER_DELIVERY_RETRY_MAX_MS,
@@ -279,16 +280,17 @@ test("empty durable claims back off the idle wait and reset on a delivery", asyn
     reads >= 4,
     "the read edge POSTs on the same loop as the claim, after idleSleep",
   );
+  const idleSleeps = sleeps.filter((ms) => ms > LISTENER_REQUEST_WAIT_FLOOR_MS);
   assert.deepEqual(
-    sleeps.slice(0, 3),
+    idleSleeps.slice(0, 3),
     [
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 0),
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 1),
       nextIdlePollMs(IDLE_POLL_DEFAULT_MS, 2),
     ],
   );
-  assert.deepEqual(sleeps.slice(0, 3), [15_000, 30_000, 60_000]);
-  const resetSleep = sleeps.find((ms, index) => index >= 3 && ms === IDLE_POLL_DEFAULT_MS);
+  assert.deepEqual(idleSleeps.slice(0, 3), [15_000, 30_000, 60_000]);
+  const resetSleep = idleSleeps.find((ms, index) => index >= 3 && ms === IDLE_POLL_DEFAULT_MS);
   assert.equal(resetSleep, IDLE_POLL_DEFAULT_MS, "a delivery must reset the idle wait to the base");
   assert.ok(idleEvents.includes(15_000));
   assert.ok(idleEvents.includes(30_000));
@@ -713,10 +715,8 @@ async function productionReadRetry(
     fetcher,
     pollMs: 0,
     random: () => 0,
-    onEvent: (event) => events.push(event),
-    sleep: async (ms) => {
-      if (ms > 0) controller.abort();
-    },
+    onEvent: (event) => { events.push(event); if (event.type === "read_retry") controller.abort(); },
+    sleep: async () => {},
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(fetchCalls, 2, "the failure reached the production signal fetch");
@@ -788,12 +788,10 @@ test("listener body-stall retry is classified through the production signal dead
     fetcher,
     pollMs: 0,
     random: () => 0,
-    onEvent: (event) => events.push(event),
-    sleep: async (ms) => {
-      if (ms > 0) controller.abort();
-    },
+    onEvent: (event) => { events.push(event); if (event.type === "read_retry") controller.abort(); },
+    sleep: async () => {},
   });
-  for (let turn = 0; turn < 20 && !bodyStarted; turn += 1) {
+  for (let turn = 0; turn < 100 && !bodyStarted; turn += 1) {
     await Promise.resolve();
   }
   assert.equal(fetchCalls, 2, "the ready read and stalled read both reached fetch");
@@ -1205,7 +1203,7 @@ test("durable claim persists one command id across retries, uses fresh bearers, 
   for (const [index, value] of callOrder.entries()) {
     if (value === "claim") assert.equal(callOrder[index - 1], "bearer");
   }
-  assert.ok(delays.includes(750));
+  assert.ok(delays.includes(LISTENER_REQUEST_WAIT_FLOOR_MS));
   assert.equal(journal.record.active, null);
   assert.equal(model.prompts.length, 0);
 });
@@ -2009,7 +2007,7 @@ test("C-1 composition: an expired leased claim with a resumable effect re-claims
   assert.equal(journal.record.active, null);
 });
 
-test("C-1 composition: a live leased claim with a resumable effect replays immediately", async () => {
+test("C-1 composition: a live leased claim with a resumable effect replays after request spacing", async () => {
   const claimedAsk = ask(
     "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaad5",
     "2026-07-30T00:00:01.000Z",
@@ -2071,9 +2069,7 @@ test("C-1 composition: a live leased claim with a resumable effect replays immed
     model,
     signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:02:31.000Z"),
-    sleep: async () => {
-      controller.abort();
-    },
+    sleep: async () => {},
     readPage: async () => durablePage([], 1),
     poster: {
       async post() {
@@ -2085,7 +2081,7 @@ test("C-1 composition: a live leased claim with a resumable effect replays immed
   assert.deepEqual(
     claimIds,
     [active.claimCommandId],
-    "C-1 live durable recovery must replay the stored claim immediately",
+    "C-1 live durable recovery must replay the stored claim",
   );
   assert.equal(ackCalls, 1);
   assert.equal(model.prompts.length, 0);
@@ -2994,6 +2990,7 @@ test("caller abort during claim retry sleep starts no later delivery request", a
   const journal = new MemoryDeliveryJournal();
   const controller = new AbortController();
   let claimCalls = 0;
+  let claimRetryPending = false;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3011,8 +3008,9 @@ test("caller abort during claim retry sleep starts no later delivery request", a
     store: new MemoryStore(),
     model: new FakeModel(),
     signal: controller.signal,
+    onEvent: (event) => { if (event.type === "claim_retry") claimRetryPending = true; },
     sleep: async () => {
-      controller.abort();
+      if (claimRetryPending) controller.abort();
     },
     readPage: async () => durablePage(),
   });
@@ -3038,6 +3036,7 @@ test("caller abort during ACK retry sleep starts no later ACK request", async ()
   }));
   const controller = new AbortController();
   let ackCalls = 0;
+  let ackRetryPending = false;
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -3056,8 +3055,9 @@ test("caller abort during ACK retry sleep starts no later ACK request", async ()
     model: new FakeModel(),
     signal: controller.signal,
     now: () => Date.parse("2026-07-30T00:00:30.000Z"),
+    onEvent: (event) => { if (event.type === "ack_retry") ackRetryPending = true; },
     sleep: async () => {
-      controller.abort();
+      if (ackRetryPending) controller.abort();
     },
     readPage: async () => page([], {
       capabilities: {
@@ -3667,7 +3667,9 @@ test("claim backoff reaches its cap across successful forced reads", { timeout: 
       const delays: number[] = [];
       const during: ListenerStatus[] = [];
       const events: ListenerRuntimeEvent[] = [];
+      let pendingRetryDelay: number | null = null;
       let reads = 0;
+      let lastReadAt: number | null = null;
       const final = await runListenerSupervisor({
         paths: target,
         profileId: `profile-claim-${httpStatus}`,
@@ -3686,15 +3688,28 @@ test("claim backoff reaches its cap across successful forced reads", { timeout: 
           signal,
           now: clock.now,
           random: () => 1,
-          onEvent: (event) => { events.push(event); onEvent(event); },
-          readPage: async () => { reads += 1; return durablePage([], 1); },
+          onEvent: (event) => {
+            events.push(event);
+            if (event.type === "claim_retry") pendingRetryDelay = event.delayMs;
+            onEvent(event);
+          },
+          readPage: async () => { reads += 1; lastReadAt = clock.now(); return durablePage([], 1); },
           deliveryClient: {
-            async claimAgentInbox() { throw new DeliveryHttpError(httpStatus, code, code); },
+            async claimAgentInbox() {
+              assert.ok(lastReadAt !== null && clock.now() - lastReadAt >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+              throw new DeliveryHttpError(httpStatus, code, code);
+            },
             async ackAgentDelivery() { throw new Error("ack must not run"); },
           },
           sleep: async (ms, sleepSignal) => {
-            delays.push(ms);
-            during.push(await queryListenerControl(target, "status"));
+            if (pendingRetryDelay !== null) {
+              assert.equal(ms, pendingRetryDelay);
+              pendingRetryDelay = null;
+              delays.push(ms);
+              during.push(await queryListenerControl(target, "status"));
+            } else {
+              assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+            }
             await clock.sleep(ms, sleepSignal);
             if (delays.length === 8) await queryListenerControl(target, "stop");
           },
@@ -3702,7 +3717,7 @@ test("claim backoff reaches its cap across successful forced reads", { timeout: 
       });
       assert.equal(final.state, "stopped");
       assert.ok(reads >= 3, "forced reads must continue to succeed");
-      assert.deepEqual(delays, [500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+      assert.deepEqual(delays, [1_000, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
       assert.equal(Math.max(...delays), LISTENER_DELIVERY_RETRY_MAX_MS);
       assert.ok(during.every((status) => status.state === "claim_retry"));
       assert.deepEqual(during.map((status) => status.claimRetryCount), [1, 2, 3, 4, 5, 6, 7, 8]);
@@ -3894,6 +3909,8 @@ test("foreign claim answers retry with a named next attempt and recover", { time
       const journal = new MemoryDeliveryJournal();
       const clock = advancingClock();
       const observed: ListenerStatus[] = [];
+      let retryPending = false;
+      let stopRequest: Promise<unknown> | null = null;
       const events: ListenerRuntimeEvent[] = [];
       let claims = 0;
       let reads = 0;
@@ -3915,7 +3932,12 @@ test("foreign claim answers retry with a named next attempt and recover", { time
           signal,
           now: clock.now,
           random: () => 1,
-          onEvent: (event) => { events.push(event); onEvent(event); if (event.type === "delivery_claim" && claims === 2) void queryListenerControl(paths, "stop"); },
+          onEvent: (event) => {
+            events.push(event);
+            if (event.type === "claim_retry") retryPending = true;
+            onEvent(event);
+            if (event.type === "delivery_claim" && claims === 2) stopRequest = queryListenerControl(paths, "stop");
+          },
           readPage: async () => { reads += 1; return durablePage([], 1); },
           fetcher: (async () => {
             claims += 1;
@@ -3924,7 +3946,11 @@ test("foreign claim answers retry with a named next attempt and recover", { time
               : new Response(JSON.stringify({ status: "accepted", ok: true, capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 }, deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 });
           }) as typeof fetch,
           sleep: async (ms, sleepSignal) => {
-            observed.push(await queryListenerControl(paths, "status"));
+            if (stopRequest !== null) await stopRequest;
+            if (retryPending) {
+              observed.push(await queryListenerControl(paths, "status"));
+              retryPending = false;
+            }
             await clock.sleep(ms, sleepSignal);
           },
         }),
@@ -3949,6 +3975,8 @@ test("foreign claim answers retry with a named next attempt and recover", { time
 
 test("push wake retries a foreign claim without a preceding read", { timeout: 15_000 }, async () => {
   const controller = new AbortController();
+  let current = Date.parse("2026-09-22T22:00:00.000Z");
+  const claimTimes: number[] = [];
   const journal = new MemoryDeliveryJournal();
   const events: ListenerRuntimeEvent[] = [];
   let reads = 0;
@@ -3971,21 +3999,27 @@ test("push wake retries a foreign claim without a preceding read", { timeout: 15
     store: new MemoryStore(),
     model: new FakeModel(),
     signal: controller.signal,
+    now: () => current,
     wake,
     random: () => 1,
     readPage: async () => { reads += 1; return durablePage([], 1); },
     onEvent: (event) => { events.push(event); if (event.type === "delivery_claim" && claims === 3) controller.abort(); },
     fetcher: (async () => {
+      claimTimes.push(current);
+      current += 20;
       claims += 1;
       return claims === 2
         ? new Response('{"error":"missing_route"}', { status: 400 })
         : new Response(JSON.stringify({ status: "accepted", ok: true, capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 }, deliveries: [], pending_delivery_count: 0, terminal_delivery_failure_count: 0 }), { status: 200 });
     }) as typeof fetch,
-    sleep: async (ms) => { assert.ok(ms > 0 && ms <= LISTENER_DELIVERY_RETRY_MAX_MS); },
+    sleep: async (ms) => { assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS && ms <= LISTENER_DELIVERY_RETRY_MAX_MS); current += ms; },
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(reads, 1);
   assert.equal(claims, 3);
+  for (let i = 1; i < claimTimes.length; i++) {
+    assert.ok(claimTimes[i]! - claimTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
   assert.equal(events.find((event) => event.type === "claim_retry")?.code, "http_400");
 });
 
@@ -4039,6 +4073,8 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
       await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
       const clock = advancingClock("2026-07-30T00:00:30.000Z");
       const observed: ListenerStatus[] = [];
+      let retryPending = false;
+      let stopRequest: Promise<unknown> | null = null;
       let acks = 0;
       const final = await runListenerSupervisor({
         paths,
@@ -4058,7 +4094,11 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
           signal,
           now: clock.now,
           random: () => 1,
-          onEvent: (event) => { onEvent(event); if (event.type === "delivery_ack") void queryListenerControl(paths, "stop"); },
+          onEvent: (event) => {
+            if (event.type === "ack_retry") retryPending = true;
+            onEvent(event);
+            if (event.type === "delivery_ack") stopRequest = queryListenerControl(paths, "stop");
+          },
           readPage: async () => durablePage([], 1),
           fetcher: (async () => {
             acks += 1;
@@ -4067,7 +4107,11 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
               : new Response(JSON.stringify({ status: "accepted", ok: true, signal_id: directNote.id, outcome: "observed" }), { status: 200 });
           }) as typeof fetch,
           sleep: async (ms, sleepSignal) => {
-            observed.push(await queryListenerControl(paths, "status"));
+            if (stopRequest !== null) await stopRequest;
+            if (retryPending) {
+              observed.push(await queryListenerControl(paths, "status"));
+              retryPending = false;
+            }
             await clock.sleep(ms, sleepSignal);
           },
         }),
@@ -4099,6 +4143,7 @@ test("repeated ACK failures force a read without resetting ACK backoff", { timeo
   const controller = new AbortController();
   const clock = advancingClock("2026-07-30T00:00:30.000Z");
   const sleeps: number[] = [];
+  let pendingAckRetryDelay: number | null = null;
   let reads = 0;
   let acks = 0;
   const stop = await runListenerRuntime({
@@ -4109,6 +4154,7 @@ test("repeated ACK failures force a read without resetting ACK backoff", { timeo
     credentialSession: { async bearer() { return "token"; } },
     store, model: new FakeModel(), signal: controller.signal,
     now: clock.now, random: () => 1,
+    onEvent: (event) => { if (event.type === "ack_retry") pendingAckRetryDelay = event.delayMs; },
     readPage: async () => { reads += 1; return durablePage([], 1); },
     deliveryClient: {
       async claimAgentInbox() { throw new Error("claim must not run"); },
@@ -4118,15 +4164,21 @@ test("repeated ACK failures force a read without resetting ACK backoff", { timeo
       },
     },
     sleep: async (ms, signal) => {
-      sleeps.push(ms);
-      if (sleeps.length === 4) controller.abort();
+      if (pendingAckRetryDelay !== null) {
+        assert.equal(ms, pendingAckRetryDelay);
+        pendingAckRetryDelay = null;
+        sleeps.push(ms);
+        if (sleeps.length === 4) controller.abort();
+      } else {
+        assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      }
       await clock.sleep(ms, signal);
     },
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(acks, 4);
   assert.ok(reads >= 2, `reads=${reads}`);
-  assert.deepEqual(sleeps.slice(0, 4), [500, 1_000, 2_000, 4_000]);
+  assert.deepEqual(sleeps.slice(0, 4), [1_000, 1_000, 2_000, 4_000]);
 });
 
 test("repeated ACK failures let the read edge open the credential window", { timeout: 15_000 }, async () => {
@@ -6355,7 +6407,7 @@ test("renewal window retries before expiry and a successful successor keeps the 
   assert.ok(events.some((event) => event.type === "credential_check_cleared"));
 });
 
-test("generated renewal answer orderings never sleep past the renewal deadline and recover", { timeout: 30_000 }, async () => {
+test("generated renewal answer orderings keep a request floor and recover", { timeout: 30_000 }, async () => {
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   const failures = ["ours", "foreign", "network", "server"] as const;
   type Answer = typeof failures[number] | "success";
@@ -6374,12 +6426,13 @@ test("generated renewal answer orderings never sleep past the renewal deadline a
   }
   assert.equal(answerSequences.length, 184);
   let sequences = 0;
-  for (const lifetimeMs of [35_000, 90_000, 180_000, 270_000]) {
+  for (const lifetimeMs of [180_000, 210_000, 240_000, 270_000]) {
     for (const answers of answerSequences) {
       let current = start;
       const expiry = start + lifetimeMs;
       const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
       let calls = 0;
+      const requestTimes: number[] = [];
       let reads = 0;
       const controller = new AbortController();
       const session = await AgentCredentialSession.open({
@@ -6388,6 +6441,8 @@ test("generated renewal answer orderings never sleep past the renewal deadline a
           principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
         store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
         fetcher: (async () => {
+          requestTimes.push(current);
+          current += 20; // A fast but nonzero round trip exposes a zero-wait retry.
           const answer = answers[Math.min(calls++, answers.length - 1)];
           if (answer === "network") throw new TypeError("network unavailable");
           if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
@@ -6403,26 +6458,129 @@ test("generated renewal answer orderings never sleep past the renewal deadline a
         target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
         principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
         model: new FakeModel(), signal: controller.signal, now: () => current,
-        readPage: async () => { reads++; controller.abort(); return page([]); },
+        onEvent: (event) => {
+          if (event.type === "credential_check") {
+            assert.ok(event.nextAttemptAt && Date.parse(event.nextAttemptAt) - Date.parse(event.ts) >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+          }
+          if (event.type === "read_retry") assert.ok(event.delayMs >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+        },
+        readPage: async () => {
+          assert.ok(current - requestTimes[requestTimes.length - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+          reads++;
+          controller.abort();
+          return page([]);
+        },
         sleep: async (ms) => {
-          if (session.expiry === expiry && current < expiry) {
-            assert.ok(current + ms <= Math.max(current, deadline),
+          if (session.expiry === expiry && current < deadline - LISTENER_REQUEST_WAIT_FLOOR_MS) {
+            assert.ok(current + ms <= deadline,
               `${answers.join(",")} at ${lifetimeMs}ms slept ${ms}ms past deadline`);
             assert.ok(ms <= RENEWAL_WINDOW_RETRY_MS,
               `${answers.join(",")} at ${lifetimeMs}ms delayed renewal ${ms}ms`);
           }
+          assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
           current += ms;
         },
       });
-      assert.equal(stop.reason, "cancelled", answers.join(","));
+      assert.equal(stop.reason, "cancelled", stop.reason === "fatal" ? stop.error.message : answers.join(","));
       assert.equal(calls, answers.indexOf("success") + 1, answers.join(","));
       assert.ok(reads > 0, answers.join(","));
       assert.ok(current < expiry, answers.join(","));
       assert.ok((session.expiry ?? 0) > expiry, answers.join(","));
+      for (let i = 1; i < requestTimes.length; i++) {
+        assert.ok(requestTimes[i]! - requestTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS,
+          `${answers.join(",")} issued requests ${requestTimes[i]! - requestTimes[i - 1]!}ms apart`);
+      }
+      const marginCalls = requestTimes.filter((time) => time >= deadline && time < expiry);
+      assert.ok(marginCalls.length <= Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
       sequences++;
     }
   }
   assert.equal(sequences, 736);
+});
+
+test("generated failing renewals and a healthy null-store listener stay rate bounded through expiry", { timeout: 30_000 }, async () => {
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  const expiry = start + 120_000;
+  const deadline = expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
+  const failures = ["ours", "foreign", "network", "unsupported"] as const;
+  let sequences = 0;
+  for (let code = 0; code < failures.length ** 3; code++) {
+    let current = start;
+    const requestTimes: number[] = [];
+    let calls = 0;
+    const session = await AgentCredentialSession.open({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+      store: renewalMemoryStore(), listenerMode: true, now: () => current, warn: () => {},
+      fetcher: (async () => {
+        requestTimes.push(current);
+        current += 20; // Every request costs 20 ms, including failures.
+        assert.ok(++calls <= 130, `unbounded renewal sequence ${code}`);
+        const answer = failures[Math.min(calls - 1, 2)]!;
+        if (answer === "network") throw new TypeError("network unavailable");
+        if (answer === "ours") return new Response('{"error":"unauthenticated"}', { status: 401 });
+        if (answer === "foreign") return new Response("<html>wrong edge</html>", { status: 401 });
+        return new Response('{"status":"rejected","reason":"renewal_unsupported"}', { status: 200 });
+      }) as typeof fetch,
+    });
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(),
+      model: new FakeModel(), now: () => current,
+      onEvent: (event) => {
+        if (event.type === "credential_check") {
+          assert.ok(event.nextAttemptAt && Date.parse(event.nextAttemptAt) - Date.parse(event.ts) >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+        }
+        if (event.type === "read_retry") assert.ok(event.delayMs >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      },
+      sleep: async (ms) => { current += ms; },
+    });
+    assert.equal(stop.reason, "credential", `sequence ${code}`);
+    assert.ok(requestTimes.some((time) => time >= deadline && time < expiry), `sequence ${code} missed margin`);
+    assert.ok(requestTimes.some((time) => time >= expiry), `sequence ${code} missed expiry`);
+    for (let i = 1; i < requestTimes.length; i++) {
+      assert.ok(requestTimes[i]! - requestTimes[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS,
+        `sequence ${code}: ${requestTimes[i]! - requestTimes[i - 1]!}ms apart`);
+    }
+    assert.ok(requestTimes.filter((time) => time >= deadline && time < expiry).length <=
+      Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
+    assert.equal(requestTimes.filter((time) => time >= expiry).length, 1);
+    sequences++;
+  }
+
+  let current = start;
+  const reads: number[] = [];
+  const controller = new AbortController();
+  const nullStore = await AgentCredentialSession.open({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principalId: PRINCIPAL_ID, runId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expiresAt: expiry },
+    store: null, listenerMode: true, now: () => current, warn: () => {},
+    fetcher: (async () => { assert.fail("a null store must not renew"); }) as typeof fetch,
+  });
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID, credentialSession: nullStore, store: new MemoryStore(),
+    model: new FakeModel(), signal: controller.signal, now: () => current,
+    readPage: async () => {
+      reads.push(current);
+      current += 20;
+      assert.ok(reads.length <= 130, "unbounded healthy null-store reads");
+      if (current > expiry + 60_000) controller.abort();
+      return page([]);
+    },
+    sleep: async (ms) => { current += ms; },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.ok(reads.some((time) => time >= deadline && time < expiry));
+  assert.ok(reads.some((time) => time >= expiry));
+  for (let i = 1; i < reads.length; i++) {
+    assert.ok(reads[i]! - reads[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
+  assert.ok(reads.filter((time) => time >= deadline && time < expiry).length <=
+    Math.ceil(RENEWAL_WINDOW_EXPIRY_MARGIN_MS / LISTENER_REQUEST_WAIT_FLOOR_MS) + 1);
+  assert.equal(sequences, 64);
 });
 
 test("generated confirmation windows stop only after the full span of confirmed answers", { timeout: 30_000 }, async () => {
@@ -6479,6 +6637,7 @@ test("expired predecessor stops on the next confirmed renewal answer", { timeout
   let current = start;
   const expiry = start + 90_000;
   let renewals = 0;
+  const events: ListenerRuntimeEvent[] = [];
   const session = await AgentCredentialSession.open({
     target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
     presented: { token: "swm_agt_" + "A".repeat(43), tokenId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
@@ -6489,12 +6648,15 @@ test("expired predecessor stops on the next confirmed renewal answer", { timeout
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"), workspaceId: WORKSPACE_ID,
     principalId: PRINCIPAL_ID, credentialSession: session, store: new MemoryStore(), model: new FakeModel(),
-    now: () => current, sleep: async (ms) => { current += ms; },
+    now: () => current, onEvent: (event) => events.push(event), sleep: async (ms) => { current += ms; },
   });
   assert.equal(stop.reason, "credential");
   assert.ok(current >= expiry);
   assert.ok(current < start + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
   assert.ok(renewals >= 2);
+  const check = events.find((event) => event.type === "credential_check");
+  assert.ok(check?.nextAttemptAt);
+  assert.ok(Date.parse(check.nextAttemptAt) > Date.parse(check.ts));
 });
 
 test("a read with the still-valid token clears a renewal credential sample", { timeout: 15_000 }, async () => {
@@ -6588,7 +6750,7 @@ test("renewal retry status names state and token expiry", { timeout: 15_000 }, a
     const retryStatus = observed as ListenerStatus | null;
     assert.equal(retryStatus?.lastErrorCode, "renewal_retry");
     assert.equal(retryStatus?.renewalExpiresAt, new Date(now + 3 * 60_000).toISOString());
-    assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*capped backoff/);
+    assert.match(renderListenerStatus(retryStatus!), /Credential renewal is retrying.*current token expires at.*backoff of at least one second/);
     assert.match(renderListenerStatus(retryStatus!), /Reads and claims pause.*stops and needs a new credential/);
   } finally {
     await rm(root, { recursive: true, force: true });

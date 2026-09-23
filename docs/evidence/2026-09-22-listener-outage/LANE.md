@@ -443,3 +443,29 @@ Mutation controls: restoring a five-minute confirmation sleep made the generated
 | `git diff --check a9846955...HEAD` | 0 | 0 tests; see commit verification below. |
 
 This fold does not establish a green `ps`-permitted full-suite run, behavior under real DNS failover, or a bound on production client clock skew. Immediate retries after the deadline have not been load-tested against an edge that answers immediately for the rest of the token's life. No release, merge, or production operation occurred.
+
+## Fold 10
+
+**Invariant C — request retry floor.** Runtime waits, wake waits, and supervisor restart waits have a named one-second minimum, `LISTENER_REQUEST_WAIT_FLOOR_MS`. A shared runtime gate also inserts the floor between distinct network calls when no loop wait intervened, including renewal-to-read and read-to-claim or ACK. The deadline cap cannot reduce a wait below that minimum, even in `[deadline, expiry)` or after local expiry. One second bounds a fast-failing listener to at most one retry request per second; it is short compared with the 30-second renewal timeout and keeps stop signals responsive. The cap is used only while a session can renew: it has a usable credential store, is not latched unsupported, and renewal is due. A null-store or latched session keeps its idle and wake cadence. The supervisor receives that same session predicate. Status records the next credential-check attempt and says when renewal is retrying in the last minute.
+
+The renewal margin is **92 seconds**. Let **S = 30 seconds** be the allowed server-clock lead. `RENEW_TIMEOUT_MS` is 30 seconds. `2 × RENEW_TIMEOUT_MS + S + 2 × LISTENER_REQUEST_WAIT_FLOOR_MS = 92 seconds`: the first floor permits an attempt to start up to one second after the deadline, two renewal timeouts can then run, and the second floor separates those attempts. The second can still finish before a server clock S seconds ahead reaches expiry. This is an engineering bound for clocks no more than S ahead, not a measurement of production clock skew. After the deadline, the one-second floor applies to further attempts until renewal succeeds or the local expiry stop fires.
+
+**Invariant B correction.** A one-shot 200 response with JSON body `null` follows `a9846955`: it warns and uses a still-live token. Listener-mode malformed-body handling remains explicit. After expiry, the listener stop says the credential expired before renewal completed; it does not claim the server was unavailable after a server answer.
+
+The generated recovery test advances its fake clock by 20 ms for each renewal response, checks minimum spacing and a request-count bound in the deadline-to-expiry span, and covers 736 answer/lifetime orderings. It checks the renewal-to-read spacing too. A second generated test covers 64 sustained answer orderings through local expiry, including `renewal_unsupported`; each request advances the clock by 20 ms. It requires one final request after expiry and checks spacing and the margin count. The same test runs a healthy null-store listener through and beyond expiry. A claim test checks read-to-claim spacing. A supervisor test checks successive restarts after the deadline; the push-wake test checks spacing across immediate wake returns. These are stubbed requests, not real network load measurements.
+
+Mutation controls were run with the source restored after each probe. Forcing `capWaitMs` to return zero after the deadline failed both generated tests (exit 1; 0/2 passed), then the restored source passed both (exit 0; 2/2). Removing the supervisor floor failed both restart tests (exit 1; 0/2 passed), then the restored source passed both (exit 0; 2/2). The detached loopback listener received a renewal 401, a 500, then a successor; it reached `ready`, and the fixture was stopped. Its token-free [fold10-detached-renewal-status.json](fold10-detached-renewal-status.json) was saved from the running process.
+
+### Fold 10 gates and limits
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | 0 tests; TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` with an isolated `HOME` | 1 | 951 tests: 949 passed, 2 failed, 0 skipped. Both failures invoke real `ps`, denied by this sandbox with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` with an isolated `HOME` | 1 | 838 tests: 835 passed, 3 failed, 0 skipped. All three invoke real `ps`, denied with `spawn EPERM` or `spawnSync ps EPERM`. |
+| `npm run check:tests` | 0 | 0 tests; source and test types passed. |
+| `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
+
+This fold does not establish a green full-suite run on a host that permits `ps`, a bound on production clock skew, or the result of a real DNS failover. The rate tests use a 20 ms stub round trip and a fake clock. No release, merge, or production operation occurred.
+
+One intermediate `npm test` run also had four unrelated ACP held-close timing failures under load (945/951 passed); each of those four tests passed alone, and the subsequent full suite returned to 949/951 with only the two `ps` sandbox failures.

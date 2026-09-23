@@ -429,7 +429,7 @@ export async function requestSuccessor(options: {
     const text = await response.text();
     if (text) {
       const parsed: unknown = JSON.parse(text);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      if (options.listenerMode && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) {
         throw new RenewalMalformedResponseError("renewal response was not an object");
       }
       body = parsed as Record<string, unknown>;
@@ -832,6 +832,10 @@ export class AgentCredentialSession {
     return this.expiresAt;
   }
 
+  get renewalDue(): boolean {
+    return this.due();
+  }
+
   /**
    * ★ RENEWAL REQUIRES SOMEWHERE TO KEEP THE SUCCESSOR, AND THAT IS A SAFETY RULE, NOT A
    * CONVENIENCE. A successful renewal SUPERSEDES the predecessor server-side — the fence
@@ -887,7 +891,7 @@ export class AgentCredentialSession {
       }
       if (error instanceof RenewalCredentialCheckError && this.expired()) {
         throw new RenewalRevoked("predecessor_expired_local",
-          "The current credential expired while renewal was unavailable. Ask whoever set this agent up for a new credential.");
+          "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential.");
       }
       if (error instanceof RenewalCredentialCheckError ||
           error instanceof RenewalReauthorisationRequired ||
@@ -899,7 +903,7 @@ export class AgentCredentialSession {
       if (this.options.listenerMode && retryableRenewalOutcome && this.expired()) {
         throw new RenewalRevoked(
           "predecessor_expired_local",
-          "The current credential expired while renewal was unavailable. Ask whoever set this agent up for a new credential.",
+          "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential.",
         );
       }
       if (this.options.listenerMode && retryableRenewalOutcome) {

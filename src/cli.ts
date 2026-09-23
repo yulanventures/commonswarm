@@ -5713,14 +5713,14 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
     : CONFIRMED_CREDENTIAL_LOSS_CODES).join(" or ");
   if (status.renewalExpiresAt &&
       Date.parse(status.renewalExpiresAt) < Date.parse(status.credentialStopAt)) {
-    return `The server refused this credential (${codes}). The listener is still running. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
+    return `The server refused this credential (${codes}). The listener is still running and retrying renewal${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : ""}. The current token expires at ${status.renewalExpiresAt}; unless renewal succeeds first, the listener stops on the next renewal answer after expiry. Run cswarm whoami with this credential to see the grant state.`;
   }
   return `The server refused this credential (${codes}). The listener is still running. It will stop at ${status.credentialStopAt} if every check until then confirms the loss; a transient answer extends the check window. Run cswarm whoami with this credential to see the grant state.`;
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
   if (status.lastErrorCode === "renewal_retry" && status.nextAttemptAt) {
-    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with capped backoff. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
+    return `Credential renewal is retrying. The current token expires at ${status.renewalExpiresAt ?? "an unknown time"}. The listener will retry at ${status.nextAttemptAt} with backoff of at least one second. Reads and claims pause while renewal is unresolved because the successor may already have been issued. If renewal does not succeed before expiry, the listener stops and needs a new credential.`;
   }
   if (!LISTENER_RUNNING_STATES.includes(status.state) ||
       typeof status.nextAttemptAt !== "string" ||
@@ -6572,6 +6572,7 @@ async function runConfiguredListener(options: {
   let storedCredential: string | null = null;
   const credentialSession = {
     get expiry(): number | null { return liveCredentialSession.expiry; },
+    get renewalDue(): boolean { return liveCredentialSession.renewalDue; },
     bearer: async (): Promise<string> => {
       const credential = await liveCredentialSession.bearer();
       if (credential !== storedCredential) {
@@ -6770,6 +6771,7 @@ async function runConfiguredListener(options: {
       routeMode,
       deferOverChars,
       getCredentialExpiryMs: () => credentialSession.expiry,
+      getCredentialRenewalDue: () => credentialSession.renewalDue,
       // The bound a timeout event reports: the last turn's clamped budget when
       // one has run, else the configured cap.
       getTurnBudgetMs: () => lastAppliedTurnBudgetMs ?? turnBudgetMs,

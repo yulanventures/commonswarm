@@ -26,7 +26,7 @@ import {
   LISTENER_RUNNING_STATES,
   type ListenerStatus,
 } from "./control.js";
-import { isRestartableListenerStop, RENEWAL_WINDOW_EXPIRY_MARGIN_MS } from "./runtime.js";
+import { isRestartableListenerStop, LISTENER_REQUEST_WAIT_FLOOR_MS, RENEWAL_WINDOW_EXPIRY_MARGIN_MS } from "./runtime.js";
 import type {
   ListenerRuntimeEvent,
   ListenerRuntimeStop,
@@ -164,6 +164,7 @@ export interface ListenerSupervisorOptions {
   now?: () => number;
   /** Current credential expiry, including a successor adopted by a later attempt. */
   getCredentialExpiryMs?: () => number | null;
+  getCredentialRenewalDue?: () => boolean;
   /**
    * Runs under starting.lock after the live-socket rejection check, before
    * the socket can answer. Receives the one proposed UUID and selects the
@@ -670,7 +671,7 @@ export async function runListenerSupervisor(
         lastErrorCode: event.code,
         lastErrorDetail: null,
         lastErrorReasonCode: null,
-        nextAttemptAt: null,
+        nextAttemptAt: event.nextAttemptAt ?? null,
       });
       log({
         ts: event.ts,
@@ -1073,9 +1074,12 @@ export async function runListenerSupervisor(
       restarts += 1;
       const expiry = options.getCredentialExpiryMs?.() ?? null;
       const deadline = expiry === null ? null : expiry - RENEWAL_WINDOW_EXPIRY_MARGIN_MS;
-      const delayMs = deadline !== null && now() < expiry!
-        ? Math.min(listenerRestartDelayMs(restarts, policy, restartRandom), Math.max(0, deadline - now()))
-        : listenerRestartDelayMs(restarts, policy, restartRandom);
+      const proposedDelayMs = listenerRestartDelayMs(restarts, policy, restartRandom);
+      const cappedDelayMs = deadline !== null && now() < expiry! &&
+        options.getCredentialRenewalDue?.() !== false
+        ? Math.min(proposedDelayMs, Math.max(0, deadline - now()))
+        : proposedDelayMs;
+      const delayMs = Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, cappedDelayMs);
       const restartCode = safeErrorCode(stop.error);
       const restartStderrTail = takeTail();
       const nextAttemptAt = new Date(now() + delayMs).toISOString();

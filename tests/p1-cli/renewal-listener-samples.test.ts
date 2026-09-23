@@ -128,6 +128,7 @@ test("one-shot bearer preserves a9846955 outcomes across renewal answers", { tim
     { name: "http 302", status: 302, body: '{}', outcome: "warn" },
     { name: "unknown rejection", status: 200, body: '{"status":"rejected","reason":"new_reason"}', outcome: "warn" },
     { name: "malformed successor", status: 200, body: '{"status":"accepted","agent_token":"bad"}', outcome: "warn" },
+    { name: "JSON null", status: 200, body: "null", outcome: "warn" },
     { name: "empty accepted answer", status: 200, body: '{"status":"accepted"}', outcome: "revoked" },
     { name: "grant suspended", status: 200, body: '{"status":"rejected","reason":"renewal_grant_suspended"}', outcome: "suspended" },
     { name: "horizon reached", status: 200, body: '{"status":"rejected","reason":"renewal_horizon_reached"}', outcome: "reauthorise" },

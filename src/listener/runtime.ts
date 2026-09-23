@@ -146,7 +146,10 @@ export const CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS = 3;
 export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
 /** A renewal check must leave more than one attempt before a live token expires. */
 export const RENEWAL_WINDOW_RETRY_MS = 30_000;
-export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS = 60_000;
+/** A failed request may retry at most once per second, even at or after expiry. */
+export const LISTENER_REQUEST_WAIT_FLOOR_MS = 1_000;
+/** Two 30 s renewal timeouts, 30 s server clock lead, and two wait floors. */
+export const RENEWAL_WINDOW_EXPIRY_MARGIN_MS = 92_000;
 /**
  * Earliest permanent stop, measured from the first confirmed-loss answer.
  * `(MIN_CHECKS - 1)` intervals, so the last check lands on this window.
@@ -252,6 +255,8 @@ export class ListenerCapabilityError extends Error {
 export interface ListenerCredentialSession {
   bearer(): Promise<string>;
   readonly expiry?: number | null;
+  /** True only while this session has a store and is due to renew. */
+  readonly renewalDue?: boolean;
 }
 
 /** A parsed delivery response contradicts the local lease or advertised lease bound. */
@@ -404,6 +409,7 @@ export type ListenerRuntimeEvent =
     code: string;
     edge: "read" | "command";
     renewalExpiresAt?: string;
+    nextAttemptAt?: string;
     ts: string;
   }
   | {
@@ -960,6 +966,7 @@ export async function runListenerRuntime(
 ): Promise<ListenerRuntimeStop> {
   const now = options.now ?? Date.now;
   const rawSleep = options.sleep ?? defaultSleep;
+  let waitGeneration = 0;
   const renewalDeadline = (): number | null => {
     const expiry = options.credentialSession.expiry;
     return expiry === null || expiry === undefined
@@ -968,19 +975,23 @@ export async function runListenerRuntime(
   const capWaitMs = (ms: number): number => {
     const expiry = options.credentialSession.expiry;
     const deadline = renewalDeadline();
-    return expiry !== null && expiry !== undefined && now() < expiry && deadline !== null
+    const wait = expiry !== null && expiry !== undefined && now() < expiry &&
+      options.credentialSession.renewalDue !== false && deadline !== null
       ? Math.min(ms, Math.max(0, deadline - now())) : ms;
+    return Math.max(LISTENER_REQUEST_WAIT_FLOOR_MS, wait);
   };
   const mayWaitForWake = (): boolean => {
     const expiry = options.credentialSession.expiry;
     const deadline = renewalDeadline();
-    return expiry === null || expiry === undefined || now() >= expiry ||
+    return options.credentialSession.renewalDue === false ||
+      expiry === null || expiry === undefined || now() >= expiry ||
       deadline === null || now() < deadline;
   };
   const sleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
     const capped = capWaitMs(ms);
     if (capped <= 0) return;
     await rawSleep(capped, signal);
+    if (!signal?.aborted) waitGeneration += 1;
   };
   const random = options.random ?? Math.random;
   const pageLimit = options.pageLimit ?? LISTENER_PAGE_LIMIT;
@@ -991,6 +1002,24 @@ export async function runListenerRuntime(
   const deliveryHoldBudgetMs = options.deliveryHoldBudgetMs ??
     LISTENER_DELIVERY_HOLD_BUDGET_MS;
   const abort = options.signal;
+  let lastRequestWaitGeneration = -1;
+  let requestGate: Promise<void> = Promise.resolve();
+  const paceRequest = async (): Promise<void> => {
+    const preceding = requestGate;
+    let release!: () => void;
+    requestGate = new Promise<void>((resolve) => { release = resolve; });
+    await preceding;
+    try {
+      if (lastRequestWaitGeneration === waitGeneration) {
+        await rawSleep(LISTENER_REQUEST_WAIT_FLOOR_MS, abort);
+        if (!abort?.aborted) waitGeneration += 1;
+      }
+      if (abort?.aborted) throw new DOMException("listener stopped", "AbortError");
+      lastRequestWaitGeneration = waitGeneration;
+    } finally {
+      release();
+    }
+  };
   const idleSleep = async (hadDelivery: boolean): Promise<void> => {
     if (hadDelivery) emptyIdleStreak = 0;
     const intervalMs = capWaitMs(nextIdlePollMs(pollMs, emptyIdleStreak, LISTENER_IDLE_POLL_MAX_MS));
@@ -1232,7 +1261,7 @@ export async function runListenerRuntime(
     return "unauthenticated";
   };
 
-  const emitCredentialCheck = (): void => {
+  const emitCredentialCheck = (delayMs: number): void => {
     if (credentialWindow === null) return;
     options.onEvent?.({
       type: "credential_check",
@@ -1240,6 +1269,7 @@ export async function runListenerRuntime(
       checks: credentialWindow.checks,
       code: credentialWindow.code,
       edge: credentialWindow.edge,
+      nextAttemptAt: new Date(now() + delayMs).toISOString(),
       ...(options.credentialSession.expiry == null ? {}
         : { renewalExpiresAt: new Date(options.credentialSession.expiry).toISOString() }),
       ts: eventTime(now),
@@ -1280,7 +1310,7 @@ export async function runListenerRuntime(
     const currentExpiry = options.credentialSession.expiry;
     if (currentExpiry !== null && currentExpiry !== undefined && atMs >= currentExpiry) {
       return { reason: "credential", error: new RenewalRevoked("predecessor_expired_local",
-        "The current credential expired while renewal was unavailable. Ask whoever set this agent up for a new credential.") };
+        "The current credential expired before it could be renewed. Ask whoever set this agent up for a new credential.") };
     }
     if (kind === "confirmed") {
       if (credentialWindow === null) {
@@ -1316,10 +1346,10 @@ export async function runListenerRuntime(
     } else {
       return "continue";
     }
-    emitCredentialCheck();
     const expiry = options.credentialSession.expiry;
     const delayMs = expiry !== null && expiry !== undefined && atMs < expiry
       ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+    emitCredentialCheck(capWaitMs(delayMs));
     await sleep(delayMs, abort);
     if (abort?.aborted) return { reason: "cancelled" };
     return "continue";
@@ -1350,7 +1380,9 @@ export async function runListenerRuntime(
     }
     while (true) {
       try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const credential = await options.credentialSession.bearer();
+        await paceRequest();
         await deliveryClient!.ackAgentDelivery({
           workspaceId: options.workspaceId,
           credential,
@@ -1438,11 +1470,16 @@ export async function runListenerRuntime(
         wakeSubscriber !== null &&
         wakeSubscriber.hasTopic && mayWaitForWake()
       ) {
-        const until = Math.min(reconcileDueAt, now() + waitCapMs(), renewalDeadline() ?? Infinity);
+        const until = Math.min(reconcileDueAt, now() + waitCapMs(),
+          options.credentialSession.renewalDue === false ? Infinity : renewalDeadline() ?? Infinity);
+        const wakeWaitStartedAt = now();
         const reason = await wakeSubscriber.next({
           until,
           ...(abort ? { signal: abort } : {}),
         });
+        const remainingFloorMs = LISTENER_REQUEST_WAIT_FLOOR_MS - (now() - wakeWaitStartedAt);
+        if (remainingFloorMs > 0 && !abort?.aborted) await rawSleep(remainingFloorMs, abort);
+        if (!abort?.aborted) waitGeneration += 1;
         emitWake();
         if (abort?.aborted) {
           stop = { reason: "cancelled" };
@@ -1469,9 +1506,11 @@ export async function runListenerRuntime(
       if (skipRead) {
         /* Wake tick: claim without a read. */
       } else try {
+        if (options.credentialSession.renewalDue === true) await paceRequest();
         const token = await options.credentialSession.bearer();
         /* Same idle wait as the claim: idleSleep is the only pause in this
          * loop, so the read POST and the claim POST share the back-off. */
+        await paceRequest();
         page = await readPage({
           token,
           after,
@@ -1613,7 +1652,9 @@ export async function runListenerRuntime(
           void (async () => {
             let declared = false;
             try {
+              if (options.credentialSession.renewalDue === true) await paceRequest();
               const credential = await options.credentialSession.bearer();
+              await paceRequest();
               const outcome = await declareAgentModel(options.target, {
                 workspaceId: options.workspaceId,
                 model: declaredLabel,
@@ -1793,7 +1834,9 @@ export async function runListenerRuntime(
         while (result === null && !stop) {
           try {
             await journal.recordClaimAttempt(eventTime(now));
+            if (options.credentialSession.renewalDue === true) await paceRequest();
             const credential = await options.credentialSession.bearer();
+            await paceRequest();
             result = await deliveryClient!.claimAgentInbox({
               workspaceId: options.workspaceId,
               credential,

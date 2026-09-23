@@ -77,7 +77,7 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7028, 7028],
+    lines: [7030, 7030],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note

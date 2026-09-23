@@ -18,6 +18,7 @@ import {
   LISTENER_RESTART_MAX_MS,
   LISTENER_RESTART_SUSTAINED_MAX_MS,
   RENEWAL_WINDOW_EXPIRY_MARGIN_MS,
+  LISTENER_REQUEST_WAIT_FLOOR_MS,
   ackCommandId,
   appendListenerEvent,
   claimCommandId,
@@ -1448,7 +1449,7 @@ test("restart backoff ends by the live credential's renewal deadline", async () 
   const start = Date.parse("2026-07-30T00:00:00.000Z");
   let current = start;
   let runs = 0;
-  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS + 500;
+  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS + 1_500;
   const status = await runListenerSupervisor({
     paths: paths(root), profileId: "profile-restart-deadline",
     workspaceId: randomUUID(), principalId: randomUUID(),
@@ -1463,7 +1464,36 @@ test("restart backoff ends by the live credential's renewal deadline", async () 
   });
   assert.equal(status.state, "stopped");
   assert.equal(runs, 2);
-  assert.equal(current, start + 500);
+  assert.equal(current, start + LISTENER_REQUEST_WAIT_FLOOR_MS);
+});
+
+test("supervisor restarts keep the request floor after the renewal deadline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-floor-"));
+  const start = Date.parse("2026-07-30T00:00:00.000Z");
+  let current = start;
+  const runs: number[] = [];
+  const expiry = start + RENEWAL_WINDOW_EXPIRY_MARGIN_MS - 1_000;
+  const status = await runListenerSupervisor({
+    paths: paths(root), profileId: "profile-restart-floor",
+    workspaceId: randomUUID(), principalId: randomUUID(),
+    now: () => current, getCredentialExpiryMs: () => expiry,
+    getCredentialRenewalDue: () => true,
+    restart: { maxAttempts: 4, random: () => 0, sleep: async (ms) => {
+      assert.ok(ms >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+      current += ms;
+    } },
+    run: async () => {
+      runs.push(current); // Each attempt stands in for a fast failed request.
+      return runs.length < 5
+        ? { reason: "fatal", error: new SignalHttpError(500) }
+        : { reason: "cancelled" };
+    },
+  });
+  assert.equal(status.state, "stopped");
+  assert.equal(runs.length, 5);
+  for (let i = 1; i < runs.length; i++) {
+    assert.ok(runs[i]! - runs[i - 1]! >= LISTENER_REQUEST_WAIT_FLOOR_MS);
+  }
 });
 
 test("D-051: a transient stop restarts a bounded number of times, then stays down and says why", async () => {
@@ -1494,7 +1524,7 @@ test("D-051: a transient stop restarts a bounded number of times, then stays dow
   assert.equal(status.state, "failed");
   assert.equal(delays.length, 3);
   // Full jitter with random() === 0 is exactly half the exponential.
-  assert.deepEqual(delays, [500, 1_000, 2_000]);
+  assert.deepEqual(delays, [1_000, 1_000, 2_000]);
 
   const events = await readEvents(target);
   const restarting = events.filter((e) => e.event === "listener_restarting");
@@ -1692,7 +1722,9 @@ test("credential and claim status use the answering edge and current retry state
     ...statusFor(target, "credential_check"), credentialStopAt: stopAt,
     credentialCheckEdge: "command", lastErrorCode: "unauthenticated",
     renewalExpiresAt: "2026-09-22T00:03:00.000Z",
+    nextAttemptAt: "2026-09-22T00:02:01.000Z",
   });
+  assert.match(expiring, /retrying renewal at 2026-09-22T00:02:01.000Z/);
   assert.match(expiring, /current token expires at 2026-09-22T00:03:00.000Z; unless renewal succeeds first, the listener stops on the next renewal answer after expiry/);
   assert.doesNotMatch(expiring, /transient answer extends/);
   const stopped = renderListenerStatus({
@@ -1939,7 +1971,7 @@ test("the restart attempt count resets after a clean run", async () => {
     delays[LISTENER_RESTART_MAX_ATTEMPTS],
     LISTENER_RESTART_SUSTAINED_MAX_MS / 2,
   );
-  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], 500);
+  assert.equal(delays[LISTENER_RESTART_MAX_ATTEMPTS + 1], LISTENER_REQUEST_WAIT_FLOOR_MS);
 });
 
 test("D-051: one rejected write does not poison the rest of the supervisor's writes", { timeout: 15_000 }, async () => {
