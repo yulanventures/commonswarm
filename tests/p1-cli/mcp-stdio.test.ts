@@ -299,6 +299,15 @@ test("MCP check preview has a cached full-text tool and advances after the respo
 test("MCP cancellation sends no result and same-id retry reaches the edge", { timeout: 15_000 }, async () => {
   const f = await fixture();
   try {
+    const send = f.transport.send.bind(f.transport);
+    let cancelledId: string | number | undefined;
+    f.transport.send = async message => {
+      if ("method" in message && message.method === "tools/call" &&
+          (message.params as { name?: string } | undefined)?.name === "note" && "id" in message) {
+        cancelledId = message.id;
+      }
+      await send(message);
+    };
     f.delayNextAnswer();
     const abort = new AbortController();
     const call = f.client.callTool({ name: "note", arguments: { body: "cancelled intent", request_id: "cancel01" } }, undefined, { signal: abort.signal });
@@ -309,7 +318,9 @@ test("MCP cancellation sends no result and same-id retry reaches the edge", { ti
     await assert.rejects(call);
     await new Promise(done => setTimeout(done, 300));
     const messages = f.stdout().trim().split("\n").map(line => JSON.parse(line));
-    assert.ok(!messages.some(row => row.result?.content?.some((item: any) => item.text?.includes('"outcome":"unknown"'))));
+    assert.notEqual(cancelledId, undefined);
+    assert.ok(!messages.some(row => row.id === cancelledId && (Object.hasOwn(row, "result") || Object.hasOwn(row, "error"))),
+      "the server sent no response for the cancelled JSON-RPC ID");
     await f.call("note", { body: "cancelled intent", request_id: "cancel01" });
     assert.equal(f.posts.filter(row => row.command_id === "cancel01").length, 2);
     assert.equal(new Set(f.posts.map(row => row.command_id)).size, 1);
