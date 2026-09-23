@@ -1286,7 +1286,7 @@ export async function runListenerRuntime(
       checks: credentialWindow.checks,
       code: credentialWindow.code,
       edge: credentialWindow.edge,
-      nextAttemptAt: new Date(now() + delayMs).toISOString(),
+      ...(delayMs > 0 ? { nextAttemptAt: new Date(now() + delayMs).toISOString() } : {}),
       ...(options.credentialSession.expiry == null ? {}
         : { renewalExpiresAt: new Date(options.credentialSession.expiry).toISOString() }),
       ts: eventTime(now),
@@ -1301,8 +1301,14 @@ export async function runListenerRuntime(
     );
     return Math.max(
       credentialWindow.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
-      atMs + remaining * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS,
+      atMs + remaining * credentialCheckDelayMs(atMs),
     );
+  };
+
+  const credentialCheckDelayMs = (atMs: number): number => {
+    const expiry = options.credentialSession.expiry;
+    return expiry !== null && expiry !== undefined && atMs < expiry
+      ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
   };
 
   const clearCredentialWindow = (): void => {
@@ -1353,6 +1359,8 @@ export async function runListenerRuntime(
         window.checks >= CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS &&
         atMs >= window.startedAtMs + CREDENTIAL_LOSS_CONFIRM_WINDOW_MS
       ) {
+        window.stopAtMs = atMs;
+        emitCredentialCheck(0);
         return { reason: "credential", error: asError(error) };
       }
     } else if (credentialWindow !== null) {
@@ -1363,9 +1371,7 @@ export async function runListenerRuntime(
     } else {
       return "continue";
     }
-    const expiry = options.credentialSession.expiry;
-    const delayMs = expiry !== null && expiry !== undefined && atMs < expiry
-      ? RENEWAL_WINDOW_RETRY_MS : CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
+    const delayMs = credentialCheckDelayMs(atMs);
     emitCredentialCheck(capWaitMs(delayMs));
     await sleep(delayMs, abort);
     if (abort?.aborted) return { reason: "cancelled" };

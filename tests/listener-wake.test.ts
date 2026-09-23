@@ -881,6 +881,7 @@ test("subscribed wake then one empty claim; two wakes in one claim latch one mor
   wake.setPush();
   wake.queue.push("wake", "wake");
   let claims = 0;
+  const pushReconcileWaits: boolean[] = [];
   const stop = await runListenerRuntime({
     target: cloudTarget("https://cloud.example.test", "anon"),
     workspaceId: WORKSPACE_ID,
@@ -905,12 +906,17 @@ test("subscribed wake then one empty claim; two wakes in one claim latch one mor
     now: () => Date.parse("2026-07-30T00:00:00.000Z"),
     sleep: async () => {},
     wake,
+    onEvent: (event) => {
+      if (event.type === "idle_poll") pushReconcileWaits.push(event.pushReconcileWait ?? false);
+    },
     readPage: async () => durablePage(),
   });
   assert.equal(stop.reason, "cancelled");
   assert.equal(claims, 3);
   assert.equal(wake.wakeClaims, 2);
   assert.ok(wake.waits >= 1);
+  assert.deepEqual(pushReconcileWaits, [true, false, false],
+    "an empty push-wake claim is not the scheduled read reconcile");
 });
 
 test("CHANNEL_ERROR path reconciles on the idle cadence then push on resubscribe", async () => {

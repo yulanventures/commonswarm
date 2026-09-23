@@ -3481,6 +3481,46 @@ test("a transient failure during a credential check keeps the window going", asy
   assert.ok(clock.elapsed() > CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
 });
 
+test("a live token's stated credential stop matches the stopping sample after a transient", async () => {
+  const clock = advancingClock();
+  const events: ListenerRuntimeEvent[] = [];
+  const sleeps: number[] = [];
+  let reads = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID,
+    principalId: PRINCIPAL_ID,
+    credentialSession: { expiry: clock.startMs + 30 * 60_000, async bearer() { return "token"; } },
+    store: new MemoryStore(),
+    model: new FakeModel(),
+    now: clock.now,
+    onEvent: (event) => events.push(event),
+    sleep: async (ms, signal) => {
+      sleeps.push(ms);
+      await clock.sleep(sleeps.length === 1 ? 9 * 60_000 : ms, signal);
+    },
+    readPage: async () => {
+      reads += 1;
+      if (reads === 2) throw new SignalHttpError(500);
+      throw forbiddenRead();
+    },
+  });
+  assert.equal(stop.reason, "credential");
+  assert.equal(reads, 4);
+  assert.deepEqual(sleeps, Array(3).fill(RENEWAL_WINDOW_RETRY_MS));
+  assert.equal(clock.elapsed(), CREDENTIAL_LOSS_CONFIRM_WINDOW_MS);
+  const checks = events.filter((event) => event.type === "credential_check");
+  assert.equal(checks.length, 4, "the stopping sample must be published");
+  const actualStop = clock.now();
+  for (const check of checks) {
+    assert.ok(Date.parse(check.stopAt) <= actualStop,
+      `sample ${check.checks} stated a stop after the actual stop`);
+  }
+  assert.equal(Date.parse(checks.at(-1)!.stopAt), actualStop);
+  assert.equal(Date.parse(checks.at(-1)!.ts), actualStop);
+  assert.equal(checks.at(-1)!.nextAttemptAt, undefined);
+});
+
 test("cswarm listen stop ends a credential check at once", async () => {
   const clock = advancingClock();
   const root = await mkdtemp(join(tmpdir(), "cswarm-credential-stop-now-"));

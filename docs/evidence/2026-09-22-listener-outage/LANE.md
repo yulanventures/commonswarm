@@ -541,3 +541,24 @@ The full suites are not green in this sandbox. The timing tests use fake clocks,
 - Round-10 R2, recorded: the fold-13 turn limit ends a worker turn 110 s before token expiry, so a turn that starts
   just before renewal is due can get up to 50 s less time than before. This can happen at most once per credential
   period.
+
+## Fold 14
+
+**Credential stop time.** The credential-window projection and its next sleep now choose their interval through the same function: 30 seconds while the token is live, five minutes when its expiry is unknown. On the stopping confirmed sample, the runtime publishes the actual stop time before returning. A fake-clock test with an expiry 30 minutes away runs one confirmed read, a 500 nine minutes later, then two more confirmed reads. All three scheduled waits are 30 seconds, the stop occurs at ten minutes, and every published stop time is no later than that stop. The last event is stamped at the actual stop and has no next attempt. Restoring the five-minute projector failed this test (exit 1, 0/1 passed); restored code passed (exit 0, 1/1 passed).
+
+**Push status.** The existing subscribed-wake test now checks the `idle_poll` events: the initial read reconcile marks the push reconcile wait, while both empty claims from push wakes do not. Removing `&& !skipRead` failed this test (exit 1, 0/1 passed); restored code passed (exit 0, 1/1 passed).
+
+A detached listener against a loopback read fixture, using a temporary `--state-dir` and isolated HOME, reached `credential_check` with a live token and a 30-second next attempt. Its token-free [fold14-detached-credential-check-status.json](fold14-detached-credential-check-status.json) was retained. The focused detached test passed (exit 0, 1/1 passed), stopped the listener, and the saved PID was absent afterward. The separate production live-control evidence was not changed.
+
+### Fold 14 gates and limits
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | 0 tests; TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 961 tests: 959 passed, 2 failed. Both require `ps`, denied by this sandbox with `spawn EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 838 tests: 818 passed, 20 failed. Failures involve sandbox-denied `ps` or home-directory writes, or stderr warnings from unavailable credential storage. |
+| `npm run check:tests` | 0 | 0 tests; source and test types passed. |
+| `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
+| `git diff --check a9846955...HEAD` | 0 | 0 tests; whitespace check passed after commit. |
+
+The stop-time sequence uses a fake clock; the detached listener records the first live credential check, not a ten-minute real-time stop. No release, merge, or production operation occurred.
