@@ -92,6 +92,10 @@ export interface ListenerStatus {
   principalId: string;
   /** Absolute project directory selected when this listener was started. */
   projectDirectory?: string;
+  /** Validated service base URL, with no credential, query, or path. */
+  targetUrl?: string;
+  /** Edge that produced the last retry, when known. */
+  lastRetryEdge?: "read" | "command" | "local";
   pid: number;
   state: ListenerStatusState;
   startedAt: string;
@@ -326,6 +330,8 @@ const STATUS_ALLOWED_KEYS = new Set([
   "credentialCheckEdge",
   "claimRetryCount",
   "projectDirectory",
+  "targetUrl",
+  "lastRetryEdge",
 ]);
 const STATUS_ACTIVITY_ERROR_CODES = new Set<ActivityPublishErrorCode>([
   "activity_credential_failed",
@@ -657,7 +663,17 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !(row.claimRetryCount === undefined ||
       (typeof row.claimRetryCount === "number" && Number.isSafeInteger(row.claimRetryCount) && row.claimRetryCount >= 0)) ||
     !(row.projectDirectory === undefined ||
-      (typeof row.projectDirectory === "string" && isAbsolute(row.projectDirectory)))
+      (typeof row.projectDirectory === "string" && isAbsolute(row.projectDirectory))) ||
+    !(row.targetUrl === undefined ||
+      (typeof row.targetUrl === "string" && (() => {
+        try {
+          const url = new URL(row.targetUrl as string);
+          return (url.protocol === "https:" || url.protocol === "http:") &&
+            url.origin === row.targetUrl && !url.username && !url.password;
+        } catch { return false; }
+      })())) ||
+    !(row.lastRetryEdge === undefined || row.lastRetryEdge === "read" ||
+      row.lastRetryEdge === "command" || row.lastRetryEdge === "local")
   ) {
     throw new Error("stored listener status is malformed");
   }

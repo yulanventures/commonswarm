@@ -60,6 +60,8 @@ import {
   CREDENTIAL_LOSS_CONFIRM_WINDOW_MS,
   LISTENER_CLAIM_REFUSALS_BEFORE_READ,
   LISTENER_DELIVERY_RETRY_MAX_MS,
+  READ_FATAL_ANSWERS,
+  COMMAND_FATAL_ANSWERS,
   ListenerH0SeatError,
   isRestartableListenerStop,
   LISTENER_IDLE_POLL_MS,
@@ -3624,6 +3626,57 @@ test("claim backoff reaches its cap across successful forced reads", { timeout: 
   }
 });
 
+test("a failed forced read replaces the stale claim retry time", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-forced-read-status-"));
+  try {
+    const target = listenerPaths({ profileId: "forced-read-status", workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, stateDirectory: root });
+    const clock = advancingClock();
+    const journal = new MemoryDeliveryJournal();
+    let reads = 0;
+    let observed: ListenerStatus | null = null;
+    const final = await runListenerSupervisor({
+      paths: target, profileId: "forced-read-status", workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID, targetUrl: "https://cloud.example.test", now: clock.now,
+      run: (signal, onEvent) => runListenerRuntime({
+        target: cloudTarget("https://cloud.example.test", "anon"),
+        workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+        listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+        credentialSession: { async bearer() { return "token"; } },
+        store: new MemoryStore(), model: new FakeModel(), signal, now: clock.now,
+        random: () => 1, onEvent,
+        readPage: async () => {
+          reads += 1;
+          if (reads === 1) return durablePage([], 1);
+          throw new SignalHttpError(503);
+        },
+        deliveryClient: {
+          async claimAgentInbox() { throw new DeliveryHttpError(503, "temporarily_unavailable", "outage"); },
+          async ackAgentDelivery() { throw new Error("ack must not run"); },
+        },
+        sleep: async (ms, sleepSignal) => {
+          const status = await queryListenerControl(target, "status");
+          if (status.lastRetryEdge === "read") {
+            observed = status;
+            await queryListenerControl(target, "stop");
+          }
+          await clock.sleep(ms, sleepSignal);
+        },
+      }),
+    });
+    assert.equal(final.state, "stopped");
+    assert.ok(observed);
+    const status = observed as ListenerStatus;
+    assert.equal(status.state, "claim_retry");
+    assert.equal(status.lastErrorCode, "http_503");
+    assert.ok(Date.parse(status.nextAttemptAt!) > Date.parse(status.updatedAt));
+    assert.match(renderListenerStatus(status), /^Listener retrying /);
+    assert.match(renderListenerStatus(status), /https:\/\/cloud\.example\.test/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("startup read failures name the cause and next attempt while retrying", { timeout: 15_000 }, async () => {
   for (const scenario of [
     { code: "http_400", status: 400 },
@@ -3685,7 +3738,7 @@ test("startup read failures name the cause and next attempt while retrying", { t
       assert.ok(observed.nextAttemptAt);
       assert.equal(observed.readHealth?.currentEpisodeAttempts, 1);
       assert.match(renderListenerStatus(observed), new RegExp(scenario.code));
-      assert.match(renderListenerStatus(observed), /Check the target URL and/);
+      assert.match(renderListenerStatus(observed), /Check the target URL and|Leave the listener running/);
       assert.match(listenerStartPendingMessage(observed), new RegExp(scenario.code));
       assert.match(listenerStartPendingMessage(observed), /target URL/);
       if (scenario.code === "sender_relation_capability_missing") {
@@ -3699,7 +3752,9 @@ test("startup read failures name the cause and next attempt while retrying", { t
 
 test("foreign read responses retry with bounded sleep instead of a permanent stop", { timeout: 15_000 }, async () => {
   for (const [status, body] of [
-    [400, "{}"], [404, "{}"], [426, "{}"], [200, "<html>wrong backend</html>"],
+    [400, "{}"], [404, "{}"], [405, "<html>wrong backend</html>"],
+    [408, "{}"], [409, "{}"], [413, "{}"], [421, "{}"],
+    [422, "{}"], [426, "{}"], [200, "<html>wrong backend</html>"],
   ] as const) {
     const controller = new AbortController();
     let requests = 0;
@@ -3733,6 +3788,13 @@ test("foreign claim answers retry with a named next attempt and recover", { time
     { status: 200, body: "<html>wrong host</html>", code: "malformed_response" },
     { status: 404, body: '{"error":"missing_route"}', code: "http_404" },
     { status: 400, body: '{"error":"missing_route"}', code: "http_400" },
+    ...[405, 408, 409, 413, 421, 422].map((status) => ({
+      status, body: "<html>wrong host</html>", code: `http_${status}`,
+    })),
+    ...["session_proof_missing", "session_proof_invalid", "session_expired"].map((code) => ({
+      status: 401, body: JSON.stringify({ error: code }), code,
+    })),
+    { status: 409, body: '{"error":"session_conflict"}', code: "session_conflict" },
     { status: 200, body: '{"status":"other","ok":true}', code: "malformed_response" },
   ]) {
     const root = await mkdtemp(join(tmpdir(), "cswarm-foreign-claim-"));
@@ -3784,6 +3846,10 @@ test("foreign claim answers retry with a named next attempt and recover", { time
       assert.equal(observed[0]?.lastErrorCode, scenario.code);
       assert.ok(observed[0]?.nextAttemptAt);
       assert.match(renderListenerStatus(observed[0]!), /will try again at/);
+      if (scenario.code.startsWith("session_")) {
+        assert.match(renderListenerStatus(observed[0]!), /Start or renew the seat's session, or stop the listener/);
+        assert.match(renderListenerStatus(observed[0]!), /CONNECTED: no/);
+      }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -3836,6 +3902,7 @@ test("malformed read overflow and delivery marker retry", { timeout: 15_000 }, a
   for (const body of [
     { signals: [{}, {}, {}, {}], capabilities: { sender_owner_relation: 1, cursor_after: 1 } },
     { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 2 } },
+    { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: "bad" },
   ]) {
     const controller = new AbortController();
     const events: ListenerRuntimeEvent[] = [];
@@ -3923,6 +3990,87 @@ test("foreign ACK answers retry and recover with a named next attempt", { timeou
   }
 });
 
+test("repeated ACK failures force a read without resetting ACK backoff", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa19", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  const controller = new AbortController();
+  const clock = advancingClock("2026-07-30T00:00:30.000Z");
+  const sleeps: number[] = [];
+  let reads = 0;
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId,
+    deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store, model: new FakeModel(), signal: controller.signal,
+    now: clock.now, random: () => 1,
+    readPage: async () => { reads += 1; return durablePage([], 1); },
+    deliveryClient: {
+      async claimAgentInbox() { throw new Error("claim must not run"); },
+      async ackAgentDelivery() {
+        acks += 1;
+        throw new DeliveryHttpError(503, "temporarily_unavailable", "outage");
+      },
+    },
+    sleep: async (ms, signal) => {
+      sleeps.push(ms);
+      if (sleeps.length === 4) controller.abort();
+      await clock.sleep(ms, signal);
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(acks, 4);
+  assert.ok(reads >= 2, `reads=${reads}`);
+  assert.deepEqual(sleeps.slice(0, 4), [500, 1_000, 2_000, 4_000]);
+});
+
+test("repeated ACK failures let the read edge open the credential window", { timeout: 15_000 }, async () => {
+  const directNote = note("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaa20", "2026-07-30T00:00:01.000Z");
+  const active = leasedActive({ signalId: directNote.id, phase: "ack_pending", outcome: "observed" });
+  const journal = new MemoryDeliveryJournal(active);
+  const store = new MemoryStore();
+  await store.write(newObservedNoteRecord({ signalId: directNote.id, body: directNote.body, until: directNote.until, senderOwnerRelation: "same_owner", updatedAt: "2026-07-30T00:00:02.000Z" }));
+  const controller = new AbortController();
+  const clock = advancingClock("2026-07-30T00:00:30.000Z");
+  const events: ListenerRuntimeEvent[] = [];
+  let reads = 0;
+  let acks = 0;
+  const stop = await runListenerRuntime({
+    target: cloudTarget("https://cloud.example.test", "anon"),
+    workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+    listenerInstanceId: journal.record.listenerInstanceId, deliveryJournal: journal,
+    credentialSession: { async bearer() { return "token"; } },
+    store, model: new FakeModel(), signal: controller.signal,
+    now: clock.now, random: () => 1,
+    onEvent: (event) => events.push(event),
+    readPage: async () => {
+      reads += 1;
+      if (reads === 1) return durablePage([], 1);
+      throw new SignalHttpError(403, null, { error: "forbidden", requestId: null, retryable: null });
+    },
+    deliveryClient: {
+      async claimAgentInbox() { throw new Error("claim must not run"); },
+      async ackAgentDelivery() {
+        acks += 1;
+        throw new DeliveryHttpError(503, "temporarily_unavailable", "outage");
+      },
+    },
+    sleep: async (ms, signal) => {
+      if (events.some((event) => event.type === "credential_check")) controller.abort();
+      await clock.sleep(ms, signal);
+    },
+  });
+  assert.equal(stop.reason, "cancelled");
+  assert.equal(acks, 3);
+  assert.equal(reads, 2);
+  assert.ok(events.some((event) => event.type === "credential_check"));
+});
+
 test("a well-formed command refusal stays fatal", { timeout: 15_000 }, async () => {
   const journal = new MemoryDeliveryJournal();
   let claims = 0;
@@ -3944,6 +4092,46 @@ test("a well-formed command refusal stays fatal", { timeout: 15_000 }, async () 
   assert.equal(stop.reason, "fatal");
   assert.equal(claims, 1);
   assert.equal(isRestartableListenerStop(stop), false);
+});
+
+test("each recognized read and command refusal is fatal while foreign answers retry", { timeout: 15_000 }, async () => {
+  for (const [status, code] of READ_FATAL_ANSWERS.refusals) {
+    let reads = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID,
+      principalId: PRINCIPAL_ID,
+      credentialSession: { async bearer() { return "token"; } },
+      store: new MemoryStore(), model: new FakeModel(),
+      fetcher: (async () => {
+        reads += 1;
+        return new Response(JSON.stringify({ error: code }), { status });
+      }) as typeof fetch,
+    });
+    assert.equal(stop.reason, "fatal", `read ${status} ${code}`);
+    assert.equal(reads, 1);
+    assert.equal(isRestartableListenerStop(stop), false);
+  }
+  for (const [status, code] of COMMAND_FATAL_ANSWERS.refusals) {
+    const journal = new MemoryDeliveryJournal();
+    let claims = 0;
+    const stop = await runListenerRuntime({
+      target: cloudTarget("https://cloud.example.test", "anon"),
+      workspaceId: WORKSPACE_ID, principalId: PRINCIPAL_ID,
+      listenerInstanceId: journal.record.listenerInstanceId,
+      deliveryJournal: journal,
+      credentialSession: { async bearer() { return "swm_agt_" + "A".repeat(43); } },
+      store: new MemoryStore(), model: new FakeModel(),
+      readPage: async () => durablePage([], 1),
+      fetcher: (async () => {
+        claims += 1;
+        return new Response(JSON.stringify({ error: code }), { status });
+      }) as typeof fetch,
+    });
+    assert.equal(stop.reason, "fatal", `command ${status} ${code}`);
+    assert.equal(claims, 1);
+    assert.equal(isRestartableListenerStop(stop), false);
+  }
 });
 
 test("an H0 seat claim stops with its own code and is not retried", async () => {

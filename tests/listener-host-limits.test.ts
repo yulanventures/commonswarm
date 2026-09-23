@@ -206,7 +206,7 @@ test("listen status warns at a 60s current read lapse, not below it", () => {
   assert.match(warning, /^Listener LAPSE /);
   assert.match(warning, /WARNING \[listener_read_retry_persisting\]/);
   assert.match(warning, /This is still in progress/);
-  assert.match(warning, /Next: Check cswarm status.*restart the listener/);
+  assert.match(warning, /Next: Leave the listener running.*read service/);
   const json = listenerStatusJson(status, undefined, undefined, thresholdMs);
   assert.equal(json.listenerLapse, true);
   assert.deepEqual(json.listenerLapseCodes, ["listener_read_retry_persisting"]);

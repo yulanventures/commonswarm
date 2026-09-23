@@ -1743,7 +1743,7 @@ test("detached listener names startup read failure while it keeps retrying", { t
     const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
     assert.equal(human.code, 0, human.stderr);
     assert.match(human.stdout, /http_404/);
-    assert.match(human.stdout, /Check the target URL and read edge version/);
+    assert.ok(human.stdout.includes(`Check ${url} and read edge version`));
     const safeStatus = await readFile(paths.statusPath, "utf8");
     assert.doesNotMatch(safeStatus, /swm_agt_/);
     if (process.env.CSWARM_FOLD4_STATUS_PATH) {
@@ -1807,6 +1807,66 @@ test("detached listener keeps retrying a foreign claim answer", { timeout: 20_00
     assert.doesNotMatch(safeStatus, /swm_agt_/);
     if (process.env.CSWARM_FOLD5_STATUS_PATH) {
       await writeFile(process.env.CSWARM_FOLD5_STATUS_PATH, safeStatus);
+    }
+  } finally {
+    try {
+      await stopAndWaitForDetachedListener(["listen", "stop", ...common, "--principal-id", principalId, "--json"], paths);
+      await startPromise;
+    } finally {
+      await closeTestServer(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("detached listener retries a foreign 405 claim and records its target", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-fold6-detached-"));
+  const workspaceId = randomUUID();
+  const principalId = randomUUID();
+  const token = `swm_agt_${"B".repeat(43)}`;
+  const artifact = JSON.stringify({
+    message: AGENT_MESSAGE,
+    status: "accepted",
+    principal_id: principalId,
+    token_id: randomUUID(),
+    run_id: randomUUID(),
+    agent_token: token,
+    expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+  });
+  let claims = 0;
+  const server = createServer(async (request, response) => {
+    for await (const _chunk of request) { /* Drain the local fixture request. */ }
+    if (request.url === "/functions/v1/read") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1, delivery_claim: 1, delivery_ack: 1 }, pending_delivery_count: 1 }));
+      return;
+    }
+    claims += 1;
+    response.writeHead(405, { "content-type": "text/html" });
+    response.end("<html>wrong host</html>");
+  });
+  await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  const common = ["--url", url, "--anon-key", "public-anon", "--workspace-id", workspaceId, "--state-dir", root];
+  const paths = listenerPaths({ profileId: cloudTarget(url, "public-anon").profileId, workspaceId, principalId, stateDirectory: root });
+  const startPromise = runCli(["listen", "start", "--allow-unattended", "--provider", "grok", "--agent-token-stdin", ...common, "--json"], { stdin: artifact });
+  try {
+    const retry = await waitForListenerStatus(paths,
+      (status) => status.state === "claim_retry" && status.lastErrorCode === "http_405");
+    assert.ok(claims >= 1);
+    assert.ok(retry.nextAttemptAt);
+    assert.equal(retry.targetUrl, url);
+    const human = await runCli(["listen", "status", ...common, "--principal-id", principalId]);
+    assert.equal(human.code, 0, human.stderr);
+    assert.match(human.stdout, /claim failed \(http_405\).*will try again at/);
+    assert.match(human.stdout, /CONNECTED: no/);
+    assert.match(human.stdout, /Target URL: http:\/\/127\.0\.0\.1:/);
+    const safeStatus = await readFile(paths.statusPath, "utf8");
+    assert.doesNotMatch(safeStatus, /swm_agt_/);
+    if (process.env.CSWARM_FOLD6_STATUS_PATH) {
+      await writeFile(process.env.CSWARM_FOLD6_STATUS_PATH, safeStatus);
     }
   } finally {
     try {

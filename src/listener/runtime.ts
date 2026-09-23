@@ -22,6 +22,8 @@ import {
 } from "../cloud/delivery.js";
 import {
   classifySignalReadFailure,
+  CONFIRMED_CREDENTIAL_LOSS_CODES,
+  COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
   decayFollowAttempt,
   followErrorEnvelope,
   followHttpDetails,
@@ -147,6 +149,52 @@ export const CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS = 5 * 60_000;
 export const CREDENTIAL_LOSS_CONFIRM_WINDOW_MS =
   (CREDENTIAL_LOSS_CONFIRM_MIN_CHECKS - 1) * CREDENTIAL_LOSS_CONFIRM_INTERVAL_MS;
 
+/** Read-edge fatal answers. Credential codes require the confirmation window. */
+export const READ_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: CONFIRMED_CREDENTIAL_LOSS_CODES,
+  configurationCode: "delivery_configuration_missing",
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [404, "channel_not_found"],
+    [405, "method_not_allowed"],
+  ] as const),
+});
+
+/** Command-edge fatal answers. Credential codes require the confirmation window. */
+export const COMMAND_FATAL_ANSWERS = Object.freeze({
+  credentialCodes: COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES,
+  h0FenceCode: H0_SEAT_CLAIM_REFUSED_CODE,
+  refusals: Object.freeze([
+    [400, "invalid_request"],
+    [409, "command_id_conflict"],
+    [409, "delivery_ack_conflict"],
+    [409, "delivery_not_surfaced"],
+    [413, "payload_too_large"],
+    [403, H0_SEAT_CLAIM_REFUSED_CODE],
+  ] as const),
+});
+
+function exactRefusal(
+  set: readonly (readonly [number, string])[],
+  status: number,
+  code: string | null,
+): boolean {
+  return code !== null && set.some(([s, c]) => s === status && c === code);
+}
+
+function fatalReadRefusal(error: unknown): boolean {
+  const http = followHttpDetails(error);
+  return http !== null && exactRefusal(
+    READ_FATAL_ANSWERS.refusals, http.status, followErrorEnvelope(error).error,
+  );
+}
+
+function fatalCommandRefusal(error: DeliveryHttpError): boolean {
+  return error.recognizedEnvelope && exactRefusal(
+    COMMAND_FATAL_ANSWERS.refusals, error.status, error.code,
+  );
+}
+
 /** A claim refused because this seat is served by the h0 poll, not by `cswarm listen`. */
 export class ListenerH0SeatError extends Error {
   readonly code = H0_SEAT_CLAIM_REFUSED_CODE;
@@ -177,6 +225,14 @@ export type ListenerDeliveryJournalClient = Pick<
 >;
 
 export class ListenerCapabilityError extends Error {
+  static readonly CODES = Object.freeze([
+    "sender_relation_capability_missing",
+    "cursor_capability_missing",
+    "delivery_capability_inconsistent",
+    "delivery_configuration_missing",
+  ] as const);
+  static readonly READ_EDGE_CODES: readonly string[] =
+    ListenerCapabilityError.CODES.filter((code) => code !== "delivery_configuration_missing");
   readonly code: string;
   constructor(code: string, message: string) {
     super(message);
@@ -458,7 +514,8 @@ function isRestartableRuntimeError(error: unknown): boolean {
   if (
     error instanceof ListenerH0SeatError ||
     (error instanceof DeliveryHttpError &&
-      error.code === H0_SEAT_CLAIM_REFUSED_CODE)
+      error.recognizedEnvelope &&
+      error.code === COMMAND_FATAL_ANSWERS.h0FenceCode)
   ) {
     return false;
   }
@@ -469,9 +526,7 @@ function isRestartableRuntimeError(error: unknown): boolean {
     if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
       return false;
     }
-    return error.status === 429 || error.status >= 500 ||
-      error.status === 401 || error.status === 403 ||
-      isForeignDeliveryHttpResponse(error);
+    return !fatalCommandRefusal(error);
   }
   if (error instanceof DeliveryResponseError) return true;
   // Locally detected claim and ACK inconsistencies remain fatal.
@@ -493,7 +548,7 @@ function isRestartableRuntimeError(error: unknown): boolean {
   // A foreign read service can omit wire capabilities. Local configuration
   // errors remain fatal.
   if (error instanceof ListenerCapabilityError) {
-    return error.code !== "delivery_configuration_missing";
+    return error.code !== READ_FATAL_ANSWERS.configurationCode;
   }
 
   // Credential horizons are a human checkpoint, never a restart.
@@ -505,17 +560,18 @@ function isRestartableRuntimeError(error: unknown): boolean {
   }
 
   // Read-path failures, themselves closed.
-  return isRestartableReadError(error) || isForeignReadResponseFailure(error);
+  return !fatalReadRefusal(error) &&
+    (isRestartableReadError(error) || isForeignReadResponseFailure(error));
 }
 
 function isForeignReadResponseFailure(error: unknown): boolean {
   if (error instanceof ListenerCapabilityError) {
-    return error.code !== "delivery_configuration_missing";
+    return error.code !== READ_FATAL_ANSWERS.configurationCode;
   }
   if (classifySignalReadFailure(error).code === "malformed_response") return true;
   const http = followHttpDetails(error);
-  return http !== null && (http.status === 400 || http.status === 404 ||
-    http.status === 426);
+  return http !== null && !fatalReadRefusal(error) &&
+    !isConfirmedCredentialHttpFailure(http.status, followErrorEnvelope(error).error, "read");
 }
 
 /**
@@ -571,13 +627,13 @@ function isServerConfirmedCredentialLoss(error: unknown): boolean {
 
 function isH0SeatClaimRefusal(error: unknown): boolean {
   return error instanceof DeliveryHttpError &&
+    error.recognizedEnvelope &&
     error.status === 403 &&
-    error.code === H0_SEAT_CLAIM_REFUSED_CODE;
+    error.code === COMMAND_FATAL_ANSWERS.h0FenceCode;
 }
 
 function isForeignDeliveryHttpResponse(error: DeliveryHttpError): boolean {
-  return !error.recognizedEnvelope &&
-    (error.status === 400 || error.status === 404 || error.status === 426);
+  return !error.recognizedEnvelope;
 }
 
 function deliveryRetryCode(error: unknown): string {
@@ -592,13 +648,11 @@ function isRetryableDeliveryError(error: unknown): boolean {
   if (error instanceof DeliveryTransportError) return true;
   if (error instanceof DeliveryResponseError) return true;
   if (!(error instanceof DeliveryHttpError)) return false;
-  if (error.code === H0_SEAT_CLAIM_REFUSED_CODE) return false;
+  if (fatalCommandRefusal(error)) return false;
   if (isConfirmedCredentialHttpFailure(error.status, error.code, "command")) {
     return false;
   }
-  return error.status === 429 || error.status >= 500 ||
-    error.status === 401 || error.status === 403 ||
-    isForeignDeliveryHttpResponse(error);
+  return true;
 }
 
 function deliveryRetryDelay(
@@ -611,7 +665,7 @@ function deliveryRetryDelay(
     LISTENER_DELIVERY_RETRY_MAX_MS,
     LISTENER_DELIVERY_RETRY_INITIAL_MS * (2 ** exponent),
   );
-  const jitter = Math.floor(Math.max(0, Math.min(1, random())) * ceiling);
+  const jitter = Math.floor((0.5 + Math.max(0, Math.min(1, random())) * 0.5) * ceiling);
   const retryAfter = error instanceof DeliveryHttpError && error.status === 429
     ? error.retryAfterMs ?? 0
     : 0;
@@ -737,13 +791,13 @@ async function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
 function requireCapabilities(page: AgentSignalPage): void {
   if (!page.capabilities.senderOwnerRelation) {
     throw new ListenerCapabilityError(
-      "sender_relation_capability_missing",
+      ListenerCapabilityError.CODES[0],
       "the read service does not prove sender ownership; refusing to wake a model",
     );
   }
   if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
     throw new ListenerCapabilityError(
-      "cursor_capability_missing",
+      ListenerCapabilityError.CODES[1],
       "the read service does not support lossless ascending inbox pages; refusing to wake a model",
     );
   }
@@ -756,13 +810,13 @@ function classifyDeliveryMode(
   const { deliveryClaim, deliveryAck } = page.capabilities;
   if (deliveryClaim && !deliveryAck) {
     throw new ListenerCapabilityError(
-      "delivery_capability_inconsistent",
+      ListenerCapabilityError.CODES[2],
       "the read service delivery capability is inconsistent",
     );
   }
   if ((deliveryClaim || deliveryAck) && !durableConfigured) {
     throw new ListenerCapabilityError(
-      "delivery_configuration_missing",
+      ListenerCapabilityError.CODES[3],
       "durable delivery configuration is required by the read service",
     );
   }
@@ -1212,6 +1266,8 @@ export async function runListenerRuntime(
     return "continue";
   };
 
+  let ackAttempt = 0;
+  let ackReadDue = false;
   const sendPreparedAck = async (
     active: NonNullable<ListenerDeliveryJournalRecord["active"]>,
   ): Promise<ListenerRuntimeStop | null> => {
@@ -1233,7 +1289,6 @@ export async function runListenerRuntime(
     } catch (error) {
       return { reason: "fatal", error: asError(error) };
     }
-    let attempt = 0;
     while (true) {
       try {
         const credential = await options.credentialSession.bearer();
@@ -1249,6 +1304,7 @@ export async function runListenerRuntime(
         });
         await options.deliveryJournal!.clearActive(eventTime(now));
         after = null;
+        ackAttempt = 0;
         clearCredentialWindow();
         options.onEvent?.({ type: "ack_retry_cleared", ts: eventTime(now) });
         options.onEvent?.({
@@ -1293,11 +1349,15 @@ export async function runListenerRuntime(
         if (!isRetryableDeliveryError(error)) {
           return { reason: "fatal", error: asError(error) };
         }
-        attempt += 1;
-        const delayMs = deliveryRetryDelay(attempt, error, random);
-        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt, delayMs, ts: eventTime(now) });
+        ackAttempt += 1;
+        const delayMs = deliveryRetryDelay(ackAttempt, error, random);
+        options.onEvent?.({ type: "ack_retry", code: deliveryRetryCode(error), attempt: ackAttempt, delayMs, ts: eventTime(now) });
         await sleep(delayMs, abort);
         if (abort?.aborted) return { reason: "cancelled" };
+        if (ackAttempt % LISTENER_CLAIM_REFUSALS_BEFORE_READ === 0) {
+          ackReadDue = true;
+          return null;
+        }
       }
     }
   };
@@ -1344,6 +1404,7 @@ export async function runListenerRuntime(
       }
       let page: AgentSignalPage | null = null;
       forceRead = false;
+      ackReadDue = false;
       if (skipRead) {
         /* Wake tick: claim without a read. */
       } else try {
@@ -1419,10 +1480,10 @@ export async function runListenerRuntime(
           continue;
         }
         const failure = classifySignalReadFailure(error);
-        const transientRead = isRetryableFollowError(error) ||
+        const transientRead = !fatalReadRefusal(error) && (isRetryableFollowError(error) ||
           isForeignReadResponseFailure(error) ||
           failure.code === "aborted" ||
-          failure.code === "host_ports_exhausted";
+          failure.code === "host_ports_exhausted");
         if (credentialWindow !== null && transientRead) {
           const decided = await holdCredentialWindow("transient", error);
           if (decided !== "continue") {
@@ -1530,6 +1591,10 @@ export async function runListenerRuntime(
             stop = { reason: "cancelled" };
             break;
           }
+          if (ackReadDue) {
+            forceRead = true;
+            continue;
+          }
           await idleSleep(true);
           continue;
         }
@@ -1581,6 +1646,7 @@ export async function runListenerRuntime(
                 stop = ackStop;
                 break;
               }
+              if (ackReadDue) forceRead = true;
               continue;
             } catch (error) {
               stop = { reason: "fatal", error: asError(error) };
@@ -1952,6 +2018,7 @@ export async function runListenerRuntime(
             stop = ackStop;
             break;
           }
+          if (ackReadDue) forceRead = true;
         } catch (error) {
           stop = { reason: "fatal", error: asError(error) };
           break;

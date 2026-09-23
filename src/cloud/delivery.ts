@@ -94,6 +94,13 @@ export const DELIVERY_FAILED_TERMINAL_CODES: readonly string[] = Object.freeze([
 ]);
 
 /** The bounded client-visible server error vocabulary; anything else collapses. */
+export const DELIVERY_SESSION_PROOF_CODES: readonly string[] = Object.freeze([
+  "session_proof_missing",
+  "session_proof_invalid",
+  "session_expired",
+  "session_conflict",
+]);
+
 export const DELIVERY_SERVER_ERROR_CODES: readonly string[] = Object.freeze([
   "unauthenticated",
   "fresh_auth_required",
@@ -102,11 +109,13 @@ export const DELIVERY_SERVER_ERROR_CODES: readonly string[] = Object.freeze([
   "forbidden",
   "delivery_unavailable",
   "delivery_ack_conflict",
+  "delivery_not_surfaced",
   "command_id_conflict",
   "rate_limited",
   "upgrade_required",
   "temporarily_unavailable",
   "internal_error",
+  ...DELIVERY_SESSION_PROOF_CODES,
   H0_SEAT_CLAIM_REFUSED_CODE,
 ]);
 

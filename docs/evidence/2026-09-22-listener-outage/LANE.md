@@ -295,3 +295,42 @@ Final gates used a temporary HOME and unset `FORCE_COLOR` for both test suites:
 The two `npm test` failures were `resume-process-table.test.ts` and `resume.test.ts`. The CLI suite also failed `unknown-flag-message.test.ts`. Each failure came from this sandbox denying `ps` with `spawn EPERM` or `spawnSync ps EPERM`. The isolated listener runtime, control, and delivery-client files passed 169/169. The detached foreign-claim product test passed separately (1/1).
 
 No live workspace or production edge was contacted. This fold did not establish behavior against a deployed command or read edge.
+
+## Fold 6
+
+The two exported fatal-answer constants are `READ_FATAL_ANSWERS` and `COMMAND_FATAL_ANSWERS` in `src/listener/runtime.ts:153-176`. An HTTP answer outside these exact `(status, error)` pairs retries, including 405, 408, 409, 413, 421 and 422 without a recognized envelope. An unexpected page field retries as `malformed_response`. The credential members enter the existing three-check, ten-minute window before a stop. Local journal, effect, and credential-state failures still stop by their typed paths (`runtime.ts` `sendPreparedAck`, `validateClaimResult`, and `isLocalCredentialLoss`); they are not inferred from an HTTP status.
+
+| Edge | Fatal member | Source of the edge answer |
+|---|---|---|
+| Read | 401 `unauthenticated`; 403 `forbidden` after confirmation | `supabase/functions/read/index.ts:471,475` |
+| Read | 400 `invalid_request` | `supabase/functions/read/index.ts:409` |
+| Read | 404 `channel_not_found` | `supabase/functions/read/index.ts:770` |
+| Read | 405 `method_not_allowed` | `supabase/functions/read/index.ts:384` |
+| Read | local `delivery_configuration_missing` | `src/listener/runtime.ts:816-820`; the edge advertises both delivery capabilities on its successful page |
+| Command | 401 `unauthenticated` after confirmation | `supabase/functions/command/index.ts:8915,8925` |
+| Command | 400 `invalid_request` | `supabase/functions/command/index.ts:11189` |
+| Command | 409 `command_id_conflict` | `supabase/functions/command/index.ts:9374,11079` |
+| Command | 409 `delivery_ack_conflict` | `supabase/functions/command/index.ts:11397` |
+| Command | 409 `delivery_not_surfaced` | `supabase/functions/command/index.ts:11404`; status from `src/cloud/session-wire.ts:156` |
+| Command | 413 `payload_too_large` | `supabase/functions/command/index.ts:1405,1420,9091` |
+| Command | 403 `h0_seat_uses_poll` | `src/cloud/delivery.ts:82` names the expected fence. **No edge producer of this slug exists in this checkout**; the edge source cannot be cited here. The classifier and test preserve the existing H0 contract, but the live edge behavior is unestablished. |
+
+`session_proof_missing`, `session_proof_invalid`, and `session_expired` originate in `supabase/functions/_shared/agent-auth.ts:231-290`; the command fence returns them at `supabase/functions/command/index.ts:8927-8943`. `session_conflict` is also possible there. They retry and status tells the operator to start or renew the seat session, or stop the listener. `CONNECTED` is no in claim and ACK retry states. A read failure after ready, including a forced read after claims or ACKs, records its code and the next attempt. The 60-second notice says to leave the running listener in place.
+
+The retry cap is 30 seconds with a 15-second minimum at the cap. A lasting read outage therefore emits about two to four status writes and two to four log lines per minute per listener. A lasting claim or ACK outage emits about two to four retry writes and lines per minute, plus a forced read every third refusal and any read-failure event. `events.ndjson` has no total-size limit.
+
+Proving tests: `tests/listener-runtime.test.ts` covers all six foreign statuses on both read and claim paths, malformed pending count, every fatal pair, all managed-session codes, forced-read status, and repeated ACK failures with backoff surviving the read. `tests/listener-control.test.ts` covers a ready listener's read retry headline and target URL. `tests/listener-cli-process.test.ts` starts a detached listener against a local stub on a temporary state directory, records [fold6-detached-status.json](fold6-detached-status.json) in `claim_retry` with `http_405` and a next attempt, then stops it. No real workspace or model was used.
+
+Mutation control: forcing HTTP 405 into the command fatal check made the foreign-claim test fail while the foreign-read positive control passed (exit 1, one pass and one failure). After restoring the classifier both passed (exit 0). This proves the command test reaches the changed decision.
+
+### Fold 6 gates
+
+| Gate | Exit | Result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build passed. |
+| `env -u FORCE_COLOR npm test` | 1 | 930 tests: 928 passed, 2 failed. Both failures call `ps` and received sandbox `spawn EPERM` (`resume-process-table`, `resume`). |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 827 tests: 809 passed, 18 failed. Three `ps` denials (`resume-process-table`, `resume`, `unknown-flag-message`); seven protected-home writes were denied; eight child CLI assertions received the sandbox's unavailable-credential-store warning. This gate ran before the final two focused listener tests; those tests and the citation-drift test passed separately afterward. |
+| `npm run check:tests` | 0 | Source and test type-check passed. |
+| `bash scripts/build-release.sh` | 0 | Single-file CLI built and execute-checked at version 0.1.72. |
+
+The requested range `git diff --check a9846955...HEAD` is recorded after the fold commit. No hosted edge or production box was contacted. No live workspace behavior was established. The H0 edge producer is absent from this checkout, so its live refusal was not established here.

@@ -272,7 +272,7 @@ function plainMalformedError(message: string): Error {
 
 function checkedUuid(value: unknown, field: string): string {
   if (typeof value !== "string" || !UUID_RE.test(value)) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value.toLowerCase();
 }
@@ -283,14 +283,14 @@ function checkedNullableUuid(value: unknown, field: string): string | null {
 
 function checkedBoolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
 
 function checkedTimestamp(value: unknown, field: string): string {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
-    throw new Error(`signal read returned a malformed ${field}`);
+    throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value;
 }
@@ -341,7 +341,7 @@ function pendingDeliveryCountOf(
   if (!capabilities.deliveryClaim && !capabilities.deliveryAck) return null;
   const value = body.pending_delivery_count;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new Error("signal read returned a malformed pending_delivery_count");
+    throw new SignalMalformedError("signal read returned a malformed pending_delivery_count");
   }
   return value;
 }
@@ -400,14 +400,14 @@ function parseSignalRecipients(
 ): { recipients?: SignalRecipientRef[] } {
   if (value === undefined) return {};
   if (!Array.isArray(value)) {
-    throw new Error("signal read returned a malformed recipients list");
+    throw new SignalMalformedError("signal read returned a malformed recipients list");
   }
   const recipients: SignalRecipientRef[] = [];
   const seenPositions = new Set<number>();
   const seenIds = new Set<string>();
   for (const entry of value) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const row = entry as Record<string, unknown>;
     const keys = Object.keys(row).sort();
@@ -420,11 +420,11 @@ function parseSignalRecipients(
       !Number.isSafeInteger(row.position) ||
       row.position < 0
     ) {
-      throw new Error("signal read returned a malformed recipients list");
+      throw new SignalMalformedError("signal read returned a malformed recipients list");
     }
     const id = checkedUuid(row.id, "recipients[].id");
     if (seenPositions.has(row.position) || seenIds.has(id)) {
-      throw new Error("signal read returned a repeated recipient");
+      throw new SignalMalformedError("signal read returned a repeated recipient");
     }
     seenPositions.add(row.position);
     seenIds.add(id);
@@ -473,7 +473,7 @@ export function parseSignalRecord(
   options: { attachmentsEnabled?: boolean } = {},
 ): SignalRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("signal read returned a malformed row");
+    throw new SignalMalformedError("signal read returned a malformed row");
   }
   const row = value as Record<string, unknown>;
   if (
@@ -486,7 +486,7 @@ export function parseSignalRecord(
     !(row.about === null ||
       typeof row.about === "string")
   ) {
-    throw new Error("signal read returned malformed signal data");
+    throw new SignalMalformedError("signal read returned malformed signal data");
   }
   let senderOwnerRelation: SenderOwnerRelation = "unknown";
   if (row.sender_owner_relation !== undefined) {
@@ -496,7 +496,7 @@ export function parseSignalRecord(
         row.sender_owner_relation as SenderOwnerRelation,
       )
     ) {
-      throw new Error(
+      throw new SignalMalformedError(
         "signal read returned a malformed sender_owner_relation",
       );
     }

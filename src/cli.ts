@@ -280,6 +280,7 @@ import {
 import {
   DELIVERY_HANDLED_OUTCOMES,
   H0_SEAT_CLAIM_REFUSED_CODE,
+  DELIVERY_SESSION_PROOF_CODES,
   H0_SEAT_LISTENER_STOP_SENTENCE,
 } from "./cloud/delivery.js";
 import {
@@ -319,6 +320,7 @@ import {
   writeListenerCredentialState,
   LISTENER_DELIVERY_FAILING_THRESHOLD,
   LISTENER_RUNNING_STATES,
+  ListenerCapabilityError,
   LISTENER_THROUGHPUT_LAPSE_RATIO,
   LISTENER_ROUTE_MODES,
   listenerRouteUsage,
@@ -5321,7 +5323,9 @@ function listenerAttendanceState(
   const pending = status.pendingForMainCount ?? 0;
   const connected = LISTENER_RUNNING_STATES.includes(status.state) &&
     status.state !== "starting" && status.state !== "stopping" &&
-    status.state !== "credential_check";
+    status.state !== "credential_check" &&
+    status.state !== "claim_retry" && status.state !== "ack_retry" &&
+    status.readHealth?.currentEpisodeStartedAt == null;
   // A leftover hook-surface file still proves a message was surfaced.
   // attendingSurfaces does not include that file; it is the hook installed now.
   const attendingSurfaces = evidence.attendingSurfaces ?? [];
@@ -5428,7 +5432,7 @@ function listenerLapseNotices(
       code: "listener_read_retry_persisting",
       message: `Listener reads have failed continuously for ${Math.floor(summary.currentEpisodeDurationMs / 1_000)}s. This is still in progress.`,
       nextStep:
-        "Check cswarm status and the CommonSwarm service. If both are healthy, restart the listener.",
+        "Leave the listener running while it waits for the read service; check the target URL and CommonSwarm service.",
     });
   }
   if (!down && summary.throughputLapseHours.length > 0) {
@@ -5707,21 +5711,22 @@ function credentialCheckSentence(status: ListenerStatus): string | null {
 }
 
 function listenerRetrySentence(status: ListenerStatus): string | null {
-  if (status.state !== "starting" || typeof status.nextAttemptAt !== "string") {
+  if (!LISTENER_RUNNING_STATES.includes(status.state) ||
+      typeof status.nextAttemptAt !== "string" ||
+      (status.state !== "starting" && status.lastRetryEdge !== "read")) {
     return null;
   }
   const code = status.lastErrorCode ?? "no code recorded";
-  if ((status.readHealth?.currentEpisodeAttempts ?? 0) > 0) {
+  if (status.lastRetryEdge === "read" &&
+      (status.readHealth?.currentEpisodeAttempts ?? 0) > 0) {
     const failure = status.readHealth!;
     const detail = failure.currentHttpStatus === null ? "" : ` (HTTP ${failure.currentHttpStatus})`;
-    const next = code === "sender_relation_capability_missing" ||
-      code === "cursor_capability_missing" ||
-      code === "delivery_capability_inconsistent"
-      ? "Check the target URL and update the read edge before starting a model."
-      : "Check the target URL and read edge version.";
+    const next = ListenerCapabilityError.READ_EDGE_CODES.includes(code)
+      ? `Check ${status.targetUrl ?? "the target URL"} and update the read edge before starting a model.`
+      : `Check ${status.targetUrl ?? "the target URL"} and read edge version. Leave the listener running while the read service recovers.`;
     return `The read edge failed (${code}${detail}). The listener is still running and will try again at ${status.nextAttemptAt}. ${next}`;
   }
-  return `The last attempt failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
+  return `The ${status.lastRetryEdge === "command" ? "command edge" : "last attempt"} failed (${code}). The listener is still running and will try again at ${status.nextAttemptAt}. Leave it running. To stop it now: cswarm listen stop --workspace-id ${status.workspaceId} --principal-id ${status.principalId}`;
 }
 
 function listenerDownSentence(status: ListenerStatus): string | null {
@@ -5742,6 +5747,22 @@ function listenerDownSentence(status: ListenerStatus): string | null {
   return `This listener failed (${code}) and is not reading signals. Read ${status.logPath}, then restart it by piping the same agent credential into: ${listenerRestartCommand(status)}`;
 }
 
+function listenerDeliveryRetrySentence(status: ListenerStatus): string | null {
+  if (status.lastRetryEdge === "read") return null;
+  const when = status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff";
+  const code = status.lastErrorCode ?? "no code recorded";
+  if (status.state === "claim_retry") {
+    if (DELIVERY_SESSION_PROOF_CODES.includes(code)) {
+      return `The claim is refused (${code}); this managed seat needs a live session. CONNECTED is no while claims fail. Start or renew the seat's session, or stop the listener. The listener will try again${when}.`;
+    }
+    return `The claim failed (${code}) ${status.claimRetryCount ?? 0} times. ${code === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${when}, reading signals after repeated failures.`;
+  }
+  if (status.state === "ack_retry") {
+    return `The delivery acknowledgement failed (${code}). The inbox is waiting on this acknowledgement. The listener will try again${when} and read signals after repeated failures.`;
+  }
+  return null;
+}
+
 export function renderListenerStatus(
   status: ListenerStatus,
   evidence: ListenerAttendanceEvidence = emptyAttendanceEvidence(),
@@ -5760,10 +5781,12 @@ export function renderListenerStatus(
   const readSummary = listenerReadHealthSummary(status, nowMs);
   const lapseNotices = listenerLapseNotices(status, readSummary);
   const down = status.state === "stopped" || status.state === "failed";
-  const retrying = status.state === "starting" &&
+  const retrying = LISTENER_RUNNING_STATES.includes(status.state) &&
+    (status.state === "starting" || status.lastRetryEdge === "read") &&
     typeof status.nextAttemptAt === "string";
   const credentialCheck = credentialCheckSentence(status);
   const retrySentence = listenerRetrySentence(status);
+  const deliveryRetrySentence = listenerDeliveryRetrySentence(status);
   const downSentence = listenerDownSentence(status);
   const lines = [
     down
@@ -5778,9 +5801,7 @@ export function renderListenerStatus(
       ? `Listener WARNING for agent ${status.principalId}: ${unattendedCount}.`
       : `Listener ${status.state} for agent ${status.principalId}.`,
     ...(credentialCheck === null ? [] : [credentialCheck]),
-    ...(status.state === "claim_retry" || status.state === "ack_retry"
-      ? [status.state === "claim_retry" ? `The claim failed (${status.lastErrorCode ?? "no code recorded"}) ${status.claimRetryCount ?? 0} times. ${status.lastErrorCode === "delivery_unreachable" ? "The server could not be reached." : "The command edge did not accept the claim."} The listener is running and will try again${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff"}, reading signals after repeated failures.` : `The delivery acknowledgement failed (${status.lastErrorCode ?? "no code recorded"}). The listener is running and will try again${status.nextAttemptAt ? ` at ${status.nextAttemptAt}` : " with backoff"}.`]
-      : []),
+    ...(deliveryRetrySentence === null ? [] : [deliveryRetrySentence]),
     ...(retrySentence === null ? [] : [retrySentence]),
     ...(downSentence === null ? [] : [downSentence]),
     `CONNECTED: ${attendance.connected ? "yes" : "no"}. Transport state is ${status.state}.`,
@@ -5810,6 +5831,7 @@ export function renderListenerStatus(
         : "not yet measured"
     }.`,
     `Provider: ${status.provider}; process: ${status.pid}; started: ${status.startedAt}.`,
+    `Target URL: ${status.targetUrl ?? "not recorded"}.`,
     `Provider executable: ${status.providerExecutable ?? "not measured"}.`,
     `Connections opened: ${status.connectionsOpened ?? "not measured"}.`,
     `Connection reuse ratio: ${status.connectionReuseRatio ?? "not measured"}.`,
@@ -6100,12 +6122,14 @@ export function renderListenerStatus(
 export function listenerStartPendingMessage(status: ListenerStatus): string {
   if (status.state === "starting" && status.lastErrorCode) {
     const code = status.lastErrorCode;
-    const capability = code === "sender_relation_capability_missing" ||
-      code === "cursor_capability_missing" ||
-      code === "delivery_capability_inconsistent";
+    const capability = ListenerCapabilityError.READ_EDGE_CODES.includes(code);
+    const target = status.targetUrl ?? "the target URL";
+    if (status.lastRetryEdge !== "read") {
+      return `Listener ${status.lastRetryEdge === "command" ? "command edge" : "startup"} failed (${code}); check ${target}. Use cswarm listen status to follow retries.`;
+    }
     return capability
-      ? `Listener read edge failed (${code}); check the target URL. ${listenerFailureMessage(code)}. Use cswarm listen status to follow retries.`
-      : `Listener read edge failed (${code}); check the target URL and read edge version. Use cswarm listen status to follow retries.`;
+      ? `Listener read edge failed (${code}); check ${target}. ${listenerFailureMessage(code)}. Use cswarm listen status to follow retries.`
+      : `Listener read edge failed (${code}); check ${target} and read edge version. Use cswarm listen status to follow retries.`;
   }
   return "Listener is still starting or checking; use cswarm listen status to follow it.";
 }
@@ -6247,11 +6271,7 @@ export function listenerFailureMessage(
   ) {
     return `OpenCode host safety check failed (${code}); re-authenticate and ensure OPENCODE_DISABLE_PROJECT_CONFIG keeps project allow from merging`;
   }
-  if (
-    code === "sender_relation_capability_missing" ||
-    code === "cursor_capability_missing" ||
-    code === "delivery_capability_inconsistent"
-  ) {
+  if (ListenerCapabilityError.READ_EDGE_CODES.includes(code)) {
     return `the deployed read service lacks the safe listener capability (${code}); update/deploy the read edge before starting a model`;
   }
   if (code === "credential_stopped") {
@@ -6724,6 +6744,7 @@ async function runConfiguredListener(options: {
       workspaceId: options.workspaceId,
       principalId: options.principalId,
       projectDirectory: options.cwd,
+      targetUrl: options.cloud.url,
       provider: options.provider,
       cswarmVersion: CLI_BUILD_VERSION,
       permissionMode: options.permissionMode,

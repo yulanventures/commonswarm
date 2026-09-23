@@ -2011,14 +2011,14 @@ const RESTART_MATRIX: ReadonlyArray<[string, Error, boolean]> = [
   ["delivery 500", new DeliveryHttpError(500, "delivery_500", "delivery failed (HTTP 500)"), true],
   ["delivery 503", new DeliveryHttpError(503, "delivery_503", "delivery failed (HTTP 503)"), true],
   ["delivery 429", new DeliveryHttpError(429, "delivery_429", "delivery failed (HTTP 429)"), true],
-  ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), false],
+  ["delivery 400", new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)"), true],
   ["delivery 401", new DeliveryHttpError(401, "delivery_401", "delivery failed (HTTP 401)"), true],
   ["delivery 403", new DeliveryHttpError(403, "delivery_403", "delivery failed (HTTP 403)"), true],
   // Command-edge `forbidden` is not a credential check, so a delivery 403
   // with that slug stays restartable. Read-edge `forbidden` does not.
   ["delivery 403 forbidden", new DeliveryHttpError(403, "forbidden", "delivery failed (HTTP 403)"), true],
   ["delivery 401 unauthenticated", new DeliveryHttpError(401, "unauthenticated", "delivery failed (HTTP 401)"), false],
-  ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), false],
+  ["delivery 409 conflict", new DeliveryHttpError(409, "delivery_409", "delivery failed (HTTP 409)"), true],
   ["delivery protocol", new DeliveryProtocolError("delivery claim returned more than one row"), false],
 
   // --- command posts -------------------------------------------------------
@@ -2211,7 +2211,7 @@ test("D-057: a non-restartable delivery failure is not restarted by the supervis
       runs += 1;
       // Before D-057 this restarted 3 times, repeating a delivery command that
       // the server had already rejected as invalid.
-      return { reason: "fatal", error: new DeliveryHttpError(400, "delivery_400", "delivery failed (HTTP 400)") };
+      return { reason: "fatal", error: new DeliveryHttpError(400, "invalid_request", "delivery failed (HTTP 400)") };
     },
   });
   assert.equal(runs, 1);
@@ -2781,4 +2781,78 @@ test("read retry episodes persist, recover once, and log typed totals", async ()
   assert.equal(recovered.length, 1, "one episode emits one recovery line");
   assert.equal(recovered[0]!.attempts, 2);
   assert.equal(recovered[0]!.duration_ms, 65_000);
+});
+
+test("a ready listener names a read retry, target URL, and next attempt", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-ready-read-retry-"));
+  try {
+    const target = paths(root);
+    const workspaceId = randomUUID();
+    const principalId = randomUUID();
+    const ts = "2026-09-22T12:00:00.000Z";
+    let snapshot: ListenerStatus | null = null;
+    await runListenerSupervisor({
+      paths: target, profileId: "ready-read-retry", workspaceId, principalId,
+      targetUrl: "https://cloud.example.test",
+      run: async (_signal, onEvent) => {
+        onEvent({ type: "ready", workspaceId, principalId, cadenceMs: 15_000, ts });
+        onEvent({ type: "read_retry", attempt: 1, episodeAttempt: 1,
+          episodeStartedAt: ts,
+          failure: { code: "http_status", httpStatus: 503, errorConstructor: null },
+          code: "http_503", delayMs: 20_000, ts });
+        snapshot = await queryListenerControl(target, "status");
+        return { reason: "cancelled" };
+      },
+    });
+    assert.ok(snapshot);
+    const observed = snapshot as ListenerStatus;
+    assert.equal(observed.state, "ready");
+    assert.equal(observed.lastErrorCode, "http_503");
+    assert.equal(observed.nextAttemptAt, "2026-09-22T12:00:20.000Z");
+    const human = renderListenerStatus(observed, undefined, Date.parse(ts) + 61_000);
+    assert.match(human, /^Listener retrying /);
+    assert.match(human, /Target URL: https:\/\/cloud\.example\.test/);
+    assert.match(human, /CONNECTED: no/);
+    assert.match(human, /Leave the listener running/);
+    assert.doesNotMatch(human, /restart the listener/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clearing a credential check preserves a failing claim and start names its edge", { timeout: 15_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-claim-check-status-"));
+  try {
+    const target = paths(root);
+    const workspaceId = randomUUID();
+    const principalId = randomUUID();
+    const ts = "2026-09-22T12:00:00.000Z";
+    let snapshot: ListenerStatus | null = null;
+    await runListenerSupervisor({
+      paths: target, profileId: "claim-check-status", workspaceId, principalId,
+      targetUrl: "https://cloud.example.test",
+      run: async (_signal, onEvent) => {
+        onEvent({ type: "ready", workspaceId, principalId, cadenceMs: 15_000, ts });
+        onEvent({ type: "claim_retry", code: "session_proof_missing", attempts: 1,
+          delayMs: 1_000, ts });
+        onEvent({ type: "credential_check", edge: "read", code: "forbidden",
+          checks: 1, stopAt: "2026-09-22T12:10:00.000Z", ts });
+        onEvent({ type: "credential_check_cleared", ts });
+        snapshot = await queryListenerControl(target, "status");
+        return { reason: "cancelled" };
+      },
+    });
+    assert.ok(snapshot);
+    const observed = snapshot as ListenerStatus;
+    assert.equal(observed.state, "claim_retry");
+    assert.equal(observed.claimRetryCount, 1);
+    assert.equal(observed.lastErrorCode, "session_proof_missing");
+    assert.match(renderListenerStatus(observed), /CONNECTED: no/);
+    const restarting = { ...observed, state: "starting" as const };
+    assert.match(listenerStartPendingMessage(restarting), /Listener command edge failed/);
+    assert.match(listenerStartPendingMessage(restarting), /https:\/\/cloud\.example\.test/);
+    assert.doesNotMatch(listenerStartPendingMessage(restarting), /Listener read edge failed/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

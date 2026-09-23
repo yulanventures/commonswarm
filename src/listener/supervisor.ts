@@ -1,6 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { ListenerCredentialStateMismatchError } from "../cloud/signals.js";
-import { DELIVERY_PROVIDER_PROVEN_OUTCOMES } from "../cloud/delivery.js";
+import {
+  ListenerCredentialStateMismatchError,
+  classifySignalReadFailure,
+} from "../cloud/signals.js";
+import {
+  DELIVERY_PROVIDER_PROVEN_OUTCOMES,
+  DeliveryHttpError,
+  DeliveryResponseError,
+  DeliveryTransportError,
+} from "../cloud/delivery.js";
+import { CommandHttpError, CommandTransportError } from "../cloud/command-client.js";
 import { SECRET_SHAPE_RE } from "../host/credential-redaction.js";
 import { redactSessionText } from "../cloud/session-proof.js";
 import { AcpPermissionCanaryError } from "../host/types.js";
@@ -144,6 +153,7 @@ export interface ListenerSupervisorOptions {
   workspaceId: string;
   principalId: string;
   projectDirectory?: string;
+  targetUrl?: string;
   /** Host adapter id recorded in status metadata only. Default: grok. */
   provider?: ListenerProviderId;
   /** Build version this supervisor can report while its control socket is live. */
@@ -219,8 +229,20 @@ function safeErrorCode(error: Error): string {
     const normalized = explicit.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
     if (normalized.length > 0) return normalized.slice(0, 96);
   }
+  const read = classifySignalReadFailure(error);
+  if (read.code === "http_status") return `http_${read.httpStatus}`;
+  if (read.code === "malformed_response") return read.code;
+  if (error instanceof DeliveryResponseError) return "malformed_response";
   const name = error.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "_");
   return name.slice(0, 96) || "listener_error";
+}
+
+function retryEdgeOf(error: Error): "read" | "command" | "local" {
+  if (error instanceof DeliveryHttpError || error instanceof DeliveryResponseError ||
+      error instanceof DeliveryTransportError || error instanceof CommandHttpError ||
+      error instanceof CommandTransportError) return "command";
+  if (classifySignalReadFailure(error).code !== "unclassified") return "read";
+  return "local";
 }
 
 /** Keep provider messages local, bounded, and free of credential-shaped text. */
@@ -331,6 +353,7 @@ export async function runListenerSupervisor(
     workspaceId: options.workspaceId.toLowerCase(),
     principalId: options.principalId.toLowerCase(),
     ...(options.projectDirectory ? { projectDirectory: options.projectDirectory } : {}),
+    ...(options.targetUrl ? { targetUrl: options.targetUrl } : {}),
     pid: process.pid,
     state: "starting",
     startedAt,
@@ -384,6 +407,8 @@ export async function runListenerSupervisor(
     claimRetryCount: 0,
     logPath: options.paths.logPath,
   };
+  let lastClaimRetryCode: string | null = null;
+  let lastAckRetryCode: string | null = null;
   let writes = Promise.resolve();
   // Each link swallows its own failure. Without this a single rejected write
   // poisons the shared chain, so every LATER status persist and event append
@@ -653,10 +678,14 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "credential_check_cleared") {
-      transition(status.readyAt === null ? "starting" : "ready", {
+      transition(status.claimRetryCount && status.claimRetryCount > 0 ? "claim_retry" :
+        status.readyAt === null ? "starting" : "ready", {
         credentialStopAt: null,
         credentialCheckEdge: null,
-        lastErrorCode: null,
+        lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
+          ? lastClaimRetryCode : null,
+        lastRetryEdge: status.claimRetryCount && status.claimRetryCount > 0
+          ? "command" : undefined,
         lastErrorDetail: null,
         lastErrorReasonCode: null,
         nextAttemptAt: null,
@@ -668,7 +697,9 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "claim_retry") {
+      lastClaimRetryCode = event.code;
       transition(status.credentialStopAt ? "credential_check" : "claim_retry", {
+        lastRetryEdge: "command",
         claimRetryCount: event.attempts,
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
         lastErrorDetail: null,
@@ -678,6 +709,7 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "claim_retry_cleared") {
+      lastClaimRetryCode = null;
       transition(status.credentialStopAt ? "credential_check" :
         status.readyAt === null ? "starting" : "ready", {
         claimRetryCount: 0,
@@ -688,7 +720,9 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "ack_retry") {
+      lastAckRetryCode = event.code;
       transition(status.credentialStopAt ? "credential_check" : "ack_retry", {
+        lastRetryEdge: "command",
         lastErrorCode: status.credentialStopAt ? status.lastErrorCode : event.code,
         lastErrorDetail: null,
         nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
@@ -697,6 +731,7 @@ export async function runListenerSupervisor(
       return;
     }
     if (event.type === "ack_retry_cleared") {
+      lastAckRetryCode = null;
       if (status.state === "ack_retry") {
         transition(status.readyAt === null ? "starting" : "ready", {
           lastErrorCode: null,
@@ -709,10 +744,9 @@ export async function runListenerSupervisor(
     if (event.type === "read_retry") {
       status = {
         ...status,
-        ...(status.state === "starting" ? {
-          lastErrorCode: event.code,
-          nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
-        } : {}),
+        lastErrorCode: event.code,
+        lastRetryEdge: "read",
+        nextAttemptAt: new Date(Date.parse(event.ts) + event.delayMs).toISOString(),
         readHealth: recordListenerReadRetry(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -745,6 +779,14 @@ export async function runListenerSupervisor(
     if (event.type === "read_recovered") {
       status = {
         ...status,
+        ...(status.lastRetryEdge === "read" ? {
+          nextAttemptAt: null,
+          lastErrorCode: status.claimRetryCount && status.claimRetryCount > 0
+            ? lastClaimRetryCode : status.state === "ack_retry" ? lastAckRetryCode : null,
+          lastRetryEdge: (status.claimRetryCount && status.claimRetryCount > 0) ||
+            status.state === "ack_retry"
+            ? "command" as const : undefined,
+        } : {}),
         readHealth: recordListenerReadRecovery(
           status.readHealth ?? emptyListenerReadHealth(),
           {
@@ -1035,6 +1077,7 @@ export async function runListenerSupervisor(
       transition("starting", {
         readyAt: null,
         lastErrorCode: restartCode,
+        lastRetryEdge: retryEdgeOf(stop.error),
         lastErrorDetail: safeErrorDetail(stop.error),
         ...providerFailureFields(stop.error),
         lastWorkerStderrTail: restartStderrTail,
