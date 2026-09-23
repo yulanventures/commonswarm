@@ -44,7 +44,8 @@ says this window stopped them.
    database backup is required.
 3. Anvil runs these commands on the Mac mini from this repository. They prove
    the archive came from the GitHub remote. The lead must have already written
-   `gate-evidence.txt` in the evidence directory. `git archive` reads tracked
+   `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
+   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>/`). `git archive` reads tracked
    Git objects and has no `--no-xattrs` option; Mac `tar` commands below use
    both `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
@@ -254,7 +255,8 @@ sudo -n -i
     test ! -e "$RELEASE_DIR"
     install -d -m "$RELEASE_MODE" -o commonswarm -g commonswarm "$RELEASE_DIR"
     tar -xf "$ARCHIVE" -C "$RELEASE_DIR"
-    test -z "$(find "$RELEASE_DIR" -name '._*' -print -quit)"
+    APPLEDOUBLE="$(find "$RELEASE_DIR" -name '._*' -print -quit)"
+    test -z "$APPLEDOUBLE"
     printf '%s\n' "$SHA" >"$RELEASE_DIR/RELEASE_SHA"
     chown -R commonswarm:commonswarm "$RELEASE_DIR"
     chmod "$RELEASE_MODE" "$RELEASE_DIR"
@@ -1224,7 +1226,9 @@ whether that blocks the window (it did not for H0 on 2026-09-23). Without that
 read, no probe reaches the database, so the edge-to-database path and the later
 `CONNECT_TIMEOUT` log check are NOT VERIFIED too, unless the lead supplies a
 credential-free database probe: `h0/note` with a well-formed but unknown
-`Authorization: Bearer swm_agt_<43 characters>` must return 401 after the token
+`Authorization: Bearer swm_agt_` followed by 43 base64url characters that match no
+real token (for example 43 times `A`; do not use `+`, `/` or `=`, which are refused
+before any database work) must return 401 after the token
 lookup in `swarm.agent_tokens`. Record which of the two applied in `run.log`. Also probe `/functions/v1/h0/note`
 without authorization using a valid note body: it must return 401, never 500
 `h0_command_not_configured`. The authenticated read and H0 document are
