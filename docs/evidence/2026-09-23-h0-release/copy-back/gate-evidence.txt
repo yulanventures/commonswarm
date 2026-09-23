@@ -1,0 +1,3 @@
+SHA=30ba33f9202138b3ec59b968b6282cf76d3dc7f3
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
