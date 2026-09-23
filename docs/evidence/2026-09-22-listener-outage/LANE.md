@@ -532,3 +532,12 @@ These tests use fake clocks or a local loopback fixture. The two full suites rem
 | `bash scripts/build-release.sh` | 0 | 0 tests; the single-file CLI built and passed its execute check. |
 
 The full suites are not green in this sandbox. The timing tests use fake clocks, and the detached fixture uses loopback HTTP. No production host or real workspace was contacted, and no release or merge occurred.
+
+## Lead fold after review round 10 (Opus PASS at 0a47a550)
+
+- Round-10 R1: after a claim started by a push wake finds no work, the `idle_poll` event no longer marks the wait as
+  the push reconcile wait (`runtime.ts`, `pushReconcileWait: ... && !skipRead`), so status does not print the time
+  left until the next reconcile as "reconcile every <n>s". Runtime, wake and idle-poll tests: 147 pass.
+- Round-10 R2, recorded: the fold-13 turn limit ends a worker turn 110 s before token expiry, so a turn that starts
+  just before renewal is due can get up to 50 s less time than before. This can happen at most once per credential
+  period.

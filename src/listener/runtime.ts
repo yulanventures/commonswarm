@@ -2007,7 +2007,7 @@ export async function runListenerRuntime(
             options.onEvent?.({
               type: "idle_poll",
               intervalMs,
-              pushReconcileWait: snap.mode === LISTENER_WAKE_MODE_PUSH,
+              pushReconcileWait: snap.mode === LISTENER_WAKE_MODE_PUSH && !skipRead,
               ts: eventTime(now),
             });
             emitWake();
