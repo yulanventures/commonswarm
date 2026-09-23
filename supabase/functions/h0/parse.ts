@@ -92,14 +92,64 @@ export interface H0AckWire {
 }
 
 export type H0SeatVerb = "poll" | "ack";
+export type H0ForwardVerb = "register" | "ask" | "note" | "reply" | "working-on";
+
+/* Kept separate from the document table so the contract test can detect drift. */
+const FORWARD_FIELDS: Record<H0ForwardVerb, {
+  required: readonly string[];
+  omittable: readonly string[];
+}> = {
+  register: { required: ["joinCredential", "attemptId", "name"], omittable: ["icon"] },
+  ask: { required: ["body"], omittable: ["to", "requestId"] },
+  note: { required: ["body"], omittable: ["to", "requestId"] },
+  reply: { required: ["signal_id", "body"], omittable: ["requestId"] },
+  "working-on": { required: ["body"], omittable: ["requestId"] },
+};
+
+export function parseH0ForwardBody(
+  verb: H0ForwardVerb,
+  value: unknown,
+): { ok: true; body: Record<string, unknown> } | H0ParseFailure {
+  const body = record(value);
+  if (body === null) return fail(H0_INVALID_REQUEST, "The body must be a JSON object.");
+  const fields = FORWARD_FIELDS[verb];
+  const allowed = new Set([...fields.required, ...fields.omittable]);
+  if (Object.keys(body).some((key) => !allowed.has(key))) {
+    return fail(H0_INVALID_REQUEST, "The body has an unknown field.");
+  }
+  if (fields.required.some((key) => !Object.hasOwn(body, key))) {
+    return fail(H0_INVALID_REQUEST, "The body is missing a required field.");
+  }
+  if (Object.values(body).some((item) => item === null)) {
+    return fail(H0_INVALID_REQUEST, "Null is not accepted for this verb.");
+  }
+  if (verb === "register") {
+    if (typeof body.joinCredential !== "string" ||
+      !isUuid(body.attemptId) ||
+      typeof body.name !== "string" || body.name.length < 1 || body.name.length > 80 ||
+      (Object.hasOwn(body, "icon") && typeof body.icon !== "string")) {
+      return fail(H0_INVALID_REQUEST, "Registration fields are malformed.");
+    }
+  } else {
+    if (typeof body.body !== "string" || body.body.length < 1 ||
+      (Object.hasOwn(body, "requestId") &&
+        (typeof body.requestId !== "string" || !/^[A-Za-z0-9_-]{8,72}$/.test(body.requestId))) ||
+      ((verb === "ask" || verb === "note") && Object.hasOwn(body, "to") &&
+        (!Array.isArray(body.to) || body.to.length === 0)) ||
+      (verb === "reply" && !isUuid(body.signal_id))) {
+      return fail(H0_INVALID_REQUEST, "Signal fields are malformed.");
+    }
+  }
+  return { ok: true, body };
+}
 
 export function h0PollLockDurationMs(waitSeconds: number): number {
   return waitSeconds * 1_000 + H0_POLL_CLEANUP_MS + H0_POLL_LOCK_SLACK_MS;
 }
 
-export function h0VerbPath(pathname: string): H0SeatVerb | null {
-  const match = /^(?:\/functions\/v1)?\/h0\/(poll|ack)\/?$/.exec(pathname);
-  if (match?.[1] === "poll" || match?.[1] === "ack") return match[1];
+export function h0VerbPath(pathname: string): H0SeatVerb | H0ForwardVerb | null {
+  const match = /^(?:\/functions\/v1)?\/h0\/(poll|ack|register|ask|note|reply|working-on)\/?$/.exec(pathname);
+  if (match?.[1]) return match[1] as H0SeatVerb | H0ForwardVerb;
   return null;
 }
 

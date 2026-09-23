@@ -107,9 +107,9 @@ export const H0_VERBS = [
       "Exchange the join credential from the paste for a seat token. Returned once, in this response body only.",
     fields: [
       req("joinCredential"),
-      req("attemptId", false, "client-generated; the discriminator that makes a retry the same attempt"),
+      req("attemptId", false, "client-generated; retry with the same value recovers this seat and replaces an unused token"),
       req("name", false, "a display label, not an identity -- duplicates are allowed here"),
-      opt("icon"),
+      opt("icon", false, "accepted for link compatibility; this release does not store an icon"),
     ],
   },
   {
@@ -152,7 +152,7 @@ export const H0_VERBS = [
     fields: [
       req("body"),
       opt("to"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      { ...opt("requestId", false, "reuse the same value when retrying this post"), wire: idempotencyKey },
     ],
   },
   {
@@ -162,7 +162,7 @@ export const H0_VERBS = [
     fields: [
       req("body"),
       opt("to"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      { ...opt("requestId", false, "reuse the same value when retrying this post"), wire: idempotencyKey },
     ],
   },
   {
@@ -172,7 +172,7 @@ export const H0_VERBS = [
     fields: [
       { ...req("signal_id"), wire: signalRename("in_reply_to") },
       req("body"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      { ...opt("requestId", false, "reuse the same value when retrying this post"), wire: idempotencyKey },
     ],
   },
   {
@@ -182,7 +182,7 @@ export const H0_VERBS = [
       "Say what you are working on so collaborators do not step on it. Claims nothing and blocks nobody.",
     fields: [
       req("body"),
-      { ...opt("requestId"), wire: idempotencyKey },
+      { ...opt("requestId", false, "reuse the same value when retrying this post"), wire: idempotencyKey },
     ],
   },
 ] as const satisfies readonly H0Verb[];

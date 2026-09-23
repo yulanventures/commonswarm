@@ -1,5 +1,7 @@
 import {
   buildH0AgentDocument,
+  H0_CACHE_CONTROL,
+  H0_ROBOTS_TAG,
   handleH0Request,
   internalErrorResponse,
 } from "./core.ts";
@@ -11,6 +13,7 @@ import {
   handleH0PollRequest,
 } from "./poll-ack.ts";
 import { h0VerbPath } from "./parse.ts";
+import { handleH0ForwardRequest } from "./forward.ts";
 import {
   H0_VERBS,
   h0AgentDocumentDescription,
@@ -42,7 +45,12 @@ Deno.serve((request) => {
     const verb = h0VerbPath(new URL(request.url).pathname);
     if (verb === "poll") {
       return handleH0PollRequest(request).catch((error: unknown) => {
-        if (error instanceof H0ClientAbort) return new Response(null, { status: 204 });
+        if (error instanceof H0ClientAbort) {
+          return new Response(null, {
+            status: 204,
+            headers: { "cache-control": H0_CACHE_CONTROL, "x-robots-tag": H0_ROBOTS_TAG },
+          });
+        }
         const retryable = h0RetryableDatabaseFailure(error);
         if (retryable !== null) return retryable;
         const code = typeof error === "object" && error !== null && "code" in error &&
@@ -59,6 +67,13 @@ Deno.serve((request) => {
         if (retryable !== null) return retryable;
         console.error("h0 ack failed");
         return h0VerbFailure();
+      });
+    }
+    if (verb === "register" || verb === "ask" || verb === "note" ||
+      verb === "reply" || verb === "working-on") {
+      return handleH0ForwardRequest(request, verb).catch(() => {
+        console.error("h0 forwarding failed");
+        return internalErrorResponse();
       });
     }
     return handleH0Request(request, agentDocument);
