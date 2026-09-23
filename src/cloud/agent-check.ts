@@ -145,6 +145,8 @@ export async function checkAgentMessages(options: {
   deadlineAtMs?: number;
   /** Cursor advances only after the consumer has accepted the output. */
   present: (result: AgentCheckResult) => Promise<void>;
+  /** MCP commits only after the stdio response has been written. */
+  deferCursorCommit?: (commit: () => Promise<void>) => void;
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
@@ -221,7 +223,15 @@ export async function checkAgentMessages(options: {
         if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached));
         signal.throwIfAborted();
         await options.present(result);
-        if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+        if (presented.length > 0) {
+          if (options.deferCursorCommit) {
+            options.deferCursorCommit(() => withFileLock(dirname(path), "check", async () => {
+              await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+            }));
+          } else {
+            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+          }
+        }
         return result;
       }, options.fetcher);
     }, { timeoutMs: Math.min(Math.max(0, Math.floor(deadlineMs - Date.now())), 30_000) });
