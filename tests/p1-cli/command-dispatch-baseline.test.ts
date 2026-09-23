@@ -306,6 +306,9 @@ function coreFixtures(): Fixture[] {
     { id: "meta.no-positional-profile", argv: profile },
     { id: "meta.bare", argv: [] },
     { id: "mcp", argv: ["mcp", "extra"] },
+    { id: "mcp.missing-profile", argv: ["mcp"] },
+    { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
+    { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
 
     { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },

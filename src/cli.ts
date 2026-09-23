@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { serveMcp } from "./mcp/server.js";
+import { signalDuration } from "./cloud/signal-duration.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
@@ -3268,24 +3268,6 @@ function unknownChannelReadMessage(
   if (details === null || details.status !== 404) return null;
   if (followErrorEnvelope(error).error !== "channel_not_found") return null;
   return `There is no channel named ${slug} in this workspace. Nothing was read. Create it with cswarm channel create ${slug}, or drop --channel to read everything.`;
-}
-
-function signalDuration(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const match = /^([1-9]\d*)(m|h|d)$/.exec(value);
-  if (!match) {
-    throw new Error("--until must be a duration such as 90m, 24h, or 7d");
-  }
-  const unit = match[2] === "m"
-    ? 60_000
-    : match[2] === "h"
-    ? 3_600_000
-    : 86_400_000;
-  const milliseconds = Number(match[1]) * unit;
-  if (!Number.isSafeInteger(milliseconds) || milliseconds > 30 * 86_400_000) {
-    throw new Error("--until must be no more than 30d");
-  }
-  return milliseconds;
 }
 
 /**
@@ -9393,7 +9375,7 @@ const inboxVariants = {
  */
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   mcp: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
-    handler: async args => { args.assertShape(["profile", "host-session-id"], 1); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
+    handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
     description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
     flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
     visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]"], bootstrap: true }),

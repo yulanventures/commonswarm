@@ -1,5 +1,7 @@
-import { H0_REQUEST_ID_RE } from "../h0/verbs.js";
-import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "../cloud/signal-limits.js";
+import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
+import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
+import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannelSlug } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
@@ -13,9 +15,10 @@ const string = (maxLength?: number, minLength?: number, pattern?: string) => ({
   ...(minLength === undefined ? {} : { minLength }), ...(pattern === undefined ? {} : { pattern }),
 });
 const body = string(SIGNAL_BODY_MAX, 1);
-const requestId = string(72, 8, H0_REQUEST_ID_RE.source);
-const uuid = string(36, 36, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F"));
-const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: string(), until: string(), request_id: requestId };
+const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
+const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
+const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
+const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
 const schema = (properties: Record<string, ReturnType<typeof string>>, required: string[] = []) => ({
   type: "object" as const, properties, required, additionalProperties: false as const,
 });
@@ -23,8 +26,8 @@ const schema = (properties: Record<string, ReturnType<typeof string>>, required:
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string() }, ["body", "request_id"]), mapResult: mapSignal },
-  { name: "note", description: "Share a note. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string() }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "note", description: "Share a note. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "working_on", description: "Share current work. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
@@ -40,10 +43,15 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   for (const key of Object.keys(args)) {
     const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string>>)[key];
     if (!rule) throw new Error(`Unknown argument: ${key}.`);
-    const item = args[key];
+    const item = key === "channel" && typeof args[key] === "string" ? normalizeChannelSlug(args[key]) : args[key];
     if (typeof item !== "string" || (rule.minLength !== undefined && item.length < rule.minLength) ||
         (rule.maxLength !== undefined && item.length > rule.maxLength) ||
-        (rule.pattern !== undefined && !new RegExp(rule.pattern, "i").test(item))) throw new Error(`Invalid argument: ${key}.`);
+        (rule.pattern !== undefined && !new RegExp(rule.pattern).test(item)) ||
+        (key === "channel" && channelSlugProblem(args[key] as string) !== null)) throw new Error(`Invalid argument: ${key}.`);
+    if (key === "until") {
+      try { signalDuration(item); } catch { throw new Error("Invalid argument: until."); }
+    }
+    if (key === "channel") args[key] = item;
   }
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");
@@ -62,7 +70,7 @@ export function mapCheck(result: AgentCheckResult): object {
 
 export function mapCachedCheck(row: SignalRecord): object {
   return { checked: true, cached: true, messages: [{ id: row.id, from: row.from, from_kind: row.from_kind,
-    kind: row.kind, body: row.body, created_at: row.created_at }] };
+    sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind, body: row.body, created_at: row.created_at }] };
 }
 
 export function mapWhoami(directory: SignalDirectory, principalId: string, workspaceId: string): object {
@@ -77,15 +85,26 @@ export function mapMembers(directory: SignalDirectory, workspaceId: string): obj
     agents: directory.agents.map(row => ({ principal_id: row.principal_id, name: row.name })) };
 }
 
-export function mapSignal(result: PostSignalResult, replayed: boolean): object {
+export function mapSignal(result: PostSignalResult): object {
   const row = result.response.signal!;
   return { signal_id: row.id, kind: row.kind, created_at: row.created_at,
-    in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null, replayed };
+    in_reply_to: row.in_reply_to ?? null, channel_id: row.channel_id ?? null };
+}
+
+/** Only message prefixes the model received may advance the cursor. */
+export function capFreshCheck(result: AgentCheckResult): { output: object; lastVisibleId: string | null } {
+  let visible = result.messages.length;
+  while (visible >= 0) {
+    const output = mapCheck({ ...result, messages: result.messages.slice(0, visible), has_more: visible < result.messages.length || result.has_more });
+    if (Buffer.byteLength(JSON.stringify(output)) <= MCP_RESULT_MAX_BYTES) return { output, lastVisibleId: visible ? result.messages[visible - 1]!.id : null };
+    visible--;
+  }
+  return { output: capMcpResult(mapCheck(result)), lastVisibleId: null };
 }
 
 export function capMcpResult(value: object): object {
   const raw = JSON.stringify(value);
   if (Buffer.byteLength(raw) <= MCP_RESULT_MAX_BYTES) return value;
   // A bounded, explicit answer is safer than cutting JSON or silently hiding rows.
-  return { truncated: true, message: "Result exceeds the MCP byte cap. Narrow the request or use the CLI outside the model session." };
+  return { truncated: true, message: "Result exceeds the MCP byte cap. Narrow the request." };
 }

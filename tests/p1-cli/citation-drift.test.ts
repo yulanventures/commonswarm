@@ -65,19 +65,19 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6378, 6378],
+    lines: [6360, 6360],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6404, 6404],
+    lines: [6386, 6386],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7038, 7038],
+    lines: [7020, 7020],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
@@ -179,7 +179,7 @@ const CITATIONS: Citation[] = [
   },
 ];
 
-test("every file:line this lane cites still points at what it claims", () => {
+test("every file:line this lane cites still points at what it claims", { timeout: 5_000 }, () => {
   const failures: string[] = [];
   for (const c of CITATIONS) {
     const path = fileURLToPath(new URL(c.file, root));

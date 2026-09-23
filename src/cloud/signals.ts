@@ -10,6 +10,7 @@ import {
   type SignalRecipientRef,
   type SignalRecord,
 } from "./command-client.js";
+import { SIGNAL_RECIPIENT_MAX } from "./signal-limits.js";
 import {
   relativeAge,
   relativeExpiry,
@@ -233,6 +234,13 @@ export class SignalMalformedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "SignalMalformedError";
+  }
+}
+
+export class SignalRecipientError extends Error {
+  readonly name = "SignalRecipientError";
+  constructor(readonly code: "recipient_unknown" | "recipient_ambiguous" | "recipient_invalid", message: string) {
+    super(message);
   }
 }
 
@@ -1470,6 +1478,7 @@ export function resolveSignalRecipient(
   selector: string,
   directory: SignalDirectory | readonly SignalMember[],
 ): ResolvedSignalRecipient {
+  if (!selector || selector.length > SIGNAL_RECIPIENT_MAX) throw new SignalRecipientError("recipient_invalid", "signal recipient name is too long or empty");
   const resolved: SignalDirectory = Array.isArray(directory)
     ? { members: directory, agents: [] }
     : directory as SignalDirectory;
@@ -1483,13 +1492,9 @@ export function resolveSignalRecipient(
     if (member && !agent) return { kind: "user", id: member.user_id };
     if (agent && !member) return { kind: "agent", id: agent.principal_id };
     if (member && agent) {
-      throw new Error(
-        `signal recipient id matches both a member and an agent; use a unique id`,
-      );
+      throw new SignalRecipientError("recipient_ambiguous", "signal recipient id matches both a member and an agent; use a unique id");
     }
-    throw new Error(
-      "signal recipient is not a live member or agent of this workspace",
-    );
+    throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
   }
 
   const memberMatches = resolved.members.filter(
@@ -1510,15 +1515,9 @@ export function resolveSignalRecipient(
       ...memberMatches.map((member) => `user ${member.user_id}`),
       ...agentMatches.map((agent) => `agent ${agent.principal_id}`),
     ];
-    throw new Error(
-      `signal recipient name is ambiguous; use one of these ids: ${
-        choices.join(", ")
-      }`,
-    );
+    throw new SignalRecipientError("recipient_ambiguous", `signal recipient name is ambiguous; use one of these ids: ${choices.join(", ")}`);
   }
-  throw new Error(
-    "signal recipient is not a live member or agent of this workspace",
-  );
+  throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
 }
 
 /** Parse --wait as an integer number of seconds in 1..300. */

@@ -146,7 +146,7 @@ export async function checkAgentMessages(options: {
   /** Cursor advances only after the consumer has accepted the output. */
   present: (result: AgentCheckResult) => Promise<void>;
   /** MCP commits only after the stdio response has been written. */
-  deferCursorCommit?: (commit: () => Promise<void>) => void;
+  deferCursorCommit?: (commit: (lastVisibleId?: string) => Promise<void>) => void;
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
@@ -225,8 +225,15 @@ export async function checkAgentMessages(options: {
         await options.present(result);
         if (presented.length > 0) {
           if (options.deferCursorCommit) {
-            options.deferCursorCommit(() => withFileLock(dirname(path), "check", async () => {
-              await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+            options.deferCursorCommit((lastVisibleId?: string) => withFileLock(dirname(path), "check", async () => {
+              const current = await readCheckState(path);
+              const visible = lastVisibleId === undefined ? cursor : presented.find(row => row.id === lastVisibleId);
+              const candidate = visible ? { id: visible.id, created_at: visible.created_at } : null;
+              if (candidate && (!current.cursor || compareSignalCursor(candidate, current.cursor) > 0)) {
+                // Re-read under the lock: another check may have advanced the cursor or
+                // cached additional full bodies since this response was prepared.
+                await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate }));
+              }
             }));
           } else {
             await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));

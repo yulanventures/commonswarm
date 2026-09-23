@@ -1,0 +1,114 @@
+import { AgentSetupError } from "../cloud/agent-profile.js";
+import { AgentCredentialInputError } from "../cloud/agent-credential-input.js";
+import { CommandHttpError } from "../cloud/command-client.js";
+import { classifySignalReadFailure, followErrorEnvelope, followHttpDetails, LocalCredentialSecretAbsentError, SignalRecipientError } from "../cloud/signals.js";
+import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisationRequired, RenewalRefused, RenewalRetryError, RenewalRevoked, RenewalSuperseded, RenewalSuspended, RenewalUnsupported } from "../cloud/renewal.js";
+import { SessionContextError } from "../cloud/session-context.js";
+import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
+
+type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id";
+type Sentence = { message: string; next_step: Action };
+const RETRY: Action = "retry the same call";
+const FIX: Action = "fix the named argument";
+const PERSON: Action = "a person must restore this agent's access outside this session";
+const STOP: Action = "stop and keep the same request id";
+const entry = (message: string, next_step: Action): Sentence => ({ message, next_step });
+
+/** The only model-visible error prose. No producer message is copied here. */
+export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
+  profile_path_invalid: entry("The profile location is invalid.", FIX),
+  agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
+  agent_credential_not_object: entry("The saved agent credential is damaged.", PERSON),
+  agent_credential_missing_agent_token: entry("The saved agent credential is incomplete.", PERSON),
+  agent_credential_invalid_agent_token: entry("The saved agent credential is invalid.", PERSON),
+  agent_credential_fields_invalid: entry("The saved agent credential is damaged.", PERSON),
+  profile_symlink: entry("The profile location is unsafe.", FIX),
+  profile_inside_repository: entry("The profile location is unsafe.", FIX),
+  profile_missing: entry("The profile is missing.", PERSON),
+  profile_invalid: entry("The profile is damaged.", PERSON),
+  profile_credential_missing: entry("The agent credential is missing.", PERSON),
+  profile_identity_mismatch: entry("The credential belongs to another agent.", PERSON),
+  profile_session_conflict: entry("The host session does not match this agent.", PERSON),
+  profile_conflict: entry("The profile belongs to another agent or workspace.", PERSON),
+  connection_invalid: entry("The connection is invalid.", PERSON),
+  connection_target_invalid: entry("The connection target is invalid.", PERSON),
+  connection_identity_mismatch: entry("The connection names another agent.", PERSON),
+  authenticated_identity_mismatch: entry("The service did not confirm this agent.", PERSON),
+  check_state_invalid: entry("The saved message state is damaged.", PERSON),
+  check_paging_unsupported: entry("The service cannot page messages safely.", PERSON),
+  check_recipient_mismatch: entry("The service returned a message for another recipient.", RETRY),
+  check_page_order_invalid: entry("The message page is out of order.", RETRY),
+  check_timeout: entry("The message check timed out; the inbox state is unknown.", RETRY),
+  message_id_invalid: entry("The message_id argument is invalid.", FIX),
+  message_not_cached: entry("That message is absent from the local cache.", FIX),
+  host_session_required: entry("This agent requires its current host session.", PERSON),
+  host_session_invalid: entry("The host session is invalid.", PERSON),
+  until_invalid: entry("The until argument is invalid.", FIX),
+  recipient_unknown: entry("The to argument does not name a live recipient.", FIX),
+  recipient_ambiguous: entry("The to argument names more than one recipient; use a unique identifier.", FIX),
+  recipient_invalid: entry("The to argument is invalid.", FIX),
+  command_id_conflict: entry("This request id was used for different arguments.", STOP),
+  signal_refused: entry("The service refused this signal.", PERSON),
+  forbidden: entry("The service refused this agent's access.", PERSON),
+  unauthenticated: entry("The service refused this agent's credential.", PERSON),
+  upgrade_required: entry("This client must be upgraded before access can resume.", PERSON),
+  horizon_reached: entry("This agent reached its renewal horizon.", PERSON),
+  grant_exhausted: entry("This agent exhausted its renewal grant.", PERSON),
+  renewal_lineage_revoked: entry("This agent's renewal lineage was revoked.", PERSON),
+  renewal_grant_revoked: entry("This agent's renewal grant was revoked.", PERSON),
+  predecessor_revoked: entry("This agent's prior credential was revoked.", PERSON),
+  predecessor_not_found: entry("This agent's prior credential is unavailable.", PERSON),
+  predecessor_not_owned: entry("This agent's prior credential is unavailable.", PERSON),
+  predecessor_expired: entry("This agent's credential expired.", PERSON),
+  predecessor_expired_local: entry("This agent's credential expired.", PERSON),
+  renewal_idle_suspended: entry("This agent's renewal is suspended.", PERSON),
+  renewal_grant_suspended: entry("This agent's renewal grant is suspended.", PERSON),
+  renewal_revoked: entry("This agent's renewal was revoked.", PERSON),
+  renewal_suspended: entry("This agent's renewal is suspended.", PERSON),
+  renewal_device_unavailable: entry("This agent's renewal device is unavailable.", PERSON),
+  renewal_device_mismatch: entry("This agent's renewal device does not match.", PERSON),
+  renewal_unsupported: entry("This agent cannot renew its credential.", PERSON),
+  renewal_outcome_unknown: entry("The renewal outcome is unknown.", RETRY),
+  renewal_superseded: entry("Another process renewed this credential.", RETRY),
+  renewal_retry: entry("The credential renewal is retrying.", RETRY),
+  renewal_credential_check: entry("The service could not verify this credential.", PERSON),
+  read_refused: entry("The service refused this read.", PERSON),
+  read_failed: entry("The service could not complete this read.", RETRY),
+  read_malformed: entry("The service returned an invalid read response.", RETRY),
+  read_transport: entry("The read could not reach the service.", RETRY),
+  read_timeout: entry("The read timed out.", RETRY),
+  session_context_invalid: entry("The host session context is invalid.", PERSON),
+  file_lock_timeout: entry("The local credential store is busy.", RETRY),
+  stored_record_oversized: entry("The saved credential state is too large.", PERSON),
+  local_credential_absent: entry("The local credential is missing.", PERSON),
+  mcp_call_failed: entry("The tool could not complete this call.", RETRY),
+};
+
+export function mapMcpError(error: unknown): { code: string; message: string; next_step: string; status?: number } {
+  const readHttp = followHttpDetails(error);
+  const readCode = followErrorEnvelope(error).error;
+  const readFailure = classifySignalReadFailure(error);
+  const code = error instanceof AgentSetupError ? error.code
+    : error instanceof AgentCredentialInputError ? error.code
+    : error instanceof CommandHttpError ? error.code ?? `http_${error.status}`
+    : error instanceof SignalRecipientError ? error.code
+    : readHttp ? (readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : [401, 403, 426].includes(readHttp.status) ? "read_refused" : "read_failed")
+    : error instanceof RenewalReauthorisationRequired ? error.reason
+    : error instanceof RenewalRefused || error instanceof RenewalRetryError || error instanceof RenewalRevoked || error instanceof RenewalSuspended ? error.code
+    : error instanceof RenewalUnsupported ? "renewal_unsupported"
+    : error instanceof RenewalSuperseded ? "renewal_superseded"
+    : error instanceof RenewalOutcomeUnknown ? "renewal_outcome_unknown"
+    : error instanceof RenewalCredentialCheckError ? "renewal_credential_check"
+    : readFailure.code === "malformed_response" ? "read_malformed"
+    : readFailure.code === "body_timeout" ? "read_timeout"
+    : ["no_response", "host_ports_exhausted", "aborted"].includes(readFailure.code) ? "read_transport"
+    : error instanceof SessionContextError ? "session_context_invalid"
+    : error instanceof FileLockTimeoutError ? "file_lock_timeout"
+    : error instanceof StoredRecordOversizedError ? "stored_record_oversized"
+    : error instanceof LocalCredentialSecretAbsentError ? "local_credential_absent"
+    : "mcp_call_failed";
+  const safeCode = /^[a-z][a-z0-9_]{0,63}$/.test(code) ? code : "mcp_call_failed";
+  const sentence = MCP_ERROR_SENTENCES[safeCode] ?? entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`, RETRY);
+  const status = error instanceof CommandHttpError ? error.status : readHttp?.status ?? (error instanceof RenewalRefused || error instanceof RenewalCredentialCheckError ? error.status : undefined);
+  return { code: safeCode, ...sentence, ...(status !== undefined && status >= 400 ? { status } : {}) };
+}
