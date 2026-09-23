@@ -38,7 +38,9 @@ Written by CSwarmDevLead (seat 4989ea3b) when N-db landed on main. Newest resume
    `PUBLIC_H0_LINK_JOIN`, which is OFF: record `docs/evidence/2026-09-22-h0-lane4b/LANDING.md`. Lane 5a (poll, ack, the
    listener fence, three migrations 20260922000001-3, release proofs) LANDED, not deployed: record
    `docs/evidence/2026-09-22-h0-lane5a/LANDING.md`. Lane 5b (the h0
-   function forwards register, ask, note, reply, working-on) has not started. The box release procedure
+   function forwards register, ask, note, reply, working-on, in process) LANDED, not deployed: record
+   `docs/evidence/2026-09-22-h0-lane5b/LANDING.md`. Next for H0: the box release (migrations 20260922000001-3, then
+   command + h0 + router) by Anvil under HezLead with `deploy/RELEASE-TO-BOX.md`, then the three-host done-test. The box release procedure
    `deploy/RELEASE-TO-BOX.md` is on main (PR #24, merged 844d0de2); H0 is released with it, run by Anvil under HezLead.
 6. Ahead of H0, by the Strategist's ruling: `lane/listener-outage` (a listener no longer stops for good on one
    transient 403/500; found when no listener on the mini was running), to ship as 0.1.73 with a live control, then
