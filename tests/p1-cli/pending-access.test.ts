@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
+import ts from "typescript";
 import { parsePendingAccess, pendingAccessAge, readPendingAccess, readPendingAccessOptional } from "../../src/cloud/pending-access.js";
 import { renderRoster } from "../../src/cli.js";
 
@@ -89,5 +91,51 @@ test("pending migration ships section 5 proofs and no new index", { timeout: 2_0
   const migration = await readFile(new URL("supabase/migrations/20260924000001_pending_access.sql", root), "utf8");
   assert.match(catalog, /AS catalog_ok\s*\\gset\s*$/);
   assert.match(functional, /swarm_read\.pending_access/);
+  const body = migration.match(/AS \$\$([\s\S]*?)\$\$;/)?.[1];
+  assert.ok(body, "migration contains a function body");
+  const digest = createHash("md5").update(body).digest("hex");
+  assert.match(catalog, new RegExp(`md5\\(p\\.prosrc\\)\\s*=\\s*'${digest}'`));
+  assert.match(functional, /IF v_count < 1 THEN RAISE EXCEPTION/);
+  assert.match(functional, /SELECT count\(\*\) INTO v_count FROM swarm_read\.pending_access\(v_workspace\);\s*IF v_count <> 0 THEN/);
   assert.doesNotMatch(migration, /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i);
+});
+
+function membersPendingCalls(source: string): string[] {
+  const ast = ts.createSourceFile("cli.ts", source, ts.ScriptTarget.Latest, true);
+  let members: ts.FunctionDeclaration | undefined;
+  const find = (node: ts.Node): void => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "runMembers") members = node;
+    ts.forEachChild(node, find);
+  };
+  find(ast);
+  assert.ok(members?.body, "members command must exist");
+  const calls: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && /^readPendingAccess/.test(node.expression.text)) calls.push(node.expression.text);
+    ts.forEachChild(node, visit);
+  };
+  visit(members.body);
+  return calls;
+}
+
+test("the members command itself uses the nonthrowing pending read", { timeout: 2_000 }, async () => {
+  const source = await readFile(new URL("../../src/cli.ts", import.meta.url), "utf8");
+  const calls = membersPendingCalls(source);
+  assert.deepEqual(calls, ["readPendingAccessOptional"]);
+  const reverted = source.replace("const pending = await readPendingAccessOptional(",
+    "const pending = await readPendingAccess(");
+  assert.notEqual(reverted, source, "the mutation reaches members");
+  assert.deepEqual(membersPendingCalls(reverted), ["readPendingAccess"]);
+});
+
+test("lane evidence records the local reset and every Fold 2 ruling", { timeout: 2_000 }, async () => {
+  const lane = await readFile(new URL("../../docs/evidence/2026-09-24-item-j/LANE.md", import.meta.url), "utf8");
+  assert.match(lane, /### Fold 1 post-apply update[\s\S]*lead ran `db:reset`[\s\S]*normal[\s\S]*1\/1 passed/);
+  assert.doesNotMatch(lane, /The revised function is not installed in the lead's shared local stack/);
+  const fold = lane.split("## Fold 2 — 2026-09-24")[1];
+  assert.ok(fold, "Fold 2 section exists");
+  for (const ruling of ["F1", "F2", "F3", "F4", "F5"]) {
+    assert.match(fold, new RegExp(`\\| ${ruling} \\|`));
+  }
 });

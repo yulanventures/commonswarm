@@ -175,3 +175,45 @@ test("member Remove and agent actions have usable rendered geometry", async () =
     `three-child agent row overflows its container: ${JSON.stringify(geometry.agent)}`,
   );
 });
+
+test("Pending access is rendered in the dialog at narrow and desktop widths", { timeout: 40_000 }, async () => {
+  const directory = await mkdtemp(join(tmpdir(), "commonswarm-pending-geometry-"));
+  const fixture = join(directory, "index.html");
+  try {
+    await writeFile(fixture, `<!doctype html><html><head><style>
+      :root { --s-2: .5rem; --s-3: .75rem; --border: #ccc; }
+      .dashboard [hidden] { display: none !important; }
+      ${style}
+    </style></head><body><div class="dashboard">
+      <section class="dashboard__roster-dialog-pending" data-visible>Pending access</section>
+      <section class="dashboard__roster-dialog-pending" data-hidden hidden>Hidden pending</section>
+    </div><script>
+      const shown = document.querySelector('[data-visible]');
+      const hidden = document.querySelector('[data-hidden]');
+      document.documentElement.dataset.pending = btoa(JSON.stringify({
+        width: innerWidth,
+        display: getComputedStyle(shown).display,
+        bounds: shown.getBoundingClientRect().width,
+        hiddenDisplay: getComputedStyle(hidden).display,
+      }));
+    </script></body></html>`, "utf8");
+    const chrome = await findChrome();
+    for (const width of [600, 1200]) {
+      const { stdout } = await run(chrome, [
+        "--headless=new", "--disable-gpu", "--no-sandbox", "--allow-file-access-from-files",
+        `--window-size=${width},700`, "--dump-dom", `file://${fixture}`,
+      ], { maxBuffer: 10 * 1024 * 1024, timeout: 15_000, killSignal: "SIGKILL" });
+      const encoded = stdout.match(/data-pending="([^"]+)"/)?.[1];
+      assert.ok(encoded, `Chrome returned pending geometry at ${width}px`);
+      const measured = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as {
+        width: number; display: string; bounds: number; hiddenDisplay: string;
+      };
+      assert.equal(measured.width, width);
+      assert.equal(measured.display, "grid", `${width}px pending section must be visible`);
+      assert.ok(measured.bounds > 0, `${width}px pending section has rendered bounds`);
+      assert.equal(measured.hiddenDisplay, "none", `${width}px empty section stays hidden`);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

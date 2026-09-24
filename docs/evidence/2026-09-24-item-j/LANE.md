@@ -86,11 +86,12 @@ the edge is verified; build and publish the CLI bundle separately. Verify a
 human and an agent in workspace A see A's pending rows and get an empty result
 for workspace B, then verify first use, exhaustion, revocation, and expiry.
 
-## Not established
+## Initial lane state (superseded below)
 
-The migration and new read resource have not been applied to a local isolated
-stack or to production. No hosted behavior, one-minute poll timing, schema
-catalog state, cross-tenant edge request, or box release was measured here.
+At the initial handoff, the migration and new read resource had not been
+applied to a local isolated stack or to production. The Fold 1 post-apply
+update below records the later local reset and server result. Hosted behavior,
+one-minute poll timing, and a box release were not measured at initial handoff.
 
 ## Fold 1 — 2026-09-24
 
@@ -151,10 +152,55 @@ do not prove those suites pass on an unrestricted host.
 Both new commits passed the local identity and agent-trailer guards (4 address
 fields and 2/2 commits, respectively).
 
-### Fold 1 not established
+### Fold 1 post-apply update
 
-The revised function is not installed in the lead's shared local stack: its
-normal server test currently fails at the old-function row count. Source-mode
-passed in a rolled-back transaction and is not a substitute for the lead's
-post-apply server suite. No production, browser timing, or release behavior was
-measured.
+After Fold 1, the lead ran `db:reset` on the local stack. The checker measured
+the installed function body against the lane migration and ran the normal
+server test: 1/1 passed. This supersedes the earlier “not installed” note.
+It does not establish that the Fold 2 migration body is installed. No
+production, browser timing, or release behavior was measured.
+
+## Fold 2 — 2026-09-24
+
+The Strategist ruled all five Opus findings in scope before the box release.
+This fold changes the lane migration; the lead must run `db:reset` and the
+server suite again after this commit. All local SQL source-mode probes ran
+against loopback and rolled back their fixture and function changes.
+
+| Ruling | Change | Test or proof and mutation result |
+|---|---|---|
+| F1 | The join-code branch now requires a live issuer membership. | The server fixture adds a live, unexpired, unfilled code whose issuer membership is revoked. Baseline source-mode server test: 1/1. Removing only the new predicate makes seven rows instead of six; test exit 1 on the row-count assertion. |
+| F2 | The section 5 catalog proof pins `md5(pg_proc.prosrc)` to the migration body, alongside its shape and grants. The functional proof discovers a live member with a real pending row, requires at least one row for that member, and then requires exactly zero rows without member identity. The release proof README requires that row to be seeded through the normal product path before the release window. | The server test executes both SQL proofs against its seeded fixture. Baseline: 1/1. Changing the issuer display literal only, preserving shape, makes catalog `catalog_ok=false`; test exit 1 on the catalog assertion. Replacing the function's membership guard with `IF false` makes the functional proof raise `pending access returned rows without a member identity`; test exit 1. Changing the guard to `IF true` makes the positive proof raise `no seeded pending row visible to a live member`; test exit 1. The CLI test recomputes the body digest from the migration and checks the catalog constant, so stale proof text also fails. |
+| F3 | Added source-enumerating TypeScript AST checks for the `runMembers` read and every `pendingAgentAccess` call in the app script. | CLI focused test: 6/6; replacing `readPendingAccessOptional` with the throwing `readPendingAccess` in `runMembers` changes the discovered call and fails its assertion. Site observer: 25/25; it discovers four calls and verifies each direct `loadPendingAccess` wrapper. For each of the four, an in-memory revert to the direct throwing call makes the observer throw. |
+| F4 | The roster dialog's Pending access section now uses its existing grid, gap, padding and border at every width; the old desktop `display: none` rule and now-redundant narrow override are gone. | The source observer asserts desktop-capable grid display. A rendered geometry test checks the section at 600px and 1200px, including the `[hidden]` case. The existing geometry test and the new test both fail here because sandboxed Chrome aborts with `SIGABRT`, before measuring CSS. The CSS revert is rejected by the source observer; rendered geometry remains for the lead's unrestricted run. |
+| F5 | Removed the stale Fold 1 “not installed” note and recorded the lead's earlier local `db:reset` plus passing normal server test. This table lists every Fold 2 code, proof, and test change. | This evidence file now distinguishes Fold 1's installed state from Fold 2's source-mode state. |
+
+### Fold 2 gates
+
+All commands ran with a process-group timeout. Exit 1 in the full suites is
+reported rather than hidden; focused tests for this fold passed. Ignored
+scratch logs contain the detailed output and are not release inputs.
+
+| Gate | Exit and count |
+|---|---|
+| `npm run build` | 0 |
+| `env -u FORCE_COLOR npm test` | 1; 962 tests, 960 passed, 2 failed. The real `ps` and resume subprocess fail under sandbox process restrictions. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1; final run: 929 tests, 911 passed, 18 failed. Failures are the sandbox process, hook lock, receipt subprocess, feed limit, and live whoami probes; all 7 pending-access tests passed in this full run and the focused run. An earlier run before the final evidence assertion had 928 tests, 909 passed, 19 failed. |
+| `npm run check:tests` | 0 |
+| `npm run check:edge` | 0; six entry points checked |
+| `bash scripts/build-release.sh` | 0; shipped bundle execute check passed, version 0.1.76 |
+| `npm --prefix site run build` | 0; 12 pages built |
+| `env -u FORCE_COLOR npm --prefix site test` | 1; final run: 574 tests, 570 passed, 3 failed, 1 skipped. The two geometry cases and screenshot/result writer could not run under sandboxed Chrome. An earlier run had 569 passed and 4 failed; its dynamic-viewport case also failed. |
+| Focused server source mode | 0; 1/1, including both release proof SQL files against the seeded fixture |
+| Focused CLI pending | 0; 7/7 |
+| Focused site pending observer | 0; 25/25 |
+
+`git diff --check origin/main...HEAD` and commit guard results follow the
+Fold 2 commit.
+
+### Fold 2 not established
+
+The Fold 2 function is not yet installed in the lead's local stack, and its
+normal server suite remains for the lead after `db:reset`. The rendered desktop
+and narrow geometry, box release proofs under the target role, hosted behavior,
+and production query plans are not established by this lane.

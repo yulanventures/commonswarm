@@ -52,6 +52,9 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
     const revokedRun = randomUUID();
     const partialRun = randomUUID();
     const partialJoin = randomUUID();
+    const issuerLeftJoin = randomUUID();
+    const issuerLeftRegistrar = randomUUID();
+    const issuerLeftRun = randomUUID();
     const rolledBack = new Error("pending access fixture rolled back");
     await assert.rejects(sql.begin(async (tx) => {
       // Source-mode is for local mutation probes only. Normal server runs assert
@@ -78,12 +81,14 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
         (${expiredRegistrar}::uuid, ${workspaceA}::uuid, ${ownerA}::uuid, 'Expired registrar'),
         (${revokedRegistrar}::uuid, ${workspaceA}::uuid, ${ownerA}::uuid, 'Revoked registrar'),
         (${partialRegistrar}::uuid, ${workspaceA}::uuid, ${ownerA}::uuid, 'Partial registrar'),
+        (${issuerLeftRegistrar}::uuid, ${workspaceA}::uuid, ${ownerB}::uuid, 'Issuer left registrar'),
         (${otherTenant}::uuid, ${workspaceB}::uuid, ${ownerB}::uuid, 'Other tenant')`;
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
         VALUES (${run}::uuid, ${registrar}::uuid, ${device}::uuid),
           (${expiredRun}::uuid, ${expiredRegistrar}::uuid, ${device}::uuid),
           (${revokedRun}::uuid, ${revokedRegistrar}::uuid, ${device}::uuid),
-          (${partialRun}::uuid, ${partialRegistrar}::uuid, ${device}::uuid)`;
+          (${partialRun}::uuid, ${partialRegistrar}::uuid, ${device}::uuid),
+          (${issuerLeftRun}::uuid, ${issuerLeftRegistrar}::uuid, ${device}::uuid)`;
       const tokenRun = randomUUID();
       await tx`INSERT INTO swarm.agent_runs (run_id, principal_id, device_id)
         VALUES (${tokenRun}::uuid, ${withToken}::uuid, ${device}::uuid)`;
@@ -122,6 +127,13 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
           ${partialRegistrar}::uuid, ${partialRun}::uuid, ${randomBytes(32)},
           ${randomBytes(16).toString("base64url")}, 1, 3,
           statement_timestamp() + interval '1 hour', ${`pending-${partialJoin}`})`;
+      await tx`INSERT INTO swarm.agent_join_credentials
+        (id, workspace_id, owner_user_id, registrar_principal_id, registrar_run_id,
+         credential_hash, locator, seat_cap, expires_at, mint_command_id)
+        VALUES (${issuerLeftJoin}::uuid, ${workspaceA}::uuid, ${ownerB}::uuid,
+          ${issuerLeftRegistrar}::uuid, ${issuerLeftRun}::uuid, ${randomBytes(32)},
+          ${randomBytes(16).toString("base64url")}, 2,
+          statement_timestamp() + interval '1 hour', ${`pending-${issuerLeftJoin}`})`;
 
     const revokedSibling = randomUUID();
     const expiredSibling = randomUUID();
@@ -184,6 +196,8 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
       });
     }
 
+    const functionalProof = readFileSync("deploy/release-proofs/item-j/20260924000001-functional.sql", "utf8");
+    await tx.unsafe(functionalProof);
     const visible = await readAs(ownerA, workspaceA);
     assert.equal(visible.length, 6);
     assert.deepEqual(visible.map((row) => row.kind).sort(), ["classic", "classic", "classic", "classic", "join", "join"]);
@@ -206,6 +220,12 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
     assert.ok(!visible.some((row) => row.principal_id === registrar));
     assert.ok(!visible.some((row) => row.join_credential_id === expiredJoin));
     assert.ok(!visible.some((row) => row.join_credential_id === revokedJoin));
+    assert.ok(!visible.some((row) => row.join_credential_id === issuerLeftJoin),
+      "a code whose issuer left the workspace cannot register a seat");
+    const catalogProof = readFileSync("deploy/release-proofs/item-j/20260924000001-catalog.sql", "utf8")
+      .replace(/\\gset\s*$/, "");
+    const proofResult = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogProof);
+    assert.equal(proofResult[0]?.catalog_ok, true, "section 5 catalog proof checks the installed body");
     assert.deepEqual(Object.keys(visible[0]!).sort(), [
       "expires_at", "issued_at", "issuer_display", "join_credential_id", "kind",
       "owner_user_id", "principal_id", "principal_name", "seat_cap", "seats_used",
