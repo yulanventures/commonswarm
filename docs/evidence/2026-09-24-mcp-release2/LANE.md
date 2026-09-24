@@ -145,7 +145,7 @@ The hard rules barred live H0 registration/read/post and production-host contact
 
 ## Fold 3 — round-3 rulings and controls
 
-Fold 3 checks claims against the existing server source only. `registerAgentSeat` can return `forbidden`, `invalid_request`, `upgrade_required`, and `principal_limit_reached` after loading a credential that may already have been redeemed. The H0 forwarding and routing refusals do not reach registration. `REGISTER_NO_SEAT_THIS_ATTEMPT` is generated from those handlers and states only what this call proves. The three existing-seat codes retain the revoke sentence; `command_id_conflict` remains uncertain. No server, edge, or migration file changed.
+Code and regression tests were committed at `2892f3ee`. Fold 3 checks claims against the existing server source only. `registerAgentSeat` can return `forbidden`, `invalid_request`, `upgrade_required`, and `principal_limit_reached` after loading a credential that may already have been redeemed. The H0 forwarding and routing refusals do not reach registration. `REGISTER_NO_SEAT_THIS_ATTEMPT` is generated from those handlers and states only what this call proves. The three existing-seat codes retain the revoke sentence; `command_id_conflict` remains uncertain. No server, edge, or migration file changed.
 
 | Ruling | Change | Regression control and reversal mutation |
 |---|---|---|
@@ -168,7 +168,7 @@ Eight reversal probes ran against the restored source, each with a passing posit
 | `bash scripts/build-release.sh` | 0 | Single-file bundle built and execute-checked. |
 | `npm --prefix site run build` | 0 | 12 static pages. The first local dependency copy dereferenced `.bin` links and could not resolve Astro; a second copy preserving those links passed, then the original symlink was restored. |
 | `env -u FORCE_COLOR npm --prefix site test` | 1 | 570 tests: 494 pass, 75 browser subprocess SIGABRT failures, 1 skip. The Fold 3 prompt test passes. |
-| `git diff --check origin/main...HEAD` | Pending commit | Check the committed branch range after this evidence lands. |
+| `git diff --check origin/main...HEAD` | 0 | Checked the committed branch range after the code commit; rechecked after this evidence commit. |
 
 All gate subprocesses had wall-clock timeouts and process-group termination on timeout. They used temporary HOME and XDG config directories and loopback `CSWARM_SITE` and `SWARM_CLOUD_URL` overrides. No gate timed out; no test process remains.
 
