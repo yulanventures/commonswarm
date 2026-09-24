@@ -265,11 +265,15 @@ import {
   formatArrivalRetryNotice,
   ARRIVAL_RETRY_NOTICE_THRESHOLD_MS,
   EXIT_NOTIFY_ORPHANED,
+  NOTIFY_FLAG,
+  NOTIFY_SIGNAL_EXIT_CODES,
+  notifySignalStopSentence,
   NotifyStdoutClosedError,
   releaseArrivalWatchLock,
   runArrivalWatch,
   writeArrivalMonitorLine,
 } from "./cloud/arrival-watch.js";
+import { lsofStdoutConsumer } from "./stdout-consumer.js";
 import {
   IDLE_POLL_DEFAULT_MS,
   idlePollHelpSentence,
@@ -4542,7 +4546,7 @@ async function runSignalRead(
   args: Arguments,
   inbox: boolean,
 ): Promise<void> {
-  const notify = inbox && args.has("notify");
+  const notify = inbox && args.has(NOTIFY_FLAG);
   args.assertShape(notify
     ? [
       ...TARGET_FLAGS,
@@ -4756,9 +4760,17 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
 
   const controller = new AbortController();
   const httpClient = new ListenerHttpClient();
-  const stop = () => controller.abort();
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
+  let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
+  const stopInt = () => { stopSignal = "SIGINT"; controller.abort(); };
+  const stopTerm = () => { stopSignal = "SIGTERM"; controller.abort(); };
+  process.on("SIGINT", stopInt);
+  process.on("SIGTERM", stopTerm);
+  const testCheckMs = process.env.NODE_ENV === "test" &&
+      new URL(cloud.url).hostname === "127.0.0.1"
+    ? Number(process.env.CSWARM_TEST_NOTIFY_CHECK_MS)
+    : NaN;
+  const stdoutCheckIntervalMs = Number.isInteger(testCheckMs) && testCheckMs >= 100 && testCheckMs <= 60_000
+    ? testCheckMs : 60_000;
   const lockPath = arrivalWatchLockPath(
     cloud,
     selected.selectedWorkspace,
@@ -4780,6 +4792,8 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       store: cursorStore,
       signal: controller.signal,
       wake,
+      stdoutConsumer: lsofStdoutConsumer(Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2))),
+      stdoutCheckIntervalMs,
       readPage: async ({ after, baseline, limit }) => {
         const token = selected.session
           ? await selected.session.bearer()
@@ -4840,9 +4854,14 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     if (result.reason === "error") {
       throw result.error ?? new Error("arrival watch stopped");
     }
+    // Programmatic aborts keep exit 0; only an OS signal sets a failure status.
+    if (stopSignal !== null) {
+      process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal)}\n`);
+      process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
+    }
   } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
+    process.off("SIGINT", stopInt);
+    process.off("SIGTERM", stopTerm);
     httpClient.close();
     await wake.close();
     await releaseArrivalWatchLock(lockPath);
@@ -9595,7 +9614,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   reply: commandEntry({ tool: "reply", handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed"], workspaceErrorJson: true }),
-  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has("notify") ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", "notify"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
+  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(NOTIFY_FLAG) ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
   workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use"], workspaceErrorJson: true }),
   new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm new \"<workspace name>\"", "cswarm new --name"] }),

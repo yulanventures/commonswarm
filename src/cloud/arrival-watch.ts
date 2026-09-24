@@ -27,6 +27,7 @@ import {
   LISTENER_WAKE_MODE_PUSH,
   type WakeHandle,
 } from "../listener/wake.js";
+import type { StdoutConsumerAdapter } from "../stdout-consumer.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -41,6 +42,13 @@ export const ARRIVAL_WATCH_POLL_MS = IDLE_ARRIVAL_WATCH_POLL_MS;
 export const ARRIVAL_RETRY_NOTICE_THRESHOLD_MS = 60_000;
 /** sysexits EX_IOERR: stdout's pipe reader is gone, so the monitor must stop. */
 export const EXIT_NOTIFY_ORPHANED = 74;
+export const NOTIFY_FLAG = "notify";
+export const NOTIFY_RESTART_COMMAND = `cswarm inbox --${NOTIFY_FLAG}`;
+export const NOTIFY_SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 } as const;
+
+export function notifySignalStopSentence(signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES): string {
+  return `inbox --notify stopped because of ${signal}; nothing is watching this inbox now. Restart it under the session's Monitor with ${NOTIFY_RESTART_COMMAND}.`;
+}
 
 /** Stable typed failure for a notify monitor whose stdout reader has closed. */
 export class NotifyStdoutClosedError extends Error {
@@ -532,6 +540,9 @@ export async function runArrivalWatch(options: {
   /** Shared Realtime subscriber. Absent: poll only, as before this lane. */
   wake?: WakeHandle;
   reconcileMs?: number;
+  /** Present only for the CLI monitor; other callers retain their wait behavior. */
+  stdoutConsumer?: StdoutConsumerAdapter;
+  stdoutCheckIntervalMs?: number;
 }): Promise<ArrivalWatchStop> {
   const pollMs = options.pollMs ?? ARRIVAL_WATCH_POLL_MS;
   const random = options.random ?? Math.random;
@@ -544,7 +555,25 @@ export async function runArrivalWatch(options: {
   let attempt = 0;
   let reconcileDueAt = now();
   let pendingKind: "wake" | "other" = "other";
+  const checkIntervalMs = options.stdoutCheckIntervalMs ?? IDLE_POLL_MAX_MS;
+  if (!Number.isFinite(checkIntervalMs) || checkIntervalMs <= 0 || checkIntervalMs > IDLE_POLL_MAX_MS) {
+    throw new RangeError("stdout check interval must be within the idle poll cap");
+  }
+  let nextStdoutCheckAt = now();
   const cancelled = () => options.signal?.aborted === true;
+
+  const inspectStdout = async (): Promise<void> => {
+    if (!options.stdoutConsumer || cancelled() || now() < nextStdoutCheckAt) return;
+    // Advance before awaiting: one watch never starts a second inspector child.
+    nextStdoutCheckAt = now() + checkIntervalMs;
+    let state: Awaited<ReturnType<StdoutConsumerAdapter["inspect"]>>;
+    try {
+      state = await options.stdoutConsumer.inspect(process.pid, options.signal);
+    } catch {
+      state = "cannot_determine";
+    }
+    if (!cancelled() && state === "orphaned") throw new NotifyStdoutClosedError();
+  };
 
   const wait = async (ms: number): Promise<void> => {
     if (options.sleep) {
@@ -571,7 +600,17 @@ export async function runArrivalWatch(options: {
     if (hadDelivery) emptyIdleStreak = 0;
     const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, IDLE_POLL_MAX_MS);
     if (!hadDelivery) emptyIdleStreak += 1;
-    await wait(intervalMs);
+    if (!options.stdoutConsumer) {
+      await wait(intervalMs);
+      return;
+    }
+    const until = now() + intervalMs;
+    while (!cancelled()) {
+      await inspectStdout();
+      const remaining = until - now();
+      if (remaining <= 0) return;
+      await wait(Math.min(remaining, Math.max(1, nextStdoutCheckAt - now())));
+    }
   };
 
   const pushMode = (): boolean =>
@@ -604,10 +643,22 @@ export async function runArrivalWatch(options: {
     }
     const cap = waitCapMs();
     const until = Math.min(reconcileDueAt, now() + cap);
-    const reason = await wake.next({
-      until,
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    let reason: Awaited<ReturnType<WakeHandle["next"]>>;
+    if (!options.stdoutConsumer) {
+      reason = await wake.next({ until, ...(options.signal ? { signal: options.signal } : {}) });
+    } else {
+      while (true) {
+        await inspectStdout();
+        if (cancelled()) return;
+        reason = await wake.next({
+          until: Math.min(until, nextStdoutCheckAt),
+          ...(options.signal ? { signal: options.signal } : {}),
+        });
+        if (cancelled() || reason !== "deadline" || now() >= until) break;
+        // A deadline that has already passed must still yield to cancellation.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    }
     if (cancelled()) return;
     if (reason === "wake" && pushMode()) {
       const coalesceMs = wake.coalescingRemainingMs(now());
