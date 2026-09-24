@@ -46,8 +46,35 @@ export const NOTIFY_FLAG = "notify";
 export const NOTIFY_RESTART_COMMAND = `cswarm inbox --${NOTIFY_FLAG}`;
 export const NOTIFY_SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 } as const;
 
-export function notifySignalStopSentence(signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES): string {
-  return `inbox --notify stopped because of ${signal}; nothing is watching this inbox now. Restart it under the session's Monitor with ${NOTIFY_RESTART_COMMAND}.`;
+export interface NotifyRestartOptions {
+  agentTokenFile?: string;
+  agentTokenStdin?: boolean;
+  workspaceId?: string;
+  url?: string;
+  anonKey?: string;
+}
+
+function shellArg(value: string): string {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export function notifyRestartCommand(options: NotifyRestartOptions): string {
+  const parts = [NOTIFY_RESTART_COMMAND];
+  if (options.agentTokenFile !== undefined) parts.push("--agent-token-file", shellArg(options.agentTokenFile));
+  if (options.agentTokenStdin) parts.push("--agent-token-stdin");
+  if (options.workspaceId !== undefined) parts.push("--workspace-id", shellArg(options.workspaceId));
+  if (options.url !== undefined) parts.push("--url", shellArg(options.url));
+  if (options.anonKey !== undefined) parts.push("--anon-key", shellArg(options.anonKey));
+  return parts.join(" ");
+}
+
+export function notifySignalStopSentence(
+  signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES,
+  options: NotifyRestartOptions,
+): string {
+  const stdin = options.agentTokenStdin ? " with the same credential input on stdin" : "";
+  return `inbox --notify stopped because of ${signal} and nothing is watching this inbox now; restart it under the session's Monitor with ${notifyRestartCommand(options)}${stdin}.`;
 }
 
 /** Stable typed failure for a notify monitor whose stdout reader has closed. */
@@ -596,10 +623,7 @@ export async function runArrivalWatch(options: {
     });
   };
 
-  const idleWait = async (hadDelivery: boolean): Promise<void> => {
-    if (hadDelivery) emptyIdleStreak = 0;
-    const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, IDLE_POLL_MAX_MS);
-    if (!hadDelivery) emptyIdleStreak += 1;
+  const waitWithStdoutChecks = async (intervalMs: number): Promise<void> => {
     if (!options.stdoutConsumer) {
       await wait(intervalMs);
       return;
@@ -611,6 +635,13 @@ export async function runArrivalWatch(options: {
       if (remaining <= 0) return;
       await wait(Math.min(remaining, Math.max(1, nextStdoutCheckAt - now())));
     }
+  };
+
+  const idleWait = async (hadDelivery: boolean): Promise<void> => {
+    if (hadDelivery) emptyIdleStreak = 0;
+    const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, IDLE_POLL_MAX_MS);
+    if (!hadDelivery) emptyIdleStreak += 1;
+    await waitWithStdoutChecks(intervalMs);
   };
 
   const pushMode = (): boolean =>
@@ -772,7 +803,7 @@ export async function runArrivalWatch(options: {
       );
       const typed = error instanceof Error ? error : new Error(String(error));
       options.onRetry?.(typed, delayMs);
-      await wait(delayMs);
+      await waitWithStdoutChecks(delayMs);
     }
   }
   return { reason: "cancelled" };

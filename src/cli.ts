@@ -268,6 +268,7 @@ import {
   NOTIFY_FLAG,
   NOTIFY_SIGNAL_EXIT_CODES,
   notifySignalStopSentence,
+  type NotifyRestartOptions,
   NotifyStdoutClosedError,
   releaseArrivalWatchLock,
   runArrivalWatch,
@@ -4758,6 +4759,14 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     );
   }
 
+  const restartOptions: NotifyRestartOptions = {
+    ...(args.has("agent-token-file") ? { agentTokenFile: args.optional("agent-token-file") } : {}),
+    ...(args.has("agent-token-stdin") ? { agentTokenStdin: true } : {}),
+    ...(args.has("workspace-id") ? { workspaceId: args.optional("workspace-id") } : {}),
+    ...(args.has("url") ? { url: args.optional("url") } : {}),
+    ...(args.has("anon-key") ? { anonKey: args.optional("anon-key") } : {}),
+  };
+
   const controller = new AbortController();
   const httpClient = new ListenerHttpClient();
   let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
@@ -4856,7 +4865,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     }
     // Programmatic aborts keep exit 0; only an OS signal sets a failure status.
     if (stopSignal !== null) {
-      process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal)}\n`);
+      process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions)}\n`);
       process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
     }
   } finally {
