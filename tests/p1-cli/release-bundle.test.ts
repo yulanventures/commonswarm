@@ -64,6 +64,10 @@ test("the shipped CJS artifact starts and can load a host module", { timeout: 12
   const bin = join(isolated, "cswarm");
   const missing = join(isolated, MISSING_BRIDGE);
   try {
+    const inRepoHelp = runIsolated(bundlePath, ["mcp", "connect", "--help"], { cwd: isolated, home });
+    assert.equal(inRepoHelp.status, 0, inRepoHelp.stderr + inRepoHelp.stdout);
+    assert.match(inRepoHelp.stdout, /cswarm mcp connect --url/);
+
     await copyFile(bundlePath, bin);
     await chmod(bin, 0o755);
 

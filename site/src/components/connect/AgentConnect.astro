@@ -43,6 +43,7 @@ interface Props {
 import { STANDING_GRANT_COPY } from "../../lib/standing-grants";
 import { h0LinkJoinEnabled } from "../../lib/h0-link-join-flag";
 import { joinInviteLimitSentence } from "../../../../src/protocol/agent-join-limits";
+import { dashboardMcpPrompt } from "./agent-prompt";
 
 const {
   workspaceId,
@@ -150,8 +151,13 @@ const {
     </button>
 
     <button class="ac__btn ac__btn--primary" type="submit" data-action="mint">
-      Generate prompt
+      Generate fallback prompt
     </button>
+    <details class="ac__advanced">
+      <summary>Connect with MCP</summary>
+      <p class="ac__hint">This terminal flow keeps the connect code and seat token out of the agent's model turn.</p>
+      <pre class="ac__pre">{dashboardMcpPrompt()}</pre>
+    </details>
     {h0LinkJoinEnabled && (
       <div class="ac__field" data-h0-link-join>
         <p class="ac__hint">
@@ -202,7 +208,7 @@ const {
           stroke-linejoin="round"></path>
       </svg>
       <span>
-        Keep the prompt or setup file private. Copy it before you leave this screen.
+        This fallback prompt or setup file carries a secret through the model. Keep it private. Copy it before you leave this screen.
         If you lose it, create another.
       </span>
     </p>

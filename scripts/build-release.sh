@@ -35,6 +35,12 @@ npx esbuild src/cli.ts \
   --define:__COSWARM_VERSION__="\"$VERSION\"" \
   --outfile="$OUT/cswarm"
 
+# The repository is an ESM package. A suffixless CJS bundle run by its in-repo
+# path inherits that package scope even when the caller's cwd is elsewhere.
+# A copied standalone bundle has no such parent and already works; this makes
+# the in-repo artifact use the same module format during verification.
+printf '{"type":"commonjs"}\n' > "$OUT/package.json"
+
 chmod +x "$OUT/cswarm"
 
 # esbuild preserves the shebang already present in src/cli.ts. Do not add another —

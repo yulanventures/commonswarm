@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
-import { dashboardAgentConnection, dashboardAgentFilePrompt, dashboardAgentPrompt, promptCopyPayload} from "./agent-prompt";
+import { dashboardAgentConnection, dashboardAgentFilePrompt, dashboardAgentPrompt, dashboardMcpPrompt, promptCopyPayload} from "./agent-prompt";
 import { parseAgentConnection } from "../../../../src/cloud/agent-profile";
 import { AGENT_CONNECTION_FIELDS } from "../../../../src/cloud/agent-onboarding-contract";
 import { decodeAgentConnectionToken } from "../../../../src/cloud/agent-connection-token";
@@ -18,6 +18,21 @@ const INPUT = {
   workspaceId: "44444444-4444-4444-8444-444444444444", workspaceName: "Observer room",
   deploymentUrl: "https://example.supabase.co", anonKey: "TEST_ONLY_PUBLIC_KEY",
 };
+
+test("MCP handoff contains only operator terminal steps; legacy prompt discloses its secret path", { timeout: 10000 }, () => {
+  const mcp = dashboardMcpPrompt();
+  assert.match(mcp, /cswarm mcp code/);
+  assert.match(mcp, /cswarm mcp connect --url/);
+  assert.match(mcp, /hidden prompt/);
+  assert.match(mcp, /claude mcp add --scope user --transport stdio cswarm/);
+  assert.match(mcp, /\[mcp_servers\.cswarm\]/);
+  assert.doesNotMatch(mcp, /swm_join_|swm_agt_|CSWARMA\./);
+  assert.match(dashboardAgentPrompt(INPUT), /fallback passes a credential through the model/);
+  assert.match(dashboardAgentFilePrompt(INPUT), /fallback passes a credential through the model/);
+  const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
+  assert.match(component, /<summary>Connect with MCP<\/summary>/);
+  assert.match(component, /\{dashboardMcpPrompt\(\)\}/);
+});
 
 test("the generated connection is accepted by the CLI without changing the credential schema", () => {
   const raw = dashboardAgentConnection(INPUT);

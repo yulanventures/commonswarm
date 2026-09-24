@@ -37,6 +37,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   profile_session_conflict: entry("The host session does not match this agent.", PERSON),
   profile_other_session: entry("This profile belongs to another session. Stop and tell the operator.", STOP_OPERATOR),
   profile_conflict: entry("The profile belongs to another agent or workspace.", PERSON),
+  profile_exists: entry("The profile path already holds a connection.", PERSON),
   connection_invalid: entry("The connection is invalid.", PERSON),
   connection_target_invalid: entry("The connection target is invalid.", PERSON),
   connection_identity_mismatch: entry("The connection names another agent.", PERSON),

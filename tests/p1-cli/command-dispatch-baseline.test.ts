@@ -80,7 +80,10 @@ const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
   ...["show", "set", "clear", "refusal"].map(key => ({ key: `target.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   { key: "status", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: true },
   { key: "whoami", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
-  { key: "mcp", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.serve", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.code", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.connect", variants: ["default"], profile: "native", hostSessionId: "drop", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.refusal", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "standard", workspaceErrorJson: false },
   { key: "resume", variants: ["inspect", "profile"], profile: "native", hostSessionId: "keep", errorMode: "standard", workspaceErrorJson: false },
   { key: "feedback", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
   ...["create", "ls", "rename", "archive", "refusal"].map(key => ({ key: `channel.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
@@ -150,6 +153,7 @@ async function commandEntryCoverage(): Promise<readonly CommandEntryCoverage[]> 
  * refusal coverage.
  */
 const GROUP_REFUSAL_SITES = [
+  "mcp",
   "receive",
   "hook",
   "listen",
@@ -308,6 +312,8 @@ function coreFixtures(): Fixture[] {
     { id: "meta.no-positional-profile", argv: profile },
     { id: "meta.bare", argv: [] },
     { id: "mcp", argv: ["mcp", "extra"] },
+    { id: "mcp.code", argv: ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"] },
+    { id: "mcp.connect", argv: ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"] },
     { id: "mcp.missing-profile", argv: ["mcp"] },
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
@@ -423,6 +429,7 @@ function canonicalFixtureId(key: string): string {
     return `refusal.group.${groupName}.missing.plain`;
   }
   const overrides: Record<string, string> = {
+    "mcp.serve": "mcp",
     setup: "setup.import",
     check: "check.default",
     "__listen-supervisor": "internal.listen-supervisor",
@@ -505,7 +512,9 @@ function selectedErrorSource(
       "receive.idle.default": ["receive", "idle"],
       "receive.serve.default": ["receive", "serve", "extra"],
       "receive.refusal.default": ["receive"],
-      "mcp.default": ["mcp", "extra"],
+      "mcp.serve.default": ["mcp", "extra"],
+      "mcp.code.default": ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
+      "mcp.connect.default": ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
     };
     const route = `${entry.key}.${variant}`;
     const argv = argvByKey[route];

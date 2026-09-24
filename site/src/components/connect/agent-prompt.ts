@@ -2,7 +2,7 @@
 import { credentialArtifact, type AgentCredential } from "../../lib/agent-connect";
 import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
 import { INSTALL_CMD } from "../../lib/install";
-import { AGENT_CONNECTION_VERSION, AGENT_MESSAGE_FORMAT_RULE, AGENT_SETUP_HOST_GUIDANCE, type AgentConnectionEnvelope } from "../../../../src/cloud/agent-onboarding-contract";
+import { AGENT_CONNECTION_VERSION, AGENT_MESSAGE_FORMAT_RULE, AGENT_SETUP_HOST_GUIDANCE, MCP_OPERATOR_GUIDE, type AgentConnectionEnvelope } from "../../../../src/cloud/agent-onboarding-contract";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../../../src/cloud/agent-credential-input";
 import { encodeAgentConnectionToken } from "../../../../src/cloud/agent-connection-codec";
 
@@ -12,6 +12,12 @@ export interface DashboardPromptInput {
   workspaceName: string;
   deploymentUrl: string;
   anonKey: string;
+}
+
+/** Safe to paste into an assistant: the operator enters the code outside the model turn. */
+export function dashboardMcpPrompt(): string {
+  const serverName = "cswarm";
+  return `${MCP_OPERATOR_GUIDE}\nClaude Code: claude mcp add --scope user --transport stdio ${serverName} -- ${serverName} mcp --profile <path>\nCodex config: [mcp_servers.cswarm] command = "cswarm", args = ["mcp", "--profile", "<path>"]. Use the exact private path printed by connect.`;
 }
 
 export function dashboardAgentConnection(input: DashboardPromptInput): string {
@@ -28,11 +34,12 @@ export function dashboardAgentConnection(input: DashboardPromptInput): string {
 
 function setupPrompt(source: string): string {
   return [
+    "This fallback passes a credential through the model. For MCP, a person can run cswarm mcp code and cswarm mcp connect in their terminal.",
     "Connect this agent to CommonSwarm. Keep the connection file private; never echo its contents or put them in shell commands, logs, URLs, or environment variables.",
     `Use Node.js 22+ and run:
 
 ${codeBlock("sh", INSTALL_CMD)}`,
-    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm. Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.",
+    "Confirm cswarm setup --check-version returns setup_version 1.",
     source,
     `${AGENT_MESSAGE_FORMAT_RULE} (Up to ${SIGNAL_BODY_MAX} characters.)`,
     AGENT_SETUP_HOST_GUIDANCE,

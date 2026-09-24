@@ -134,6 +134,7 @@ export function h0AgentPaste(input: H0AgentPasteInput): string {
    * `attemptId` and `name`.
    */
   return [
+    "This non-MCP handoff sends a join credential through the model. For MCP hosts, a person can use cswarm mcp code and cswarm mcp connect instead.",
     "First fetch this agent document; reading it requires no login or key:",
     document.href,
     `Then call ${verb} once as that document describes, using this single-purpose join credential:`,
