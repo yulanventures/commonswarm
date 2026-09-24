@@ -27,6 +27,19 @@ SELECT
     SELECT v.relkind = 'v'
       AND v.reloptions @> ARRAY['security_barrier=true']
       AND pg_get_userbyid(v.relowner) = 'swarm_admin'
+      AND pg_get_viewdef(v.oid) LIKE '%wake_path_eligible_deliveries%'
+      AND pg_get_viewdef(v.oid) LIKE '%swarm.is_member%'
+    FROM pg_class AS v
+    WHERE v.oid = to_regclass('swarm_read.agent_wake_path_deliveries')
+  ), false)
+  AND COALESCE((
+    SELECT v.relkind = 'v'
+      AND v.reloptions @> ARRAY['security_barrier=true']
+      AND pg_get_userbyid(v.relowner) = 'swarm_admin'
+      AND NOT has_table_privilege('authenticated', v.oid, 'SELECT')
+      AND NOT has_table_privilege('anon', v.oid, 'SELECT')
+      AND NOT has_table_privilege('swarm_read', v.oid, 'SELECT')
+      AND NOT has_table_privilege('swarm_command', v.oid, 'SELECT')
       AND pg_get_viewdef(v.oid) LIKE '%d.acked_at IS NULL%'
       AND pg_get_viewdef(v.oid) LIKE '%d.lease_id IS NULL%'
       AND pg_get_viewdef(v.oid) LIKE '%d.leased_by IS NULL%'
@@ -38,14 +51,13 @@ SELECT
       AND pg_get_viewdef(v.oid) LIKE '%s.kind = ANY%'
       AND pg_get_viewdef(v.oid) LIKE '%s.to_agent_principal_id = d.recipient_agent_principal_id%'
       AND pg_get_viewdef(v.oid) LIKE '%r.recipient_agent_principal_id = d.recipient_agent_principal_id%'
-      AND pg_get_viewdef(v.oid) LIKE '%swarm.is_member%'
       AND pg_get_viewdef(v.oid) LIKE '%later.enqueued_at > d.enqueued_at%'
     FROM pg_class AS v
-    WHERE v.oid = to_regclass('swarm_read.agent_wake_path_deliveries')
+    WHERE v.oid = to_regclass('swarm.wake_path_eligible_deliveries')
   ), false)
   AND COALESCE((
     SELECT p.prosecdef
-      AND pg_get_functiondef(p.oid) LIKE '%agent_wake_path_deliveries%'
+      AND pg_get_functiondef(p.oid) LIKE '%wake_path_eligible_deliveries%'
     FROM pg_proc AS p
     WHERE p.oid = to_regprocedure('swarm_read.signal_delivery_receipts(uuid,uuid,bytea)')
   ), false)

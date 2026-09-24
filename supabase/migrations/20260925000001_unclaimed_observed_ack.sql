@@ -61,8 +61,11 @@ CREATE TABLE swarm.wake_path_release (
 INSERT INTO swarm.wake_path_release (singleton) VALUES (true);
 ALTER TABLE swarm.wake_path_release OWNER TO swarm_admin;
 
--- One eligible-row source feeds both the roster aggregate and receipts.
-CREATE VIEW swarm_read.agent_wake_path_deliveries WITH (security_barrier = true) AS
+-- One private eligible-row source feeds both the roster and receipts. Its
+-- release cutoff is redundant by construction: a known seat has an observed
+-- ACK after the cutoff, and that later observation excludes older mail. Keep
+-- the cutoff as an explicit release guard; no independent test can reach it.
+CREATE VIEW swarm.wake_path_eligible_deliveries WITH (security_barrier = true) AS
 SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
        d.enqueued_at
 FROM swarm.signal_deliveries AS d
@@ -91,8 +94,15 @@ WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
       AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
       AND later.enqueued_at > d.enqueued_at
       AND later.ack_outcome = 'observed' AND later.last_lease_id IS NULL
-      AND later.last_leased_by IS NULL)
-  AND swarm.is_member(d.workspace_id, auth.uid());
+      AND later.last_leased_by IS NULL);
+ALTER VIEW swarm.wake_path_eligible_deliveries OWNER TO swarm_admin;
+REVOKE ALL ON swarm.wake_path_eligible_deliveries FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;
+
+-- The roster adds caller membership; agent-token receipts cannot use auth.uid().
+CREATE VIEW swarm_read.agent_wake_path_deliveries WITH (security_barrier = true) AS
+SELECT workspace_id, signal_id, principal_id, enqueued_at
+FROM swarm.wake_path_eligible_deliveries AS d
+WHERE swarm.is_member(d.workspace_id, auth.uid());
 ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
 
 -- The browser only sees this member-readable aggregate. An ACK removes its row.
@@ -124,7 +134,7 @@ BEGIN
   SELECT COALESCE(jsonb_agg(
     CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
       receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
-        SELECT 1 FROM swarm_read.agent_wake_path_deliveries AS d
+        SELECT 1 FROM swarm.wake_path_eligible_deliveries AS d
         WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
           AND d.principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
       ))

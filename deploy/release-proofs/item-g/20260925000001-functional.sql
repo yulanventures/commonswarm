@@ -16,42 +16,19 @@ DECLARE
   v_owner uuid;
   v_seed uuid := current_setting('item_g.seed_signal_id')::uuid;
 BEGIN
-  SELECT d.workspace_id, d.recipient_agent_principal_id, d.enqueued_at, p.owner_user_id
+  SELECT d.workspace_id, d.principal_id, d.enqueued_at, p.owner_user_id
     INTO v_workspace, v_principal, v_enqueued, v_owner
-  FROM swarm.signal_deliveries AS d
-  JOIN swarm.signals AS s ON s.id = d.signal_id AND s.workspace_id = d.workspace_id
+  FROM swarm.wake_path_eligible_deliveries AS d
   JOIN swarm.agent_principals AS p ON p.workspace_id = d.workspace_id
-    AND p.principal_id = d.recipient_agent_principal_id
+    AND p.principal_id = d.principal_id
   WHERE d.signal_id = v_seed
-    AND d.acked_at IS NULL AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
-    AND d.lease_id IS NULL AND d.leased_by IS NULL
-    AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
-    AND s.until > statement_timestamp() AND s.kind IN ('ask', 'note')
-    AND (s.to_agent_principal_id = d.recipient_agent_principal_id
-      OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
-        WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
-          AND r.recipient_agent_principal_id = d.recipient_agent_principal_id))
-    AND p.revoked_at IS NULL AND swarm.is_member(d.workspace_id, p.owner_user_id)
-    AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
-      WHERE observed.workspace_id = d.workspace_id
-        AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
-        AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
-        AND observed.last_leased_by IS NULL
-        AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton));
+    AND swarm.is_member(d.workspace_id, p.owner_user_id);
   IF v_workspace IS NULL THEN
     RAISE EXCEPTION 'seed signal is not an eligible live unobserved delivery for a known, active seat';
   END IF;
-  SELECT count(*) INTO v_count FROM swarm.signal_deliveries AS d
-  JOIN swarm.signals AS s ON s.id = d.signal_id AND s.workspace_id = d.workspace_id
-  WHERE d.workspace_id = v_workspace AND d.recipient_agent_principal_id = v_principal
-    AND d.signal_id <> v_seed AND d.acked_at IS NULL AND d.lease_id IS NULL
-    AND d.leased_by IS NULL AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
-    AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
-    AND s.until > statement_timestamp() AND s.kind IN ('ask', 'note')
-    AND (s.to_agent_principal_id = d.recipient_agent_principal_id
-      OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
-        WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
-          AND r.recipient_agent_principal_id = d.recipient_agent_principal_id));
+  SELECT count(*) INTO v_count FROM swarm.wake_path_eligible_deliveries AS d
+  WHERE d.workspace_id = v_workspace AND d.principal_id = v_principal
+    AND d.signal_id <> v_seed;
   IF v_count <> 0 THEN
     RAISE EXCEPTION 'seed seat has other eligible mail; use a dedicated test seat';
   END IF;
