@@ -11198,7 +11198,7 @@
       "--json"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"b86f4467a2c4daca332c3247\",\n  \"checked_directory\": \"<ROOT>/listen.status/state/0928840267ac4056659617c7a3794575e55fa2ea99b2c1790754cf73a0e2f576\"\n}\n",
+    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/listen.status/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"
@@ -11218,7 +11218,7 @@
       "--json"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"b86f4467a2c4daca332c3247\",\n  \"checked_directory\": \"<ROOT>/listen.stop/state/0928840267ac4056659617c7a3794575e55fa2ea99b2c1790754cf73a0e2f576\"\n}\n",
+    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/listen.stop/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"
@@ -13408,7 +13408,7 @@
       "fixture-host"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"b86f4467a2c4daca332c3247\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.status.keep/state/0928840267ac4056659617c7a3794575e55fa2ea99b2c1790754cf73a0e2f576\"\n}\n",
+    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.status.keep/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"
@@ -13428,7 +13428,7 @@
       "fixture-host"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"b86f4467a2c4daca332c3247\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.stop.keep/state/0928840267ac4056659617c7a3794575e55fa2ea99b2c1790754cf73a0e2f576\"\n}\n",
+    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.stop.keep/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"
@@ -13845,7 +13845,7 @@
     "handlers": []
   },
   {
-    "id": "policy.host-session.session.disable.keep",
+    "id": "policy.host-session.session.disable.drop",
     "argv": [
       "session",
       "disable",
@@ -13865,11 +13865,11 @@
     ],
     "exitCode": 1,
     "stdout": "",
-    "stderr": "cswarm: Do not combine --profile with --url, --anon-key, --workspace-id.\n",
+    "stderr": "cswarm: --profile is supported by: whoami, resume, working-on, note, ask, reply, receipt, feed, inbox, brain, file, members, feedback, listen, session, channel.\n",
     "handlers": []
   },
   {
-    "id": "policy.host-session.session.enable.keep",
+    "id": "policy.host-session.session.enable.drop",
     "argv": [
       "session",
       "enable",
@@ -13889,11 +13889,11 @@
     ],
     "exitCode": 1,
     "stdout": "",
-    "stderr": "cswarm: Do not combine --profile with --url, --anon-key, --workspace-id.\n",
+    "stderr": "cswarm: --profile is supported by: whoami, resume, working-on, note, ask, reply, receipt, feed, inbox, brain, file, members, feedback, listen, session, channel.\n",
     "handlers": []
   },
   {
-    "id": "policy.host-session.session.recover.keep",
+    "id": "policy.host-session.session.recover.drop",
     "argv": [
       "session",
       "recover",
@@ -13913,7 +13913,7 @@
     ],
     "exitCode": 1,
     "stdout": "",
-    "stderr": "cswarm: Do not combine --profile with --url, --anon-key, --workspace-id.\n",
+    "stderr": "cswarm: --profile is supported by: whoami, resume, working-on, note, ask, reply, receipt, feed, inbox, brain, file, members, feedback, listen, session, channel.\n",
     "handlers": []
   },
   {
