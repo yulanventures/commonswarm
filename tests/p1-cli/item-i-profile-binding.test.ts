@@ -314,7 +314,7 @@ test("bound command producers include the saved id; manual commands stay unchang
     assert.match(AGENT_QUICK_GUIDE, /cswarm check --profile <saved-profile> --host-session-id <this-session-id>/);
     const connectPrompt = await readFile(resolve("site/src/components/connect/agent-prompt.ts"), "utf8");
     assert.match(connectPrompt, /cswarm check --profile <saved-profile> --host-session-id <this-session-id>/);
-    assert.match(AGENT_SETUP_HOST_GUIDANCE, /cswarm reads no environment variable for the session id/);
+    assert.match(AGENT_SETUP_HOST_GUIDANCE, /The CLI reads no environment variable for the session id/);
     const brief = await readFile(resolve("docs/design/2026-09-24-ITEM-I-PROFILE-SESSION-BINDING-BRIEF.md"), "utf8");
     assert.match(brief, /Decision 4's retired words/);
     assert.match(brief, /cswarm reads no environment variable for the session id/);
@@ -357,6 +357,16 @@ test("setup network failures include the operator step", { timeout: 10000 }, asy
   try {
     const result = cli(f.dir, ["setup", "--connection-file", f.input, "--profile", f.profile, "--host-session-id", "session-A", "--json"]);
     assert.ok(result.error?.message.endsWith("Stop and tell the operator. Do not open another agent's profile."), JSON.stringify(result));
+    // The failure sentence is closed before the step is added.
+    assert.match(result.error?.message ?? "", /[.!?] Stop and tell the operator\./);
     assert.equal(result.error?.code, "onboarding_failed");
+  } finally { await f.cleanup(); }
+});
+
+test("setup argument errors are the caller's to fix and carry no operator step", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const result = cli(f.dir, ["setup", "--profile", f.profile, "--json"]);
+    assert.equal(result.error?.message, "--connection-file is required", JSON.stringify(result));
   } finally { await f.cleanup(); }
 });

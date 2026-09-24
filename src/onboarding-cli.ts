@@ -142,22 +142,33 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   }
 }
 
+export const SETUP_OPERATOR_STEP = "Stop and tell the operator. Do not open another agent's profile.";
+
+/** Ends the failure sentence, then adds the operator step. */
+export function withSetupOperatorStep(message: string): string {
+  const trimmed = message.trimEnd();
+  return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;
+}
+
 export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-import");
+  // Argument errors are the caller's to fix; only a setup that ran and failed ends with the operator step.
+  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+  const connectionFile = args.required("connection-file");
+  const hostSessionId = args.optional("host-session-id");
+  if (hostSessionId !== undefined) checkedHostSessionId(hostSessionId);
   try {
-    args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
-    if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
-    await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
+    await output(await setupAgent({ connectionFile, profilePath: args.optional("profile"), hostSessionId }));
   } catch (error) {
     if (error instanceof AgentSetupError && !["profile_other_session", "host_session_required", "setup_host_session_required"].includes(error.code) && !error.code.startsWith("token_")) {
-      throw new AgentSetupError(error.code, `${error.message} Stop and tell the operator. Do not open another agent's profile.`);
+      throw new AgentSetupError(error.code, withSetupOperatorStep(error.message));
     }
     if (error instanceof AgentCredentialInputError) {
-      throw new AgentCredentialInputError(error.code, `${error.detail} Stop and tell the operator. Do not open another agent's profile.`);
+      throw new AgentCredentialInputError(error.code, withSetupOperatorStep(error.detail));
     }
     if (error instanceof AgentSetupError) throw error;
-    if (error instanceof Error) throw new Error(`${error.message} Stop and tell the operator. Do not open another agent's profile.`, { cause: error });
-    throw new Error(`Setup failed. Stop and tell the operator. Do not open another agent's profile.`, { cause: error });
+    if (error instanceof Error) throw new Error(withSetupOperatorStep(error.message), { cause: error });
+    throw new Error(withSetupOperatorStep("Setup failed."), { cause: error });
   }
 }
 
