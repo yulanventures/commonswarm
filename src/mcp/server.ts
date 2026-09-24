@@ -88,10 +88,10 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             });
             const capped = capFreshCheck(result);
             output = capped.output;
-            if (deferredCommit && capped.lastVisibleId && !extra.signal.aborted) {
+            if (deferredCommit && (capped.lastVisibleId || result.messages.length === 0) && !extra.signal.aborted) {
               const commit = deferredCommit;
               const lastVisibleId = capped.lastVisibleId;
-              commitAfterWrite.set(extra.requestId, () => commit(lastVisibleId));
+              commitAfterWrite.set(extra.requestId, () => commit(lastVisibleId ?? undefined));
               extra.signal.addEventListener("abort", () => commitAfterWrite.delete(extra.requestId), { once: true });
             }
           }

@@ -13,6 +13,7 @@ import {
 } from "../src/cloud/delivery-receipts.js";
 import { renderSignalReceiptReport } from "../src/cloud/receipts.js";
 import { cloudTarget } from "../src/cloud/config.js";
+import { WAKE_STALE_MS, WAKE_STALE_LABEL } from "../src/cloud/idle-poll.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const SIGNAL = "22222222-2222-4222-8222-222222222222";
@@ -461,6 +462,23 @@ test("every ledger state stays distinct, including queued, observed, and replied
     });
     assert.equal(deliveryReceiptState(agentReceipt(parsed.receipts[0]!)), outcome);
   }
+});
+
+test("an unobserved directed receipt ages into the shared wake threshold", () => {
+  const parsed = parseDeliveryReceiptResult({ addressed: true, receipts: [receipt()] });
+  const report = { ...parsed, addressed: true as const, workspaceId: WORKSPACE, signalId: SIGNAL };
+  const acceptedAt = Date.parse(ENQUEUED);
+  const young = renderSignalReceiptReport(report, acceptedAt + WAKE_STALE_MS - 1);
+  assert.match(young, /Not yet delivered/);
+  const stale = renderSignalReceiptReport(report, acceptedAt + WAKE_STALE_MS);
+  assert.match(stale, new RegExp(`has not checked this in ${WAKE_STALE_LABEL}`));
+  assert.match(stale, /recipient's operator/);
+  // Mutation control: moving the clock back one millisecond clears the stale sentence.
+  assert.notEqual(stale, young);
+  const observed = renderSignalReceiptReport({ ...report, receipts: [agentReceipt(parseDeliveryReceiptResult({
+    addressed: true, receipts: [receipt({ delivered_at: DELIVERED, acked_at: ACKED, ack_outcome: "observed" })],
+  }).receipts[0]!)] }, acceptedAt + WAKE_STALE_MS);
+  assert.match(observed, new RegExp(`saw this at ${ACKED.replaceAll(".", "\\.")}`));
 });
 
 test("a queued receipt names the session hook and the recipient queue size", () => {

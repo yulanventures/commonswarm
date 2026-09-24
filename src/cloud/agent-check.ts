@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { SignalRecord } from "./command-client.js";
 import {
   compareSignalCursor, parseSignalRecord, readAgentSignalDirectory, readAgentSignalPage,
@@ -18,6 +19,7 @@ import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
+import { DeliveryCommandClient } from "./delivery.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -29,6 +31,7 @@ export const AGENT_CHECK_PAGE_SIZE = 20;
 export const AGENT_CHECK_PREVIEW_CHARS = 1_000;
 export const AGENT_CHECK_BODY_BUDGET = 4_000;
 export const AGENT_CHECK_CACHE_LIMIT = 200;
+export const AGENT_CHECK_ACK_BATCH_LIMIT = AGENT_CHECK_PAGE_SIZE;
 
 export interface AgentCheckMessage {
   id: string;
@@ -64,6 +67,10 @@ interface CheckState {
   cursor: SignalCursor | null;
   /** A bounded cache of presented messages, not delivery ACKs. The service remains authoritative. */
   messages: SignalRecord[];
+  /** Only rows that were successfully presented and locally committed enter this retry queue. */
+  pending_observed_ids?: string[];
+  /** Rotates bounded retries so one permanently refused row cannot starve later mail. */
+  pending_observed_next?: number;
 }
 
 function checkTimeoutError(): AgentSetupError {
@@ -126,6 +133,11 @@ async function readCheckState(path: string): Promise<CheckState> {
   let state: CheckState;
   try { state = JSON.parse(raw); } catch { throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing."); }
   if (!state || state.version !== 1 || !Array.isArray(state.messages) || state.messages.length > AGENT_CHECK_CACHE_LIMIT ||
+      (state.pending_observed_ids !== undefined && (!Array.isArray(state.pending_observed_ids) ||
+        state.pending_observed_ids.length > AGENT_CHECK_CACHE_LIMIT ||
+        state.pending_observed_ids.some(id => typeof id !== "string" || !ONBOARDING_UUID.test(id)))) ||
+      (state.pending_observed_next !== undefined &&
+        (!Number.isSafeInteger(state.pending_observed_next) || state.pending_observed_next < 0)) ||
       (state.cursor !== null && (!state.cursor || !ONBOARDING_UUID.test(state.cursor.id) || !Number.isFinite(Date.parse(state.cursor.created_at))))) {
     throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing.");
   }
@@ -134,7 +146,7 @@ async function readCheckState(path: string): Promise<CheckState> {
   return state;
 }
 
-/** Always fresh: no cooldown, no listener, no background process, and no delivery ACK. */
+/** Always fresh: no cooldown, no listener, no background process. */
 export async function checkAgentMessages(options: {
   profilePath: string;
   hostSessionId?: string;
@@ -155,9 +167,10 @@ export async function checkAgentMessages(options: {
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
   const deadlineMs = Math.min(startedAt + timeoutMs, options.deadlineAtMs ?? Number.POSITIVE_INFINITY);
   try {
-    return await withFileLock(dirname(path), "check", async () => {
+    const checked = await withFileLock(dirname(path), "check", async () => {
       const state = await readCheckState(path);
-      return withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
+      let ackAfterCommit: (() => Promise<void>) | undefined;
+      const result = await withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
         const managed = await profileSessionContext(profile, options.hostSessionId);
         const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
         const credential = await openProfileCredential(profile, fetcher);
@@ -223,6 +236,36 @@ export async function checkAgentMessages(options: {
         if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached));
         signal.throwIfAborted();
         await options.present(result);
+        const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
+        const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
+        const ackPending = async () => {
+          const client = new DeliveryCommandClient(target, fetcher, {
+            deadlineMs: Math.max(1, Math.min(AGENT_CHECK_TIMEOUT_MS, deadlineMs - Date.now())),
+          });
+          const succeeded: string[] = [];
+          const committed = await readCheckState(path);
+          const queued = committed.pending_observed_ids ?? [];
+          const start = queued.length === 0 ? 0 : (committed.pending_observed_next ?? 0) % queued.length;
+          const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
+          let attempted = 0;
+          for (const id of batch) {
+            if (Date.now() >= deadlineMs) break;
+            attempted++;
+            try {
+              await client.observeUnclaimedAgentDelivery({ workspaceId: profile.workspace_id,
+                credential: token, commandId: randomUUID(), signalId: id });
+              succeeded.push(id);
+            } catch { /* Observation is best effort; the committed queue retries on a later check. */ }
+          }
+          if (attempted === 0) return;
+          await withFileLock(dirname(path), "check", async () => {
+            const current = await readCheckState(path);
+            const remaining = (current.pending_observed_ids ?? []).filter(id => !succeeded.includes(id));
+            await writeSecureJsonFile(path, JSON.stringify({ ...current,
+              pending_observed_ids: remaining,
+              pending_observed_next: remaining.length === 0 ? 0 : (start + attempted) % remaining.length }));
+          });
+        };
         if (presented.length > 0) {
           if (options.deferCursorCommit) {
             options.deferCursorCommit((lastVisibleId?: string) => withFileLock(dirname(path), "check", async () => {
@@ -232,16 +275,31 @@ export async function checkAgentMessages(options: {
               if (candidate && (!current.cursor || compareSignalCursor(candidate, current.cursor) > 0)) {
                 // Re-read under the lock: another check may have advanced the cursor or
                 // cached additional full bodies since this response was prepared.
-                await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate }));
+                const visibleIds = presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1)
+                  .filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
+                await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate,
+                  pending_observed_ids: [...new Set([...(current.pending_observed_ids ?? []), ...visibleIds])].slice(-AGENT_CHECK_CACHE_LIMIT) }));
               }
-            }));
+            }).then(async () => { try { await ackPending(); } catch { /* Never change MCP output. */ } }));
           } else {
-            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor }));
+            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds }));
+            ackAfterCommit = ackPending;
+          }
+        } else if (pendingIds.length > 0) {
+          if (options.deferCursorCommit) {
+            options.deferCursorCommit(async () => { try { await ackPending(); } catch { /* Output is already written. */ } });
+          } else {
+            ackAfterCommit = ackPending;
           }
         }
         return result;
       }, options.fetcher);
+      return { result, ackAfterCommit };
     }, { timeoutMs: Math.min(Math.max(0, Math.floor(deadlineMs - Date.now())), 30_000) });
+    if (checked.ackAfterCommit) {
+      try { await checked.ackAfterCommit(); } catch { /* Check output and exit status are unchanged. */ }
+    }
+    return checked.result;
   } catch (error) {
     if (error instanceof FileLockTimeoutError || error instanceof SignalReadTimeoutError) {
       throw checkTimeoutError();

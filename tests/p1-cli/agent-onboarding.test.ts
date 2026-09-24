@@ -9,7 +9,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
-import { cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -46,7 +46,7 @@ function row(i: number, body = `message ${i}`): SignalRecord {
     from: OWNER, from_kind: "user", to: null, to_agent: AGENT, in_reply_to: null, about: null, kind: i % 2 ? "ask" : "note",
     body, until: "2099-01-01T00:00:00.000Z", created_at: "2026-09-08T00:00:00.000Z", sender_owner_relation: "same_owner" };
 }
-function fixture(rows: SignalRecord[] = [], principal = AGENT) {
+function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck = false) {
   const requests: Array<Record<string, unknown>> = [];
   const fetcher = (async (_input: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -63,7 +63,15 @@ function fixture(rows: SignalRecord[] = [], principal = AGENT) {
       signals: rows.filter(r => !body.after_id || r.id > body.after_id).slice(0, body.limit),
       capabilities: { sender_owner_relation: 1, cursor_after: 1 },
     };
-    else throw new Error("unexpected request");
+    else if ((body.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery") {
+      const command = body.command as Record<string, unknown>;
+      assert.equal(command.unclaimed, true);
+      assert.equal(command.lease_id, null);
+      assert.equal(command.outcome, "observed");
+      return new Response(JSON.stringify(failAck ? { error: "temporarily_unavailable" } :
+        { ok: true, status: "accepted", event_ids: [], signal_id: command.signal_id, outcome: "observed" }),
+        { status: failAck ? 503 : 200 });
+    } else throw new Error("unexpected request");
     return new Response(JSON.stringify(result), { status: 200 });
   }) as typeof fetch;
   return { fetcher, requests };
@@ -151,7 +159,7 @@ test("repeat setup preserves receive choice; a profile cannot be replaced by ano
   assert.equal((await readAgentProfile(profilePath)).principal_id, AGENT);
 });
 
-test("standalone checks drain tied timestamps and overflow without a listener or ACK", async () => {
+test("standalone checks drain tied timestamps and overflow and ACK what was shown", async () => {
   const rows = Array.from({ length: 45 }, (_, i) => row(i + 1, "x".repeat(1200)));
   const { profilePath, fake } = await setup(rows);
   const seen: string[] = [];
@@ -161,7 +169,7 @@ test("standalone checks drain tied timestamps and overflow without a listener or
     more = result.has_more;
   }
   assert.deepEqual(seen, rows.map(r => r.id));
-  assert.ok(fake.requests.every(r => r.resource === "members" || r.resource === "signals"));
+  assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, rows.length);
   const quiet = await checkAgentMessages({ profilePath, hostSessionId: "resumed-session", fetcher: fake.fetcher, present: async () => {} });
   assert.equal(quiet.messages.length, 0, "resume shares the profile cursor");
   assert.equal(renderAgentCheck(quiet), "");
@@ -178,6 +186,35 @@ test("output failure does not advance the cursor; a fresh check is not a cooldow
   const next = fixture([row(1), row(2)]);
   await checkAgentMessages({ profilePath, fetcher: next.fetcher, present: async r => { shown += r.messages.length; } });
   assert.equal(shown, 2);
+});
+
+test("failed observation leaves check successful and retries after a later empty check", async () => {
+  const { profilePath } = await setup();
+  const failed = fixture([row(1)], AGENT, true);
+  const first = await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  assert.equal(first.messages.length, 1);
+  assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
+  const recovered = fixture([row(1)]);
+  const second = await checkAgentMessages({ profilePath, fetcher: recovered.fetcher, present: async () => {} });
+  assert.equal(second.messages.length, 0);
+  assert.equal(recovered.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
+  // Mutation control: once the ACK succeeds, a third check must not repeat it.
+  const quiet = fixture([row(1)]);
+  await checkAgentMessages({ profilePath, fetcher: quiet.fetcher, present: async () => {} });
+  assert.equal(quiet.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 0);
+});
+
+test("bounded observation retries rotate past persistent refusals", async () => {
+  const { profilePath } = await setup();
+  const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE + 1 }, (_, index) => row(index + 1));
+  const failed = fixture(rows, AGENT, true);
+  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  const after = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.ok(after.length - before.length <= AGENT_CHECK_PAGE_SIZE);
+  assert.equal((after[before.length]!.command as { signal_id: string }).signal_id, rows.at(-1)!.id);
 });
 
 test("check stops at wrong-recipient and out-of-order pages without consuming them", async () => {
@@ -289,7 +326,7 @@ test("managed profile checks use only the named host's proof", async () => {
   const { newSessionBinding, defaultSessionContextPath, writeSessionContext } = await import("../../src/cloud/session-context.js");
   const { profileSessionContext, profileTarget } = await import("../../src/cloud/agent-profile.js");
   const { AGENT_SESSION_ID_HEADER } = await import("../../src/cloud/session-contract.js");
-  const { profilePath, fake } = await setup();
+  const { profilePath, fake } = await setup([row(1)]);
   const profile = await readAgentProfile(profilePath);
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = join(root, "managed-config");
@@ -306,7 +343,8 @@ test("managed profile checks use only the named host's proof", async () => {
       return fake.fetcher(url, init);
     }) as typeof fetch;
     await checkAgentMessages({ profilePath, hostSessionId: "this-session", fetcher: boundFetch, present: async () => {} });
-    assert.equal(count, 2);
+    assert.equal(count, 3, "directory, inbox, and observation all carry the current session proof");
+    assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
   } finally { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; }
 });
 

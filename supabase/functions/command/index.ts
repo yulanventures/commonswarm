@@ -1687,12 +1687,14 @@ function validateCommand(
         DELIVERY_CLIENT_ERROR_CODES.has(lastError)
       : lastError === null;
     const hasSurfaced = Object.hasOwn(cmd, "surfaced");
+    const hasUnclaimed = Object.hasOwn(cmd, "unclaimed");
     const validSurfaced = !hasSurfaced ||
       cmd.surfaced === true || cmd.surfaced === false;
     /* surfaced is optional on the wire; managed enforcement is in ACK. */
     const valid = exactKeys(cmd, [
       "kind", "signal_id", "lease_id", "listener_instance_id",
       "outcome", "last_error_code", ...(hasSurfaced ? ["surfaced"] : []),
+      ...(hasUnclaimed ? ["unclaimed"] : []),
     ]) &&
       typeof cmd.signal_id === "string" &&
       UUID_RE.test(cmd.signal_id) &&
@@ -1701,7 +1703,9 @@ function validateCommand(
         UUID_RE.test(cmd.listener_instance_id)) ||
         (cmd.lease_id === null && cmd.listener_instance_id === null &&
           outcome === "observed")) &&
-      validOutcome && validError && validSurfaced;
+      validOutcome && validError && validSurfaced &&
+      (!hasUnclaimed || (cmd.unclaimed === true && outcome === "observed" &&
+        cmd.lease_id === null && cmd.listener_instance_id === null && cmd.surfaced === true));
     return valid
       ? {
         ok: true,
@@ -1717,6 +1721,7 @@ function validateCommand(
           outcome: outcome as DeliveryAckOutcome,
           last_error_code: lastError as string | null,
           ...(hasSurfaced ? { surfaced: cmd.surfaced as boolean } : {}),
+          ...(hasUnclaimed ? { unclaimed: true as const } : {}),
         },
       }
       : {
@@ -7680,7 +7685,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3669 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3674 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -10363,6 +10368,7 @@ async function handleTransaction(
         outcome: command.outcome,
         lastErrorCode: command.last_error_code,
         surfaced: command.surfaced,
+        unclaimed: command.unclaimed,
         managed: agent.managed_at != null,
         proof: sessionProofParse.ok ? sessionProofParse.proof : null,
       });

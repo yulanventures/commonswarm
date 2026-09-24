@@ -11,8 +11,9 @@
  * the verbs reach. That circularity is not hypothetical:
  * the first version of this lane shipped eight green tests, and a review arm gutted the `ack`
  * contract to `required: ["signal_id"], optional: ["made_up_field"]` with all eight still passing.
- * The non-circular controls compare this table to the command types at the enforcement boundary.
- * `ack` is checked field-for-field against `AckAgentDeliveryCommand`. The field vocabulary on
+ * The non-circular controls compare this table to the request types at the enforcement boundary.
+ * `ack` is checked field-for-field against H0AckBody, which excludes the command edge's
+ * check-only unclaimed observation. The field vocabulary on
  * ask, note, reply, and working-on is checked against `SignalCommand`; this does not prove that
  * those adapter surfaces expose every input they need. Fields supplied by the command envelope
  * declare that separate target. Poll is compared by calling the h0 poll parser, which does not
@@ -145,9 +146,9 @@ export const H0_VERBS = [
     name: "ack",
     auth: "seat-token",
     /*
-     * The field set below is measured against the command edge's
-     * `AckAgentDeliveryCommand` interface. The AST control checks name, presence, and
-     * nullability for every member except `kind`, which the H0 verb name supplies.
+     * The field set below is measured against H0AckBody, the stricter H0 parser
+     * contract. The command edge also accepts the check-only `unclaimed` shape,
+     * which the H0 poll/ack endpoint does not accept.
      */
     summary:
       "Acknowledge ONE message after its local effect is persisted. Unacknowledged messages replay.",

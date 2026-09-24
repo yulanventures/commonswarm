@@ -26,6 +26,7 @@ export const ARRIVAL_WATCH_POLL_MS = IDLE_POLL_MAX_MS;
  */
 export const WAKE_STALE_MULTIPLE = 3;
 export const WAKE_STALE_MS = IDLE_POLL_MAX_MS * WAKE_STALE_MULTIPLE;
+export const WAKE_STALE_LABEL = formatIdlePollDuration(WAKE_STALE_MS);
 
 const DURATION_RE = /^([1-9]\d*)(s|m)$/;
 

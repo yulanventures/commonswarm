@@ -191,7 +191,7 @@ test("receipt rendering keeps pending, delivered, and current work distinct and 
     leased_until: "2026-08-28T12:40:00.000Z",
   })), NOW);
 
-  assert.match(pending, /Not yet delivered/);
+  assert.match(pending, /recipient's session has not checked this in/);
   assert.match(pending, /cswarm listen status/);
   assert.match(pending, /cswarm receipt/);
   assert.doesNotMatch(pending, /Delivered to agent|working on it right now|finished/);
@@ -199,11 +199,11 @@ test("receipt rendering keeps pending, delivered, and current work distinct and 
   assert.match(delivered, /Delivered to agent/);
   assert.match(delivered, /has not acted on it/);
   assert.match(delivered, /cswarm receipt/);
-  assert.doesNotMatch(delivered, /Not yet delivered|working on it right now|finished/);
+  assert.doesNotMatch(delivered, /has not checked this in|working on it right now|finished/);
 
   assert.match(working, /working on it right now/);
   assert.match(working, /cswarm receipt/);
-  assert.doesNotMatch(working, /Not yet delivered|has not acted on it|finished/);
+  assert.doesNotMatch(working, /has not checked this in|has not acted on it|finished/);
 });
 
 test("an expired lease is delivered and untouched, not current work", () => {
@@ -221,7 +221,7 @@ test("each receipt outcome keeps its exact meaning and next step", () => {
   const expected: Record<DeliveryAckOutcome, RegExp[]> = {
     replied: [/outcome replied/, /cswarm inbox/],
     observed: [
-      /reported outcome observed/,
+      /saw this at 2026-08-28T12:25:00.000Z/,
       /surfaced to the agent's session or handled by its listener/,
       /answer may still be posted/,
       /cswarm ask/,
@@ -536,7 +536,7 @@ test("the receipt CLI uses the human wording by default", async () => {
 
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.match(result.stdout, /Not yet delivered/);
+  assert.match(result.stdout, /recipient's session has not checked this in/);
   assert.match(result.stdout, /cswarm listen status/);
   assert.match(result.stdout, /cswarm receipt/);
   assert.doesNotMatch(result.stdout, /^\s*\{/);

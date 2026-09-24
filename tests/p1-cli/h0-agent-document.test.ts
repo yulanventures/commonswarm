@@ -337,7 +337,9 @@ test("every field's JSON TYPE matches the wire member it maps to", () => {
    * holds for every reference these verbs reach today and would misread an object type. */
   const document = agentDocument() as { paths: Record<string, any> };
   const wires: Record<string, Map<string, WireMember>> = {
-    ack: wireMembers("supabase/functions/command/durable-delivery.ts", "AckAgentDeliveryCommand", 7),
+    // H0 parses a strict subset of the command ACK wire; unclaimed check observations
+    // are not accepted by its poll/ack endpoint.
+    ack: wireMembers("supabase/functions/h0/parse.ts", "H0AckBody", 6),
     signal: wireMembers("supabase/functions/command/index.ts", "SignalCommand", 13),
   };
   const verbWire: Record<string, "ack" | "signal"> = {

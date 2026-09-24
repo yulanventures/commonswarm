@@ -48,3 +48,26 @@ BEGIN
     RAISE EXCEPTION 'signal_deliveries_check9 now admits a lease-free replied ack: %', v_def;
   END IF;
 END $$;
+
+-- A member-readable aggregate for the app roster. The browser never reads the
+-- authority table directly, and an ACK makes the principal disappear from this view.
+CREATE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
+SELECT d.workspace_id, d.recipient_agent_principal_id AS principal_id,
+       min(d.enqueued_at) AS oldest_unobserved_at
+FROM swarm.signal_deliveries AS d
+JOIN swarm.signals AS s
+  ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+JOIN swarm.agent_principals AS p
+  ON p.workspace_id = d.workspace_id AND p.principal_id = d.recipient_agent_principal_id
+WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
+  AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+  AND s.kind IN ('ask', 'note')
+  AND (s.to_agent_principal_id = d.recipient_agent_principal_id
+    OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
+      WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+        AND r.recipient_agent_principal_id = d.recipient_agent_principal_id))
+  AND p.revoked_at IS NULL
+  AND swarm.is_member(d.workspace_id, auth.uid())
+GROUP BY d.workspace_id, d.recipient_agent_principal_id;
+ALTER VIEW swarm_read.agent_wake_path OWNER TO swarm_admin;
+GRANT SELECT ON swarm_read.agent_wake_path TO authenticated;

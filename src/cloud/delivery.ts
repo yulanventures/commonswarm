@@ -241,6 +241,14 @@ export interface DeliveryObservationRequest {
   surfaced?: boolean;
 }
 
+/** A profile check's observation, distinct from a leased ACK or hook queue promotion. */
+export interface UnclaimedObservationRequest {
+  workspaceId: string;
+  credential: string;
+  commandId: string;
+  signalId: string;
+}
+
 export interface DeliveryClientOptions {
   /**
    * Per-request deadline in ms covering fetch and the response body read.
@@ -981,5 +989,27 @@ export class DeliveryCommandClient {
       signalId: request.signalId.toLowerCase(),
       outcome: "observed",
     };
+  }
+
+  async observeUnclaimedAgentDelivery(request: UnclaimedObservationRequest): Promise<DeliveryAckResult> {
+    checkedCommandId(request.commandId);
+    assertAgentToken(request.credential);
+    checkedUuidRequest(request.workspaceId, "workspaceId");
+    checkedUuidRequest(request.signalId, "signalId");
+    const { response, text } = await this.post(request, {
+      kind: "ack_agent_delivery",
+      signal_id: request.signalId.toLowerCase(),
+      lease_id: null,
+      listener_instance_id: null,
+      outcome: "observed",
+      last_error_code: null,
+      [ACK_AGENT_DELIVERY_SURFACED_FIELD]: true,
+      unclaimed: true,
+    }, "unclaimed delivery observation");
+    if (!response.ok) throw refusal(response, text);
+    parseAckSuccess(successBody(response, text, "unclaimed delivery observation"), {
+      signalId: request.signalId.toLowerCase(), outcome: "observed",
+    });
+    return { httpStatus: response.status, signalId: request.signalId.toLowerCase(), outcome: "observed" };
   }
 }

@@ -43,6 +43,7 @@ function signal(body: string, kind: string, id = ID) {
 async function fixture(incomingBody = "A teammate's full message", expiresAt = "2099-01-01T00:00:00.000Z") {
   const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-"));
   const posts: Array<Record<string, any>> = [];
+  const observations: Array<Record<string, any>> = [];
   let renewals = 0;
   const committed = new Map<string, object>();
   let readRefusal = false, sendRefusal = false, readError: { status: number; code: string } | null = null;
@@ -71,6 +72,11 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         if (readError) return send(readError.status, { error: readError.code });
         if (readRefusal) return send(403, { error: "forbidden", message: "Read refused." });
         return send(200, { signals: body.after_id ? incoming.filter(row => row.id > body.after_id) : incoming, capabilities: { cursor_after: 1, sender_owner_relation: 1 } });
+      }
+      if (body.command?.kind === "ack_agent_delivery" && body.command?.unclaimed === true) {
+        observations.push(body);
+        return send(200, { ok: true, status: "accepted", event_ids: [],
+          signal_id: body.command.signal_id, outcome: "observed" });
       }
       if (body.command?.kind === "renew_agent_token") {
         renewals++;
@@ -139,7 +145,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     assert.ok(!text.text.includes("cswarm check --"));
     return { result, value: JSON.parse(text.text) as Record<string, any> };
   };
-  return { root, profile, posts, created: () => committed.size, renewals: () => renewals, client, transport, call, close, stderr: () => stderr, stdout: () => stdout,
+  return { root, profile, posts, observations, created: () => committed.size, renewals: () => renewals, client, transport, call, close, stderr: () => stderr, stdout: () => stdout,
     refuseReads: (value: boolean) => { readRefusal = value; }, refuseSends: (value: boolean) => { sendRefusal = value; },
     setReadError: (value: typeof readError) => { readError = value; }, setSendError: (value: typeof sendError) => { sendError = value; },
     loseNextAnswer: () => { lostAttempts = 3; }, delayNextAnswer: () => { delayAnswer = true; }, malformedNextAnswer: () => { malformedAnswer = true; },
@@ -692,6 +698,25 @@ test("MCP deferred commit occurs only after a successful write", { timeout: 5_00
   await assert.rejects(sendWithDeferredCommit({ id: 2, result: {} }, async () => { throw new Error("write failed"); }, commits));
   assert.equal(commits.size, 0);
   assert.ok(!events.includes("wrong-commit"));
+});
+
+test("MCP check observes directed mail only after its response write", { timeout: 15_000 }, async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.call("check")).value.messages[0].id, ID);
+    for (let turn = 0; turn < 10 && f.observations.length === 0; turn++) {
+      await f.call("whoami");
+    }
+    assert.equal(f.observations.length, 1);
+    assert.equal(f.observations[0]!.command.unclaimed, true);
+    assert.ok(f.stdout().includes(ID), "the response was written before the observation request");
+    const failedWrite: string[] = [];
+    const commits = new Map<string | number, () => Promise<void>>([[1, async () => { failedWrite.push("observed"); }]]);
+    await assert.rejects(sendWithDeferredCommit({ id: 1, result: {} }, async () => {
+      throw new Error("closed stdout");
+    }, commits));
+    assert.deepEqual(failedWrite, [], "mutation control: failed output cannot observe");
+  } finally { await f.close(); }
 });
 
 test("MCP schemas reject invalid durations and use shared request and channel rules", { timeout: 15_000 }, async () => {

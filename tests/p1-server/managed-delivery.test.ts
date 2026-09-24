@@ -241,6 +241,17 @@ async function deliveryRow(signalId: string, principalId: string) {
   return row;
 }
 
+async function wakePathRows(principalId: string, userId = shared.ownerId): Promise<Date[]> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    const rows = await tx<{ oldest_unobserved_at: Date }[]>`
+      SELECT oldest_unobserved_at FROM swarm_read.agent_wake_path
+      WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${principalId}::uuid
+    `;
+    return rows.map(row => row.oldest_unobserved_at);
+  });
+}
+
 before(async () => {
   local = localEnvironment();
   sql = postgres(local.DB_URL, { prepare: false, max: 5 });
@@ -469,6 +480,14 @@ test("surfaced ACK with current proof succeeds and sets surfaced_at", async () =
   const row = await deliveryRow(signalId, agent.principalId);
   assert.equal(row.ack_outcome, "observed");
   assert.ok(row.surfaced_at);
+  const staleReplay = await runCmd(agent.token, {
+    kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null,
+    outcome: "observed", last_error_code: null, surfaced: true,
+  }, { headers: proofHeaders(held.sessionId, held.generation + 1, held.key) });
+  assert.equal(staleReplay.status, 409, JSON.stringify(staleReplay.body));
+  assert.equal(staleReplay.body.error, "session_conflict");
+  assert.deepEqual(await deliveryRow(signalId, agent.principalId), row);
 });
 
 test("unmanaged ACK keeps today's queued-to-observed promotion", async () => {
@@ -504,6 +523,83 @@ test("unmanaged ACK keeps today's queued-to-observed promotion", async () => {
   assert.equal(row.ack_outcome, "observed");
   assert.equal(row.surfaced_at, null);
   assert.equal(row.session_id, null);
+});
+
+test("unclaimed check observation accepts only untouched directed rows and is idempotent", async () => {
+  const agent = await seedAgent("unclaimed-check");
+  const signalId = await postAsk(agent.principalId);
+  assert.equal((await wakePathRows(agent.principalId)).length, 1,
+    "a member sees the unobserved directed delivery");
+  assert.equal((await wakePathRows(agent.principalId, randomUUID())).length, 0,
+    "mutation control: another identity cannot see this wake path");
+  const command = {
+    kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null,
+    outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true,
+  };
+  const first = await runCmd(agent.token, command);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const observed = await deliveryRow(signalId, agent.principalId);
+  assert.equal(observed.ack_outcome, "observed");
+  assert.ok(observed.acked_at);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0,
+    "the roster mark clears once check observes the delivery");
+  const second = await runCmd(agent.token, command);
+  assert.equal(second.status, 200, JSON.stringify(second.body));
+  const replay = await deliveryRow(signalId, agent.principalId);
+  assert.deepEqual(replay.acked_at, observed.acked_at);
+  // Mutation control: a different principal must reach the edge and be refused.
+  const other = await seedAgent("unclaimed-other");
+  const foreign = await runCmd(other.token, command);
+  assert.equal(foreign.status, 403, JSON.stringify(foreign.body));
+  assert.equal(foreign.body.error, "delivery_unavailable");
+});
+
+test("unclaimed check observation cannot change a claimed queued row", async () => {
+  const agent = await seedAgent("unclaimed-claimed");
+  const signalId = await postAsk(agent.principalId);
+  const listener = randomUUID();
+  const claim = await runCmd(agent.token, { kind: "claim_agent_inbox", listener_instance_id: listener });
+  assert.equal(claim.status, 200, JSON.stringify(claim.body));
+  const leaseId = String((claim.body.deliveries as Array<Record<string, unknown>>)[0]?.lease_id);
+  const queued = await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: leaseId, listener_instance_id: listener, outcome: "queued", last_error_code: null });
+  assert.equal(queued.status, 200, JSON.stringify(queued.body));
+  const refusal = await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true });
+  assert.equal(refusal.status, 409, JSON.stringify(refusal.body));
+  assert.equal(refusal.body.error, "delivery_ack_conflict");
+  assert.equal((await deliveryRow(signalId, agent.principalId)).ack_outcome, "queued");
+  const terminal = await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null, outcome: "observed", last_error_code: null });
+  assert.equal(terminal.status, 200, JSON.stringify(terminal.body));
+  const terminalBefore = await deliveryRow(signalId, agent.principalId);
+  const terminalRefusal = await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true });
+  assert.equal(terminalRefusal.status, 409, JSON.stringify(terminalRefusal.body));
+  assert.equal(terminalRefusal.body.error, "delivery_ack_conflict");
+  assert.deepEqual(await deliveryRow(signalId, agent.principalId), terminalBefore);
+});
+
+test("managed unclaimed observation requires the row's current session proof", async () => {
+  const agent = await seedAgent("unclaimed-managed");
+  const held = await holdSession(agent);
+  const signalId = await postAsk(agent.principalId);
+  const command = { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true };
+  const stale = await runCmd(agent.token, command,
+    { headers: proofHeaders(held.sessionId, held.generation + 1, held.key) });
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
+  assert.equal(stale.body.error, "session_conflict");
+  assert.equal((await deliveryRow(signalId, agent.principalId)).acked_at, null);
+  const current = await runCmd(agent.token, command,
+    { headers: proofHeaders(held.sessionId, held.generation, held.key) });
+  assert.equal(current.status, 200, JSON.stringify(current.body));
+  assert.equal((await deliveryRow(signalId, agent.principalId)).ack_outcome, "observed");
 });
 
 test("recovery reclaims a queued unsurfaced row; new holder claims it; attempt unchanged", async () => {
