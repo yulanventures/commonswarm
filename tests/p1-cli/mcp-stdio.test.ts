@@ -151,6 +151,13 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     conflictNext: () => { serverConflict = true; } };
 }
 
+test("profile errors never tell the model to fix a tool argument", () => {
+  // The profile is a process flag, not a tool argument: no profile_* code may carry the "fix the named argument" step.
+  const profileCodes = Object.keys(MCP_ERROR_SENTENCES).filter(code => code.startsWith("profile_"));
+  assert.ok(profileCodes.length >= 8);
+  for (const code of profileCodes) assert.notEqual(MCP_ERROR_SENTENCES[code]!.next_step, "fix the named argument", code);
+});
+
 test("an unknown argument name is echoed quoted and bounded", () => {
   const long = "k".repeat(MCP_ARGUMENT_NAME_ECHO_MAX * 4);
   assert.throws(() => validateMcpArguments("whoami", { [long]: "x" }), (error: Error) =>

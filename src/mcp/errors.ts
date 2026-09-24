@@ -21,14 +21,14 @@ const entry = (message: string, next_step: Action): Sentence => ({ message, next
 
 /** The only model-visible error prose. No producer message is copied here. */
 export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
-  profile_path_invalid: entry("The profile location is invalid.", FIX),
+  profile_path_invalid: entry("The profile location is invalid.", PERSON),
   agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_not_object: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_missing_agent_token: entry("The saved agent credential is incomplete.", PERSON),
   agent_credential_invalid_agent_token: entry("The saved agent credential is invalid.", PERSON),
   agent_credential_fields_invalid: entry("The saved agent credential is damaged.", PERSON),
-  profile_symlink: entry("The profile location is unsafe.", FIX),
-  profile_inside_repository: entry("The profile location is unsafe.", FIX),
+  profile_symlink: entry("The profile location is unsafe.", PERSON),
+  profile_inside_repository: entry("The profile location is unsafe.", PERSON),
   profile_missing: entry("The profile is missing.", PERSON),
   profile_invalid: entry("The profile is damaged.", PERSON),
   profile_credential_missing: entry("The agent credential is missing.", PERSON),
