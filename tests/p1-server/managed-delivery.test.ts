@@ -597,6 +597,11 @@ test("wake mark ignores pre-cutoff and expired mail, then ages and clears live m
     listener_instance_id: null, outcome: "observed", last_error_code: null,
     surfaced: true, unclaimed: true };
   assert.equal((await runCmd(agent.token, command)).status, 200);
+  // The observed row must be OLDER than the later rows this test backdates: a later-enqueued observed
+  // ack means the seat already saw everything before it (fold 2, H2), so leave it after the cutoff but
+  // well before the four-minute-old live row.
+  await sql`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '10 minutes'
+    WHERE signal_id = ${first}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
   assert.equal((await wakePathRows(agent.principalId)).length, 0,
     "old pre-cutoff mail cannot make a known seat stale");
   assert.equal(await receiptWakePath(preCutoff, agent.principalId), false);
@@ -801,7 +806,8 @@ test("box functional proof exits nonzero for missing and ineligible seeds", { ti
     `UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = '${agent.principalId}'::uuid;`,
     `DELETE FROM swarm.memberships WHERE workspace_id = '${shared.workspace}'::uuid AND user_id = '${shared.ownerId}'::uuid;`,
     `UPDATE swarm.signal_deliveries SET enqueued_at = (SELECT applied_at - interval '1 minute' FROM swarm.wake_path_release WHERE singleton) WHERE signal_id = '${seed}'::uuid;`,
-    `UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(), ack_outcome = 'observed', last_error_code = NULL WHERE signal_id = '${seed}'::uuid;`,
+    // The same columns the edge writes for an unclaimed observed ack (an acked row needs delivered_at).
+    `UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(), ack_outcome = 'observed', last_error_code = NULL, delivered_at = COALESCE(delivered_at, statement_timestamp()), surfaced_at = COALESCE(surfaced_at, statement_timestamp()), updated_at = statement_timestamp() WHERE signal_id = '${seed}'::uuid;`,
     `ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only; UPDATE swarm.signals SET created_at = statement_timestamp() - interval '10 seconds', until = statement_timestamp() - interval '1 second' WHERE id = '${seed}'::uuid;`,
   ]) {
     const result = runProof(seed, setup);
