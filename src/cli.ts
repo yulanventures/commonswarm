@@ -7482,7 +7482,7 @@ async function runSession(args: Arguments): Promise<void> {
       "host-session-id",
       ...TARGET_FLAGS,
       ...CREDENTIAL_FLAGS,
-      "workspace-id",
+      ...(args.hadProfileOption ? ["workspace-id"] : []),
       "session-context",
       "json",
     ], 2);
@@ -7518,7 +7518,7 @@ async function runSession(args: Arguments): Promise<void> {
       "host-session-id",
       ...TARGET_FLAGS,
       ...CREDENTIAL_FLAGS,
-      "workspace-id",
+      ...(args.hadProfileOption ? ["workspace-id"] : []),
       "session-context",
       "json",
     ], 2);
@@ -9575,11 +9575,20 @@ function commandEntries(root: AgentCommandRoot): AgentCommandEntry[] {
 export const AGENT_PROFILE_COMMANDS: readonly string[] = Object.entries(AGENT_COMMANDS)
   .map(([verb, root]) => ({
     verb,
-    order: isCommandGroup(root) ? root.profileListOrder : root.profileListOrder,
+    order: root.profileListOrder,
+    commands: isCommandGroup(root)
+      ? (() => {
+          const entries = Object.entries(root.subcommands);
+          const accepting = entries.filter(([, entry]) => entry.profile !== "refuse" && entry.flags.includes("profile"));
+          return accepting.length === entries.length
+            ? [verb]
+            : accepting.map(([action]) => `${verb} ${action}`);
+        })()
+      : root.profile !== "refuse" && root.flags.includes("profile") ? [verb] : [],
   }))
-  .filter((row): row is { verb: string; order: number } => row.order !== undefined)
+  .filter((row): row is { verb: string; order: number; commands: string[] } => row.order !== undefined)
   .sort((left, right) => left.order - right.order)
-  .map(row => row.verb);
+  .flatMap(row => row.commands);
 
 export const CHANNEL_SUBCOMMAND_NAMES: readonly string[] = Object.keys(
   (AGENT_COMMANDS.channel as AgentCommandGroup).subcommands,

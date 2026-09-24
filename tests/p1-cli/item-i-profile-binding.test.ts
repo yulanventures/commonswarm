@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
-import { AGENT_COMMANDS, type AgentCommandEntry, type AgentCommandGroup } from "../../src/cli.js";
+import { AGENT_COMMANDS, AGENT_PROFILE_COMMANDS, type AgentCommandEntry, type AgentCommandGroup } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE, AGENT_SETUP_HOST_GUIDANCE, boundProfileCommands, turnCheckInstruction } from "../../src/cloud/agent-onboarding-contract.js";
 import { turnHookFailureText } from "../../src/onboarding-cli.js";
 import { configureAgentReceive, requestReceiveCanary } from "../../src/cloud/agent-receive.js";
@@ -257,6 +257,55 @@ test("human session lifecycle refuses agent credentials before human login", { t
         "--url", "http://127.0.0.1:9", "--anon-key", "public-test", "--principal-id", AGENT]);
       assert.match(token.stderr, /unknown option: --agent-token-file/, action);
       assert.doesNotMatch(token.stderr, /not logged in/, action);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("profile refusal names exactly the accepting command pairs in table order", { timeout: 10000 }, async () => {
+  const ordered = Object.entries(AGENT_COMMANDS)
+    .filter(([, root]) => root.profileListOrder !== undefined)
+    .sort(([, left], [, right]) => left.profileListOrder! - right.profileListOrder!);
+  const expected = ordered.flatMap(([verb, root]) => {
+    if (!("subcommands" in root)) return root.profile !== "refuse" && root.flags.includes("profile") ? [verb] : [];
+    const pairs = Object.entries(root.subcommands);
+    const accepting = pairs.filter(([, entry]) => entry.profile !== "refuse" && entry.flags.includes("profile"));
+    return accepting.length === pairs.length ? [verb] : accepting.map(([action]) => `${verb} ${action}`);
+  });
+  assert.deepEqual(AGENT_PROFILE_COMMANDS, expected);
+  for (const name of AGENT_PROFILE_COMMANDS) {
+    const [verb, action] = name.split(" ");
+    const root = AGENT_COMMANDS[verb]!;
+    if ("subcommands" in root) {
+      if (action === undefined) {
+        assert.ok(Object.values(root.subcommands).every(entry => entry.profile !== "refuse" && entry.flags.includes("profile")), name);
+      } else {
+        const entry = root.subcommands[action]!;
+        assert.ok(entry.profile !== "refuse" && entry.flags.includes("profile"), name);
+      }
+    } else assert.ok(root.profile !== "refuse" && root.flags.includes("profile"), name);
+  }
+  const f = await fixture();
+  try {
+    const refusal = cliRaw(f.dir, ["session", "enable", "--profile", f.profile]);
+    assert.match(refusal.stderr, /--profile is supported by:/);
+    assert.ok(refusal.stderr.includes(`--profile is supported by: ${expected.join(", ")}.`));
+  } finally { await f.cleanup(); }
+});
+
+test("session status and stop reject workspace id without profile", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    for (const action of ["status", "stop"]) {
+      const without = cliRaw(f.dir, ["session", action, "--url", "http://127.0.0.1:9", "--workspace-id", WS]);
+      assert.notEqual(without.status, 0);
+      assert.match(without.stderr, /unknown option: --workspace-id/, action);
+      const plain = cliRaw(f.dir, ["session", action, "--url", "http://127.0.0.1:9"]);
+      assert.doesNotMatch(plain.stderr, /unknown option: --workspace-id/, action);
+      assert.match(plain.stderr, /needs --agent-token-file or --agent-token-stdin/, action);
+      const expanded = cliRaw(f.dir, ["session", action, "--profile", f.profile, "--host-session-id", "session-A"]);
+      assert.doesNotMatch(expanded.stderr, /unknown option: --workspace-id/, action);
+      assert.match(expanded.stderr, /--session-context is required/, action);
     }
   } finally { await f.cleanup(); }
 });
