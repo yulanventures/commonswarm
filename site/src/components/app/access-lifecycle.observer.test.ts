@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { PendingRefreshGate } from "../../lib/pending-refresh";
 import { isInviteSubmitCurrent } from "../../lib/invite-submit";
 import {
+  loadPendingAccess,
   pendingAccessRows,
   shouldPollPendingAccess,
   shouldRetireFreshInvite,
@@ -42,13 +43,32 @@ test("server pending rows show invitation age and disappear with the next snapsh
   };
   const cancellable = pendingAccessRows([], [token], () => "Owner", Date.parse(issuedAt),
     () => "2 minutes ago", pending, "workspace");
+  assert.equal(cancellable.length, 2);
   assert.equal(cancellable[0]!.kind, "agent");
   assert.equal(cancellable[0]!.id, "token-1");
+  assert.equal(cancellable[0]!.state,
+    "Model not specified · owned by Owner · expires 2 minutes ago");
+  assert.equal(cancellable[0]!.cancelLabel, "Cancel access for Wren");
   assert.equal(cancellable[1]!.kind, "pending");
+  assert.equal(cancellable[1]!.id, "j1");
+  const withoutServer = pendingAccessRows([], [token], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", [], "workspace");
+  assert.equal(withoutServer[0]!.id, "token-1");
   // Mutation control: first use, cap exhaustion, revocation or expiry removes a
   // server row; the next poll's empty snapshot must clear both display rows.
   assert.deepEqual(pendingAccessRows([], [], () => "Owner", Date.parse(issuedAt),
     () => "2 minutes ago", [], "workspace"), []);
+});
+
+test("a failed pending read leaves the workspace pending section available", { timeout: 2_000 }, async () => {
+  for (const failure of [new Error("network"), new Error("404"), new Error("500")]) {
+    assert.deepEqual(await loadPendingAccess(async () => { throw failure; }), { rows: [], failed: true });
+  }
+  assert.deepEqual(await loadPendingAccess(async () => ["row"]), { rows: ["row"], failed: false });
+  const source = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(source, /data-pending-load-note hidden>Invited, not connected: could not load/);
+  assert.match(source, /loadPendingAccess\(\(\) => pendingAgentAccess\(selected\.id\)\)/);
+  assert.match(source, /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed/);
 });
 
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");

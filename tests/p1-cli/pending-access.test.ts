@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import { parsePendingAccess, pendingAccessAge, readPendingAccess } from "../../src/cloud/pending-access.js";
+import { parsePendingAccess, pendingAccessAge, readPendingAccess, readPendingAccessOptional } from "../../src/cloud/pending-access.js";
 import { renderRoster } from "../../src/cli.js";
 
 const OWNER = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -31,6 +32,12 @@ test("members renders server pending entries with age and join capacity", { time
     new Map([[OWNER, "Owner"]]), undefined, [],
   );
   assert.doesNotMatch(cleared, /Wren|Agent connect code/);
+  const unavailable = renderRoster(
+    { members: [{ user_id: OWNER, display_name: "Owner" }], agents: [] },
+    new Map([[OWNER, "Owner"]]), undefined, null,
+  );
+  assert.match(unavailable, /People:\n- Owner/);
+  assert.match(unavailable, /Invited, not connected: could not load/);
 });
 
 test("pending parser rejects a malformed kind and does not infer identity", { timeout: 2_000 }, () => {
@@ -58,4 +65,29 @@ test("members pending read requests the workspace-scoped edge resource", { timeo
     "fixture-bearer", workspace, fetcher,
   ), []);
   assert.equal(requests, 1);
+});
+
+test("pending read failures reject for the members fallback to handle", { timeout: 2_000 }, async () => {
+  const target = { url: "http://127.0.0.1:54321", anonKey: "fixture-anon", profileId: "fixture" };
+  const workspace = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  for (const status of [404, 500]) {
+    await assert.rejects(readPendingAccess(target, "fixture-bearer", workspace,
+      (async () => new Response("", { status })) as typeof fetch), /pending access read failed/);
+    assert.equal(await readPendingAccessOptional(target, "fixture-bearer", workspace,
+      (async () => new Response("", { status })) as typeof fetch), null);
+  }
+  await assert.rejects(readPendingAccess(target, "fixture-bearer", workspace,
+    (async () => { throw new TypeError("network unavailable"); }) as typeof fetch), /network unavailable/);
+  assert.equal(await readPendingAccessOptional(target, "fixture-bearer", workspace,
+    (async () => { throw new TypeError("network unavailable"); }) as typeof fetch), null);
+});
+
+test("pending migration ships section 5 proofs and no new index", { timeout: 2_000 }, async () => {
+  const root = new URL("../../", import.meta.url);
+  const catalog = await readFile(new URL("deploy/release-proofs/item-j/20260924000001-catalog.sql", root), "utf8");
+  const functional = await readFile(new URL("deploy/release-proofs/item-j/20260924000001-functional.sql", root), "utf8");
+  const migration = await readFile(new URL("supabase/migrations/20260924000001_pending_access.sql", root), "utf8");
+  assert.match(catalog, /AS catalog_ok\s*\\gset\s*$/);
+  assert.match(functional, /swarm_read\.pending_access/);
+  assert.doesNotMatch(migration, /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i);
 });

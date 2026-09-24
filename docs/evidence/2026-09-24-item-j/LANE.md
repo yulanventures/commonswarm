@@ -91,3 +91,70 @@ for workspace B, then verify first use, exhaustion, revocation, and expiry.
 The migration and new read resource have not been applied to a local isolated
 stack or to production. No hosted behavior, one-minute poll timing, schema
 catalog state, cross-tenant edge request, or box release was measured here.
+
+## Fold 1 — 2026-09-24
+
+Both review arms failed the principal-wide dead-token filter. This fold applies
+their rulings without contacting a production host. The source-mode server probe
+uses the lead's loopback stack inside a rolled-back transaction; the normal
+server test still checks the database function actually installed by the lead.
+
+| Ruling | Change | Test and mutation result |
+|---|---|---|
+| J1 | The SQL rejects a principal after **any** first use, but otherwise accepts a no-token principal or one with a live unused token. The LATERAL takes the newest live unused token for age and expiry. The app keeps its original per-token pending rows and Cancel action, then adds server-only no-token and join rows. A dead sibling does not hide a live replacement. A principal that has ever connected stays off the pending list. | Server source-mode baseline 1/1. Revoked sibling and expired sibling each remain visible; used sibling and dead-only principals do not. Newest-token age assertion kills ascending order. Site observer 24/24; its existing-token row retains the original owner/expiry line and Cancel identity while a join row remains. Client mutations of the classic-token loop and server-only rows both exited 1. |
+| J2 | The server fixture covers revoked and expired siblings, several tokens with one used, revoked-only, expired-only, no-token, and live/partly used/revoked/expired/exhausted join credentials. Catalog assertion now compares all ten names and their count exactly. | Rolled-back SQL mutation run: baseline exit 0; all 15 filter/order mutants exited 1 on assertions. See the local scratch probe `scratchpad/item-j-fold1/mutate-sql.py`; it is ignored, not release input. |
+| J3 | Every seeded database row is inserted inside one transaction deliberately rolled back; the test asserts zero remaining workspaces and join credentials. Workspace names and mint ids include random UUIDs. Auth test users are deleted in `finally`. | Source-mode baseline passed its zero-leftovers assertion. A safe cleanup mutant let the fixture savepoint commit inside a protective outer transaction: the zero-leftovers assertion exited 1, then the outer transaction rolled back. The installed old function's negative control failed at the expected visible-row count; its fixture also rolled back. |
+| J4 | Added `deploy/release-proofs/item-j/20260924000001-catalog.sql` and `20260924000001-functional.sql` in the H0 proof shape, with a README giving the section 5 transfer location. The catalog proof checks owner, security definer, stable volatility, search path, exact ten output names, and execute grants. It ends with its own `catalog_ok` `\gset`. | Both proof bodies ran read-only on loopback: catalog returned one `t`; functional check passed. The CLI test checks both files exist and the catalog ends in `\gset`; removing the terminator exited 1. Removing either proof file also fails its required read. No remote database was used. |
+| J5 | `cswarm members` treats a pending-read failure as `null` and prints its member roster plus `Invited, not connected: could not load`. The app opens the workspace, retains classic token rows, and exposes the same note in its pending section; a zero-agent workspace still shows the header door. | CLI focused 4/4: network, 404, and 500 reads return `null`, and the roster renders members plus the note. Site focused 24/24: the same read failures return an empty pending result with a failure flag; source wiring pins the note and header door. Client mutations of both fallbacks, the zero-agent door, and the CLI note each exited 1. |
+| J6 | No index added. | The CLI test rejects `CREATE INDEX` in this migration; adding one in a temporary mutation exited 1. Opus measured the current query at 2.4 ms raw and 3.6–5.6 ms as a function with about 3.8k principals and 3.1k join credentials. Global history can increase the principal and registrar scans; revisit indexing when measured latency warrants it. |
+| J7 | Classic entries require a live owner membership. | Server fixture has an owner whose membership was revoked and asserts the principal is hidden. Removing the owner gate exited 1 in the SQL mutation run. |
+
+The 15 SQL mutants, each exit 1 after a passing baseline in the same invocation:
+`reader-membership`, `principal-workspace`, `principal-revoked`,
+`registrar-hidden`, `used-token`, `revoked-token`, `expired-token`,
+`no-token`, `dead-only`, `owner-member`, `newest-live-token`,
+`join-revoked`, `join-workspace`, `join-expired`, and `join-cap`. The four
+mutants with terse assertion output (`reader-membership`, `principal-revoked`,
+`newest-live-token`, `join-cap`) were separately checked to be assertion
+failures, not SQL errors. The six client mutants and the two proof/index mutants
+also exited 1 after their passing controls. The cleanup mutant exited 1 on an
+assertion after its baseline exited 0; its protective outer transaction rolled
+back. All probe SQL transactions rolled back, and the scratch scripts are ignored.
+
+Release order: the migration and `read` edge must reach the box and pass their
+proofs **before** publishing the CLI to npm or releasing the site. Only HezLead
+directs and Anvil executes that release from a reviewed SHA landed on `main`.
+The migration is additive; a merge alone does not apply it.
+
+### Fold 1 gates
+
+Every gate ran under a process-group timeout. Logs are local ignored scratch data;
+only exit codes and counts are release evidence. The unchanged sandbox failures
+do not prove those suites pass on an unrestricted host.
+
+| Gate | Exit and count |
+|---|---|
+| `npm run build` | 0 |
+| `env -u FORCE_COLOR npm test` | 1; 962 tests, 960 passed, 2 failed. The real `ps` and resume subprocess fail with sandbox `EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1; 927 tests, 909 passed, 18 failed. Failures are the pre-existing sandbox process, lock, receipt subprocess, feed, and whoami probes; the pending test and citation test pass in focused runs. |
+| `npm run check:tests` | 0 |
+| `npm run check:edge` | 0; six entry points checked |
+| `bash scripts/build-release.sh` | 0; bundle execute check passed |
+| `npm --prefix site run build` | 0; 12 pages built |
+| `env -u FORCE_COLOR npm --prefix site test` | 1; 572 tests, 568 passed, 3 failed, 1 skipped. Browser geometry, screenshot writer, and dynamic-viewport tests fail in this sandbox. |
+| Focused server source mode | 0; 1/1 passed on loopback, in a rolled-back transaction |
+| Focused site pending/header observers | 0; 37/37 passed |
+| Focused CLI pending and citation | 0; 5/5 and 1/1 passed |
+| `git diff --check` before commit | 0 |
+
+`git diff --check origin/main...HEAD`: exit 0 after the Fold 1 commits.
+Both new commits passed the local identity and agent-trailer guards (4 address
+fields and 2/2 commits, respectively).
+
+### Fold 1 not established
+
+The revised function is not installed in the lead's shared local stack: its
+normal server test currently fails at the old-function row count. Source-mode
+passed in a rolled-back transaction and is not a substitute for the lead's
+post-apply server suite. No production, browser timing, or release behavior was
+measured.
