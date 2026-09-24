@@ -665,6 +665,7 @@ export class Arguments {
   readonly positionals: string[] = [];
   private readonly leadingPositionals: string[] = [];
   private readonly flags = new Map<string, string[]>();
+  readonly hadProfileOption: boolean;
 
   constructor(values: string[]) {
     let positionalOnly = false;
@@ -717,6 +718,7 @@ export class Arguments {
       this.push(name, next);
       index += 1;
     }
+    this.hadProfileOption = this.flags.has("profile");
   }
 
   private push(name: string, value: string): void {
@@ -802,6 +804,12 @@ export class Arguments {
 const TARGET_FLAGS = ["url", "anon-key", "force-file-store"] as const;
 const ROUTE_FLAGS = ["workspace-id", "repo-mapping-id"] as const;
 const CREDENTIAL_FLAGS = ["agent-token-file", "agent-token-stdin"] as const;
+
+function requireProfileWithHostSessionId(args: Arguments): void {
+  if (args.has("host-session-id") && !args.hadProfileOption) {
+    throw new UsageError("--host-session-id requires --profile for this command");
+  }
+}
 
 const SESSION_CONTEXT_FLAGS = ["session-context"] as const;
 const TASK_FLAGS = [
@@ -6916,6 +6924,7 @@ async function runListenStart(args: Arguments): Promise<void> {
     "foreground",
     "json",
   ], 2);
+  requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
       "listen start requires --agent-token-file or --agent-token-stdin; credentials are never accepted on argv",
@@ -7265,6 +7274,7 @@ async function runListenStatusOrStop(
     "json",
     ...SESSION_CONTEXT_FLAGS,
   ], 2);
+  requireProfileWithHostSessionId(args);
   const cloud = await target(args);
   const workspaceId = listenerUuid(args.optional("workspace-id"), "workspace-id");
   let principalId: string;
@@ -7371,6 +7381,7 @@ async function runListenCanary(args: Arguments): Promise<void> {
     "wait",
     "json",
   ], 2);
+  requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
       "listen canary requires --agent-token-file or --agent-token-stdin; credentials are never accepted on argv",
@@ -7432,9 +7443,7 @@ async function runSession(args: Arguments): Promise<void> {
     action === "enable" || action === "disable" || action === "recover"
   ) {
     args.assertShape([
-      "host-session-id",
       ...TARGET_FLAGS,
-      ...CREDENTIAL_FLAGS,
       "workspace-id",
       "principal-id",
       "json",
@@ -7477,6 +7486,7 @@ async function runSession(args: Arguments): Promise<void> {
       "session-context",
       "json",
     ], 2);
+    requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
         "cswarm session status needs --agent-token-file or --agent-token-stdin",
@@ -7512,6 +7522,7 @@ async function runSession(args: Arguments): Promise<void> {
       "session-context",
       "json",
     ], 2);
+    requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
         "cswarm session stop needs --agent-token-file or --agent-token-stdin",
@@ -9442,7 +9453,10 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 13,
     refusalTrace: "runListen",
   }),
-  session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm session ${action}`] })])), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
+  session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => {
+    const humanOnly = action === "enable" || action === "disable" || action === "recover";
+    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: humanOnly ? [...humanFlags, "principal-id"] : [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [`cswarm session ${action}`] })];
+  })), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 14,
     refusalTrace: "runSession",

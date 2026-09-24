@@ -167,7 +167,10 @@ export async function runSetupImport(args: OnboardingArguments): Promise<void> {
       throw new AgentCredentialInputError(error.code, withSetupOperatorStep(error.detail));
     }
     if (error instanceof AgentSetupError) throw error;
-    if (error instanceof Error) throw new Error(withSetupOperatorStep(error.message), { cause: error });
+    if (error instanceof Error) {
+      error.message = withSetupOperatorStep(error.message);
+      throw error;
+    }
     throw new Error(withSetupOperatorStep("Setup failed."), { cause: error });
   }
 }
@@ -272,6 +275,6 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
     authenticated_now: false, ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
-    instruction: turnCheckInstruction(path, profile.host_session_id),
+    instruction: turnCheckInstruction(path, profile.host_session_id ?? binding?.host_session_id),
   });
 }

@@ -220,7 +220,7 @@ test("every table row that accepts --profile refuses B and parses A's id", { tim
       } else rows.push({ command: [verb], entry: root });
     }
     const accepting = rows.filter(({ entry }) => entry.flags.includes("profile") && entry.profile !== "refuse");
-    assert.equal(accepting.length, 42, "reconcile the generated profile rows when the command table changes");
+    assert.equal(accepting.length, 39, "reconcile the generated profile rows when the command table changes");
     for (const { command, entry } of accepting) {
       const extra = [
         ...(entry.flags.includes("connection-file") ? ["--connection-file", f.input] : []),
@@ -239,6 +239,82 @@ test("every table row that accepts --profile refuses B and parses A's id", { tim
       const own = cli(f.dir, [...command, "--profile", f.profile, "--host-session-id", "session-A", ...ownExtra]);
       assert.doesNotMatch(own.error?.message ?? "", /unknown option|host_session_required|profile_other_session/, `${command.join(" ")}: ${JSON.stringify(own)}`);
     }
+  } finally { await f.cleanup(); }
+});
+
+test("human session lifecycle refuses agent credentials before human login", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const action of ["enable", "disable", "recover"]) {
+      const entry = (AGENT_COMMANDS.session as AgentCommandGroup).subcommands[action]!;
+      assert.equal(entry.profile, "refuse", action);
+      assert.ok(!entry.flags.includes("profile"), action);
+      assert.ok(!entry.flags.includes("agent-token-file"), action);
+      const profile = cliRaw(f.dir, ["session", action, "--profile", f.profile, "--principal-id", AGENT]);
+      assert.match(profile.stderr, /--profile is supported by:/, action);
+      assert.doesNotMatch(profile.stderr, /not logged in/, action);
+      const token = cliRaw(f.dir, ["session", action, "--agent-token-file", join(f.dir, "absent-token"),
+        "--url", "http://127.0.0.1:9", "--anon-key", "public-test", "--principal-id", AGENT]);
+      assert.match(token.stderr, /unknown option: --agent-token-file/, action);
+      assert.doesNotMatch(token.stderr, /not logged in/, action);
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("host session id on listener and session control rows requires profile", { timeout: 20000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const [verb, actions] of [["listen", ["start", "status", "stop", "canary"]], ["session", ["status", "stop"]]] as const) {
+      const root = AGENT_COMMANDS[verb] as AgentCommandGroup;
+      for (const action of actions) {
+        const entry = root.subcommands[action]!;
+        assert.ok(entry.flags.includes("profile") && entry.flags.includes("host-session-id"), `${verb} ${action}`);
+        const result = cliRaw(f.dir, [verb, action, "--host-session-id", "session-A"]);
+        assert.notEqual(result.status, 0, `${verb} ${action}`);
+        assert.match(result.stderr, /--host-session-id requires --profile/, `${verb} ${action}`);
+        assert.match(result.stderr, /Usage:/, `${verb} ${action}`);
+      }
+    }
+  } finally { await f.cleanup(); }
+});
+
+test("resume uses receive binding for unbound profile and profile binding for bound profile", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const oldHome = process.env.HOME;
+  process.env.HOME = f.dir;
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "manual");
+    await configureAgentReceive({ profilePath: f.profile, mode: "turn", provider: "claude", hostSessionId: "session-B", cwd: f.dir,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] } });
+    const unbound = cli(f.dir, ["resume", "--profile", f.profile, "--host-session-id", "session-B", "--json"]);
+    assert.match(unbound.instruction ?? "", /--host-session-id 'session-B'/);
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    const bound = cli(f.dir, ["resume", "--profile", f.profile, "--host-session-id", "session-A", "--json"]);
+    assert.match(bound.instruction ?? "", /--host-session-id 'session-A'/);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    await f.cleanup();
+  }
+});
+
+test("setup preserves a typed renewal failure and CLI non-JSON handling", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const preloader = join(f.dir, "typed-fetch.mjs");
+    await writeFile(f.input, JSON.stringify({ ...connection, credential: { ...connection.credential,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    } }), { mode: 0o600 });
+    await writeFile(preloader, `globalThis.fetch = async () => new Response(JSON.stringify({status:"rejected",reason:"renewal_horizon_reached"}), {status:200});\n`);
+    const result = spawnSync(process.execPath, ["--import", preloader, resolve("dist/cli.js"), "setup", "--connection-file", f.input,
+      "--profile", f.profile, "--host-session-id", "session-A"], {
+      encoding: "utf8", timeout: 3000,
+      env: { ...process.env, HOME: f.dir, XDG_CONFIG_HOME: join(f.dir, "config"), SWARM_AGENT_STATE_DIR: join(f.dir, "state") },
+    });
+    assert.equal(result.error, undefined);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Stop and tell the operator\. Do not open another agent's profile\./);
+    assert.match(result.stderr, /stopped renewing the credential/);
+    assert.doesNotMatch(result.stderr, /^cswarm:/);
   } finally { await f.cleanup(); }
 });
 

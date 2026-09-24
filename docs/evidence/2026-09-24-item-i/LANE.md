@@ -54,3 +54,27 @@ The pre-edit item I suite passed 7/7 at `5fe61316`, including an assertion that 
 ### Deployment and live verification
 
 None. No production host, staging host, server, migration, real workspace, deployment, commit, merge, or push was touched. Production request counts, live host hook ID equality, MCP startup with a host's static config, and the blocked HTTP/MCP integration cases remain unestablished.
+
+## Fold 2 (2026-09-24)
+
+### Before and after acceptance evidence
+
+- Before the edit, the new human-session test found `session enable` in `expand` mode; the generated profile test counted 42 accepting rows. `listen start --host-session-id session-A` reached its credential requirement without a profile. The unbound resume probe initially needed a temporary `HOME` to keep hook locks inside the fixture; with that fixture corrected, its revert mutation showed the missing session B flag. The typed setup probe used a local renewal rejection, so no service request was made.
+- After the edit, all three human-only variants refuse `--profile` and reject `--agent-token-file` before human login. The generated profile count is 39. All six selected listener/session control rows give a usage error for `--host-session-id` without `--profile`. Resume uses the receive binding for an unbound profile and the profile id for a bound one. A typed renewal error from setup keeps the CLI's non-JSON renewal formatting and ends with the operator step.
+
+| Ruling | Change and acceptance test | Reversion mutation result |
+|---|---|---|
+| G1 | `session enable`, `disable`, and `recover` use `REFUSE_PROFILE`, expose only human flags plus `principal-id`, and restore the `0260ab8d` assertion shape. `human session lifecycle refuses agent credentials before human login` checks all three profile refusals and unknown agent-token-file errors with a temporary HOME and explicit local test target. The generated all-profile test now counts 39. | Adding `CREDENTIAL_FLAGS` back to the human assertion shape made the token-file refusal fail; it reached `not logged in; run cswarm login` instead of `unknown option`. Exit 1. |
+| G2 | Resume's instruction uses `profile.host_session_id ?? binding?.host_session_id`. `resume uses receive binding for unbound profile and profile binding for bound profile` checks B for the unbound receive binding and A for the bound profile. | Reverting the fallback removed `--host-session-id 'session-B'` from the unbound instruction. Exit 1. |
+| G3 | The parser remembers whether `--profile` was supplied before expansion. `listen start/status/stop/canary` and `session status/stop` reject a host id without it through `UsageError`. `host session id on listener and session control rows requires profile` checks the six declared rows and usage output. | Removing the `listen start` guard made that row reach its credential requirement instead of the usage refusal. Exit 1. |
+| G4 | For non-`AgentSetupError` failures, setup adds the step to the original error message and rethrows that object. `setup preserves a typed renewal failure and CLI non-JSON handling` uses a temporary connection and a local renewal rejection; it checks the renewal message, operator step, and class-specific output without a `cswarm:` error prefix. | Restoring the plain `Error` wrapper made the same typed failure print as generic `cswarm:` output. Exit 1. |
+
+### Tests
+
+- Required `npm run build` and `npm run check:tests` passed. The required focused command passed 30/30 after the citation test's three line pointers were moved to the current `src/cli.ts` lines. All Item I tests have explicit timeouts; CLI child processes have a three-second timeout and temporary HOME.
+- Each mutation was built and run against its named focused test with a 30-second process timeout. The original sources were restored after each run, and the final restored build passed.
+- The additional dispatch-baseline test could not start its loopback fixture in this sandbox: `listen EPERM ... 127.0.0.1`. Its baseline was not regenerated or claimed passing here.
+
+### Deployment and live verification
+
+None. No production or staging host, real workspace, deployment, commit, merge, or push was touched. Production request counts, live hook session-id equality, static MCP argument behavior, and the full suites remain unestablished.
