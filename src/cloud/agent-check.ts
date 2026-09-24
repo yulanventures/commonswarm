@@ -78,6 +78,12 @@ interface CheckState {
   pending_observed_retries?: Record<string, { attempts: number; first_at: number; next_at?: number }>;
 }
 
+function queuedRetries(state: CheckState, ids: string[]): CheckState["pending_observed_retries"] {
+  const queued = new Set(ids);
+  return Object.fromEntries(Object.entries(state.pending_observed_retries ?? {})
+    .filter(([id]) => queued.has(id)));
+}
+
 function checkTimeoutError(): AgentSetupError {
   return new AgentSetupError(
     "check_timeout",
@@ -154,6 +160,7 @@ async function readCheckState(path: string): Promise<CheckState> {
   }
   try { state.messages = state.messages.map(row => parseSignalRecord(row)); }
   catch { throw new AgentSetupError("check_state_invalid", "The saved messages are damaged. Restore the check state before continuing."); }
+  state.pending_observed_retries = queuedRetries(state, state.pending_observed_ids ?? []);
   return state;
 }
 
@@ -261,11 +268,10 @@ export async function checkAgentMessages(options: {
               const current = await readCheckState(path);
               const remaining = (current.pending_observed_ids ?? []).filter(value => !removed.has(value));
               const retries = { ...(current.pending_observed_retries ?? {}) };
-              for (const id of removed) delete retries[id];
               for (const [id, retry] of retryUpdates) retries[id] = retry;
               if (attempt) retries[attempt.id] = attempt.retry;
               await writeSecureJsonFile(path, JSON.stringify({ ...current,
-                pending_observed_ids: remaining, pending_observed_retries: retries,
+                pending_observed_ids: remaining, pending_observed_retries: queuedRetries({ ...current, pending_observed_retries: retries }, remaining),
                 ...(rotate ? { pending_observed_next: remaining.length === 0 ? 0 : (start + batch.length) % remaining.length } : {}) }));
             }, { timeoutMs: Math.max(1, Math.floor(deadlineMs - Date.now())) });
             removed.clear();
@@ -317,12 +323,16 @@ export async function checkAgentMessages(options: {
                 // cached additional full bodies since this response was prepared.
                 const visibleIds = presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1)
                   .filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
+                const pendingVisibleIds = [...new Set([...(current.pending_observed_ids ?? []), ...visibleIds])]
+                  .slice(-AGENT_CHECK_CACHE_LIMIT);
                 await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate,
-                  pending_observed_ids: [...new Set([...(current.pending_observed_ids ?? []), ...visibleIds])].slice(-AGENT_CHECK_CACHE_LIMIT) }));
+                  pending_observed_ids: pendingVisibleIds,
+                  pending_observed_retries: queuedRetries(current, pendingVisibleIds) }));
               }
             }).then(async () => { try { await ackPending(); } catch { /* Never change MCP output. */ } }));
           } else {
-            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds }));
+            await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds,
+              pending_observed_retries: queuedRetries(cached, pendingIds) }));
             ackAfterCommit = ackPending;
           }
         } else if (pendingIds.length > 0) {
