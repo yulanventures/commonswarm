@@ -1,0 +1,31 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url (it contacts commonswarm.com); no
+ssh, vercel, no remote supabase command; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill;
+print no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item G lane 1 (wake-path liveness), branch lane/item-g-lane1 at bb229da9 (Codex; on a merge of the 2026-09-14 WIP
+branch lane/wake-liveness onto main 4d4cb3f7). Your current directory is a detached worktree at bb229da9. Diff:
+git diff origin/main...bb229da9. SPEC: docs/design/2026-09-24-ITEM-G-LANE-1-BRIEF.md (decisions 1-4; decision 5 out of
+scope); design: docs/evidence/2026-09-24-item-g-design/wake-liveness-design-v1.md. Record:
+docs/evidence/2026-09-25-item-g-lane1/LANE.md. It adds a MIGRATION (20260925000001) and changes the command edge and a
+read path, so it goes to production through a box release: SQL and edge mistakes are PRODUCTION findings.
+
+CHECK clause by clause:
+- the migration and the command-edge branch: an unclaimed `observed` ack is accepted ONLY for a directed ask/note
+  delivered to the calling principal; idempotent; managed principals need a valid session proof; it never changes a
+  claimed, leased or terminal row, and never lets one principal ack another's delivery; the widened CHECK constraint
+  still rejects every shape it rejected before except exactly this one; migration safety on a live DB (lock on
+  signal_deliveries while the constraint is replaced? validation scan cost?);
+- the new read (`swarm_read.agent_wake_path` or similar): member scope, no secret columns, correct staleness
+  (WAKE_STALE_MS, unobserved directed rows only), cost;
+- `check` (profile, --hook, MCP check tool): acks only what it presented, after the cursor commit (MCP: after the
+  response was written); ack failures never change output or exit code; the retry queue is bounded and cannot grow or
+  ack a row check did not show; item I binding respected;
+- surfaces: receipt text, the app roster stale mark, `listen status` no_listener wording — each true for its state,
+  labels generated from WAKE_STALE_MS; the two changed dispatch-baseline rows intended;
+- the box-release proofs can fail for their stated reasons; tests prove what they name and run under package scripts;
+  LANE.md claims true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

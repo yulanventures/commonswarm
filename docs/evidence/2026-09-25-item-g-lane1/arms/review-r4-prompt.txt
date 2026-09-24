@@ -1,0 +1,32 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command (no db push, link, functions deploy, --linked); no db:reset, db:stop or test:p1-server (the lead owns the local
+stack); do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git
+and file reads; pure tests with a temporary HOME (build first for dist/ tests). SQL probes against the local stack
+(postgresql://postgres:postgres@127.0.0.1:54322/postgres) only inside a transaction that you ROLL BACK.
+
+LANE: item G lane 1, branch lane/item-g-lane1 at a3736201. Your current directory is a detached worktree at a3736201.
+Lane base on main: 4d4cb3f7. Spec: docs/design/2026-09-24-ITEM-G-LANE-1-BRIEF.md. Record:
+docs/evidence/2026-09-25-item-g-lane1/LANE.md (Folds 1-4).
+Round 3 (Opus FAIL on agent-sender receipts, fixed in fold 3 as I1-I4; Grok FAIL on the heal order and kind, fixed in
+fold 4 as K1-K2). a3736201 is the lead's fix of three fold-4 server-test fixtures the Maker could not run: the
+late-recipient fixtures disable signal_recipients_same_transaction inside a rolled-back transaction, and the proof
+mutations now target the member gate as a WHERE clause. The lead measured on the reset local stack:
+managed-delivery.test.ts 20/20; replacing the (created_at, id) tuple with enqueued_at fails only the check-order
+test; removing the ask/note kind filter fails only the non-ask/note test.
+
+REVIEW `git diff b178c470..a3736201` closely and the whole lane (`git diff 4d4cb3f7..a3736201`). CHECK:
+1. K1: the heal rule in the shared eligibility view uses the order `cswarm check` pages in, and only a later observed
+   ack of a directed ask/note heals. Can any row the seat did NOT see still be hidden (a later signal acked by a
+   different session, equal created_at, a row check's cursor skips, broadcast vs directed vs signal_recipients)?
+   Is the late-recipient fixture (trigger disabled) a faithful model of a row production can hold, or does the
+   trigger make that case unreachable and the rule over-constrained? Say which.
+2. K2: retry metadata is always a subset of the queued ids and bounded; backoff bounded; ack never changes check output.
+3. I1-I4 still hold after fold 4 (agent-sender receipts, nonmember sees nothing, private view grants, box proof
+   exits nonzero for missing and ineligible seeds).
+4. Every test the lane claims as a control fails on revert (read the test and the code; run pure tests).
+5. LANE.md's box release order is runnable by the box operator, and every claim in LANE.md is true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,26 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command (no db push, link, functions deploy, --linked); no db:reset, db:stop or test:p1-server (the lead owns the local
+stack); do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git
+and file reads; pure tests with a temporary HOME (build first for dist/ tests). SQL probes against the local stack
+(postgresql://postgres:postgres@127.0.0.1:54322/postgres) only inside a transaction that you ROLL BACK.
+
+LANE: item G lane 1, branch lane/item-g-lane1 at a1a3fd74. Your current directory is a detached worktree at a1a3fd74.
+Lane base on main: 4d4cb3f7. Record: docs/evidence/2026-09-25-item-g-lane1/LANE.md ("Lead fold").
+Round 6 on ec44cc95 (the partial index): Opus FAIL — R6-F1 PRODUCTION: the section-6 read-edge probe body in LANE.md's
+box order lacked keys the read edge requires (400) and ran before its note existed; R6-F2 RIGOUR: the catalog proof's
+index clause used LIKE and accepted wrong indexes; R6-F3 RIGOUR: the timing claims were half true and cited unsaved
+runs in the gitignored scratchpad. The lead fixed these in a1a3fd74.
+
+REVIEW `git diff ec44cc95..a1a3fd74`, and confirm the index itself (reviewed in round 6) is unchanged. CHECK:
+1. The read-edge probe body in LANE.md's "Box release order" is exactly what the read edge's validator accepts for an
+   agent credential (supabase/functions/read/index.ts), the order of steps is runnable, and "contain the note's id"
+   holds under the stated precondition. Measure it against the local read edge with a well-formed unknown token if
+   you can (loopback 127.0.0.1:54321 only).
+2. The catalog proof's exact index clause returns t on the installed catalog and f for wrong indexes; the test's
+   wrong-index cases each reach the index clause (not an earlier failure).
+3. Every LANE.md claim and file reference added in a1a3fd74 is true; the evidence files hold no secret.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

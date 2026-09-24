@@ -1,0 +1,30 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command (no db push, link, functions deploy, --linked); no db:reset, db:stop or test:p1-server (the lead owns the local
+stack); do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git
+and file reads; pure tests with a temporary HOME (build first for dist/ tests). SQL probes against the local stack
+(postgresql://postgres:postgres@127.0.0.1:54322/postgres) only inside a transaction that you ROLL BACK.
+
+LANE: item G lane 1, branch lane/item-g-lane1 at ec44cc95. Your current directory is a detached worktree at ec44cc95.
+Lane base on main: 4d4cb3f7. Record: docs/evidence/2026-09-25-item-g-lane1/LANE.md ("Lead fold").
+Round 5 on c61ae4a7: Opus PASS and Grok PASS. Opus R5-F1 (RIGOUR) measured the roster heal at 0.7-1.3 s on a
+50,000-delivery probe because no index serves a seat's unclaimed observed ACKs. The lead then committed ec44cc95: a
+partial index swarm.signal_deliveries_unclaimed_observed on (workspace_id, recipient_agent_principal_id) WHERE
+ack_outcome = 'observed' AND last_lease_id IS NULL AND last_leased_by IS NULL, built inside the migration; the
+catalog proof requires it; the catalog test drops it as a mutation; and text fixes for Opus R5-F2..F4 (LANE.md
+superseded marks, a section-6 read-edge probe, the cursor task's scope). This round reviews only that change.
+
+REVIEW `git diff c61ae4a7..ec44cc95`. CHECK:
+1. The index: correct columns and predicate for both lookups that use it (the known-seat EXISTS and the heal NOT
+   EXISTS in swarm.wake_path_eligible_deliveries); safe to build in the migration transaction on the box (lock class,
+   scan cost at release when no row matches the predicate); no effect on other writers or plans that would regress.
+   Measure on the local stack if you can, inside a rolled-back transaction.
+2. The catalog proof's new index clause returns t on the installed catalog and f without the index (or with a wrong
+   predicate); the catalog test's "no unclaimed observed index" case measures that.
+3. The section-6 read-edge probe in LANE.md's box order is a valid request for the read edge (check it against the
+   read edge's request validator) and is runnable by the box operator.
+4. Every LANE.md claim added in ec44cc95 is true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

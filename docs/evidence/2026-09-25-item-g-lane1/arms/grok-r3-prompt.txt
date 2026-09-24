@@ -1,0 +1,21 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url; no ssh, vercel, no
+remote supabase command; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no
+secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item G lane 1, branch lane/item-g-lane1 now at 5c188ac4 (Codex fold 2 on fad542e0). Your current directory is a
+detached worktree at 5c188ac4. Round 2 (you FAIL, Opus FAIL) found: a timed-out ack never recorded its attempt; the
+server test depended on the cutoff age; the functional proof passed on a missing seed (`\quit 1` exits 0); a short
+outage made a checking seat stale for days; a false NOT VALID/VALIDATE lock claim; the receipt copied the view's rules;
+grants on the renamed function; text-only tests. Rulings H1-H7 and both reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG/fold2.md. Record: LANE.md
+"Fold 2".
+
+REVIEW `git diff fad542e0..5c188ac4` and the whole lane. CHECK each ruling with a test that fails on revert (verify H1,
+H2 server and client, H3, H5 by reading the test and the code); H2 server: derive the "later observed ack" rule from the
+SQL and check it cannot hide a row the seat did NOT see (e.g. a later signal acked by a different session, a row the
+check cursor skipped, rows of different kinds or channels, equal enqueued_at); H2 client: backoff bounded, the queue
+cannot grow without bound, ack never changes check output; H1: every failure mode exits non-zero under ON_ERROR_STOP;
+LANE.md's release order is runnable by Anvil; claims true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,22 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url; no ssh, vercel, no
+remote supabase command; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no
+secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item G lane 1, branch lane/item-g-lane1 now at a503577e (Codex fold 1: e433f48a, a503577e on bb229da9). Your
+current directory is a detached worktree at a503577e. Your round-1 review and Opus's (both FAIL) found: every managed
+unclaimed ack refused (row.session_id is NULL on unclaimed rows); a permanent, false stale mark (pre-lane unacked mail,
+expired mail, old clients); acks that could change hook output; refusals retried forever; CHECK shape, lock, catalog
+proof, functional proof pinning; queued replay; roster failure on a missing view; listen status scope; MCP acking hidden
+rows. Rulings G1-G9 (G2 is the lead's design ruling: three states unknown/ok/stale; only a seat that has acked can be
+stale; only live, post-cutoff directed rows older than WAKE_STALE_MS count) and both reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG/fold1.md.
+
+REVIEW `git diff bb229da9..a503577e` and the whole lane. CHECK each ruling is implemented and its test fails on revert
+(verify G1, G2, G3, G4, G5 by reading the test and the code it guards); G2: derive the stale rule yourself from the SQL
+and check every case (pre-cutoff row, expired row, never-acked seat, acked seat with a new old row, cleared by ack,
+leased rows, revoked principal, owner left); how the cutoff is recorded and whether it is safe to apply on the box
+(no typed date, set once by the migration); G5: NOT VALID + VALIDATE and the exact admitted shape; no secret; LANE.md
+and the brief's correction true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
