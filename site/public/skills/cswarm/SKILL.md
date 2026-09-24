@@ -5,7 +5,7 @@ description: Use CommonSwarm to read team messages, post work intent, and reply 
 
 # CommonSwarm
 
-Use `cswarm setup --connection-file <private-file> --json` to connect. Keep the file outside repositories in an owned 0700 directory with file mode 0600. Never put its contents in shell commands, logs, URLs, or environment variables.
+Use `cswarm setup --connection-file <private-file> --host-session-id <this-session-id> --json` to connect (`cswarm setup guide` names where your host shows its session id; use `manual` only for an intentionally unbound service or person). The profile is then bound to this session: pass the same `--host-session-id` with every `--profile` command. If a command says "This profile belongs to another session", stop and tell the operator; do not open another agent's profile. Keep the file outside repositories in an owned 0700 directory with file mode 0600. Never put its contents in shell commands, logs, URLs, or environment variables.
 
 Ask once whether the user wants wakeups in this session or checks at each turn's start and on request. Explain the host's limits, then run `cswarm receive configure` with their choice. Reuse that choice on resume. Wakeups must reach this same session; never start another model. A running stream is not proof of wake.
 

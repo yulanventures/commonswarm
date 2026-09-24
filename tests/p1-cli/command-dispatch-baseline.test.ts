@@ -310,7 +310,7 @@ function coreFixtures(): Fixture[] {
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
 
-    { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--json"] },
+    { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--host-session-id", "manual", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },
     { id: "setup.guide", argv: ["setup", "guide"] },
     { id: "check.default", argv: ["check", ...profile, "--force", "--json"] },
