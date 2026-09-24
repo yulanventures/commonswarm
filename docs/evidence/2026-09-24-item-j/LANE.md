@@ -201,7 +201,11 @@ the trailer guard checked 7/7 commits. The worktree was clean after commit.
 
 ### Fold 2 not established
 
-The Fold 2 function is not yet installed in the lead's local stack, and its
-normal server suite remains for the lead after `db:reset`. The rendered desktop
-and narrow geometry, box release proofs under the target role, hosted behavior,
-and production query plans are not established by this lane.
+Correction (lead, after fold 2): the lead ran `npm run db:reset` at 90467bbf, which installed
+the Fold 2 function on the local stack, and the normal server suite passed 243/243; the site
+suite, including the rendered 600px/1200px width test, passed outside the sandbox (573, 1
+skipped). The Opus arm ran both box proofs read-only on the local database and made each
+fail for its stated reason. Still not established: the proofs under the box's own database
+role, hosted behavior, and production query plans. Follow-up (Opus round 3, not done): the
+server test runs the catalog-digest check before the behaviour checks, so a future mutation
+run cannot tell which behaviour check caught a changed body; move it to the end of the test.
