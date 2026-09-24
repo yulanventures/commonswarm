@@ -13,6 +13,21 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
+## Update 2026-09-24 (later): item J landed on main (4ef0f300) — waiting for its box release
+
+- Item J (option A, Strategist ruling: no setup-error text; that is its own item later): members see pending seats and
+  unredeemed join / `mcp code` codes with their age in the app and `cswarm members`. Record:
+  `docs/evidence/2026-09-24-item-j/LANDING.md`. Brief: `docs/design/2026-09-24-ITEM-J-INVITED-NOT-CONNECTED-BRIEF.md`.
+- Box release REQUESTED from HezLead (native message): SHA 4ef0f3005a3981941512698a3e1e3e7641773f5b; migration
+  `20260924000001_pending_access.sql`; edge function `read`; proofs `deploy/release-proofs/item-j/`; gate evidence
+  (untracked, in the mini's main checkout) `docs/evidence/2026-09-24-release-4ef0f3005a39/gate-evidence.txt` — rewrite
+  it under the window's UTC date if the window is on a later day. The functional proof needs a live pending row
+  (HezLead seeds a join code near the window).
+- AFTER the box: bump and release cswarm 0.1.77 (npm, GitHub) and deploy the site with `PUBLIC_H0_LINK_JOIN=1`; then
+  the J done-test on production (issue a code, see it within one minute with its age, connect, see it clear).
+- Next item: G (wake-path liveness), then the queue. Alloy `execute` stays blocked by retained tasks; use direct Codex
+  lanes.
+
 ## Update 2026-09-24 12:1xZ: H release 2 released as 0.1.76 — item H still OPEN
 
 - `cswarm mcp code` (a signed-in person) mints a one-hour, one-seat H0 join code and prints the connect line;
