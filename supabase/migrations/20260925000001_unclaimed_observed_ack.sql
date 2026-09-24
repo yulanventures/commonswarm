@@ -52,6 +52,14 @@ BEGIN
   END IF;
 END $$;
 
+-- The known-seat check and the heal look up a seat's unclaimed observed ACKs.
+-- No existing index serves that lookup, so each stale row scanned the whole
+-- primary key. This partial index holds only those rows (none at release); it is
+-- built inside the exclusive window above.
+CREATE INDEX signal_deliveries_unclaimed_observed
+  ON swarm.signal_deliveries (workspace_id, recipient_agent_principal_id)
+  WHERE ack_outcome = 'observed' AND last_lease_id IS NULL AND last_leased_by IS NULL;
+
 -- The migration itself records the release boundary; old mail cannot become a
 -- permanent false stale mark when a seat's existing cursor is already past it.
 CREATE TABLE swarm.wake_path_release (

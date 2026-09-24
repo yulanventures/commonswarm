@@ -1,7 +1,10 @@
 # Follow-up task: preserve check inbox order within one millisecond
 
 **Status (2026-09-24, lead fold of item G lane 1):** the same-millisecond skip is
-FIXED in that lane. The read edge now orders by the cursor's own key
+FIXED in that lane for the read edge (the agent inbox that `cswarm check` reads).
+The human PostgREST paging path in `src/cloud/signals.ts` (`order=created_at.asc,id.asc`
+with a `gte` millisecond cursor) can still skip a same-millisecond pair; it does
+not feed the wake-path heal and is still OPEN. The read edge now orders by the cursor's own key
 (`date_trunc('milliseconds', created_at)`, then `id`), and the wake-path heal
 uses the same order; a served test pages two signals inside one millisecond with
 inverted ids. The commit-order skip below is still OPEN. The text below is the

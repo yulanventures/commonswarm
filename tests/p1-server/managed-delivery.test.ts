@@ -961,9 +961,11 @@ test("section 5 catalog proof accepts the installed view and refuses an old heal
     ["no release cutoff", replaceOnce(view,
       "  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)\n", ""), false],
   ];
+  cases.push(["no unclaimed observed index", view, false]);
   for (const [name, body, expected] of cases) {
     await sql.begin(async (tx) => {
       await tx.unsafe(`CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries${body}`);
+      if (name === "no unclaimed observed index") await tx`DROP INDEX swarm.signal_deliveries_unclaimed_observed`;
       const [row] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
       assert.equal(row?.catalog_ok, expected, `catalog proof on ${name}`);
       throw new Error("ROLLBACK_CATALOG_CASE");
