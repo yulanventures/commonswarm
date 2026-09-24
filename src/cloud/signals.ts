@@ -10,7 +10,6 @@ import {
   type SignalRecipientRef,
   type SignalRecord,
 } from "./command-client.js";
-import { SIGNAL_RECIPIENT_MAX } from "./signal-limits.js";
 import {
   relativeAge,
   relativeExpiry,
@@ -1478,7 +1477,6 @@ export function resolveSignalRecipient(
   selector: string,
   directory: SignalDirectory | readonly SignalMember[],
 ): ResolvedSignalRecipient {
-  if (!selector || selector.length > SIGNAL_RECIPIENT_MAX) throw new SignalRecipientError("recipient_invalid", "signal recipient name is too long or empty");
   const resolved: SignalDirectory = Array.isArray(directory)
     ? { members: directory, agents: [] }
     : directory as SignalDirectory;

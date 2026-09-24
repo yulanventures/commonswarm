@@ -355,6 +355,16 @@ test("signal recipients resolve only among exact live member ids or names", () =
   );
 });
 
+test("CLI recipient resolution accepts a full database text name", { timeout: 5_000 }, () => {
+  // The migration uses unbounded text for both display_name and agent name.
+  // A 256-character name is a regression control for the MCP-only 80-character cap.
+  const name = "N".repeat(256);
+  assert.deepEqual(resolveSignalRecipient(name, [{ user_id: USER, display_name: name }]), {
+    kind: "user", id: USER,
+  });
+  assert.throws(() => resolveSignalRecipient("", [{ user_id: USER, display_name: name }]), /not a live member or agent/);
+});
+
 test("supplementary signal failures degrade without hiding core status", async () => {
   const row = signal() as unknown as SignalRecord;
   const recentUnavailable = await settleSignalStatus(

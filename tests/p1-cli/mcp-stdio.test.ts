@@ -11,7 +11,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { parseAgentConnection, profileTarget, readAgentProfile, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { newSessionBinding, SessionContextError } from "../../src/cloud/session-context.js";
-import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisationRequired, RenewalRefused, RenewalRetryError, RenewalRevoked, RenewalSuperseded, RenewalSuspended, RenewalUnsupported, RenewalUpgradeRequiredError } from "../../src/cloud/renewal.js";
+import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisationRequired, RenewalRefused, RenewalRetryError, RenewalRevoked, RenewalSuperseded, RenewalSuspended, RenewalUnsupported, RenewalUpgradeRequiredError, REVOCATION_REASONS_LIST } from "../../src/cloud/renewal.js";
 import { checkAgentMessages, cachedAgentMessage, AGENT_CHECK_PAGE_SIZE, AGENT_CHECK_BODY_BUDGET } from "../../src/cloud/agent-check.js";
 import { AgentSetupError } from "../../src/cloud/agent-profile.js";
 import { CommandHttpError } from "../../src/cloud/command-client.js";
@@ -44,7 +44,9 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const posts: Array<Record<string, any>> = [];
   let renewals = 0;
   const committed = new Map<string, object>();
-  let readRefusal = false, sendRefusal = false, serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
+  let readRefusal = false, sendRefusal = false, readError: { status: number; code: string } | null = null;
+  let sendError: { status: number; code: string } | null = null;
+  let serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
   let workspaceName = "Test workspace";
   let ambiguousRecipient = false, malformedRead = false, renewalReason: string | null = null;
   let incoming = [signal(incomingBody, "ask")];
@@ -56,6 +58,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       const body = JSON.parse(raw);
       const send = (status: number, value: object) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
       if (body.resource === "members") {
+        if (readError) return send(readError.status, { error: readError.code });
         if (readRefusal) return send(403, { error: "forbidden", message: "Read refused." });
         if (malformedRead) return send(200, { members: "malformed" });
         return send(200, { members: [{ user_id: OWNER, display_name: "Owner" }, ...(ambiguousRecipient ? [{ user_id: ID, display_name: "Owner" }] : [])],
@@ -64,6 +67,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
             workspace_name: workspaceName, owner_user_id: OWNER, token_id: "SECRET-TOKEN-ID", grant_id: "SECRET-GRANT-ID" } });
       }
       if (body.resource === "signals") {
+        if (readError) return send(readError.status, { error: readError.code });
         if (readRefusal) return send(403, { error: "forbidden", message: "Read refused." });
         return send(200, { signals: body.after_id ? incoming.filter(row => row.id > body.after_id) : incoming, capabilities: { cursor_after: 1, sender_owner_relation: 1 } });
       }
@@ -74,6 +78,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       }
       if (body.command?.kind === "post_signal") {
         posts.push(body);
+        if (sendError) return send(sendError.status, { error: sendError.code });
         if (serverConflict) { serverConflict = false; return send(409, { error: "command_id_conflict", message: "Request ID conflicts with another command." }); }
         if (sendRefusal) return send(403, { error: "signal_refused", message: "Signal refused." });
         const previous = committed.get(body.command_id);
@@ -135,6 +140,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   };
   return { root, profile, posts, created: () => committed.size, renewals: () => renewals, client, transport, call, close, stderr: () => stderr, stdout: () => stdout,
     refuseReads: (value: boolean) => { readRefusal = value; }, refuseSends: (value: boolean) => { sendRefusal = value; },
+    setReadError: (value: typeof readError) => { readError = value; }, setSendError: (value: typeof sendError) => { sendError = value; },
     loseNextAnswer: () => { lostAttempts = 3; }, delayNextAnswer: () => { delayAnswer = true; }, malformedNextAnswer: () => { malformedAnswer = true; },
     setIncoming: (rows: ReturnType<typeof signal>[]) => { incoming = rows; },
     setWorkspaceName: (name: string) => { workspaceName = name; },
@@ -328,10 +334,21 @@ test("MCP cancellation sends no result and same-id retry reaches the edge", { ti
 });
 
 test("MCP errors come from the owned table and producer codes stay covered", { timeout: 20_000 }, async () => {
-  const sources = ["src/cloud/agent-profile.ts", "src/cloud/agent-check.ts", "src/mcp/server.ts"];
+  const config = ts.readConfigFile("tsconfig.tests.json", ts.sys.readFile);
+  assert.equal(config.error, undefined);
+  const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, ".");
+  const program = ts.createProgram(parsed.fileNames, parsed.options);
+  const server = program.getSourceFile(resolve("src/mcp/server.ts"))!;
+  const paths = new Set([server.fileName]);
+  for (const statement of server.statements) {
+    if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    const resolved = ts.resolveModuleName(statement.moduleSpecifier.text, server.fileName, parsed.options, ts.sys).resolvedModule;
+    if (resolved?.resolvedFileName) paths.add(resolved.resolvedFileName);
+  }
   const codes = new Set<string>();
-  for (const path of sources) {
-    const source = ts.createSourceFile(path, await readFile(path, "utf8"), ts.ScriptTarget.Latest, true);
+  for (const path of paths) {
+    const source = program.getSourceFile(path);
+    if (!source) continue;
     const visit = (node: ts.Node): void => {
       if (ts.isNewExpression(node) && node.expression.getText(source) === "AgentSetupError" &&
           node.arguments?.[0] && ts.isStringLiteral(node.arguments[0])) codes.add(node.arguments[0].text);
@@ -341,6 +358,41 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
   }
   assert.ok(codes.size >= 15);
   for (const code of codes) assert.ok(MCP_ERROR_SENTENCES[code], `missing MCP sentence for ${code}`);
+  // These exported unions and the revocation set are consumed by renewal
+  // enforcement. Derive coverage from their declarations, not copied filenames.
+  const unionCodes = (name: string): string[] => {
+    for (const source of program.getSourceFiles()) {
+      for (const statement of source.statements) {
+        if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== name || !ts.isUnionTypeNode(statement.type)) continue;
+        return statement.type.types.filter(ts.isLiteralTypeNode)
+          .map(node => node.literal).filter(ts.isStringLiteral).map(node => node.text);
+      }
+    }
+    throw new Error(`Missing exported code union ${name}`);
+  };
+  const renewalCodes = unionCodes("RenewalRejectionReason");
+  assert.ok(renewalCodes.length >= 20);
+  for (const code of [...renewalCodes, ...REVOCATION_REASONS_LIST]) {
+    assert.ok(MCP_ERROR_SENTENCES[code], `missing renewal sentence for ${code}`);
+  }
+  const renewalSource = program.getSourceFiles().find(source => source.statements.some(statement =>
+    ts.isClassDeclaration(statement) && statement.name?.text === "RenewalRevoked"));
+  assert.ok(renewalSource);
+  const localRenewalCodes = new Set<string>();
+  const visitRenewal = (node: ts.Node): void => {
+    if (ts.isNewExpression(node)) {
+      const name = node.expression.getText(renewalSource);
+      const codeArg = name === "RenewalRefused" ? node.arguments?.[1] : name === "RenewalRevoked" ? node.arguments?.[0] : undefined;
+      if (codeArg && ts.isStringLiteral(codeArg)) localRenewalCodes.add(codeArg.text);
+    }
+    ts.forEachChild(node, visitRenewal);
+  };
+  visitRenewal(renewalSource);
+  assert.ok(localRenewalCodes.size >= 8);
+  for (const code of localRenewalCodes) assert.ok(MCP_ERROR_SENTENCES[code], `missing local renewal sentence for ${code}`);
+  for (const code of unionCodes("SessionContextErrorCode")) {
+    assert.equal(mapMcpError(new SessionContextError(code as ConstructorParameters<typeof SessionContextError>[0], "hidden" )).code, "session_context_invalid");
+  }
   for (const [code, sentence] of Object.entries(MCP_ERROR_SENTENCES)) {
     assert.doesNotMatch(sentence.message, /cswarm|--[a-z]|\/|\\/i, code);
     assert.doesNotMatch(sentence.next_step, /cswarm|--[a-z]|\/|\\/i, code);
@@ -365,12 +417,49 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
     const unknownCode = mapMcpError(new CommandHttpError(418, "producer shell command", "new_code"));
     assert.equal(unknownCode.message, "The service returned new_code with status 418.");
     assert.equal(unknownCode.status, 418);
-    assert.equal(unknownCode.next_step, "a person must restore this agent's access outside this session");
+    assert.equal(unknownCode.next_step, "check the arguments; if the problem stays, ask a person");
     assert.equal(mapMcpError(new CommandHttpError(418, "producer shell command", "new-code")).message,
       "The service returned new-code with status 418.");
     assert.equal(mapMcpError(new CommandHttpError(418, "producer shell command", "constructor")).message,
       "The service returned constructor with status 418.");
     assert.equal(mapMcpError(new AgentSetupError("profile_missing", "cswarm setup --profile /private")).message, MCP_ERROR_SENTENCES.profile_missing!.message);
+  } finally { await f.close(); }
+});
+
+test("MCP stdio edge refusal codes give exact post and read next steps", { timeout: 20_000 }, async () => {
+  const f = await fixture();
+  try {
+    const writeCases = [
+      [403, "forbidden", "A reply may target your own ask or an expired signal; a recipient may no longer be active; this agent's access may also have changed.", "check the named arguments; if they are right, a person may need to restore this agent's access"],
+      [404, "channel_not_found", "The channel argument names no channel in this workspace.", "fix the named argument"],
+      [409, "channel_archived", "The channel argument names an archived channel.", "fix the named argument"],
+      [400, "invalid_request", "The service did not accept the named arguments.", "fix the named argument"],
+      [413, "payload_too_large", "The body or about argument is too large.", "fix the named argument"],
+      [429, "rate_limited", "The signal rate limit was reached.", "retry the same call"],
+      [418, "new_code", "The service returned new_code with status 418.", "check the arguments; if the problem stays, ask a person"],
+    ] as const;
+    let index = 0;
+    for (const [status, code, message, next_step] of writeCases) {
+      f.setSendError({ status, code });
+      const name = status === 403 ? ["ask", "note", "reply", "working_on"] : ["note"];
+      for (const tool of name) {
+        const request_id = `edge${String(++index).padStart(4, "0")}`;
+        const args = tool === "reply" ? { signal_id: ID, body: "reply", request_id }
+          : tool === "ask" ? { to: "Owner", body: "ask", request_id }
+          : { body: "note", request_id, ...(code.startsWith("channel_") ? { channel: "team-updates" } : {}) };
+        const { result, value } = await f.call(tool, args);
+        assert.equal(result.isError, true);
+        assert.deepEqual(value, { code, message, next_step, status });
+      }
+    }
+    f.setSendError(null);
+    for (const [status, code] of [[401, "unauthenticated"], [403, "forbidden"], [426, "upgrade_required"]] as const) {
+      f.setReadError({ status, code });
+      const { result, value } = await f.call("members");
+      assert.equal(result.isError, true);
+      assert.deepEqual(value, { code: "read_refused", message: "The service refused this read.",
+        next_step: "a person must restore this agent's access outside this session", status });
+    }
   } finally { await f.close(); }
 });
 
@@ -382,6 +471,10 @@ test("MCP typed producer classes have owned sentences and truthful status", { ti
     [new RenewalCredentialCheckError(401, "unauthenticated"), "renewal_credential_check"],
     [new RenewalRetryError(null), "renewal_retry"],
     [new RenewalRefused(200, "renewal_device_mismatch", "cswarm --bad /path"), "renewal_device_mismatch"],
+    [new RenewalRevoked("predecessor_superseded", "cswarm --bad /path"), "predecessor_superseded"],
+    [new RenewalRevoked("forbidden", "cswarm --bad /path"), "renewal_forbidden"],
+    [new RenewalRevoked("successor_not_recoverable", "cswarm --bad /path"), "successor_not_recoverable"],
+    [new RenewalRefused(200, "malformed_successor", "cswarm --bad /path"), "malformed_successor"],
     [new SignalRecipientError("recipient_unknown", "cswarm --bad /path"), "recipient_unknown"],
     [new SignalMalformedError("cswarm --bad /path"), "read_malformed"],
     [new SignalTransportError("cswarm --bad /path"), "read_transport"],
@@ -399,6 +492,9 @@ test("MCP typed producer classes have owned sentences and truthful status", { ti
   }
   assert.equal(mapMcpError(new RenewalCredentialCheckError(401, "unauthenticated")).status, 401);
   assert.equal(mapMcpError(new RenewalRefused(200, "renewal_device_mismatch", "bad")).status, undefined);
+  assert.equal(mapMcpError(new RenewalRevoked("predecessor_superseded", "bad")).next_step, "retry the same call");
+  assert.equal(mapMcpError(new RenewalRevoked("forbidden", "bad")).next_step, "a person must restore this agent's access outside this session");
+  assert.equal(mapMcpError(new RenewalRefused(200, "malformed_successor", "bad")).next_step, "retry the same call");
 });
 
 test("MCP malformed accepted response is unknown after the signal was created", { timeout: 15_000 }, async () => {
@@ -466,11 +562,34 @@ test("MCP fresh check cap leaves unseen messages eligible for the next check", {
     f.setWorkspaceName("Test workspace");
     assert.equal((await f.call("check")).value.messages[0].id, ID);
     const largest = capFreshCheck({ checked: true, cached: false, workspace_id: WS, workspace_name: "w".repeat(80),
-      messages: Array.from({ length: AGENT_CHECK_PAGE_SIZE }, (_, index) => ({ id: ID, from: OWNER, from_kind: "user" as const,
+      messages: Array.from({ length: AGENT_CHECK_PAGE_SIZE }, (_, index) => ({ id: `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`, from: OWNER, from_kind: "user" as const,
         sender_owner_relation: "same_owner", kind: "ask" as const, body: "界".repeat(AGENT_CHECK_BODY_BUDGET / AGENT_CHECK_PAGE_SIZE),
         truncated: false, attachment_count: 0, created_at: `2026-09-23T00:00:${String(index).padStart(2, "0")}.000Z` })),
       has_more: true, next_action: null });
     assert.ok(Buffer.byteLength(JSON.stringify(largest.output)) <= MCP_RESULT_MAX_BYTES);
+    assert.equal(largest.lastVisibleId, `dddddddd-dddd-4ddd-8ddd-${String(AGENT_CHECK_PAGE_SIZE).padStart(12, "0")}`,
+      "the largest supported page must fit without dropping a message");
+  } finally { await f.close(); }
+});
+
+test("MCP partial check commits only the last visible message", { timeout: 15_000 }, async () => {
+  const f = await fixture();
+  try {
+    const ids = Array.from({ length: 6 }, (_, index) => `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`);
+    f.setIncoming(ids.map((id, index) => signal(`message ${index} ${"x".repeat(1_000)}`, "ask", id)));
+    f.setWorkspaceName("w".repeat(30_000));
+    const first = (await f.call("check")).value;
+    assert.ok(first.messages.length > 0 && first.messages.length < ids.length, "the cap must show a strict prefix");
+    assert.equal(first.has_more, true);
+    f.setWorkspaceName("Test workspace");
+    const seen = [...first.messages];
+    for (let page = 0; page < ids.length && seen.length < ids.length; page++) {
+      const next = (await f.call("check")).value;
+      assert.ok(next.messages.length > 0, "each next page must make progress");
+      seen.push(...next.messages);
+    }
+    assert.deepEqual(seen.map((row: { id: string }) => row.id), ids);
+    assert.deepEqual((await f.call("check")).value.messages, []);
   } finally { await f.close(); }
 });
 
@@ -533,10 +652,15 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
       [{ body: "hello", request_id: "valid003", channel: "bad space" }, "channel"],
       [{ body: "hello", request_id: "valid004", to: "x".repeat(81) }, "to"],
     ] as const) await assert.rejects(f.client.callTool({ name: "note", arguments: args }), (error: any) => error.code === -32602 && error.message.includes(bad));
-    const posted = await f.call("note", { body: "hello", request_id: "valid005", channel: "  TEAM-UPDATES  " });
+    for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates "]) {
+      await assert.rejects(f.client.callTool({ name: "note", arguments: { body: "hello", request_id: "valid005", channel } }),
+        (error: any) => error.code === -32602 && error.message.includes("channel"));
+    }
+    const posted = await f.call("note", { body: "hello", request_id: "valid006", channel: "team-updates" });
     assert.equal(posted.result.isError, undefined);
     assert.equal(f.posts.at(-1)!.command.channel, "team-updates");
     assert.equal((note.inputSchema.properties!.channel as { maxLength: number }).maxLength, 32);
+    assert.match(note.description!, /slugs are lowercase/);
   } finally { await f.close(); }
 });
 

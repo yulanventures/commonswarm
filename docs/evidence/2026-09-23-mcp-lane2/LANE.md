@@ -86,3 +86,35 @@ Implementation commits: `f8f2dec0` and `3ad4e676`; the latter closes the unliste
 - Local managed detection cannot prove a managed principal whose context exists only elsewhere. The hosted service decides whether a call without session proof is authorized.
 - Rare producer classes such as a renewal lock timeout were mapped with constructed class controls, not all forced through the stdio fake edge. Stdio probes exercised setup, credential, read HTTP, malformed read, recipient, command HTTP, upgrade, and several renewal classes.
 - Production controls, live Claude Code and Codex transcripts, npm publication, and deployment are lead-owned and were not attempted.
+
+## Fold 2 (2026-09-23)
+
+All edge traffic in these tests went to a loopback fake. No model or live workspace was contacted. Each mutation replaced one source expression in this worktree, rebuilt the CLI, ran one bounded test, and restored the source before the next mutation.
+
+| Ruling | Implementation | Test and reverted-fix mutation |
+|---|---|---|
+| F2-A | `src/mcp/errors.ts` distinguishes post `forbidden` from read 401/403/426. The post sentence names the reply and recipient eligibility causes in the command edge and allows for changed access. Channel errors name `channel`; `invalid_request` and `payload_too_large` direct argument repair; `rate_limited` directs retry. Unlisted 4xx responses give the neutral check-arguments step. | The stdio fake edge returns each real code, four `forbidden` post tools, and the three read refusals; it checks the entire payload exactly. Restoring the old `forbidden` sentence and PERSON step: test exit 1, 0/1 pass. |
+| F2-B | The existing check code commits the last visible cursor after a capped page. The new stateful six-message test asserts that a strict prefix is visible and all remaining ids arrive on later checks. The largest supported check now asserts the final id, rather than only a capped byte length. | Replacing `commit(lastVisibleId)` with a full-cursor commit: exit 1, 0/1 pass. Raising `AGENT_CHECK_BODY_BUDGET` from 4,000 to 16,000: exit 1, 0/1 pass. Both mutant builds exited 0. |
+| F2-C | The owned table covers the exported renewal rejection union, local `RenewalRevoked` and `RenewalRefused` literal codes, including `predecessor_superseded` as retry and `successor_not_recoverable` as person action. A bare renewal `forbidden` is class-mapped to `renewal_forbidden`, so it never inherits the post-signal argument advice. | Coverage derives codes from the TypeScript unions, the exported revocation set, and renewal constructors; direct class controls check next steps. Removing `predecessor_superseded`: test exit 1, 0/1 pass; mutant build exit 0. |
+| F2-D | The 80-character selector cap applies to the MCP schema only. The shared CLI resolver again accepts any exact database `text` name, including empty-name handling as at `adef94b4`. MCP channel validation checks the raw input against the advertised lowercase slug pattern and does not normalize it. | A 256-character member name resolves in the CLI resolver; reintroducing the 80-character bound: exit 1, 0/1 pass. Uppercase and padded channel slugs give `-32602`; adding normalization: exit 1, 0/1 pass. Both mutant builds exited 0. |
+
+The `swarm.users.display_name` and `swarm.agent_principals.name` columns are unbounded `text` in `supabase/migrations/20260723000001_p1_schema.sql`. There is no finite database maximum to copy into a CLI validator.
+
+### Fold 2 gates
+
+All test commands had process timeouts and isolated `HOME` values. The final source was rebuilt after mutation restoration. The full CLI test run has a long silent interval but completed before its 600-second bound.
+
+| Gate | Exit | Count or result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build and executable CLI completed. |
+| `env -u FORCE_COLOR npm test` | 1 | 960/962 pass; two existing process-table tests failed because sandbox `ps` returns `EPERM`. A prior run also got 960/962; one intermediate load-affected run got 956/962, with four unrelated host child-exit timing failures that each passed in isolation (4/4). |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 871/874 pass; three existing process-table tests failed because sandbox `ps` returns `EPERM`. |
+| `npm run check:tests` | 0 | Source and test TypeScript check completed. |
+| Focused MCP stdio test, 120-second process bound | 0 | 19/19 pass. |
+| `bash scripts/build-release.sh` | 0 | Single-file bundle built and execute-checked. |
+| Copied release artifact `mcp --help` from an external temporary directory | 0 | One MCP help row; empty stderr. |
+
+### Not established in fold 2
+
+- The sandbox did not permit the `ps`-based tests to pass. The lead can rerun both full suites outside it.
+- No production control, hosted model transcript, npm publication, or deployment was attempted. Those remain lead-owned.

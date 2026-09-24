@@ -1,7 +1,7 @@
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
-import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem, normalizeChannelSlug } from "../cloud/channels.js";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
@@ -26,10 +26,10 @@ const schema = (properties: Record<string, ReturnType<typeof string>>, required:
 export const MCP_TOOL_TABLE = [
   { name: "whoami", description: "Show this authenticated agent and workspace.", inputSchema: schema({}), mapResult: mapWhoami },
   { name: "check", description: "Read new directed messages. If a result is lost, call check with its message_id to read the cached full text.", inputSchema: schema({ message_id: uuid }), mapResult: { fresh: mapCheck, cached: mapCachedCheck } },
-  { name: "ask", description: "Ask a teammate. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
-  { name: "note", description: "Share a note. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "ask", description: "Ask a teammate. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
-  { name: "working_on", description: "Share current work. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
+  { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
 ] as const;
 export const MCP_TOOLS = MCP_TOOL_TABLE.map(({ mapResult: _mapResult, ...tool }) => tool);
@@ -43,15 +43,14 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   for (const key of Object.keys(args)) {
     const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string>>)[key];
     if (!rule) throw new Error(`Unknown argument: ${key}.`);
-    const item = key === "channel" && typeof args[key] === "string" ? normalizeChannelSlug(args[key]) : args[key];
+    const item = args[key];
     if (typeof item !== "string" || (rule.minLength !== undefined && item.length < rule.minLength) ||
         (rule.maxLength !== undefined && item.length > rule.maxLength) ||
         (rule.pattern !== undefined && !new RegExp(rule.pattern).test(item)) ||
-        (key === "channel" && channelSlugProblem(args[key] as string) !== null)) throw new Error(`Invalid argument: ${key}.`);
+        (key === "channel" && channelSlugProblem(item) !== null)) throw new Error(`Invalid argument: ${key}.`);
     if (key === "until") {
       try { signalDuration(item); } catch { throw new Error("Invalid argument: until."); }
     }
-    if (key === "channel") args[key] = item;
   }
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");

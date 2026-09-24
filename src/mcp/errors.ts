@@ -6,12 +6,14 @@ import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisat
 import { SessionContextError } from "../cloud/session-context.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
 
-type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id";
+type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person";
 type Sentence = { message: string; next_step: Action };
 const RETRY: Action = "retry the same call";
 const FIX: Action = "fix the named argument";
 const PERSON: Action = "a person must restore this agent's access outside this session";
 const STOP: Action = "stop and keep the same request id";
+const CHECK_ACCESS: Action = "check the named arguments; if they are right, a person may need to restore this agent's access";
+const CHECK_ARGUMENTS: Action = "check the arguments; if the problem stays, ask a person";
 const entry = (message: string, next_step: Action): Sentence => ({ message, next_step });
 
 /** The only model-visible error prose. No producer message is copied here. */
@@ -49,7 +51,15 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   recipient_invalid: entry("The to argument is invalid.", FIX),
   command_id_conflict: entry("This request id was used for different arguments.", STOP),
   signal_refused: entry("The service refused this signal.", PERSON),
-  forbidden: entry("The service refused this agent's access.", PERSON),
+  // The post_signal edge uses this same bare code for an ineligible reply,
+  // an expired reference, an inactive recipient, and the scope gate.
+  forbidden: entry("A reply may target your own ask or an expired signal; a recipient may no longer be active; this agent's access may also have changed.", CHECK_ACCESS),
+  renewal_forbidden: entry("The service refused this agent's credential renewal.", PERSON),
+  channel_not_found: entry("The channel argument names no channel in this workspace.", FIX),
+  channel_archived: entry("The channel argument names an archived channel.", FIX),
+  invalid_request: entry("The service did not accept the named arguments.", FIX),
+  payload_too_large: entry("The body or about argument is too large.", FIX),
+  rate_limited: entry("The signal rate limit was reached.", RETRY),
   unauthenticated: entry("The service refused this agent's credential.", PERSON),
   upgrade_required: entry("This client must be upgraded before access can resume.", PERSON),
   horizon_reached: entry("This agent reached its renewal horizon.", PERSON),
@@ -61,6 +71,18 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   predecessor_not_owned: entry("This agent's prior credential is unavailable.", PERSON),
   predecessor_expired: entry("This agent's credential expired.", PERSON),
   predecessor_expired_local: entry("This agent's credential expired.", PERSON),
+  predecessor_superseded: entry("Another process renewed this agent's credential.", RETRY),
+  successor_not_recoverable: entry("The renewed credential cannot be recovered.", PERSON),
+  predecessor_not_presented: entry("The prior credential was not presented.", PERSON),
+  predecessor_pending_first_use: entry("The prior credential is still pending first use.", RETRY),
+  renewal_requires_agent_credential: entry("Renewal requires an agent credential.", PERSON),
+  renewal_binding_incomplete: entry("The renewal binding is incomplete.", PERSON),
+  renewal_grant_not_found: entry("The renewal grant is unavailable.", PERSON),
+  renewal_grant_mismatch: entry("The renewal grant does not match this agent.", PERSON),
+  renewal_horizon_reached: entry("This agent reached its renewal horizon.", PERSON),
+  renewal_horizon_invalid: entry("The renewal horizon is invalid.", PERSON),
+  renewal_successors_exhausted: entry("This agent exhausted its renewal grant.", PERSON),
+  renewal_scope_widened: entry("The renewed credential would exceed its prior scope.", PERSON),
   renewal_idle_suspended: entry("This agent's renewal is suspended.", PERSON),
   renewal_grant_suspended: entry("This agent's renewal grant is suspended.", PERSON),
   renewal_revoked: entry("This agent's renewal was revoked.", PERSON),
@@ -72,6 +94,11 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   renewal_superseded: entry("Another process renewed this credential.", RETRY),
   renewal_retry: entry("The credential renewal is retrying.", RETRY),
   renewal_credential_check: entry("The service could not verify this credential.", PERSON),
+  malformed_successor: entry("The service returned a malformed renewed credential.", RETRY),
+  incomplete_successor: entry("The service returned an incomplete renewed credential.", RETRY),
+  successor_expiry_missing: entry("The renewed credential has no expiry.", RETRY),
+  successor_ttl_too_long: entry("The renewed credential lifetime exceeds the safe limit.", RETRY),
+  malformed_wake: entry("The renewed credential has an invalid wake hint.", RETRY),
   read_refused: entry("The service refused this read.", PERSON),
   read_failed: entry("The service could not complete this read.", RETRY),
   read_malformed: entry("The service returned an invalid read response.", RETRY),
@@ -92,8 +119,9 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : error instanceof AgentCredentialInputError ? error.code
     : error instanceof CommandHttpError ? error.code ?? `http_${error.status}`
     : error instanceof SignalRecipientError ? error.code
-    : readHttp ? (readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : [401, 403, 426].includes(readHttp.status) ? "read_refused" : "read_failed")
+    : readHttp ? ([401, 403, 426].includes(readHttp.status) ? "read_refused" : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed")
     : error instanceof RenewalReauthorisationRequired ? error.reason
+    : error instanceof RenewalRevoked && error.code === "forbidden" ? "renewal_forbidden"
     : error instanceof RenewalRefused || error instanceof RenewalRetryError || error instanceof RenewalRevoked || error instanceof RenewalSuspended ? error.code
     : error instanceof RenewalUnsupported ? "renewal_unsupported"
     : error instanceof RenewalSuperseded ? "renewal_superseded"
@@ -111,7 +139,7 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
   const sentence = Object.hasOwn(MCP_ERROR_SENTENCES, safeCode)
     ? MCP_ERROR_SENTENCES[safeCode]!
     : entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`,
-      error instanceof CommandHttpError && error.status >= 500 ? RETRY : PERSON);
+      error instanceof CommandHttpError && error.status >= 500 ? RETRY : error instanceof CommandHttpError && error.status >= 400 && error.status < 500 ? CHECK_ARGUMENTS : PERSON);
   const status = error instanceof CommandHttpError ? error.status : readHttp?.status ?? (error instanceof RenewalRefused || error instanceof RenewalCredentialCheckError ? error.status : undefined);
   return { code: safeCode, ...sentence, ...(status !== undefined && status >= 400 ? { status } : {}) };
 }
