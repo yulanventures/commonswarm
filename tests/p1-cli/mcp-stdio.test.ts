@@ -641,6 +641,10 @@ test("MCP partial check commits only the last visible message", { timeout: 15_00
     const first = (await f.call("check")).value;
     assert.ok(first.messages.length > 0 && first.messages.length < ids.length, "the cap must show a strict prefix");
     assert.equal(first.has_more, true);
+    for (let turn = 0; turn < 10 && f.observations.length < first.messages.length; turn++) await f.call("whoami");
+    assert.deepEqual(f.observations.map(row => row.command.signal_id),
+      first.messages.map((row: { id: string }) => row.id),
+      "only the response's visible prefix may be observed");
     f.setWorkspaceName("Test workspace");
     const seen = [...first.messages];
     for (let page = 0; page < ids.length && seen.length < ids.length; page++) {

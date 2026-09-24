@@ -181,8 +181,8 @@ function wireReport(
   };
 }
 
-test("receipt rendering keeps pending, delivered, and current work distinct and actionable", () => {
-  const pending = renderSignalReceiptReport(report(receipt()), NOW);
+test("receipt rendering keeps pending, delivered, and current work distinct and actionable", { timeout: 5_000 }, () => {
+  const pending = renderSignalReceiptReport(report(receipt({ wake_path_observing: true })), NOW);
   const delivered = renderSignalReceiptReport(report(receipt({
     delivered_at: "2026-08-28T12:18:00.000Z",
   })), NOW);
@@ -531,15 +531,22 @@ test("the receipt CLI prints machine fields from the fake server", async () => {
   });
 });
 
-test("the receipt CLI uses the human wording by default", async () => {
+test("the receipt CLI keeps an unknown seat neutral by default", { timeout: 10_000 }, async () => {
   const result = await runCliAgainst(200, wireReport([wireRow()]), false);
 
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.match(result.stdout, /recipient's session has not checked this in/);
+  assert.match(result.stdout, /Not yet delivered/);
+  assert.doesNotMatch(result.stdout, /recipient's session has not checked this in/);
   assert.match(result.stdout, /cswarm listen status/);
   assert.match(result.stdout, /cswarm receipt/);
   assert.doesNotMatch(result.stdout, /^\s*\{/);
+});
+
+test("the receipt CLI names stale only with server observation evidence", { timeout: 10_000 }, async () => {
+  const result = await runCliAgainst(200, wireReport([wireRow({ wake_path_observing: true })]), false);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /recipient's session has not checked this in/);
 });
 
 test("the receipt CLI prints one fixed brain nudge only for replied outcome", async () => {

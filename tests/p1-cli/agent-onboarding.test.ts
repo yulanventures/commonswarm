@@ -46,7 +46,7 @@ function row(i: number, body = `message ${i}`): SignalRecord {
     from: OWNER, from_kind: "user", to: null, to_agent: AGENT, in_reply_to: null, about: null, kind: i % 2 ? "ask" : "note",
     body, until: "2099-01-01T00:00:00.000Z", created_at: "2026-09-08T00:00:00.000Z", sender_owner_relation: "same_owner" };
 }
-function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck = false) {
+function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck: boolean | number = false) {
   const requests: Array<Record<string, unknown>> = [];
   const fetcher = (async (_input: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -68,9 +68,9 @@ function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck = false) 
       assert.equal(command.unclaimed, true);
       assert.equal(command.lease_id, null);
       assert.equal(command.outcome, "observed");
-      return new Response(JSON.stringify(failAck ? { error: "temporarily_unavailable" } :
+      return new Response(JSON.stringify(failAck ? { error: failAck === 409 ? "delivery_ack_conflict" : "temporarily_unavailable" } :
         { ok: true, status: "accepted", event_ids: [], signal_id: command.signal_id, outcome: "observed" }),
-        { status: failAck ? 503 : 200 });
+        { status: failAck ? typeof failAck === "number" ? failAck : 503 : 200 });
     } else throw new Error("unexpected request");
     return new Response(JSON.stringify(result), { status: 200 });
   }) as typeof fetch;
@@ -204,17 +204,65 @@ test("failed observation leaves check successful and retries after a later empty
   assert.equal(quiet.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 0);
 });
 
-test("bounded observation retries rotate past persistent refusals", async () => {
+test("in-flight observation ends within the remaining check deadline", { timeout: 5_000 }, async () => {
+  const { profilePath } = await setup();
+  const base = fixture([row(1), row(2)]);
+  let ackStarted = 0;
+  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.command?.kind === "ack_agent_delivery") {
+      ackStarted++;
+      if (ackStarted === 1) {
+        await new Promise(resolve => setTimeout(resolve, 160));
+        return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503 });
+      }
+      return await new Promise<Response>(() => {}); // transport ignores abort
+    }
+    return base.fetcher(input, init);
+  }) as typeof fetch;
+  const deadline = Date.now() + 350;
+  const output: string[] = [];
+  let forcedExitText = "";
+  const hardExit = setTimeout(() => { forcedExitText = "check_timeout"; }, Math.max(0, deadline - Date.now() + 150));
+  let result: Awaited<ReturnType<typeof checkAgentMessages>>;
+  try {
+    result = await checkAgentMessages({ profilePath, fetcher, deadlineAtMs: deadline,
+      present: async value => { output.push(renderAgentCheck(value)); } });
+  } finally { clearTimeout(hardExit); }
+  assert.equal(result.messages.length, 2);
+  assert.equal(ackStarted, 2);
+  assert.ok(output[0]?.includes(row(1).id));
+  assert.ok(Date.now() < deadline + 100, "an ack in flight must finish before hook forced-exit grace");
+  assert.equal(forcedExitText, "", "the forced-exit failure text cannot fire after an ACK deadline");
+  assert.doesNotMatch(output.join(""), /check_timeout/);
+});
+
+test("terminal observation refusals leave the queue after one request each", { timeout: 15_000 }, async () => {
   const { profilePath } = await setup();
   const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE + 1 }, (_, index) => row(index + 1));
-  const failed = fixture(rows, AGENT, true);
+  const failed = fixture(rows, AGENT, 409);
   await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  for (let check = 0; check < 5; check++)
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  const acks = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks.length, rows.length, "N terminal refusals cause N requests across five later checks");
+  assert.deepEqual(acks.map(r => (r.command as { signal_id: string }).signal_id), rows.map(row => row.id));
+});
+
+test("transient observation retries stop at the attempt and age caps", { timeout: 10_000 }, async () => {
+  const { profilePath } = await setup();
+  const failed = fixture([row(1)], AGENT, 503);
+  for (let check = 0; check < 5; check++)
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks().length, 3);
+  const path = join(dirname(profilePath), "check.json");
+  const state = JSON.parse(await readFile(path, "utf8"));
+  state.pending_observed_ids = [row(2).id];
+  state.pending_observed_retries = { [row(2).id]: { attempts: 1, first_at: Date.now() - 2 * 24 * 60 * 60 * 1_000 } };
+  await writeFile(path, JSON.stringify(state), { mode: 0o600 });
   await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
-  const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
-  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
-  const after = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
-  assert.ok(after.length - before.length <= AGENT_CHECK_PAGE_SIZE);
-  assert.equal((after[before.length]!.command as { signal_id: string }).signal_id, rows.at(-1)!.id);
+  assert.equal(acks().length, 3, "an aged retry is dropped without a request");
 });
 
 test("check stops at wrong-recipient and out-of-order pages without consuming them", async () => {

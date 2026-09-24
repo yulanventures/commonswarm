@@ -20,6 +20,7 @@ import {
   DELIVERY_NOT_SURFACED_CODE,
 } from "../../src/cloud/session-wire.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { WAKE_STALE_MS } from "../../src/cloud/idle-poll.js";
 
 interface LocalEnvironment {
   API_URL: string;
@@ -528,8 +529,8 @@ test("unmanaged ACK keeps today's queued-to-observed promotion", async () => {
 test("unclaimed check observation accepts only untouched directed rows and is idempotent", async () => {
   const agent = await seedAgent("unclaimed-check");
   const signalId = await postAsk(agent.principalId);
-  assert.equal((await wakePathRows(agent.principalId)).length, 1,
-    "a member sees the unobserved directed delivery");
+  assert.equal((await wakePathRows(agent.principalId)).length, 0,
+    "a seat that has never observed mail is unknown");
   assert.equal((await wakePathRows(agent.principalId, randomUUID())).length, 0,
     "mutation control: another identity cannot see this wake path");
   const command = {
@@ -554,6 +555,35 @@ test("unclaimed check observation accepts only untouched directed rows and is id
   const foreign = await runCmd(other.token, command);
   assert.equal(foreign.status, 403, JSON.stringify(foreign.body));
   assert.equal(foreign.body.error, "delivery_unavailable");
+});
+
+test("wake mark ignores pre-cutoff and expired mail, then ages and clears live mail", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-states");
+  const preCutoff = await postAsk(agent.principalId);
+  await sql`UPDATE swarm.signal_deliveries SET enqueued_at =
+    (SELECT applied_at - interval '1 minute' FROM swarm.wake_path_release WHERE singleton)
+    WHERE signal_id = ${preCutoff}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+  assert.equal((await wakePathRows(agent.principalId)).length, 0, "unknown seat stays neutral");
+  const first = await postAsk(agent.principalId);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0, "no observed ACK means unknown");
+  const command = { kind: "ack_agent_delivery", signal_id: first, lease_id: null,
+    listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true };
+  assert.equal((await runCmd(agent.token, command)).status, 200);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0,
+    "old pre-cutoff mail cannot make a known seat stale");
+  const expired = await postAsk(agent.principalId);
+  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second'
+    WHERE id = ${expired}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+  assert.equal((await wakePathRows(agent.principalId)).length, 0, "expired mail cannot make a seat stale");
+  const live = await postAsk(agent.principalId);
+  await sql`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '4 minutes'
+    WHERE signal_id = ${live}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+  const stale = await wakePathRows(agent.principalId);
+  assert.equal(stale.length, 1);
+  assert.ok(Date.now() - stale[0]!.getTime() >= WAKE_STALE_MS);
+  assert.equal((await runCmd(agent.token, { ...command, signal_id: live })).status, 200);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0, "observed ACK clears stale");
 });
 
 test("unclaimed check observation cannot change a claimed queued row", async () => {
@@ -584,17 +614,18 @@ test("unclaimed check observation cannot change a claimed queued row", async () 
   assert.deepEqual(await deliveryRow(signalId, agent.principalId), terminalBefore);
 });
 
-test("managed unclaimed observation requires the row's current session proof", async () => {
+test("managed unclaimed observation accepts a current proof for an enqueued row", { timeout: 30_000 }, async () => {
   const agent = await seedAgent("unclaimed-managed");
   const held = await holdSession(agent);
   const signalId = await postAsk(agent.principalId);
+  assert.equal((await deliveryRow(signalId, agent.principalId)).session_id, null);
   const command = { kind: "ack_agent_delivery", signal_id: signalId,
     lease_id: null, listener_instance_id: null, outcome: "observed", last_error_code: null,
     surfaced: true, unclaimed: true };
   const stale = await runCmd(agent.token, command,
     { headers: proofHeaders(held.sessionId, held.generation + 1, held.key) });
   assert.equal(stale.status, 409, JSON.stringify(stale.body));
-  assert.equal(stale.body.error, "session_conflict");
+  assert.equal(stale.body.error, "session_conflict", "generic session fence refuses stale proof");
   assert.equal((await deliveryRow(signalId, agent.principalId)).acked_at, null);
   const current = await runCmd(agent.token, command,
     { headers: proofHeaders(held.sessionId, held.generation, held.key) });

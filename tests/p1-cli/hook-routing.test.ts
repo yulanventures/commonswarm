@@ -1280,7 +1280,7 @@ test("listen status and stop name the exact directory and profile when no listen
       ]);
       assert.equal(result.status, 0, result.stderr);
       assert.ok(result.stdout.includes(command === "status"
-        ? `${NO_LISTENER_STATUS_SENTENCE} Checked ${expected.instanceDirectory} for profile ${target.profileId}.`
+        ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", expected.instanceDirectory)} Checked profile ${target.profileId}.`
         : `No listener found under ${expected.instanceDirectory} for profile ${target.profileId}.`));
     }
   } finally {

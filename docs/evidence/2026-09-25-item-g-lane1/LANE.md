@@ -2,6 +2,8 @@
 
 Branch: `lane/item-g-lane1`. Specification: `docs/design/2026-09-24-ITEM-G-LANE-1-BRIEF.md`, decisions 1–4 only. This is source and local verification evidence, not a production release record.
 
+The initial implementation notes below describe `bb229da9`. Fold 1 supersedes their statements about row-bound proof on never-claimed mail, unconditional stale marks, queued replay proof, and the pre-migration seed.
+
 ## Decisions and implementation
 
 1. Migration `20260925000001_unclaimed_observed_ack.sql` widens the delivery CHECK for an unclaimed `observed` row and adds the member-scoped `swarm_read.agent_wake_path` aggregate. That view includes only directed ask/note deliveries with no current or former lease. The command edge accepts the separate `unclaimed: true` observation shape only for a directed ask/note to the caller, with a current row-bound session proof when managed. It sets `delivered_at`, `acked_at`, `surfaced_at`, and `ack_outcome` on an untouched row. Replay is idempotent. A claimed or terminal row is refused without change. The existing queued hook promotion remains separate; its managed proof is checked before even an idempotent replay response. Typed refusals remain `delivery_unavailable`, `delivery_ack_conflict`, `delivery_not_surfaced`, and `session_conflict` as appropriate. The new server read is `swarm_read.agent_wake_path`; the app never reads `swarm.signal_deliveries` directly.
@@ -11,7 +13,7 @@ Branch: `lane/item-g-lane1`. Specification: `docs/design/2026-09-24-ITEM-G-LANE-
 
 ## Box release order
 
-After cross-family review and landing an exact SHA on `main`, HezLead directs Anvil to apply migration `20260925000001` with the two files in `deploy/release-proofs/item-g/`, then release the command edge on the box. The migration functional proof needs a directed, unclaimed note seeded through the normal product path before the window and intentionally left unchecked. Only after migration and edge verification should npm and the site be released. The site depends on the new `swarm_read.agent_wake_path` view. CI and merge do not deploy any surface.
+After cross-family review and landing an exact SHA on `main`, HezLead directs Anvil to apply migration `20260925000001`, then release the command edge on the box. Afterward a dedicated test seat must send one unclaimed observed ACK, then receive a new directed note left unchecked. Pass that exact note ID as `item_g_seed_signal_id` to the functional proof. The catalog proof checks the schema. Only after migration and edge verification should npm and the site be released. The roster tolerates a missing view. CI and merge do not deploy any surface.
 
 ## Proof files and mutation controls
 
@@ -34,3 +36,35 @@ The command dispatch baseline was regenerated twice from the loopback fixture (2
 - No production host was contacted, and no production done-test was run. The box migration, command edge, npm package, and site are not released by this lane.
 - The lead's local-stack server suite and cross-family review are outstanding. The release proofs validate schema and read behavior in a rolled-back local transaction; live command behavior needs the server tests and release control.
 - The app's full visual geometry suite is not established in this sandbox. The new pure roster threshold test passes; the complete site gate's failing controls are recorded above rather than called green.
+
+## Fold 1 — 2026-09-25
+
+The Opus and Grok round-1 reviews failed. This fold implements the lead's G1–G9 rulings. The source tests below are in existing package gates; the local SQL probes ran against loopback PostgreSQL with `lock_timeout = 1s`, inside transactions rolled back afterward. A read verified the old local view was restored and `swarm.wake_path_release` was absent. No box state was read or changed.
+
+| Ruling | Change | Regression test and mutation result |
+|---|---|---|
+| G1 | An enqueued managed row has no session binding. The unclaimed ACK requires a current command proof and rejects only an existing *different* row binding. | `delivery-client.test.ts` uses a NULL-bound row, missing proof, and different bound session: passed; reverting the fence failed the test. In the rolled-back local stack, `ackAgentDelivery` accepted the current proof and refused a different row binding. `managed-delivery.test.ts` checks the real HTTP flow after the lead's reset; its old generation negative is explicitly the general fence. |
+| G2 | Migration records its cutoff in `swarm.wake_path_release`. The view requires a prior post-cutoff unclaimed observed ACK, then counts only post-cutoff, live, unleased, unacked directed ask/note rows. The receipt wrapper adds a row-specific `wake_path_observing` Boolean; absent/false stays neutral. The dated brief correction retains the retired decision wording. | `delivery-client.test.ts` pins the view predicates; `delivery-receipts.test.ts` checks unknown versus stale. Removing the view cutoff or receipt eligibility made the focused tests fail. Rolled-back local view controls passed unknown, known-stale, expired-excluded, pre-cutoff-excluded, and ACK-clears. `managed-delivery.test.ts` covers those cases after the lead's reset. |
+| G3 | Observation runs after output and cursor commit. Each ACK gets only its then-remaining deadline; a named 50 ms floor skips late attempts. The final queue write uses that remaining budget. The profile and hook share this path. | `agent-onboarding.test.ts` holds a second ACK in flight past the first's delay and checks return before simulated forced-exit text, with output unchanged. Replacing the remaining budget with a fresh full timeout failed the test. |
+| G4 | Only transport and 5xx errors retry. Other typed refusals leave the queue immediately. Transient retry metadata caps attempts at 3 and age at 24 hours. | `agent-onboarding.test.ts` shows N 409 refusals produce N ACK requests across five later checks, plus attempt and age caps; treating a 409 as transient failed the focused test. |
+| G5 | The new lease-free shape requires `observed` and `last_error_code IS NULL`. The constraint is added `NOT VALID` and then validated. Catalog proof checks definition and validation, including competing lease requirements. | `delivery-client.test.ts` pins both SQL clauses; removing the error-code condition failed. In a rolled-back local transaction, error-free observed succeeded, observed with `provider_refused` failed CHECK 23514, and the catalog proof returned false for the old definition under the same constraint name. |
+| G6 | Functional proof requires `item_g_seed_signal_id`, checks that exact eligible post-cutoff row for an active principal whose owner is still a member, excludes competing mail, and checks exact view time plus nonmember and anonymous reads. | `delivery-client.test.ts` pins the seed and exclusions; removing the seed predicate failed. The rolled-back local proof passed its exact seed and failed with its intended eligibility or competing-mail error for missing, pre-cutoff, expired, revoked, owner-left, and competing-row seeds. |
+| G7 | Queued `observed` replay returns idempotently before the row session comparison, as it did before this lane. | `delivery-client.test.ts` replays with a different session and passes; disabling the early replay failed it. |
+| G8 | A wake-view read error returns the app roster without a mark. The absent-listener sentence scopes itself to the checked state directory through one constant. | `wake-path.observer.test.ts` and `delivery-client.test.ts` pin both clauses; restoring the throw or the unscoped sentence failed their focused tests. `hook-routing.test.ts` checks rendered copy. |
+| G9 | The MCP deferred commit ACKs only IDs through the last visible response row. | `mcp-stdio.test.ts` now checks the ACK ID sequence after a capped response. Replacing the visible prefix with all presented rows failed this test (the mutation that previously passed 42/42). |
+
+The functional box proof's seed procedure changed: after migration and command-edge release, use a dedicated test seat to send one observed ACK, then send the pinned note and leave it unchecked. Supply its ID with psql `-v item_g_seed_signal_id=<uuid>`. The proof cannot be run against the old pre-cutoff seed.
+
+### Fold 1 gates
+
+- `npm run build`: exit 0. `npm run check:tests`: exit 0. `npm run check:edge`: exit 0.
+- `npm run build:command-core` plus `git diff --exit-code supabase/functions/_shared/protocol.js`: exit 0, generated bundle unchanged. `bash scripts/build-release.sh`: exit 0, executable bundle check passed. `npm --prefix site run build`: exit 0, 12 pages.
+- `env -u FORCE_COLOR npm test`: exit 1, 970 tests, 968 pass, 2 sandbox failures (`ps EPERM`, resume `spawn EPERM`).
+- `env -u FORCE_COLOR npm run test:p1-cli`: exit 1, 935 tests, 932 pass, 3 sandbox failures (two `ps EPERM` and resume `spawn EPERM`). The amended receipt and wake-path controls passed.
+- `env -u FORCE_COLOR npm --prefix site test`: exit 1, 576 tests, 499 pass, 76 fail, 1 skipped. The wake-path tests passed. Browser geometry tests aborted in headless Chrome; local provider-button controls lacked untracked `site/.env`.
+- Dispatch baseline regenerated twice from loopback fixtures: 2/2 each run, exit 0, byte-identical SHA-256 `38bf1d93286cccad41c7f74d9009d0b67b31a3d7fdf0cc78c9d94792ac406e85` (rows) and `5d5f7f20d51cbf1868cb093f23af9d42c5586f5859369effced7199fa1ccf938` (counts). Against `origin/main`, only `listen.status` and `policy.host-session.listen.status.keep` change from `not_found` to `no_listener`; this fold did not change either file.
+- `git diff --check origin/main...HEAD`: exit 0. Local identity check: exit 0, four address fields. Local agent-trailer check: exit 0, both fold commits.
+
+### Still to establish
+
+The lead owns `db:reset` and the full server suite after this fold. The rolled-back local probes validate schema, view, proof, and the in-process edge; they do not establish the served HTTP path on a reset stack. No production release or hosted turn latency was measured.
