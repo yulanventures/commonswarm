@@ -1,17 +1,113 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import ts from "typescript";
 import { PendingRefreshGate } from "../../lib/pending-refresh";
 import { isInviteSubmitCurrent } from "../../lib/invite-submit";
 import {
+  loadPendingAccess,
   pendingAccessRows,
   shouldPollPendingAccess,
   shouldRetireFreshInvite,
 } from "../../lib/pending-access";
 import type {
   AgentAccessStatus,
+  PendingAgentAccess,
   PendingMemberInvite,
 } from "../../lib/commonswarm";
+
+test("server pending rows show invitation age and disappear with the next snapshot", { timeout: 2_000 }, () => {
+  const issuedAt = "2026-09-24T12:00:00Z";
+  const pending: PendingAgentAccess[] = [
+    { kind: "classic", principalId: "p1", principalName: "Wren", joinCredentialId: null,
+      ownerUserId: "u1", issuerDisplay: "Owner", issuedAt, expiresAt: null,
+      seatsUsed: null, seatCap: null },
+    { kind: "join", principalId: null, principalName: null, joinCredentialId: "j1",
+      ownerUserId: "u1", issuerDisplay: "Owner", issuedAt,
+      expiresAt: "2026-09-25T12:00:00Z", seatsUsed: 1, seatCap: 2 },
+  ];
+  const rows = pendingAccessRows([], [], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", pending, "workspace");
+  assert.deepEqual(rows.map((row) => row.title), ["Wren", "Agent connect code (j1)"]);
+  assert.match(rows[0]!.state, /Invited, not connected · 2 minutes ago/);
+  assert.match(rows[1]!.state, /1\/2 seats used/);
+  assert.match(rows[1]!.state, /issued by Owner/);
+  assert.equal(rows[0]!.kind, "pending");
+  assert.equal(rows[1]!.cancelLabel, "");
+  const token = {
+    workspaceId: "workspace", principalId: "p1", ownerUserId: "u1",
+    agentName: "Wren", model: null, tokenId: "token-1", issuedAt,
+    expiresAt: "2026-09-25T12:00:00Z", firstUsedAt: null, revokedAt: null,
+    grantId: "grant-1", grantKind: "standing" as const, horizonExpiresAt: null,
+    boundDeviceId: null, lastUsedAt: null, lastUsedDeviceId: null,
+    lastUsedFrom: null, newHostAt: null, suspendedAt: null, grantRevokedAt: null,
+  };
+  const cancellable = pendingAccessRows([], [token], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", pending, "workspace");
+  assert.equal(cancellable.length, 2);
+  assert.equal(cancellable[0]!.kind, "agent");
+  assert.equal(cancellable[0]!.id, "token-1");
+  assert.equal(cancellable[0]!.state,
+    "Model not specified · owned by Owner · expires 2 minutes ago");
+  assert.equal(cancellable[0]!.cancelLabel, "Cancel access for Wren");
+  assert.equal(cancellable[1]!.kind, "pending");
+  assert.equal(cancellable[1]!.id, "j1");
+  const withoutServer = pendingAccessRows([], [token], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", [], "workspace");
+  assert.equal(withoutServer[0]!.id, "token-1");
+  // Mutation control: first use, cap exhaustion, revocation or expiry removes a
+  // server row; the next poll's empty snapshot must clear both display rows.
+  assert.deepEqual(pendingAccessRows([], [], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", [], "workspace"), []);
+});
+
+test("a failed pending read leaves the workspace pending section available", { timeout: 2_000 }, async () => {
+  for (const failure of [new Error("network"), new Error("404"), new Error("500")]) {
+    assert.deepEqual(await loadPendingAccess(async () => { throw failure; }), { rows: [], failed: true });
+  }
+  assert.deepEqual(await loadPendingAccess(async () => ["row"]), { rows: ["row"], failed: false });
+  const source = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+  assert.match(source, /data-pending-load-note hidden>Invited, not connected: could not load/);
+  assert.equal(pendingReadWiring(source).length, 4);
+  assert.match(source, /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed/);
+});
+
+function pendingReadWiring(source: string): number[] {
+  const script = source.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "dashboard script must exist");
+  const ast = ts.createSourceFile("dashboard.ts", script, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const sites: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)
+        && node.expression.text === "pendingAgentAccess") {
+      sites.push(ast.getLineAndCharacterOfPosition(node.getStart(ast)).line + 1);
+      const arrow = node.parent;
+      const loader = arrow.parent;
+      assert.ok(ts.isArrowFunction(arrow) && ts.isCallExpression(loader)
+        && ts.isIdentifier(loader.expression) && loader.expression.text === "loadPendingAccess",
+      `pending read at script line ${sites.at(-1)} must use the nonthrowing loader`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return sites;
+}
+
+test("every app pending read site uses the nonthrowing loader", { timeout: 2_000 }, async () => {
+  const source = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
+  const sites = pendingReadWiring(source);
+  assert.equal(sites.length, 4, "enumerate every pendingAgentAccess call from the script");
+  for (const site of sites) {
+    const lines = source.split("\n");
+    // Script starts after the markup. Mutate one discovered site at a time.
+    const scriptStart = lines.findIndex((line) => line === "<script>") + 1;
+    const index = scriptStart + site - 2;
+    assert.match(lines[index] ?? "", /loadPendingAccess\(\(\) => pendingAgentAccess\(/);
+    lines[index] = lines[index]!.replace(/loadPendingAccess\(\(\) => (pendingAgentAccess\([^)]*\))\)/, "$1");
+    assert.throws(() => pendingReadWiring(lines.join("\n")),
+      /nonthrowing loader|pending read/, `restoring a throwing read at script line ${site} must fail`);
+  }
+});
 
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 const connect = await readFile(
@@ -667,7 +763,7 @@ test("the Live chip shows only while the feed poll can be armed", () => {
   );
 });
 
-test("the Agents dialog carries a mobile-presented Pending access section fed by one renderer", () => {
+test("the Agents dialog carries Pending access at every width from one renderer", () => {
   /* The section's hooks, its h3 under the dialog's h2, and a unique labelledby. */
   assert.match(dashboard, /data-dialog-access-section/);
   assert.match(dashboard, /data-dialog-access-list/);
@@ -735,16 +831,21 @@ test("the Agents dialog carries a mobile-presented Pending access section fed by
     /\.dashboard__pending-access-row\s*>\s*\.dashboard__text-button\s*\{[\s\S]*white-space:\s*nowrap/,
     "the pending-row action keeps Cancel horizontal at rail and phone widths",
   );
-  /* Mobile presentation: the section displays only at ≤52rem; desktop keeps the rail. */
+  /* The dialog is the only pending surface at every width. */
+  const visibleAtEveryWidth = /\.dashboard__roster-dialog-pending\s*\{\s*display: grid;/;
+  // Discriminating control: the pre-item-J base rule hid the section at desktop.
+  assert.doesNotMatch(dashboard, /\.dashboard__roster-dialog-pending\s*\{\s*display:\s*none/,
+    "no base rule hides the only pending surface at desktop");
   assert.match(
     dashboard,
-    /@media \(max-width: 52rem\)[\s\S]*\.dashboard__roster-dialog-pending\s*\{[\s\S]*display: grid/,
+    visibleAtEveryWidth,
+    "pending rows remain available in the desktop dialog",
   );
-  assert.match(
-    dashboard,
-    /\.dashboard__roster-dialog-pending\s*\{\s*display: none;/,
-    "hidden at desktop — no duplicate, competing control",
-  );
+  const hiddenAtDesktop = dashboard.replace(visibleAtEveryWidth,
+    ".dashboard__roster-dialog-pending { display: none;");
+  assert.notEqual(hiddenAtDesktop, dashboard, "the CSS mutation reaches the pending section");
+  assert.throws(() => assert.match(hiddenAtDesktop, visibleAtEveryWidth),
+    "restoring desktop display:none must fail the observer");
 
   /* The view- and row-agnostic timer: armed from the predicate after every render,
      cleared on hide and sign-out, and network work remains gate-bounded. */

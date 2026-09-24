@@ -118,6 +118,11 @@ interface RenewalGrantReadRequest {
   workspace_id: string;
 }
 
+interface PendingAccessReadRequest {
+  resource: "pending_access";
+  workspace_id: string;
+}
+
 /**
  * The channel list for an agent credential.
  *
@@ -209,9 +214,20 @@ function exactKeys(
 function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
-  RenewalGrantReadRequest | ChannelReadRequest | null {
+  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (
+    body.resource === "pending_access" &&
+    exactKeys(body, ["resource", "workspace_id"]) &&
+    typeof body.workspace_id === "string" &&
+    UUID_RE.test(body.workspace_id)
+  ) {
+    return {
+      resource: "pending_access",
+      workspace_id: body.workspace_id.toLowerCase(),
+    };
+  }
   if (
     body.resource === "channels" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -412,7 +428,8 @@ async function handle(
     });
   }
   const agentCredential = AGENT_TOKEN_RE.test(token);
-  if (!agentCredential && body.resource !== "renewal_grants") {
+  if (!agentCredential && body.resource !== "renewal_grants" &&
+    body.resource !== "pending_access") {
     return json(401, { error: "unauthenticated" });
   }
   let humanUserId: string | null = null;
@@ -439,6 +456,15 @@ async function handle(
           true
         )
       `;
+      if (body.resource === "pending_access") {
+        const pending = await tx<Record<string, unknown>[]>`
+          SELECT kind, principal_id, principal_name, join_credential_id,
+                 owner_user_id, issuer_display, issued_at, expires_at,
+                 seats_used, seat_cap
+          FROM swarm_read.pending_access(${body.workspace_id}::uuid)
+        `;
+        return json(200, { pending });
+      }
       const grants = await tx<Record<string, unknown>[]>`
         SELECT *
         FROM swarm_read.renewal_grant_roster(${body.workspace_id}::uuid)
@@ -491,6 +517,9 @@ async function handle(
       }
       if (body.resource === "renewal_grants") {
         return json(200, { grants: [] });
+      }
+      if (body.resource === "pending_access") {
+        return json(200, { pending: [] });
       }
       if (body.resource === "channels") {
         return json(200, { channels: [] });
@@ -592,6 +621,15 @@ async function handle(
     `;
     // Stay as swarm_read for membership-gated views. The definer already
     // stamped first-use; this path never elevates to swarm_command.
+    if (body.resource === "pending_access") {
+      const pending = await tx<Record<string, unknown>[]>`
+        SELECT kind, principal_id, principal_name, join_credential_id,
+               owner_user_id, issuer_display, issued_at, expires_at,
+               seats_used, seat_cap
+        FROM swarm_read.pending_access(${body.workspace_id}::uuid)
+      `;
+      return json(200, { pending });
+    }
     if (body.resource === "channels") {
       /* Same eight columns and the same slug order the human REST read takes,
        * so `cswarm channel ls` renders identically whichever credential ran it.

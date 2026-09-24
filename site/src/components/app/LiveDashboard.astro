@@ -1086,11 +1086,10 @@ import "../../styles/tokens.css";
         </div>
       </section>
 
-      {/* Pending access lives here only where the rail's own details are hidden:
-          at ≤52rem this dialog is the ONLY reachable pending surface, so the
-          section must exist — and at desktop the rail keeps it and the dialog
-          stays quiet, so there is never a second, competing control. Both lists
-          render from the same pendingAccessRows call, so they cannot disagree. */}
+      {/* Pending access lives in this dialog at every width. The rail's own pending
+          details were removed when the secondary rail controls moved into this dialog
+          (b7977ad3), so this section is the only pending surface: it must not be hidden
+          at desktop (item J). */}
       <section
         class="dashboard__roster-dialog-pending"
         data-dialog-access-section
@@ -1108,6 +1107,7 @@ import "../../styles/tokens.css";
           class="dashboard__agent-list dashboard__roster-dialog-pending-list"
           data-dialog-access-list
         ></ul>
+        <p data-pending-load-note hidden>Invited, not connected: could not load</p>
         <p class="dashboard__form-error" data-dialog-access-error role="alert" hidden></p>
       </section>
     </div>
@@ -1132,6 +1132,7 @@ import "../../styles/tokens.css";
     FILE_CONTENT_WARNING,
     BROWSER_ATTACHMENT_MAX,
     agentAccessStatuses,
+    pendingAgentAccess,
     archiveWorkspace,
     client,
     createWorkspace,
@@ -1180,6 +1181,7 @@ import "../../styles/tokens.css";
     type Signal,
     type WorkspaceChannel,
     type AgentAccessStatus,
+    type PendingAgentAccess,
     type AgentActivitySubscription,
     type PendingMemberInvite,
     type BrowserDeliveryIndicator,
@@ -1251,6 +1253,7 @@ import "../../styles/tokens.css";
   } from "../../lib/channels";
   import {
     pendingAccessRows,
+    loadPendingAccess,
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
@@ -1397,6 +1400,8 @@ import "../../styles/tokens.css";
     let members: Member[] = [];
     let pendingInvites: PendingMemberInvite[] = [];
     let accessStatuses: AgentAccessStatus[] = [];
+    let pendingAgents: PendingAgentAccess[] = [];
+    let pendingAgentsLoadFailed = false;
     let renderedPendingAccessKey = "";
     let people = new Map<string, string>();
     let signals: Signal[] = [];
@@ -2123,9 +2128,8 @@ import "../../styles/tokens.css";
      * Agents dialog section (the only reachable surface at ≤52rem) both render from
      * a single pendingAccessRows call, so they can never disagree about content,
      * order, or wording — the lists are mirrors of one state, never two states.
-     * Each list's Cancel closures capture that list's own error slot, and each row
-     * carries the exact id its cancel command needs, so a Cancel always reaches the
-     * right revoke with the right invitation/token id.
+     * Each Cancel closure captures its list's own error slot. Join codes and
+     * principals with no token are informational rows, so they have no Cancel.
      */
     const currentPendingAccessRows = () =>
       pendingAccessRows(
@@ -2134,6 +2138,8 @@ import "../../styles/tokens.css";
         (userId) => people.get(userId) ?? "Workspace member",
         Date.now(),
         (iso) => formatTime(iso).relative,
+        sampleMode ? undefined : pendingAgents,
+        activeWorkspaceId,
       );
 
     const pendingAccessKey = (rows = currentPendingAccessRows()): string =>
@@ -2167,8 +2173,10 @@ import "../../styles/tokens.css";
 
       const dialogSection = one<HTMLElement>("[data-dialog-access-section]");
       const dialogCount = one<HTMLElement>("[data-dialog-access-count]");
+      const loadNote = one<HTMLElement>("[data-pending-load-note]");
+      if (loadNote) loadNote.hidden = !pendingAgentsLoadFailed;
       if (dialogCount) dialogCount.textContent = String(total);
-      if (dialogSection) dialogSection.hidden = sampleMode || total === 0;
+      if (dialogSection) dialogSection.hidden = sampleMode || (total === 0 && !pendingAgentsLoadFailed);
 
       const buildRows = (errorTarget: HTMLElement | null): DocumentFragment => {
         const fragment = document.createDocumentFragment();
@@ -2182,46 +2190,49 @@ import "../../styles/tokens.css";
           const state = document.createElement("span");
           state.textContent = row.state;
           copy.append(title, state);
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "dashboard__text-button";
-          button.textContent = "Cancel";
-          button.dataset.pendingKind = row.kind;
-          button.dataset.pendingId = row.id;
-          button.setAttribute("aria-label", row.cancelLabel);
-          button.addEventListener("click", async () => {
-            if (!session) return;
-            if (errorTarget) {
-              errorTarget.hidden = true;
-              errorTarget.textContent = "";
-            }
-            button.disabled = true;
-            try {
-              if (row.kind === "invite") {
-                await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
-              } else {
-                await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
-              }
-              /* The reload closes the dialog and re-renders both lists from the
-                 fresh state. The row that held focus is gone, so hand focus to
-                 the door that reopens the roster — or to the empty channel's
-                 Add door when no agents remain — instead of dropping it on
-                 <body>. Same pattern as the roster Remove path. */
-              await openWorkspace(row.workspaceId);
-              const door = agents.length > 0
-                ? one<HTMLButtonElement>("[data-roster-open]")
-                : one<HTMLButtonElement>("[data-add-agent]");
-              door?.focus({ preventScroll: true });
-            } catch (error) {
+          if (row.kind !== "pending") {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "dashboard__text-button";
+            button.textContent = "Cancel";
+            button.dataset.pendingKind = row.kind;
+            button.dataset.pendingId = row.id;
+            button.setAttribute("aria-label", row.cancelLabel);
+            button.addEventListener("click", async () => {
+              if (!session) return;
               if (errorTarget) {
-                errorTarget.textContent = readableError(error);
-                errorTarget.hidden = false;
+                errorTarget.hidden = true;
+                errorTarget.textContent = "";
               }
-            } finally {
-              button.disabled = false;
-            }
-          });
-          item.append(copy, button);
+              button.disabled = true;
+              try {
+                if (row.kind === "invite") {
+                  await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
+                } else {
+                  await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
+                }
+                /* The reload closes the dialog and re-renders both lists from the
+                   fresh state. The row that held focus is gone, so hand focus to
+                   the door that reopens the roster — or to the empty channel's
+                   Add door when no agents remain — instead of dropping it on
+                   <body>. Same pattern as the roster Remove path. */
+                await openWorkspace(row.workspaceId);
+                const door = agents.length > 0
+                  ? one<HTMLButtonElement>("[data-roster-open]")
+                  : one<HTMLButtonElement>("[data-add-agent]");
+                door?.focus({ preventScroll: true });
+              } catch (error) {
+                if (errorTarget) {
+                  errorTarget.textContent = readableError(error);
+                  errorTarget.hidden = false;
+                }
+              } finally {
+                button.disabled = false;
+              }
+            });
+            item.append(button);
+          }
+          item.prepend(copy);
           fragment.append(item);
         }
         return fragment;
@@ -3996,7 +4007,7 @@ import "../../styles/tokens.css";
       const stack = one<HTMLElement>("[data-header-agent-stack]");
       const button = one<HTMLButtonElement>("[data-roster-open]");
       const summary = one<HTMLElement>("[data-header-roster-summary]");
-      const show = agents.length > 0 || pendingTotal > 0;
+      const show = agents.length > 0 || pendingTotal > 0 || pendingAgentsLoadFailed;
       if (wrap) wrap.hidden = !show;
       one<HTMLElement>(".dashboard__channel")?.classList.toggle(
         "dashboard__channel--roster",
@@ -5661,6 +5672,7 @@ import "../../styles/tokens.css";
      */
     const hasPendingAccess = (): boolean =>
       pendingInvites.length > 0 ||
+      pendingAgents.length > 0 ||
       accessStatuses.some(
         (access) =>
           access.firstUsedAt === null &&
@@ -5686,9 +5698,10 @@ import "../../styles/tokens.css";
         return;
       }
       try {
-        const [nextInvites, nextStatuses, nextRoster] = await Promise.all([
+        const [nextInvites, nextStatuses, nextPending, nextRoster] = await Promise.all([
           pendingMemberInvites(workspaceId),
           agentAccessStatuses(workspaceId),
+          loadPendingAccess(() => pendingAgentAccess(workspaceId)),
           memberRoster(workspaceId).catch(() => null),
         ]);
         /* A request that settles after the user moved on applies nothing: its
@@ -5696,6 +5709,8 @@ import "../../styles/tokens.css";
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         pendingInvites = nextInvites;
         accessStatuses = nextStatuses;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         if (nextRoster) {
           people = nextRoster.names;
           members = nextRoster.members;
@@ -5778,6 +5793,8 @@ import "../../styles/tokens.css";
       members = [];
       pendingInvites = [];
       accessStatuses = [];
+      pendingAgents = [];
+      pendingAgentsLoadFailed = false;
       renderedPendingAccessKey = "";
       people = new Map();
       signals = [];
@@ -6148,6 +6165,8 @@ import "../../styles/tokens.css";
       members = [];
       pendingInvites = [];
       accessStatuses = [];
+      pendingAgents = [];
+      pendingAgentsLoadFailed = false;
       renderedPendingAccessKey = "";
       /* Restart one timer under the new workspace/version. The callbacks read the
          guarded live identity, and a failed initial load remains retryable. */
@@ -6184,11 +6203,12 @@ import "../../styles/tokens.css";
          a review arm. */
       const channelGeneration = ++channelReadGeneration;
       try {
-        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextFiles, nextChannels] = await Promise.all([
+        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
           pendingMemberInvites(selected.id),
           agentAccessStatuses(selected.id),
+          loadPendingAccess(() => pendingAgentAccess(selected.id)),
           workspaceFiles(selected.id).then(
             (value) => ({ value, error: "" }),
             (error) => ({
@@ -6210,6 +6230,8 @@ import "../../styles/tokens.css";
         members = nextRoster.members;
         pendingInvites = nextInvites;
         accessStatuses = nextAccessStatuses;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         files = nextFiles.value;
         fileLoadError = nextFiles.error;
         /* Only if no newer channel read has landed since this one started. A create the
@@ -9084,13 +9106,16 @@ import "../../styles/tokens.css";
       }
       const version = requestVersion;
       try {
-        const [nextAgents, nextStatuses] = await Promise.all([
+        const [nextAgents, nextStatuses, nextPending] = await Promise.all([
           roster(workspaceId),
           agentAccessStatuses(workspaceId),
+          loadPendingAccess(() => pendingAgentAccess(workspaceId)),
         ]);
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         agents = nextAgents;
         accessStatuses = nextStatuses;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         renderRoster();
         renderPendingAccess();
         const refresh = one<HTMLButtonElement>("[data-refresh]");
@@ -9128,9 +9153,11 @@ import "../../styles/tokens.css";
           receipt.hidden = true;
         }, 6_000);
       }
-      void agentAccessStatuses(activeWorkspaceId).then((next) => {
+      void Promise.all([agentAccessStatuses(activeWorkspaceId), loadPendingAccess(() => pendingAgentAccess(activeWorkspaceId))]).then(([next, pending]) => {
         if (selected.id !== activeWorkspaceId) return;
         accessStatuses = next;
+        pendingAgents = pending.rows;
+        pendingAgentsLoadFailed = pending.failed;
         renderPendingAccess();
       });
       window.requestAnimationFrame(() => {
@@ -11320,13 +11347,13 @@ import "../../styles/tokens.css";
     margin-inline: calc(var(--s-2) * -1);
   }
 
-  /* Pending access in the dialog exists only where the rail's own details are
-     hidden. At desktop the rail keeps the control and the dialog does not
-     duplicate it; at ≤52rem this section is the ONLY reachable pending surface.
-     The [hidden] case (nothing pending, or sample) stays hidden by the global
-     [hidden] rule in every width. */
+  /* Pending access belongs in the roster dialog at every width. The rail has
+     no pending markup, so hiding this section hides the only pending surface. */
   .dashboard__roster-dialog-pending {
-    display: none;
+    display: grid;
+    gap: var(--s-2);
+    padding-block-start: var(--s-3);
+    border-block-start: 1px solid var(--border);
   }
 
   /* The dialog becomes a column so the body can scroll when the pending section
@@ -11486,15 +11513,6 @@ import "../../styles/tokens.css";
     display: flex;
     flex-wrap: wrap;
     gap: var(--s-3);
-  }
-
-  @media (max-width: 52rem) {
-    .dashboard__roster-dialog-pending {
-      display: grid;
-      gap: var(--s-2);
-      padding-block-start: var(--s-3);
-      border-block-start: 1px solid var(--border);
-    }
   }
 
   .dashboard__roster-dialog-list .dashboard__agent {

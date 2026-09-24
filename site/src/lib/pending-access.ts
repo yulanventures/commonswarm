@@ -13,17 +13,17 @@
  * Pure and I/O-free so the dashboard and its test drive the same decisions.
  */
 
-import type { AgentAccessStatus, PendingMemberInvite } from "./commonswarm";
+import type { AgentAccessStatus, PendingAgentAccess, PendingMemberInvite } from "./commonswarm";
 
 export interface PendingAccessRow {
-  /** Which cancel command the row needs: revoke_invitation or revoke_agent_token. */
-  kind: "invite" | "agent";
-  /** The id the cancel command sends: invitationId or tokenId. */
+  /** The cancellation route, or pending when no cancellable token exists. */
+  kind: "invite" | "agent" | "pending";
+  /** The invitation, token, principal, or join credential id. */
   id: string;
   workspaceId: string;
   /** The row's strong line: the invitee's email or the agent's name. */
   title: string;
-  /** The row's quiet line: kind, owner/model where relevant, and the expiry. */
+  /** The row's quiet line: invitation expiry or pending age and capacity. */
   state: string;
   /** The Cancel button's accessible name, specific to the row it cancels. */
   cancelLabel: string;
@@ -40,6 +40,8 @@ export function pendingAccessRows(
   ownerName: (userId: string) => string,
   now: number,
   relative: (iso: string) => string,
+  serverPending?: PendingAgentAccess[],
+  workspaceId = "",
 ): PendingAccessRow[] {
   const rows: PendingAccessRow[] = [];
   for (const invitation of invites) {
@@ -69,7 +71,32 @@ export function pendingAccessRows(
       cancelLabel: `Cancel access for ${entry.agentName}`,
     });
   }
+  if (serverPending !== undefined) {
+    for (const entry of serverPending) {
+      if (entry.principalId !== null && access.some((status) =>
+        status.principalId === entry.principalId && status.firstUsedAt === null &&
+        status.revokedAt === null && new Date(status.expiresAt).getTime() > now
+      )) continue;
+      rows.push({
+        kind: "pending",
+        id: entry.principalId ?? entry.joinCredentialId ?? "",
+        workspaceId,
+        title: entry.principalName ??
+          `Agent connect code (${entry.joinCredentialId?.slice(0, 8) ?? ""})`,
+        state: `Invited, not connected · ${relative(entry.issuedAt)}` +
+          (entry.kind === "join"
+            ? ` · ${entry.seatsUsed}/${entry.seatCap} seats used · issued by ${entry.issuerDisplay}`
+            : ""),
+        cancelLabel: "",
+      });
+    }
+  }
   return rows;
+}
+
+export async function loadPendingAccess<T>(read: () => Promise<T[]>): Promise<{ rows: T[]; failed: boolean }> {
+  try { return { rows: await read(), failed: false }; }
+  catch { return { rows: [], failed: true }; }
 }
 
 /**

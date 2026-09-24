@@ -2,6 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { signalDuration } from "./cloud/signal-duration.js";
+import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } from "./cloud/pending-access.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
@@ -4176,6 +4177,7 @@ export function renderRoster(
   directory: SignalDirectory,
   memberNames: ReadonlyMap<string, string>,
   workspace?: { workspaceId: string; workspaceName: string | null },
+  pending: readonly PendingAgentAccess[] | null = [],
 ): string {
   /* FM-1, found by Verity: an EMPTY roster is ambiguous and must not be reported as emptiness.
    *
@@ -4243,6 +4245,19 @@ export function renderRoster(
     );
   }
   lines.push("");
+  lines.push(pending === null ? "Invited, not connected: could not load" : "Invited, not connected:");
+  if (pending !== null && pending.length === 0) lines.push("- none yet");
+  for (const entry of pending ?? []) {
+    const name = entry.kind === "classic"
+      ? sanitizeDisplayLabel(entry.principal_name ?? "", "Unnamed agent")
+      : "Agent connect code";
+    const id = entry.principal_id ?? entry.join_credential_id;
+    const seats = entry.kind === "join"
+      ? ` · ${entry.seats_used}/${entry.seat_cap} seats used · issued by ${sanitizeDisplayLabel(entry.issuer_display, "Workspace member")}`
+      : "";
+    lines.push(`- ${name} (${id}) · ${pendingAccessAge(entry.issued_at)}${seats}`);
+  }
+  lines.push("");
   /* The UUID is the addressable identity and the name is not: names are not unique per
    * workspace (a duplicate is allowed by explicit choice), and a name you did not create can
    * belong to someone you did not mean. Saying so here is the cheap half of D-062. */
@@ -4267,6 +4282,9 @@ async function runMembers(args: Arguments): Promise<void> {
     cloud,
     selected.selectedWorkspace,
     selected,
+  );
+  const pending = await readPendingAccessOptional(
+    cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher,
   );
 
   const memberNames = new Map(
@@ -4299,6 +4317,8 @@ async function runMembers(args: Arguments): Promise<void> {
                 ? null
                 : memberNames.get(agent.owner_user_id) ?? null,
             })),
+            pending,
+            ...(pending === null ? { pending_error: "could not load" } : {}),
           },
           null,
           2,
@@ -4311,7 +4331,7 @@ async function runMembers(args: Arguments): Promise<void> {
   process.stdout.write(renderRoster(directory, memberNames, {
     workspaceId: selected.selectedWorkspace,
     workspaceName: workspaceLabel(directory),
-  }));
+  }, pending));
 }
 
 /** Show the identity authenticated by this request, never a saved human profile. */

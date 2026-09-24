@@ -74,8 +74,8 @@ test("pending access keeps the header management door reachable before the first
   );
   assert.match(
     header,
-    /const show = agents\.length > 0 \|\| pendingTotal > 0;/,
-    "a zero-agent workspace with a pending invite still exposes the only mobile door",
+    /const show = agents\.length > 0 \|\| pendingTotal > 0 \|\| pendingAgentsLoadFailed;/,
+    "a zero-agent workspace with a pending invite or failed pending read still exposes the only mobile door",
   );
   assert.match(header, /pendingTotal[^\n]*pending/);
   assert.match(header, /pending access/);
