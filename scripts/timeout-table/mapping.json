@@ -3162,7 +3162,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:146",
+          "citation": "src/cloud/mcp-connect.ts:167",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",

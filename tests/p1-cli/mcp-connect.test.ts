@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -13,7 +14,7 @@ import { mcpFailureCode } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile } from "../../src/cloud/agent-profile.js";
-import { REGISTER_REFUSALS, REGISTER_UNUSED_REFUSALS, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
+import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -57,9 +58,9 @@ test("register refusal table and seat-state sets are generated from the server h
   const core = await readFile("supabase/functions/h0/core.ts", "utf8");
   for (const code of ["method_not_allowed", "payload_too_large"]) assert.match(forward, new RegExp(`error: "${code}"`));
   assert.match(core, /error: "not_found"/);
-  assert.deepEqual(Object.keys(REGISTER_UNUSED_REFUSALS).sort(), ["upgrade_required", "principal_limit_reached", "forbidden", "invalid_request", "payload_too_large", "not_found", "method_not_allowed"].sort());
+  assert.deepEqual(Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT).sort(), ["upgrade_required", "principal_limit_reached", "forbidden", "invalid_request", "payload_too_large", "not_found", "method_not_allowed"].sort());
   assert.deepEqual(Object.keys(REGISTER_EXISTING_SEAT_REFUSALS).sort(), ["join_credential_seat_cap_reached", "registration_token_already_used", "registration_seat_revoked"].sort());
-  assert.equal(REGISTER_UNUSED_REFUSALS.command_id_conflict, undefined);
+  assert.equal(REGISTER_NO_SEAT_THIS_ATTEMPT.command_id_conflict, undefined);
   assert.equal(REGISTER_EXISTING_SEAT_REFUSALS.command_id_conflict, undefined);
 });
 
@@ -237,26 +238,49 @@ test("connect saves an unbound private profile and never returns either secret",
 test("generated register refusal inventory and typed remedies", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
-    for (const code of [...Object.keys(REGISTER_UNUSED_REFUSALS), ...Object.keys(REGISTER_EXISTING_SEAT_REFUSALS)]) {
+    const noSeatRemedies: Record<string, string> = {
+      forbidden: "This code is unknown, expired or revoked; this attempt created no seat. Ask the operator for a new code.",
+      upgrade_required: "Update cswarm and run mcp connect again; this attempt created no seat.",
+      principal_limit_reached: "The workspace has no free agent seat; this attempt created no seat. Ask the operator.",
+      invalid_request: "The request was refused; this attempt created no seat. Ask the operator for a new code.",
+      payload_too_large: "The request was refused; this attempt created no seat. Ask the operator for a new code.",
+      not_found: "Check --url; this attempt created no seat.",
+      method_not_allowed: "Check --url; this attempt created no seat.",
+    };
+    assert.deepEqual(Object.keys(noSeatRemedies).sort(), Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT).sort());
+    const messages: string[] = [];
+    for (const code of [...Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT), ...Object.keys(REGISTER_EXISTING_SEAT_REFUSALS)]) {
       f.refuse(code);
       const path = join(f.root, code, "profile.json");
       await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
         assert.equal((error as {code:string}).code, code);
-        const message = String(error);
-        assert.match(message, code === "upgrade_required" ? /Update cswarm/ : code === "principal_limit_reached" ? /no free agent seat/ : code === "not_found" || code === "method_not_allowed" ? /Check --url/ : /new code/);
-        if (Object.hasOwn(REGISTER_EXISTING_SEAT_REFUSALS, code)) assert.match(message, /This code was already used/);
-        else assert.match(message, /the code was not used|The code was not used/);
+        const message = (error as Error).message;
+        messages.push(message);
+        assert.equal(message, noSeatRemedies[code] ?? "This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.");
+        assert.doesNotMatch(message, /was not used/i);
         assert.doesNotMatch(message, /swm_join_|swm_agt_/);
         return true;
       });
       await assert.rejects(stat(path), { code: "ENOENT" });
     }
     assert.equal(f.calls(), 10);
+    assert.equal(messages.length, 10);
     f.refuse(JOIN);
     const path = join(f.root, "hostile-error", "profile.json");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }),
       { code: "register_outcome_unknown", message: "The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code." });
     assert.equal(f.calls(), 11);
+  } finally { await f.close(); }
+});
+
+test("a previously redeemed code can later receive forbidden without claiming the code was unused", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await connectMcp({ target: TARGET, profilePath: join(f.root, "first", "profile.json"), readCode: async () => JOIN, fetcher: f.fetcher });
+    f.refuse("forbidden");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: join(f.root, "later", "profile.json"), readCode: async () => JOIN, fetcher: f.fetcher }),
+      { code: "forbidden", message: "This code is unknown, expired or revoked; this attempt created no seat. Ask the operator for a new code." });
+    assert.equal(f.calls(), 2);
   } finally { await f.close(); }
 });
 
@@ -397,7 +421,7 @@ test("Fold 1 evidence states the measured TTY limit and output without gating a 
   assert.match(lane, /SHA-256 of the build in .* at commit/);
   const testSource = await readFile(new URL(import.meta.url), "utf8");
   assert.equal(testSource.includes(["dist-release", "cswarm.sha256"].join("/")), false, "no location-dependent bundle SHA gate");
-  for (const phrase of ["The five retained fallback-prompt shortenings", "Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "Wake works with Claude Code preview channels or Grok Bot", "Read brain topics; post intent and reply"]) assert.ok(lane.includes(phrase), `Fold 2 must disclose: ${phrase}`);
+  for (const phrase of ["The five retained fallback-prompt shortenings", "Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "Wake works with Claude Code preview channels or the local Grok Bot gateway", "Read brain topics; post intent and reply"]) assert.ok(lane.includes(phrase), `Fold 3 must disclose: ${phrase}`);
 });
 
 
@@ -430,6 +454,55 @@ test("cancelled and refused connect removes only a newly created empty profile d
       readCode: async () => { throw new Error("cancelled"); }, fetcher: f.fetcher }), /cancelled/);
     assert.equal((await stat(existing)).isDirectory(), true);
     assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("cleanup EACCES after a committed 502 preserves the revoke instruction", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    let commits = 0;
+    let cleanups = 0;
+    const path = join(f.root, "cleanup-failure", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { commits++; return Response.json({ error: "upstream_failure" }, { status: 502 }); },
+      removeEmptyDirectory: async () => { cleanups++; throw Object.assign(new Error("EACCES removing profile directory"), { code: "EACCES" }); },
+    }), { code: "register_outcome_unknown", message: "The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code." });
+    assert.equal(commits, 1);
+    assert.equal(cleanups, 1);
+    assert.equal(existsSync(dirname(path)), true, "failed cleanup leaves its own empty directory");
+  } finally { await f.close(); }
+});
+
+test("signals synchronously remove only the empty profile directory this connect created", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const signal of ["SIGINT", "SIGTERM"] as const) for (const existing of [false, true]) {
+      const dir = join(f.root, `${signal}-${existing}`);
+      if (existing) await mkdir(dir, { mode: 0o700 });
+      const input = new PassThrough();
+      const signals = new EventEmitter();
+      const echoes: boolean[] = [];
+      const exits: number[] = [];
+      let prompted!: () => void;
+      const promptReady = new Promise<void>(resolve => { prompted = resolve; });
+      const terminal: HiddenTerminal = {
+        isTTY: true, input, signals, echo: on => { echoes.push(on); },
+        write: value => { if (value === "Connect code: ") prompted(); },
+        exit: code => {
+          assert.equal(existsSync(dir), existing, "cleanup completes before process exit");
+          exits.push(code);
+          input.end();
+        },
+      };
+      const pending = connectMcp({ target: TARGET, profilePath: join(dir, "profile.json"), terminal, fetcher: f.fetcher });
+      await promptReady;
+      signals.emit(signal);
+      await assert.rejects(pending, { code: "code_missing" });
+      assert.deepEqual(exits, [signal === "SIGINT" ? 130 : 143]);
+      assert.deepEqual(echoes, [false, true]);
+      assert.equal(existsSync(dir), existing);
+    }
+    assert.equal(f.calls(), 0);
   } finally { await f.close(); }
 });
 

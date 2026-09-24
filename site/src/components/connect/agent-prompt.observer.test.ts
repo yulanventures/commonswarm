@@ -33,7 +33,7 @@ test("MCP handoff contains only operator terminal steps; legacy prompt discloses
   assert.match(dashboardAgentPrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
   assert.match(dashboardAgentFilePrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
   for (const prompt of [dashboardAgentPrompt(INPUT), dashboardAgentFilePrompt(INPUT)]) {
-    for (const phrase of ["Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "Grok Bot; Codex supports turn checks", "Read brain topics; post intent and reply"]) assert.ok(prompt.includes(phrase), `fallback wording missing: ${phrase}`);
+    for (const phrase of ["Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "the local Grok Bot gateway; Codex supports turn checks", "Read brain topics; post intent and reply"]) assert.ok(prompt.includes(phrase), `fallback wording missing: ${phrase}`);
   }
   const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
   assert.match(component, /<summary>Connect with MCP<\/summary>/);
@@ -180,15 +180,15 @@ test("the payload is returned byte for byte: no underscore escaping, no link rew
   assert.equal(promptCopyPayload("", whole), whole);
 });
 
-test("Fold 2 lists each retained shorter fallback sentence verbatim", { timeout: 10000 }, () => {
+test("Fold 3 keeps the version remedy and gateway wording in both fallback prompt and lane evidence", { timeout: 10000 }, () => {
   const lane = readFileSync(new URL("../../../../docs/evidence/2026-09-24-mcp-release2/LANE.md", import.meta.url), "utf8");
   const prompt = dashboardAgentFilePrompt(INPUT);
   for (const sentence of [
     "Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.",
-    "Confirm cswarm setup --check-version returns setup_version 1.",
-    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm; otherwise report that the release needs updating.",
+    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm.",
+    "Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.",
     "Run setup --json. Reuse its --profile and this session's --host-session-id.",
-    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or Grok Bot; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
+    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
     "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.",
   ]) {
     assert.ok(prompt.includes(sentence), `fallback prompt changed: ${sentence}`);

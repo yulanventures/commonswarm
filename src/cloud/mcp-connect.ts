@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
-import { constants } from "node:fs";
+import { constants, lstatSync, rmdirSync } from "node:fs";
 import { access, lstat, mkdir, rmdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -14,7 +14,7 @@ import { type CloudTarget } from "./config.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
-import { REGISTER_UNUSED_REFUSALS, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
+import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -62,7 +62,7 @@ export interface HiddenTerminal {
 export async function readHiddenJoinCode(terminal: HiddenTerminal = {
   isTTY: Boolean(process.stdin.isTTY), input: process.stdin, echo: terminalEcho,
   write: value => process.stderr.write(value), signals: process, exit: code => process.exit(code),
-}): Promise<string> {
+}, cleanupOnSignal?: () => void): Promise<string> {
   if (!terminal.isTTY) throw new McpConnectError("terminal_required", "Run mcp connect in a terminal to enter the code privately. A plain pipe or redirect is refused; a pseudo-terminal wrapper is not detected.");
   terminal.echo(false);
   let restored = false;
@@ -71,7 +71,14 @@ export async function readHiddenJoinCode(terminal: HiddenTerminal = {
     terminal.signals.off("SIGINT", onInterrupt);
     terminal.signals.off("SIGTERM", onTerminate);
   };
-  const interrupted = (status: number) => { try { restore(); } finally { removeSignals(); terminal.exit(status); } };
+  const interrupted = (status: number) => {
+    try { restore(); }
+    finally {
+      removeSignals();
+      try { cleanupOnSignal?.(); } catch { /* Cleanup cannot replace the exit. */ }
+      terminal.exit(status);
+    }
+  };
   function onInterrupt() { interrupted(130); }
   function onTerminate() { interrupted(143); }
   terminal.signals.on("SIGINT", onInterrupt);
@@ -109,6 +116,8 @@ export interface McpConnectOptions {
   readCode?: () => Promise<string>;
   fetcher?: typeof fetch;
   saveProfile?: typeof saveAgentProfile;
+  terminal?: HiddenTerminal;
+  removeEmptyDirectory?: typeof rmdir;
 }
 
 export interface McpConnectResult { profile: string; principal_id: string; install: string }
@@ -119,7 +128,7 @@ export function renderMcpConnect(result: McpConnectResult): string {
 }
 
 export async function connectMcp(options: McpConnectOptions): Promise<McpConnectResult> {
-  if (!options.readCode && !process.stdin.isTTY) throw new McpConnectError("terminal_required", "Run mcp connect in a terminal to enter the code privately. A plain pipe or redirect is refused; a pseudo-terminal wrapper is not detected.");
+  if (!options.readCode && !(options.terminal?.isTTY ?? process.stdin.isTTY)) throw new McpConnectError("terminal_required", "Run mcp connect in a terminal to enter the code privately. A plain pipe or redirect is refused; a pseudo-terminal wrapper is not detected.");
   const endpoint = new URL(options.target.url);
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname))) {
     throw new McpConnectError("connect_url_invalid", "Use an HTTPS deployment URL or a loopback test URL.");
@@ -133,6 +142,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
   // mkdir's return value is undefined when the directory already existed.
   const createdDirectory = (await mkdir(profileDir, { recursive: true, mode: 0o700 })) !== undefined;
   const createdInfo = createdDirectory ? await lstat(profileDir) : null;
+  const cleanupOnSignal = () => {
+    if (!createdInfo) return;
+    try {
+      const current = lstatSync(profileDir);
+      if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) rmdirSync(profileDir);
+    } catch { /* The registration error or signal exit must survive cleanup failure. */ }
+  };
   try {
     await ensureSecureStateDirectory(profileDir);
     await access(dirname(path), constants.W_OK);
@@ -144,7 +160,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
       throw new McpConnectError("connect_name_invalid", `Use a display name of 1 to ${H0_REGISTRATION_NAME_MAX} characters.`);
     }
-    const code = (await (options.readCode ?? readHiddenJoinCode)()).trim();
+    const code = (await (options.readCode ?? (() => readHiddenJoinCode(options.terminal, cleanupOnSignal)))()).trim();
     if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
     if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
     const controller = new AbortController();
@@ -176,12 +192,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       if (response.status >= 300 && response.status < 400) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
       if (!response.ok) {
         const errorCode = body?.error;
-        if (typeof errorCode === "string" && (REGISTER_UNUSED_REFUSALS[errorCode] === response.status || REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status)) {
-          const message = errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; the code was not used."
-            : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat. Ask the operator to revoke a principal. The code was not used."
-            : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; the code was not used."
+        if (typeof errorCode === "string" && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status)) {
+          const message = errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; this attempt created no seat."
+            : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat; this attempt created no seat. Ask the operator."
+            : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; this attempt created no seat."
             : REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status ? "This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code."
-            : "The code was not used. Ask the operator for a new code.";
+            : errorCode === "forbidden" ? "This code is unknown, expired or revoked; this attempt created no seat. Ask the operator for a new code."
+            : "The request was refused; this attempt created no seat. Ask the operator for a new code.";
           throw new McpConnectError(errorCode, message);
         }
         throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
@@ -215,10 +232,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     if (createdInfo) {
       try {
         const current = await lstat(profileDir);
-        if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) await rmdir(profileDir);
-      } catch (error) {
-        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
-      }
+        if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) await (options.removeEmptyDirectory ?? rmdir)(profileDir);
+      } catch { /* Cleanup must never replace a refusal or revoke instruction. */ }
     }
   }
 }

@@ -12,7 +12,7 @@ export const REGISTER_REFUSALS: Readonly<Record<string, number>> = {
   "registration_token_already_used": 409,
   "upgrade_required": 426
 };
-export const REGISTER_UNUSED_REFUSALS: Readonly<Record<string, number>> = {
+export const REGISTER_NO_SEAT_THIS_ATTEMPT: Readonly<Record<string, number>> = {
   "forbidden": 403,
   "invalid_request": 400,
   "method_not_allowed": 405,

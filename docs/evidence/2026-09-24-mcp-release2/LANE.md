@@ -90,20 +90,20 @@ Code and tests were committed at `8e4c21f0b7b76a690a12783a8290169072ecaccc`. Thi
 | Ruling | Change and test | Reversion mutation |
 |---|---|---|
 | L1 | Removed the location-dependent release-bundle SHA assertion. The evidence test checks that the Fold 1 hash names its build folder and commit and that no test reads the generated bundle checksum. | Historical build-folder wording removed, then the old checksum path restored: evidence test 0 → 1 failure → 0 in each probe; sources restored byte-for-byte. |
-| L2 | Generated separate seven-code unused and three-code existing-seat sets from server source. The existing-seat remedy says: “This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.” The source inventory and all ten remedy cases run in `mcp-connect.test.ts`. | Seat-cap code removed from the existing-seat set: generated-set test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L2 | Generated separate seven-code early-refusal and three-code existing-seat sets from server source. Fold 3 narrowed the early-refusal claim to this attempt only. The existing-seat remedy says: “This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.” The source inventory and all ten remedy cases run in `mcp-connect.test.ts`. | Seat-cap code removed from the existing-seat set: generated-set test 0 → 1 failure → 0; source restored byte-for-byte. |
 | L3 | Restored `main` → `HEAD` in the timeout mapping, including all three MCP rows. The synthetic post-merge inventory test validates HEAD as main. | `main` alias removed: synthetic post-merge test 0 → 1 failure → 0; source restored byte-for-byte. |
 | L4 | The signal test checks echo restoration before its stubbed `exit`; it does not rely on prompt cleanup. | Signal handler `restore()` removed: hidden-terminal test 0 → 1 failure → 0; source restored byte-for-byte. |
 | L5 | The wrong-status matrix sends known refusal codes with 500 and 200, and keeps `command_id_conflict` uncertain. | HTTP status comparison removed: wrong-status test 0 → 1 failure → 0; source restored byte-for-byte. |
 | L6 | The five shortened fallback-prompt sentences below remain necessary to meet the inline 3,200-character and file 2,000-character limits. A full restoration measured 3,252 and 2,114 characters. The site prompt and evidence assertions pin the wording. | Shortening disclosure heading removed, then a verbatim Grok sentence altered: evidence and site tests each went 0 → 1 failure → 0; source restored byte-for-byte. |
 | L7 | `mcp code` and `mcp connect` now use their own generic failure labels; typed errors keep their codes, and `mcp` serve keeps `mcp_start_failed`. The CLI and code classifier tests check this. | `mcp code` generic label changed back to `mcp_start_failed`: label test 0 → 1 failure → 0; source restored byte-for-byte. |
-| L8 | Connect removes only its own empty profile directory after cancellation or refusal. The directory test checks a new directory disappears and a preexisting one remains. | Empty-directory cleanup disabled: cancellation/refusal test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L8 | At Fold 2, the async cleanup removed an empty profile directory created by this run after EOF, an empty line, or a refusal. SIGINT and SIGTERM exited before that cleanup; Fold 3 added synchronous signal cleanup. The directory test checked that a new directory disappears and a preexisting one remains. | Empty-directory cleanup disabled: cancellation/refusal test 0 → 1 failure → 0; source restored byte-for-byte. |
 
 The five retained fallback-prompt shortenings, relative to the original longer prompt, are:
 
 1. “Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.” This shortens the connection-file and shell-command sentence.
-2. “Confirm cswarm setup --check-version returns setup_version 1.” and “The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm; otherwise report that the release needs updating.” These split and shorten the installer/version sentence while preserving the npm fallback.
+2. “The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm.” and “Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.” These split and shorten the installer/version sentence while preserving the npm fallback. Fold 3 restored the version check as the condition for the release-update instruction.
 3. “Run setup --json. Reuse its --profile and this session's --host-session-id.” This shortens the setup-command sentence.
-4. “Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or Grok Bot; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.” This shortens the gateway, approval, and model sentence.
+4. “Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.” This shortens the gateway, approval, and model sentence. Fold 3 restored the setup guide's gateway name.
 5. “Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.” This shortens the brain, connection, and wake-proof sentence.
 
 The dispatch fixture was regenerated from the loopback harness. It remains 1,330 rows: zero added, zero removed, eleven changed. Every changed row is a stderr label: `mcp.code`, `policy.host-session.mcp.connect.drop`, `selected-error.mcp.code.json-before`, and eight `selected-error.mcp.connect.*` rows. The old `mcp_start_failed` labels became `mcp_code_failed` or `mcp_connect_failed`; no serve row changed. The generator invocation passed (exit 0); the subsequent full P1 CLI gate is recorded below.
@@ -112,14 +112,15 @@ The exact client remedy sentences are:
 
 | Server result | Client sentence |
 |---|---|
-| `upgrade_required` | “Update cswarm and run mcp connect again; the code was not used.” |
-| `principal_limit_reached` | “The workspace has no free agent seat. Ask the operator to revoke a principal. The code was not used.” |
-| `not_found`, `method_not_allowed` | “Check --url; the code was not used.” |
-| `forbidden`, `invalid_request`, `payload_too_large` | “The code was not used. Ask the operator for a new code.” |
+| `upgrade_required` | “Update cswarm and run mcp connect again; this attempt created no seat.” |
+| `principal_limit_reached` | “The workspace has no free agent seat; this attempt created no seat. Ask the operator.” |
+| `not_found`, `method_not_allowed` | “Check --url; this attempt created no seat.” |
+| `forbidden` | “This code is unknown, expired or revoked; this attempt created no seat. Ask the operator for a new code.” |
+| `invalid_request`, `payload_too_large` | “The request was refused; this attempt created no seat. Ask the operator for a new code.” |
 | `join_credential_seat_cap_reached`, `registration_token_already_used`, `registration_seat_revoked` | “This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.” |
 | `command_id_conflict`, network failures, malformed responses, redirects, save failures | “The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code.” |
 
-The first group is returned before this registration inserts a seat. The existing-seat group follows the server's attempt or seat-cap branches. The uncertain group cannot prove whether a seat was created. Each sentence matches the client code at `8e4c21f0`.
+The first group proves only that this registration attempt did not insert a seat; the credential may have been redeemed earlier. The existing-seat group follows the server's attempt or seat-cap branches. The uncertain group cannot prove whether a seat was created. The table records Fold 3's corrected client sentences; Fold 2's earlier sentence was overbroad.
 
 ### Fold 2 gates
 
@@ -141,6 +142,37 @@ Focused final controls after the last evidence edit: MCP connect 19/19, site fal
 ### Fold 2 not established
 
 The hard rules barred live H0 registration/read/post and production-host contact. Fresh Codex and Claude Code MCP sessions, D-036 transcripts, npm publication, a box release, the production fit of the 10-second register budget, and `cswarm principal revoke` on an H0 seat remain unmeasured. Local gates do not establish any of those conditions.
+
+## Fold 3 — round-3 rulings and controls
+
+Fold 3 checks claims against the existing server source only. `registerAgentSeat` can return `forbidden`, `invalid_request`, `upgrade_required`, and `principal_limit_reached` after loading a credential that may already have been redeemed. The H0 forwarding and routing refusals do not reach registration. `REGISTER_NO_SEAT_THIS_ATTEMPT` is generated from those handlers and states only what this call proves. The three existing-seat codes retain the revoke sentence; `command_id_conflict` remains uncertain. No server, edge, or migration file changed.
+
+| Ruling | Change | Regression control and reversal mutation |
+|---|---|---|
+| M1 | Renamed the generated early-refusal set and replaced every overbroad remedy with the exact attempt-scoped sentences above. | `mcp-connect.test.ts` checks generated membership, all ten exact remedies, absence of the old claim, and successful use followed by `forbidden`. Reverting a remedy or the generated name fails the focused test. |
+| M2 | Attached “otherwise report that the release needs updating” to `setup --check-version`, retained the npm fallback, and restored “the local Grok Bot gateway.” | `agent-prompt.observer.test.ts` pins both prompt sentences and this evidence; reverting either fails. The existing length tests enforce the inline and file limits. |
+| M3 | Async directory cleanup ignores every removal error so it cannot replace a committed-register failure. SIGINT and SIGTERM remove a newly created empty directory synchronously, before exit, after matching its device and inode; an existing directory remains. | `mcp-connect.test.ts` injects EACCES after a committed 502 and checks the revoke sentence; the signal test checks both signals and both directory origins at exit. Reverting either fix fails its focused test. This corrects Fold 2's L8 statement: EOF, an empty line, and refusal were covered then; signal exit is covered now. |
+| M4 | Corrected the timeout map's register-abort timer citation to the timer's current source line. | `timeout-table.test.ts` resolves the citation and asserts that line contains the actual abort timer; reverting the citation fails. |
+| M5 | Fold 2 removed the pre-existing real `main` enumeration from the timeout inventory's exact-both-directions test. It substituted a synthetic post-merge `HEAD` inventory test because, before merge, real `main` lacks the MCP rows and reports them as stale. Once main contains this branch, the synthetic inventory models the intended alias. | `timeout-table.test.ts` checks that Fold 3 records the removed check and its reason; deleting this disclosure fails. |
+
+Eight reversal probes ran against the restored source, each with a passing positive control and a failing mutation: M1 remedy text and generated-set name; M2 version remedy and gateway name; M3 EACCES cleanup and signal cleanup; M4 timer citation; M5 removed-check disclosure. Each mutation produced one focused test failure and the source was restored byte-for-byte. Focused final controls: MCP connect 22/22, site prompt 13/13, timer citation 1/1, and the independently rerun hook deadline 1/1.
+
+### Fold 3 gates
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build. |
+| `env -u FORCE_COLOR npm test` | 1 | 962 tests: 960 pass, 2 `ps`/spawn EPERM sandbox failures. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 922 tests: 916 pass, 6 fail. Three `ps`/spawn EPERM sandbox failures; two F-1 tests see the protective loopback site override; one hook deadline timing test took 5,009 ms under suite load. The hook test passed 1/1 when rerun alone. |
+| `npm run check:tests` | 0 | Test TypeScript check. |
+| `bash scripts/build-release.sh` | 0 | Single-file bundle built and execute-checked. |
+| `npm --prefix site run build` | 0 | 12 static pages. The first local dependency copy dereferenced `.bin` links and could not resolve Astro; a second copy preserving those links passed, then the original symlink was restored. |
+| `env -u FORCE_COLOR npm --prefix site test` | 1 | 570 tests: 494 pass, 75 browser subprocess SIGABRT failures, 1 skip. The Fold 3 prompt test passes. |
+| `git diff --check origin/main...HEAD` | Pending commit | Check the committed branch range after this evidence lands. |
+
+All gate subprocesses had wall-clock timeouts and process-group termination on timeout. They used temporary HOME and XDG config directories and loopback `CSWARM_SITE` and `SWARM_CLOUD_URL` overrides. No gate timed out; no test process remains.
+
+The release and production controls remain unmeasured: no live H0 registration/read/post, fresh Codex or Claude Code MCP session, D-036 transcript, npm publication, box release, production timing fit, or H0-seat revocation was performed.
 
 ## Dispatch baseline row inventory
 

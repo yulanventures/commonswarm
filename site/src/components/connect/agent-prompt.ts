@@ -39,13 +39,13 @@ function setupPrompt(source: string): string {
     `Use Node.js 22+ and run:
 
 ${codeBlock("sh", INSTALL_CMD)}`,
-    "Confirm cswarm setup --check-version returns setup_version 1.",
-    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm; otherwise report that the release needs updating.",
+    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm.",
+    "Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.",
     source,
     `${AGENT_MESSAGE_FORMAT_RULE} (Up to ${SIGNAL_BODY_MAX} characters.)`,
     AGENT_SETUP_HOST_GUIDANCE,
     "Run setup --json. Reuse its --profile and this session's --host-session-id.",
-    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or Grok Bot; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
+    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
     "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.",
   ].join("\n\n");
 }
