@@ -573,8 +573,16 @@ test("wake mark ignores pre-cutoff and expired mail, then ages and clears live m
   assert.equal((await wakePathRows(agent.principalId)).length, 0,
     "old pre-cutoff mail cannot make a known seat stale");
   const expired = await postAsk(agent.principalId);
-  await sql`UPDATE swarm.signals SET until = statement_timestamp() - interval '1 second'
-    WHERE id = ${expired}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+  // signals is append-only; expire the row the way tests/p1-server/command.test.ts does.
+  await sql`ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only`;
+  try {
+    await sql`UPDATE swarm.signals
+      SET created_at = statement_timestamp() - interval '10 seconds',
+          until = statement_timestamp() - interval '1 second'
+      WHERE id = ${expired}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+  } finally {
+    await sql`ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only`;
+  }
   assert.equal((await wakePathRows(agent.principalId)).length, 0, "expired mail cannot make a seat stale");
   const live = await postAsk(agent.principalId);
   await sql`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '4 minutes'
