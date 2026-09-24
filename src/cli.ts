@@ -9808,11 +9808,17 @@ export function isCliMain(): boolean {
   }
 }
 
+export function mcpFailureCode(error: unknown, subcommand: string | undefined): string {
+  if (error instanceof AgentSetupError) return error.code;
+  return subcommand === "code" ? "mcp_code_failed"
+    : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
+}
+
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
     if (selected?.args.positionals[0] === "mcp") {
-      process.stderr.write(`cswarm: [${error instanceof AgentSetupError ? error.code : "mcp_start_failed"}] ${safeError(error)}\n`);
+      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${safeError(error)}\n`);
       process.exitCode = 1;
       return;
     }

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
 import { constants } from "node:fs";
-import { access, lstat } from "node:fs/promises";
+import { access, lstat, mkdir, rmdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -14,7 +14,7 @@ import { type CloudTarget } from "./config.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
-import { REGISTER_REFUSALS } from "./mcp-register-refusals.js";
+import { REGISTER_UNUSED_REFUSALS, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -129,80 +129,96 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
   if (basename(path).toLowerCase() === "credential.json" || path === join(dirname(path), "credential.json")) {
     throw new McpConnectError("profile_path_invalid", "The profile path cannot be credential.json.");
   }
-  await ensureSecureStateDirectory(dirname(path));
-  await access(dirname(path), constants.W_OK);
-  // Refuse before prompting or registering. An existing credential without a profile is also occupied.
-  if (await pathExists(path) || await pathExists(join(dirname(path), "credential.json"))) {
-    throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
-  }
-  const name = options.name ?? "MCP agent";
-  if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
-    throw new McpConnectError("connect_name_invalid", `Use a display name of 1 to ${H0_REGISTRATION_NAME_MAX} characters.`);
-  }
-  const code = (await (options.readCode ?? readHiddenJoinCode)()).trim();
-  if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
-  if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
-  let redirected = false;
-  const headersChannel = channel("undici:request:headers");
-  const onHeaders = (value: unknown) => {
-    const event = value as { request?: { origin?: string; path?: string; method?: string }; response?: { statusCode?: number } };
-    if (event.request?.origin === options.target.url && event.request.path === "/functions/v1/h0/register" &&
-        event.request.method === "POST" && (event.response?.statusCode ?? 0) >= 300 && (event.response?.statusCode ?? 0) < 400) redirected = true;
-  };
-  headersChannel.subscribe(onHeaders);
-  let response: Response;
+  const profileDir = dirname(path);
+  // mkdir's return value is undefined when the directory already existed.
+  const createdDirectory = (await mkdir(profileDir, { recursive: true, mode: 0o700 })) !== undefined;
+  const createdInfo = createdDirectory ? await lstat(profileDir) : null;
   try {
-    response = await (options.fetcher ?? fetch)(`${options.target.url}/functions/v1/h0/register`, {
-      method: "POST", headers: { "content-type": "application/json", apikey: options.target.anonKey },
-      body: JSON.stringify({ joinCredential: code, attemptId: randomUUID(), name }), signal: controller.signal, redirect: "error",
-    });
-  } catch {
-    clearTimeout(timer);
-    if (redirected) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
-    throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-  } finally { headersChannel.unsubscribe(onHeaders); }
-  try {
-    let body: Record<string, unknown> | null;
-    try { body = record(await response.json()); }
-    catch { body = null; }
-    clearTimeout(timer);
-    if (response.status >= 300 && response.status < 400) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
-    if (!response.ok) {
-      const errorCode = body?.error;
-      if (typeof errorCode === "string" && REGISTER_REFUSALS[errorCode] === response.status) {
-        const message = errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; the code was not used."
-          : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat. Ask the operator to revoke a principal. The code was not used."
-          : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; the code was not used."
-          : "The code was not used. Ask the operator for a new code.";
-        throw new McpConnectError(errorCode, message);
-      }
-      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+    await ensureSecureStateDirectory(profileDir);
+    await access(dirname(path), constants.W_OK);
+    // Refuse before prompting or registering. An existing credential without a profile is also occupied.
+    if (await pathExists(path) || await pathExists(join(dirname(path), "credential.json"))) {
+      throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
     }
-    if (body?.status !== "accepted") throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-    if (typeof body.workspace_id !== "string" || !ONBOARDING_UUID.test(body.workspace_id) ||
-        typeof body.principal_id !== "string" || !ONBOARDING_UUID.test(body.principal_id) ||
-        typeof body.run_id !== "string" || !ONBOARDING_UUID.test(body.run_id) ||
-        typeof body.token_id !== "string" || !ONBOARDING_UUID.test(body.token_id) ||
-        typeof body.agent_token !== "string" || !SEAT_TOKEN.test(body.agent_token) ||
-        typeof body.expires_at !== "string" || Number.isNaN(Date.parse(body.expires_at))) {
-      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+    const name = options.name ?? "MCP agent";
+    if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
+      throw new McpConnectError("connect_name_invalid", `Use a display name of 1 to ${H0_REGISTRATION_NAME_MAX} characters.`);
     }
-    const connection: AgentConnectionEnvelope = {
-      version: 1, url: options.target.url, anon_key: options.target.anonKey,
-      workspace_id: body.workspace_id, principal_id: body.principal_id,
-      credential: { message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted", principal_id: body.principal_id,
-        run_id: body.run_id, token_id: body.token_id, agent_token: body.agent_token, expires_at: body.expires_at },
+    const code = (await (options.readCode ?? readHiddenJoinCode)()).trim();
+    if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
+    if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
+    let redirected = false;
+    const headersChannel = channel("undici:request:headers");
+    const onHeaders = (value: unknown) => {
+      const event = value as { request?: { origin?: string; path?: string; method?: string }; response?: { statusCode?: number } };
+      if (event.request?.origin === options.target.url && event.request.path === "/functions/v1/h0/register" &&
+          event.request.method === "POST" && (event.response?.statusCode ?? 0) >= 300 && (event.response?.statusCode ?? 0) < 400) redirected = true;
     };
-    // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
-    await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true);
-    const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm mcp --profile ${quoteAgentArgument(path)}`;
-    const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ["mcp", "--profile", ${JSON.stringify(path)}]`;
-    return { profile: path, principal_id: body.principal_id, install: `${claude}\n${codex}` };
-  } catch (error) {
-    clearTimeout(timer);
-    if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;
-    throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+    headersChannel.subscribe(onHeaders);
+    let response: Response;
+    try {
+      response = await (options.fetcher ?? fetch)(`${options.target.url}/functions/v1/h0/register`, {
+        method: "POST", headers: { "content-type": "application/json", apikey: options.target.anonKey },
+        body: JSON.stringify({ joinCredential: code, attemptId: randomUUID(), name }), signal: controller.signal, redirect: "error",
+      });
+    } catch {
+      clearTimeout(timer);
+      if (redirected) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
+      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+    } finally { headersChannel.unsubscribe(onHeaders); }
+    try {
+      let body: Record<string, unknown> | null;
+      try { body = record(await response.json()); }
+      catch { body = null; }
+      clearTimeout(timer);
+      if (response.status >= 300 && response.status < 400) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
+      if (!response.ok) {
+        const errorCode = body?.error;
+        if (typeof errorCode === "string" && (REGISTER_UNUSED_REFUSALS[errorCode] === response.status || REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status)) {
+          const message = errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; the code was not used."
+            : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat. Ask the operator to revoke a principal. The code was not used."
+            : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; the code was not used."
+            : REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status ? "This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code."
+            : "The code was not used. Ask the operator for a new code.";
+          throw new McpConnectError(errorCode, message);
+        }
+        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+      }
+      if (body?.status !== "accepted") throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+      if (typeof body.workspace_id !== "string" || !ONBOARDING_UUID.test(body.workspace_id) ||
+          typeof body.principal_id !== "string" || !ONBOARDING_UUID.test(body.principal_id) ||
+          typeof body.run_id !== "string" || !ONBOARDING_UUID.test(body.run_id) ||
+          typeof body.token_id !== "string" || !ONBOARDING_UUID.test(body.token_id) ||
+          typeof body.agent_token !== "string" || !SEAT_TOKEN.test(body.agent_token) ||
+          typeof body.expires_at !== "string" || Number.isNaN(Date.parse(body.expires_at))) {
+        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+      }
+      const connection: AgentConnectionEnvelope = {
+        version: 1, url: options.target.url, anon_key: options.target.anonKey,
+        workspace_id: body.workspace_id, principal_id: body.principal_id,
+        credential: { message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted", principal_id: body.principal_id,
+          run_id: body.run_id, token_id: body.token_id, agent_token: body.agent_token, expires_at: body.expires_at },
+      };
+      // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
+      await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true);
+      const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm mcp --profile ${quoteAgentArgument(path)}`;
+      const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ["mcp", "--profile", ${JSON.stringify(path)}]`;
+      return { profile: path, principal_id: body.principal_id, install: `${claude}\n${codex}` };
+    } catch (error) {
+      clearTimeout(timer);
+      if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;
+      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+    }
+  } finally {
+    if (createdInfo) {
+      try {
+        const current = await lstat(profileDir);
+        if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) await rmdir(profileDir);
+      } catch (error) {
+        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      }
+    }
   }
 }

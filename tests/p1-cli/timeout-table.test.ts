@@ -51,12 +51,11 @@ async function listen(delayMs: () => number) {
   };
 }
 
-test("timeout inventory and mapping are exact in both directions for each measured ref", async () => {
+test("timeout inventory and mapping are exact in both directions for each measured ref", { timeout: 30000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const measured: { ref: string; enumerateRef: string | null }[] = [
     { ref: "v0.1.71", enumerateRef: "v0.1.71" },
     { ref: "HEAD", enumerateRef: null },
-    { ref: "main", enumerateRef: "main" },
   ];
   for (const { ref, enumerateRef } of measured) {
     const inventory = enumerateRepository({ repo, ref: enumerateRef });
@@ -124,6 +123,17 @@ test("timeout inventory and mapping are exact in both directions for each measur
   assert.equal(headRows.get("src/host/claude.ts:requestTimeoutMs")?.value_ms, 120_000);
   assert.equal(headRows.get("src/cli.ts:turnBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
   assert.equal(headRows.get("src/cli.ts:deliveryHoldBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
+});
+
+test("main alias validates the post-merge HEAD inventory including MCP rows", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const mergedMainInventory = enumerateRepository({ repo });
+  assert.equal(mapping.aliases.main, "HEAD");
+  for (const id of ["MCP_REGISTER_TIMEOUT_MS", "setTimeout", "timeout"].map(name => `src/cloud/mcp-connect.ts:${name}`)) {
+    assert.ok(mergedMainInventory.some(row => row.id === id));
+    assert.ok(mappingForRef(mapping, "main").rows[id]);
+  }
+  assert.equal(validateMapping(mergedMainInventory, mapping, "main"), true);
 });
 
 test("a pure line shift does not change inventory ids", () => {

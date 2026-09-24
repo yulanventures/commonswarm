@@ -12,3 +12,17 @@ export const REGISTER_REFUSALS: Readonly<Record<string, number>> = {
   "registration_token_already_used": 409,
   "upgrade_required": 426
 };
+export const REGISTER_UNUSED_REFUSALS: Readonly<Record<string, number>> = {
+  "forbidden": 403,
+  "invalid_request": 400,
+  "method_not_allowed": 405,
+  "not_found": 404,
+  "payload_too_large": 413,
+  "principal_limit_reached": 403,
+  "upgrade_required": 426
+};
+export const REGISTER_EXISTING_SEAT_REFUSALS: Readonly<Record<string, number>> = {
+  "join_credential_seat_cap_reached": 409,
+  "registration_seat_revoked": 409,
+  "registration_token_already_used": 409
+};

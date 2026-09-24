@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "aliases": {},
+  "aliases": {"main": "HEAD"},
   "refs": {
     "v0.1.71": {
       "rows": {
@@ -3189,14 +3189,6 @@
           }
         }
       }
-    },
-    "main": {
-      "inherits": "HEAD",
-      "omit": [
-        "src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS",
-        "src/cloud/mcp-connect.ts:setTimeout",
-        "src/cloud/mcp-connect.ts:timeout"
-      ]
     }
   }
 }
