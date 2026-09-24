@@ -105,11 +105,12 @@ test("pending access is member scoped, omits secrets, and clears on durable stat
       return await sql.begin(async (tx) => {
         await tx`SELECT set_config('role', 'swarm_read', true),
           set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
-        return await tx<Record<string, unknown>[]>`
+        // postgres.js returns a Result array subclass; compare plain rows.
+        return [...await tx<Record<string, unknown>[]>`
           SELECT kind, principal_id, principal_name, join_credential_id,
                  owner_user_id, issuer_display, issued_at, expires_at,
                  seats_used, seat_cap
-          FROM swarm_read.pending_access(${workspaceId}::uuid)`;
+          FROM swarm_read.pending_access(${workspaceId}::uuid)`];
       });
     }
 

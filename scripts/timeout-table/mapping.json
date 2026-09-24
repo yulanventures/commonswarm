@@ -1,6 +1,8 @@
 {
   "version": 2,
-  "aliases": {"main": "HEAD"},
+  "aliases": {
+    "main": "HEAD"
+  },
   "refs": {
     "v0.1.71": {
       "rows": {
@@ -3186,6 +3188,24 @@
             "writes": [],
             "removes": [],
             "reason": "stty requires an interactive terminal."
+          }
+        },
+        "src/cloud/pending-access.ts:AbortSignal.timeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/pending-access.ts:66",
+          "detail": "Pending access (invited, not connected) read for cswarm members and the app roster.",
+          "operation": {
+            "name": "pending-access",
+            "class": "not-run",
+            "proxy_operation": "signal-read",
+            "writes": [],
+            "removes": [],
+            "reason": "It runs inside cswarm members after the member list; it is not measured on its own.",
+            "proxy": "signal-read reaches the same authenticated read function with one resource query; like renewal-grants, it posts no receipts."
           }
         }
       }
