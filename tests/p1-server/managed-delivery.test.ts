@@ -782,6 +782,55 @@ test("an observed non-ask/note delivery cannot heal directed mail", { timeout: 3
   });
 });
 
+async function inboxPage(token: string, after: { created_at: string; id: string }): Promise<Array<{ id: string; created_at: string }>> {
+  const response = await fetch(`${local.API_URL}/functions/v1/read`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, apikey: local.ANON_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "signals", workspace_id: shared.workspace, inbox: true, about: null,
+      kind: null, since: null, after_created_at: after.created_at, after_id: after.id, limit: 1,
+      include_stale: true }),
+  });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  return (JSON.parse(text) as { signals: Array<{ id: string; created_at: string }> }).signals;
+}
+
+test("check pages one millisecond by id, and the heal uses that order", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-same-millisecond");
+  const first = await postAsk(agent.principalId);
+  const second = await postAsk(agent.principalId);
+  const [low, high] = [first, second].sort();
+  // Inside one millisecond, the higher id gets the earlier microsecond.
+  await sql`ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only`;
+  let base: string;
+  try {
+    const [row] = await sql<{ base: string }[]>`SELECT to_char(date_trunc('milliseconds', statement_timestamp())
+      - interval '5 minutes' - interval '1 millisecond', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS base`;
+    base = row!.base;
+    await sql`UPDATE swarm.signals SET created_at = ${base}::timestamptz + interval '1 millisecond'
+        + interval '100 microseconds' WHERE id = ${high}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+    await sql`UPDATE swarm.signals SET created_at = ${base}::timestamptz + interval '1 millisecond'
+        + interval '900 microseconds' WHERE id = ${low}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+  } finally {
+    await sql`ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only`;
+  }
+  const seen: string[] = [];
+  let cursor = { created_at: base, id: "00000000-0000-4000-8000-000000000000" };
+  for (let page = 0; page < 2; page += 1) {
+    const rows = await inboxPage(agent.token, cursor);
+    assert.equal(rows.length, 1);
+    seen.push(rows[0]!.id);
+    cursor = { created_at: rows[0]!.created_at, id: rows[0]!.id };
+  }
+  assert.deepEqual(seen, [low, high], "one-row pages return both signals once, in (millisecond, id) order");
+  // The seat observed only the first signal check shows; the second stays eligible.
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: low,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), [high]);
+  assert.equal(await receiptWakePath(high, agent.principalId), true);
+});
+
 test("revoked principal has no wake row or observing receipt", { timeout: 30_000 }, async () => {
   const agent = await seedAgent("wake-revoked");
   const observed = await postAsk(agent.principalId);
@@ -892,6 +941,8 @@ function eligibleViewBody(): string {
   return migration.split("CREATE VIEW swarm.wake_path_eligible_deliveries", 2)[1]!
     .split("ALTER VIEW swarm.wake_path_eligible_deliveries", 1)[0]!;
 }
+const CHECK_ORDER_HEAL = "AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)\n" +
+  "        > (date_trunc('milliseconds', s.created_at), s.id)";
 function replaceOnce(text: string, find: string, replacement: string): string {
   assert.equal(text.split(find).length, 2, `the mutation must find ${JSON.stringify(find)} once`);
   return text.replace(find, replacement);
@@ -903,8 +954,9 @@ test("section 5 catalog proof accepts the installed view and refuses an old heal
   const view = eligibleViewBody();
   const cases: Array<[string, string, boolean]> = [
     ["installed", view, true],
-    ["enqueue-order heal", replaceOnce(view, "AND (later_signal.created_at, later_signal.id) > (s.created_at, s.id)",
-      "AND later.enqueued_at > d.enqueued_at"), false],
+    ["enqueue-order heal", replaceOnce(view, CHECK_ORDER_HEAL, "AND later.enqueued_at > d.enqueued_at"), false],
+    ["microsecond-order heal", replaceOnce(view, CHECK_ORDER_HEAL,
+      "AND (later_signal.created_at, later_signal.id) > (s.created_at, s.id)"), false],
     ["no later kind filter", replaceOnce(view, "      AND later_signal.kind IN ('ask', 'note')\n", ""), false],
     ["no release cutoff", replaceOnce(view,
       "  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)\n", ""), false],

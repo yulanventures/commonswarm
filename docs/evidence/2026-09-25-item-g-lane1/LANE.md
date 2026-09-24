@@ -13,7 +13,7 @@ The initial implementation notes below describe `bb229da9`. Fold 1 supersedes th
 
 ## Box release order
 
-After cross-family review and landing an exact SHA on `main`, HezLead directs Anvil to apply migration `20260925000001`, then release the command edge on the box. Afterward a dedicated test seat must send one unclaimed observed ACK, then receive a new directed note left unchecked. Pass that exact note ID as `item_g_seed_signal_id` to the functional proof. The catalog proof checks the schema. Only after migration and edge verification should npm and the site be released. The roster tolerates a missing view. CI and merge do not deploy any surface.
+After cross-family review and landing an exact SHA on `main`, HezLead directs Anvil to apply migration `20260925000001`, then release the command and read edges on the box (the read edge carries the check-order `ORDER BY` from the lead fold). Afterward a dedicated test seat must send one unclaimed observed ACK, then receive a new directed note left unchecked. Pass that exact note ID as `item_g_seed_signal_id` to the functional proof. The catalog proof checks the schema. Only after migration and edge verification should npm and the site be released. The roster tolerates a missing view. CI and merge do not deploy any surface.
 
 ## Proof files and mutation controls
 
@@ -155,6 +155,7 @@ redundancy claim.
 | R4-F3 RIGOUR | LANE.md did not record the lead's fixture fix. | This section. |
 | R4-F4 RIGOUR | Fixture comments called the late-recipient and non-ask/note rows "historical". Production inverts signal and enqueue order only inside one posting transaction (milliseconds) and cannot hold the non-ask/note row. The comments now say so. | Comment only. The Opus arm answered the brief's question: the rule is not over-constrained, because `(created_at, id)` is `cswarm check`'s own order. |
 | R4-F5 RIGOUR | The check-cursor follow-up task named only the same-millisecond skip. It now also names the commit-order skip (reasoned from code by the Opus arm, not measured). | Doc only. |
+| Grok R4-2 PRODUCTION | The read edge paged by `(created_at, id)` in microseconds but its cursor compares milliseconds, so a page could end on a row whose cursor excluded a later row in the same millisecond with a lower id; check never showed that row, and the heal (then also microseconds) hid it. "Check order" is now `(date_trunc('milliseconds', created_at), id)` in all three places: the read edge's `ORDER BY`, its cursor predicate (unchanged), and the heal's tuple. The client comparator (`compareSignalCursor`, `Date.parse`) already used that order. The catalog proof requires the millisecond tuple. | New served test "check pages one millisecond by id, and the heal uses that order": two asks in one millisecond, the higher id at the earlier microsecond; one-row pages must return both once in `(ms, id)` order, and an observed ACK of the first must leave the second eligible. Read edge back to microsecond `ORDER BY`: page 2 is empty (`0 !== 1`). Migration heal back to the microsecond tuple (reset stack): the second ask is not eligible (`[]`). The catalog test also refuses a microsecond-order heal. |
 
 ### Lead fold gates (a3736201; reset local stack)
 
@@ -162,7 +163,7 @@ redundancy claim.
   (`file-artifacts.test.ts:534`). That file rerun alone: 21/21. The lane does not touch brain or file code.
 - `npm test`: the ten failures are `host-acp-*` timing tests under parallel file runs at load 4-12. The four
   `host-acp-*` files with `--test-concurrency=1` pass 84/84 on the lane and on main `4d4cb3f7`.
-- After the R4 fixes: `managed-delivery.test.ts` 22/22. The full gates for the new commit are in its landing record.
+- After the R4 fixes and the check-order fix: `managed-delivery.test.ts` 23/23 on a reset stack. The full gates for the new commit are in its landing record.
 
 Not established: the box migration and command release, the production row count and query cost of the heal join,
-the commit-order cursor skip (reasoned only), and live behavior. No production host was contacted.
+the commit-order cursor skip (reasoned only; still open), and live behavior. The read-edge `ORDER BY` change reaches the box with this lane's edge release. No production host was contacted.

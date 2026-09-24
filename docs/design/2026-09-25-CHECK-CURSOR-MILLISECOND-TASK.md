@@ -1,5 +1,12 @@
 # Follow-up task: preserve check inbox order within one millisecond
 
+**Status (2026-09-24, lead fold of item G lane 1):** the same-millisecond skip is
+FIXED in that lane. The read edge now orders by the cursor's own key
+(`date_trunc('milliseconds', created_at)`, then `id`), and the wake-path heal
+uses the same order; a served test pages two signals inside one millisecond with
+inverted ids. The commit-order skip below is still OPEN. The text below is the
+original task, kept for readers who meet it.
+
 The read edge pages the inbox using JSON timestamps with millisecond precision.
 Its `after` predicate truncates PostgreSQL `created_at` to milliseconds, then
 compares `id`. A page ending at `12:00:00.000100` with a high UUID can skip a

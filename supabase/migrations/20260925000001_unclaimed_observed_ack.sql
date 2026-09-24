@@ -88,14 +88,16 @@ WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
       AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
       AND observed.last_leased_by IS NULL
       AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
-  -- Check pages signals by (created_at, id), not by delivery enqueue time.
-  -- A recipient added after signal creation can invert those two orders.
+  -- Check pages signals by (created_at cut to milliseconds, id), the read
+  -- edge's cursor order, not by delivery enqueue time. A recipient added after
+  -- signal creation can invert signal and enqueue order.
   AND NOT EXISTS (SELECT 1 FROM swarm.signal_deliveries AS later
     JOIN swarm.signals AS later_signal
       ON later_signal.workspace_id = later.workspace_id AND later_signal.id = later.signal_id
     WHERE later.workspace_id = d.workspace_id
       AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
-      AND (later_signal.created_at, later_signal.id) > (s.created_at, s.id)
+      AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)
+        > (date_trunc('milliseconds', s.created_at), s.id)
       AND later_signal.kind IN ('ask', 'note')
       AND (later_signal.to_agent_principal_id = d.recipient_agent_principal_id
         OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS later_recipient

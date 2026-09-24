@@ -52,7 +52,7 @@ SELECT
       AND pg_get_viewdef(v.oid) LIKE '%s.to_agent_principal_id = d.recipient_agent_principal_id%'
       AND pg_get_viewdef(v.oid) LIKE '%r.recipient_agent_principal_id = d.recipient_agent_principal_id%'
       AND pg_get_viewdef(v.oid) LIKE '%d.enqueued_at >= ( SELECT wake_path_release.applied_at%'
-      AND pg_get_viewdef(v.oid) LIKE '%ROW(later_signal.created_at, later_signal.id) > ROW(s.created_at, s.id)%'
+      AND pg_get_viewdef(v.oid) LIKE '%ROW(date_trunc(''milliseconds''::text, later_signal.created_at), later_signal.id) > ROW(date_trunc(''milliseconds''::text, s.created_at), s.id)%'
       AND pg_get_viewdef(v.oid) LIKE '%later_signal.kind = ANY%'
       AND pg_get_viewdef(v.oid) NOT LIKE '%later.enqueued_at > d.enqueued_at%'
     FROM pg_class AS v
