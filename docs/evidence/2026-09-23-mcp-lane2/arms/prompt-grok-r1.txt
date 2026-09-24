@@ -1,0 +1,31 @@
+You review one lane of the CommonSwarm repo as the second arm of a D-036 pair. You are a reviewer: change no file,
+commit nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Use read-only git and file
+reads; you may run pure tests (node --import tsx --test <file>, with a temporary HOME).
+
+LANE: item H lane 2, "cswarm mcp over stdio, release 1", branch lane/mcp-stdio, SHA 064a1cdd (Codex Maker), base
+origin/main adef94b4. Your current directory is a detached worktree at that SHA. Diff: git diff origin/main...064a1cdd.
+THE SPECIFICATION is docs/design/2026-09-23-MCP-LANE-2-BRIEF.md (nine decisions + "Done for release 1"); the Maker's
+record is docs/evidence/2026-09-23-mcp-lane2/LANE.md. New code: src/mcp/server.ts, src/mcp/tools.ts, the mcp row and
+error path in src/cli.ts, deferCursorCommit in src/cloud/agent-check.ts, tests/p1-cli/mcp-stdio.test.ts.
+
+CHECK every decision against the code, clause by clause. In particular:
+- can any token, grant/device id, profile path, lock/cache path, or shell command reach a tool result or error text
+  (every AgentSetupError/CommandHttpError/Renewal* message producer that mapMcpError passes through);
+- the check cursor: can it advance when the model did not receive the messages (the byte cap replaces the whole result
+  but the deferred commit still runs; a failed write; a cancelled call);
+- request_id: the in-process seenRequests map and `replayed` (is replayed true when the first attempt never reached the
+  server? is the conflict decided locally where the brief says a 409 decides?), 5xx/transport -> unknown, cancellation
+  sending a second JSON-RPC response on an id the SDK already handled;
+- the managed-principal refusal and `--host-session-id manual`; one-shot renewal (invariant B) and D-004/D-011/426 text;
+- schema validation (pattern flags, uuid case, `until`, `to`, `channel` limits) and the deny-set gate + positive control;
+- stdout purity (any console.log / process.stdout write reachable from the server path, including imports of cli.ts);
+- the 858-line change to tests/p1-cli/fixtures/command-dispatch-baseline.json: is it only the new row, or did existing
+  command behaviour change;
+- that each test runs under a package script and proves what its name says; doc claims in LANE.md are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

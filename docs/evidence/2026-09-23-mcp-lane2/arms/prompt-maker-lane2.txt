@@ -1,0 +1,44 @@
+You are the Maker for item H lane 2, "cswarm mcp over stdio, release 1", in the CommonSwarm repo. Work ONLY in your
+current directory, the git worktree of branch lane/mcp-stdio (from main adef94b4).
+
+HARD RULES: do not contact production (api.commonswarm.com, commonswarm.com, 178.105.29.28, 100.115.66.74) and no
+Supabase or Vercel service; run no supabase, vercel, swarm or cswarm command against a real workspace; do not read or
+touch ~/.cswarm or ~/.config/cswarm (tests use a temporary HOME and loopback fakes); start no other model; use no skill;
+no auto-approve flags; print no secret; do not push or rebase; touch no other worktree. Real exit codes; never pipe a
+gate into grep. Every test has a timeout; no process of yours survives the run.
+SANDBOX: network access and the repository .git directory are writable: commit yourself and run every gate.
+
+THE SPECIFICATION IS docs/design/2026-09-23-MCP-LANE-2-BRIEF.md: read it fully and implement exactly its nine
+decisions and its "Done for release 1" items that can be done without production (the production controls and the
+live Claude Code / Codex runs are the lead's). Read also, for context only: the review arms in
+docs/evidence/2026-09-23-mcp-v20-review/ (they list the traps: the lane-1 argumentSchema exposes credential flags;
+table handlers print to stdout; runWhoami's object carries grant and token ids; pending-command ids clear on success;
+reportRenderedBroadcasts posts receipts), src/cloud/agent-channel.ts (the existing SDK stdio server pattern),
+src/cloud/agent-check.ts, src/cloud/pending-command.ts, src/cloud/agent-profile.ts, src/h0/verbs.ts
+(H0_REQUEST_ID_RE, the H0 field vocabulary), and the AGENT_COMMANDS table in src/cli.ts.
+
+Put the server in its own module(s) under src/mcp/ (a leaf-friendly layout: the tool table with its allow-listed
+schemas and result mappers as data, one place), wire the `mcp` row into AGENT_COMMANDS as the brief says, and keep
+existing CLI behaviour unchanged (the command-dispatch baseline must stay green; if the new row changes the usage
+text, update the fixture only for that row). Tests under tests/p1-cli/ (globbed), driving the server through the SDK's
+real stdio client against a loopback fake command/read edge: every tool's happy path and refusal, the deny-set gate
+and its tools/call positive control, stdout purity, request_id replay (same id twice -> one signal; a lost answer ->
+outcome unknown), the managed-principal refusal without --host-session-id, one-shot renewal error mapping, and result
+allow-lists (no token, no grant ids, no profile path, no shell command in any result). Mutation controls for the deny
+gate and stdout purity.
+
+COMMIT(S): prefix "feat(mcp):" / "test(mcp):", trailers exactly:
+Agent-Name: Yulan Bot
+Agent-Model: <your model id>
+Agent-Family: openai
+Agent-Tool: codex <version>
+Agent-Model-Source: runtime-ambiguous
+Write docs/evidence/2026-09-23-mcp-lane2/LANE.md: what was built per decision, tests and scripts, mutation results, and
+what you did not establish.
+
+GATES (each with its exit code and count): npm run build ; env -u FORCE_COLOR npm test ;
+env -u FORCE_COLOR npm run test:p1-cli ; npm run check:tests ; bash scripts/build-release.sh (it runs the artifact:
+also run `dist-release/cswarm mcp --help` from a temporary directory outside the repo) ; git diff --check origin/main...HEAD
+
+REPORT: commit SHAs; the tool table; each decision's implementation and proving test; mutation results; gate exit
+codes with counts; what you did not establish.

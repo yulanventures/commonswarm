@@ -1,0 +1,51 @@
+You are the Maker for fold 2 on item H lane 2, "cswarm mcp over stdio, release 1". Work ONLY in your current
+directory, the git worktree of branch lane/mcp-stdio (tip 8321eae3, your lane after fold 1). Read your LANE.md, then
+the round-2 Opus review, which MEASURED each point:
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/opus-r2.md (its probes are under /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/opus-probes/ and may be reused as models for tests).
+
+HARD RULES: as for the lane and fold 1 — no production host (api.commonswarm.com, commonswarm.com,
+edge-staging.commonswarm.com, 178.105.29.28, 100.115.66.74), no Supabase or Vercel service, no swarm/cswarm against a
+real workspace, do not touch ~/.cswarm or ~/.config/cswarm, no other model, no skill, no auto-approve flags, no secret
+printed, no push or rebase, no other worktree. Real exit codes; never pipe a gate into grep. Every test has a timeout;
+no process of yours survives. D-053: never branch on error.message.
+SANDBOX: network access and the repository .git directory are writable: commit yourself and run every gate.
+
+LEAD RULINGS (each with a test that fails when the fix is reverted; record the mutation result in LANE.md "Fold 2"):
+F2-A (finding A, blocking). Post-path refusals must give a truthful next step. A bare 403 `forbidden` on ask, note,
+  reply or working_on gets a hedged sentence that names the causes the edge uses for it (a reply to your own ask, a
+  reply to an expired signal, a recipient that is no longer active; take the list from the edge code in
+  supabase/functions/command/, and state it only as far as the edge enforces it) and next_step "check the named
+  arguments; if they are right, a person may need to restore this agent's access". `channel_not_found`,
+  `channel_archived` and `invalid_request` (and every other edge code a model's own arguments can cause: enumerate them
+  from supabase/functions/command/ and the protocol, do not guess) get "fix the named argument", naming the argument
+  where the code determines it. The fallback for an unlisted 4xx code is neutral: "check the arguments; if the problem
+  stays, ask a person". Read-path 401/403/426 keep "a person must restore access". Test: a stdio test with a fake edge
+  that returns each of these real codes, asserting the exact table sentence and next_step.
+F2-B (finding B). Add a test that fails if the full cursor is committed after a partial (capped) page (mutation M4a
+  from the review must now fail), and make the "largest fresh check" bound an assertion that can fail (derive it from
+  the exported constants, and show by mutation that raising a constant past the cap fails it).
+F2-C (finding C). Every renewal code a tool path can throw is in the sentence table with a truthful next step
+  (`predecessor_superseded` and any other retryable one -> "retry the same call"). The coverage test must be generated
+  from the exported code sets / unions of the error classes (the same constants the enforcement reads), not from a
+  hand-typed list of files.
+F2-D (finding D). No CLI behaviour change from this lane: the CLI `--to` must accept every name it accepted at main
+  adef94b4. Set SIGNAL_RECIPIENT_MAX from the largest name the database allows for a member display name or an agent
+  name (read the migrations; name the source in a comment), or apply the bound only in the MCP schema; a test proves
+  the CLI accepts a name at the DB maximum. For `channel`: enforcement must equal the advertised pattern; the MCP
+  path does not normalise, it rejects input that does not already match the slug pattern (-32602), and the
+  description says slugs are lowercase.
+
+COMMIT(S): "fix(mcp): ..." / "test(mcp): ...", trailers exactly:
+Agent-Name: Yulan Bot
+Agent-Model: <your model id>
+Agent-Family: openai
+Agent-Tool: codex <version>
+Agent-Model-Source: runtime-ambiguous
+
+GATES (each with its exit code and count): npm run build ; env -u FORCE_COLOR npm test ;
+env -u FORCE_COLOR npm run test:p1-cli ; npm run check:tests ; bash scripts/build-release.sh (then run
+dist-release/cswarm mcp --help from a temporary directory outside the repo) ; git diff --check origin/main...HEAD.
+(Tests that call ps may fail with EPERM in your sandbox; name them; the lead reruns the gates outside it.)
+
+REPORT: commit SHAs; each ruling -> implementation -> test -> mutation result; gate exit codes with counts; what you
+did not establish.

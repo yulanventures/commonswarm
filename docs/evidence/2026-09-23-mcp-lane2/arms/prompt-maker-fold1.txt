@@ -1,0 +1,81 @@
+You are the Maker for fold 1 on item H lane 2, "cswarm mcp over stdio, release 1". Work ONLY in your current
+directory, the git worktree of branch lane/mcp-stdio (tip 064a1cdd, your lane). Read the spec
+docs/design/2026-09-23-MCP-LANE-2-BRIEF.md, your LANE.md, then the Opus review, which MEASURED most findings:
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/opus-r1.md (probes under /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/opus-probes/src064/probes/ may be reused as a model for tests).
+
+HARD RULES: do not contact production (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74) and no Supabase or Vercel service; run no supabase, vercel, swarm or cswarm command
+against a real workspace; do not read or touch ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; no
+auto-approve flags; print no secret; do not push or rebase; touch no other worktree. Real exit codes; never pipe a gate
+into grep. Every test has a timeout; no process of yours survives the run. D-053: never branch on error.message.
+SANDBOX: network access and the repository .git directory are writable: commit yourself and run every gate.
+
+LEAD RULINGS (implement all; each with a test that fails when the fix is reverted, and record the mutation result):
+R1 (findings 1, 2, 12, 13). No CLI prose reaches the model. mapMcpError builds {code, message, next_step, status?}
+  from ONE MCP-owned table keyed by the stable code / error class, never by message text and never passing a
+  producer's message through. Cover every class a tool path can throw: AgentSetupError codes, CommandHttpError (by its
+  code; an unlisted code gets a generic sentence that names the code and status), the read-edge client errors, the
+  recipient-resolution errors (unknown / ambiguous "to": say which argument is wrong so the model can fix it), the
+  Renewal* classes (revoked, suspended, expired/D-004, D-011 refusal, 426 upgrade), the check timeout, the reply
+  refusal. next_step is per code and truthful: "retry the same call", "fix the named argument", or "a person must
+  restore this agent's access outside this session" (revoked / suspended / expired / upgrade). No sentence in the
+  table contains a shell command, a flag, "cswarm", or a path. status appears only for HTTP answers (never 200).
+  Tests: (a) every producer class driven through the real stdio server returns a table sentence (allow-list: the
+  message equals the table's value) and matches no /cswarm|--[a-z]|\/|\\/ ; (b) a test that the table covers the
+  codes the enforcement throws, generated from the same exported constants, not a typed list. Replace the lane test at
+  mcp-stdio.test.ts:~210 that asserted the pass-through.
+R2 (finding 3). Once the request has been sent, every failure except a definitive typed HTTP refusal (a 4xx
+  CommandHttpError with a code) returns {outcome:"unknown", retry_with_same_request_id:true}, including a response
+  that fails the client's validation. Test with a fake edge that creates the signal and returns a malformed body.
+R3 (finding 4). Delete seenRequests and the local conflict check (the server's 409 command_id_conflict decides, and
+  it maps to the "stop, do not mint a new id" sentence). Remove  from the post results: the server answer
+  carries no replay marker, so the field cannot be true as named. Post results are
+  {signal_id, kind, created_at, in_reply_to, channel_id}. No state is shared between calls except the SDK's own.
+R4 (finding 5). Remove the manual transport.send on a cancelled id (the MCP spec says no response after
+  cancellation; the host drops it). A cancelled call gets no result; the tool descriptions keep "if the outcome is
+  unknown, retry with the same request_id and arguments". The test must use the SDK client and show that nothing is
+  sent for the cancelled id and that a same-id retry reaches the fake edge with the same command_id.
+R5 (finding 6). A fresh check result that would exceed MCP_RESULT_MAX_BYTES must never advance the cursor over
+  messages the model did not receive. Prefer returning fewer messages (has_more true) and committing the cursor only
+  to the last message included; if that is not possible with checkAgentMessages' cursor semantics, skip the commit and
+  return the truncated answer. Add a test that computes the largest fresh check from the constants and asserts the
+  bound, and a test that forces the cap and shows the cursor did not pass unseen messages.
+R6 (finding 7). The deferred commit re-reads check.json under the lock and only moves the cursor forward (it never
+  overwrites a later cursor or drops cache rows written by a hook check in between). Delete commitAfterWrite entries on
+  error and cancel. Add a discriminating control: moving the commit before the write MUST fail a test (record the
+  mutation), plus a test of the forward-only merge.
+R7 (finding 8). The stdout-purity test captures the child's stdout from spawn (before connect) through every tool and
+  exit; mutation control: a banner written before serveMcp must fail it.
+R8 (finding 9). cli.ts loads the server with a dynamic import inside the mcp handler; the SDK is not loaded for any
+  other command. A test asserts cli.ts has no static import of ./mcp/ (AST, not regex over prose).
+R9 (finding 10). No typed limits: export the request-id bounds with H0_REQUEST_ID_RE (or derive them from it) and use
+  them; export the CLI's until parser (signalDuration) from a shared module and use it, and advertise its pattern so a
+  bad until is -32602; channel uses CHANNEL_SLUG_MAX / CHANNEL_SLUG_RE and the same trim+lowercase normalisation as the
+  CLI; bound  with the constant the CLI or edge enforces for a recipient name (find it; if none exists, name one
+  in one shared module and use it in both). Enforcement uses exactly the advertised pattern (no added "i" flag); if
+  uppercase uuids are to be accepted, the advertised pattern says so.
+R10 (finding 11). Dispatch-baseline rows for mcp that reach the mcp policy: missing --profile, an unreadable profile,
+  and --host-session-id manual (without the extra positional).
+R11 (finding 12, not established). Managed detection is local only: keep it, and state it in LANE.md under "not
+  established".
+R12 (finding 14). The cached full-text view carries sender_owner_relation, as the fresh view does.
+R13. Correct the brief in place (the artifact, not a message): in docs/design/2026-09-23-MCP-LANE-2-BRIEF.md add a
+  dated "Correction (fold 1)" note under decisions 5 and 6:  is removed (no server marker); a cancelled call
+  gets no result per the MCP spec, and the retry contract carries it; keep the retired wording quoted so readers who
+  met it can find it.
+
+COMMIT(S): "fix(mcp): ..." / "test(mcp): ...", trailers exactly:
+Agent-Name: Yulan Bot
+Agent-Model: <your model id>
+Agent-Family: openai
+Agent-Tool: codex <version>
+Agent-Model-Source: runtime-ambiguous
+Update docs/evidence/2026-09-23-mcp-lane2/LANE.md with a "Fold 1" section: each ruling, its test, its mutation result.
+
+GATES (each with its exit code and count): npm run build ; env -u FORCE_COLOR npm test ;
+env -u FORCE_COLOR npm run test:p1-cli ; npm run check:tests ; bash scripts/build-release.sh (then run
+dist-release/cswarm mcp --help from a temporary directory outside the repo) ; git diff --check origin/main...HEAD.
+(Tests that call ps may fail with EPERM in your sandbox; name them; the lead reruns the gates outside it.)
+
+REPORT: commit SHAs; each ruling -> implementation -> test -> mutation result; gate exit codes with counts; what you
+did not establish.

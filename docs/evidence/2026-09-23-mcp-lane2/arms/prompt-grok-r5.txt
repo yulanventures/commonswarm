@@ -1,0 +1,23 @@
+You review one lane of the CommonSwarm repo as the second arm of a D-036 pair. You are a reviewer: change no file,
+commit nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file reads;
+you may run pure tests with a temporary HOME (the stdio test runs dist/: run `npm run build` first if you run it).
+
+LANE: item H lane 2, "cswarm mcp over stdio". Your round-4 review of c32abeb5 was PASS. The lane is now at 0a45e791 =
+c32abeb5 + two lead commits: b52245b3 (rate_limited sentence) and 0a45e791 (profile_* next step). Your current
+directory is a detached worktree at 0a45e791.
+
+REVIEW `git diff c32abeb5..0a45e791` only. CHECK: (1) the edge returns the same 429 rate_limited for the credential
+bucket (SIGNAL_CREDENTIAL_LIMIT) and the workspace bucket (SIGNAL_WORKSPACE_LIMIT) in
+supabase/functions/command/index.ts; is the new sentence "The signal rate limit for this agent or its workspace was
+reached; it resets within an hour." true for both, and was the old sentence "for this agent was reached" false for
+the workspace bucket; (2) the profile path is a process flag, not a tool argument: is "a person must restore this
+agent's access outside this session" a truthful next step for profile_path_invalid, profile_symlink and
+profile_inside_repository, and does the new test fail if "fix the named argument" returns on any profile_* code;
+(3) nothing else changed; LANE.md F4-3's correction is accurate.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence. Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

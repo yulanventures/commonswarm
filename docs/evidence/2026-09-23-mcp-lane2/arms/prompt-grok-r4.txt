@@ -1,0 +1,25 @@
+You review one lane of the CommonSwarm repo as the second arm of a D-036 pair. You are a reviewer: change no file,
+commit nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Use read-only git and file
+reads; you may run pure tests (node --import tsx --test <file>, with a temporary HOME).
+
+LANE: item H lane 2, "cswarm mcp over stdio, release 1", branch lane/mcp-stdio, now at c32abeb5 (Codex fold 4 on
+d7c17124). Your current directory is a detached worktree at c32abeb5. Your round-3 review of d7c17124 (FAIL) is the
+file /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/grok-r3.md: (1) PRODUCTION the post `forbidden` sentence stated permissions ("A reply may target your
+own ask ..."); (2) session_proof_missing / session_proof_invalid / session_expired / session_conflict had no owned
+sentence and a wrong next step; (3) channel enforcement was stricter than the advertised schema (reserved slugs);
+(4) the partial-page test passed with the byte cap removed; (5) stale LANE.md claims. The lead's rulings for the fold:
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/mcp/maker-fold4.txt. Record: docs/evidence/2026-09-23-mcp-lane2/LANE.md "Fold 4".
+
+REVIEW `git diff d7c17124..c32abeb5` and the whole lane `git diff origin/main...c32abeb5`. CHECK: each of your five
+points is fixed and has a test that fails when the fix is reverted; re-derive your table of edge codes for a
+post_signal from an MCP tool and for the read path, and confirm each sentence and next step is true now; the new
+schema `not` enum is generated from the constant channelSlugProblem reads and validation enforces exactly the
+advertised schema; nothing in the fold changed CLI behaviour; no model-visible string carries a shell command, flag,
+path, token or producer message; LANE.md claims are true. Start-up stderr text is ruled acceptable; do not re-raise.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

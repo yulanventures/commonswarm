@@ -1,0 +1,30 @@
+You review one lane of the CommonSwarm repo as the second arm of a D-036 pair. You are a reviewer: change no file,
+commit nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Use read-only git and file
+reads; you may run pure tests (node --import tsx --test <file>, with a temporary HOME).
+
+LANE: item H lane 2, "cswarm mcp over stdio, release 1", branch lane/mcp-stdio, now at d7c17124. Your current
+directory is a detached worktree at d7c17124. History: 064a1cdd (Maker), fold 1 (f8f2dec0..8321eae3), fold 2
+(9e725974), lead fix d7c17124. Your round-2 review of 8321eae3 (FAIL) found: reachable command refusals (403
+forbidden on a reply or a non-live `to`, 429 rate_limited, 404 channel_not_found, 409 channel_archived) told the
+model "a person must restore this agent's access"; the byte-cap test never shortened a page; the unknown-argument
+name was echoed raw; the CLI `--to` lost names over 80 characters; the mcp policy-matrix rows stop at the extra
+positional while LANE.md said they reach MCP policy. Start-up stderr naming a flag or command was RULED acceptable by
+the lead (stderr goes to the person who starts the server, not to the model) — do not re-raise it.
+Records: docs/evidence/2026-09-23-mcp-lane2/LANE.md ("Fold 1", "Fold 2"); brief with dated corrections:
+docs/design/2026-09-23-MCP-LANE-2-BRIEF.md.
+
+REVIEW `git diff 8321eae3..d7c17124` and the whole lane `git diff origin/main...d7c17124`. CHECK: each round-2 point is
+fixed and has a test that fails when the fix is reverted; src/mcp/errors.ts: for EVERY code the command edge
+(supabase/functions/command/index.ts) can return to a post_signal from an MCP tool, the sentence and next_step are
+true (enumerate the codes from the edge; list any code missing or mis-stepped); read-path 401/403/426 still say a
+person must restore access; the partial-page test proves no message is skipped or repeated; the CLI accepts at least
+every recipient name it accepted at origin/main; channel enforcement equals the advertised pattern; no model-visible
+string carries a shell command, flag, path, token or producer message; the whole lane still meets the nine decisions
+of the brief as corrected; doc claims in LANE.md are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

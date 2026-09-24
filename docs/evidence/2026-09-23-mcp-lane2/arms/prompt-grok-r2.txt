@@ -1,0 +1,30 @@
+You review one lane of the CommonSwarm repo as the second arm of a D-036 pair. You are a reviewer: change no file,
+commit nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Use read-only git and file
+reads; you may run pure tests (node --import tsx --test <file>, with a temporary HOME).
+
+LANE: item H lane 2, "cswarm mcp over stdio, release 1", branch lane/mcp-stdio, now at 8321eae3 (Codex fold 1 on top
+of 064a1cdd). Your current directory is a detached worktree at 8321eae3. Round 1 (both arms FAIL) found: CLI prose with
+shell commands passed through to the model; unclassified errors collapsed to one generic sentence; a committed post
+could be reported as a failure; `replayed` and command_id conflicts decided from process memory; an unsolicited
+response on a cancelled id; the byte cap could advance the check cursor over unseen messages; the deferred commit wrote
+a stale snapshot; the stdout-purity test missed start-up; a static SDK import in cli.ts; typed or missing schema limits
+(request id, until, channel, to, the "i" flag); dispatch-baseline mcp rows never reached mcp policy; the cached view
+dropped sender_owner_relation. The fold's record: docs/evidence/2026-09-23-mcp-lane2/LANE.md ("Fold 1"); the spec with
+dated corrections: docs/design/2026-09-23-MCP-LANE-2-BRIEF.md.
+
+REVIEW `git diff 064a1cdd..8321eae3` and the whole lane `git diff origin/main...8321eae3`. CHECK: each round-1 finding
+is fixed in code AND has a test that fails when the fix is reverted (the LANE claims a mutation for each: verify at
+least the error table, the cancel path, the cap/cursor path and the forward-only merge by reading the test and the
+code it guards); src/mcp/errors.ts: can any string in a tool result or error carry a shell command, a flag, a path, a
+token, or a producer's message; is every class a tool path can throw mapped, and is next_step truthful per code; does
+the "post-send failures are unknown" rule hold for every failure after bytes left (and NOT for a pre-send refusal);
+the new SignalRecipientError / SIGNAL_RECIPIENT_MAX changes to src/cloud/signals.ts: did any existing CLI behaviour or
+message change, and is each change intended; the check cap path (fewer messages, cursor to last included) cannot skip
+or repeat a message; stdout purity; the brief corrections are accurate; doc claims in LANE.md are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
