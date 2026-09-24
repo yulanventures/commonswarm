@@ -449,7 +449,7 @@ test("MCP stdio edge refusal codes give exact post and read next steps", { timeo
       [409, "channel_archived", "The channel argument names an archived channel.", "fix the named argument"],
       [400, "invalid_request", "The service did not accept the named arguments.", "fix the named argument"],
       [413, "payload_too_large", "The body or about argument is too large.", "fix the named argument"],
-      [429, "rate_limited", "The signal rate limit for this agent was reached; it resets within an hour.", "wait, then retry the same call with the same request_id"],
+      [429, "rate_limited", "The signal rate limit for this agent or its workspace was reached; it resets within an hour.", "wait, then retry the same call with the same request_id"],
       [418, "new_code", "The service returned new_code with status 418.", "check the arguments; if the problem stays, ask a person"],
     ] as const;
     let index = 0;

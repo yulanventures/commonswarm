@@ -62,7 +62,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   channel_archived: entry("The channel argument names an archived channel.", FIX),
   invalid_request: entry("The service did not accept the named arguments.", FIX),
   payload_too_large: entry("The body or about argument is too large.", FIX),
-  rate_limited: entry("The signal rate limit for this agent was reached; it resets within an hour.", WAIT_AND_RETRY),
+  rate_limited: entry("The signal rate limit for this agent or its workspace was reached; it resets within an hour.", WAIT_AND_RETRY),
   ...Object.fromEntries(AGENT_SESSION_PROOF_REFUSAL_CODES.map(code =>
     [code, entry("The current host session was refused by the service.", RESTART_SESSION)])),
   unauthenticated: entry("The service refused this agent's credential.", PERSON),
