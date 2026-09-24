@@ -47,6 +47,8 @@ export const NOTIFY_RESTART_COMMAND = `cswarm inbox --${NOTIFY_FLAG}`;
 export const NOTIFY_SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 } as const;
 
 export interface NotifyRestartOptions {
+  /** Original parsed option tokens, before profile expansion; never credential contents. */
+  arguments?: readonly string[];
   agentTokenFile?: string;
   agentTokenStdin?: boolean;
   workspaceId?: string;
@@ -61,6 +63,7 @@ function shellArg(value: string): string {
 
 export function notifyRestartCommand(options: NotifyRestartOptions): string {
   const parts = [NOTIFY_RESTART_COMMAND];
+  if (options.arguments !== undefined) return [...parts, ...options.arguments.map(shellArg)].join(" ");
   if (options.agentTokenFile !== undefined) parts.push("--agent-token-file", shellArg(options.agentTokenFile));
   if (options.agentTokenStdin) parts.push("--agent-token-stdin");
   if (options.workspaceId !== undefined) parts.push("--workspace-id", shellArg(options.workspaceId));
@@ -73,8 +76,8 @@ export function notifySignalStopSentence(
   signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES,
   options: NotifyRestartOptions,
 ): string {
-  const stdin = options.agentTokenStdin ? " with the same credential input on stdin" : "";
-  return `inbox --notify stopped because of ${signal} and nothing is watching this inbox now; restart it under the session's Monitor with ${notifyRestartCommand(options)}${stdin}.`;
+  const stdin = options.agentTokenStdin ? " pipe the same credential on stdin, then" : "";
+  return `inbox --notify stopped because of ${signal} and nothing is watching this inbox now;${stdin} restart it under the session's Monitor with ${notifyRestartCommand(options)}.`;
 }
 
 /** Stable typed failure for a notify monitor whose stdout reader has closed. */

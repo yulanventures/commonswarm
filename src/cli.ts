@@ -672,6 +672,7 @@ export class Arguments {
   readonly positionals: string[] = [];
   private readonly leadingPositionals: string[] = [];
   private readonly flags = new Map<string, string[]>();
+  private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
 
   constructor(values: string[]) {
@@ -696,6 +697,7 @@ export class Arguments {
       }
       if (BOOLEAN_FLAGS.has(name)) {
         this.push(name, "true");
+        this.originalOptions.push({ name });
         continue;
       }
       const next = values[index + 1];
@@ -723,6 +725,7 @@ export class Arguments {
         throw new Error(`--${name} requires a value`);
       }
       this.push(name, next);
+      this.originalOptions.push({ name, value: next });
       index += 1;
     }
     this.hadProfileOption = this.flags.has("profile");
@@ -751,6 +754,14 @@ export class Arguments {
 
   all(name: string): string[] {
     return [...(this.flags.get(name) ?? [])];
+  }
+
+  /** Preserve the user's parsed option order before a profile adds derived flags. */
+  originalOptionTokens(exclude: string): string[] {
+    return this.originalOptions.flatMap(({ name, value }) => {
+      if (name === exclude) return [];
+      return [`--${name}`, ...(value === undefined ? [] : [NOTIFY_PATH_FLAGS.has(name) ? resolve(value) : value])];
+    });
   }
 
   // Main swallowed hook-check errors only when `hook check` preceded every
@@ -819,6 +830,17 @@ function requireProfileWithHostSessionId(args: Arguments): void {
 }
 
 const SESSION_CONTEXT_FLAGS = ["session-context"] as const;
+const NOTIFY_PATH_FLAGS = new Set(["agent-token-file", "profile", "session-context"]);
+export const NOTIFY_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, NOTIFY_FLAG, "json", ...SESSION_CONTEXT_FLAGS,
+] as const;
+
+export function notifyRestartOptions(args: Arguments): NotifyRestartOptions {
+  return {
+    arguments: args.originalOptionTokens(NOTIFY_FLAG),
+    agentTokenStdin: args.has("agent-token-stdin"),
+  };
+}
 const TASK_FLAGS = [
   "task-id",
   "slug",
@@ -4549,14 +4571,7 @@ async function runSignalRead(
 ): Promise<void> {
   const notify = inbox && args.has(NOTIFY_FLAG);
   args.assertShape(notify
-    ? [
-      ...TARGET_FLAGS,
-      "workspace-id",
-      ...CREDENTIAL_FLAGS,
-      "notify",
-      "json",
-      ...SESSION_CONTEXT_FLAGS,
-    ]
+    ? NOTIFY_ACCEPTED_FLAGS
     : [
       ...TARGET_FLAGS,
       "workspace-id",
@@ -4759,13 +4774,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     );
   }
 
-  const restartOptions: NotifyRestartOptions = {
-    ...(args.has("agent-token-file") ? { agentTokenFile: args.optional("agent-token-file") } : {}),
-    ...(args.has("agent-token-stdin") ? { agentTokenStdin: true } : {}),
-    ...(args.has("workspace-id") ? { workspaceId: args.optional("workspace-id") } : {}),
-    ...(args.has("url") ? { url: args.optional("url") } : {}),
-    ...(args.has("anon-key") ? { anonKey: args.optional("anon-key") } : {}),
-  };
+  const restartOptions = notifyRestartOptions(args);
 
   const controller = new AbortController();
   const httpClient = new ListenerHttpClient();

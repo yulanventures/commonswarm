@@ -3226,7 +3226,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/stdout-consumer.ts:24-32",
+          "citation": "src/stdout-consumer.ts:24-35",
           "detail": "Bounded local lsof child used by notify and resume to inspect stdout.",
           "operation": {
             "name": "notify-stdout-inspection",

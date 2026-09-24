@@ -21,13 +21,16 @@ export function parseLsofStdout(output: string): StdoutConsumerState {
 }
 
 /** One bounded child per inspection. Abort kills it when the watcher stops. */
-export function lsofStdoutConsumer(timeoutMs = 5_000): StdoutConsumerAdapter {
+export function lsofStdoutConsumer(
+  timeoutMs = 5_000,
+  executable = process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
+): StdoutConsumerAdapter {
   return {
     async inspect(pid, signal) {
       let output: string;
       try {
         output = await new Promise<string>((resolve, reject) => {
-          execFile(process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
+          execFile(executable,
             ["-nP", "-a", "-p", String(pid), "-d", "1", "-F", "pftan"],
             { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: timeoutMs, signal },
             (error, stdout) => error ? reject(error) : resolve(stdout));

@@ -48,7 +48,8 @@ import {
   type ParentProcessAdapter,
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
-import { parseLsofStdout } from "../../src/stdout-consumer.js";
+import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
+import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, notifyRestartOptions } from "../../src/cli.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -72,6 +73,41 @@ test("recorded lsof fd 1 shapes classify without a false orphan", { timeout: 1_0
     ["p12\nf1\ntunix\nn->0x30df\nn->(none)\n", "live_reader"],
   ] as const;
   for (const [output, expected] of cases) assert.equal(parseLsofStdout(output), expected, output);
+});
+
+test("cancelling an in-flight stdout inspection kills its lsof child", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-lsof-abort-"));
+  const pidFile = join(root, "pid");
+  let childPid: number | undefined;
+  try {
+    const fixture = join(root, "fixture");
+    await writeFile(fixture, `#!/bin/sh\nprintf '%s' "$$" > '${pidFile}'\nexec /bin/sleep 30\n`, { mode: 0o755 });
+    const controller = new AbortController();
+    const inspection = lsofStdoutConsumer(1_500, fixture).inspect(process.pid, controller.signal);
+    const deadline = Date.now() + 1_000;
+    while (childPid === undefined && Date.now() < deadline) {
+      try { childPid = Number(await readFile(pidFile, "utf8")); }
+      catch { await new Promise((done) => setTimeout(done, 10)); }
+    }
+    assert.ok(childPid && Number.isInteger(childPid), "lsof fixture started");
+    controller.abort();
+    const result = await Promise.race([
+      inspection,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("inspection ignored abort")), 400)),
+    ]);
+    assert.equal(result, "cannot_determine");
+    let gone = false;
+    for (let attempt = 0; attempt < 20 && !gone; attempt += 1) {
+      try { process.kill(childPid!, 0); await new Promise((done) => setTimeout(done, 10)); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") gone = true; else throw error; }
+    }
+    assert.equal(gone, true, "aborted lsof child exited");
+  } finally {
+    if (childPid !== undefined) {
+      try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("ps parent parser and adapter classify init, live, missing, unreadable, and EPERM", { timeout: 1_000 }, async () => {
@@ -341,14 +377,15 @@ function spawnCli(
   root: string,
   xdg: string,
   extraEnv: Record<string, string> = {},
+  cwd = process.cwd(),
 ): ChildProcess {
   return spawn(process.execPath, [
     "--import",
-    "tsx",
+    import.meta.resolve("tsx"),
     resolve("src/cli.ts"),
     ...args,
   ], {
-    cwd: process.cwd(),
+    cwd,
     env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -635,7 +672,32 @@ test("the restart sentence uses the CLI's notify flag constant", { timeout: 1_00
   assert.equal(notifyRestartCommand({ agentTokenFile: "/tmp/agent.json", workspaceId: WORKSPACE }),
     `cswarm inbox --notify --agent-token-file /tmp/agent.json --workspace-id ${WORKSPACE}`);
   assert.match(notifySignalStopSentence("SIGTERM", { agentTokenStdin: true }),
-    /cswarm inbox --notify --agent-token-stdin with the same credential input on stdin\.$/);
+    /pipe the same credential on stdin, then restart .* with cswarm inbox --notify --agent-token-stdin\.$/);
+});
+
+test("every notify parser flag survives in parsed start order without a token", { timeout: 1_000 }, () => {
+  const unique = new Set(NOTIFY_ACCEPTED_FLAGS);
+  assert.equal(unique.size, NOTIFY_ACCEPTED_FLAGS.length);
+  for (const flag of NOTIFY_ACCEPTED_FLAGS) {
+    const value = BOOLEAN_FLAGS.has(flag) ? [] : [flag === "agent-token-file" || flag === "session-context"
+      ? "relative/file.json" : "public-value"];
+    const args = new Arguments(["inbox", "--notify", ...(flag === NOTIFY_FLAG ? [] : [`--${flag}`, ...value])]);
+    args.assertShape(NOTIFY_ACCEPTED_FLAGS, 1);
+    const command = notifyRestartCommand(notifyRestartOptions(args));
+    assert.ok(command.includes(`--${flag}`), flag);
+    if (value.length) assert.ok(command.includes(flag === "agent-token-file" || flag === "session-context"
+      ? resolve(value[0]!) : value[0]!), flag);
+    assert.equal(command.includes(TOKEN), false);
+  }
+  const ordered = new Arguments(["inbox", "--json", "--force-file-store", "--url", "http://127.0.0.1:1", "--notify"]);
+  ordered.assertShape(NOTIFY_ACCEPTED_FLAGS, 1);
+  assert.equal(notifyRestartCommand(notifyRestartOptions(ordered)),
+    "cswarm inbox --notify --json --force-file-store --url http://127.0.0.1:1");
+  const profile = new Arguments(["inbox", "--notify", "--profile", "relative/profile.json", "--host-session-id", "public-session"]);
+  const command = notifyRestartCommand(notifyRestartOptions(profile));
+  assert.ok(command.includes(`--profile ${resolve("relative/profile.json")}`));
+  assert.ok(command.includes("--host-session-id public-session"));
+  assert.equal(command.includes("--agent-token-file"), false);
 });
 
 test("the printed restart command starts a watcher against the same loopback read service", { timeout: 12_000 }, async () => {
@@ -667,20 +729,25 @@ test("the printed restart command starts a watcher against the same loopback rea
     await writeFile(credential, credentialArtifact(), { mode: 0o600 });
     const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
     await writeFile(join(bin, "cswarm"),
-      `#!/bin/sh\nexec ${shellQuote(process.execPath)} --import tsx ${shellQuote(resolve("src/cli.ts"))} "$@"\n`,
+      `#!/bin/sh\nexec ${shellQuote(process.execPath)} --import ${shellQuote(import.meta.resolve("tsx"))} ${shellQuote(resolve("src/cli.ts"))} "$@"\n`,
       { mode: 0o755 });
-    original = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
-      "--url", url, "--anon-key", "anon-restart", "--workspace-id", WORKSPACE], root, xdg);
+    original = spawnCli(["inbox", "--notify", "--agent-token-file", "agent credential's file.json",
+      "--url", url, "--anon-key", "anon-restart", "--workspace-id", WORKSPACE,
+      "--json", "--force-file-store"], root, xdg, {}, root);
     let stderr = "";
     original.stderr!.setEncoding("utf8");
     original.stderr!.on("data", (chunk: string) => stderr += chunk);
     const originalExit = waitForExit(original, () => stderr, 4_000);
-    await first;
+    await Promise.race([first, originalExit.then((code) => {
+      assert.fail(`original watcher exited ${code} before reading: ${stderr}`);
+    })]);
     original.kill("SIGTERM");
     assert.equal(await originalExit, 143, stderr);
     const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
     assert.ok(match, stderr);
     assert.ok(match[1]!.includes("--agent-token-file"));
+    assert.ok(match[1]!.includes(root), "relative credential becomes absolute for another cwd");
+    assert.ok(match[1]!.includes("--json --force-file-store"));
     assert.ok(match[1]!.includes("--workspace-id"));
     assert.ok(match[1]!.includes(`--url ${url}`));
     assert.ok(match[1]!.includes("--anon-key anon-restart"));
@@ -707,6 +774,97 @@ test("the printed restart command starts a watcher against the same loopback rea
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const startMode of ["stdin", "profile"] as const) {
+  test(`the ${startMode} restart command runs through /bin/sh and makes a new read`, { timeout: 12_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), `cswarm-restart-${startMode}-`));
+    const xdg = join(root, "state");
+    const bin = join(root, "bin");
+    let firstRead!: () => void;
+    let secondRead!: () => void;
+    const first = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
+    const second = new Promise<void>((resolveRead) => { secondRead = resolveRead; });
+    let requests = 0;
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on("end", () => {
+        requests += 1;
+        response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+          signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 },
+        }));
+        if (requests === 1) firstRead();
+        if (requests === 2) secondRead();
+      });
+    });
+    const url = await listen(server);
+    let original: ChildProcess | undefined;
+    let restarted: ChildProcess | undefined;
+    try {
+      await mkdir(bin);
+      const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
+      await writeFile(join(bin, "cswarm"),
+        `#!/bin/sh\nexec ${shellQuote(process.execPath)} --import ${shellQuote(import.meta.resolve("tsx"))} ${shellQuote(resolve("src/cli.ts"))} "$@"\n`,
+        { mode: 0o755 });
+      const profile = join(root, "profile.json");
+      if (startMode === "profile") {
+        await writeFile(join(root, "credential.json"), credentialArtifact(), { mode: 0o600 });
+        await writeFile(profile, JSON.stringify({
+          version: 1, url, anon_key: "anon-profile", workspace_id: WORKSPACE,
+          principal_id: PRINCIPAL, credential_file: join(root, "credential.json"),
+        }), { mode: 0o600 });
+      }
+      const flags = startMode === "stdin"
+        ? ["--agent-token-stdin", "--url", url, "--anon-key", "anon-stdin", "--workspace-id", WORKSPACE]
+        : ["--profile", profile];
+      original = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), resolve("src/cli.ts"), "inbox", "--notify", ...flags], {
+        cwd: root,
+        env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      original.stdin!.end(startMode === "stdin" ? credentialArtifact() : "");
+      let stderr = "";
+      original.stderr!.setEncoding("utf8");
+      original.stderr!.on("data", (chunk: string) => stderr += chunk);
+      const originalExit = waitForExit(original, () => stderr, 4_000);
+      await Promise.race([first, originalExit.then((code) => {
+        assert.fail(`original watcher exited ${code} before reading: ${stderr}`);
+      })]);
+      original.kill("SIGTERM");
+      assert.equal(await originalExit, 143, stderr);
+      const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
+      assert.ok(match, stderr);
+      assert.equal(stderr.includes(TOKEN), false);
+      if (startMode === "stdin") {
+        assert.ok(stderr.includes("pipe the same credential on stdin, then restart"));
+        assert.ok(match[1]!.includes("--agent-token-stdin"));
+      } else {
+        assert.ok(match[1]!.includes(`--profile ${profile}`));
+        assert.equal(match[1]!.includes("--agent-token-file"), false);
+      }
+      restarted = spawn("/bin/sh", ["-c", match[1]!], {
+        cwd: process.cwd(),
+        env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ""}` },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      restarted.stdin!.end(startMode === "stdin" ? credentialArtifact() : "");
+      let restartError = "";
+      restarted.stderr!.setEncoding("utf8");
+      restarted.stderr!.on("data", (chunk: string) => restartError += chunk);
+      const restartedExit = waitForExit(restarted, () => restartError, 4_000);
+      await Promise.race([second, restartedExit.then((code) => {
+        assert.fail(`printed command exited ${code} before watching: ${restartError}`);
+      })]);
+      restarted.kill("SIGTERM");
+      assert.equal(await restartedExit, 143, restartError);
+      assert.ok(requests >= 2);
+    } finally {
+      if (original?.exitCode === null) original.kill("SIGKILL");
+      if (restarted?.exitCode === null) restarted.kill("SIGKILL");
+      await close(server);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES) as Array<[keyof typeof NOTIFY_SIGNAL_EXIT_CODES, number]>) {
   test(`${signalName} stops an idle watcher with ${expectedCode} and one restart sentence`, { timeout: 8_000 }, async () => {
@@ -738,7 +896,7 @@ for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES
       child.kill(signalName);
       assert.equal(await exit, expectedCode, stderr);
       assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence(signalName, {
-        agentTokenFile: credential, workspaceId: WORKSPACE, url, anonKey: "anon-signal",
+        arguments: ["--agent-token-file", credential, "--url", url, "--anon-key", "anon-signal", "--workspace-id", WORKSPACE],
       })}`);
       assert.ok(stderr.includes(NOTIFY_RESTART_COMMAND));
       assert.doesNotMatch(stderr, /now\. Restart/, "the signal message is one sentence");
