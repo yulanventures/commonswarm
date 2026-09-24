@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
+import { notifyRestartCommand } from "./cloud/arrival-watch.js";
 export { lsofStdoutConsumer } from "./stdout-consumer.js";
 export type { StdoutConsumerAdapter, StdoutConsumerState } from "./stdout-consumer.js";
 import type { BrainTopicSnapshot } from "./cloud/brain.js";
@@ -238,26 +239,41 @@ export function systemProcessTable(
   };
 }
 
-/** A missing or init parent is independent evidence of an orphaned watcher. */
-export function systemParentProcess(): ParentProcessAdapter {
+/** Classify a ps parent row without depending on the host process table. */
+export function parseParentProcessOutput(
+  output: string,
+  checkAlive: (pid: number) => void = (pid) => process.kill(pid, 0),
+): ParentState {
+  const parent = Number(output.trim());
+  if (!Number.isSafeInteger(parent) || parent <= 0) return "cannot_determine";
+  if (parent === 1) return "parent_is_init";
+  try {
+    checkAlive(parent);
+    return "parent_alive";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "parent_missing";
+    if (code === "EPERM") return "parent_alive";
+    return "cannot_determine";
+  }
+}
+
+/** A missing or init parent is independent evidence when stdout is unproved. */
+export function systemParentProcess(adapters: {
+  ps?: (pid: number) => Promise<string>;
+  checkAlive?: (pid: number) => void;
+} = {}): ParentProcessAdapter {
   return {
     async inspect(pid) {
       let output: string;
       try {
-        output = await execFileText("ps", ["-o", "ppid=", "-p", String(pid)]);
+        output = adapters.ps
+          ? await adapters.ps(pid)
+          : await execFileText("ps", ["-o", "ppid=", "-p", String(pid)]);
       } catch {
         return "cannot_determine";
       }
-      const parent = Number(output.trim());
-      if (!Number.isSafeInteger(parent) || parent <= 0) return "cannot_determine";
-      if (parent === 1) return "parent_is_init";
-      try {
-        process.kill(parent, 0);
-        return "parent_alive";
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "ESRCH"
-          ? "parent_missing" : "cannot_determine";
-      }
+      return parseParentProcessOutput(output, adapters.checkAlive);
     },
   };
 }
@@ -410,6 +426,15 @@ function commonCommandArgs(report: ResumeInspection): string {
   ].join(" ");
 }
 
+function watcherRestartCommand(report: ResumeInspection): string {
+  return notifyRestartCommand({
+    agentTokenFile: report.credentialFile,
+    workspaceId: report.workspaceId,
+    url: report.target.url,
+    anonKey: report.target.anonKey,
+  });
+}
+
 function restartCommand(report: ResumeInspection, status: ListenerStatus): string {
   const common = commonCommandArgs(report);
   const start = [
@@ -423,12 +448,9 @@ function restartCommand(report: ResumeInspection, status: ListenerStatus): strin
 }
 
 function watcherState(watcher: NotifyWatcher): StdoutConsumerState {
-  if (watcher.stdout === "orphaned" || watcher.parent === "parent_is_init" || watcher.parent === "parent_missing") {
-    return "orphaned";
-  }
-  if (watcher.stdout === "cannot_determine" || watcher.parent === "cannot_determine") {
-    return "cannot_determine";
-  }
+  if (watcher.stdout === "live_reader" || watcher.stdout === "orphaned") return watcher.stdout;
+  if (watcher.parent === "parent_is_init" || watcher.parent === "parent_missing") return "orphaned";
+  if (watcher.stdout === "cannot_determine" || watcher.parent === "cannot_determine") return "cannot_determine";
   return watcher.stdout;
 }
 
@@ -443,8 +465,9 @@ function watcherStateLine(watcher: NotifyWatcher): string {
     : watcher.stdout === "not_pipe"
     ? "stdout is not a pipe; the dead-reader check does not apply"
     : "stdout reader cannot be determined on this host";
-  const parent = watcher.parent === "parent_is_init" ? "ORPHAN: parent PID is 1"
-    : watcher.parent === "parent_missing" ? "ORPHAN: parent process no longer exists"
+  const orphanPrefix = watcher.stdout === "live_reader" ? "" : "ORPHAN: ";
+  const parent = watcher.parent === "parent_is_init" ? `${orphanPrefix}parent PID is 1`
+    : watcher.parent === "parent_missing" ? `${orphanPrefix}parent process no longer exists`
     : watcher.parent === "parent_alive" ? "parent process is live"
     : "parent process cannot be determined";
   return `- PID ${watcher.pid}: ${state}; ${parent}; matched ${matched}.`;
@@ -507,7 +530,7 @@ export function renderResume(report: ResumeInspection): string {
   if (report.watchers.length === 0) {
     lines.push(
       "Found: 0.",
-      `Next: start one watcher under a live Monitor: cswarm inbox --notify ${commonCommandArgs(report)}`,
+      `Next: start one watcher under a live Monitor: ${watcherRestartCommand(report)}`,
     );
   } else {
     lines.push(`Found: ${report.watchers.length}.`);
@@ -515,11 +538,16 @@ export function renderResume(report: ResumeInspection): string {
     const orphans = report.watchers.filter((watcher) => watcherState(watcher) === "orphaned");
     if (orphans.length > 0) {
       lines.push(
-        `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}; then restart cswarm inbox --notify under the session's Monitor.`,
+        `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}; then restart ${watcherRestartCommand(report)} under the session's Monitor.`,
       );
     } else if (report.watchers.some((watcher) => watcherState(watcher) === "cannot_determine")) {
+      const unknown = report.watchers.filter((watcher) => watcherState(watcher) === "cannot_determine");
+      const evidence = [
+        ...(unknown.some((watcher) => watcher.stdout === "cannot_determine") ? ["stdout reader"] : []),
+        ...(unknown.some((watcher) => watcher.parent === "cannot_determine") ? ["parent process"] : []),
+      ].join(" and ");
       lines.push(
-        "Next: verify each unknown stdout reader in the host Monitor before you start another watcher.",
+        `Next: verify each unknown ${evidence} in the host Monitor before you start another watcher.`,
       );
     } else {
       lines.push("Next: keep one watcher with a live output surface; do not start a duplicate.");
