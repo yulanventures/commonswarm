@@ -9,7 +9,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
-import { AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -275,7 +275,29 @@ test("transient observation retries use backoff until the age cap", { timeout: 1
   await writeFile(path, JSON.stringify(state), { mode: 0o600 });
   await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
   assert.equal(acks().length, 5, "an aged retry is dropped without a request");
-  assert.deepEqual(JSON.parse(await readFile(path, "utf8")).pending_observed_ids, []);
+  const aged = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(aged.pending_observed_ids, []);
+  assert.deepEqual(aged.pending_observed_retries, {});
+});
+
+test("observation retry metadata stays within the capped queue", { timeout: 20_000 }, async () => {
+  const rows = Array.from({ length: AGENT_CHECK_CACHE_LIMIT + 5 }, (_, i) => row(i + 1));
+  const { profilePath } = await setup();
+  const failed = fixture(rows, AGENT, 503);
+  let more = true;
+  while (more) {
+    const result = await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    more = result.has_more;
+  }
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  const queued = new Set<string>(state.pending_observed_ids);
+  const retries = Object.keys(state.pending_observed_retries);
+  assert.equal(queued.size, AGENT_CHECK_CACHE_LIMIT);
+  assert.deepEqual(state.pending_observed_ids, rows.slice(-AGENT_CHECK_CACHE_LIMIT).map(value => value.id));
+  assert.ok(retries.length > 0, "failed observations entered the retry map");
+  assert.ok(retries.length <= AGENT_CHECK_CACHE_LIMIT);
+  assert.ok(retries.every(id => queued.has(id)), "retry metadata belongs only to queued ids");
+  assert.ok(!retries.includes(rows[0]!.id), "a row dropped by the cap loses its retry metadata");
 });
 
 test("deadline timeout counts the attempt and preserves an earlier 409 removal", { timeout: 5_000 }, async () => {
@@ -324,6 +346,7 @@ test("typed 403, 404, session conflict, and invalid request leave the queue", { 
     await checkAgentMessages({ profilePath, fetcher, present: async () => {} });
     const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
     assert.deepEqual(state.pending_observed_ids, [], `${status} ${code}`);
+    assert.deepEqual(state.pending_observed_retries, {}, `${status} ${code}`);
   }
 });
 

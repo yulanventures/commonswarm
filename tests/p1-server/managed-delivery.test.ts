@@ -604,9 +604,8 @@ test("wake mark ignores expired mail, then ages and clears live mail", { timeout
     listener_instance_id: null, outcome: "observed", last_error_code: null,
     surfaced: true, unclaimed: true };
   assert.equal((await runCmd(agent.token, command)).status, 200);
-  // The observed row must be OLDER than the later rows this test backdates: a later-enqueued observed
-  // ack means the seat already saw everything before it (fold 2, H2), so leave it after the cutoff but
-  // well before the four-minute-old live row.
+  // The observed signal was created before the live signal, so it cannot heal
+  // the live row in check order. Keep its delivery after the release cutoff.
   await sql`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '10 minutes'
     WHERE signal_id = ${first}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
   assert.equal((await wakePathRows(agent.principalId)).length, 0);
@@ -690,6 +689,88 @@ test("later observed mail heals older unobserved mail in view and receipt", { ti
   assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), [third]);
   assert.equal(await receiptWakePath(third, agent.principalId), true);
   assert.equal(await receiptWakePath(first, agent.principalId), false);
+});
+
+test("check order wins when an older signal gains its recipient after newer mail", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-inverted-order");
+  const other = await seedAgent("wake-inverted-other");
+  const known = await postAsk(agent.principalId);
+  const older = await postAsk(other.principalId);
+  const pending = await postAsk(agent.principalId);
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  await sql.begin(async (tx) => {
+    await tx`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() - interval '2 hours' WHERE singleton`;
+    // The older signal already exists. Adding this recipient later creates its delivery then.
+    await tx`INSERT INTO swarm.signal_recipients
+      (signal_id, workspace_id, recipient_agent_principal_id, position)
+      VALUES (${older}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid, 1)`;
+    await tx`ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only`;
+    try {
+      await tx`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '90 minutes'
+        WHERE id = ${known}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+      await tx`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '80 minutes'
+        WHERE id = ${older}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+      await tx`UPDATE swarm.signals SET created_at = statement_timestamp() - interval '70 minutes'
+        WHERE id = ${pending}::uuid AND workspace_id = ${shared.workspace}::uuid`;
+    } finally { await tx`ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only`; }
+    await tx`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '90 minutes'
+      WHERE signal_id = ${known}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+    await tx`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '15 minutes',
+      acked_at = statement_timestamp(), ack_outcome = 'observed', last_error_code = NULL,
+      delivered_at = statement_timestamp(), surfaced_at = statement_timestamp(), updated_at = statement_timestamp()
+      WHERE signal_id = ${older}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+    await tx`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '40 minutes'
+      WHERE signal_id = ${pending}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
+    const rows = await tx<{ signal_id: string }[]>`SELECT signal_id::text FROM swarm_read.agent_wake_path_deliveries
+      WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+    assert.deepEqual(rows.map(row => row.signal_id), [pending],
+      "a later enqueue for an earlier signal cannot heal later check mail");
+    const [receipt] = await tx<{ value: { receipts: Array<{ recipient_agent_principal_id?: string; wake_path_observing?: boolean }> } }[]>`
+      SELECT swarm_read.signal_delivery_receipts(${shared.workspace}::uuid, ${pending}::uuid, NULL) AS value`;
+    assert.equal(receipt?.value.receipts.find(value => value.recipient_agent_principal_id === agent.principalId)?.wake_path_observing, true);
+    throw new Error("ROLLBACK_INVERTED_WAKE_ORDER");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_INVERTED_WAKE_ORDER") throw error;
+  });
+});
+
+test("an observed non-ask/note delivery cannot heal directed mail", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-nondirected-kind");
+  const known = await postAsk(agent.principalId);
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  const pending = await postAsk(agent.principalId);
+  const posted = await runCmd(shared.ownerJwt, { kind: "post_signal", signal_kind: "working-on",
+    body: `synth-working-${randomUUID()}`, to_user_id: null, to_agent_principal_id: null,
+    about: "https://example.test/work", in_reply_to: null });
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const later = (posted.body.signal as { id: string }).id;
+  await sql.begin(async (tx) => {
+    // A malformed historical row can exist even though today's command edge refuses this ACK.
+    await tx`INSERT INTO swarm.signal_recipients
+      (signal_id, workspace_id, recipient_agent_principal_id, position)
+      VALUES (${later}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid, 0)`;
+    await tx`INSERT INTO swarm.signal_deliveries
+      (signal_id, workspace_id, recipient_agent_principal_id, enqueued_at,
+       delivered_at, surfaced_at, acked_at, ack_outcome, updated_at)
+      VALUES (${later}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid,
+        statement_timestamp(), statement_timestamp(), statement_timestamp(),
+        statement_timestamp(), 'observed', statement_timestamp())`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
+    const rows = await tx<{ signal_id: string }[]>`SELECT signal_id::text FROM swarm_read.agent_wake_path_deliveries
+      WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+    assert.deepEqual(rows.map(row => row.signal_id), [pending]);
+    const [receipt] = await tx<{ value: { receipts: Array<{ recipient_agent_principal_id?: string; wake_path_observing?: boolean }> } }[]>`
+      SELECT swarm_read.signal_delivery_receipts(${shared.workspace}::uuid, ${pending}::uuid, NULL) AS value`;
+    assert.equal(receipt?.value.receipts.find(value => value.recipient_agent_principal_id === agent.principalId)?.wake_path_observing, true);
+    throw new Error("ROLLBACK_NON_ASK_NOTE_WAKE");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_NON_ASK_NOTE_WAKE") throw error;
+  });
 });
 
 test("revoked principal has no wake row or observing receipt", { timeout: 30_000 }, async () => {
@@ -876,7 +957,12 @@ test("box functional proof exits nonzero for missing and ineligible seeds", { ti
     acked_at = statement_timestamp(), ack_outcome = 'observed', last_error_code = NULL,
     delivered_at = COALESCE(delivered_at, statement_timestamp()),
     surfaced_at = COALESCE(surfaced_at, statement_timestamp()), updated_at = statement_timestamp()
-    WHERE signal_id = '${competitor}'::uuid;`;
+    WHERE signal_id = '${competitor}'::uuid;
+    ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only;
+    UPDATE swarm.signals SET created_at =
+      (SELECT created_at - interval '1 minute' FROM swarm.signals WHERE id = '${seed}'::uuid)
+      WHERE id = '${competitor}'::uuid;
+    ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only;`;
   const viewOmitted = runProof(seed, `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
     SELECT workspace_id, principal_id, min(enqueued_at) AS oldest_unobserved_at
     FROM swarm_read.agent_wake_path_deliveries WHERE false GROUP BY workspace_id, principal_id;`);

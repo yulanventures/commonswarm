@@ -117,3 +117,25 @@ Every gate ran with an outer process-group timeout and a temporary `HOME`; the w
 - `env -u FORCE_COLOR npm run test:p1-cli`: exit 1; 938 tests, 935 passed, 3 failed on sandbox `ps`/`spawn EPERM`.
 - `env -u FORCE_COLOR npm --prefix site test`: exit 1; 576 tests, 499 passed, 76 failed, 1 skipped. Headless Chrome aborted (`SIGABRT`) in the failing browser tests.
 - `git diff --check origin/main...HEAD`: exit 0 after the fold commits.
+
+## Fold 4 — 2026-09-25
+
+The Grok round-3 review found two remaining defects. This fold starts at `b178c470` and changes the lane migration, check-state retry queue, and their regression tests. The lead's local stack remains reserved for server tests; this fold did not reset, stop, or query it.
+
+| Ruling | Change | Test and mutation |
+|---|---|---|
+| K1 | The private shared eligibility view joins each later delivery to its signal and compares `(created_at, id)` in the same order as `cswarm check`. Only a later unclaimed observed ACK of a directed ask/note can heal earlier mail. Roster and receipt still read that single view. | `managed-delivery.test.ts` adds a delayed additional recipient: its earlier-created signal is enqueued after a later-created pending ask. The pending ask must remain in the view and receipt. A separate test inserts an observed `working-on` delivery for a listed recipient after a pending ask and requires both surfaces to remain eligible. The existing later-ask ACK test requires a genuine heal. Reverting the tuple comparison fails the inverted-order assertion; removing the kind filter fails the `working-on` assertion; removing the heal fails the existing assertion. These server tests are written but await the lead's local stack, so mutation outcomes are reasoned from the assertions, not measured here. |
+| K2 | Retry metadata is filtered to queued IDs on state read and every write, including successful or terminal removal and the 200-ID cap on direct and deferred cursor commits. | `agent-onboarding.test.ts` pushes 205 failed ACKs through the queue and asserts the retry map is bounded and a subset of the last 200 IDs. It also checks retry removal after aged and terminal drops. The focused cap test passed 1/1; replacing the prune helper with the old whole-map copy failed 1/1 with `retry metadata belongs only to queued ids`. |
+
+The later-observed heal rule is only as safe as check's cursor. The separate [same-millisecond inbox cursor task](../../design/2026-09-25-CHECK-CURSOR-MILLISECOND-TASK.md) records a read-edge skip when two microsecond-distinct rows share one JSON millisecond and their UUID order is inverted. This fold does not change the read edge.
+
+### Fold 4 gates
+
+All test commands used a process-group timeout and a temporary `HOME`; the wrapper kills remaining processes in that group. `npm run build`: exit 0. `npm run check:tests`: exit 0. `npm run check:edge`: exit 0. `npm run build:command-core`: exit 0, and the generated bundle diff: exit 0. `bash scripts/build-release.sh`: exit 0, with an explicit loopback `--url` on its artifact check. `npm --prefix site run build`: exit 0, 12 pages.
+
+- `env -u FORCE_COLOR npm test`: exit 1; 967 tests, 965 passed, 2 failed on sandbox `spawn EPERM`.
+- `env -u FORCE_COLOR npm --prefix site test`: exit 1; 576 tests, 499 passed, 76 failed, 1 skipped. The browser tests aborted Chrome with `SIGABRT` in this sandbox.
+- `env -u FORCE_COLOR npm run test:p1-cli`: exit 1; 939 tests, 936 passed, 3 failed on sandbox `ps`/`spawn EPERM`. The first 240-second run timed out before a complete count; the second bounded run finished with this count.
+- `git diff --check origin/main...HEAD`: exit 0 after the fold commits.
+
+The served server tests, box migration and command release, production cursor safety, production lock window, and live behavior remain unestablished. No production host was contacted.
