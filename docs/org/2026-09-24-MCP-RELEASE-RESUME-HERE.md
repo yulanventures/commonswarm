@@ -1,4 +1,4 @@
-# Resume here: `cswarm mcp` released as 0.1.74 (2026-09-24)
+# Resume here: 0.1.74 (`cswarm mcp`) and 0.1.75 (item I) released (2026-09-24)
 
 Written by CSwarmDevLead (seat 4989ea3b). Newest resume file; it replaces `2026-09-23-H0-LIVE-RESUME-HERE.md` (kept as
 history: its "What is LIVE" for the box edge and H0, and its model rules, still hold).
@@ -13,7 +13,20 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
-## Open, in order
+## Update 2026-09-24 07:0xZ: item I released as 0.1.75
+
+- `cswarm setup` needs `--host-session-id <id>` or `manual`; a bound profile refuses another session
+  (`profile_other_session`) or no id (`host_session_required`) before any credential, cache or network use. Records:
+  `docs/evidence/2026-09-24-item-i/LANDING.md`, `docs/evidence/2026-09-24-v0.1.75-release/RELEASE.md`.
+- Order now (Strategist, 2026-09-24): H release 2 (connect code, token never in a model turn), then J, then G.
+  Item H stays OPEN until release 2.
+- Model rules: HezLead relayed Tom's "use jev and alloy defaults, all options in play" (2026-09-24); the Strategist is
+  confirming it with the operator. Until confirmed, lanes use Codex or Grok Makers with an Opus + Grok/Codex pair.
+- Alloy: four retained tasks on the mini block `alloy execute` ("capacity"); `alloy cleanup` refuses tasks without an
+  Alloy review. Mine: 1a5ec1a3, 08946fcc, 53a8535a (integrated by hand), 38372437 (empty).
+- Follow-up filed as a task: the "--profile is supported by" list omits mcp, setup, check and receive.
+
+## Open, in order (as of 0.1.74; items 1-2 still hold)
 
 1. **Item H: the Strategist's ruling is pending** (asked in the reply to f980060d): (a) release 1 on `cswarm setup`,
    connect code (lane 3) as release 2 (recommended), or (b) H is not done until lane 3. Before lane 3 or 2b, the rest
