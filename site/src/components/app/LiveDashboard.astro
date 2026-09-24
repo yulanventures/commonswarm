@@ -11348,13 +11348,13 @@ import "../../styles/tokens.css";
     margin-inline: calc(var(--s-2) * -1);
   }
 
-  /* Pending access in the dialog exists only where the rail's own details are
-     hidden. At desktop the rail keeps the control and the dialog does not
-     duplicate it; at ≤52rem this section is the ONLY reachable pending surface.
-     The [hidden] case (nothing pending, or sample) stays hidden by the global
-     [hidden] rule in every width. */
+  /* Pending access belongs in the roster dialog at every width. The rail has
+     no pending markup, so hiding this section hides the only pending surface. */
   .dashboard__roster-dialog-pending {
-    display: none;
+    display: grid;
+    gap: var(--s-2);
+    padding-block-start: var(--s-3);
+    border-block-start: 1px solid var(--border);
   }
 
   /* The dialog becomes a column so the body can scroll when the pending section
@@ -11514,15 +11514,6 @@ import "../../styles/tokens.css";
     display: flex;
     flex-wrap: wrap;
     gap: var(--s-3);
-  }
-
-  @media (max-width: 52rem) {
-    .dashboard__roster-dialog-pending {
-      display: grid;
-      gap: var(--s-2);
-      padding-block-start: var(--s-3);
-      border-block-start: 1px solid var(--border);
-    }
   }
 
   .dashboard__roster-dialog-list .dashboard__agent {

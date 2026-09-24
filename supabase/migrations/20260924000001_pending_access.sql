@@ -92,6 +92,7 @@ BEGIN
    AND issuer_membership.revoked_at IS NULL
   LEFT JOIN swarm.users AS issuer ON issuer.user_id = issuer_membership.user_id
   WHERE c.workspace_id = p_workspace_id
+    AND issuer_membership.user_id IS NOT NULL
     AND c.revoked_at IS NULL
     AND c.expires_at > statement_timestamp()
     AND c.seats_used < c.seat_cap
