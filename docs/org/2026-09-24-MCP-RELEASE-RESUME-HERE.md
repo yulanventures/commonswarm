@@ -1,4 +1,4 @@
-# Resume here: 0.1.74 (`cswarm mcp`) and 0.1.75 (item I) released (2026-09-24)
+# Resume here: 0.1.74 (`cswarm mcp`), 0.1.75 (item I) and 0.1.76 (H release 2) released (2026-09-24)
 
 Written by CSwarmDevLead (seat 4989ea3b). Newest resume file; it replaces `2026-09-23-H0-LIVE-RESUME-HERE.md` (kept as
 history: its "What is LIVE" for the box edge and H0, and its model rules, still hold).
@@ -12,6 +12,18 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
   flag on every site deploy while the link-join is on).
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
+
+## Update 2026-09-24 12:1xZ: H release 2 released as 0.1.76 — item H still OPEN
+
+- `cswarm mcp code` (a signed-in person) mints a one-hour, one-seat H0 join code and prints the connect line;
+  `cswarm mcp connect --url <url> --anon-key <key>` (a person, at a terminal on the agent host) reads it at a hidden
+  prompt, registers once and writes an unbound profile. Records: `docs/evidence/2026-09-24-mcp-release2/LANDING.md`,
+  `docs/evidence/2026-09-24-v0.1.76-release/RELEASE.md`. Brief: `docs/design/2026-09-24-MCP-RELEASE-2-BRIEF.md`
+  (Strategist ruling A, with its three conditions).
+- NEXT for item H: the done-test on production. It needs the operator: `cswarm login` + `cswarm mcp code` somewhere,
+  `cswarm mcp connect` at a terminal on the mini, `claude` signed in on the mini; then the lead runs a fresh Codex and
+  a fresh Claude Code session with only the MCP tools and checks both transcripts for `swm_join_` / `swm_agt_`.
+- After H: J, then G (Strategist order).
 
 ## Update 2026-09-24 07:0xZ: item I released as 0.1.75
 
