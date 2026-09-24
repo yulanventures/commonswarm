@@ -19,7 +19,7 @@ import { LocalCredentialSecretAbsentError, SignalMalformedError, SignalRecipient
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/cloud/storage.js";
 import { mapMcpError, sendWithDeferredCommit } from "../../src/mcp/server.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
-import { MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck } from "../../src/mcp/tools.js";
+import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -149,6 +149,14 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setRenewalReason: (value: string) => { renewalReason = value; },
     conflictNext: () => { serverConflict = true; } };
 }
+
+test("an unknown argument name is echoed quoted and bounded", () => {
+  const long = "k".repeat(MCP_ARGUMENT_NAME_ECHO_MAX * 4);
+  assert.throws(() => validateMcpArguments("whoami", { [long]: "x" }), (error: Error) =>
+    error.message === `Unknown argument: "${"k".repeat(MCP_ARGUMENT_NAME_ECHO_MAX)}".`);
+  assert.throws(() => validateMcpArguments("whoami", { "a\nb": "x" }), (error: Error) =>
+    error.message === "Unknown argument: \"a\\nb\"." && !error.message.includes("\n"));
+});
 
 test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeout: 30_000 }, async () => {
   const f = await fixture();

@@ -8,6 +8,8 @@ import type { SignalRecord } from "../cloud/command-client.js";
 import type { SignalDirectory } from "../cloud/signals.js";
 import type { PostSignalResult } from "../cloud/command-client.js";
 
+/** An unknown argument name is echoed to the caller only up to this length. */
+export const MCP_ARGUMENT_NAME_ECHO_MAX = 64;
 /** MCP's model-visible contract. Do not derive it from CLI flags. */
 export const MCP_RESULT_MAX_BYTES = 32 * 1024;
 const string = (maxLength?: number, minLength?: number, pattern?: string) => ({
@@ -42,7 +44,7 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   const args = value as Record<string, unknown>;
   for (const key of Object.keys(args)) {
     const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string>>)[key];
-    if (!rule) throw new Error(`Unknown argument: ${key}.`);
+    if (!rule) throw new Error(`Unknown argument: ${JSON.stringify(key.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
     const item = args[key];
     if (typeof item !== "string" || (rule.minLength !== undefined && item.length < rule.minLength) ||
         (rule.maxLength !== undefined && item.length > rule.maxLength) ||
