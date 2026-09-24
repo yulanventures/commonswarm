@@ -962,10 +962,22 @@ test("section 5 catalog proof accepts the installed view and refuses an old heal
       "  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)\n", ""), false],
   ];
   cases.push(["no unclaimed observed index", view, false]);
+  cases.push(["index that can hold no row", view, false]);
+  cases.push(["unique index", view, false]);
   for (const [name, body, expected] of cases) {
     await sql.begin(async (tx) => {
       await tx.unsafe(`CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries${body}`);
-      if (name === "no unclaimed observed index") await tx`DROP INDEX swarm.signal_deliveries_unclaimed_observed`;
+      if (name !== "installed" && name.includes("index")) await tx`DROP INDEX swarm.signal_deliveries_unclaimed_observed`;
+      if (name === "index that can hold no row") {
+        await tx`CREATE INDEX signal_deliveries_unclaimed_observed ON swarm.signal_deliveries
+          (workspace_id, recipient_agent_principal_id) WHERE ack_outcome = 'observed'
+          AND last_lease_id IS NULL AND last_leased_by IS NULL AND acked_at IS NULL`;
+      }
+      if (name === "unique index") {
+        await tx`CREATE UNIQUE INDEX signal_deliveries_unclaimed_observed ON swarm.signal_deliveries
+          (workspace_id, recipient_agent_principal_id, signal_id) WHERE ack_outcome = 'observed'
+          AND last_lease_id IS NULL AND last_leased_by IS NULL`;
+      }
       const [row] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
       assert.equal(row?.catalog_ok, expected, `catalog proof on ${name}`);
       throw new Error("ROLLBACK_CATALOG_CASE");

@@ -1,0 +1,65 @@
+Timing is on.
+BEGIN
+Time: 0.080 ms
+SET
+Time: 0.111 ms
+SET
+Time: 0.017 ms
+CREATE TABLE
+Time: 6.815 ms
+INSERT 0 1000000
+Time: 3894.656 ms (00:03.895)
+CREATE INDEX
+Time: 127.287 ms
+ALTER TABLE
+Time: 366.635 ms
+  heap
+--------
+ 153 MB
+(1 row)
+
+Time: 0.286 ms
+---- the
+unterminated quoted string
+ALTER TABLE
+Time: 0.307 ms
+ALTER TABLE
+Time: 60.194 ms
+CREATE INDEX
+Time: 39.030 ms
+ new_index_size | matching_rows
+----------------+---------------
+ 8192 bytes     |             0
+(1 row)
+
+Time: 0.364 ms
+           mode           | granted
+--------------------------+---------
+ AccessExclusiveLock      | t
+ AccessShareLock          | t
+ RowExclusiveLock         | t
+ ShareLock                | t
+ ShareUpdateExclusiveLock | t
+(5 rows)
+
+Time: 1.008 ms
+---- a second build, warm cache
+DROP INDEX
+Time: 1.850 ms
+CREATE INDEX
+Time: 40.757 ms
+---- insert cost: 10,000 more rows with and without the partial index present
+INSERT 0 10000
+Time: 98.097 ms
+DROP INDEX
+Time: 0.307 ms
+INSERT 0 10000
+Time: 48.579 ms
+ROLLBACK
+Time: 14.771 ms
+  ?column?
+-------------
+ leftover: 0
+(1 row)
+
+Time: 0.688 ms

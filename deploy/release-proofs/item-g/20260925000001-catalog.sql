@@ -74,10 +74,7 @@ SELECT
     WHERE p.oid = to_regprocedure('swarm_read.signal_delivery_receipts_without_wake_path(uuid,uuid,bytea)')
   ), false)
   AND COALESCE((
-    SELECT pg_get_indexdef(i.oid) LIKE '%(workspace_id, recipient_agent_principal_id)%'
-      AND pg_get_indexdef(i.oid) LIKE '%ack_outcome = ''observed''%'
-      AND pg_get_indexdef(i.oid) LIKE '%last_lease_id IS NULL%'
-      AND pg_get_indexdef(i.oid) LIKE '%last_leased_by IS NULL%'
+    SELECT pg_get_indexdef(i.oid) = 'CREATE INDEX signal_deliveries_unclaimed_observed ON swarm.signal_deliveries USING btree (workspace_id, recipient_agent_principal_id) WHERE ((ack_outcome = ''observed''::text) AND (last_lease_id IS NULL) AND (last_leased_by IS NULL))'
       AND x.indisvalid
     FROM pg_class AS i JOIN pg_index AS x ON x.indexrelid = i.oid
     WHERE i.oid = to_regclass('swarm.signal_deliveries_unclaimed_observed')
