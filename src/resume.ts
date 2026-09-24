@@ -1,4 +1,7 @@
 import { execFile, spawn } from "node:child_process";
+import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
+export { lsofStdoutConsumer } from "./stdout-consumer.js";
+export type { StdoutConsumerAdapter, StdoutConsumerState } from "./stdout-consumer.js";
 import type { BrainTopicSnapshot } from "./cloud/brain.js";
 import type { CloudTarget } from "./cloud/config.js";
 import {
@@ -55,20 +58,16 @@ export class ProcessTableError extends Error {
   }
 }
 
-export type StdoutConsumerState =
-  | "live_reader"
-  | "orphaned"
-  | "not_pipe"
-  | "cannot_determine";
-
-export interface StdoutConsumerAdapter {
-  inspect(pid: number): Promise<StdoutConsumerState>;
+export type ParentState = "parent_alive" | "parent_is_init" | "parent_missing" | "cannot_determine";
+export interface ParentProcessAdapter {
+  inspect(pid: number): Promise<ParentState>;
 }
 
 export interface NotifyWatcher {
   pid: number;
   matchedBy: Array<"agent_token_file" | "principal_id">;
   stdout: StdoutConsumerState;
+  parent: ParentState;
 }
 
 export interface ResumeListenerInspection {
@@ -106,6 +105,7 @@ export interface ResumeInspectionAdapters {
   ): Promise<ResumeInboxCount>;
   processTable?: ProcessTableAdapter;
   stdoutConsumer?: StdoutConsumerAdapter;
+  parentProcess?: ParentProcessAdapter;
   queryStatus?: (
     paths: ListenerPaths,
     command: "status",
@@ -238,31 +238,26 @@ export function systemProcessTable(
   };
 }
 
-/** macOS lsof can distinguish a live unix-pipe peer from `->(none)`. */
-export function lsofStdoutConsumer(): StdoutConsumerAdapter {
+/** A missing or init parent is independent evidence of an orphaned watcher. */
+export function systemParentProcess(): ParentProcessAdapter {
   return {
     async inspect(pid) {
       let output: string;
       try {
-        output = await execFileText(
-          process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
-          ["-nP", "-a", "-p", String(pid), "-d", "1", "-F", "pftan"],
-        );
+        output = await execFileText("ps", ["-o", "ppid=", "-p", String(pid)]);
       } catch {
         return "cannot_determine";
       }
-      const lines = output.split("\n");
-      const type = lines.find((line) => line.startsWith("t"))?.slice(1) ?? "";
-      const names = lines.filter((line) => line.startsWith("n")).map((line) => line.slice(1));
-      if (type === "unix") {
-        if (names.some((name) => name === "->(none)")) return "orphaned";
-        if (names.some((name) => name.startsWith("->") && name !== "->(none)")) {
-          return "live_reader";
-        }
-        return "cannot_determine";
+      const parent = Number(output.trim());
+      if (!Number.isSafeInteger(parent) || parent <= 0) return "cannot_determine";
+      if (parent === 1) return "parent_is_init";
+      try {
+        process.kill(parent, 0);
+        return "parent_alive";
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH"
+          ? "parent_missing" : "cannot_determine";
       }
-      if (type === "PIPE" || type === "FIFO") return "cannot_determine";
-      return type.length === 0 ? "cannot_determine" : "not_pipe";
     },
   };
 }
@@ -298,6 +293,7 @@ export async function findNotifyWatchers(options: {
   processTable?: ProcessTableAdapter;
   processTableCommand?: ProcessTableCommand;
   stdoutConsumer?: StdoutConsumerAdapter;
+  parentProcess?: ParentProcessAdapter;
 }): Promise<NotifyWatcher[]> {
   const processTable = options.processTable ?? systemProcessTable({
     retain: isNotifyCommand,
@@ -306,8 +302,9 @@ export async function findNotifyWatchers(options: {
       : {}),
   });
   const stdoutConsumer = options.stdoutConsumer ?? lsofStdoutConsumer();
+  const parentProcess = options.parentProcess ?? systemParentProcess();
   const rows = await processTable.list();
-  const matches = rows.flatMap((row): Array<Omit<NotifyWatcher, "stdout">> => {
+  const matches = rows.flatMap((row): Array<Pick<NotifyWatcher, "pid" | "matchedBy">> => {
     if (!isNotifyCommand(row.command)) return [];
     const matchedBy: NotifyWatcher["matchedBy"] = [];
     if (commandHasFlagValue(row.command, "--agent-token-file", options.credentialPaths)) {
@@ -323,6 +320,7 @@ export async function findNotifyWatchers(options: {
   return await Promise.all(unique.map(async (row) => ({
     ...row,
     stdout: await stdoutConsumer.inspect(row.pid),
+    parent: await parentProcess.inspect(row.pid),
   })));
 }
 
@@ -368,6 +366,7 @@ export async function inspectResume(
     principalId,
     ...(adapters.processTable ? { processTable: adapters.processTable } : {}),
     ...(adapters.stdoutConsumer ? { stdoutConsumer: adapters.stdoutConsumer } : {}),
+    ...(adapters.parentProcess ? { parentProcess: adapters.parentProcess } : {}),
   });
   const topics = await adapters.readBrainTopics();
   const digestStore = new FileBrainDigestStore(paths.instanceDirectory, principalId);
@@ -423,6 +422,16 @@ function restartCommand(report: ResumeInspection, status: ListenerStatus): strin
   return `cswarm listen stop ${common} && ${start}`;
 }
 
+function watcherState(watcher: NotifyWatcher): StdoutConsumerState {
+  if (watcher.stdout === "orphaned" || watcher.parent === "parent_is_init" || watcher.parent === "parent_missing") {
+    return "orphaned";
+  }
+  if (watcher.stdout === "cannot_determine" || watcher.parent === "cannot_determine") {
+    return "cannot_determine";
+  }
+  return watcher.stdout;
+}
+
 function watcherStateLine(watcher: NotifyWatcher): string {
   const matched = watcher.matchedBy.map((value) =>
     value === "agent_token_file" ? "credential path" : "principal id"
@@ -434,7 +443,11 @@ function watcherStateLine(watcher: NotifyWatcher): string {
     : watcher.stdout === "not_pipe"
     ? "stdout is not a pipe; the dead-reader check does not apply"
     : "stdout reader cannot be determined on this host";
-  return `- PID ${watcher.pid}: ${state}; matched ${matched}.`;
+  const parent = watcher.parent === "parent_is_init" ? "ORPHAN: parent PID is 1"
+    : watcher.parent === "parent_missing" ? "ORPHAN: parent process no longer exists"
+    : watcher.parent === "parent_alive" ? "parent process is live"
+    : "parent process cannot be determined";
+  return `- PID ${watcher.pid}: ${state}; ${parent}; matched ${matched}.`;
 }
 
 /** Stable human output: identity, listener, watchers, brain, then inbox. */
@@ -499,12 +512,12 @@ export function renderResume(report: ResumeInspection): string {
   } else {
     lines.push(`Found: ${report.watchers.length}.`);
     lines.push(...report.watchers.map(watcherStateLine));
-    const orphans = report.watchers.filter((watcher) => watcher.stdout === "orphaned");
+    const orphans = report.watchers.filter((watcher) => watcherState(watcher) === "orphaned");
     if (orphans.length > 0) {
       lines.push(
-        `Next: stop only the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}`,
+        `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}; then restart cswarm inbox --notify under the session's Monitor.`,
       );
-    } else if (report.watchers.some((watcher) => watcher.stdout === "cannot_determine")) {
+    } else if (report.watchers.some((watcher) => watcherState(watcher) === "cannot_determine")) {
       lines.push(
         "Next: verify each unknown stdout reader in the host Monitor before you start another watcher.",
       );
@@ -569,6 +582,8 @@ export function resumeJson(report: ResumeInspection): Record<string, unknown> {
       pid: watcher.pid,
       matched_by: watcher.matchedBy,
       stdout: watcher.stdout,
+      parent: watcher.parent,
+      state: watcherState(watcher),
     })),
     brain: {
       high_water_file: report.brain.highWaterFile,
