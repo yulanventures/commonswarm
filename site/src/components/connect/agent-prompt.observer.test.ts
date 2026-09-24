@@ -26,9 +26,12 @@ test("MCP handoff contains only operator terminal steps; legacy prompt discloses
   assert.match(mcp, /hidden prompt/);
   assert.match(mcp, /claude mcp add --scope user --transport stdio cswarm/);
   assert.match(mcp, /\[mcp_servers\.cswarm\]/);
+  assert.match(mcp, /Codex config:\n\[mcp_servers\.cswarm\]\ncommand = "cswarm"\nargs = \["mcp", "--profile", "<path>"\]/);
   assert.doesNotMatch(mcp, /swm_join_|swm_agt_|CSWARMA\./);
   assert.match(dashboardAgentPrompt(INPUT), /fallback passes a credential through the model/);
   assert.match(dashboardAgentFilePrompt(INPUT), /fallback passes a credential through the model/);
+  assert.match(dashboardAgentPrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
+  assert.match(dashboardAgentFilePrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
   const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
   assert.match(component, /<summary>Connect with MCP<\/summary>/);
   assert.match(component, /\{dashboardMcpPrompt\(\)\}/);

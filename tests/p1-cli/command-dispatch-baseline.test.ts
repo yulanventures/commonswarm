@@ -423,13 +423,14 @@ function coreFixtures(): Fixture[] {
 const GROUP_NAMES = new Set<string>(GROUP_REFUSAL_SITES);
 
 function canonicalFixtureId(key: string): string {
+  if (key === "mcp.refusal") return "mcp";
   if (key.endsWith(".refusal")) {
     const groupName = key.slice(0, -".refusal".length);
     assert.ok(GROUP_NAMES.has(groupName), `no refusal fixture group for ${key}`);
     return `refusal.group.${groupName}.missing.plain`;
   }
   const overrides: Record<string, string> = {
-    "mcp.serve": "mcp",
+    "mcp.serve": "refusal.group.mcp.missing.plain",
     setup: "setup.import",
     check: "check.default",
     "__listen-supervisor": "internal.listen-supervisor",
@@ -512,7 +513,7 @@ function selectedErrorSource(
       "receive.idle.default": ["receive", "idle"],
       "receive.serve.default": ["receive", "serve", "extra"],
       "receive.refusal.default": ["receive"],
-      "mcp.serve.default": ["mcp", "extra"],
+      "mcp.serve.default": ["mcp"],
       "mcp.code.default": ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
       "mcp.connect.default": ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
     };
@@ -576,6 +577,13 @@ async function fixtures(): Promise<Fixture[]> {
   assert.equal(new Set(ids).size, ids.length, "baseline fixture ids must be unique");
   return [...core, ...generated];
 }
+
+test("MCP baseline row names select the route they claim", { timeout: 10000 }, async () => {
+  const rows = new Map((await fixtures()).map(row => [row.id, row.argv]));
+  assert.deepEqual(rows.get("policy.host-session.mcp.serve.keep"), ["mcp", "--profile", "<PROFILE>", "--host-session-id", "fixture-host"]);
+  assert.deepEqual(rows.get("policy.host-session.mcp.refusal.keep"), ["mcp", "extra", "--profile", "<PROFILE>", "--host-session-id", "fixture-host"]);
+  assert.deepEqual(rows.get("selected-error.mcp.serve.json-before"), ["--json", "mcp"]);
+});
 
 async function prepareRow(root: string, origin: string, fixture: Fixture) {
   const rowRoot = join(root, fixture.id.replace(/[^a-z0-9.-]/gi, "_"));

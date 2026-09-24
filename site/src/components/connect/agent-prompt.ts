@@ -17,7 +17,7 @@ export interface DashboardPromptInput {
 /** Safe to paste into an assistant: the operator enters the code outside the model turn. */
 export function dashboardMcpPrompt(): string {
   const serverName = "cswarm";
-  return `${MCP_OPERATOR_GUIDE}\nClaude Code: claude mcp add --scope user --transport stdio ${serverName} -- ${serverName} mcp --profile <path>\nCodex config: [mcp_servers.cswarm] command = "cswarm", args = ["mcp", "--profile", "<path>"]. Use the exact private path printed by connect.`;
+  return `${MCP_OPERATOR_GUIDE}\nClaude Code: claude mcp add --scope user --transport stdio ${serverName} -- ${serverName} mcp --profile <path>\nCodex config:\n[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ["mcp", "--profile", "<path>"]\nUse the exact private path printed by connect.`;
 }
 
 export function dashboardAgentConnection(input: DashboardPromptInput): string {
@@ -34,18 +34,19 @@ export function dashboardAgentConnection(input: DashboardPromptInput): string {
 
 function setupPrompt(source: string): string {
   return [
-    "This fallback passes a credential through the model. For MCP, a person can run cswarm mcp code and cswarm mcp connect in their terminal.",
-    "Connect this agent to CommonSwarm. Keep the connection file private; never echo its contents or put them in shell commands, logs, URLs, or environment variables.",
+    "This fallback passes a credential through the model. For MCP, run cswarm mcp code and cswarm mcp connect in a terminal.",
+    "Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.",
     `Use Node.js 22+ and run:
 
 ${codeBlock("sh", INSTALL_CMD)}`,
     "Confirm cswarm setup --check-version returns setup_version 1.",
+    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm; otherwise report that the release needs updating.",
     source,
     `${AGENT_MESSAGE_FORMAT_RULE} (Up to ${SIGNAL_BODY_MAX} characters.)`,
     AGENT_SETUP_HOST_GUIDANCE,
-    "Run the setup command for this host with --json. Use the returned --profile and this session's --host-session-id with later commands.",
-    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake supports Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain any approval or restart needed. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model to answer here.",
-    "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read relevant brain topics; post intent and reply. Use cswarm setup guide only when needed. Report the connection, receive mode, and next step; do not claim wake works until its idle test passes.",
+    "Run setup --json. Reuse its --profile and this session's --host-session-id.",
+    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or Grok Bot; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
+    "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.",
   ].join("\n\n");
 }
 

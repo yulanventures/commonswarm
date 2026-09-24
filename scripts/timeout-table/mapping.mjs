@@ -14,6 +14,15 @@ export function mappingForRef(mapping, ref) {
   const aliases = mapping.aliases && typeof mapping.aliases === "object" ? mapping.aliases : {};
   const key = typeof aliases[requested] === "string" ? aliases[requested] : requested;
   const section = mapping.refs[key];
+  if (section?.inherits && !section.rows) {
+    const parent = mappingForRef(mapping, section.inherits);
+    if (!Array.isArray(section.omit)) throw new Error(`timeout mapping ${key} must list omitted inherited ids`);
+    section.rows = { ...parent.rows };
+    for (const id of section.omit) {
+      if (!Object.hasOwn(section.rows, id)) throw new Error(`timeout mapping ${key} omits unknown id ${id}`);
+      delete section.rows[id];
+    }
+  }
   if (!section || typeof section !== "object" || !section.rows || typeof section.rows !== "object") {
     throw new Error(
       `timeout mapping has no section for ref ${requested}; known=[${knownMappingRefs(mapping).join(", ")}]`,

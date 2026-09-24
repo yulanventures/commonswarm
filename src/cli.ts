@@ -685,7 +685,7 @@ export class Arguments {
       sawOption = true;
       const name = value.slice(2);
       if (!name || name.includes("=")) {
-        throw new Error(`invalid option: ${value}`);
+        throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
       if (BOOLEAN_FLAGS.has(name)) {
         this.push(name, "true");
@@ -9396,15 +9396,23 @@ async function runMcpCode(args: Arguments): Promise<void> {
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
-  const { mintMcpCode } = await import("./cloud/mcp-connect.js");
+  const { mintMcpCode, renderMcpCode } = await import("./cloud/mcp-connect.js");
   const result = await mintMcpCode(cloud, human.accessToken, workspace);
-  process.stdout.write(`Connect code (shown once): ${result.code}\nExpires: ${result.expires_at}\nGive this code to the person at the agent host.\n`);
+  process.stdout.write(renderMcpCode(result, cloud));
 }
 
 async function runMcpConnect(args: Arguments): Promise<void> {
   args.assertShape(["url", "anon-key", "profile", "name"], 2);
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
-  const cloud = await resolveCloudTarget({ explicitUrl: args.required("url"), explicitAnonKey: args.optional("anon-key"), mode: "human" });
+  const explicitUrl = args.required("url");
+  const explicitAnonKey = args.optional("anon-key");
+  if (explicitAnonKey === undefined) {
+    const saved = await readCurrentTarget();
+    if (saved === null || cloudTarget(explicitUrl, saved.anonKey).url !== saved.url) {
+      throw new AgentSetupError("connect_anon_key_required", "Pass --anon-key for this URL on the agent host.");
+    }
+  }
+  const cloud = await resolveCloudTarget({ explicitUrl, explicitAnonKey, mode: "human" });
   const { connectMcp, renderMcpConnect } = await import("./cloud/mcp-connect.js");
   const result = await connectMcp({ target: cloud, profilePath: args.optional("profile"), name: args.optional("name") });
   process.stdout.write(renderMcpConnect(result));

@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { PassThrough } from "node:stream";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { connectMcp, mintMcpCode, renderMcpConnect } from "../../src/cloud/mcp-connect.js";
+import { writeCurrentTarget } from "../../src/cloud/current-target.js";
+import { connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile } from "../../src/cloud/agent-profile.js";
+import { REGISTER_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -28,7 +34,124 @@ test("mcp code uses the human bearer and one-seat, one-hour mint", { timeout: 10
     return Response.json({ status: "accepted", ok: true, event_ids: [], join_credential: JOIN, expires_at: "2099-01-01T00:00:00Z" });
   };
   assert.deepEqual(await mintMcpCode(TARGET, "human-test-access", WS, fetcher), { code: JOIN, expires_at: "2099-01-01T00:00:00Z" });
+  assert.match(renderMcpCode({ code: JOIN, expires_at: "2099-01-01T00:00:00Z" }, TARGET), new RegExp(`Expires: 2099-01-01T00:00:00Z\\nOn the agent host run: cswarm mcp connect --url ${TARGET.url} --anon-key ${TARGET.anonKey}`));
   assert.equal(calls, 1);
+});
+
+test("register refusal table is generated from the server handlers", { timeout: 10000 }, () => {
+  const result = spawnSync(process.execPath, ["scripts/generate-mcp-register-refusals.mjs", "--check"], { timeout: 5000, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(REGISTER_REFUSALS.join_credential_not_found, undefined);
+  assert.equal(REGISTER_REFUSALS.join_credential_expired, undefined);
+  assert.equal(REGISTER_REFUSALS.join_credential_revoked, undefined);
+});
+
+test("equals-style option errors never echo an option value on three commands", { timeout: 15000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-equals-"));
+  try {
+    for (const argv of [["mcp", "connect", "--url", TARGET.url, "--anon-key", TARGET.anonKey], ["mcp", "code"], ["check"]]) {
+      const result = await cli([...argv, `--code=${JOIN}`], { HOME: root, CSWARM_SITE: "http://127.0.0.1:9" });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /invalid option: --code/);
+      assert.doesNotMatch(result.stdout + result.stderr, /swm_join_|swm_agt_/);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("fresh connect without an anon key names only the accepted flag", { timeout: 10000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-fresh-"));
+  try {
+    const result = await cli(["mcp", "connect", "--url", TARGET.url], { HOME: root, SWARM_CLOUD_ANON_KEY: "ignored-public-key" });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /--anon-key/);
+    assert.doesNotMatch(result.stderr, /SWARM_CLOUD_ANON_KEY|target set/);
+    await writeCurrentTarget(TARGET, { stateDirectory: join(root, ".cswarm", "credentials.d") });
+    const matched = await cli(["mcp", "connect", "--url", `${TARGET.url}/`], { HOME: root });
+    assert.match(matched.stderr, /terminal_required/, "a saved target for the same URL supplies the public key");
+    const mismatched = await cli(["mcp", "connect", "--url", "http://127.0.0.1:9"], { HOME: root });
+    assert.match(mismatched.stderr, /--anon-key/);
+    assert.doesNotMatch(mismatched.stderr, /SWARM_CLOUD_ANON_KEY/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("preprompt directory and credential path checks refuse before consuming the code", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const dir = join(f.root, "public");
+    await mkdir(dir, { mode: 0o755 });
+    const readonly = join(f.root, "readonly");
+    await mkdir(readonly, { mode: 0o500 });
+    const linked = join(f.root, "linked");
+    await symlink(dir, linked);
+    for (const path of [join(dir, "profile.json"), join(readonly, "profile.json"), join(linked, "profile.json"), join(f.root, "credential.json"), join(f.root, "Credential.JSON")]) {
+      let prompts = 0;
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => { prompts++; return JOIN; }, fetcher: f.fetcher }));
+      assert.equal(prompts, 0);
+    }
+    assert.equal(f.calls(), 0);
+  } finally { await f.close(); }
+});
+
+test("invalid input and malformed seat tokens never appear in errors", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: join(f.root, "invalid", "profile.json"),
+      readCode: async () => `${JOIN}wrong`, fetcher: f.fetcher }), error => {
+      assert.equal((error as {code:string}).code, "join_credential_invalid");
+      assert.doesNotMatch(String(error), /swm_join_|swm_agt_/);
+      return true;
+    });
+    assert.equal(f.calls(), 0);
+    const fetcher: typeof fetch = async () => Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+      run_id: RUN, token_id: TOKEN_ID, agent_token: `${TOKEN}bad`, expires_at: "2099-01-01T00:00:00Z" });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: join(f.root, "bad-seat", "profile.json"),
+      readCode: async () => JOIN, fetcher }), error => {
+      assert.equal((error as {code:string}).code, "register_outcome_unknown");
+      assert.match(String(error), /cswarm principal revoke/);
+      assert.doesNotMatch(String(error), /swm_join_|swm_agt_/);
+      return true;
+    });
+  } finally { await f.close(); }
+});
+
+test("connect rejects cleartext non-loopback targets before prompting", { timeout: 10000 }, async () => {
+  let prompts = 0;
+  await assert.rejects(connectMcp({ target: cloudTarget("http://example.test", TARGET.anonKey),
+    readCode: async () => { prompts++; return JOIN; } }), { code: "connect_url_invalid" });
+  assert.equal(prompts, 0);
+});
+
+test("hidden prompt rejects EOF and empty input, trims input, and restores echo and signal handlers", { timeout: 10000 }, async () => {
+  for (const kind of ["eof", "empty", "padded", "write-error", "sigint", "sigterm", "stty-error"] as const) {
+    const input = new PassThrough();
+    const signals = new EventEmitter();
+    const echoes: boolean[] = [];
+    const writes: string[] = [];
+    const exits: number[] = [];
+    const terminal: HiddenTerminal = {
+      isTTY: true, input, signals,
+      echo: on => { if (kind === "stty-error" && !on) throw new Error("stty unavailable"); echoes.push(on); },
+      write: value => { writes.push(value); if (kind === "write-error") throw new Error("prompt write failed"); },
+      exit: code => { exits.push(code); },
+    };
+    const pending = readHiddenJoinCode(terminal);
+    if (kind === "eof") input.end();
+    if (kind === "empty") input.end("\n");
+    if (kind === "padded") input.end(`  ${JOIN}  \n`);
+    if (kind === "sigint" || kind === "sigterm") {
+      signals.emit(kind === "sigint" ? "SIGINT" : "SIGTERM");
+      assert.equal(signals.listenerCount("SIGINT") + signals.listenerCount("SIGTERM"), 0, "signal handlers leave before exit");
+      input.end();
+    }
+    if (kind === "padded") assert.equal((await pending).trim(), JOIN);
+    else if (kind === "eof" || kind === "empty" || kind === "sigint" || kind === "sigterm") await assert.rejects(pending, { code: "code_missing" });
+    else await assert.rejects(pending);
+    if (kind === "sigint" || kind === "sigterm") assert.deepEqual(exits, [kind === "sigint" ? 130 : 143]);
+    if (kind !== "stty-error") assert.deepEqual(echoes, [false, true]);
+    if (kind === "stty-error") assert.deepEqual(writes, [], "no prompt if stty fails");
+    assert.equal(signals.listenerCount("SIGINT"), 0);
+    assert.equal(signals.listenerCount("SIGTERM"), 0);
+  }
 });
 
 async function fixture() {
@@ -45,7 +168,7 @@ async function fixture() {
     assert.equal(body.joinCredential, JOIN);
     assert.equal(body.name, "MCP agent");
     assert.match(body.attemptId, /^[0-9a-f-]{36}$/);
-    if (refusal || consumed) return Response.json({ error: refusal ?? "join_credential_seat_cap_reached" }, { status: refusal === "forbidden" ? 403 : 409 });
+    if (refusal || consumed) { const error = refusal ?? "join_credential_seat_cap_reached"; return Response.json({ error }, { status: REGISTER_REFUSALS[error] ?? 409 }); }
     consumed = true;
     return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
@@ -58,7 +181,7 @@ test("connect saves an unbound private profile and never returns either secret",
   const f = await fixture();
   try {
     const path = join(f.root, "seat", "profile.json");
-    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => `  ${JOIN}  `, fetcher: f.fetcher });
     assert.equal(f.calls(), 1);
     assert.equal(result.profile, path);
     assert.equal(result.principal_id, PRINCIPAL);
@@ -86,28 +209,33 @@ test("connect saves an unbound private profile and never returns either secret",
     await assert.rejects(connectMcp({ target: TARGET, profilePath: orphan, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "profile_exists" });
     assert.equal(f.calls(), 1, "orphan credential must be refused before register");
     const second = join(f.root, "second", "profile.json");
-    await assert.rejects(connectMcp({ target: TARGET, profilePath: second, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "join_credential_seat_cap_reached", message: "Ask the operator for a new code." });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: second, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "join_credential_seat_cap_reached", message: "The code was not used. Ask the operator for a new code." });
     assert.equal(f.calls(), 2, "register must not retry");
     await assert.rejects(stat(second), { code: "ENOENT" });
   } finally { await f.close(); }
 });
 
-test("expired, unknown and revoked codes use typed refusals and write nothing", { timeout: 10000 }, async () => {
+test("generated register refusal inventory and typed remedies", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
-    for (const code of ["join_credential_expired", "join_credential_not_found", "join_credential_revoked", "forbidden"]) {
+    for (const code of ["forbidden", "upgrade_required", "principal_limit_reached", "join_credential_seat_cap_reached", "not_found"]) {
       f.refuse(code);
       const path = join(f.root, code, "profile.json");
-      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }),
-        { code, message: "Ask the operator for a new code." });
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+        assert.equal((error as {code:string}).code, code);
+        const message = String(error);
+        assert.match(message, code === "upgrade_required" ? /Update cswarm/ : code === "principal_limit_reached" ? /no free agent seat/ : code === "not_found" ? /Check --url/ : /new code/);
+        assert.doesNotMatch(message, /swm_join_|swm_agt_/);
+        return true;
+      });
       await assert.rejects(stat(path), { code: "ENOENT" });
     }
-    assert.equal(f.calls(), 4);
+    assert.equal(f.calls(), 5);
     f.refuse(JOIN);
     const path = join(f.root, "hostile-error", "profile.json");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }),
-      { code: "register_refused", message: "Registration failed. Ask the operator for a new code." });
-    assert.equal(f.calls(), 5);
+      { code: "register_outcome_unknown", message: "The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code." });
+    assert.equal(f.calls(), 6);
   } finally { await f.close(); }
 });
 
@@ -138,8 +266,7 @@ test("CLI refuses argv, file and environment code inputs", { timeout: 15000 }, a
     assert.equal(result.code, 1);
     assert.match(result.stderr, /terminal_required/);
     assert.doesNotMatch(result.stdout + result.stderr, /swm_join_|swm_agt_/);
-    // Strategist condition: an agent cannot pipe the code in. A piped stdin is not a terminal, so connect refuses
-    // before reading it, and nothing is written under HOME.
+    // A plain pipe or redirect is refused; a same-user pseudo-terminal wrapper is not detected.
     const piped = await cli(base, { HOME: root }, `${JOIN}\n`);
     assert.equal(piped.code, 1);
     assert.match(piped.stderr, /terminal_required/);
@@ -159,4 +286,94 @@ test("mcp code refuses agent credentials and profiles before a request", { timeo
       assert.doesNotMatch(result.stderr, /swm_join_|swm_agt_/);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("every uncertain committed register and save failure instructs revocation without leaking secrets", { timeout: 15000 }, async () => {
+  let mode = "";
+  let commits = 0;
+  const accepted = { status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
+    token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" };
+  const server = createServer(async (request, response) => {
+    let input = "";
+    for await (const chunk of request) input += chunk;
+    assert.equal(JSON.parse(input).joinCredential, JOIN);
+    commits++;
+    if (mode === "cut") { response.writeHead(200, { "content-type": "application/json" }); response.write('{"status":"accepted","agent_token":"swm_agt_'); response.destroy(); return; }
+    if (mode === "garbage") { response.writeHead(200, { "content-type": "application/json" }); response.end(`garbage ${TOKEN}`); return; }
+    if (mode === "502") { response.writeHead(502, { "content-type": "application/json" }); response.end('{"error":"upstream_failure"}'); return; }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify(mode === "invalid" ? { ...accepted, agent_token: "swm_agt_short" } : accepted));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const target = cloudTarget(`http://127.0.0.1:${address.port}`, TARGET.anonKey);
+  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-committed-"));
+  try {
+    for (mode of ["save", "garbage", "cut", "502", "invalid"]) {
+      const before = commits;
+      const path = join(root, mode, "profile.json");
+      await assert.rejects(connectMcp({ target, profilePath: path, readCode: async () => JOIN,
+        ...(mode === "save" ? { saveProfile: async () => { throw new Error(`EIO ${TOKEN}`); } } : {}) }), error => {
+        assert.equal((error as { code: string }).code, "register_outcome_unknown");
+        assert.equal((error as Error).message, "The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code.");
+        assert.doesNotMatch(String(error), /swm_join_|swm_agt_/);
+        return true;
+      });
+      assert.equal(commits, before + 1);
+      await assert.rejects(stat(path), { code: "ENOENT" });
+    }
+  } finally {
+    server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("two committed connects racing for one profile give the loser revoke advice", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "race", "profile.json");
+    const fetcher: typeof fetch = async () => Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+      run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
+    let arrivals = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const readCode = async () => { if (++arrivals === 2) release(); await barrier; return JOIN; };
+    const results = await Promise.allSettled([connectMcp({ target: TARGET, profilePath: path, readCode, fetcher }), connectMcp({ target: TARGET, profilePath: path, readCode, fetcher })]);
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    const loser = results.find(result => result.status === "rejected") as PromiseRejectedResult;
+    assert.equal(loser.reason.code, "register_outcome_unknown");
+    assert.match(loser.reason.message, /cswarm principal revoke/);
+  } finally { await f.close(); }
+});
+
+test("register redirects do not forward a join code to another origin", { timeout: 10000 }, async () => {
+  let received = 0;
+  const destination = createServer((_request, response) => { received++; response.end("unexpected"); });
+  destination.listen(0, "127.0.0.1");
+  await once(destination, "listening");
+  const destinationAddress = destination.address();
+  assert.ok(destinationAddress && typeof destinationAddress === "object");
+  const source = createServer((_request, response) => { response.writeHead(308, { location: `http://127.0.0.1:${destinationAddress.port}/stolen` }); response.end(); });
+  source.listen(0, "127.0.0.1");
+  await once(source, "listening");
+  const sourceAddress = source.address();
+  assert.ok(sourceAddress && typeof sourceAddress === "object");
+  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-redirect-"));
+  try {
+    await assert.rejects(connectMcp({ target: cloudTarget(`http://127.0.0.1:${sourceAddress.port}`, TARGET.anonKey), profilePath: join(root, "profile.json"), readCode: async () => JOIN }), { code: "register_redirected" });
+    assert.equal(received, 0);
+  } finally { source.close(); destination.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("Fold 1 evidence states the measured TTY limit, output, and current bundle hash", { timeout: 10000 }, async () => {
+  const lane = await readFile("docs/evidence/2026-09-24-mcp-release2/LANE.md", "utf8");
+  assert.match(lane, /A plain pipe or redirect is refused; a same-user pseudo-terminal wrapper is not detected/);
+  assert.match(lane, /Connect prints only the profile path and the Claude Code and Codex install lines/);
+  assert.doesNotMatch(lane, /Connect prints only profile path, principal ID/);
+  assert.match(lane, /npm fallback sentence/);
+  const checksum = (await readFile("dist-release/cswarm.sha256", "utf8")).split(/\s+/)[0];
+  assert.match(checksum, /^[a-f0-9]{64}$/);
+  assert.ok(lane.includes(checksum), "LANE must name the current built bundle SHA");
 });
