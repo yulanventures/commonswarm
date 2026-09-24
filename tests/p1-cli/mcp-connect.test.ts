@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -65,6 +65,10 @@ test("connect saves an unbound private profile and never returns either secret",
     assert.doesNotMatch(JSON.stringify(result), /swm_join_|swm_agt_/);
     assert.doesNotMatch(renderMcpConnect(result), /swm_join_|swm_agt_/);
     assert.match(renderMcpConnect(result), new RegExp(`Profile: ${path}`));
+    // The printed lines name the profile path only: no principal, workspace, token or run id.
+    const printed = renderMcpConnect(result);
+    for (const id of [PRINCIPAL, WS]) assert.ok(!printed.includes(id), `printed output names ${id}`);
+    assert.deepEqual(printed.trimEnd().split("\n").filter(line => !line.includes(path)).filter(line => !/^\[mcp_servers\.cswarm\]$|^command = "cswarm"$/.test(line)), []);
     assert.match(result.install, /claude mcp add --scope user --transport stdio cswarm/);
     assert.match(result.install, /\[mcp_servers\.cswarm\]/);
     assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
@@ -107,8 +111,9 @@ test("expired, unknown and revoked codes use typed refusals and write nothing", 
   } finally { await f.close(); }
 });
 
-async function cli(argv: string[], env: Record<string, string>) {
+async function cli(argv: string[], env: Record<string, string>, input?: string) {
   const child = spawn(process.execPath, [resolve("dist/cli.js"), ...argv], { env: { PATH: process.env.PATH ?? "", ...env }, stdio: ["pipe", "pipe", "pipe"] });
+  if (input !== undefined) child.stdin.end(input);
   let stdout = "", stderr = "";
   child.stdout.on("data", chunk => stdout += chunk);
   child.stderr.on("data", chunk => stderr += chunk);
@@ -133,6 +138,13 @@ test("CLI refuses argv, file and environment code inputs", { timeout: 15000 }, a
     assert.equal(result.code, 1);
     assert.match(result.stderr, /terminal_required/);
     assert.doesNotMatch(result.stdout + result.stderr, /swm_join_|swm_agt_/);
+    // Strategist condition: an agent cannot pipe the code in. A piped stdin is not a terminal, so connect refuses
+    // before reading it, and nothing is written under HOME.
+    const piped = await cli(base, { HOME: root }, `${JOIN}\n`);
+    assert.equal(piped.code, 1);
+    assert.match(piped.stderr, /terminal_required/);
+    assert.doesNotMatch(piped.stdout + piped.stderr, /swm_join_|swm_agt_/);
+    assert.deepEqual((await readdir(root)).filter(name => name !== "code.txt"), []);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

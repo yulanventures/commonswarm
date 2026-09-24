@@ -79,8 +79,9 @@ export interface McpConnectOptions {
 
 export interface McpConnectResult { profile: string; principal_id: string; install: string }
 
+/** Strategist ruling (2026-09-24): the printed lines name the profile path only; no id, code or token. */
 export function renderMcpConnect(result: McpConnectResult): string {
-  return `Profile: ${result.profile}\nPrincipal: ${result.principal_id}\n${result.install}\n`;
+  return `Profile: ${result.profile}\n${result.install}\n`;
 }
 
 export async function connectMcp(options: McpConnectOptions): Promise<McpConnectResult> {
