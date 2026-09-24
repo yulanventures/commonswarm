@@ -173,7 +173,7 @@ against loopback and rolled back their fixture and function changes.
 | F2 | The section 5 catalog proof pins `md5(pg_proc.prosrc)` to the migration body, alongside its shape and grants. The functional proof discovers a live member with a real pending row, requires at least one row for that member, and then requires exactly zero rows without member identity. The release proof README requires that row to be seeded through the normal product path before the release window. | The server test executes both SQL proofs against its seeded fixture. Baseline: 1/1. Changing the issuer display literal only, preserving shape, makes catalog `catalog_ok=false`; test exit 1 on the catalog assertion. Replacing the function's membership guard with `IF false` makes the functional proof raise `pending access returned rows without a member identity`; test exit 1. Changing the guard to `IF true` makes the positive proof raise `no seeded pending row visible to a live member`; test exit 1. The CLI test recomputes the body digest from the migration and checks the catalog constant, so stale proof text also fails. |
 | F3 | Added source-enumerating TypeScript AST checks for the `runMembers` read and every `pendingAgentAccess` call in the app script. | CLI focused test: 6/6; replacing `readPendingAccessOptional` with the throwing `readPendingAccess` in `runMembers` changes the discovered call and fails its assertion. Site observer: 25/25; it discovers four calls and verifies each direct `loadPendingAccess` wrapper. For each of the four, an in-memory revert to the direct throwing call makes the observer throw. |
 | F4 | The roster dialog's Pending access section now uses its existing grid, gap, padding and border at every width; the old desktop `display: none` rule and now-redundant narrow override are gone. | The source observer asserts desktop-capable grid display. A rendered geometry test checks the section at 600px and 1200px, including the `[hidden]` case. The existing geometry test and the new test both fail here because sandboxed Chrome aborts with `SIGABRT`, before measuring CSS. The CSS revert is rejected by the source observer; rendered geometry remains for the lead's unrestricted run. |
-| F5 | Removed the stale Fold 1 “not installed” note and recorded the lead's earlier local `db:reset` plus passing normal server test. This table lists every Fold 2 code, proof, and test change. | This evidence file now distinguishes Fold 1's installed state from Fold 2's source-mode state. |
+| F5 | Removed the stale Fold 1 “not installed” note and recorded the lead's earlier local `db:reset` plus passing normal server test. This table lists every Fold 2 code, proof, and test change. | The CLI evidence test passes 7/7. In a temporary file mutation, restoring the `Fold 1 not established` heading makes that test fail on the missing post-apply reset record (exit 1); restoring the file returns it to 7/7. |
 
 ### Fold 2 gates
 
@@ -195,8 +195,9 @@ scratch logs contain the detailed output and are not release inputs.
 | Focused CLI pending | 0; 7/7 |
 | Focused site pending observer | 0; 25/25 |
 
-`git diff --check origin/main...HEAD` and commit guard results follow the
-Fold 2 commit.
+`git diff --check origin/main...HEAD`: exit 0 after the Fold 2 commits.
+The local identity guard accepted all 14 address fields in seven lane commits;
+the trailer guard checked 7/7 commits. The worktree was clean after commit.
 
 ### Fold 2 not established
 
