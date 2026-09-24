@@ -69,6 +69,16 @@ export async function readPendingAccess(
   return parsePendingAccess(await response.json());
 }
 
+export async function readPendingAccessOptional(
+  target: CloudTarget,
+  bearer: string,
+  workspaceId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<PendingAgentAccess[] | null> {
+  try { return await readPendingAccess(target, bearer, workspaceId, fetcher); }
+  catch { return null; }
+}
+
 export function pendingAccessAge(issuedAt: string, now = Date.now()): string {
   const minutes = Math.max(0, Math.floor((now - Date.parse(issuedAt)) / 60_000));
   if (minutes < 1) return "just now";

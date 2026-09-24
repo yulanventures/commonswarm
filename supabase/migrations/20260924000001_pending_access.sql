@@ -36,8 +36,8 @@ BEGIN
     NULL::uuid,
     p.owner_user_id,
     COALESCE(u.display_name, 'Workspace member'),
-    COALESCE(tokens.first_issued_at, p.created_at),
-    tokens.first_expires_at,
+    COALESCE(tokens.issued_at, p.created_at),
+    tokens.expires_at,
     NULL::integer,
     NULL::integer
   FROM swarm.agent_principals AS p
@@ -46,14 +46,19 @@ BEGIN
    AND owner_membership.user_id = p.owner_user_id
    AND owner_membership.revoked_at IS NULL
   LEFT JOIN swarm.users AS u ON u.user_id = owner_membership.user_id
+  -- The used-token anti-join below means every token reaching this probe is unused.
   LEFT JOIN LATERAL (
-    SELECT min(t.issued_at) AS first_issued_at,
-           min(t.expires_at) AS first_expires_at
+    SELECT t.issued_at, t.expires_at
     FROM swarm.agent_tokens AS t
     WHERE t.principal_id = p.principal_id
+      AND t.revoked_at IS NULL
+      AND t.expires_at > statement_timestamp()
+    ORDER BY t.issued_at DESC, t.token_id DESC
+    LIMIT 1
   ) AS tokens ON true
   WHERE p.workspace_id = p_workspace_id
     AND p.revoked_at IS NULL
+    AND owner_membership.user_id IS NOT NULL
     AND NOT EXISTS (
       SELECT 1 FROM swarm.agent_join_credentials AS registrar
       WHERE registrar.registrar_principal_id = p.principal_id
@@ -61,9 +66,12 @@ BEGIN
     AND NOT EXISTS (
       SELECT 1 FROM swarm.agent_tokens AS used
       WHERE used.principal_id = p.principal_id
-        AND (used.first_used_at IS NOT NULL
-          OR used.revoked_at IS NOT NULL
-          OR used.expires_at <= statement_timestamp())
+        AND used.first_used_at IS NOT NULL
+    )
+    AND (
+      NOT EXISTS (SELECT 1 FROM swarm.agent_tokens AS any_token
+                  WHERE any_token.principal_id = p.principal_id)
+      OR tokens.issued_at IS NOT NULL
     )
   UNION ALL
   SELECT

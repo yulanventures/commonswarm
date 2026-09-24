@@ -54,28 +54,6 @@ export function pendingAccessRows(
       cancelLabel: `Cancel invite for ${invitation.email}`,
     });
   }
-  if (serverPending !== undefined) {
-    for (const entry of serverPending) {
-      const cancellable = entry.principalId === null ? undefined : access.find(
-        (status) => status.principalId === entry.principalId &&
-          status.firstUsedAt === null && status.revokedAt === null &&
-          new Date(status.expiresAt).getTime() > now && status.tokenId.length > 0,
-      );
-      rows.push({
-        kind: cancellable ? "agent" : "pending",
-        id: cancellable?.tokenId ?? entry.principalId ?? entry.joinCredentialId ?? "",
-        workspaceId,
-        title: entry.principalName ??
-          `Agent connect code (${entry.joinCredentialId?.slice(0, 8) ?? ""})`,
-        state: `Invited, not connected · ${relative(entry.issuedAt)}` +
-          (entry.kind === "join"
-            ? ` · ${entry.seatsUsed}/${entry.seatCap} seats used · issued by ${entry.issuerDisplay}`
-            : ""),
-        cancelLabel: cancellable ? `Cancel access for ${entry.principalName ?? "agent"}` : "",
-      });
-    }
-    return rows;
-  }
   for (const entry of access) {
     const pending =
       entry.firstUsedAt === null &&
@@ -93,7 +71,32 @@ export function pendingAccessRows(
       cancelLabel: `Cancel access for ${entry.agentName}`,
     });
   }
+  if (serverPending !== undefined) {
+    for (const entry of serverPending) {
+      if (entry.principalId !== null && access.some((status) =>
+        status.principalId === entry.principalId && status.firstUsedAt === null &&
+        status.revokedAt === null && new Date(status.expiresAt).getTime() > now
+      )) continue;
+      rows.push({
+        kind: "pending",
+        id: entry.principalId ?? entry.joinCredentialId ?? "",
+        workspaceId,
+        title: entry.principalName ??
+          `Agent connect code (${entry.joinCredentialId?.slice(0, 8) ?? ""})`,
+        state: `Invited, not connected · ${relative(entry.issuedAt)}` +
+          (entry.kind === "join"
+            ? ` · ${entry.seatsUsed}/${entry.seatCap} seats used · issued by ${entry.issuerDisplay}`
+            : ""),
+        cancelLabel: "",
+      });
+    }
+  }
   return rows;
+}
+
+export async function loadPendingAccess<T>(read: () => Promise<T[]>): Promise<{ rows: T[]; failed: boolean }> {
+  try { return { rows: await read(), failed: false }; }
+  catch { return { rows: [], failed: true }; }
 }
 
 /**

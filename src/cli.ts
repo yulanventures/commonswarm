@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { signalDuration } from "./cloud/signal-duration.js";
-import { pendingAccessAge, readPendingAccess, type PendingAgentAccess } from "./cloud/pending-access.js";
+import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } from "./cloud/pending-access.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
@@ -4177,7 +4177,7 @@ export function renderRoster(
   directory: SignalDirectory,
   memberNames: ReadonlyMap<string, string>,
   workspace?: { workspaceId: string; workspaceName: string | null },
-  pending: readonly PendingAgentAccess[] = [],
+  pending: readonly PendingAgentAccess[] | null = [],
 ): string {
   /* FM-1, found by Verity: an EMPTY roster is ambiguous and must not be reported as emptiness.
    *
@@ -4245,9 +4245,9 @@ export function renderRoster(
     );
   }
   lines.push("");
-  lines.push("Invited, not connected:");
-  if (pending.length === 0) lines.push("- none yet");
-  for (const entry of pending) {
+  lines.push(pending === null ? "Invited, not connected: could not load" : "Invited, not connected:");
+  if (pending !== null && pending.length === 0) lines.push("- none yet");
+  for (const entry of pending ?? []) {
     const name = entry.kind === "classic"
       ? sanitizeDisplayLabel(entry.principal_name ?? "", "Unnamed agent")
       : "Agent connect code";
@@ -4283,7 +4283,7 @@ async function runMembers(args: Arguments): Promise<void> {
     selected.selectedWorkspace,
     selected,
   );
-  const pending = await readPendingAccess(
+  const pending = await readPendingAccessOptional(
     cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher,
   );
 
@@ -4318,6 +4318,7 @@ async function runMembers(args: Arguments): Promise<void> {
                 : memberNames.get(agent.owner_user_id) ?? null,
             })),
             pending,
+            ...(pending === null ? { pending_error: "could not load" } : {}),
           },
           null,
           2,

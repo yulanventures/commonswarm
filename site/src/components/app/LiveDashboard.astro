@@ -1108,6 +1108,7 @@ import "../../styles/tokens.css";
           class="dashboard__agent-list dashboard__roster-dialog-pending-list"
           data-dialog-access-list
         ></ul>
+        <p data-pending-load-note hidden>Invited, not connected: could not load</p>
         <p class="dashboard__form-error" data-dialog-access-error role="alert" hidden></p>
       </section>
     </div>
@@ -1253,6 +1254,7 @@ import "../../styles/tokens.css";
   } from "../../lib/channels";
   import {
     pendingAccessRows,
+    loadPendingAccess,
     shouldPollPendingAccess,
     shouldRetireFreshInvite,
   } from "../../lib/pending-access";
@@ -1400,6 +1402,7 @@ import "../../styles/tokens.css";
     let pendingInvites: PendingMemberInvite[] = [];
     let accessStatuses: AgentAccessStatus[] = [];
     let pendingAgents: PendingAgentAccess[] = [];
+    let pendingAgentsLoadFailed = false;
     let renderedPendingAccessKey = "";
     let people = new Map<string, string>();
     let signals: Signal[] = [];
@@ -2171,8 +2174,10 @@ import "../../styles/tokens.css";
 
       const dialogSection = one<HTMLElement>("[data-dialog-access-section]");
       const dialogCount = one<HTMLElement>("[data-dialog-access-count]");
+      const loadNote = one<HTMLElement>("[data-pending-load-note]");
+      if (loadNote) loadNote.hidden = !pendingAgentsLoadFailed;
       if (dialogCount) dialogCount.textContent = String(total);
-      if (dialogSection) dialogSection.hidden = sampleMode || total === 0;
+      if (dialogSection) dialogSection.hidden = sampleMode || (total === 0 && !pendingAgentsLoadFailed);
 
       const buildRows = (errorTarget: HTMLElement | null): DocumentFragment => {
         const fragment = document.createDocumentFragment();
@@ -4003,7 +4008,7 @@ import "../../styles/tokens.css";
       const stack = one<HTMLElement>("[data-header-agent-stack]");
       const button = one<HTMLButtonElement>("[data-roster-open]");
       const summary = one<HTMLElement>("[data-header-roster-summary]");
-      const show = agents.length > 0 || pendingTotal > 0;
+      const show = agents.length > 0 || pendingTotal > 0 || pendingAgentsLoadFailed;
       if (wrap) wrap.hidden = !show;
       one<HTMLElement>(".dashboard__channel")?.classList.toggle(
         "dashboard__channel--roster",
@@ -5697,7 +5702,7 @@ import "../../styles/tokens.css";
         const [nextInvites, nextStatuses, nextPending, nextRoster] = await Promise.all([
           pendingMemberInvites(workspaceId),
           agentAccessStatuses(workspaceId),
-          pendingAgentAccess(workspaceId),
+          loadPendingAccess(() => pendingAgentAccess(workspaceId)),
           memberRoster(workspaceId).catch(() => null),
         ]);
         /* A request that settles after the user moved on applies nothing: its
@@ -5705,7 +5710,8 @@ import "../../styles/tokens.css";
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         pendingInvites = nextInvites;
         accessStatuses = nextStatuses;
-        pendingAgents = nextPending;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         if (nextRoster) {
           people = nextRoster.names;
           members = nextRoster.members;
@@ -5789,6 +5795,7 @@ import "../../styles/tokens.css";
       pendingInvites = [];
       accessStatuses = [];
       pendingAgents = [];
+      pendingAgentsLoadFailed = false;
       renderedPendingAccessKey = "";
       people = new Map();
       signals = [];
@@ -6160,6 +6167,7 @@ import "../../styles/tokens.css";
       pendingInvites = [];
       accessStatuses = [];
       pendingAgents = [];
+      pendingAgentsLoadFailed = false;
       renderedPendingAccessKey = "";
       /* Restart one timer under the new workspace/version. The callbacks read the
          guarded live identity, and a failed initial load remains retryable. */
@@ -6201,7 +6209,7 @@ import "../../styles/tokens.css";
           memberRoster(selected.id),
           pendingMemberInvites(selected.id),
           agentAccessStatuses(selected.id),
-          pendingAgentAccess(selected.id),
+          loadPendingAccess(() => pendingAgentAccess(selected.id)),
           workspaceFiles(selected.id).then(
             (value) => ({ value, error: "" }),
             (error) => ({
@@ -6223,7 +6231,8 @@ import "../../styles/tokens.css";
         members = nextRoster.members;
         pendingInvites = nextInvites;
         accessStatuses = nextAccessStatuses;
-        pendingAgents = nextPending;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         files = nextFiles.value;
         fileLoadError = nextFiles.error;
         /* Only if no newer channel read has landed since this one started. A create the
@@ -9101,12 +9110,13 @@ import "../../styles/tokens.css";
         const [nextAgents, nextStatuses, nextPending] = await Promise.all([
           roster(workspaceId),
           agentAccessStatuses(workspaceId),
-          pendingAgentAccess(workspaceId),
+          loadPendingAccess(() => pendingAgentAccess(workspaceId)),
         ]);
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         agents = nextAgents;
         accessStatuses = nextStatuses;
-        pendingAgents = nextPending;
+        pendingAgents = nextPending.rows;
+        pendingAgentsLoadFailed = nextPending.failed;
         renderRoster();
         renderPendingAccess();
         const refresh = one<HTMLButtonElement>("[data-refresh]");
@@ -9144,10 +9154,11 @@ import "../../styles/tokens.css";
           receipt.hidden = true;
         }, 6_000);
       }
-      void Promise.all([agentAccessStatuses(activeWorkspaceId), pendingAgentAccess(activeWorkspaceId)]).then(([next, pending]) => {
+      void Promise.all([agentAccessStatuses(activeWorkspaceId), loadPendingAccess(() => pendingAgentAccess(activeWorkspaceId))]).then(([next, pending]) => {
         if (selected.id !== activeWorkspaceId) return;
         accessStatuses = next;
-        pendingAgents = pending;
+        pendingAgents = pending.rows;
+        pendingAgentsLoadFailed = pending.failed;
         renderPendingAccess();
       });
       window.requestAnimationFrame(() => {
