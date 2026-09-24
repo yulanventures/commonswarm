@@ -26,6 +26,20 @@ import { test } from "node:test";
 
 const root = new URL("../../", import.meta.url);
 
+test("lane record marks the retired parent rule and reconciles Fold 1 probe counts", { timeout: 1_000 }, () => {
+  const record = readFileSync(new URL("docs/evidence/2026-09-24-item-g-lane2a/LANE.md", root), "utf8");
+  assert.match(record, /^\| Parent orphan evidence \(superseded by Fold 1 F3\) \|/m);
+  const fold1 = record.split("## Fold 1\n")[1]?.split("The test controls live")[0];
+  assert.ok(fold1);
+  const rows = fold1.match(/^\| F\d+ \|.*$/gm) ?? [];
+  assert.equal(rows.length, 7);
+  const listed = rows.reduce((count, row) => count + (row.match(/exit 1/g)?.length ?? 0), 0);
+  const counts = record.match(/table lists (\d+) reverted behaviours;.*there were (\d+) unique probes/);
+  assert.ok(counts);
+  assert.equal(Number(counts[1]), listed);
+  assert.equal(Number(counts[2]), listed - 1, "F3 and F4 share the EPERM probe");
+});
+
 interface Citation {
   /** Where the citing comment lives, for the failure message. */
   citedBy: string;

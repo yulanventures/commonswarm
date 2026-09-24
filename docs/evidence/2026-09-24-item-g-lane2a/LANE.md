@@ -9,7 +9,7 @@ Branch: `lane/item-g-lane2a`. Base named by the brief: `origin/main` at `b3e9eab
 | Idle closed reader | `src/stdout-consumer.ts` holds the shared `lsof` parser and a bounded, abortable child. `runArrivalWatch` checks fd 1 while idle, serially, on a 60 s maximum cadence. Only proven `orphaned` raises `NotifyStdoutClosedError`, which exits 74. The CLI's shorter check interval is enabled only for a loopback target with `NODE_ENV=test`. | `tests/p1-cli/resume.test.ts`: a real `inbox --notify` child reads an empty loopback inbox, its stdout reader alone is destroyed, then it exits 74 with no output or signal. `tests/support/arrival-watch.test.ts`: live, non-pipe, unknown, and throwing inspectors remain silent and continue. | Disable the poll-path idle inspection: exit 1, 0/1 pass. Change each non-orphan result into an orphan: live 0/1, non-pipe 0/1, unknown 0/1, throwing inspector 0/1. Add a per-check stderr write: 0/1. Each mutation was restored after its bounded run. |
 | Push-mode idle check | A wake wait is split at the next reader inspection deadline, before the five-minute reconcile. A past deadline yields to cancellation. | `tests/support/arrival-watch.test.ts`: a fake subscribed wake topic stays in push mode while the third inspection proves an orphan before its 3 s reconcile. | Disable the push-path inspection: exit 1, 0/1 pass. |
 | Signal health exit | One code table maps SIGINT to 130 and SIGTERM to 143. The watcher writes one stderr sentence naming the signal, unwatched inbox, and restart command. A programmatic abort without a signal still leaves exit 0. The restart command is composed from the notify flag read by CLI dispatch. | `tests/p1-cli/resume.test.ts`: real idle CLI children receive each signal; the test verifies the OS-derived code and exact sentence. Existing `arrival-notify` controls now expect 143. A separate test ties the sentence's command to the parsed flag. | Change both table codes to 0: exit 1, 0/2 pass. Change the restart command: exit 1, 0/1 pass. |
-| Parent orphan evidence | `resume` reads each matched watcher's ppid via `ps`, marks ppid 1 or a missing parent as orphaned, retains stdout evidence separately, and reports why. Unreadable parent evidence remains `cannot_determine`. Human output says `kill <pid>` and restart under the session Monitor. | `tests/p1-cli/resume.test.ts`: injected parent adapter covers init, missing, live, and unreadable; checks human output and JSON states with stdout still live. | Force every parent to `parent_alive`: exit 1, 0/1 pass. |
+| Parent orphan evidence (superseded by Fold 1 F3) | `resume` reads each matched watcher's ppid via `ps`, marks ppid 1 or a missing parent as orphaned, retains stdout evidence separately, and reports why. Unreadable parent evidence remains `cannot_determine`. Human output says `kill <pid>` and restart under the session Monitor. | `tests/p1-cli/resume.test.ts`: injected parent adapter covers init, missing, live, and unreadable; checks human output and JSON states with stdout still live. | Force every parent to `parent_alive`: exit 1, 0/1 pass. |
 | No server or listener change | Only CLI source, tests, timeout inventory test data, and this record changed. | Diff review and protocol bundle gate. | No server/listener mutation applies. |
 
 The ten mutation variants above were run with a 12 s process-group timeout; all returned exit 1 with the named test failing. The polling child test uses a 300 ms test-only inspection interval and a 3 s child deadline. New tests have explicit test timeouts.
@@ -50,7 +50,7 @@ Reviewed failures: `itemG2a/opus-r1.md` and `itemG2a/grok-r1.md`, read in full. 
 | F6 | The timeout-table citation now spans the `timeout: timeoutMs` option, and its test resolves the range. The signal message is one sentence; the CLI tests check exact output. | Restore the old citation: exit 1, 0/1 pass; split the sentence: exit 1, 0/1 pass. |
 | F7 | The Not established section records the Linux `lsof` peer limit and the consequence for idle exit 74. A test pins that statement. | Remove the statement: exit 1, 0/1 pass. |
 
-The test controls live in `tests/p1-cli/resume.test.ts`, `tests/p1-cli/arrival-notify.test.ts`, `tests/p1-cli/citation-drift.test.ts`, and the pre-existing `resume-process-table.test.ts`. All are reached by `test:p1-cli`; all except `arrival-notify.test.ts` are also in the literal `npm test` list. Each new test has its own timeout. Each of the 11 targeted probes ran its positive control and reverted mutation in the same bounded invocation: positive exit 0 with 1/1 pass, reverted exit 1 with 0/1 pass. The reverted source was restored after each probe.
+The test controls live in `tests/p1-cli/resume.test.ts`, `tests/p1-cli/arrival-notify.test.ts`, `tests/p1-cli/citation-drift.test.ts`, and the pre-existing `resume-process-table.test.ts`. All are reached by `test:p1-cli`; all except `arrival-notify.test.ts` are also in the literal `npm test` list. Each new test has its own timeout. The table lists 12 reverted behaviours; the `EPERM` → missing probe appears in both F3 and F4, so there were 11 unique probes. Each ran its positive control and reverted mutation in the same bounded invocation: positive exit 0 with 1/1 pass, reverted exit 1 with 0/1 pass. The reverted source was restored after each probe.
 
 ### Fold 1 gates
 
@@ -72,3 +72,35 @@ The test controls live in `tests/p1-cli/resume.test.ts`, `tests/p1-cli/arrival-n
 - Linux lsof peer output was not measured on Linux. The idle check cannot prove closure there under the known output shape, so the watcher does not exit 74 from that check while its inbox is empty; the write-time EPIPE path remains.
 - No live Monitor, Realtime child socket, production release, or hosted service was tested by this fold.
 - The final `pgrep` check returned exit 3 (`sysmond service not found` / `Cannot get process list`), so host-wide process absence is not established by that command. Each test killed its child on its own deadline or in `finally`.
+
+## Fold 2
+
+The round-2 Grok and Opus reviews were read in full. Tests used loopback read services, temporary HOME and state directories, bounded child lifetimes, and no real workspace. The final-tree targeted restart and cancellation controls passed 5/5. Each revert below ran its positive control and mutation in one bounded invocation; the source was restored after every probe.
+
+| Ruling | Change and test | Measured revert |
+|---|---|---|
+| H1 | The stdin credential instruction precedes the restart command, so the command is the last part of the sentence. `resume.test.ts` starts a stdin watcher, stops it with SIGTERM, extracts the same final command as the token-file test, pipes the credential into `/bin/sh`, and observes a second loopback read. The sentence and command contain no agent token. | Restore the suffix after the command: positive exit 0, 1/1 pass; revert exit 1, 0/1 pass. |
+| H2 | `Arguments` retains parsed options and values in order before profile expansion. The notify restart builder uses those captured tokens; paths and public values are shell-quoted, and a profile remains `--profile <path>`. A test enumerates `NOTIFY_ACCEPTED_FLAGS` from the CLI shape and checks each flag, ordered flags, paths, and token absence. Real CLI tests restart with `--json`, `--force-file-store`, and `--profile` against loopback. | Restore the hand-typed subset: positive exit 0, 2/2 pass; revert exit 1, 0/2 pass. |
+| H3 | The command resolves file-path options against the watcher's cwd. The token-file test starts with a relative path containing a space and apostrophe, runs the extracted command from another cwd, and sees a second loopback read. The parser test also covers profile and session-context path resolution. | Print relative paths unchanged: positive exit 0, 1/1 pass; revert exit 1, 0/1 pass. |
+| H4 | The stdout inspector accepts a fixture executable for a real child-process abort test. The test waits for its in-flight child, aborts inspection, checks prompt `cannot_determine`, and verifies that pid exits; cleanup sends SIGKILL if needed. | Remove the `execFile` abort signal: positive exit 0, 1/1 pass; revert exit 1, 0/1 pass. |
+| H5 | The old parent-evidence row is marked superseded by Fold 1 F3. Fold 1 now says 12 listed reverted behaviours, 11 unique probes because F3/F4 share EPERM. `citation-drift.test.ts` derives the listed count from the table. | Remove the superseded marker: positive exit 0, 1/1 pass; revert exit 1, 0/1 pass. Change 12 back to 11: positive exit 0, 1/1 pass; revert exit 1, 0/1 pass. |
+
+### Fold 2 gates
+
+| Gate | Exit | Count or result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript errors: 0. |
+| `env -u FORCE_COLOR npm test` | 1 | 989 tests: 987 pass, 2 fail, 0 cancelled. Both failures are host `ps` sandbox `spawn EPERM`; the lane controls passed. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 956 tests: 953 pass, 3 fail, 0 cancelled, with a temporary HOME and state directory. All three failures are host `ps` sandbox `spawn EPERM` (one `spawnSync`). A shorter 240 s outer run stopped during the baseline test before TAP totals; the complete run used a 720 s outer limit. |
+| `npm run check:tests` | 0 | Test TypeScript errors: 0. |
+| `npm run check:edge` | 0 | Six edge entry points checked; errors: 0. |
+| `npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js` | 0 | Both commands exited 0; generated bundle diff: 0 files. |
+| `bash scripts/build-release.sh` | 0 | One single-file CLI artifact built and execute-checked with a loopback `--url`. |
+| `npm --prefix site run build` | 0 | 12 static pages built with public backend variables blank. |
+| `git diff --check origin/main...HEAD` | 0 | Whitespace errors: 0, checked after Fold 2 commits. |
+
+### Fold 2 not established
+
+- The full test gates do not establish the three host `ps` controls in this sandbox; each failed with `spawn EPERM`. All targeted Fold 2 tests passed.
+- The lead's live Monitor check, Linux `lsof` peer behavior, a real Realtime child socket, and hosted or released behavior were not exercised here.
+- A final host-wide process absence check depends on `pgrep`; this sandbox reports `sysmond service not found` / `Cannot get process list`. Test children use bounded waits and `finally` cleanup, and the gate runner killed its timed-out process group.
