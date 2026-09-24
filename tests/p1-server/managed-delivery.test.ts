@@ -703,6 +703,8 @@ test("check order wins when an older signal gains its recipient after newer mail
   await sql.begin(async (tx) => {
     await tx`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() - interval '2 hours' WHERE singleton`;
     // The older signal already exists. Adding this recipient later creates its delivery then.
+    // Today's trigger refuses a late recipient; this rolled-back fixture models a historical row.
+    await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_same_transaction`;
     await tx`INSERT INTO swarm.signal_recipients
       (signal_id, workspace_id, recipient_agent_principal_id, position)
       VALUES (${older}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid, 1)`;
@@ -751,15 +753,20 @@ test("an observed non-ask/note delivery cannot heal directed mail", { timeout: 3
   const later = (posted.body.signal as { id: string }).id;
   await sql.begin(async (tx) => {
     // A malformed historical row can exist even though today's command edge refuses this ACK.
+    await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_same_transaction`;
     await tx`INSERT INTO swarm.signal_recipients
       (signal_id, workspace_id, recipient_agent_principal_id, position)
       VALUES (${later}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid, 0)`;
+    // The recipient trigger may already have enqueued this delivery; make it observed either way.
     await tx`INSERT INTO swarm.signal_deliveries
-      (signal_id, workspace_id, recipient_agent_principal_id, enqueued_at,
-       delivered_at, surfaced_at, acked_at, ack_outcome, updated_at)
-      VALUES (${later}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid,
-        statement_timestamp(), statement_timestamp(), statement_timestamp(),
-        statement_timestamp(), 'observed', statement_timestamp())`;
+      (signal_id, workspace_id, recipient_agent_principal_id, enqueued_at)
+      VALUES (${later}::uuid, ${shared.workspace}::uuid, ${agent.principalId}::uuid, statement_timestamp())
+      ON CONFLICT DO NOTHING`;
+    const marked = await tx`UPDATE swarm.signal_deliveries SET delivered_at = statement_timestamp(),
+      surfaced_at = statement_timestamp(), acked_at = statement_timestamp(), ack_outcome = 'observed',
+      last_error_code = NULL, updated_at = statement_timestamp()
+      WHERE signal_id = ${later}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+    assert.equal(marked.count, 1);
     await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
     const rows = await tx<{ signal_id: string }[]>`SELECT signal_id::text FROM swarm_read.agent_wake_path_deliveries
       WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
@@ -971,15 +978,17 @@ test("box functional proof exits nonzero for missing and ineligible seeds", { ti
   const migration = readFileSync(fileURLToPath(new URL("../../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url)), "utf8");
   const detailView = migration.split("CREATE VIEW swarm_read.agent_wake_path_deliveries", 2)[1]!
     .split("ALTER VIEW swarm_read.agent_wake_path_deliveries", 1)[0]!;
+  const memberGate = "WHERE swarm.is_member(d.workspace_id, auth.uid())";
+  assert.equal(detailView.split(memberGate).length, 2, "the mutation must find the member gate once");
   const noMemberGate = runProof(seed,
     `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries${detailView.replace(
-      "AND swarm.is_member(d.workspace_id, auth.uid())", "AND true")}`);
+      memberGate, "WHERE true")}`);
   assert.notEqual(noMemberGate.code, 0);
   assert.match(noMemberGate.output, /wake-path view exposed a row to a nonmember/);
   const noAnonymousGate = runProof(seed,
     `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries${detailView.replace(
-      "AND swarm.is_member(d.workspace_id, auth.uid())",
-      "AND (swarm.is_member(d.workspace_id, auth.uid()) OR auth.uid() IS NULL)")}`);
+      memberGate,
+      "WHERE (swarm.is_member(d.workspace_id, auth.uid()) OR auth.uid() IS NULL)")}`);
   assert.notEqual(noAnonymousGate.code, 0);
   assert.match(noAnonymousGate.output, /wake-path view exposed a row without member identity/);
 });
