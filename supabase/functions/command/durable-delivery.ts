@@ -707,7 +707,54 @@ export async function ackAgentDelivery(
     args.leaseId === null &&
     args.listenerInstanceId === null;
   if (queuedObservation) {
-    if (row.acked_at === null) return { status: "unavailable" };
+    /* ATTENDED SEAT, never claimed. Item G lane 1 (brain topic wake-liveness-design).
+     *
+     * A seat with no listener never takes a lease, so its rows sit acked_at IS NULL forever and
+     * nothing server-side can tell "read it" from "the wake path is dead". That is the gap the
+     * 2026-09-14 incident fell through: the operator noticed before the seat did.
+     *
+     * `cswarm check` sends exactly this shape — outcome observed, lease_id null,
+     * listener_instance_id null — after it has PRINTED the message, so the ack means a reader
+     * saw it, not that a queue moved.
+     *
+     * The write below only ever sets acked_at/ack_outcome/updated_at and leaves the lease
+     * columns null, which signal_deliveries_check9 admits for `observed` and for no other
+     * outcome (20260914000001_unclaimed_observed_ack.sql). A managed principal still has to
+     * present session proof, exactly as the queued path below does — an unclaimed ack is not a
+     * way around the session fence. */
+    if (row.acked_at === null) {
+      if (row.ack_outcome !== null) return { status: "conflict" };
+      if (managed) {
+        if (
+          args.proof == null ||
+          row.session_id !== args.proof.session_id ||
+          Number(row.session_generation) !== args.proof.generation
+        ) {
+          return { status: "session_conflict" };
+        }
+      }
+      await tx`
+        UPDATE swarm.signal_deliveries
+        SET
+          acked_at = statement_timestamp(),
+          ack_outcome = 'observed',
+          surfaced_at = COALESCE(surfaced_at, statement_timestamp()),
+          updated_at = statement_timestamp()
+        WHERE workspace_id = ${args.workspaceId}::uuid
+          AND signal_id = ${args.signalId}::uuid
+          AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          AND acked_at IS NULL
+      `;
+      return {
+        status: "accepted",
+        response: {
+          ok: true,
+          event_ids: [],
+          signal_id: args.signalId,
+          outcome: "observed",
+        },
+      };
+    }
     if (row.ack_outcome === "observed") {
       return {
         status: "idempotent",
