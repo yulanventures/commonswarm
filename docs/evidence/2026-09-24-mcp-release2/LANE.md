@@ -11,7 +11,7 @@ Fold 1 results below supersede the original lane's verification counts and artif
 | 1. Operator redeems | `mcp code` authenticates as a human and sends `mint_agent_join_credential` with `seat_cap: 1`, `ttl_hours: 1`; `mcp connect` reads from a hidden terminal prompt, registers once with a fresh `attemptId`, and saves an unbound profile through `saveAgentProfile`. | `mcp-connect.test.ts`: mint request, private profile, no secret in connect result, CLI refusal of argv/file/environment code sources. |
 | 2. Secret-free install | Connect prints only the profile path and the Claude Code and Codex install lines. The in-repo release artifact now has its own CommonJS package scope so the exact bundle path runs from an outside directory. | `mcp-connect.test.ts`: install lines and no join or seat secret in rendered output; `release-bundle.test.ts`: execute the in-repo bundle from a temporary directory. |
 | 3. Target | The 256-bit `swm_join_` code has no deployment. Connect requires `--url`; the public anon key comes from `--anon-key` or a saved current target with the same URL. The register response supplies `workspace_id` and `principal_id`. No guess based on an unrelated saved target is accepted. | `mcp-connect.test.ts`: register URL and public key, saved workspace and principal. Existing `current-target.test.ts` covers URL/key matching. |
-| 4. Fail closed | Invalid codes and registration refusals produce typed codes with “Ask the operator for a new code.” `403 forbidden` is the shared edge refusal for unknown, expired, and revoked codes, so the client cannot distinguish those cases. Connect does not retry; occupied profile or credential paths are refused before register, and the writer rechecks inside its lock. | `mcp-connect.test.ts`: refusal codes, second use seat cap, one request per call, no new profile on refusal, existing profile and orphan credential guards. |
+| 4. Fail closed | Invalid codes and registration refusals produce typed codes with remedies matched to whether the server can prove a seat already exists. `403 forbidden` is the shared edge refusal for unknown, expired, and revoked codes, so the client cannot distinguish those cases. Connect does not retry; occupied profile or credential paths are refused before register, and the writer rechecks inside its lock. | `mcp-connect.test.ts`: refusal codes, second use seat cap, one request per call, no new profile on refusal, existing profile and orphan credential guards. |
 | 5. Onboarding | `setup guide` explains the MCP terminal flow and labels file and H0 handoffs as secret-bearing. The Connect component exposes an MCP guide without minting a credential for that path; its existing prompt and file flow remain labeled as fallback. H0's existing paste now names the model-visible join credential. | `agent-prompt.observer.test.ts`: MCP guide has no credential and shows install lines; fallback prompt discloses the model-visible credential. `h0-paste.test.ts`: reviewed paste golden and canonical URL control. |
 | 6. Client-only | The code uses the existing mint command and `h0/register`; no server or migration files changed. | Changed-path inventory and the local loopback tests. |
 
@@ -36,7 +36,7 @@ The focused test passed unchanged (5/5). Each temporary source mutation was reve
 | `env -u FORCE_COLOR npm test` | 1 | 962 tests: 960 pass, 2 fail. Both failures call `ps`, which returns EPERM in this sandbox: `the real ps returns this test process`; `the real resume CLI uses only read resources and leaves local files byte-identical`. Run with temporary HOME. |
 | `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 901 tests: 898 pass, 3 fail. All three call `ps`, which returns EPERM here: `the real ps returns this test process`; `the real resume CLI uses only read resources and leaves local files byte-identical`; `whoami trusts the live credential identity and file input keeps the token out of ps`. Run with temporary HOME. |
 | `npm run check:tests` | 0 | One tests TypeScript check. |
-| `bash scripts/build-release.sh` | 0 | One CJS bundle built and execute-checked; the Fold 1 table gives the current bundle SHA. |
+| `bash scripts/build-release.sh` | 0 | One CJS bundle built and execute-checked; the Fold 1 table records that checkout's historical bundle SHA. |
 | `dist-release/cswarm mcp connect --help` from an external temporary directory | 0 | One invocation; both `mcp code` and `mcp connect` usage lines present. |
 | `git diff --check origin/main...HEAD` | 0 | One branch range diff, checked after commit. |
 
@@ -63,12 +63,12 @@ The option A TTY condition rejects plain pipes, `/dev/null`, and closed stdin. A
 | K7 | The refusal table is generated from H0 and command producers; tests check generation, existing codes, status matches, and remedies without inspecting server message text. | Upgrade remedy replaced by “new code”: typed-remedy test failed; restored pass. |
 | K8 | Register fetch uses `redirect: "error"`; the loopback 308 test proves no second origin receives the code. | `redirect: "error"` changed to `"follow"`: loopback 308 test failed; restored pass. |
 | K9 | `mcp code` prints the exact URL and public anon key connect line; fresh connect without the key names only `--anon-key`. Unit and CLI tests cover both. | Two mutations were caught: omitted anon key from mint output and advice naming the ignored environment variable. Both focused tests failed. |
-| K10 | Removed the principal ID output claim; corrected site gate history and the final bundle SHA below; documented the npm sentence restoration. A claim control checks the evidence. | Stale principal-ID output claim restored: evidence claim test failed; restored pass. |
+| K10 | Removed the principal ID output claim; corrected site gate history and the historical bundle SHA below; documented the npm sentence restoration. A claim control checks the evidence. | Stale principal-ID output claim restored: evidence claim test failed; restored pass. |
 | K11 | Serve and refusal fixture sources now exercise their named routes; baseline regenerated twice with identical bytes. The fixture comparison checks route outputs. | Refusal fixture override removed: named-route test failed; restored pass. |
 
 ### Fold 1 gates
 
-All 15 distinct mutations had a passing positive control and a failing named test; K2, K3, K6, and K9 were rechecked after final refinements. Each source file was restored byte-for-byte. The final release bundle SHA-256 is `ae29260330660822bec971c2fb4b48aa68ea01287d0ce0e745cacab0ac28e210`. Final dispatch fixture: 1,330 rows, 0 added or removed, 12 changed against `da5fa657`; two final generations were byte-identical (`dacacbd4fbcf497511e1d5e022cecb4a739d0a8f918c07acf5ce8f5b70c2df62` fixture; `5d5f7f20d51cbf1868cb093f23af9d42c5586f5859369effced7199fa1ccf938` counts). Changed rows: `mcp.connect`, `setup.guide`, `policy.host-session.mcp.refusal.keep`, `policy.host-session.mcp.serve.keep`, and `selected-error.mcp.serve.{host-before,json-before,json-profile-missing-before,json-profile-valid-before,profile-json-missing-before,profile-json-valid-before,profile-missing-before,profile-valid-before}`.
+All 15 distinct mutations had a passing positive control and a failing named test; K2, K3, K6, and K9 were rechecked after final refinements. Each source file was restored byte-for-byte. The SHA-256 of the build in `/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/wt-hr2` at commit `f8328f83` was `ae29260330660822bec971c2fb4b48aa68ea01287d0ce0e745cacab0ac28e210`; it is a location-dependent historical measurement, not a gate. Final dispatch fixture: 1,330 rows, 0 added or removed, 12 changed against `da5fa657`; two final generations were byte-identical (`dacacbd4fbcf497511e1d5e022cecb4a739d0a8f918c07acf5ce8f5b70c2df62` fixture; `5d5f7f20d51cbf1868cb093f23af9d42c5586f5859369effced7199fa1ccf938` counts). Changed rows: `mcp.connect`, `setup.guide`, `policy.host-session.mcp.refusal.keep`, `policy.host-session.mcp.serve.keep`, and `selected-error.mcp.serve.{host-before,json-before,json-profile-missing-before,json-profile-valid-before,profile-json-missing-before,profile-json-valid-before,profile-missing-before,profile-valid-before}`.
 
 | Gate | Exit | Count and result |
 |---|---:|---|
@@ -76,12 +76,71 @@ All 15 distinct mutations had a passing positive control and a failing named tes
 | `env -u FORCE_COLOR npm test` | 1 | 962 tests: 960 pass, 2 `ps` EPERM failures in this sandbox. Temporary HOME and loopback site override. |
 | `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 913 tests: 908 pass, 5 fail. Three are `ps` EPERM; the two F-1 target-discovery tests see the protective `CSWARM_SITE=http://127.0.0.1:9` override even though they inject a fake fetcher. No production discovery was attempted. |
 | `npm run check:tests` | 0 | Test TypeScript check. |
-| `bash scripts/build-release.sh` | 0 | Single-file CJS artifact built and execute-checked; SHA above. |
+| `bash scripts/build-release.sh` | 0 | Single-file CJS artifact built and execute-checked; historical checkout SHA above. |
 | `npm --prefix site run build` | 0 | 12 static pages built. The first attempt hit EPERM because `site/node_modules` was a symlink outside the writable sandbox; a workspace-local dependency copy let the final build complete. |
 | `env -u FORCE_COLOR npm --prefix site test` | 1 | 569 tests: 566 pass, 2 browser geometry/screenshot subprocess failures, 1 skip. Both site tests that failed in review pass. |
 | `git diff --check origin/main...HEAD` | 0 | Committed branch range, checked after the Fold 1 commit. |
 
 No production host or real workspace was contacted in Fold 1. The Opus round-1 review disclosed one earlier unauthenticated discovery request to `commonswarm.com` from its comparison probe. Live H0, fresh MCP host sessions, D-036, npm publication, and box release are not established.
+
+## Fold 2 — review rulings and controls
+
+Code and tests were committed at `8e4c21f0b7b76a690a12783a8290169072ecaccc`. This fold remains client, site, test, and evidence only. The generated refusal sets were checked against `registerAgentSeat`, its registration conflict constants, and the H0 forwarding/core handlers. `command_id_conflict` has no proof of seat state and keeps the uncertain-outcome remedy. A typed refusal is accepted only at its declared HTTP status.
+
+| Ruling | Change and test | Reversion mutation |
+|---|---|---|
+| L1 | Removed the location-dependent release-bundle SHA assertion. The evidence test checks that the Fold 1 hash names its build folder and commit and that no test reads the generated bundle checksum. | Historical build-folder wording removed, then the old checksum path restored: evidence test 0 → 1 failure → 0 in each probe; sources restored byte-for-byte. |
+| L2 | Generated separate seven-code unused and three-code existing-seat sets from server source. The existing-seat remedy says: “This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.” The source inventory and all ten remedy cases run in `mcp-connect.test.ts`. | Seat-cap code removed from the existing-seat set: generated-set test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L3 | Restored `main` → `HEAD` in the timeout mapping, including all three MCP rows. The synthetic post-merge inventory test validates HEAD as main. | `main` alias removed: synthetic post-merge test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L4 | The signal test checks echo restoration before its stubbed `exit`; it does not rely on prompt cleanup. | Signal handler `restore()` removed: hidden-terminal test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L5 | The wrong-status matrix sends known refusal codes with 500 and 200, and keeps `command_id_conflict` uncertain. | HTTP status comparison removed: wrong-status test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L6 | The five shortened fallback-prompt sentences below remain necessary to meet the inline 3,200-character and file 2,000-character limits. A full restoration measured 3,252 and 2,114 characters. The site prompt and evidence assertions pin the wording. | Shortening disclosure heading removed, then a verbatim Grok sentence altered: evidence and site tests each went 0 → 1 failure → 0; source restored byte-for-byte. |
+| L7 | `mcp code` and `mcp connect` now use their own generic failure labels; typed errors keep their codes, and `mcp` serve keeps `mcp_start_failed`. The CLI and code classifier tests check this. | `mcp code` generic label changed back to `mcp_start_failed`: label test 0 → 1 failure → 0; source restored byte-for-byte. |
+| L8 | Connect removes only its own empty profile directory after cancellation or refusal. The directory test checks a new directory disappears and a preexisting one remains. | Empty-directory cleanup disabled: cancellation/refusal test 0 → 1 failure → 0; source restored byte-for-byte. |
+
+The five retained fallback-prompt shortenings, relative to the original longer prompt, are:
+
+1. “Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.” This shortens the connection-file and shell-command sentence.
+2. “Confirm cswarm setup --check-version returns setup_version 1.” and “The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm; otherwise report that the release needs updating.” These split and shorten the installer/version sentence while preserving the npm fallback.
+3. “Run setup --json. Reuse its --profile and this session's --host-session-id.” This shortens the setup-command sentence.
+4. “Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or Grok Bot; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.” This shortens the gateway, approval, and model sentence.
+5. “Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.” This shortens the brain, connection, and wake-proof sentence.
+
+The dispatch fixture was regenerated from the loopback harness. It remains 1,330 rows: zero added, zero removed, eleven changed. Every changed row is a stderr label: `mcp.code`, `policy.host-session.mcp.connect.drop`, `selected-error.mcp.code.json-before`, and eight `selected-error.mcp.connect.*` rows. The old `mcp_start_failed` labels became `mcp_code_failed` or `mcp_connect_failed`; no serve row changed. The generator invocation passed (exit 0); the subsequent full P1 CLI gate is recorded below.
+
+The exact client remedy sentences are:
+
+| Server result | Client sentence |
+|---|---|
+| `upgrade_required` | “Update cswarm and run mcp connect again; the code was not used.” |
+| `principal_limit_reached` | “The workspace has no free agent seat. Ask the operator to revoke a principal. The code was not used.” |
+| `not_found`, `method_not_allowed` | “Check --url; the code was not used.” |
+| `forbidden`, `invalid_request`, `payload_too_large` | “The code was not used. Ask the operator for a new code.” |
+| `join_credential_seat_cap_reached`, `registration_token_already_used`, `registration_seat_revoked` | “This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code.” |
+| `command_id_conflict`, network failures, malformed responses, redirects, save failures | “The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code.” |
+
+The first group is returned before this registration inserts a seat. The existing-seat group follows the server's attempt or seat-cap branches. The uncertain group cannot prove whether a seat was created. Each sentence matches the client code at `8e4c21f0`.
+
+### Fold 2 gates
+
+| Gate | Exit | Count and result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build. |
+| `env -u FORCE_COLOR npm test` | 1 | 962 tests: 960 pass, 2 `ps` spawn EPERM failures in this sandbox. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 917 tests: 912 pass, 5 fail. Three `ps` spawn EPERM failures and two F-1 target-discovery tests see the protective loopback site override. The dispatch baseline passes. |
+| `npm run check:tests` | 0 | Test TypeScript check. |
+| `bash scripts/build-release.sh` | 0 | Single-file bundle built and execute-checked. Its location-dependent SHA is not a gate. |
+| `npm --prefix site run build` | 0 | Site build with a worktree-local dependency copy; the original `site/node_modules` symlink was restored afterward. An initial attempt using the symlink hit EPERM while unlinking Vite cache outside the sandbox. |
+| `env -u FORCE_COLOR npm --prefix site test` | 1 | 570 tests: 494 pass, 75 headless Chrome SIGABRT failures, 1 skip. The new prompt claim test passes. |
+| `git diff --check origin/main...HEAD` | 0 | Branch diff checked after the code commit; rechecked after this evidence commit. |
+
+All test commands had a process-group timeout and a temporary HOME, XDG config directory, and loopback site override. No production host or real workspace was used. The Fold 2 post-gate change only strengthened the checksum-gate absence assertion; its focused test and mutation both passed.
+
+Focused final controls after the last evidence edit: MCP connect 19/19, site fallback prompt 13/13, and the synthetic post-merge timeout alias 1/1. The generated refusal-table check is part of the MCP set.
+
+### Fold 2 not established
+
+The hard rules barred live H0 registration/read/post and production-host contact. Fresh Codex and Claude Code MCP sessions, D-036 transcripts, npm publication, a box release, the production fit of the 10-second register budget, and `cswarm principal revoke` on an H0 seat remain unmeasured. Local gates do not establish any of those conditions.
 
 ## Dispatch baseline row inventory
 
