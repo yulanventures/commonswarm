@@ -10,8 +10,46 @@ import {
 } from "../../lib/pending-access";
 import type {
   AgentAccessStatus,
+  PendingAgentAccess,
   PendingMemberInvite,
 } from "../../lib/commonswarm";
+
+test("server pending rows show invitation age and disappear with the next snapshot", { timeout: 2_000 }, () => {
+  const issuedAt = "2026-09-24T12:00:00Z";
+  const pending: PendingAgentAccess[] = [
+    { kind: "classic", principalId: "p1", principalName: "Wren", joinCredentialId: null,
+      ownerUserId: "u1", issuerDisplay: "Owner", issuedAt, expiresAt: null,
+      seatsUsed: null, seatCap: null },
+    { kind: "join", principalId: null, principalName: null, joinCredentialId: "j1",
+      ownerUserId: "u1", issuerDisplay: "Owner", issuedAt,
+      expiresAt: "2026-09-25T12:00:00Z", seatsUsed: 1, seatCap: 2 },
+  ];
+  const rows = pendingAccessRows([], [], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", pending, "workspace");
+  assert.deepEqual(rows.map((row) => row.title), ["Wren", "Agent connect code (j1)"]);
+  assert.match(rows[0]!.state, /Invited, not connected · 2 minutes ago/);
+  assert.match(rows[1]!.state, /1\/2 seats used/);
+  assert.match(rows[1]!.state, /issued by Owner/);
+  assert.equal(rows[0]!.kind, "pending");
+  assert.equal(rows[1]!.cancelLabel, "");
+  const token = {
+    workspaceId: "workspace", principalId: "p1", ownerUserId: "u1",
+    agentName: "Wren", model: null, tokenId: "token-1", issuedAt,
+    expiresAt: "2026-09-25T12:00:00Z", firstUsedAt: null, revokedAt: null,
+    grantId: "grant-1", grantKind: "standing" as const, horizonExpiresAt: null,
+    boundDeviceId: null, lastUsedAt: null, lastUsedDeviceId: null,
+    lastUsedFrom: null, newHostAt: null, suspendedAt: null, grantRevokedAt: null,
+  };
+  const cancellable = pendingAccessRows([], [token], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", pending, "workspace");
+  assert.equal(cancellable[0]!.kind, "agent");
+  assert.equal(cancellable[0]!.id, "token-1");
+  assert.equal(cancellable[1]!.kind, "pending");
+  // Mutation control: first use, cap exhaustion, revocation or expiry removes a
+  // server row; the next poll's empty snapshot must clear both display rows.
+  assert.deepEqual(pendingAccessRows([], [], () => "Owner", Date.parse(issuedAt),
+    () => "2 minutes ago", [], "workspace"), []);
+});
 
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 const connect = await readFile(

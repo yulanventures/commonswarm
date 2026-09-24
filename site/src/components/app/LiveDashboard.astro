@@ -1132,6 +1132,7 @@ import "../../styles/tokens.css";
     FILE_CONTENT_WARNING,
     BROWSER_ATTACHMENT_MAX,
     agentAccessStatuses,
+    pendingAgentAccess,
     archiveWorkspace,
     client,
     createWorkspace,
@@ -1180,6 +1181,7 @@ import "../../styles/tokens.css";
     type Signal,
     type WorkspaceChannel,
     type AgentAccessStatus,
+    type PendingAgentAccess,
     type AgentActivitySubscription,
     type PendingMemberInvite,
     type BrowserDeliveryIndicator,
@@ -1397,6 +1399,7 @@ import "../../styles/tokens.css";
     let members: Member[] = [];
     let pendingInvites: PendingMemberInvite[] = [];
     let accessStatuses: AgentAccessStatus[] = [];
+    let pendingAgents: PendingAgentAccess[] = [];
     let renderedPendingAccessKey = "";
     let people = new Map<string, string>();
     let signals: Signal[] = [];
@@ -2123,9 +2126,8 @@ import "../../styles/tokens.css";
      * Agents dialog section (the only reachable surface at ≤52rem) both render from
      * a single pendingAccessRows call, so they can never disagree about content,
      * order, or wording — the lists are mirrors of one state, never two states.
-     * Each list's Cancel closures capture that list's own error slot, and each row
-     * carries the exact id its cancel command needs, so a Cancel always reaches the
-     * right revoke with the right invitation/token id.
+     * Each Cancel closure captures its list's own error slot. Join codes and
+     * principals with no token are informational rows, so they have no Cancel.
      */
     const currentPendingAccessRows = () =>
       pendingAccessRows(
@@ -2134,6 +2136,8 @@ import "../../styles/tokens.css";
         (userId) => people.get(userId) ?? "Workspace member",
         Date.now(),
         (iso) => formatTime(iso).relative,
+        sampleMode ? undefined : pendingAgents,
+        activeWorkspaceId,
       );
 
     const pendingAccessKey = (rows = currentPendingAccessRows()): string =>
@@ -2182,46 +2186,49 @@ import "../../styles/tokens.css";
           const state = document.createElement("span");
           state.textContent = row.state;
           copy.append(title, state);
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "dashboard__text-button";
-          button.textContent = "Cancel";
-          button.dataset.pendingKind = row.kind;
-          button.dataset.pendingId = row.id;
-          button.setAttribute("aria-label", row.cancelLabel);
-          button.addEventListener("click", async () => {
-            if (!session) return;
-            if (errorTarget) {
-              errorTarget.hidden = true;
-              errorTarget.textContent = "";
-            }
-            button.disabled = true;
-            try {
-              if (row.kind === "invite") {
-                await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
-              } else {
-                await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
-              }
-              /* The reload closes the dialog and re-renders both lists from the
-                 fresh state. The row that held focus is gone, so hand focus to
-                 the door that reopens the roster — or to the empty channel's
-                 Add door when no agents remain — instead of dropping it on
-                 <body>. Same pattern as the roster Remove path. */
-              await openWorkspace(row.workspaceId);
-              const door = agents.length > 0
-                ? one<HTMLButtonElement>("[data-roster-open]")
-                : one<HTMLButtonElement>("[data-add-agent]");
-              door?.focus({ preventScroll: true });
-            } catch (error) {
+          if (row.kind !== "pending") {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "dashboard__text-button";
+            button.textContent = "Cancel";
+            button.dataset.pendingKind = row.kind;
+            button.dataset.pendingId = row.id;
+            button.setAttribute("aria-label", row.cancelLabel);
+            button.addEventListener("click", async () => {
+              if (!session) return;
               if (errorTarget) {
-                errorTarget.textContent = readableError(error);
-                errorTarget.hidden = false;
+                errorTarget.hidden = true;
+                errorTarget.textContent = "";
               }
-            } finally {
-              button.disabled = false;
-            }
-          });
-          item.append(copy, button);
+              button.disabled = true;
+              try {
+                if (row.kind === "invite") {
+                  await revokeWorkspaceInvitation(session, uuid(), row.workspaceId, row.id);
+                } else {
+                  await revokeAgentToken(session, uuid(), row.workspaceId, row.id);
+                }
+                /* The reload closes the dialog and re-renders both lists from the
+                   fresh state. The row that held focus is gone, so hand focus to
+                   the door that reopens the roster — or to the empty channel's
+                   Add door when no agents remain — instead of dropping it on
+                   <body>. Same pattern as the roster Remove path. */
+                await openWorkspace(row.workspaceId);
+                const door = agents.length > 0
+                  ? one<HTMLButtonElement>("[data-roster-open]")
+                  : one<HTMLButtonElement>("[data-add-agent]");
+                door?.focus({ preventScroll: true });
+              } catch (error) {
+                if (errorTarget) {
+                  errorTarget.textContent = readableError(error);
+                  errorTarget.hidden = false;
+                }
+              } finally {
+                button.disabled = false;
+              }
+            });
+            item.append(button);
+          }
+          item.prepend(copy);
           fragment.append(item);
         }
         return fragment;
@@ -5661,6 +5668,7 @@ import "../../styles/tokens.css";
      */
     const hasPendingAccess = (): boolean =>
       pendingInvites.length > 0 ||
+      pendingAgents.length > 0 ||
       accessStatuses.some(
         (access) =>
           access.firstUsedAt === null &&
@@ -5686,9 +5694,10 @@ import "../../styles/tokens.css";
         return;
       }
       try {
-        const [nextInvites, nextStatuses, nextRoster] = await Promise.all([
+        const [nextInvites, nextStatuses, nextPending, nextRoster] = await Promise.all([
           pendingMemberInvites(workspaceId),
           agentAccessStatuses(workspaceId),
+          pendingAgentAccess(workspaceId),
           memberRoster(workspaceId).catch(() => null),
         ]);
         /* A request that settles after the user moved on applies nothing: its
@@ -5696,6 +5705,7 @@ import "../../styles/tokens.css";
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         pendingInvites = nextInvites;
         accessStatuses = nextStatuses;
+        pendingAgents = nextPending;
         if (nextRoster) {
           people = nextRoster.names;
           members = nextRoster.members;
@@ -5778,6 +5788,7 @@ import "../../styles/tokens.css";
       members = [];
       pendingInvites = [];
       accessStatuses = [];
+      pendingAgents = [];
       renderedPendingAccessKey = "";
       people = new Map();
       signals = [];
@@ -6148,6 +6159,7 @@ import "../../styles/tokens.css";
       members = [];
       pendingInvites = [];
       accessStatuses = [];
+      pendingAgents = [];
       renderedPendingAccessKey = "";
       /* Restart one timer under the new workspace/version. The callbacks read the
          guarded live identity, and a failed initial load remains retryable. */
@@ -6184,11 +6196,12 @@ import "../../styles/tokens.css";
          a review arm. */
       const channelGeneration = ++channelReadGeneration;
       try {
-        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextFiles, nextChannels] = await Promise.all([
+        const [nextAgents, nextRoster, nextInvites, nextAccessStatuses, nextPending, nextFiles, nextChannels] = await Promise.all([
           roster(selected.id),
           memberRoster(selected.id),
           pendingMemberInvites(selected.id),
           agentAccessStatuses(selected.id),
+          pendingAgentAccess(selected.id),
           workspaceFiles(selected.id).then(
             (value) => ({ value, error: "" }),
             (error) => ({
@@ -6210,6 +6223,7 @@ import "../../styles/tokens.css";
         members = nextRoster.members;
         pendingInvites = nextInvites;
         accessStatuses = nextAccessStatuses;
+        pendingAgents = nextPending;
         files = nextFiles.value;
         fileLoadError = nextFiles.error;
         /* Only if no newer channel read has landed since this one started. A create the
@@ -9084,13 +9098,15 @@ import "../../styles/tokens.css";
       }
       const version = requestVersion;
       try {
-        const [nextAgents, nextStatuses] = await Promise.all([
+        const [nextAgents, nextStatuses, nextPending] = await Promise.all([
           roster(workspaceId),
           agentAccessStatuses(workspaceId),
+          pendingAgentAccess(workspaceId),
         ]);
         if (version !== requestVersion || workspaceId !== activeWorkspaceId) return;
         agents = nextAgents;
         accessStatuses = nextStatuses;
+        pendingAgents = nextPending;
         renderRoster();
         renderPendingAccess();
         const refresh = one<HTMLButtonElement>("[data-refresh]");
@@ -9128,9 +9144,10 @@ import "../../styles/tokens.css";
           receipt.hidden = true;
         }, 6_000);
       }
-      void agentAccessStatuses(activeWorkspaceId).then((next) => {
+      void Promise.all([agentAccessStatuses(activeWorkspaceId), pendingAgentAccess(activeWorkspaceId)]).then(([next, pending]) => {
         if (selected.id !== activeWorkspaceId) return;
         accessStatuses = next;
+        pendingAgents = pending;
         renderPendingAccess();
       });
       window.requestAnimationFrame(() => {

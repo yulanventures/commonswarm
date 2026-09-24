@@ -767,6 +767,75 @@ export interface AgentAccessStatus {
   grantRevokedAt: string | null;
 }
 
+export interface PendingAgentAccess {
+  kind: "classic" | "join";
+  principalId: string | null;
+  principalName: string | null;
+  joinCredentialId: string | null;
+  ownerUserId: string;
+  issuerDisplay: string;
+  issuedAt: string;
+  expiresAt: string | null;
+  seatsUsed: number | null;
+  seatCap: number | null;
+}
+
+/** The server owns pending eligibility; a fresh poll replaces the whole list. */
+export async function pendingAgentAccess(workspaceId: string): Promise<PendingAgentAccess[]> {
+  const d = deployment();
+  if (!d) throw new NoDeployment();
+  const session = await currentSession();
+  if (!session) throw new SessionExpired();
+  const deadline = requestDeadline();
+  try {
+    const response = await fetch(`${d.url}/functions/v1/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${session.access_token}`,
+        apikey: d.anonKey,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ resource: "pending_access", workspace_id: workspaceId }),
+      signal: deadline.controller.signal,
+    });
+    if (!response.ok) throw new Error(`Pending access read failed (${response.status}).`);
+    const body = await response.json() as { pending?: Array<Record<string, unknown>> };
+    if (!Array.isArray(body.pending)) throw new Error("Pending access read returned malformed data.");
+    return body.pending.map((row) => {
+      if ((row.kind !== "classic" && row.kind !== "join") ||
+        typeof row.owner_user_id !== "string" || typeof row.issuer_display !== "string" ||
+        typeof row.issued_at !== "string" || !Number.isFinite(Date.parse(row.issued_at)) ||
+        !(row.expires_at === null ||
+          (typeof row.expires_at === "string" && Number.isFinite(Date.parse(row.expires_at)))) ||
+        (row.kind === "classic" &&
+          (typeof row.principal_id !== "string" || typeof row.principal_name !== "string" ||
+            row.join_credential_id !== null || row.seats_used !== null || row.seat_cap !== null)) ||
+        (row.kind === "join" &&
+          (row.principal_id !== null || row.principal_name !== null ||
+            typeof row.join_credential_id !== "string" ||
+            typeof row.expires_at !== "string" ||
+            !Number.isSafeInteger(row.seats_used) || !Number.isSafeInteger(row.seat_cap) ||
+            Number(row.seats_used) < 0 || Number(row.seats_used) >= Number(row.seat_cap)))) {
+        throw new Error("Pending access read returned malformed data.");
+      }
+      return {
+        kind: row.kind,
+        principalId: row.principal_id === null ? null : String(row.principal_id),
+        principalName: row.principal_name === null ? null : String(row.principal_name),
+        joinCredentialId: row.join_credential_id === null ? null : String(row.join_credential_id),
+        ownerUserId: String(row.owner_user_id),
+        issuerDisplay: String(row.issuer_display),
+        issuedAt: String(row.issued_at),
+        expiresAt: row.expires_at === null ? null : String(row.expires_at),
+        seatsUsed: row.seats_used === null ? null : Number(row.seats_used),
+        seatCap: row.seat_cap === null ? null : Number(row.seat_cap),
+      };
+    });
+  } finally {
+    deadline.clear();
+  }
+}
+
 /** Member-scoped grant status through the read edge; no direct table query. */
 export async function agentAccessStatuses(
   workspaceId: string,
