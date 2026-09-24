@@ -1,0 +1,20 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url (it contacts
+commonswarm.com); no ssh, vercel, no remote supabase command; do not read ~/.cswarm or ~/.config/cswarm; start no other
+model; use no skill; print no secret. Read-only git and file reads; pure tests with a temporary HOME (build first).
+
+LANE: item J (option A), branch lane/item-j now at a1ef90ff (Codex fold 1: 7837e384, a1ef90ff on c26b98a7). Your
+current directory is a detached worktree at a1ef90ff. Your round-1 review (FAIL) and Opus's (FAIL) found the SQL hid a
+principal with a live unused token when a sibling token was revoked or expired; Opus also found the app's per-token
+rows and Cancel lost, test gaps and leftovers, missing box-release proofs, a hard dependency, and the owner-left case.
+Rulings J1-J7 and both reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemJ/fold1.md. Record: LANE.md "Fold 1".
+
+REVIEW `git diff c26b98a7..a1ef90ff` and the whole lane. CHECK: J1 — derive the pending rule yourself from the SQL and
+check every token combination (no token; live unused; dead sibling + live unused; used + anything; revoked only;
+expired only; revoked principal; owner left) and that age/expiry come from the newest live token; the site keeps the
+old per-token rows and Cancel exactly as at origin/main; J2 the server test covers each case and the column check is
+exact; J3 no rows left; J4 the proof files match deploy/RELEASE-TO-BOX.md section 5 and the H0 lane's form; J5
+`cswarm members` and the app degrade with the "could not load" note; J7; no secret projected; LANE.md claims true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,19 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url; no ssh, vercel,
+no remote supabase command; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no
+secret. Read-only git and file reads; pure tests with a temporary HOME (build first).
+
+LANE: item J (option A, ruled), branch lane/item-j now at 90467bbf (Codex fold 2: d609b9b7, 28555194, 90467bbf on
+a1ef90ff). Your current directory is a detached worktree at 90467bbf. Your round-2 review of a1ef90ff was PASS; Opus
+round 2 was PASS with findings the lead ruled in scope: F1 join codes from a departed issuer not listed; F2 the
+box-release proofs must be able to fail (catalog pins the body, functional proof real bounds); F3 tests that catch a
+return to the throwing read at `cswarm members` and the four app sites; F4 the Pending access section visible at
+desktop widths; F5 LANE.md. Rulings: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemJ/fold2.md.
+
+REVIEW `git diff a1ef90ff..90467bbf` only. CHECK: each ruling is implemented and its test or proof fails on revert
+(read the test/proof and the code it guards); F2: can each proof fail for the reason it claims (a changed body, a removed
+member gate, zero rows), and does it follow deploy/RELEASE-TO-BOX.md section 5 (ending \gset form); F4: the CSS change
+touches only the pending section's visibility and does not change other layout; nothing else changed; LANE.md true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence. Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

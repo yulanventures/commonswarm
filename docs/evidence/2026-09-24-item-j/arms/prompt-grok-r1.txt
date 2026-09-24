@@ -1,0 +1,29 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url (it contacts commonswarm.com); no
+ssh, supabase remote commands, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill;
+print no secret. Read-only git and file reads; you may run pure tests with a temporary HOME (build first for dist/).
+
+LANE: item J ("invited, not connected" is visible), option A, branch lane/item-j at c26b98a7 (86a61a2b by Codex,
+c26b98a7 lead test fixes), base origin/main e9fe4fe8. Your current directory is a detached worktree at c26b98a7.
+Diff: git diff origin/main...c26b98a7. SPEC: docs/design/2026-09-24-ITEM-J-INVITED-NOT-CONNECTED-BRIEF.md
+(decisions 1-3; the setup-error report is OUT of scope). Record: docs/evidence/2026-09-24-item-j/LANE.md. This lane
+adds a MIGRATION and a read-edge resource, so it will go to production through a box release.
+
+CHECK clause by clause:
+- the migration: the view/function's access control (only members of that workspace; no other workspace; security
+  definer search_path and grants follow the existing patterns exactly); it projects NO hash, secret, locator or token
+  column (enumerate the columns); the hidden H0 registrar principal never appears; revoked, expired, used-up and
+  first-used entries are excluded; the SQL is correct for a principal with no token, several tokens (one used), a
+  revoked principal; performance (indexes used; no full-table scan per call that grows with history);
+- the migration is safe to apply on a live database (no locks on hot tables beyond what CREATE VIEW/FUNCTION takes; no
+  data rewrite) and matches deploy/RELEASE-TO-BOX.md's rules;
+- the read-edge resource: authentication for a human session and an agent credential of the same workspace; a caller
+  of another workspace gets nothing and no existence oracle; errors; `npm run check:edge`;
+- `cswarm members` and the app: the displayed state and age are true; "clears on first use" matches the server rule
+  (first_used_at); nothing a model sees now carries a secret; the JSON shape;
+- tests: the server test (tests/p1-server/pending-access.test.ts) proves member scope, no secret columns and each
+  clearing case; CLI and site tests prove what they name; they run under package scripts; claims in LANE.md are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
