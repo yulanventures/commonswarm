@@ -11,7 +11,7 @@ Branch: `lane/mcp-stdio`, based on `adef94b4`. This lane made no production requ
 | 3. Seven tools | Only `whoami`, `check`, `ask`, `note`, `reply`, `working_on`, and `members` are advertised. | Tool-list equality and one happy path plus refusal per tool. |
 | 4. MCP argument allow-lists | `src/mcp/tools.ts` declares independent JSON schemas with `additionalProperties: false`, validates them in the server, and reads body/about limits and request-ID pattern from enforcement constants. | All denied flag names and snake-case forms are absent from all seven schemas; each is sent through `tools/call` and receives `-32602`. |
 | 5. Result allow-lists and cap | The same tool table names the result mapper. Identity, roster, check, and signal outputs select fields explicitly; every success and error has a 32 KiB JSON text cap and a `truncated: true` overflow marker. | Result key assertions, token/grant/profile/shell exclusion checks, cap test, and stdout parsing. |
-| 6. Request-ID idempotency | `request_id` is passed as `commandId` directly, ahead of pending-intent IDs. Ambiguous transport/5xx outcomes return `unknown` with a same-ID retry hint; 409 stops. | Same ID twice yields one fake-edge signal; a committed write whose answers are lost remains one signal after retry; 409 sends no fresh ID; cancellation after send start puts unknown on the stdio wire. |
+| 6. Request-ID idempotency | `request_id` is passed as `commandId` directly, ahead of pending-intent IDs. Ambiguous transport/5xx outcomes return `unknown` with a same-ID retry hint; 409 stops. | Same ID twice yields one fake-edge signal; a committed write whose answers are lost remains one signal after retry; 409 sends no fresh ID; "cancellation after send start puts unknown on the stdio wire" (superseded by Fold 1: cancellation sends no unsolicited response; the caller can retry with the same ID). |
 | 7. Check cursor | The check library caches full bodies, and MCP defers cursor commit until the SDK transport has written the response. `check {message_id}` reads one cached full body. | Preview/full-text and second-check cursor tests; source trace of deferred commit. |
 | 8. Renewal and typed errors | Each network call opens the profile's file-backed credential session and obtains one bearer through its existing lock/one-shot path. Setup, command HTTP, and renewal classes map to structured tool errors; calls leave the server alive. | Refusal calls preserve server code, status, and sentence. A real stdio test with an expired fixture credential proves one 426 renewal exchange per call and a still-running process; class mapping also covers reauthorisation, revocation, and suspension. |
 | 9. CLI table | `mcp` is a visible stdio-only bootstrap row with `tool: null`, native profile, and kept host session. | Command-dispatch baseline, table metadata tests, and released artifact `mcp --help`. |
@@ -60,7 +60,7 @@ Implementation commits: `f8f2dec0` and `3ad4e676`; the latter closes the unliste
 | R6 | Deferred commit re-reads `check.json` under the lock, moves forward only, preserves newer cache rows, and deletes callbacks on write error or cancellation. | The forward-merge test keeps a hook check's later cursor and cached full body. Replacing the re-read with the stale snapshot: exit 1, 1/1 failed. Moving commit before the write: exit 1, 1/1 failed. |
 | R7 | Stdio capture begins immediately after child spawn, before SDK connect, and continues through child close. | The all-tool stdout parser covers the whole lifetime. Injecting a startup banner before `serveMcp`: mutant build exit 0, selected test exit 1 (1/1 failed); clean rebuild exit 0. |
 | R8 | The CLI dynamically imports the MCP server inside its handler. | TypeScript AST test rejects a static `./mcp/` import and requires the dynamic import. Adding a static import: exit 1, 1/1 failed. |
-| R9 | Request-ID bounds, duration parser and grammar, channel slug bounds and normalization, and recipient selector bound are shared with CLI enforcement. UUID schema advertises the uppercase variant characters it accepts. | Stdio schema test checks invalid durations, bounds, and normalized channel posting. Removing the channel bound from the advertised schema: exit 1, 1/1 failed. |
+| R9 | Request-ID bounds, duration parser and grammar, and channel slug bounds use enforcement constants. MCP validates channel slugs without normalization; the 80-character recipient selector bound is MCP-schema only. UUID schema advertises the uppercase variant characters it accepts. | Stdio schema test rejects `TEAM-UPDATES` and posts `team-updates` unchanged. Removing the channel bound from the advertised schema: exit 1, 1/1 failed. |
 | R10 | Dispatch baseline now includes missing profile, unreadable profile, and manual host session rows that reach the MCP start-up checks (`assertShape`, `profile_missing`, `host_session_invalid`). Correction (lead, fold 3): the generated policy-matrix and selected-error rows for `mcp` (`policy.host-session.mcp.keep`, `selected-error.mcp.*`) are built from `["mcp", "extra"]`, like the other bootstrap error rows, and stop at `too many positional arguments`; they record the error mode, not host-session handling. Prior 1,258 row values are byte-identical after JSON comparison; three rows were added. | Baseline records 1,261 rows. The focused fixture assertion checks the three codes. Removing a row: exit 1, 1/1 failed. |
 | R11 | Managed detection still uses local session contexts at startup. | The managed-context startup test checks `host_session_required`. Changing that refusal code: exit 1, 1/1 failed. A managed context absent from this host remains **not established**. |
 | R12 | Cached full-text messages include `sender_owner_relation`. | Stdio check and cached-read assertions retain the relation. Dropping it: exit 1, 1/1 failed. |
@@ -118,3 +118,30 @@ All test commands had process timeouts and isolated `HOME` values. The final sou
 
 - The sandbox did not permit the `ps`-based tests to pass. The lead can rerun both full suites outside it.
 - No production control, hosted model transcript, npm publication, or deployment was attempted. Those remain lead-owned.
+
+## Fold 4 (2026-09-23)
+
+Only this worktree was changed. Stdio tests used temporary profiles and a loopback fake edge. Each mutation was bounded, the changed source was restored, and the final build passed. Each selected mutant test exited 1 with 0/1 pass; the restored focused suite passed 20/20.
+
+| Ruling | Implementation | Test and reverted-fix mutation |
+|---|---|---|
+| F4-1 | The post `forbidden` sentence now states possible refusal causes, including own asks, expired or unaddressed signals, inactive recipients, and changed access. The existing next step remains. | The fake edge pins the complete payload for all four post tools. Replacing the sentence with the earlier wording: selected test exit 1, 0/1 pass. |
+| F4-2 | `session-wire.ts` exports the four session-proof refusal codes. The owned sentence table derives entries from that list and gives both post and read paths a host-session restart step. Other read 401/403/426 refusals retain their access step. | The generated coverage assertion requires all four owned entries. The stdio test checks post and read payloads for each code. Removing the generated entries: selected test exit 1, 0/1 pass. |
+| F4-3 | `rate_limited` names this agent's hourly limit and tells the caller to wait and retry with the same `request_id`. The command client does not type or parse the edge body's `resets_at`, so no `retry_after` field was added. | The fake edge pins the full 429 payload. Restoring the prior sentence and step: selected test exit 1, 0/1 pass. |
+| F4-4 | Channel schemas advertise `not: { enum: ... }` from `RESERVED_CHANNEL_SLUGS`, the same constant used by `channelSlugProblem`. MCP validation reads the schema rule for pattern, length, and reserved names; it does not normalize. | The test checks the advertised exclusion, sends `all-signals`, and expects `-32602`. Emptying the schema enum: selected test exit 1, 0/1 pass. |
+| F4-5 | The six-message fixture has short bodies, so `checkAgentMessages` returns all six before MCP caps the result. The test still proves a strict visible prefix, then no skipped or repeated IDs. | Returning the full library page from `capFreshCheck`: selected test exit 1, 0/1 pass. |
+| F4-6 | Fold 1 R9 now states raw channel validation and the MCP-only recipient bound. Row 6 keeps its retired cancellation words quoted with an inline supersession marker. The focused fixture assertion comments identify its three MCP start-up rows and distinguish the policy/error-mode rows. | The existing document assertion pins the R9 and row-6 corrections. Removing the inline marker: selected test exit 1, 0/1 pass. No new policy-row test was added. |
+
+### Fold 4 gates
+
+All test processes had timeouts and isolated `HOME` values. No test or help process survived. `FORCE_COLOR` was unset for both full suites.
+
+| Gate | Exit | Count or result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript build and executable CLI completed. |
+| `env -u FORCE_COLOR npm test` | 1 | 960/962 pass; two sandbox `ps` checks failed with `EPERM`. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 872/875 pass; three sandbox `ps` checks failed with `EPERM`. |
+| `npm run check:tests` | 0 | Source and test TypeScript check completed. |
+| Focused MCP stdio test | 0 | 20/20 pass. |
+| `bash scripts/build-release.sh` | 0 | Single-file bundle built and execute-checked. |
+| Copied release artifact `mcp --help` from an external temporary directory | 0 | One MCP help row; empty stderr. |

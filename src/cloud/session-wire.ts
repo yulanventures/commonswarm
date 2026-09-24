@@ -40,6 +40,14 @@ export type AgentSessionErrorCode =
   | "session_leases_live"
   | "delivery_not_surfaced";
 
+/** Session-proof refusals reachable by ordinary managed-agent commands and reads. */
+export const AGENT_SESSION_PROOF_REFUSAL_CODES = [
+  "session_proof_missing",
+  "session_proof_invalid",
+  "session_expired",
+  "session_conflict",
+] as const satisfies readonly AgentSessionErrorCode[];
+
 /** ACK body field. Closed boolean. Required for managed principals. */
 export const ACK_AGENT_DELIVERY_SURFACED_FIELD = "surfaced" as const;
 

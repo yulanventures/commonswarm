@@ -1,7 +1,7 @@
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
-import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, channelSlugProblem } from "../cloud/channels.js";
+import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
 import { ONBOARDING_UUID } from "../cloud/agent-onboarding-contract.js";
 import type { AgentCheckResult } from "../cloud/agent-check.js";
 import type { SignalRecord } from "../cloud/command-client.js";
@@ -20,7 +20,7 @@ const body = string(SIGNAL_BODY_MAX, 1);
 const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
 const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
 const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
-const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
+const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
 const schema = (properties: Record<string, ReturnType<typeof string>>, required: string[] = []) => ({
   type: "object" as const, properties, required, additionalProperties: false as const,
 });
@@ -43,13 +43,13 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Expected an object of tool arguments.");
   const args = value as Record<string, unknown>;
   for (const key of Object.keys(args)) {
-    const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string>>)[key];
+    const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string> & { not?: { enum: readonly string[] } }>)[key];
     if (!rule) throw new Error(`Unknown argument: ${JSON.stringify(key.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
     const item = args[key];
     if (typeof item !== "string" || (rule.minLength !== undefined && item.length < rule.minLength) ||
         (rule.maxLength !== undefined && item.length > rule.maxLength) ||
         (rule.pattern !== undefined && !new RegExp(rule.pattern).test(item)) ||
-        (key === "channel" && channelSlugProblem(item) !== null)) throw new Error(`Invalid argument: ${key}.`);
+        (rule.not?.enum.includes(item) ?? false)) throw new Error(`Invalid argument: ${key}.`);
     if (key === "until") {
       try { signalDuration(item); } catch { throw new Error("Invalid argument: until."); }
     }

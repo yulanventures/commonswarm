@@ -4,9 +4,10 @@ import { CommandHttpError } from "../cloud/command-client.js";
 import { classifySignalReadFailure, followErrorEnvelope, followHttpDetails, LocalCredentialSecretAbsentError, SignalRecipientError } from "../cloud/signals.js";
 import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisationRequired, RenewalRefused, RenewalRetryError, RenewalRevoked, RenewalSuperseded, RenewalSuspended, RenewalUnsupported } from "../cloud/renewal.js";
 import { SessionContextError } from "../cloud/session-context.js";
+import { AGENT_SESSION_PROOF_REFUSAL_CODES } from "../cloud/session-wire.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
 
-type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person";
+type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
 type Sentence = { message: string; next_step: Action };
 const RETRY: Action = "retry the same call";
 const FIX: Action = "fix the named argument";
@@ -14,6 +15,8 @@ const PERSON: Action = "a person must restore this agent's access outside this s
 const STOP: Action = "stop and keep the same request id";
 const CHECK_ACCESS: Action = "check the named arguments; if they are right, a person may need to restore this agent's access";
 const CHECK_ARGUMENTS: Action = "check the arguments; if the problem stays, ask a person";
+const RESTART_SESSION: Action = "restart this MCP server with the current host session";
+const WAIT_AND_RETRY: Action = "wait, then retry the same call with the same request_id";
 const entry = (message: string, next_step: Action): Sentence => ({ message, next_step });
 
 /** The only model-visible error prose. No producer message is copied here. */
@@ -53,13 +56,15 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   signal_refused: entry("The service refused this signal.", PERSON),
   // The post_signal edge uses this same bare code for an ineligible reply,
   // an expired reference, an inactive recipient, and the scope gate.
-  forbidden: entry("A reply may target your own ask or an expired signal; a recipient may no longer be active; this agent's access may also have changed.", CHECK_ACCESS),
+  forbidden: entry("The service refused this post. Possible causes: a reply to your own ask; a reply to a signal that has expired or is not addressed to this agent; a recipient that is no longer active; a change to this agent's access.", CHECK_ACCESS),
   renewal_forbidden: entry("The service refused this agent's credential renewal.", PERSON),
   channel_not_found: entry("The channel argument names no channel in this workspace.", FIX),
   channel_archived: entry("The channel argument names an archived channel.", FIX),
   invalid_request: entry("The service did not accept the named arguments.", FIX),
   payload_too_large: entry("The body or about argument is too large.", FIX),
-  rate_limited: entry("The signal rate limit was reached.", RETRY),
+  rate_limited: entry("The signal rate limit for this agent was reached; it resets within an hour.", WAIT_AND_RETRY),
+  ...Object.fromEntries(AGENT_SESSION_PROOF_REFUSAL_CODES.map(code =>
+    [code, entry("The current host session was refused by the service.", RESTART_SESSION)])),
   unauthenticated: entry("The service refused this agent's credential.", PERSON),
   upgrade_required: entry("This client must be upgraded before access can resume.", PERSON),
   horizon_reached: entry("This agent reached its renewal horizon.", PERSON),
@@ -119,7 +124,9 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : error instanceof AgentCredentialInputError ? error.code
     : error instanceof CommandHttpError ? error.code ?? `http_${error.status}`
     : error instanceof SignalRecipientError ? error.code
-    : readHttp ? ([401, 403, 426].includes(readHttp.status) ? "read_refused" : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed")
+    : readHttp ? (readCode && (AGENT_SESSION_PROOF_REFUSAL_CODES as readonly string[]).includes(readCode) ? readCode
+      : [401, 403, 426].includes(readHttp.status) ? "read_refused"
+      : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed")
     : error instanceof RenewalReauthorisationRequired ? error.reason
     : error instanceof RenewalRevoked && error.code === "forbidden" ? "renewal_forbidden"
     : error instanceof RenewalRefused || error instanceof RenewalRetryError || error instanceof RenewalRevoked || error instanceof RenewalSuspended ? error.code

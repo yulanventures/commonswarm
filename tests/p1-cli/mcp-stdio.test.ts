@@ -15,6 +15,7 @@ import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisat
 import { checkAgentMessages, cachedAgentMessage, AGENT_CHECK_PAGE_SIZE, AGENT_CHECK_BODY_BUDGET } from "../../src/cloud/agent-check.js";
 import { AgentSetupError } from "../../src/cloud/agent-profile.js";
 import { CommandHttpError } from "../../src/cloud/command-client.js";
+import { AGENT_SESSION_PROOF_REFUSAL_CODES, agentSessionErrorStatus } from "../../src/cloud/session-wire.js";
 import { LocalCredentialSecretAbsentError, SignalMalformedError, SignalRecipientError, SignalTransportError } from "../../src/cloud/signals.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/cloud/storage.js";
 import { mapMcpError, sendWithDeferredCommit } from "../../src/mcp/server.js";
@@ -401,6 +402,11 @@ test("MCP errors come from the owned table and producer codes stay covered", { t
   for (const code of unionCodes("SessionContextErrorCode")) {
     assert.equal(mapMcpError(new SessionContextError(code as ConstructorParameters<typeof SessionContextError>[0], "hidden" )).code, "session_context_invalid");
   }
+  assert.equal(AGENT_SESSION_PROOF_REFUSAL_CODES.length, 4);
+  for (const code of AGENT_SESSION_PROOF_REFUSAL_CODES) {
+    assert.ok(MCP_ERROR_SENTENCES[code], `missing session sentence for ${code}`);
+    assert.equal(MCP_ERROR_SENTENCES[code]!.next_step, "restart this MCP server with the current host session");
+  }
   for (const [code, sentence] of Object.entries(MCP_ERROR_SENTENCES)) {
     assert.doesNotMatch(sentence.message, /cswarm|--[a-z]|\/|\\/i, code);
     assert.doesNotMatch(sentence.next_step, /cswarm|--[a-z]|\/|\\/i, code);
@@ -438,12 +444,12 @@ test("MCP stdio edge refusal codes give exact post and read next steps", { timeo
   const f = await fixture();
   try {
     const writeCases = [
-      [403, "forbidden", "A reply may target your own ask or an expired signal; a recipient may no longer be active; this agent's access may also have changed.", "check the named arguments; if they are right, a person may need to restore this agent's access"],
+      [403, "forbidden", "The service refused this post. Possible causes: a reply to your own ask; a reply to a signal that has expired or is not addressed to this agent; a recipient that is no longer active; a change to this agent's access.", "check the named arguments; if they are right, a person may need to restore this agent's access"],
       [404, "channel_not_found", "The channel argument names no channel in this workspace.", "fix the named argument"],
       [409, "channel_archived", "The channel argument names an archived channel.", "fix the named argument"],
       [400, "invalid_request", "The service did not accept the named arguments.", "fix the named argument"],
       [413, "payload_too_large", "The body or about argument is too large.", "fix the named argument"],
-      [429, "rate_limited", "The signal rate limit was reached.", "retry the same call"],
+      [429, "rate_limited", "The signal rate limit for this agent was reached; it resets within an hour.", "wait, then retry the same call with the same request_id"],
       [418, "new_code", "The service returned new_code with status 418.", "check the arguments; if the problem stays, ask a person"],
     ] as const;
     let index = 0;
@@ -460,6 +466,14 @@ test("MCP stdio edge refusal codes give exact post and read next steps", { timeo
         assert.deepEqual(value, { code, message, next_step, status });
       }
     }
+    for (const code of AGENT_SESSION_PROOF_REFUSAL_CODES) {
+      const status = agentSessionErrorStatus(code);
+      f.setSendError({ status, code });
+      const { result, value } = await f.call("note", { body: "note", request_id: `session${++index}` });
+      assert.equal(result.isError, true);
+      assert.deepEqual(value, { code, message: "The current host session was refused by the service.",
+        next_step: "restart this MCP server with the current host session", status });
+    }
     f.setSendError(null);
     for (const [status, code] of [[401, "unauthenticated"], [403, "forbidden"], [426, "upgrade_required"]] as const) {
       f.setReadError({ status, code });
@@ -467,6 +481,14 @@ test("MCP stdio edge refusal codes give exact post and read next steps", { timeo
       assert.equal(result.isError, true);
       assert.deepEqual(value, { code: "read_refused", message: "The service refused this read.",
         next_step: "a person must restore this agent's access outside this session", status });
+    }
+    for (const code of AGENT_SESSION_PROOF_REFUSAL_CODES) {
+      const status = agentSessionErrorStatus(code);
+      f.setReadError({ status, code });
+      const { result, value } = await f.call("members");
+      assert.equal(result.isError, true);
+      assert.deepEqual(value, { code, message: "The current host session was refused by the service.",
+        next_step: "restart this MCP server with the current host session", status });
     }
   } finally { await f.close(); }
 });
@@ -584,8 +606,23 @@ test("MCP partial check commits only the last visible message", { timeout: 15_00
   const f = await fixture();
   try {
     const ids = Array.from({ length: 6 }, (_, index) => `dddddddd-dddd-4ddd-8ddd-${String(index + 1).padStart(12, "0")}`);
-    f.setIncoming(ids.map((id, index) => signal(`message ${index} ${"x".repeat(1_000)}`, "ask", id)));
-    f.setWorkspaceName("w".repeat(30_000));
+    f.setIncoming(ids.map((id, index) => signal(`message ${index} ${"x".repeat(100)}`, "ask", id)));
+    const priorState = process.env.SWARM_AGENT_STATE_DIR;
+    const priorConfig = process.env.XDG_CONFIG_HOME;
+    process.env.SWARM_AGENT_STATE_DIR = join(f.root, "renewal");
+    process.env.XDG_CONFIG_HOME = join(f.root, "config");
+    try {
+      const libraryPage = await checkAgentMessages({ profilePath: f.profile,
+        present: async () => undefined, deferCursorCommit: () => undefined });
+      assert.deepEqual(libraryPage.messages.map(row => row.id), ids,
+        "the check library must return all six rows before the MCP byte cap");
+    } finally {
+      if (priorState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+      else process.env.SWARM_AGENT_STATE_DIR = priorState;
+      if (priorConfig === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = priorConfig;
+    }
+    f.setWorkspaceName("w".repeat(31_000));
     const first = (await f.call("check")).value;
     assert.ok(first.messages.length > 0 && first.messages.length < ids.length, "the cap must show a strict prefix");
     assert.equal(first.has_more, true);
@@ -660,7 +697,10 @@ test("MCP schemas reject invalid durations and use shared request and channel ru
       [{ body: "hello", request_id: "valid003", channel: "bad space" }, "channel"],
       [{ body: "hello", request_id: "valid004", to: "x".repeat(81) }, "to"],
     ] as const) await assert.rejects(f.client.callTool({ name: "note", arguments: args }), (error: any) => error.code === -32602 && error.message.includes(bad));
-    for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates "]) {
+    const channelRule = note.inputSchema.properties!.channel as { pattern: string; maxLength: number; not: { enum: string[] } };
+    assert.deepEqual(channelRule.not.enum, ["all-signals"]);
+    assert.match("all-signals", new RegExp(channelRule.pattern));
+    for (const channel of ["TEAM-UPDATES", " team-updates", "team-updates ", "all-signals"]) {
       await assert.rejects(f.client.callTool({ name: "note", arguments: { body: "hello", request_id: "valid005", channel } }),
         (error: any) => error.code === -32602 && error.message.includes("channel"));
     }
@@ -692,6 +732,8 @@ test("MCP dispatch policy and fold corrections are recorded", { timeout: 5_000 }
   const rows = JSON.parse(await readFile("tests/p1-cli/fixtures/command-dispatch-baseline.json", "utf8")) as
     Array<{ id: string; exitCode: number; stderr: string }>;
   for (const [id, code] of [
+    // The policy.host-session.mcp.keep and selected-error.mcp.* fixtures stop at positional-argument parsing.
+    // mcp.missing-profile, mcp.unreadable-profile, and mcp.manual-host-session reach MCP start-up checks.
     ["mcp.missing-profile", "mcp_start_failed"],
     ["mcp.unreadable-profile", "profile_missing"],
     ["mcp.manual-host-session", "host_session_invalid"],
@@ -705,4 +747,7 @@ test("MCP dispatch policy and fold corrections are recorded", { timeout: 5_000 }
   assert.equal(brief.split("Correction (fold 1, 2026-09-23)").length - 1, 2);
   assert.match(brief, /`replayed` is removed/);
   assert.match(brief, /a cancelled call gets no/);
+  const lane = await readFile("docs/evidence/2026-09-23-mcp-lane2/LANE.md", "utf8");
+  assert.match(lane, /"cancellation after send start puts unknown on the stdio wire" \(superseded by Fold 1:/);
+  assert.match(lane, /R9 \|[^\n]*without normalization; the 80-character recipient selector bound is MCP-schema only/);
 });
