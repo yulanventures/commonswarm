@@ -181,7 +181,9 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     });
 
     assert.equal(code, NOTIFY_SIGNAL_EXIT_CODES.SIGTERM, stderr);
-    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM")}`);
+    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
+      agentTokenStdin: true, url, anonKey: "anon-key-for-arrival-test", workspaceId: WORKSPACE,
+    })}`);
     const lines = stdout.trimEnd().split("\n");
     assert.equal(lines.length, 2, stdout);
     assert.match(lines[0]!, new RegExp(SENDER));
@@ -337,7 +339,9 @@ test("inbox --notify --json carries the whole body; the readable line names a ru
       });
     });
     assert.equal(code, NOTIFY_SIGNAL_EXIT_CODES.SIGTERM, stderr);
-    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM")}`);
+    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
+      agentTokenStdin: true, url, anonKey: "anon-key-for-arrival-test", workspaceId: WORKSPACE,
+    })}`);
     return stdout.trimEnd().split("\n")[0]!;
   };
   try {

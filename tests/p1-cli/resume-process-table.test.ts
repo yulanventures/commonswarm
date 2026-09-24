@@ -81,7 +81,7 @@ function fixedStdout(state: "orphaned"): StdoutConsumerAdapter {
   return { inspect: async () => state };
 }
 
-test("a process table larger than the old buffer still yields every watcher", async () => {
+test("a process table larger than the old buffer still yields every watcher", { timeout: 15_000 }, async () => {
   const filler: string[] = [];
   let size = 0;
   for (let index = 0; size < SHIPPED_MAX_BUFFER_BYTES; index += 1) {
@@ -111,6 +111,7 @@ test("a process table larger than the old buffer still yields every watcher", as
       principalId: PRINCIPAL,
       processTableCommand: fixture.command,
       stdoutConsumer: fixedStdout("orphaned"),
+      parentProcess: { async inspect() { return "parent_alive"; } },
     });
 
     assert.deepEqual(watchers.map((watcher) => watcher.pid), [4_242, 4_243]);

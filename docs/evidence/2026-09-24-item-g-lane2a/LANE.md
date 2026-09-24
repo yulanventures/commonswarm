@@ -30,7 +30,45 @@ The ten mutation variants above were run with a 12 s process-group timeout; all 
 
 ## Not established
 
+- On Linux, `lsof` without `+E` prints no peer for fd 1, so the idle check cannot prove an orphan; a watcher with an empty inbox never exits 74 from that check. The write-time EPIPE path is unchanged. This was inferred from the parser and the review, not measured on Linux.
 - The lead's live Monitor control on the mini is not run by this lane. The push wait is covered with a fake subscribed wake adapter, not a real Realtime socket in a child CLI process.
 - Full `npm test` and `test:p1-cli` are not green in this sandbox. The host-stderr timing failures have no isolated follow-up here; the `ps` failures are explicit `EPERM`. These gate results do not establish those unrelated behaviors.
 - This lane does not establish a production release, server wake lease, listener change, or hosted behavior. The site build with a blank backend does not confirm hosted sign-in providers.
 - `pgrep` returned `sysmond service not found` / `Cannot get process list` in this sandbox. Test wrappers killed process groups on timeout and child tests kill their own children, but the requested final process-list check cannot establish a host-wide absence here.
+
+## Fold 1
+
+Reviewed failures: `itemG2a/opus-r1.md` and `itemG2a/grok-r1.md`, read in full. This fold was measured in the lane worktree with temporary HOME and state directories and loopback read services.
+
+| Ruling | Change and control | Measured reverted behavior (targeted test, 20 s outer limit) |
+|---|---|---|
+| F1 | The signal sentence composes the actual `--agent-token-file` path, explicit workspace/target flags, or `--agent-token-stdin` instruction. Shell quoting covers spaces and apostrophes. `resume` uses the same command builder. `resume.test.ts` extracts the printed command, lets `/bin/sh` parse it, and proves the restarted child reads the loopback service. | Return the constant command alone: exit 1, 0 pass / 1 fail. |
+| F2 | Retry backoff uses the same bounded stdout-check wait as idle polling. A 5xx loopback service and a destroyed stdout reader cause exit 74 within the 300 ms test cadence plus margin. | Restore the unchecked backoff wait: exit 1, 0/1 pass. |
+| F3 | Proven `live_reader` or `orphaned` stdout determines the watcher state; parent evidence decides only for `cannot_determine` or `not_pipe`. `EPERM` from `kill(pid, 0)` means the parent exists. The JSON retains both fields and the Next line names the unknown evidence. `resume.test.ts` covers all nine stdout/parent combinations. | Restore parent-first state: exit 1, 0/1 pass. Reclassify `EPERM` as missing: exit 1, 0/1 pass. |
+| F4 | The shared lsof parser has recorded unix, PIPE, FIFO, REG, CHR, empty, and second-name fixtures. The parent parser and injected `ps`/`kill` adapter cover init, live, missing, unreadable, and `EPERM`. | PIPE/FIFO as orphan: exit 1, 0/1 pass; unix path as orphan: exit 1, 0/1; adapter always init: exit 1, 0/1; `EPERM` as missing: exit 1, 0/1. |
+| F5 | The older resume test injects `parentProcess` and asserts that the fake watcher's parent is live. The large fake process-table test also injects a parent adapter. | Remove the older test's adapter: exit 1, 0/1 pass. |
+| F6 | The timeout-table citation now spans the `timeout: timeoutMs` option, and its test resolves the range. The signal message is one sentence; the CLI tests check exact output. | Restore the old citation: exit 1, 0/1 pass; split the sentence: exit 1, 0/1 pass. |
+| F7 | The Not established section records the Linux `lsof` peer limit and the consequence for idle exit 74. A test pins that statement. | Remove the statement: exit 1, 0/1 pass. |
+
+The test controls live in `tests/p1-cli/resume.test.ts`, `tests/p1-cli/arrival-notify.test.ts`, `tests/p1-cli/citation-drift.test.ts`, and the pre-existing `resume-process-table.test.ts`. All are reached by `test:p1-cli`; all except `arrival-notify.test.ts` are also in the literal `npm test` list. Each new test has its own timeout. Each of the 11 targeted probes ran its positive control and reverted mutation in the same bounded invocation: positive exit 0 with 1/1 pass, reverted exit 1 with 0/1 pass. The reverted source was restored after each probe.
+
+### Fold 1 gates
+
+| Gate | Exit | Measured count or result |
+|---|---:|---|
+| `npm run build` | 0 | TypeScript errors: 0. |
+| `env -u FORCE_COLOR npm test` | 1 | 984 tests: 973 pass, 11 fail, 0 cancelled. Nine host-stderr timing failures and two sandbox `spawn EPERM` process-table failures. Final-tree rerun. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1 | 951 tests: 948 pass, 3 fail, 0 cancelled. All three report sandbox `spawn EPERM` from `ps` (`spawnSync` in one). Final-tree rerun. |
+| `npm run check:tests` | 0 | Test TypeScript errors: 0. |
+| `npm run check:edge` | 0 | Six edge entry points checked, errors: 0. |
+| `npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js` | 0 | Bundle diff: 0 files. |
+| `bash scripts/build-release.sh` | 0 | One single-file bundle built and execute-checked with a loopback URL. |
+| `npm --prefix site run build` | 0 | 12 pages built with the public backend variables blank. |
+| `git diff --check origin/main...HEAD` | 0 | Whitespace errors: 0, measured after fold commits. |
+
+### Fold 1 not established
+
+- The host-stderr timing tests and `ps` tests are not established by the failed full gates; the fold's targeted controls passed. The sandbox's `spawn EPERM` is separate from the measured watcher behavior.
+- Linux lsof peer output was not measured on Linux. The idle check cannot prove closure there under the known output shape, so the watcher does not exit 74 from that check while its inbox is empty; the write-time EPIPE path remains.
+- No live Monitor, Realtime child socket, production release, or hosted service was tested by this fold.
+- The final `pgrep` check returned exit 3 (`sysmond service not found` / `Cannot get process list`), so host-wide process absence is not established by that command. Each test killed its child on its own deadline or in `finally`.
