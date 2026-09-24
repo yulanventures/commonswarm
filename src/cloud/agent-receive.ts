@@ -55,7 +55,7 @@ export function receiveBindingPath(profile: string, hostSessionId?: string): str
 
 export async function readReceiveBinding(profile: string, hostSessionId?: string): Promise<ReceiveBinding | null> {
   profile = privatePath(profile);
-  await readAgentProfile(profile);
+  await readAgentProfile(profile, hostSessionId);
   const host = checkedHostSessionId(hostSessionId);
   const raw = await readSecureJsonFileIfPresent(receiveBindingPath(profile, host), 32 * 1024);
   if (raw === null) return null;
@@ -217,7 +217,7 @@ export async function configureAgentReceive(options: {
     if (!grokAgentId || !ONBOARDING_UUID.test(grokAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID, or use that UUID as --host-session-id.");
     await findGrokBotGateway(options.gatewayPaths);
   }
-  await readAgentProfile(profile);
+  await readAgentProfile(profile, host);
   const cwd = await realpath(options.cwd ?? process.cwd());
   return withFileLock(dirname(profile), `receive-${profileScopeKey(host)}`, async () => {
     const existing = await readReceiveBinding(profile, host);

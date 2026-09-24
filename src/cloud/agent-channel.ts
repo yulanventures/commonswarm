@@ -86,7 +86,7 @@ export function isOwnCanary(binding: ReceiveBinding, row: DeliveryRow, principal
 
 export async function serveAgentChannel(options: { profilePath: string; hostSessionId: string; gateway?: GatewayChannelTransport }): Promise<void> {
   const profilePath = privatePath(options.profilePath);
-  const profile = await readAgentProfile(profilePath);
+  const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const host = options.hostSessionId;
   const initial = await readReceiveBinding(profilePath, host);
   if (!initial || initial.provider !== (options.gateway ? "grok-bot" : "claude") || initial.requested_mode !== "wake") {

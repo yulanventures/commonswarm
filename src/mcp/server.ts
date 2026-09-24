@@ -31,7 +31,7 @@ export async function sendWithDeferredCommit<T extends object>(
 /** One profile, one workspace, no CLI table handlers and no child process. */
 export async function serveMcp(options: McpServerOptions): Promise<void> {
   const profilePath = privatePath(options.profilePath);
-  const profile = await readAgentProfile(profilePath);
+  const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const contexts = await listSessionContexts(profile.workspace_id, profile.principal_id);
   if (!options.hostSessionId && contexts.some(context => context.released_at === null && sessionProofOf(context) !== null)) {
     throw new AgentSetupError("host_session_required", "This managed agent needs --host-session-id from its current host session.");

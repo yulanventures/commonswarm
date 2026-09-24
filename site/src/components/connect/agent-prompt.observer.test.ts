@@ -45,13 +45,15 @@ test("one-paste setup includes a single connection token and full agent ID, with
   assert.match(prompt, /0700/);
   assert.match(prompt, /0600/);
   assert.match(prompt, /cswarm setup --connection-file/);
+  assert.match(prompt, /--host-session-id "\$CLAUDE_CODE_SESSION_ID"/);
+  assert.match(prompt, /--host-session-id "\$CODEX_THREAD_ID"/);
   assert.match(prompt, /cswarm setup --check-version/);
-  assert.ok(prompt.length < 2900, `inline prompt grew to ${prompt.length} characters`);
+  assert.ok(prompt.length < 3200, `inline prompt grew to ${prompt.length} characters`);
 });
 
 test("file handoff stays short without hiding a manual fetch", () => {
   const prompt = dashboardAgentFilePrompt(INPUT);
-  assert.ok(prompt.length <= 1600, `file prompt has ${prompt.length} characters`);
+  assert.ok(prompt.length <= 2000, `file prompt has ${prompt.length} characters`);
   assert.equal(prompt.includes(TOKEN), false);
   assert.equal(prompt.includes(INPUT.anonKey), false);
   assert.match(prompt, /attached connection JSON/);

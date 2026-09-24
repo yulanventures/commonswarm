@@ -36,7 +36,7 @@ export {
 };
 
 const REPAIR_USE_SETUP_FILE =
-  "Use ‘Use a setup file’ in CommonSwarm and run setup with that file. Do not edit credentials or paste them into chat.";
+  "Use ‘Use a setup file’ in CommonSwarm and run setup with that file. Do not edit credentials or paste them into chat. Stop and tell the operator. Do not open another agent's profile.";
 
 function checkedTarget(url: string, anonKey: string): CloudTarget {
   try {

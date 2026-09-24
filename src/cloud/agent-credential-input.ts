@@ -45,8 +45,8 @@ export type AgentCredentialInputSource =
 export class AgentCredentialInputError extends Error {
   readonly name = "AgentCredentialInputError";
 
-  constructor(readonly code: AgentCredentialInputErrorCode, message: string) {
-    super(`[${code}] ${message}`);
+  constructor(readonly code: AgentCredentialInputErrorCode, readonly detail: string) {
+    super(`[${code}] ${detail}`);
   }
 }
 

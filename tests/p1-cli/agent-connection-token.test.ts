@@ -488,6 +488,7 @@ test("Control proving the OLD path still works: a plain JSON envelope file still
   const fake1 = mockFetcher();
   const jsonResult = await setupAgent({
     connectionFile: jsonFilePath,
+    hostSessionId: "manual",
     profilePath: jsonProfilePath,
     fetcher: fake1.fetcher,
   });
@@ -509,6 +510,7 @@ test("Control proving the OLD path still works: a plain JSON envelope file still
   const fake2 = mockFetcher();
   const tokenResult = await setupAgent({
     connectionFile: tokenFilePath,
+    hostSessionId: "manual",
     profilePath: tokenProfilePath,
     fetcher: fake2.fetcher,
   });

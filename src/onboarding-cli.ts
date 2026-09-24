@@ -4,6 +4,7 @@ import {
   AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, RECEIVE_MODES, RECEIVE_PROVIDERS, turnCheckInstruction,
 } from "./cloud/agent-onboarding-contract.js";
 import { setupAgent } from "./cloud/agent-setup.js";
+import { AgentCredentialInputError } from "./cloud/agent-credential-input.js";
 import {
   cachedAgentMessage, checkAgentMessages, renderAgentCheck, shellQuote,
 } from "./cloud/agent-check.js";
@@ -31,7 +32,7 @@ export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id
 export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
 
 export function onboardingUsage(): string {
-  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] [--host-session-id <id>] [--json]
+  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]
   cswarm setup --check-version
   cswarm setup guide
   cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
@@ -109,6 +110,10 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   }, processDeadlineDelayMs(HOST_HOOK_PROCESS_DEADLINE_MS));
   try {
     const event = await hookInput();
+    const stdinSessionId = event && typeof event === "object" && !Array.isArray(event) &&
+      typeof (event as Record<string, unknown>).session_id === "string"
+      ? (event as Record<string, string>).session_id : undefined;
+    await readAgentProfile(profile, stdinSessionId);
     const result = await receiveHookEvent(profile, host, event);
     if (!result.check) return;
     await checkAgentMessages({ profilePath: profile, hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
@@ -135,9 +140,19 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
 
 export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-import");
-  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
-  if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
-  await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
+  try {
+    args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+    if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
+    await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
+  } catch (error) {
+    if (error instanceof AgentSetupError && !["profile_other_session", "host_session_required", "setup_host_session_required"].includes(error.code) && !error.code.startsWith("token_")) {
+      throw new AgentSetupError(error.code, `${error.message} Stop and tell the operator. Do not open another agent's profile.`);
+    }
+    if (error instanceof AgentCredentialInputError) {
+      throw new AgentCredentialInputError(error.code, `${error.detail} Stop and tell the operator. Do not open another agent's profile.`);
+    }
+    throw error;
+  }
 }
 
 export async function runSetupVersion(args: OnboardingArguments): Promise<void> {
@@ -234,7 +249,7 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
   recordDispatch("runOnboardingCommand:resume-profile");
   args.assertShape(["profile", "host-session-id", "json"], 1);
   const path = privatePath(args.required("profile"));
-  const profile = await readAgentProfile(path);
+  const profile = await readAgentProfile(path, args.optional("host-session-id"));
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
     authenticated_now: false, ...receiveStatus(binding),

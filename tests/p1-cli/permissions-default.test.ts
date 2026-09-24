@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { listenerPermissionMode } from "../../src/cli.js";
-import { AGENT_QUICK_GUIDE, RECEIVE_PROVIDERS } from "../../src/cloud/agent-onboarding-contract.js";
+import { AGENT_QUICK_GUIDE, AGENT_SETUP_HOST_GUIDANCE, RECEIVE_PROVIDERS } from "../../src/cloud/agent-onboarding-contract.js";
 import { onboardingUsage } from "../../src/onboarding-cli.js";
 
 /* Historical ACP permission defaults, retained for compatibility. Since 0.1.61
@@ -65,7 +65,8 @@ test("onboarding does not ask agents to grant worker permissions", () => {
   const prompt = readFileSync(new URL("../../site/src/components/connect/agent-prompt.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "");
   assert.doesNotMatch(prompt, /--permissions|claude-agent-acp|codex-acp/);
-  assert.match(prompt, /cswarm setup --connection-file/);
+  assert.match(prompt, /AGENT_SETUP_HOST_GUIDANCE/);
+  assert.match(AGENT_SETUP_HOST_GUIDANCE, /cswarm setup --connection-file/);
 });
 
 test("receive help names the available turn integrations and the limited wake path", () => {

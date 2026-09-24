@@ -763,7 +763,7 @@ export class Arguments {
     if (profileMode === "native") return;
     const conflicts = ["agent-token-file", "agent-token-stdin", "url", "anon-key", "workspace-id"].filter(flag => this.has(flag));
     if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", `Do not combine --profile with ${conflicts.map(flag => `--${flag}`).join(", ")}.`);
-    const profile = await readAgentProfile(path);
+    const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
