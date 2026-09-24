@@ -42,6 +42,18 @@ export interface AgentProfile {
    * after setup, so anything asserting the current name reads it from the server.
    */
   workspace_name?: string;
+  host_session_id?: string;
+}
+
+/** Refuse a bound profile before any credential, cache, or network access. */
+export function requireProfileHost(profile: AgentProfile, hostSessionId?: string): void {
+  if (profile.host_session_id === undefined) return;
+  if (hostSessionId === undefined) {
+    throw new AgentSetupError("host_session_required", "This profile is bound to a host session. Pass --host-session-id with this session's id.");
+  }
+  if (hostSessionId !== profile.host_session_id) {
+    throw new AgentSetupError("profile_other_session", "This profile belongs to another session. Stop and tell the operator.");
+  }
 }
 
 export function privatePath(path: string): string {
@@ -137,19 +149,23 @@ export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "
   return join(homedir(), ".cswarm", "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
 }
 
-export async function readAgentProfile(path: string): Promise<AgentProfile> {
+export async function readAgentProfile(path: string, hostSessionId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
   let p: AgentProfile;
   try { p = JSON.parse(raw); } catch { throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again."); }
-  /* Exactly the required keys, optionally plus workspace_name. Written as two accepted sets
+  /* Exactly the required keys, optionally plus workspace_name and host_session_id. Written as accepted sets
    * rather than a subset test, so an unknown key is still a damaged profile. */
   const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
   const keys = Object.keys(p ?? {}).sort().join();
   const keysAccepted = keys === [...required].sort().join() ||
-    keys === [...required, "workspace_name"].sort().join();
+    keys === [...required, "workspace_name"].sort().join() ||
+    keys === [...required, "host_session_id"].sort().join() ||
+    keys === [...required, "workspace_name", "host_session_id"].sort().join();
   if (!p || p.version !== 1 || !keysAccepted ||
+      (p.host_session_id !== undefined &&
+        (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200)) ||
       (p.workspace_name !== undefined &&
         (typeof p.workspace_name !== "string" || p.workspace_name.length > 200)) ||
       typeof p.url !== "string" || typeof p.anon_key !== "string" ||
@@ -159,6 +175,7 @@ export async function readAgentProfile(path: string): Promise<AgentProfile> {
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget(p.url, p.anon_key);
+  requireProfileHost(p, hostSessionId);
   return p;
 }
 
@@ -177,7 +194,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -187,11 +204,12 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
      * a profile from a deployment that does not send the name keeps exactly the six keys every
      * released client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
+    ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
   };
   await withFileLock(dirname(path), "setup", async () => {
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
-      const existing = await readAgentProfile(path);
+      const existing = await readAgentProfile(path, hostSessionId);
       if (existing.url !== profile.url || existing.workspace_id !== profile.workspace_id || existing.principal_id !== profile.principal_id) {
         throw new AgentSetupError("profile_conflict", "This profile belongs to another workspace or agent. Use a different profile path.");
       }

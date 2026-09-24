@@ -150,7 +150,7 @@ export async function checkAgentMessages(options: {
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
-  const profile = await readAgentProfile(profilePath);
+  const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const path = checkStatePath(profilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
   const deadlineMs = Math.min(startedAt + timeoutMs, options.deadlineAtMs ?? Number.POSITIVE_INFINITY);
@@ -252,7 +252,7 @@ export async function checkAgentMessages(options: {
 
 export async function cachedAgentMessage(profilePath: string, signalId: string, hostSessionId?: string): Promise<SignalRecord> {
   profilePath = privatePath(profilePath);
-  const profile = await readAgentProfile(profilePath);
+  const profile = await readAgentProfile(profilePath, hostSessionId);
   if (!ONBOARDING_UUID.test(signalId)) throw new AgentSetupError("message_id_invalid", "Use the full signal ID from the check result.");
   const state = await readCheckState(checkStatePath(profilePath, hostSessionId));
   const row = state.messages.find(row => row.id === signalId.toLowerCase());

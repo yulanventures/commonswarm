@@ -1,6 +1,8 @@
 import { serveAgentChannel, type ChannelPending } from "./agent-channel.js";
 import { openGrokBotGateway } from "./agent-grok-bot-gateway.js";
 import { readReceiveBinding, receiveStatus, updateReceiveBinding } from "./agent-receive.js";
+import { boundProfileCommands } from "./agent-onboarding-contract.js";
+import { readAgentProfile } from "./agent-profile.js";
 import { AgentSetupError } from "./agent-profile.js";
 import { shellQuote } from "./agent-check.js";
 
@@ -16,13 +18,14 @@ ${JSON.stringify({ sender_id: pending.row.signal.from, kind: pending.row.signal.
 
 /** Explicit idle assertion: the gateway has no verified idle-state API. */
 export async function markGrokBotIdle(profile: string, host: string) {
+  const openedProfile = await readAgentProfile(profile, host);
   await updateReceiveBinding(profile, host, binding => {
     if (binding.provider !== "grok-bot" || binding.requested_mode !== "wake" || !receiveStatus(binding).channel_running) {
       throw new AgentSetupError("channel_not_running", "Start this Bot session's receive serve process first.");
     }
     return { ...binding, idle: true, last_turn_ended_at: new Date().toISOString() };
   });
-  return { state: "idle_declared", next_action: "The receiver can now send the pending wake test. After this same session confirms it, check cswarm receive status." };
+  return { state: "idle_declared", next_action: boundProfileCommands("The receiver can now send the pending wake test. After this same session confirms it, check cswarm receive status.", profile, openedProfile.host_session_id) };
 }
 
 export async function serveGrokBotChannel(options: { profilePath: string; hostSessionId: string; gatewayPaths?: readonly string[]; env?: NodeJS.ProcessEnv }): Promise<void> {

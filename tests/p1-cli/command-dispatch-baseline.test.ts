@@ -70,7 +70,9 @@ const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
   ...["check", "install", "uninstall"].map(key => ({ key: `hook.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "check" ? "hook-check" as const : "standard" as const, workspaceErrorJson: false })),
   { key: "hook.refusal", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
   ...["start", "status", "stop", "canary", "refusal"].map(key => ({ key: `listen.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "keep" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
-  ...["start", "status", "stop", "enable", "disable", "recover", "refusal"].map(key => ({ key: `session.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "keep" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
+  ...["start", "status", "stop", "refusal"].map(key => ({ key: `session.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "keep" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
+  // Item I fold 2 (G1): enable, disable and recover act with the human credential, so they refuse an agent profile.
+  ...["enable", "disable", "recover"].map(key => ({ key: `session.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   ...["login", "logout"].map(key => ({ key, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   ...["create", "revoke", "refusal"].map(key => ({ key: `invite.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   ...["remove", "refusal"].map(key => ({ key: `member.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
@@ -310,7 +312,7 @@ function coreFixtures(): Fixture[] {
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
 
-    { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--json"] },
+    { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--host-session-id", "manual", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },
     { id: "setup.guide", argv: ["setup", "guide"] },
     { id: "check.default", argv: ["check", ...profile, "--force", "--json"] },
@@ -671,6 +673,10 @@ function normalize(value: string, root: string, origin: string): string {
     .replaceAll(origin, "<ORIGIN>")
     .replaceAll(repoRoot, "<REPO>")
     .replace(/credentials\.d\/[a-f0-9]{24}/g, "credentials.d/<PROFILE_ID>")
+    // listen status|stop print the target profile id and a state directory keyed by it; both derive from the
+    // fixture server's per-run origin, so they are normalized like the credential directory above.
+    .replace(/"profile_id": "[a-f0-9]{24}"/g, '"profile_id": "<PROFILE_ID>"')
+    .replace(/\/state\/[a-f0-9]{64}/g, "/state/<STATE_KEY>")
     .replace(/<ORIGIN>\/auth\/v1\/authorize\?[^\n]+/g, "<AUTHORIZATION_URL>")
     .replace("If the browser cannot reach the loopback callback, paste the complete callback URL here:\n", "")
     .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/g, "<TIMESTAMP>")

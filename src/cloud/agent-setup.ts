@@ -6,12 +6,12 @@ import { readAgentSignalDirectory, readAgentSignalPage } from "./signals.js";
 import { readSecureJsonFileIfPresent } from "./storage.js";
 import {
   AgentSetupError, ONBOARDING_MAX_FILE_BYTES, assertPrivateLocation,
-  defaultAgentProfilePath, parseAgentConnection, profileTarget, saveAgentProfile,
+  defaultAgentProfilePath, parseAgentConnection, profileTarget, readAgentProfile, saveAgentProfile,
   type AgentProfile,
 } from "./agent-profile.js";
-import { assertProfileIdentity, withAgentDeadline } from "./agent-check.js";
+import { assertProfileIdentity, shellQuote, withAgentDeadline } from "./agent-check.js";
 import { AGENT_CONNECTION_VERSION, RECEIVE_CHOICE, RECEIVE_PROVIDERS, RECEIVE_WAKE_PROVIDER, RECEIVE_WAKE_PROVIDERS } from "./agent-onboarding-contract.js";
-import { readReceiveBinding, receiveStatus } from "./agent-receive.js";
+import { checkedHostSessionId, readReceiveBinding, receiveStatus } from "./agent-receive.js";
 import { detectAgentHost } from "./agent-host.js";
 
 export const AGENT_SETUP_TIMEOUT_MS = 10_000;
@@ -22,11 +22,19 @@ export async function setupAgent(options: {
   hostSessionId?: string;
   fetcher?: typeof fetch;
 }) {
+  if (options.hostSessionId === undefined) {
+    throw new AgentSetupError("setup_host_session_required", "Run setup with --host-session-id <this-session-id>, or use --host-session-id manual for an intentionally unbound profile. Stop and tell the operator. Do not open another agent's profile.");
+  }
+  checkedHostSessionId(options.hostSessionId);
   const connectionPath = await assertPrivateLocation(options.connectionFile);
   const raw = await readSecureJsonFileIfPresent(connectionPath, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("connection_missing", "Save the connection file outside repositories in a private 0700 directory, with file mode 0600, then run setup again.");
   const connection = parseAgentConnection(raw);
   const profilePath = await assertPrivateLocation(options.profilePath ?? defaultAgentProfilePath(connection));
+  // A rebind must be refused before setup authenticates the connection on the network.
+  if (await readSecureJsonFileIfPresent(profilePath, ONBOARDING_MAX_FILE_BYTES) !== null) {
+    await readAgentProfile(profilePath, options.hostSessionId);
+  }
   const candidate: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
     workspace_id: connection.workspace_id, principal_id: connection.principal_id,
@@ -60,20 +68,24 @@ export async function setupAgent(options: {
   /* Cache the name in the profile so a person reading the file can tell WHICH workspace it
    * points at without resolving a uuid. A cache, not the authority: a workspace can be renamed
    * after setup, so every surface that ASSERTS the current name reads it from the server. */
-  await saveAgentProfile(profilePath, connection, identity.workspace_name ?? undefined);
+  await saveAgentProfile(profilePath, connection, identity.workspace_name ?? undefined, options.hostSessionId);
   const receive = await readReceiveBinding(profilePath, options.hostSessionId);
   const wakeProviders = RECEIVE_WAKE_PROVIDERS.map(provider => ({ provider, preview: provider === RECEIVE_WAKE_PROVIDER, requires_idle_test: true }));
   const primaryWakeProvider = wakeProviders.find(provider => provider.provider === RECEIVE_WAKE_PROVIDER)!;
   return {
     setup_version: AGENT_CONNECTION_VERSION, connected: true,
+    host_session_bound: options.hostSessionId !== "manual",
     profile: profilePath, principal_id: connection.principal_id, workspace_id: connection.workspace_id,
     ...identity,
     host: await hostPromise,
     receive_capabilities: { turn: RECEIVE_PROVIDERS, wake: primaryWakeProvider, wake_providers: wakeProviders },
-    receive: receiveStatus(receive),
+    receive: receiveStatus(receive, Date.now(), options.hostSessionId === "manual" ? undefined : options.hostSessionId, profilePath),
     ...(receive === null ? { receive_choice: RECEIVE_CHOICE } : {}),
-    next_action: receive === null
+    next_action: options.hostSessionId === "manual" ? (receive === null
       ? "Ask the user to choose a receive mode. Run cswarm receive configure with this profile, their choice, and this host's session ID. Read new messages with cswarm check before work."
-      : "Receive choice reused. Read new messages with cswarm check; cswarm receive status shows any remaining host step.",
+      : "Receive choice reused. Read new messages with cswarm check; cswarm receive status shows any remaining host step.")
+      : receive === null
+        ? `Ask the user to choose a receive mode. Run cswarm receive configure --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} --mode <choice>. Read new messages with cswarm check --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} before work.`
+        : `Receive choice reused. Read new messages with cswarm check --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)}; cswarm receive status --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} shows any remaining host step.`,
   };
 }

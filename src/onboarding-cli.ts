@@ -4,6 +4,7 @@ import {
   AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, RECEIVE_MODES, RECEIVE_PROVIDERS, turnCheckInstruction,
 } from "./cloud/agent-onboarding-contract.js";
 import { setupAgent } from "./cloud/agent-setup.js";
+import { AgentCredentialInputError } from "./cloud/agent-credential-input.js";
 import {
   cachedAgentMessage, checkAgentMessages, renderAgentCheck, shellQuote,
 } from "./cloud/agent-check.js";
@@ -31,7 +32,7 @@ export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id
 export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
 
 export function onboardingUsage(): string {
-  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] [--host-session-id <id>] [--json]
+  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]
   cswarm setup --check-version
   cswarm setup guide
   cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
@@ -70,8 +71,8 @@ async function output(value: unknown): Promise<void> {
   await writeOnboardingOutput(`${JSON.stringify(value)}\n`);
 }
 
-function turnHookFailureText(profile: string, code: string): string {
-  return `CommonSwarm check failed (${code}); the inbox was not proved empty. Run cswarm check --profile ${shellQuote(profile)} to see the error.\n`;
+export function turnHookFailureText(profile: string, code: string, hostSessionId?: string): string {
+  return `CommonSwarm check failed (${code}); the inbox was not proved empty. Run cswarm check --profile ${shellQuote(profile)}${hostSessionId && hostSessionId !== "manual" ? ` --host-session-id ${shellQuote(hostSessionId)}` : ""} to see the error.\n`;
 }
 
 async function exitTurnHookProcess(text?: string): Promise<never> {
@@ -103,12 +104,20 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   const diagnostic = join(dirname(profile), `check-error-${profileScopeKey(host)}.json`);
   let hardExitStarted = false;
   let failureText: string | undefined;
+  let boundHostSessionId: string | undefined;
   const hardExit = setTimeout(() => {
     hardExitStarted = true;
-    void exitTurnHookProcess(turnHookFailureText(profile, "check_timeout"));
+    void exitTurnHookProcess(turnHookFailureText(profile, "check_timeout", boundHostSessionId));
   }, processDeadlineDelayMs(HOST_HOOK_PROCESS_DEADLINE_MS));
   try {
     const event = await hookInput();
+    const stdinSessionId = event && typeof event === "object" && !Array.isArray(event) &&
+      typeof (event as Record<string, unknown>).session_id === "string"
+      ? (event as Record<string, string>).session_id : undefined;
+    // Project hooks run for every session in that project. Another session's turn
+    // belongs to its own hook and must not alter this seat's shared diagnostic.
+    if (stdinSessionId !== host) return;
+    boundHostSessionId = (await readAgentProfile(profile, host)).host_session_id;
     const result = await receiveHookEvent(profile, host, event);
     if (!result.check) return;
     await checkAgentMessages({ profilePath: profile, hostSessionId: host, deadlineAtMs: hostHookCheckDeadlineAt(), present: async result => {
@@ -125,7 +134,7 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
       changed = await readSecureJsonFileIfPresent(diagnostic, 4096) !== JSON.stringify(code);
       if (changed) await writeSecureJsonFile(diagnostic, JSON.stringify(code));
     } catch { /* A broken state directory cannot hold a diagnostic. */ }
-    if (changed) failureText = turnHookFailureText(profile, code);
+    if (changed) failureText = turnHookFailureText(profile, code, boundHostSessionId);
     // A coordination outage must not block the user's host turn.
   } finally {
     clearTimeout(hardExit);
@@ -133,11 +142,37 @@ async function runTurnHook(args: OnboardingArguments): Promise<void> {
   }
 }
 
+export const SETUP_OPERATOR_STEP = "Stop and tell the operator. Do not open another agent's profile.";
+
+/** Ends the failure sentence, then adds the operator step. */
+export function withSetupOperatorStep(message: string): string {
+  const trimmed = message.trimEnd();
+  return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;
+}
+
 export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-import");
+  // Argument errors are the caller's to fix; only a setup that ran and failed ends with the operator step.
   args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
-  if (args.has("host-session-id")) checkedHostSessionId(args.required("host-session-id"));
-  await output(await setupAgent({ connectionFile: args.required("connection-file"), profilePath: args.optional("profile"), hostSessionId: args.optional("host-session-id") }));
+  const connectionFile = args.required("connection-file");
+  const hostSessionId = args.optional("host-session-id");
+  if (hostSessionId !== undefined) checkedHostSessionId(hostSessionId);
+  try {
+    await output(await setupAgent({ connectionFile, profilePath: args.optional("profile"), hostSessionId }));
+  } catch (error) {
+    if (error instanceof AgentSetupError && !["profile_other_session", "host_session_required", "setup_host_session_required"].includes(error.code) && !error.code.startsWith("token_")) {
+      throw new AgentSetupError(error.code, withSetupOperatorStep(error.message));
+    }
+    if (error instanceof AgentCredentialInputError) {
+      throw new AgentCredentialInputError(error.code, withSetupOperatorStep(error.detail));
+    }
+    if (error instanceof AgentSetupError) throw error;
+    if (error instanceof Error) {
+      error.message = withSetupOperatorStep(error.message);
+      throw error;
+    }
+    throw new Error(withSetupOperatorStep("Setup failed."), { cause: error });
+  }
 }
 
 export async function runSetupVersion(args: OnboardingArguments): Promise<void> {
@@ -195,7 +230,9 @@ export async function runReceiveConfigure(args: OnboardingArguments): Promise<vo
 export async function runReceiveStatus(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-status");
   args.assertShape(RECEIVE_COMMON_FLAGS, 2);
-  await output(receiveStatus(await readReceiveBinding(args.required("profile"), args.optional("host-session-id"))));
+  const path = args.required("profile");
+  const profile = await readAgentProfile(path, args.optional("host-session-id"));
+  await output(receiveStatus(await readReceiveBinding(path, args.optional("host-session-id")), Date.now(), profile.host_session_id, path));
 }
 
 export async function runReceiveTest(args: OnboardingArguments): Promise<void> {
@@ -234,10 +271,10 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
   recordDispatch("runOnboardingCommand:resume-profile");
   args.assertShape(["profile", "host-session-id", "json"], 1);
   const path = privatePath(args.required("profile"));
-  const profile = await readAgentProfile(path);
+  const profile = await readAgentProfile(path, args.optional("host-session-id"));
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
-    authenticated_now: false, ...receiveStatus(binding),
-    instruction: turnCheckInstruction(path, binding?.host_session_id),
+    authenticated_now: false, ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
+    instruction: turnCheckInstruction(path, profile.host_session_id ?? binding?.host_session_id),
   });
 }

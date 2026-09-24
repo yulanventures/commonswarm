@@ -78,7 +78,7 @@ async function setup(rows: SignalRecord[] = []) {
   const input = await saveInput();
   const profilePath = join(dirname(input), "agent", "profile.json");
   const fake = fixture(rows);
-  const result = await setupAgent({ connectionFile: input, profilePath, fetcher: fake.fetcher });
+  const result = await setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath, fetcher: fake.fetcher });
   return { input, profilePath, fake, result };
 }
 
@@ -110,10 +110,10 @@ test("setup checks identity before saving and starts no receiver", async () => {
   const input = await saveInput();
   const path = join(dirname(input), "agent", "profile.json");
   const wrong = fixture([], OTHER);
-  await assert.rejects(setupAgent({ connectionFile: input, profilePath: path, fetcher: wrong.fetcher }), { code: "authenticated_identity_mismatch" });
+  await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath: path, fetcher: wrong.fetcher }), { code: "authenticated_identity_mismatch" });
   await assert.rejects(lstat(path), { code: "ENOENT" });
   const fake = fixture();
-  const result = await setupAgent({ connectionFile: input, profilePath: path, fetcher: fake.fetcher });
+  const result = await setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath: path, fetcher: fake.fetcher });
   assert.equal(result.connected, true);
   assert.equal(JSON.stringify(result).includes(TOKEN), false);
   assert.deepEqual(result.receive_capabilities.wake, { provider: "claude", preview: true, requires_idle_test: true });
@@ -130,24 +130,24 @@ test("setup checks identity before saving and starts no receiver", async () => {
 test("setup refuses unsafe input and never writes credentials under a repo", async () => {
   const input = await saveInput();
   await chmod(input, 0o644);
-  await assert.rejects(setupAgent({ connectionFile: input, fetcher: fixture().fetcher }));
+  await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: input, fetcher: fixture().fetcher }));
   await chmod(input, 0o600);
   const repo = join(dirname(input), "repo");
   await mkdir(join(repo, ".git"), { recursive: true });
-  await assert.rejects(setupAgent({ connectionFile: input, profilePath: join(repo, "private", "profile.json"), fetcher: fixture().fetcher }), { code: "profile_inside_repository" });
+  await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath: join(repo, "private", "profile.json"), fetcher: fixture().fetcher }), { code: "profile_inside_repository" });
   const link = join(dirname(input), "link.json");
   await symlink(input, link);
-  await assert.rejects(setupAgent({ connectionFile: link, fetcher: fixture().fetcher }));
+  await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: link, fetcher: fixture().fetcher }));
 });
 
 test("repeat setup preserves receive choice; a profile cannot be replaced by another identity", async () => {
   const { input, profilePath, fake } = await setup();
   await configureAgentReceive({ profilePath, mode: "turn", execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } });
   const before = await readReceiveBinding(profilePath);
-  await setupAgent({ connectionFile: input, profilePath, fetcher: fake.fetcher });
+  await setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath, fetcher: fake.fetcher });
   assert.deepEqual(await readReceiveBinding(profilePath), before);
   const other = await saveInput(connection("https://fixture.example", OTHER));
-  await assert.rejects(setupAgent({ connectionFile: other, profilePath, fetcher: fixture([], OTHER).fetcher }), { code: "profile_conflict" });
+  await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: other, profilePath, fetcher: fixture([], OTHER).fetcher }), { code: "profile_conflict" });
   assert.equal((await readAgentProfile(profilePath)).principal_id, AGENT);
 });
 
@@ -260,7 +260,7 @@ test("CLI setup and profile feed work against an HTTP fixture without exposing s
     const input = await saveInput();
     await writeFile(input, raw);
     const profile = join(dirname(input), "saved", "profile.json");
-    const run = await cli(["setup", "--connection-file", input, "--profile", profile, "--json"]);
+    const run = await cli(["setup", "--connection-file", input, "--host-session-id", "manual", "--profile", profile, "--json"]);
     assert.equal(run.code, 0, run.stderr || run.stdout);
     assert.equal(JSON.parse(run.stdout).connected, true);
     const feed = await cli(["feed", "--profile", profile, "--json"]);
@@ -270,7 +270,7 @@ test("CLI setup and profile feed work against an HTTP fixture without exposing s
     const conflict = await cli(["feed", "--profile", profile, "--workspace-id", WS]);
     assert.equal(conflict.code, 1);
     assert.match(conflict.stderr, /Do not combine/);
-    const malformed = await cli(["setup", "--connection-file", "/does-not-exist/private/file", "--json"]);
+    const malformed = await cli(["setup", "--connection-file", "/does-not-exist/private/file", "--host-session-id", "manual", "--json"]);
     assert.equal(malformed.code, 1);
     assert.equal(JSON.parse(malformed.stdout).ok, false);
   } finally { server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); }
@@ -357,10 +357,10 @@ test("damaged handoffs fail before authentication and keep CLI errors secret-fre
     const input = await saveInput(original);
     await writeFile(input, item.raw);
     let calls = 0;
-    await assert.rejects(setupAgent({ connectionFile: input, fetcher: (async () => { calls++; throw new Error("network reached"); }) as typeof fetch }), { code: item.code });
+    await assert.rejects(setupAgent({ hostSessionId: "manual", connectionFile: input, fetcher: (async () => { calls++; throw new Error("network reached"); }) as typeof fetch }), { code: item.code });
     assert.equal(calls, 0);
     for (const flags of [[], ["--json"]]) {
-      const result = await cli(["setup", "--connection-file", input, ...flags]);
+      const result = await cli(["setup", "--connection-file", input, "--host-session-id", "manual", ...flags]);
       assert.equal(result.code, 1);
       const output = result.stdout + result.stderr;
       assert.equal(output.includes(marker), false);
