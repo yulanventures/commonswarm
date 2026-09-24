@@ -91,11 +91,11 @@ function tableContract(verbName: string): ContractField[] {
   return verb.fields.map(({ name, presence, nullable }) => ({ name, presence, nullable }));
 }
 
-test("ack's table equals AckAgentDeliveryCommand on name, presence, and nullability", () => {
+test("ack's table equals the H0 parser's ACK body on name, presence, and nullability", () => {
   const wire = interfaceContract(
-    "supabase/functions/command/durable-delivery.ts",
-    "AckAgentDeliveryCommand",
-  ).filter(({ name }) => name !== "kind");
+    "supabase/functions/h0/parse.ts",
+    "H0AckBody",
+  );
   assert.deepEqual(tableContract("ack"), wire);
 });
 

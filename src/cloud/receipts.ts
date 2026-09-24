@@ -7,6 +7,7 @@ import {
   type HumanDeliveryReceipt,
 } from "./delivery-receipts.js";
 import { relativeAge, relativeExpiry } from "./workspaces.js";
+import { WAKE_STALE_LABEL, WAKE_STALE_MS } from "./idle-poll.js";
 
 export interface SignalReceiptReport extends AgentDeliveryReceiptResult {
   workspaceId: string;
@@ -169,6 +170,13 @@ export function renderSignalReceiptReport(
   const sections = agentReceipts.map((receipt) => {
     const state = deliveryReceiptState(receipt, nowMs);
     if (state === "enqueued") {
+      if (receipt.wake_path_observing === true && nowMs - Date.parse(receipt.enqueued_at) >= WAKE_STALE_MS) {
+        return [
+          `Accepted ${relativeAge(receipt.enqueued_at, nowMs)}. The recipient's session has not checked this in ${WAKE_STALE_LABEL}.`,
+          `Next: ask the recipient's operator to run ${listenerStatusCommand(report, receipt)} and check the attended session.`,
+          `Then check again with: ${receiptCheckCommand(report)}`,
+        ].join("\n");
+      }
       return [
         `Not yet delivered to agent ${receipt.recipient_agent_principal_id}. CommonSwarm accepted it ${relativeAge(receipt.enqueued_at, nowMs)}.`,
         `Ask the agent's operator to check its listener with: ${listenerStatusCommand(report, receipt)}`,
@@ -224,7 +232,7 @@ export function renderSignalReceiptReport(
      */
     if (state === "observed") {
       return [
-        `Agent ${receipt.recipient_agent_principal_id} reported outcome observed ${relativeAge(receipt.acked_at!, nowMs)}.`,
+        `Agent ${receipt.recipient_agent_principal_id} saw this at ${receipt.acked_at} (${relativeAge(receipt.acked_at!, nowMs)}).`,
         "The signal was surfaced to the agent's session or handled by its listener.",
         "If it was an ask, an answer may still be posted.",
         `If you need an answer, send a new ask with: ${newAskCommand(report, receipt)}`,

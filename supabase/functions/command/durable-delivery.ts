@@ -69,6 +69,8 @@ export interface AckAgentDeliveryCommand {
   last_error_code: string | null;
   /** Closed boolean. Required for managed principals; ignored for unmanaged. */
   surfaced?: boolean;
+  /** check's distinct unclaimed observation; queued hook promotion omits it. */
+  unclaimed?: true;
 }
 
 export interface DeliveryLedgerRef {
@@ -668,6 +670,7 @@ export async function ackAgentDelivery(
     outcome: DeliveryAckOutcome;
     lastErrorCode: string | null;
     surfaced?: boolean;
+    unclaimed?: true;
     managed?: boolean;
     proof?: { session_id: string; generation: number } | null;
   },
@@ -680,12 +683,14 @@ export async function ackAgentDelivery(
     acked_at: Date | null;
     last_lease_id: string | null;
     last_leased_by: string | null;
+    lease_id: string | null;
+    leased_by: string | null;
     session_id: string | null;
     session_generation: string | number | null;
     surfaced_at: Date | null;
   }[]>`
     SELECT
-      ack_outcome, acked_at, last_lease_id, last_leased_by,
+      ack_outcome, acked_at, last_lease_id, last_leased_by, lease_id, leased_by,
       session_id, session_generation, surfaced_at
     FROM swarm.signal_deliveries
     WHERE workspace_id = ${args.workspaceId}::uuid
@@ -706,8 +711,68 @@ export async function ackAgentDelivery(
     args.lastErrorCode === null &&
     args.leaseId === null &&
     args.listenerInstanceId === null;
-  if (queuedObservation) {
-    if (row.acked_at === null) return { status: "unavailable" };
+  if (queuedObservation && args.unclaimed === true) {
+    /* ATTENDED SEAT, never claimed. Item G lane 1 (brain topic wake-liveness-design).
+     *
+     * A seat with no listener never takes a lease, so its rows sit acked_at IS NULL forever and
+     * nothing server-side can tell "read it" from "the wake path is dead". That is the gap the
+     * 2026-09-14 incident fell through: the operator noticed before the seat did.
+     *
+     * `cswarm check` sends exactly this shape — outcome observed, lease_id null,
+     * listener_instance_id null — after it has PRINTED the message, so the ack means a reader
+     * saw it, not that a queue moved.
+     *
+     * The write below only ever sets acked_at/ack_outcome/updated_at and leaves the lease
+     * columns null, which signal_deliveries_check9 admits for `observed` and for no other
+     * outcome (20260925000001_unclaimed_observed_ack.sql). A managed principal still has to
+     * present session proof, exactly as the queued path below does — an unclaimed ack is not a
+     * way around the session fence. */
+    if (row.last_lease_id !== null || row.last_leased_by !== null) return { status: "conflict" };
+    if (managed && (
+      args.proof == null ||
+      (row.session_id !== null && (row.session_id !== args.proof.session_id ||
+        Number(row.session_generation) !== args.proof.generation))
+    )) return { status: "session_conflict" };
+    const directed = await tx<{ allowed: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM swarm.signals AS s
+        WHERE s.workspace_id = ${args.workspaceId}::uuid
+          AND s.id = ${args.signalId}::uuid
+          AND s.kind IN ('ask', 'note')
+          AND (s.to_agent_principal_id = ${args.recipientPrincipalId}::uuid
+            OR EXISTS (
+              SELECT 1 FROM swarm.signal_recipients AS r
+              WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
+                AND r.recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+            ))
+      ) AS allowed
+    `;
+    if (!directed[0]?.allowed) return { status: "unavailable" };
+    if (row.acked_at === null) {
+      if (row.ack_outcome !== null || row.lease_id !== null || row.leased_by !== null) return { status: "conflict" };
+      await tx`
+        UPDATE swarm.signal_deliveries
+        SET
+          acked_at = statement_timestamp(),
+          ack_outcome = 'observed',
+          delivered_at = COALESCE(delivered_at, statement_timestamp()),
+          surfaced_at = COALESCE(surfaced_at, statement_timestamp()),
+          updated_at = statement_timestamp()
+        WHERE workspace_id = ${args.workspaceId}::uuid
+          AND signal_id = ${args.signalId}::uuid
+          AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
+          AND acked_at IS NULL
+      `;
+      return {
+        status: "accepted",
+        response: {
+          ok: true,
+          event_ids: [],
+          signal_id: args.signalId,
+          outcome: "observed",
+        },
+      };
+    }
     if (row.ack_outcome === "observed") {
       return {
         status: "idempotent",
@@ -719,40 +784,32 @@ export async function ackAgentDelivery(
         },
       };
     }
+    return { status: "conflict" };
+  }
+  if (queuedObservation) {
+    if (row.acked_at === null) return { status: "unavailable" };
+    if (row.ack_outcome === "observed") return {
+      status: "idempotent",
+      response: { ok: true, event_ids: [], signal_id: args.signalId, outcome: "observed" },
+    };
+    if (managed && (
+      args.proof == null || row.session_id !== args.proof.session_id ||
+      Number(row.session_generation) !== args.proof.generation
+    )) return { status: "session_conflict" };
     if (row.ack_outcome !== "queued") return { status: "conflict" };
-    if (managed) {
-      if (
-        args.proof == null ||
-        row.session_id !== args.proof.session_id ||
-        Number(row.session_generation) !== args.proof.generation
-      ) {
-        return { status: "session_conflict" };
-      }
-    }
     await tx`
-      UPDATE swarm.signal_deliveries
-      SET
-        acked_at = statement_timestamp(),
+      UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(),
         ack_outcome = 'observed',
-        surfaced_at = CASE
-          WHEN ${managed} THEN COALESCE(surfaced_at, statement_timestamp())
-          ELSE surfaced_at
-        END,
+        surfaced_at = CASE WHEN ${managed} THEN COALESCE(surfaced_at, statement_timestamp()) ELSE surfaced_at END,
         updated_at = statement_timestamp()
       WHERE workspace_id = ${args.workspaceId}::uuid
         AND signal_id = ${args.signalId}::uuid
         AND recipient_agent_principal_id = ${args.recipientPrincipalId}::uuid
         AND ack_outcome = 'queued'
     `;
-    return {
-      status: "accepted",
-      response: {
-        ok: true,
-        event_ids: [],
-        signal_id: args.signalId,
-        outcome: "observed",
-      },
-    };
+    return { status: "accepted", response: {
+      ok: true, event_ids: [], signal_id: args.signalId, outcome: "observed",
+    } };
   }
   if (args.leaseId === null || args.listenerInstanceId === null) {
     return { status: "unavailable" };

@@ -29,11 +29,11 @@
  *                                              src/cli.ts, human sessions only)
  *   120 signals / credential / hour         -> SIGNAL_CREDENTIAL_LIMIT, :652
  *   1000 signals / workspace / hour         -> SIGNAL_WORKSPACE_LIMIT, :653
- *   fixed clock hour, not rolling           -> incrementRateBucket, :5105 uses
+ *   fixed clock hour, not rolling           -> incrementRateBucket, :5110 uses
  *                                              date_trunc('hour', ...)
  *   body 1-8000                             -> migrations/20260827000001_expand_signal_body.sql
- *   about <= 500                            -> index.ts:1983-1987
- *   until <= 30d                            -> index.ts:1989-1994 (SIGNAL_MAX_UNTIL_MS)
+ *   about <= 500                            -> index.ts:1988-1992
+ *   until <= 30d                            -> index.ts:1994-1999 (SIGNAL_MAX_UNTIL_MS)
  *   invitation TTL <= 7 days                -> INVITATION_MAX_TTL_MS, :637
  *   agent credential TTL <= 30 days         -> AGENT_TOKEN_MAX_TTL_MS, :642
  *   (no single default to publish: the protocol default is 1 hour,

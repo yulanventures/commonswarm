@@ -3207,6 +3207,20 @@
             "reason": "It runs inside cswarm members after the member list; it is not measured on its own.",
             "proxy": "signal-read reaches the same authenticated read function with one resource query; like renewal-grants, it posts no receipts."
           }
+        },
+        "site/src/lib/wake-path.ts:WAKE_ROSTER_REFRESH_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "site/src/lib/wake-path.ts:4",
+          "detail": "Visible app roster refreshes its member-scoped wake-path aggregate every 30 seconds.",
+          "operation": {
+            "name": "browser-wake-roster-refresh",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The app's authenticated browser timer is not a CLI operation."
+          }
         }
       }
     }

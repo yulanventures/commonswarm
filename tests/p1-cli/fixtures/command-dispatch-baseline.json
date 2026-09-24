@@ -11808,7 +11808,7 @@
       "--json"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/listen.status/state/<STATE_KEY>\"\n}\n",
+    "stdout": "{\n  \"status\": \"no_listener\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/listen.status/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"
@@ -14018,7 +14018,7 @@
       "fixture-host"
     ],
     "exitCode": 0,
-    "stdout": "{\n  \"status\": \"not_found\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.status.keep/state/<STATE_KEY>\"\n}\n",
+    "stdout": "{\n  \"status\": \"no_listener\",\n  \"workspace_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"principal_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"profile_id\": \"<PROFILE_ID>\",\n  \"checked_directory\": \"<ROOT>/policy.host-session.listen.status.keep/state/<STATE_KEY>\"\n}\n",
     "stderr": "",
     "handlers": [
       "runListen"

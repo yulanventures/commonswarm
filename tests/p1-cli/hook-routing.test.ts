@@ -42,6 +42,7 @@ import {
   newSessionBinding,
   writeSessionContext,
 } from "../../src/cloud/session-context.js";
+import { NO_LISTENER_STATUS_SENTENCE } from "../../src/listener/main-routing.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cliPath = join(repoRoot, "src", "cli.ts");
@@ -1278,11 +1279,9 @@ test("listen status and stop name the exact directory and profile when no listen
         root,
       ]);
       assert.equal(result.status, 0, result.stderr);
-      assert.ok(
-        result.stdout.includes(
-          `No listener found under ${expected.instanceDirectory} for profile ${target.profileId}.`,
-        ),
-      );
+      assert.ok(result.stdout.includes(command === "status"
+        ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", expected.instanceDirectory)} Checked profile ${target.profileId}.`
+        : `No listener found under ${expected.instanceDirectory} for profile ${target.profileId}.`));
     }
   } finally {
     await rm(root, { recursive: true, force: true });

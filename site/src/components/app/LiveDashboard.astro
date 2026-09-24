@@ -1197,6 +1197,7 @@ import "../../styles/tokens.css";
   import { authProvider, listSentence } from "../../lib/auth-providers";
   import { isInviteSubmitCurrent } from "../../lib/invite-submit";
   import { PendingRefreshGate } from "../../lib/pending-refresh";
+  import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
   import {
@@ -1323,6 +1324,7 @@ import "../../styles/tokens.css";
     name: string;
     model: string | null;
     ownerUserId: string;
+    oldestUnobservedAt?: string | null;
   }
 
   interface Member {
@@ -2019,7 +2021,15 @@ import "../../styles/tokens.css";
         if (error) throw new Error(error.message);
         const page = data ?? [];
         result.push(...rosterAgentsFromRows(page));
-        if (page.length < pageSize) return result;
+        if (page.length < pageSize) {
+          const { data: wakeRows, error: wakeError } = await api.schema("swarm_read")
+            .from("agent_wake_path")
+            .select("principal_id,oldest_unobserved_at")
+            .eq("workspace_id", workspaceId);
+          if (wakeError) return result;
+          const oldest = new Map((wakeRows ?? []).map(row => [row.principal_id, row.oldest_unobserved_at]));
+          return result.map(agent => ({ ...agent, oldestUnobservedAt: oldest.get(agent.principalId) ?? null }));
+        }
       }
     };
 
@@ -3973,6 +3983,10 @@ import "../../styles/tokens.css";
      * One roster in memory, three surfaces: rail presence, the header stack summary, and the
      * management dialog. All render here from `agents`, so the surfaces cannot disagree.
      */
+    const wakeMarkKey = (): string => agents
+      .filter(agent => wakePathMark(agent.oldestUnobservedAt) !== null)
+      .map(agent => agent.principalId).join("|");
+    let renderedWakeMarkKey = "";
     const renderRoster = (): void => {
       const participantList = one<HTMLUListElement>("[data-sidebar-participant-list]");
       if (participantList) {
@@ -3980,6 +3994,7 @@ import "../../styles/tokens.css";
       }
       renderHeaderRoster();
       renderDialogRoster();
+      renderedWakeMarkKey = wakeMarkKey();
       /* ONE CALL, AND ORDER STOPPED BEING LOAD-BEARING. There used to be three steps here in
          an order that had to be right: the remembered set, then the draft, then a tag pass.
          Every arrangement of them was wrong in some transition, because they were three
@@ -4037,6 +4052,10 @@ import "../../styles/tokens.css";
         avatar.className = "dashboard__agent-avatar";
         avatar.textContent = initials(agent.name);
         markAgentAvatar(avatar, agent.principalId);
+        if (wakePathMark(agent.oldestUnobservedAt)) {
+          avatar.classList.add("dashboard__agent-avatar--wake-stale");
+          avatar.title = "Wake path stale";
+        }
         stack.append(avatar);
       }
     };
@@ -4112,6 +4131,13 @@ import "../../styles/tokens.css";
             people.get(agent.ownerUserId) ?? "Workspace member"
           }`;
         copy.append(name, state);
+        const wakeMark = wakePathMark(agent.oldestUnobservedAt);
+        if (wakeMark) {
+          const wake = document.createElement("span");
+          wake.className = "dashboard__wake-stale";
+          wake.textContent = wakeMark;
+          copy.append(wake);
+        }
         if (grant) {
           const grantLine = document.createElement("span");
           grantLine.className = "dashboard__grant-state";
@@ -5740,6 +5766,8 @@ import "../../styles/tokens.css";
      */
     const PENDING_POLL_TICK_MS = 4_000;
     let pendingPollTimer: number | undefined;
+    let wakeRosterLastFetchedAt = 0;
+    let wakeRosterRefreshInFlight = false;
 
     const stopPendingPoll = (): void => {
       window.clearInterval(pendingPollTimer);
@@ -5759,6 +5787,20 @@ import "../../styles/tokens.css";
              as proof that another browser cannot add access. */
           if (pendingAccessKey() !== renderedPendingAccessKey) renderPendingAccess();
           void refreshPendingAccess(activeWorkspaceId, requestVersion);
+          // The aggregate's timestamp can cross the stale boundary between reads.
+          if (wakeMarkKey() !== renderedWakeMarkKey) renderRoster();
+          if (agents.length > 0 && !wakeRosterRefreshInFlight &&
+              Date.now() - wakeRosterLastFetchedAt >= WAKE_ROSTER_REFRESH_TIMEOUT_MS) {
+            const workspaceId = activeWorkspaceId;
+            const version = requestVersion;
+            wakeRosterLastFetchedAt = Date.now();
+            wakeRosterRefreshInFlight = true;
+            void roster(workspaceId).then(nextAgents => {
+              if (workspaceId !== activeWorkspaceId || version !== requestVersion) return;
+              agents = nextAgents;
+              renderRoster();
+            }).catch(() => undefined).finally(() => { wakeRosterRefreshInFlight = false; });
+          }
         }, PENDING_POLL_TICK_MS);
       } else if (!should && pendingPollTimer !== undefined) {
         stopPendingPoll();
@@ -10732,6 +10774,22 @@ import "../../styles/tokens.css";
     font-family: var(--font-mono);
     font-size: 0.62rem;
     font-weight: var(--weight-semibold);
+  }
+
+  .dashboard__agent-copy > .dashboard__wake-stale {
+    inline-size: max-content;
+    margin-block-start: var(--s-1);
+    padding: 0.1rem 0.35rem;
+    color: var(--warning-text, var(--text));
+    background: var(--warning-dim, var(--elev-3));
+    border: 1px solid var(--warning, var(--border-strong));
+    border-radius: 999px;
+    font-size: var(--t-xs);
+  }
+
+  .dashboard__agent-avatar--wake-stale {
+    outline: 2px solid var(--warning, var(--border-strong));
+    outline-offset: 2px;
   }
 
   .dashboard__agent-empty {

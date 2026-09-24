@@ -45,6 +45,16 @@ against origin/main f96be7c2; lanes 2 and 3 get their own briefs.
 5. **Out of lane 1:** the ppid orphan flag, the closed-reader exit 74 on idle waits, the server wake lease (lane 2), the
    attended canary (lane 3).
 
+## Correction (fold 1) — 2026-09-25
+
+Decision 4's retired wording, “a directed delivery that is accepted, unobserved and older than `WAKE_STALE_MS`,”
+omitted the evidence that the seat had ever begun reporting observations. Keep it above as the original decision record.
+The release behavior has three states: **unknown** until that principal sends a post-cutoff unclaimed `observed` ACK;
+**ok** when it has done so and no qualifying row is stale; **stale** only when a qualifying row is old enough.
+Qualifying mail is a directed ask/note to that seat, unleased, unacked, unexpired, and enqueued after the migration's
+recorded cutoff. The sender's “has not checked this” wording applies only to such a row for a known-observing seat.
+Pre-cutoff backlog, expired mail, and seats that have never sent an observed ACK stay neutral.
+
 ## Done for lane 1
 
 Unit, CLI, site and server tests (named by package scripts) for each decision, with mutation controls; the box release

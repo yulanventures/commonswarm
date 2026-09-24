@@ -11,6 +11,23 @@ export const IDLE_POLL_MAX_MS = 60_000;
 export const IDLE_POLL_MIN_MS = 1_000;
 export const ARRIVAL_WATCH_POLL_MS = IDLE_POLL_MAX_MS;
 
+/**
+ * How long a directed message may sit UNOBSERVED before the recipient's wake path is called
+ * stale. Item G lane 1, from the brain topic wake-liveness-design.
+ *
+ * DERIVED, never typed. Three full back-off intervals: a healthy attended seat polls at most
+ * IDLE_POLL_MAX_MS apart, so one missed poll is noise and three is a signal. Typing 180000 here
+ * would let the cadence change without the threshold following it — the drift this repo has paid
+ * for repeatedly. Every label that names this threshold is generated from
+ * formatIdlePollDuration(WAKE_STALE_MS), so the number and the words cannot disagree.
+ *
+ * This is NOT a delivery deadline and must never be described as one. A stale wake path means
+ * "nobody has confirmed reading this"; the message is still queued and still deliverable.
+ */
+export const WAKE_STALE_MULTIPLE = 3;
+export const WAKE_STALE_MS = IDLE_POLL_MAX_MS * WAKE_STALE_MULTIPLE;
+export const WAKE_STALE_LABEL = formatIdlePollDuration(WAKE_STALE_MS);
+
 const DURATION_RE = /^([1-9]\d*)(s|m)$/;
 
 /** Whole-second duration used in flag errors and status sentences. */

@@ -32,6 +32,8 @@ export interface DeliveryReceipt {
   last_error_code: string | null;
   /** Present on newer servers for queued interactive-session deliveries. */
   pending_for_main_count?: number | null;
+  /** Server says this exact live, post-release row belongs to an observing seat. */
+  wake_path_observing?: boolean;
 }
 
 export interface HumanDeliveryReceipt {
@@ -254,6 +256,11 @@ export function parseDeliveryReceipt(value: unknown): DeliveryReceiptRow {
           "pending_for_main_count",
         )
       : null,
+    ...(Object.hasOwn(row, "wake_path_observing")
+      ? { wake_path_observing: typeof row.wake_path_observing === "boolean"
+        ? row.wake_path_observing
+        : (() => { throw new DeliveryReceiptReadError("protocol", "delivery receipt returned a malformed wake_path_observing"); })() }
+      : {}),
   };
 }
 

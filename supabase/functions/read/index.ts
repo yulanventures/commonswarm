@@ -922,9 +922,12 @@ async function handle(
             AND s.id > ${afterId}::uuid
           )
         )
+      -- Order by the cursor's own key. Ordering by microseconds let a page end
+      -- on a row whose cursor excluded a later row in the same millisecond with
+      -- a lower id. The wake-path heal (migration 20260925000001) uses this order.
       ORDER BY
-        CASE WHEN ${orderAsc} THEN s.created_at END ASC,
-        CASE WHEN ${orderDesc} THEN s.created_at END DESC,
+        CASE WHEN ${orderAsc} THEN date_trunc('milliseconds', s.created_at) END ASC,
+        CASE WHEN ${orderDesc} THEN date_trunc('milliseconds', s.created_at) END DESC,
         CASE WHEN ${orderAsc} THEN s.id END ASC,
         CASE WHEN ${orderDesc} THEN s.id END DESC
       LIMIT ${body.limit}

@@ -1,0 +1,76 @@
+---- eligible rows (expect 0: every unobserved row is before... no: last 5 per seat are AFTER the observed ones, so 1000)
+ count
+-------
+  1000
+(1 row)
+
+---- roster aggregate as the owner
+                                 set_config
+----------------------------------------------------------------------------
+ {"sub" : "0f5e0000-0000-4000-8000-00000000b002", "role" : "authenticated"}
+(1 row)
+
+                                                                                                                                                                                                                          QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual rows=200 loops=1)
+   Group Key: agent_wake_path_deliveries.principal_id
+   InitPlan 1
+     ->  Seq Scan on ctx (actual rows=1 loops=1)
+   ->  Sort (actual rows=1000 loops=1)
+         Sort Key: agent_wake_path_deliveries.principal_id
+         Sort Method: quicksort  Memory: 79kB
+         ->  Subquery Scan on agent_wake_path_deliveries (actual rows=1000 loops=1)
+               ->  Subquery Scan on d (actual rows=1000 loops=1)
+                     Filter: swarm.is_member(d.workspace_id, (COALESCE(NULLIF(current_setting('request.jwt.claim.sub'::text, true), ''::text), ((NULLIF(current_setting('request.jwt.claims'::text, true), ''::text))::jsonb ->> 'sub'::text)))::uuid)
+                     ->  Nested Loop Semi Join (actual rows=1000 loops=1)
+                           InitPlan 2
+                             ->  Index Scan using wake_path_release_pkey on wake_path_release (actual rows=1 loops=1)
+                                   Index Cond: (singleton = true)
+                           InitPlan 5
+                             ->  Index Scan using wake_path_release_pkey on wake_path_release wake_path_release_1 (actual rows=1 loops=1)
+                                   Index Cond: (singleton = true)
+                           ->  Hash Anti Join (actual rows=1000 loops=1)
+                                 Hash Cond: (d_1.recipient_agent_principal_id = later.recipient_agent_principal_id)
+                                 Join Filter: ((ROW(date_trunc('milliseconds'::text, later_signal.created_at), later_signal.id) > ROW(date_trunc('milliseconds'::text, s.created_at), s.id)) AND ((later_signal.to_agent_principal_id = d_1.recipient_agent_principal_id) OR (ANY ((later_signal.workspace_id = (hashed SubPlan 7).col1) AND (later_signal.id = (hashed SubPlan 7).col2) AND (d_1.recipient_agent_principal_id = (hashed SubPlan 7).col3)))))
+                                 Rows Removed by Join Filter: 245000
+                                 ->  Nested Loop (actual rows=1000 loops=1)
+                                       ->  Nested Loop (actual rows=1000 loops=1)
+                                             ->  Seq Scan on agent_principals p (actual rows=200 loops=1)
+                                                   Filter: ((revoked_at IS NULL) AND (workspace_id = (InitPlan 1).col1))
+                                                   Rows Removed by Filter: 25
+                                             ->  Index Scan using signal_deliveries_unacked_oldest on signal_deliveries d_1 (actual rows=5 loops=200)
+                                                   Index Cond: ((recipient_agent_principal_id = p.principal_id) AND (workspace_id = (InitPlan 1).col1) AND (enqueued_at >= (InitPlan 2).col1))
+                                                   Filter: ((lease_id IS NULL) AND (leased_by IS NULL) AND (last_lease_id IS NULL) AND (last_leased_by IS NULL))
+                                       ->  Index Scan using signals_pkey on signals s (actual rows=1 loops=1000)
+                                             Index Cond: (id = d_1.signal_id)
+                                             Filter: ((kind = ANY ('{ask,note}'::text[])) AND (workspace_id = (InitPlan 1).col1) AND (until > statement_timestamp()) AND ((to_agent_principal_id = d_1.recipient_agent_principal_id) OR EXISTS(SubPlan 3)))
+                                             SubPlan 3
+                                               ->  Index Only Scan using signal_recipients_agent_inbox on signal_recipients r (never executed)
+                                                     Index Cond: ((workspace_id = s.workspace_id) AND (recipient_agent_principal_id = d_1.recipient_agent_principal_id) AND (signal_id = s.id))
+                                                     Heap Fetches: 0
+                                 ->  Hash (actual rows=49000 loops=1)
+                                       Buckets: 65536 (originally 32768)  Batches: 1 (originally 1)  Memory Usage: 6255kB
+                                       ->  Hash Join (actual rows=49000 loops=1)
+                                             Hash Cond: (later.signal_id = later_signal.id)
+                                             ->  Seq Scan on signal_deliveries later (actual rows=49000 loops=1)
+                                                   Filter: ((last_lease_id IS NULL) AND (last_leased_by IS NULL) AND (workspace_id = (InitPlan 1).col1) AND (ack_outcome = 'observed'::text))
+                                                   Rows Removed by Filter: 1038
+                                             ->  Hash (actual rows=50000 loops=1)
+                                                   Buckets: 65536 (originally 32768)  Batches: 1 (originally 1)  Memory Usage: 4809kB
+                                                   ->  Seq Scan on signals later_signal (actual rows=50000 loops=1)
+                                                         Filter: ((kind = ANY ('{ask,note}'::text[])) AND (workspace_id = (InitPlan 1).col1))
+                                                         Rows Removed by Filter: 39
+                                 SubPlan 7
+                                   ->  Seq Scan on signal_recipients later_recipient (never executed)
+                           ->  Index Scan using signal_deliveries_unclaimed_observed on signal_deliveries observed (actual rows=1 loops=1000)
+                                 Index Cond: ((workspace_id = (InitPlan 1).col1) AND (recipient_agent_principal_id = p.principal_id))
+                                 Filter: (acked_at >= (InitPlan 5).col1)
+ Planning Time: 0.810 ms
+ Execution Time: 49.992 ms
+(55 rows)
+
+  ?column?
+-------------
+ leftover: 0
+(1 row)
+

@@ -9,7 +9,7 @@ import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-
 import { AGENT_CONNECTION_VERSION } from "../../src/cloud/agent-onboarding-contract.js";
 import { AgentSetupError, parseAgentConnection, readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
-import { cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
+import { AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_PAGE_SIZE, cachedAgentMessage, checkAgentMessages, renderAgentCheck, withAgentDeadline } from "../../src/cloud/agent-check.js";
 import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHookEvent, receiveStatus } from "../../src/cloud/agent-receive.js";
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
@@ -46,7 +46,7 @@ function row(i: number, body = `message ${i}`): SignalRecord {
     from: OWNER, from_kind: "user", to: null, to_agent: AGENT, in_reply_to: null, about: null, kind: i % 2 ? "ask" : "note",
     body, until: "2099-01-01T00:00:00.000Z", created_at: "2026-09-08T00:00:00.000Z", sender_owner_relation: "same_owner" };
 }
-function fixture(rows: SignalRecord[] = [], principal = AGENT) {
+function fixture(rows: SignalRecord[] = [], principal = AGENT, failAck: boolean | number = false) {
   const requests: Array<Record<string, unknown>> = [];
   const fetcher = (async (_input: unknown, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body));
@@ -63,7 +63,15 @@ function fixture(rows: SignalRecord[] = [], principal = AGENT) {
       signals: rows.filter(r => !body.after_id || r.id > body.after_id).slice(0, body.limit),
       capabilities: { sender_owner_relation: 1, cursor_after: 1 },
     };
-    else throw new Error("unexpected request");
+    else if ((body.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery") {
+      const command = body.command as Record<string, unknown>;
+      assert.equal(command.unclaimed, true);
+      assert.equal(command.lease_id, null);
+      assert.equal(command.outcome, "observed");
+      return new Response(JSON.stringify(failAck ? { error: failAck === 409 ? "delivery_ack_conflict" : "temporarily_unavailable" } :
+        { ok: true, status: "accepted", event_ids: [], signal_id: command.signal_id, outcome: "observed" }),
+        { status: failAck ? typeof failAck === "number" ? failAck : 503 : 200 });
+    } else throw new Error("unexpected request");
     return new Response(JSON.stringify(result), { status: 200 });
   }) as typeof fetch;
   return { fetcher, requests };
@@ -151,7 +159,7 @@ test("repeat setup preserves receive choice; a profile cannot be replaced by ano
   assert.equal((await readAgentProfile(profilePath)).principal_id, AGENT);
 });
 
-test("standalone checks drain tied timestamps and overflow without a listener or ACK", async () => {
+test("standalone checks drain tied timestamps and overflow and ACK what was shown", async () => {
   const rows = Array.from({ length: 45 }, (_, i) => row(i + 1, "x".repeat(1200)));
   const { profilePath, fake } = await setup(rows);
   const seen: string[] = [];
@@ -161,7 +169,7 @@ test("standalone checks drain tied timestamps and overflow without a listener or
     more = result.has_more;
   }
   assert.deepEqual(seen, rows.map(r => r.id));
-  assert.ok(fake.requests.every(r => r.resource === "members" || r.resource === "signals"));
+  assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, rows.length);
   const quiet = await checkAgentMessages({ profilePath, hostSessionId: "resumed-session", fetcher: fake.fetcher, present: async () => {} });
   assert.equal(quiet.messages.length, 0, "resume shares the profile cursor");
   assert.equal(renderAgentCheck(quiet), "");
@@ -178,6 +186,168 @@ test("output failure does not advance the cursor; a fresh check is not a cooldow
   const next = fixture([row(1), row(2)]);
   await checkAgentMessages({ profilePath, fetcher: next.fetcher, present: async r => { shown += r.messages.length; } });
   assert.equal(shown, 2);
+});
+
+test("failed observation leaves check successful and retries after a later empty check", async () => {
+  const { profilePath } = await setup();
+  const failed = fixture([row(1)], AGENT, true);
+  const first = await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  assert.equal(first.messages.length, 1);
+  assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
+  await new Promise(resolve => setTimeout(resolve, 270));
+  const recovered = fixture([row(1)]);
+  const second = await checkAgentMessages({ profilePath, fetcher: recovered.fetcher, present: async () => {} });
+  assert.equal(second.messages.length, 0);
+  assert.equal(recovered.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
+  // Mutation control: once the ACK succeeds, a third check must not repeat it.
+  const quiet = fixture([row(1)]);
+  await checkAgentMessages({ profilePath, fetcher: quiet.fetcher, present: async () => {} });
+  assert.equal(quiet.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 0);
+});
+
+test("in-flight observation ends within the remaining check deadline", { timeout: 5_000 }, async () => {
+  const { profilePath } = await setup();
+  const base = fixture([row(1), row(2)]);
+  let ackStarted = 0;
+  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.command?.kind === "ack_agent_delivery") {
+      ackStarted++;
+      if (ackStarted === 1) {
+        await new Promise(resolve => setTimeout(resolve, 160));
+        return new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503 });
+      }
+      return await new Promise<Response>(() => {}); // transport ignores abort
+    }
+    return base.fetcher(input, init);
+  }) as typeof fetch;
+  const deadline = Date.now() + 350;
+  const output: string[] = [];
+  let forcedExitText = "";
+  const hardExit = setTimeout(() => { forcedExitText = "check_timeout"; }, Math.max(0, deadline - Date.now() + 150));
+  let result: Awaited<ReturnType<typeof checkAgentMessages>>;
+  try {
+    result = await checkAgentMessages({ profilePath, fetcher, deadlineAtMs: deadline,
+      present: async value => { output.push(renderAgentCheck(value)); } });
+  } finally { clearTimeout(hardExit); }
+  assert.equal(result.messages.length, 2);
+  assert.equal(ackStarted, 2);
+  assert.ok(output[0]?.includes(row(1).id));
+  assert.ok(Date.now() < deadline + 100, "an ack in flight must finish before hook forced-exit grace");
+  assert.equal(forcedExitText, "", "the forced-exit failure text cannot fire after an ACK deadline");
+  assert.doesNotMatch(output.join(""), /check_timeout/);
+});
+
+test("terminal observation refusals leave the queue after one request each", { timeout: 15_000 }, async () => {
+  const { profilePath } = await setup();
+  const rows = Array.from({ length: AGENT_CHECK_PAGE_SIZE + 1 }, (_, index) => row(index + 1));
+  const failed = fixture(rows, AGENT, 409);
+  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  for (let check = 0; check < 5; check++)
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  const acks = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks.length, rows.length, "N terminal refusals cause N requests across five later checks");
+  assert.deepEqual(acks.map(r => (r.command as { signal_id: string }).signal_id), rows.map(row => row.id));
+});
+
+test("transient observation retries use backoff until the age cap", { timeout: 10_000 }, async () => {
+  const { profilePath } = await setup();
+  const failed = fixture([row(1)], AGENT, 503);
+  const path = join(dirname(profilePath), "check.json");
+  for (let check = 0; check < 5; check++) {
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(path, "utf8"));
+    assert.ok(state.pending_observed_retries[row(1).id].next_at > Date.now());
+    if (check < 4) {
+      const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length;
+      await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+      assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length,
+        before, "backoff defers an immediate retry");
+      state.pending_observed_retries[row(1).id].next_at = 0;
+      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+    }
+  }
+  const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks().length, 5, "an outage cannot exhaust an attempt cap");
+  const state = JSON.parse(await readFile(path, "utf8"));
+  state.pending_observed_ids = [row(2).id];
+  state.pending_observed_retries = { [row(2).id]: { attempts: 1, first_at: Date.now() - 2 * 24 * 60 * 60 * 1_000 } };
+  await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+  await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+  assert.equal(acks().length, 5, "an aged retry is dropped without a request");
+  const aged = JSON.parse(await readFile(path, "utf8"));
+  assert.deepEqual(aged.pending_observed_ids, []);
+  assert.deepEqual(aged.pending_observed_retries, {});
+});
+
+test("observation retry metadata stays within the capped queue", { timeout: 20_000 }, async () => {
+  const rows = Array.from({ length: AGENT_CHECK_CACHE_LIMIT + 5 }, (_, i) => row(i + 1));
+  const { profilePath } = await setup();
+  const failed = fixture(rows, AGENT, 503);
+  let more = true;
+  while (more) {
+    const result = await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    more = result.has_more;
+  }
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  const queued = new Set<string>(state.pending_observed_ids);
+  const retries = Object.keys(state.pending_observed_retries);
+  assert.equal(queued.size, AGENT_CHECK_CACHE_LIMIT);
+  assert.deepEqual(state.pending_observed_ids, rows.slice(-AGENT_CHECK_CACHE_LIMIT).map(value => value.id));
+  assert.ok(retries.length > 0, "failed observations entered the retry map");
+  assert.ok(retries.length <= AGENT_CHECK_CACHE_LIMIT);
+  assert.ok(retries.every(id => queued.has(id)), "retry metadata belongs only to queued ids");
+  assert.ok(!retries.includes(rows[0]!.id), "a row dropped by the cap loses its retry metadata");
+});
+
+test("deadline timeout counts the attempt and preserves an earlier 409 removal", { timeout: 5_000 }, async () => {
+  const { profilePath } = await setup();
+  const base = fixture([row(1), row(2)]);
+  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.command?.kind === "ack_agent_delivery") {
+      if (body.command.signal_id === row(1).id)
+        return new Response(JSON.stringify({ error: "delivery_ack_conflict" }), { status: 409 });
+      return await new Promise<Response>(() => {});
+    }
+    return base.fetcher(input, init);
+  }) as typeof fetch;
+  await checkAgentMessages({ profilePath, fetcher, deadlineAtMs: Date.now() + 450, present: async () => {} });
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  assert.deepEqual(state.pending_observed_ids, [row(2).id]);
+  assert.equal(state.pending_observed_retries[row(2).id].attempts, 1);
+  assert.ok(Number.isFinite(state.pending_observed_retries[row(2).id].first_at));
+  assert.ok(state.pending_observed_retries[row(2).id].next_at > Date.now(),
+    "a timed-out request retains backoff after the deadline");
+});
+
+test("401 and 429 observation refusals stay queued for retry", { timeout: 5_000 }, async () => {
+  for (const status of [401, 429]) {
+    const { profilePath } = await setup();
+    const failed = fixture([row(1)], AGENT, status);
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [row(1).id]);
+    assert.equal(state.pending_observed_retries[row(1).id].attempts, 1);
+  }
+});
+
+test("typed 403, 404, session conflict, and invalid request leave the queue", { timeout: 5_000 }, async () => {
+  for (const [status, code] of [[403, "delivery_unavailable"], [404, "delivery_unavailable"],
+    [409, "session_conflict"], [400, "invalid_request"]] as const) {
+    const { profilePath } = await setup();
+    const base = fixture([row(1)]);
+    const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.command?.kind === "ack_agent_delivery")
+        return new Response(JSON.stringify({ error: code }), { status });
+      return base.fetcher(input, init);
+    }) as typeof fetch;
+    await checkAgentMessages({ profilePath, fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [], `${status} ${code}`);
+    assert.deepEqual(state.pending_observed_retries, {}, `${status} ${code}`);
+  }
 });
 
 test("check stops at wrong-recipient and out-of-order pages without consuming them", async () => {
@@ -289,7 +459,7 @@ test("managed profile checks use only the named host's proof", async () => {
   const { newSessionBinding, defaultSessionContextPath, writeSessionContext } = await import("../../src/cloud/session-context.js");
   const { profileSessionContext, profileTarget } = await import("../../src/cloud/agent-profile.js");
   const { AGENT_SESSION_ID_HEADER } = await import("../../src/cloud/session-contract.js");
-  const { profilePath, fake } = await setup();
+  const { profilePath, fake } = await setup([row(1)]);
   const profile = await readAgentProfile(profilePath);
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = join(root, "managed-config");
@@ -306,7 +476,8 @@ test("managed profile checks use only the named host's proof", async () => {
       return fake.fetcher(url, init);
     }) as typeof fetch;
     await checkAgentMessages({ profilePath, hostSessionId: "this-session", fetcher: boundFetch, present: async () => {} });
-    assert.equal(count, 2);
+    assert.equal(count, 3, "directory, inbox, and observation all carry the current session proof");
+    assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
   } finally { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; }
 });
 

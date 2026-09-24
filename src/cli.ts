@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main-routing.js";
 import { signalDuration } from "./cloud/signal-duration.js";
 import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } from "./cloud/pending-access.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
@@ -7339,7 +7340,7 @@ async function runListenStatusOrStop(
   if (status === null) {
     if (args.has("json")) {
       printJson({
-        status: "not_found",
+        status: command === "status" ? NO_LISTENER_STATUS : "not_found",
         workspace_id: workspaceId,
         principal_id: principalId,
         profile_id: cloud.profileId,
@@ -7347,7 +7348,9 @@ async function runListenStatusOrStop(
       });
     } else {
       process.stdout.write(
-        `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.\n`,
+        command === "status"
+          ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", paths.instanceDirectory)} Checked profile ${cloud.profileId}.\n`
+          : `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.\n`,
       );
     }
     return;

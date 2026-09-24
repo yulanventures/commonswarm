@@ -29,6 +29,7 @@ import {
   type DeliveryClaimRequest,
 } from "../src/cloud/delivery.js";
 import { readAgentSignalPage } from "../src/cloud/signals.js";
+import { ackAgentDelivery } from "../supabase/functions/command/durable-delivery.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -961,6 +962,76 @@ test("hook observation uses a distinct idempotent command and no expired lease c
     },
   });
   assert.equal(result.outcome, "observed");
+});
+
+test("check observation is a separate unclaimed command shape", async () => {
+  const captures: CapturedRequest[] = [];
+  const client = new DeliveryCommandClient(target,
+    capturingFetch(captures, () => jsonResponse(200, ackBody({ outcome: "observed" }))));
+  await client.observeUnclaimedAgentDelivery({ workspaceId: WORKSPACE, credential: TOKEN,
+    commandId: "check_observe_0001", signalId: SIGNAL });
+  assert.deepEqual((captures[0]!.body.command as Record<string, unknown>), {
+    kind: "ack_agent_delivery", signal_id: SIGNAL, lease_id: null,
+    listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true,
+  });
+  // Mutation control: leased ACK still rejects a missing lease locally.
+  await assert.rejects(client.ackAgentDelivery({ workspaceId: WORKSPACE, credential: TOKEN,
+    commandId: "check_observe_0002", signalId: SIGNAL, leaseId: "", listenerInstanceId: LISTENER,
+    outcome: "observed", lastErrorCode: null }));
+});
+
+test("managed unclaimed observation reaches the row session fence before writing", { timeout: 5_000 }, async () => {
+  const row = { ack_outcome: null, acked_at: null, last_lease_id: null,
+    last_leased_by: null, lease_id: null, leased_by: null,
+    session_id: null as string | null, session_generation: null as number | null, surfaced_at: null };
+  let updates = 0;
+  let directedChecks = 0;
+  const tx = ((parts: TemplateStringsArray) => {
+    const query = parts.join("?");
+    if (query.includes("FROM swarm.signal_deliveries")) return Promise.resolve([row]);
+    if (query.includes("SELECT EXISTS")) { directedChecks++; return Promise.resolve([{ allowed: true }]); }
+    if (query.includes("UPDATE swarm.signal_deliveries")) { updates++; return Promise.resolve([]); }
+    throw new Error("unexpected delivery query");
+  }) as unknown as Parameters<typeof ackAgentDelivery>[0];
+  const args = { workspaceId: WORKSPACE, recipientPrincipalId: AGENT, signalId: SIGNAL,
+    leaseId: null, listenerInstanceId: null, outcome: "observed" as const,
+    lastErrorCode: null, surfaced: true, unclaimed: true as const, managed: true };
+  const stale = await ackAgentDelivery(tx, { ...args, proof: null });
+  assert.equal(stale.status, "session_conflict");
+  assert.equal(directedChecks, 0);
+  assert.equal(updates, 0);
+  // An enqueued row has no session binding; the command fence validated this proof.
+  const current = await ackAgentDelivery(tx, { ...args, proof: { session_id: "session-a", generation: 2 } });
+  assert.equal(current.status, "accepted");
+  assert.equal(directedChecks, 1);
+  assert.equal(updates, 1);
+  // A row bound to a different session still reaches the row-specific refusal.
+  row.session_id = "session-b";
+  row.session_generation = 2;
+  const boundElsewhere = await ackAgentDelivery(tx, { ...args, proof: { session_id: "session-a", generation: 2 } });
+  assert.equal(boundElsewhere.status, "session_conflict");
+  assert.equal(updates, 1);
+});
+
+test("queued observation replay stays idempotent across a new session", { timeout: 5_000 }, async () => {
+  const row = { ack_outcome: "observed", acked_at: new Date(), last_lease_id: "old-lease",
+    last_leased_by: "old-listener", lease_id: null, leased_by: null,
+    session_id: "session-a", session_generation: 1, surfaced_at: new Date() };
+  const tx = ((parts: TemplateStringsArray) => {
+    if (parts.join("?").includes("FROM swarm.signal_deliveries")) return Promise.resolve([row]);
+    throw new Error("replay must not write");
+  }) as unknown as Parameters<typeof ackAgentDelivery>[0];
+  const result = await ackAgentDelivery(tx, { workspaceId: WORKSPACE, recipientPrincipalId: AGENT,
+    signalId: SIGNAL, leaseId: null, listenerInstanceId: null, outcome: "observed",
+    lastErrorCode: null, surfaced: true, managed: true,
+    proof: { session_id: "session-b", generation: 2 } });
+  assert.equal(result.status, "idempotent");
+});
+
+test("absent-listener copy scopes its claim to the checked state directory", { timeout: 5_000 }, async () => {
+  const routing = await readFile(new URL("../src/listener/main-routing.ts", import.meta.url), "utf8");
+  assert.match(routing, /No listener is running for this agent in \{stateDirectory\}/);
 });
 
 test("ack enforces explicit-null and failed-terminal code rules before the round trip", async () => {
