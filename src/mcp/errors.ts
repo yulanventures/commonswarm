@@ -7,11 +7,12 @@ import { SessionContextError } from "../cloud/session-context.js";
 import { AGENT_SESSION_PROOF_REFUSAL_CODES } from "../cloud/session-wire.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
 
-type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
+type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
 type Sentence = { message: string; next_step: Action };
 const RETRY: Action = "retry the same call";
 const FIX: Action = "fix the named argument";
 const PERSON: Action = "a person must restore this agent's access outside this session";
+const STOP_OPERATOR: Action = "stop and tell the operator";
 const STOP: Action = "stop and keep the same request id";
 const CHECK_ACCESS: Action = "check the named arguments; if they are right, a person may need to restore this agent's access";
 const CHECK_ARGUMENTS: Action = "check the arguments; if the problem stays, ask a person";
@@ -34,7 +35,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   profile_credential_missing: entry("The agent credential is missing.", PERSON),
   profile_identity_mismatch: entry("The credential belongs to another agent.", PERSON),
   profile_session_conflict: entry("The host session does not match this agent.", PERSON),
-  profile_other_session: entry("This profile belongs to another session. Stop and tell the operator.", PERSON),
+  profile_other_session: entry("This profile belongs to another session. Stop and tell the operator.", STOP_OPERATOR),
   profile_conflict: entry("The profile belongs to another agent or workspace.", PERSON),
   connection_invalid: entry("The connection is invalid.", PERSON),
   connection_target_invalid: entry("The connection target is invalid.", PERSON),
@@ -47,7 +48,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   check_timeout: entry("The message check timed out; the inbox state is unknown.", RETRY),
   message_id_invalid: entry("The message_id argument is invalid.", FIX),
   message_not_cached: entry("That message is absent from the local cache.", FIX),
-  host_session_required: entry("This agent requires its current host session.", PERSON),
+  host_session_required: entry("This agent requires its current host session.", RESTART_SESSION),
   setup_host_session_required: entry("Setup needs this session's ID or an intentional manual choice.", PERSON),
   host_session_invalid: entry("The host session is invalid.", PERSON),
   until_invalid: entry("The until argument is invalid.", FIX),

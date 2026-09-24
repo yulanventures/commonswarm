@@ -9,7 +9,7 @@ import {
   defaultAgentProfilePath, parseAgentConnection, profileTarget, readAgentProfile, saveAgentProfile,
   type AgentProfile,
 } from "./agent-profile.js";
-import { assertProfileIdentity, withAgentDeadline } from "./agent-check.js";
+import { assertProfileIdentity, shellQuote, withAgentDeadline } from "./agent-check.js";
 import { AGENT_CONNECTION_VERSION, RECEIVE_CHOICE, RECEIVE_PROVIDERS, RECEIVE_WAKE_PROVIDER, RECEIVE_WAKE_PROVIDERS } from "./agent-onboarding-contract.js";
 import { checkedHostSessionId, readReceiveBinding, receiveStatus } from "./agent-receive.js";
 import { detectAgentHost } from "./agent-host.js";
@@ -74,14 +74,18 @@ export async function setupAgent(options: {
   const primaryWakeProvider = wakeProviders.find(provider => provider.provider === RECEIVE_WAKE_PROVIDER)!;
   return {
     setup_version: AGENT_CONNECTION_VERSION, connected: true,
+    host_session_bound: options.hostSessionId !== "manual",
     profile: profilePath, principal_id: connection.principal_id, workspace_id: connection.workspace_id,
     ...identity,
     host: await hostPromise,
     receive_capabilities: { turn: RECEIVE_PROVIDERS, wake: primaryWakeProvider, wake_providers: wakeProviders },
-    receive: receiveStatus(receive),
+    receive: receiveStatus(receive, Date.now(), options.hostSessionId === "manual" ? undefined : options.hostSessionId, profilePath),
     ...(receive === null ? { receive_choice: RECEIVE_CHOICE } : {}),
-    next_action: receive === null
+    next_action: options.hostSessionId === "manual" ? (receive === null
       ? "Ask the user to choose a receive mode. Run cswarm receive configure with this profile, their choice, and this host's session ID. Read new messages with cswarm check before work."
-      : "Receive choice reused. Read new messages with cswarm check; cswarm receive status shows any remaining host step.",
+      : "Receive choice reused. Read new messages with cswarm check; cswarm receive status shows any remaining host step.")
+      : receive === null
+        ? `Ask the user to choose a receive mode. Run cswarm receive configure --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} --mode <choice>. Read new messages with cswarm check --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} before work.`
+        : `Receive choice reused. Read new messages with cswarm check --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)}; cswarm receive status --profile ${shellQuote(profilePath)} --host-session-id ${shellQuote(options.hostSessionId!)} shows any remaining host step.`,
   };
 }

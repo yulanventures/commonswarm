@@ -60,12 +60,12 @@ test("file handoff stays short without hiding a manual fetch", () => {
   assert.match(prompt, /setup guide only when needed/);
 });
 
-test("both prompts require the mode choice and same-session proof, without retired workers", () => {
+test("both prompts require the mode choice and same-session proof, without retired workers", { timeout: 10000 }, () => {
   for (const prompt of [dashboardAgentPrompt(INPUT), dashboardAgentFilePrompt(INPUT)]) {
     assert.match(prompt, /Ask once:[\s\S]*wakeups in this same session[\s\S]*each turn's start and whenever asked/);
     assert.match(prompt, /user's choice[\s\S]*reuse a saved choice/);
     assert.match(prompt, /idle test passes/);
-    assert.match(prompt, /cswarm check before work/);
+    assert.match(prompt, /cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work/);
     assert.doesNotMatch(prompt, /claude-agent-acp|codex-acp|--permissions allow|local Claude worker|note.*does NOT wake|Only after the detached listener/);
     assert.doesNotMatch(prompt, /renews (itself|automatically)|does not expire/);
   }

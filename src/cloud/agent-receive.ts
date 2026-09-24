@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
-  RECEIVE_MODES, RECEIVE_PROVIDERS, RECEIVE_WAKE_PROVIDERS, turnCheckInstruction,
+  RECEIVE_MODES, RECEIVE_PROVIDERS, RECEIVE_WAKE_PROVIDERS, boundProfileCommands, turnCheckInstruction,
   type ReceiveMode, type ReceiveProvider,
 } from "./agent-onboarding-contract.js";
 import { AgentSetupError, ONBOARDING_UUID, privatePath, profileScopeKey, readAgentProfile } from "./agent-profile.js";
@@ -82,6 +82,7 @@ export async function readReceiveBinding(profile: string, hostSessionId?: string
 }
 
 export async function updateReceiveBinding(profile: string, host: string, update: (binding: ReceiveBinding) => ReceiveBinding): Promise<ReceiveBinding> {
+  await readAgentProfile(profile, host);
   const path = receiveBindingPath(profile, host);
   return withFileLock(dirname(path), `receive-${profileScopeKey(host)}`, async () => {
     const current = await readReceiveBinding(profile, host);
@@ -96,7 +97,7 @@ function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
-export function receiveStatus(binding: ReceiveBinding | null, now = Date.now()) {
+export function receiveStatus(binding: ReceiveBinding | null, now = Date.now(), boundHostSessionId?: string, profile?: string) {
   const channelLive = binding !== null && binding.channel_pid !== null &&
     binding.channel_heartbeat_at !== null && now - Date.parse(binding.channel_heartbeat_at) >= 0 && now - Date.parse(binding.channel_heartbeat_at) <= RECEIVE_HEARTBEAT_MAX_AGE_MS &&
     processAlive(binding.channel_pid);
@@ -108,13 +109,13 @@ export function receiveStatus(binding: ReceiveBinding | null, now = Date.now()) 
     wake_verified: Boolean(wakeVerified),
     channel_running: Boolean(channelLive),
     host_session_id: binding?.host_session_id ?? null,
-    next_action: binding === null ? "Ask the user to choose wakeups or turn checks, then run cswarm receive configure." :
+    next_action: boundProfileCommands(binding === null ? "Ask the user to choose wakeups or turn checks, then run cswarm receive configure." :
       wakeVerified ? null : binding.requested_mode === "wake" ?
         binding.provider === "grok-bot" ? "Wake is not verified. Start cswarm receive serve on this Bot computer, run cswarm receive test, then cswarm receive idle when the session is idle. Confirm with cswarm receive status. Use cswarm check meanwhile." :
         "Wake is not verified. Enable the configured Claude channel in this same session, run cswarm receive test, end the turn, then confirm with cswarm receive status. Use cswarm check meanwhile." :
         channelLive ? "Turn mode is selected; the previous channel is stopping. Confirm channel_running is false with cswarm receive status." :
         binding.hook_file !== null && binding.turn_verified_at === null ?
-          "Turn hook installed but not yet run. Trust it if the host asks, then start another turn in this same session. Confirm with cswarm receive status; use cswarm check meanwhile." : null,
+          "Turn hook installed but not yet run. Trust it if the host asks, then start another turn in this same session. Confirm with cswarm receive status; use cswarm check meanwhile." : "", profile ?? binding?.profile ?? "", boundHostSessionId) || null,
   };
 }
 
@@ -208,6 +209,7 @@ export async function configureAgentReceive(options: {
   if (!(RECEIVE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
   if (options.grokBotAgentId !== undefined && !ONBOARDING_UUID.test(options.grokBotAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID.");
   if (options.grokBotAgentId !== undefined && provider !== "grok-bot") throw new AgentSetupError("grok_bot_agent_id_unsupported", "Use --grok-bot-agent-id only with --provider grok-bot.");
+  const openedProfile = await readAgentProfile(profile, options.hostSessionId);
   const host = checkedHostSessionId(options.hostSessionId);
   if (provider !== "instructions" && host === "manual") throw new AgentSetupError("host_session_required", "A host hook needs this session's ID. Supply --host-session-id, or use --provider instructions for prompt-based turn checks.");
   if (options.mode === "wake" && !(RECEIVE_WAKE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("wake_host_unsupported", `Wake supports --provider ${RECEIVE_WAKE_PROVIDERS.join(" or ")}. Use --mode turn on this host.`);
@@ -217,7 +219,6 @@ export async function configureAgentReceive(options: {
     if (!grokAgentId || !ONBOARDING_UUID.test(grokAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID, or use that UUID as --host-session-id.");
     await findGrokBotGateway(options.gatewayPaths);
   }
-  await readAgentProfile(profile, host);
   const cwd = await realpath(options.cwd ?? process.cwd());
   return withFileLock(dirname(profile), `receive-${profileScopeKey(host)}`, async () => {
     const existing = await readReceiveBinding(profile, host);
@@ -252,7 +253,7 @@ export async function configureAgentReceive(options: {
     }
     await writeSecureJsonFile(receiveBindingPath(profile, host), JSON.stringify(binding));
     return {
-      ...receiveStatus(binding), profile, hook_file: binding.hook_file,
+      ...receiveStatus(binding, Date.now(), openedProfile.host_session_id), profile, hook_file: binding.hook_file,
       instruction: turnCheckInstruction(profile, host),
       ...(provider === "grok-bot" && options.mode === "wake" ? { host_step: `On this Bot computer, with gateway.json present, start: cswarm receive serve --profile ${shellQuote(profile)} --host-session-id ${shellQuote(host)}` } : {}),
       ...(startCommand ? { start_command: startCommand, host_step: "Resume this same Claude session with this command and approve the channel when Claude asks. Organization policy still applies. This command does not start a separate worker." } : {}),
@@ -291,5 +292,10 @@ export async function requestReceiveCanary(profile: string, host: string) {
       canary: { nonce: randomUUID(), requested_at: new Date().toISOString(), signal_id: null, emitted_while_idle: false, received_at: null },
     };
   });
-  return { state: "pending", next_action: next.provider === "grok-bot" ? "End this Bot turn. From a separate terminal on this computer, run cswarm receive idle with this profile and host-session-id only after the chat is idle. After the woken session confirms the receipt, check cswarm receive status for wake_verified: true." : "End this turn so the session becomes idle. The channel will send a self-addressed test message. After this same session receives it, run cswarm receive status to confirm wake_verified is true.", host_session_id: next.host_session_id };
+  const openedProfile = await readAgentProfile(profile, host);
+  const action = next.provider === "grok-bot"
+    ? "End this Bot turn. From a separate terminal on this computer, run cswarm receive idle with this profile and host-session-id only after the chat is idle. After the woken session confirms the receipt, check cswarm receive status for wake_verified: true."
+    : "End this turn so the session becomes idle. The channel will send a self-addressed test message. After this same session receives it, run cswarm receive status to confirm wake_verified is true.";
+  const boundAction = next.provider === "grok-bot" ? action.replace(" with this profile and host-session-id", "") : action;
+  return { state: "pending", next_action: boundProfileCommands(openedProfile.host_session_id ? boundAction : action, profile, openedProfile.host_session_id), host_session_id: next.host_session_id };
 }

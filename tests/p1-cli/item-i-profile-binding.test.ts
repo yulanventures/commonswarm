@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import ts from "typescript";
 import { AGENT_COMMANDS, type AgentCommandEntry, type AgentCommandGroup } from "../../src/cli.js";
+import { AGENT_QUICK_GUIDE, AGENT_SETUP_HOST_GUIDANCE, boundProfileCommands, turnCheckInstruction } from "../../src/cloud/agent-onboarding-contract.js";
+import { turnHookFailureText } from "../../src/onboarding-cli.js";
+import { configureAgentReceive, requestReceiveCanary } from "../../src/cloud/agent-receive.js";
+import { markGrokBotIdle } from "../../src/cloud/agent-channel-grok-bot.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { cachedAgentMessage, checkAgentMessages } from "../../src/cloud/agent-check.js";
-import { readAgentProfile, saveAgentProfile } from "../../src/cloud/agent-profile.js";
+import { profileScopeKey, readAgentProfile, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
+import { withFileLock } from "../../src/cloud/storage.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -31,13 +37,18 @@ async function fixture() {
 }
 
 function cli(dir: string, args: string[], input?: string) {
+  const raw = cliRaw(dir, args, input);
+  const output = raw.stdout || raw.stderr;
+  try { return JSON.parse(output) as { ok: boolean; error?: { code: string; message: string }; instruction?: string; next_action?: string }; }
+  catch { return { ok: false, error: { code: "plain", message: output } }; }
+}
+
+function cliRaw(dir: string, args: string[], input?: string) {
   const result = spawnSync(process.execPath, [resolve("dist/cli.js"), ...args], {
     encoding: "utf8", timeout: 3000, input, env: { ...process.env, HOME: dir, XDG_CONFIG_HOME: join(dir, "config"), SWARM_AGENT_STATE_DIR: join(dir, "state") },
   });
   assert.equal(result.error, undefined, `CLI timed out: ${args.join(" ")}`);
-  const raw = result.stdout || result.stderr;
-  try { return JSON.parse(raw) as { ok: boolean; error?: { code: string; message: string } }; }
-  catch { return { ok: false, error: { code: "plain", message: raw } }; }
+  return result;
 }
 
 test("bound A opens before fetch; B and absent id refuse before credential and cache", { timeout: 10000 }, async () => {
@@ -100,7 +111,7 @@ test("manual and old profiles stay unbound; setup cannot rebind", { timeout: 100
   } finally { await f.cleanup(); }
 });
 
-test("setup with A writes the binding and MCP maps both refusals to a person", { timeout: 10000 }, async () => {
+test("setup reports the resulting binding and MCP gives distinct remedies", { timeout: 10000 }, async () => {
   const f = await fixture();
   const oldHome = process.env.HOME;
   const oldState = process.env.SWARM_AGENT_STATE_DIR;
@@ -117,12 +128,19 @@ test("setup with A writes the binding and MCP maps both refusals to a person", {
         : { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } };
       return new Response(JSON.stringify(result), { status: 200 });
     }) as typeof fetch;
-    await setupAgent({ connectionFile: f.input, profilePath: f.profile, hostSessionId: "session-A", fetcher });
+    const setup = await setupAgent({ connectionFile: f.input, profilePath: f.profile, hostSessionId: "session-A", fetcher });
     assert.ok(calls > 0);
+    assert.equal(setup.host_session_bound, true);
+    assert.match(setup.next_action, /cswarm check --profile .* --host-session-id 'session-A'/);
     assert.equal(JSON.parse(await readFile(f.profile, "utf8")).host_session_id, "session-A");
-    for (const code of ["profile_other_session", "host_session_required"]) {
-      assert.match(MCP_ERROR_SENTENCES[code]!.next_step, /person/);
-    }
+    assert.equal(MCP_ERROR_SENTENCES.profile_other_session!.next_step, "stop and tell the operator");
+    assert.equal(MCP_ERROR_SENTENCES.host_session_required!.next_step, "restart this MCP server with the current host session");
+    const manual = await setupAgent({ connectionFile: f.input, profilePath: join(f.dir, "manual.json"), hostSessionId: "manual", fetcher });
+    assert.equal(manual.host_session_bound, false);
+    assert.doesNotMatch(manual.next_action, /cswarm check --profile/);
+    const legacy = await setupAgent({ connectionFile: f.input, profilePath: join(f.dir, "manual.json"), hostSessionId: "session-A", fetcher });
+    assert.equal(legacy.host_session_bound, true);
+    assert.equal((await readAgentProfile(join(f.dir, "manual.json"), "session-A")).host_session_id, "session-A");
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
     if (oldState === undefined) delete process.env.SWARM_AGENT_STATE_DIR; else process.env.SWARM_AGENT_STATE_DIR = oldState;
@@ -164,19 +182,34 @@ test("setup repair errors end with the operator step", { timeout: 10000 }, async
 
 test("hook stdin presents its own session id", { timeout: 10000 }, async () => {
   const f = await fixture();
+  const oldHome = process.env.HOME;
+  process.env.HOME = f.dir;
   try {
     await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    await configureAgentReceive({ profilePath: f.profile, mode: "turn", provider: "claude", hostSessionId: "session-A", cwd: f.dir,
+      execution: { command: process.execPath, args: [resolve("dist/cli.js")] } });
     const command = ["check", "--profile", f.profile, "--host-session-id", "session-A", "--hook"];
-    const a = cli(f.dir, command, JSON.stringify({ session_id: "session-A" }));
-    assert.equal(a.error?.message.includes("profile_other_session"), false);
-    const b = cli(f.dir, command, JSON.stringify({ session_id: "session-B" }));
-    assert.match(b.error?.message ?? "", /profile_other_session/);
-    const missing = cli(f.dir, command, JSON.stringify({}));
-    assert.match(missing.error?.message ?? "", /host_session_required/);
-  } finally { await f.cleanup(); }
+    const before = await readdir(f.dir);
+    for (const event of [{ session_id: "session-B" }, {}]) {
+      const other = cliRaw(f.dir, command, JSON.stringify(event));
+      assert.equal(other.stdout, "");
+      assert.equal(other.stderr, "");
+      assert.deepEqual(await readdir(f.dir), before);
+    }
+    const a = cliRaw(f.dir, command, JSON.stringify({ session_id: "session-A", hook_event_name: "UserPromptSubmit", cwd: f.dir }));
+    assert.doesNotMatch(a.stdout, /profile_other_session/);
+    assert.ok((await readdir(f.dir)).some(name => name.startsWith("check-error-")), "A did not write a check diagnostic");
+    const afterA = await Promise.all((await readdir(f.dir)).filter(name => name.startsWith("check-error-")).map(async name => [name, await readFile(join(f.dir, name), "utf8")]));
+    const bAgain = cliRaw(f.dir, command, JSON.stringify({ session_id: "session-B" }));
+    assert.equal(bAgain.stdout, "");
+    assert.deepEqual(await Promise.all((await readdir(f.dir)).filter(name => name.startsWith("check-error-")).map(async name => [name, await readFile(join(f.dir, name), "utf8")])), afterA);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    await f.cleanup();
+  }
 });
 
-test("every table row that accepts --profile refuses session B at profile open", { timeout: 120000 }, async () => {
+test("every table row that accepts --profile refuses B and parses A's id", { timeout: 120000 }, async () => {
   const f = await fixture();
   try {
     await saveAgentProfile(f.profile, connection, undefined, "session-A");
@@ -187,7 +220,7 @@ test("every table row that accepts --profile refuses session B at profile open",
       } else rows.push({ command: [verb], entry: root });
     }
     const accepting = rows.filter(({ entry }) => entry.flags.includes("profile") && entry.profile !== "refuse");
-    assert.ok(accepting.length > 20);
+    assert.equal(accepting.length, 42, "reconcile the generated profile rows when the command table changes");
     for (const { command, entry } of accepting) {
       const extra = [
         ...(entry.flags.includes("connection-file") ? ["--connection-file", f.input] : []),
@@ -199,6 +232,131 @@ test("every table row that accepts --profile refuses session B at profile open",
         ...(entry.flags.includes("json") ? ["--json"] : [])]);
       assert.ok(result.error?.code === "profile_other_session" || result.error?.message.includes(stop),
         `${command.join(" ")}: ${JSON.stringify(result)}`);
+      const ownExtra = [
+        ...(command[0] === "setup" ? ["--connection-file", f.input] : []),
+        ...(command.join(" ") === "receive configure" ? ["--mode", "turn"] : []),
+      ];
+      const own = cli(f.dir, [...command, "--profile", f.profile, "--host-session-id", "session-A", ...ownExtra]);
+      assert.doesNotMatch(own.error?.message ?? "", /unknown option|host_session_required|profile_other_session/, `${command.join(" ")}: ${JSON.stringify(own)}`);
     }
+  } finally { await f.cleanup(); }
+});
+
+test("receive configure keeps an omitted id distinct from manual", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    const options = { profilePath: f.profile, mode: "turn", execution: { command: process.execPath, args: [] } };
+    await assert.rejects(configureAgentReceive(options), {
+      code: "host_session_required",
+      message: "This profile is bound to a host session. Pass --host-session-id with this session's id.",
+    });
+    await assert.rejects(configureAgentReceive({ ...options, provider: "claude" }), {
+      code: "host_session_required",
+      message: "This profile is bound to a host session. Pass --host-session-id with this session's id.",
+    });
+    await assert.rejects(configureAgentReceive({ ...options, hostSessionId: "manual" }), { code: "profile_other_session" });
+  } finally { await f.cleanup(); }
+});
+
+test("expand checks B before a damaged credential", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    const profile = await readAgentProfile(f.profile, "session-A");
+    await writeFile(profile.credential_file, "damaged", { mode: 0o600 });
+    const b = cli(f.dir, ["whoami", "--profile", f.profile, "--host-session-id", "session-B", "--json"]);
+    assert.match(b.error?.message ?? "", /This profile belongs to another session/);
+    const a = cli(f.dir, ["whoami", "--profile", f.profile, "--host-session-id", "session-A", "--json"]);
+    assert.match(a.error?.message ?? "", /credential/i);
+  } finally { await f.cleanup(); }
+});
+
+test("receive test and idle leave B's profile folder byte-identical", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    const snapshot = async () => Promise.all((await readdir(f.dir)).sort().map(async name => [name, await readFile(join(f.dir, name), "utf8")]));
+    const before = await snapshot();
+    await assert.rejects(requestReceiveCanary(f.profile, "session-B"), { code: "profile_other_session" });
+    assert.deepEqual(await snapshot(), before);
+    await assert.rejects(markGrokBotIdle(f.profile, "session-B"), { code: "profile_other_session" });
+    assert.deepEqual(await snapshot(), before);
+    // Holding B's receive lock proves refusal happens before lock acquisition.
+    await withFileLock(f.dir, `receive-${profileScopeKey("session-B")}`, async () => {
+      await assert.rejects(requestReceiveCanary(f.profile, "session-B"), { code: "profile_other_session" });
+    }, { timeoutMs: 500 });
+    assert.deepEqual(await snapshot(), before);
+  } finally { await f.cleanup(); }
+});
+
+test("bound command producers include the saved id; manual commands stay unchanged", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    const producers = [
+      () => turnHookFailureText(f.profile, "check_failed", "session-A"),
+      () => turnCheckInstruction(f.profile, "session-A"),
+      () => boundProfileCommands("Run cswarm check, cswarm receive status, and cswarm receive configure.", f.profile, "session-A")!,
+      () => cli(f.dir, ["resume", "--profile", f.profile, "--host-session-id", "session-A", "--json"]).instruction!,
+      () => cli(f.dir, ["receive", "status", "--profile", f.profile, "--host-session-id", "session-A", "--json"]).next_action!,
+    ];
+    for (const produce of producers) {
+      const text = produce();
+      assert.match(text, /--profile/);
+      assert.match(text, /--host-session-id 'session-A'/, text);
+    }
+    assert.doesNotMatch(turnHookFailureText(f.profile, "check_failed"), /--host-session-id/);
+    assert.doesNotMatch(turnCheckInstruction(f.profile), /--host-session-id/);
+    assert.equal(boundProfileCommands("Run cswarm check.", f.profile), "Run cswarm check.");
+    const skill = await readFile(resolve("site/public/skills/cswarm/SKILL.md"), "utf8");
+    for (const command of skill.match(/`cswarm [^`]*--profile [^`]*`/g) ?? []) assert.match(command, /--host-session-id <this-session-id>/);
+    assert.match(AGENT_QUICK_GUIDE, /cswarm check --profile <saved-profile> --host-session-id <this-session-id>/);
+    const connectPrompt = await readFile(resolve("site/src/components/connect/agent-prompt.ts"), "utf8");
+    assert.match(connectPrompt, /cswarm check --profile <saved-profile> --host-session-id <this-session-id>/);
+    assert.match(AGENT_SETUP_HOST_GUIDANCE, /cswarm reads no environment variable for the session id/);
+    const brief = await readFile(resolve("docs/design/2026-09-24-ITEM-I-PROFILE-SESSION-BINDING-BRIEF.md"), "utf8");
+    assert.match(brief, /Decision 4's retired words/);
+    assert.match(brief, /cswarm reads no environment variable for the session id/);
+  } finally { await f.cleanup(); }
+});
+
+test("src never reads an environment variable as the session id", { timeout: 10000 }, async () => {
+  const names: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) await visit(path);
+      else if (entry.name.endsWith(".ts")) {
+        const source = ts.createSourceFile(path, await readFile(path, "utf8"), ts.ScriptTarget.Latest, true);
+        const scan = (node: ts.Node) => {
+          if (ts.isVariableDeclaration(node) && node.initializer?.getText(source) === "process.env" &&
+              ts.isObjectBindingPattern(node.name)) {
+            for (const element of node.name.elements) names.push((element.propertyName ?? element.name).getText(source));
+          }
+          if (ts.isPropertyAccessExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
+              node.expression.expression.getText(source) === "process" && node.expression.name.text === "env") names.push(node.name.text);
+          if (ts.isPropertyAccessExpression(node) && node.expression.getText(source) === "env") names.push(node.name.text);
+          if (ts.isElementAccessExpression(node) && node.expression.getText(source) === "process.env" &&
+              node.argumentExpression && ts.isStringLiteral(node.argumentExpression)) names.push(node.argumentExpression.text);
+          if (ts.isElementAccessExpression(node) && node.expression.getText(source) === "env" &&
+              node.argumentExpression && ts.isStringLiteral(node.argumentExpression)) names.push(node.argumentExpression.text);
+          ts.forEachChild(node, scan);
+        };
+        scan(source);
+      }
+    }
+  };
+  await visit(resolve("src"));
+  assert.ok(names.includes("CLAUDE_CONFIG_DIR"), "positive control: known host environment read");
+  assert.equal(names.filter(name => /SESSION_ID/i.test(name)).length, 0);
+});
+
+test("setup network failures include the operator step", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const result = cli(f.dir, ["setup", "--connection-file", f.input, "--profile", f.profile, "--host-session-id", "session-A", "--json"]);
+    assert.ok(result.error?.message.endsWith("Stop and tell the operator. Do not open another agent's profile."), JSON.stringify(result));
+    assert.equal(result.error?.code, "onboarding_failed");
   } finally { await f.cleanup(); }
 });

@@ -6894,6 +6894,7 @@ async function liveManagedContextPath(
 
 async function runListenStart(args: Arguments): Promise<void> {
   args.assertShape([
+    "host-session-id",
     ...TARGET_FLAGS,
     "workspace-id",
     ...CREDENTIAL_FLAGS,
@@ -7255,6 +7256,7 @@ async function runListenStatusOrStop(
   command: "status" | "stop",
 ): Promise<void> {
   args.assertShape([
+    "host-session-id",
     ...TARGET_FLAGS,
     ...CREDENTIAL_FLAGS,
     "workspace-id",
@@ -7361,6 +7363,7 @@ async function runListenStatusOrStop(
 
 async function runListenCanary(args: Arguments): Promise<void> {
   args.assertShape([
+    "host-session-id",
     ...TARGET_FLAGS,
     ...CREDENTIAL_FLAGS,
     "workspace-id",
@@ -7429,7 +7432,9 @@ async function runSession(args: Arguments): Promise<void> {
     action === "enable" || action === "disable" || action === "recover"
   ) {
     args.assertShape([
+      "host-session-id",
       ...TARGET_FLAGS,
+      ...CREDENTIAL_FLAGS,
       "workspace-id",
       "principal-id",
       "json",
@@ -7465,8 +7470,10 @@ async function runSession(args: Arguments): Promise<void> {
   }
   if (action === "status") {
     args.assertShape([
+      "host-session-id",
       ...TARGET_FLAGS,
       ...CREDENTIAL_FLAGS,
+      "workspace-id",
       "session-context",
       "json",
     ], 2);
@@ -7498,8 +7505,10 @@ async function runSession(args: Arguments): Promise<void> {
   }
   if (action === "stop") {
     args.assertShape([
+      "host-session-id",
       ...TARGET_FLAGS,
       ...CREDENTIAL_FLAGS,
+      "workspace-id",
       "session-context",
       "json",
     ], 2);

@@ -38,7 +38,7 @@ ${codeBlock("sh", INSTALL_CMD)}`,
     AGENT_SETUP_HOST_GUIDANCE,
     "Run the setup command for this host with --json. Use the returned --profile and this session's --host-session-id with later commands.",
     "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake supports Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain any approval or restart needed. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model to answer here.",
-    "Run cswarm check before work. Read only relevant brain topics; post intent and reply to requests. Use cswarm setup guide only when needed. Report the connection, receive mode, and next step; do not claim wake works until its idle test passes.",
+    "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read relevant brain topics; post intent and reply. Use cswarm setup guide only when needed. Report the connection, receive mode, and next step; do not claim wake works until its idle test passes.",
   ].join("\n\n");
 }
 

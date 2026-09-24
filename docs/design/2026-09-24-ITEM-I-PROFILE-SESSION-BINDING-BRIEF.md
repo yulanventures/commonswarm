@@ -13,7 +13,7 @@ recommending the hybrid below; answers in `docs/evidence/2026-09-24-item-i-desig
 - The command edge requires the session proof only for MANAGED principals (`managed_at`, set by a human with
   `cswarm session enable`). The read edge never checks a proof; `cswarm check` uses only the read edge.
 - Host session sources in the CLI: the `--host-session-id` flag, and Claude Code hook stdin `session_id` in
-  `cswarm hook check`. No environment variable is read (identity spec: do not infer host identity from inherited
+  `cswarm hook check`. cswarm reads no environment variable for the session id (identity spec: do not infer host identity from inherited
   variables).
 - So session B can run `cswarm check --profile <A's profile>` today and read A's messages, unless A is managed AND B
   passes its own id.
@@ -34,7 +34,7 @@ recommending the hybrid below; answers in `docs/evidence/2026-09-24-item-i-desig
      "This profile belongs to another session. Stop and tell the operator.";
    - no id: `host_session_required`, sentence "This profile is bound to a host session. Pass --host-session-id with
      this session's id." (the same session may have forgotten the flag, so "another session" would be false);
-   - the hook path presents the stdin `session_id`; a missing stdin id is `host_session_required`.
+   - the hook path presents the stdin `session_id` when it matches the configured session. A turn for another session, including one with no stdin id, exits silently.
    An unbound profile (every profile written before this release, and `manual`) behaves exactly as today.
 3. **No rebinding by setup.** `setup` on an existing bound profile with a different id is refused with
    `profile_other_session`. Moving a seat to a new session is the operator's: remove the profile directory and set the
@@ -46,11 +46,11 @@ recommending the hybrid below; answers in `docs/evidence/2026-09-24-item-i-desig
    (`src/cloud/agent-onboarding-contract.ts`) and the connect message (`site/src/components/connect/agent-prompt.ts`)
    state the rule and show the setup command with `--host-session-id`, naming where each supported host exposes its id
    (Claude Code: `"$CLAUDE_CODE_SESSION_ID"` in its shell; Codex: `"$CODEX_THREAD_ID"`), as text the agent's own shell
-   expands. `cswarm` itself still reads no environment variable. Every host named must be verified before the text
+   expands. cswarm reads no environment variable for the session id. Every host named must be verified before the text
    ships; a host that is not verified is not named.
 5. **MCP.** `cswarm mcp` calls `requireProfileHost` at start (a bound profile without a matching `--host-session-id`
-   does not start), and the MCP error table gets `profile_other_session` and `host_session_required` with the person
-   step. Whether a host's static MCP config can pass a per-session id (for example Claude Code expanding
+   does not start), and the MCP error table gives `profile_other_session` the stop-operator step and
+   `host_session_required` the restart-this-MCP-session step. Whether a host's static MCP config can pass a per-session id (for example Claude Code expanding
    `${CLAUDE_CODE_SESSION_ID}` in args) is NOT established; the release notes say so and the Claude Code live run
    checks it.
 6. **Server: no change.** The managed-principal proof fence stays as it is; the read edge is not changed. No box
@@ -67,7 +67,7 @@ It does not change unbound profiles written before this release.
 
 - Unit and CLI tests: bound to A, presented A: the fetcher is called; presented B: `profile_other_session`, fetcher
   not called, credential and cache not read; no id: `host_session_required`; unbound profile, no id: unchanged;
-  `manual`: unbound; hook stdin A passes, B refuses; setup rebinding refused; an old-format profile still reads; every
+  `manual`: unbound; hook stdin A passes, B's turn exits silently; setup rebinding refused; an old-format profile still reads; every
   `--profile` row of `AGENT_COMMANDS` reaches `requireProfileHost` (generated from the table, not a typed list).
 - Mutation control (this REPLACES the backlog's "drop the proof header, the refusal disappears", which cannot fail on
   `check`: the read edge never refuses on a proof): remove the comparison in `requireProfileHost`; the B refusal test
@@ -80,3 +80,9 @@ It does not change unbound profiles written before this release.
 
 Server-side binding (a session-bound read proof), migrating unbound seats, and reading host environment variables in
 `cswarm`. Each needs its own ruling.
+
+## Fold 1 corrections (2026-09-24)
+
+Decision 4's retired words were “`cswarm` itself still reads no environment variable.” That was too broad: host detection reads `CURSOR_AGENT`, `SAND_HOST_PORT`, and `CURSOR_AGENT_SOCKET`, and CLI configuration reads `CLAUDE_CONFIG_DIR`. The supported claim is: **cswarm reads no environment variable for the session id**.
+
+An owner may run setup with an existing unbound or `manual` profile and a new session id, using the connection file; setup reports whether the resulting profile is bound. A bound profile still refuses a different id. A project-scoped hook silently ignores a turn whose stdin session id is not its configured id, including missing stdin ids. These Fold 1 rulings replace the earlier hook-missing-id line in decision 2 and its Done-list expectation.
