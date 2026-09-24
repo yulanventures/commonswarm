@@ -1,0 +1,40 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url (it contacts commonswarm.com); run no
+ssh, supabase, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret.
+Read-only git and file reads; you may run pure tests with a temporary HOME (tests that spawn dist/ need
+`npm run build` first).
+
+LANE: item H release 2 (option A), branch lane/mcp-connect at da5fa657 (8f2e1976 by Codex, da5fa657 lead fix), base
+origin/main 86a938f3. Your current directory is a detached worktree at da5fa657. Diff: git diff origin/main...da5fa657.
+SPEC: docs/design/2026-09-24-MCP-RELEASE-2-BRIEF.md (option A, decisions 1-6, "Done for release 2"). Strategist ruling
+A with conditions: connect must refuse to run without a TTY (an agent cannot pipe the code in); the code is single-use
+even inside its hour; the printed lines name the profile path only. Record: docs/evidence/2026-09-24-mcp-release2/LANE.md.
+
+CHECK clause by clause:
+- no path puts the join code or the seat token on stdout, stderr, an error, a log, argv, the environment, or a file
+  other than the 0600 credential.json (read every producer in src/cloud/mcp-connect.ts and the two CLI handlers;
+  include error paths, the register response, and what `mcp code` prints — it prints the code once, by design, to the
+  person who ran it);
+- the TTY rule: stdin not a TTY -> refused before reading; echo off and restored on every path (success, error,
+  signal); what if stty is missing;
+- single use: connect never retries register and never reuses the attemptId; a second connect with the same code gets
+  the seat-cap refusal and writes nothing; what the server's attemptId replay path means here;
+- fail-closed: an existing profile or credential at the path is refused before any prompt or request; every failure
+  after register (response invalid, write error) says what the operator must do; nothing half-written that `check`
+  accepts;
+- `mcp code`: human credential only; refuses --profile and agent credentials before any request; seat_cap 1, ttl 1;
+- the `mcp` row became a group (serve default, code, connect): does `cswarm mcp --profile P` still serve exactly as in
+  0.1.75, including item I's binding check and the refusal policy; the dispatch-baseline changes (read the diff of the
+  fixture: which rows changed and are all intended);
+- target resolution (--url required; anon key from --anon-key or a saved target for that URL): can it pick a wrong
+  deployment or key;
+- the onboarding texts (connect prompt, setup guide, H0 paste) are true, and every claim in LANE.md is true;
+- scripts/build-release.sh now writes dist-release/package.json: does that change any published artifact or the
+  release asset list;
+- tests run under package scripts and prove what they name; the mutation controls reach their paths.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

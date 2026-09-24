@@ -1,0 +1,20 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url (it contacts
+commonswarm.com); no ssh, supabase, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no
+skill; print no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item H release 2 (option A), branch lane/mcp-connect now at 057c79cb (Codex fold 2: 8e4c21f0, 057c79cb on
+f8328f83). Your current directory is a detached worktree at 057c79cb. Your round-2 review (FAIL): seat-exists codes
+were told "the code was not used"; the signal test did not guard the handler's own restore; LANE.md remedy claims.
+Opus round 2 (FAIL): the path-dependent bundle-SHA test; the same false sentence; the timeout mapping lost main->HEAD.
+Rulings L1-L8 and both reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/hr2/fold2.md. Record: LANE.md "Fold 2".
+
+REVIEW `git diff f8328f83..057c79cb` and the whole lane. CHECK: L1-L8 each implemented with a test that fails on
+revert (verify L2, L3, L4 by reading the test and the code); L2: derive yourself from supabase/functions/command/index.ts
+and supabase/functions/h0/ which register refusal codes can occur only after a seat exists and which prove the code was
+not used, and check the CLI's two sets and sentences match exactly; L3: the mapping resolves on main after a
+fast-forward merge; the five kept prompt shortenings are listed and the prompt stays true; no secret on any output path;
+no test weakened; nothing else changed.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

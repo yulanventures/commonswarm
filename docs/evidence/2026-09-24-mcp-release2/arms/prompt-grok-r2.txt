@@ -1,0 +1,21 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url (it contacts
+commonswarm.com); no ssh, supabase, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no
+skill; print no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item H release 2 (option A), branch lane/mcp-connect now at f8328f83 (Codex fold 1 on da5fa657). Your current
+directory is a detached worktree at f8328f83. Your round-1 review of da5fa657 (FAIL) found: `--code=<secret>` echoed
+by the option parser; a failed save after register gave no revoke instruction; echo not restored on a signal; LANE.md's
+principal-id claim. Opus round 1 (FAIL) found more; the lead's rulings K1-K11 and both reviews are in
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/hr2/fold1.md. Record: docs/evidence/2026-09-24-mcp-release2/LANE.md "Fold 1".
+
+REVIEW `git diff da5fa657..f8328f83` and the whole lane `git diff origin/main...f8328f83`. CHECK each ruling K1-K11 is
+implemented and its test fails on revert (verify at least K1, K2, K6, K7, K8, K9 by reading the test and the code it
+guards); K1: can ANY option value reach an error message on any command now (search every error that interpolates an
+argument); K2: every path after the register request was sent ends in the revoke sentence unless a typed refusal
+proves the code was not used, and the "not used" set is generated from the server code; K7: every remedy sentence is
+true for its code; K5: no claim says an agent "cannot" pipe the code; the site copy is true on that screen; nothing in
+the fold weakened a test; no secret on any output path.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,20 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command without a loopback --url (it contacts
+commonswarm.com); no ssh, supabase, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no
+skill; print no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests).
+
+LANE: item H release 2 (option A), branch lane/mcp-connect now at 094d9563 (Codex fold 3: 2892f3ee, 094d9563 on
+057c79cb). Your current directory is a detached worktree at 094d9563. Your round-3 review (FAIL) and Opus's (FAIL) both
+found that `forbidden` (and invalid_request, upgrade_required, principal_limit_reached) can come after someone else
+redeemed the code, so "the code was not used" was false; plus the fallback-prompt meaning change, Ctrl-C leaving the
+directory, the timeout citation line, and a cleanup error hiding the revoke sentence. Rulings M1-M5 and both reviews:
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/hr2/fold3.md. Record: LANE.md "Fold 3".
+
+REVIEW `git diff 057c79cb..094d9563` and the whole lane. CHECK: M1 — derive yourself from
+supabase/functions/command/index.ts registerAgentSeat and supabase/functions/h0/ which refusals can follow a seat that
+already exists and which prove only "this attempt created no seat"; every connect sentence claims only what the server
+proves, and no message says the code "was not used"; the sets are generated from server source; M2-M5 each with a test
+that fails on revert; no secret on any output path; no test weakened; nothing else changed.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
