@@ -95,3 +95,25 @@ All test gates had a process-group timeout and an isolated temporary `HOME`; the
 - `git diff --check`: exit 0 before commit. `git diff --check origin/main...HEAD`: exit 0 after the commit.
 
 The reset-stack server suite, production lock window, box functional proof, and hosted behavior remain unestablished. The lead runs `db:reset` and that suite after this fold; this lane did not reset or stop the local stack.
+
+## Fold 3 — 2026-09-25
+
+The Opus round-3 review failed on agent-sender receipts. The lead's `fad542e0` and `321c5406` test-fixture commits are the starting point for this fold. This section supersedes Fold 2's H3 cutoff-test claim and H5 shared-view design. The migration was replayed inside a transaction against the local fold-2 stack and rolled back; its updated catalog proof returned `true`. The served HTTP server suite still requires the lead's reset stack.
+
+| Ruling | Change | Test and mutation |
+|---|---|---|
+| I1 | `swarm.wake_path_eligible_deliveries` holds the sole eligibility predicate, owned by `swarm_admin` with no client-role SELECT grants. The receipt SECURITY DEFINER wrapper reads it after its existing author check. `swarm_read.agent_wake_path_deliveries` adds `swarm.is_member(workspace_id, auth.uid())` for the roster. The catalog proof checks the private ACLs and both dependencies. | New server test posts directed signals as an agent and as the owner, makes their delivery rows stale for a known seat, and checks each sender's authorized receipt bit. It also checks that a nonmember receives no receipt or roster row. Reverting the receipt query to the member-gated view makes the agent assertion false; removing the roster membership gate makes the nonmember assertion fail; granting SELECT on the private view fails the catalog test. Reset-stack execution pending. |
+| I2 | Kept the release-cutoff predicate as an explicit guard. It is redundant by construction with a known seat's post-cutoff observed ACK and the later-observed rule. Removed tests that claimed to isolate the cutoff when they actually passed through the known-seat or later-observed filters. | No independent cutoff mutation test is claimed. |
+| I3 | The functional box proof selects the seed and competing mail from the same private eligibility view. Its separate owner-membership check remains. | Server proof test now marks a later signal observed with `delivered_at` and `surfaced_at`; the seed must fail with `seed signal is not an eligible live unobserved delivery for a known, active seat`. Reverting to the copied predicate makes that assertion fail with the old `wake-path view omitted exact seeded unobserved delivery` message. Reset-stack execution pending. |
+| I4 | Added no index. | Opus measured 36 ms with 50,000 observed rows, 200 known seats, and five stale rows per seat in one workspace. Its plan showed a sequential scan of 50,000 `signal_deliveries later` rows feeding a hash anti join, plus 50,000 indexed observed-seat reads through `signal_deliveries_terminal_acked`. Follow up with HezLead for the production row count before deciding on the proposed `(workspace_id, recipient_agent_principal_id, enqueued_at)` partial index for unclaimed observed rows. |
+
+The box functional proof, served HTTP server tests, production observed-row count, production query cost, and live stale-receipt behavior are not established by this fold. No production host was contacted.
+
+### Fold 3 gates
+
+Every gate ran with an outer process-group timeout and a temporary `HOME`; the wrapper killed remaining processes in its group. `npm run build` exited 0; `npm run check:tests` exited 0; `npm run check:edge` exited 0; `npm run build:command-core` exited 0 and `git diff --exit-code supabase/functions/_shared/protocol.js` exited 0; `bash scripts/build-release.sh` exited 0; `npm --prefix site run build` exited 0. The rolled-back local migration replay and catalog proof exited 0 with `catalog_ok=t`. Local process-list inspection itself failed (`sysmond service not found`), so independent global process absence was not established.
+
+- `env -u FORCE_COLOR npm test`: exit 1; 967 tests, 965 passed, 2 failed on sandbox `spawn EPERM`.
+- `env -u FORCE_COLOR npm run test:p1-cli`: exit 1; 938 tests, 935 passed, 3 failed on sandbox `ps`/`spawn EPERM`.
+- `env -u FORCE_COLOR npm --prefix site test`: exit 1; 576 tests, 499 passed, 76 failed, 1 skipped. Headless Chrome aborted (`SIGABRT`) in the failing browser tests.
+- `git diff --check origin/main...HEAD`: exit 0 after the fold commits.
