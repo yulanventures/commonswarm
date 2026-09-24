@@ -1,0 +1,22 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file reads;
+you may run pure tests with a temporary HOME (tests that spawn dist/ need `npm run build` first).
+
+LANE: item I, branch lane/item-i, now at 4cbe7d01 (fold 1 by Codex through alloy execute, on 5fe61316). Your current
+directory is a detached worktree at 4cbe7d01. Spec: docs/design/2026-09-24-ITEM-I-PROFILE-SESSION-BINDING-BRIEF.md
+(with a fold-1 correction). The lead's rulings F1-F10 and both round-1 reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemI/fold1.md. Record:
+docs/evidence/2026-09-24-item-i/LANE.md "Fold 1".
+
+REVIEW `git diff 5fe61316..4cbe7d01` and the whole lane `git diff origin/main...4cbe7d01`. CHECK: each ruling F1-F10 is
+implemented and its test fails when the fix is reverted (verify at least F1 hook silence, F2 generated all-rows A test,
+F3, F4 printed commands, F6, F8 by reading the test and the code it guards); the round-1 findings (yours and Opus's)
+are all resolved; the hook: a session B in the same project folder is silent AND A's own turns still work and still
+report real failures; no new path opens a profile without the check; the printed-command producers are enumerated
+completely; unbound profiles behave exactly as at 0260ab8d; the claims in guide/SKILL.md/brief/LANE are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,25 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file reads;
+you may run pure tests with a temporary HOME (tests that spawn dist/ need `npm run build` first).
+
+LANE: item I, branch lane/item-i, now at 2dbbfe23. Your current directory is a detached worktree at 2dbbfe23. Since
+your round-2 review of 4cbe7d01 (FAIL: the unbound resume instruction): 4a306478 (lead: usage errors keep their text;
+guide wording "The CLI reads no environment variable for the session id"; citation drift), cd2fd324 (fold 2, Codex:
+G1 session enable|disable|recover are human-only again and refuse --profile and agent credentials; G2 unbound resume
+keeps the receive binding's id; G3 listen and session status|stop take --host-session-id only with --profile; G4 the
+setup wrapper keeps each error's class), 2dbbfe23 (lead: dispatch-baseline coverage for G1 and a normalizer for the
+run-dependent profile_id and state hash). Rulings: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemI/fold2.md. Opus round 2: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemI/opus-r2.md.
+
+REVIEW `git diff 4cbe7d01..2dbbfe23` and the whole lane `git diff origin/main...2dbbfe23`. CHECK: each fold-2 ruling and
+lead fix is correct and has a test that fails on revert; G1: can any path still let an agent credential or --profile
+reach enable/disable/recover or the stored human login; the refusal text "--profile is supported by: ... session" —
+is it true now that three session variants refuse a profile; the baseline normalizer hides nothing that should be
+recorded (only run-dependent values); unbound behaviour equals 0260ab8d; no new opener skips requireProfileHost; claims
+in LANE.md, the brief and SKILL.md are true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

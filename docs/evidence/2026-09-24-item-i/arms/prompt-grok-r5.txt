@@ -1,0 +1,15 @@
+You review one commit of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host; never run a cswarm command (without a loopback --url it contacts
+commonswarm.com); no ssh, supabase, vercel; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no
+skill; print no secret. You may run pure tests with a temporary HOME.
+
+LANE: item I. Your review of 25ac71b1 was FAIL on one RIGOUR finding: tests/p1-cli/command-table-gates.test.ts
+"AGENT_PROFILE_COMMANDS is derived from table order data" still expected one name per verb. The lead's fix is
+dc834c50 (tests only). Your current directory is a detached worktree at dc834c50.
+
+REVIEW `git diff 25ac71b1..dc834c50` only: is the finding fixed; does the test still guard the order rule
+(profileListOrder) without re-implementing the list builder; does it fail if the list order breaks; did anything else
+change. Run the three files: tests/p1-cli/command-table-gates.test.ts tests/p1-cli/item-i-profile-binding.test.ts
+tests/p1-cli/citation-drift.test.ts (build first; unset FORCE_COLOR). OUTPUT: findings with file:line, severity,
+evidence. Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

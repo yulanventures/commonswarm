@@ -1,0 +1,34 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do not
+read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file reads;
+you may run pure tests with a temporary HOME (tests that spawn dist/ need `npm run build` first).
+
+LANE: item I, "a profile is bound to the host session that ran setup". Your current directory is a detached worktree
+at 5fe61316 (branch lane/item-i: d1d586a4 by Codex gpt-6-sol through alloy execute, 5fe61316 lead test/text fix),
+base origin/main 0260ab8d. Diff: git diff origin/main...5fe61316. SPEC: docs/design/2026-09-24-ITEM-I-PROFILE-SESSION-
+BINDING-BRIEF.md (six decisions, "Done for release 1"); record: docs/evidence/2026-09-24-item-i/LANE.md.
+
+CHECK, clause by clause against the brief:
+- every command that opens a profile (every --profile row of AGENT_COMMANDS, the EXPAND paths in cli.ts, setup,
+  check/cached check, receive, listen/session rows, the hook paths that resolve a profile, cswarm mcp, onboarding-cli)
+  reaches requireProfileHost BEFORE the credential, the message cache or any network call; find any opener that reads
+  profile.json by another route (JSON.parse of the file, a copy of the reader) and so skips the check;
+- the hook path presents the stdin session_id; a missing stdin id refuses;
+- `manual` never binds, and `manual` presented to a bound profile is refused; setup cannot rebind a bound profile
+  (and the refusal happens before the connection is authenticated on the network); an unbound (old) profile behaves as
+  before; an old CLI refusing a bound profile is the stated, accepted effect;
+- the exact sentences and codes; the MCP error table entries and their next steps are true;
+- the host-variable text: are CLAUDE_CODE_SESSION_ID (Claude Code shell) and CODEX_THREAD_ID (Codex shell) what those
+  hosts' own docs/source say; is anything else named without a citation; does the CLI itself read any environment
+  variable for the host session (it must not);
+- tests: positive, negative, missing id, manual, hook, rebind, old profile, and a test GENERATED from AGENT_COMMANDS
+  that every --profile row reaches requireProfileHost (not a typed list); the mutation control (remove the comparison
+  -> the B refusal test fails) reaches the path it claims; tests run under a package script;
+- the dispatch-baseline changes (7 rows) are all intended, and setup.import still reaches setup;
+- every surface that shows a setup command (site, SKILL.md, help, guide, docs) now includes --host-session-id.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

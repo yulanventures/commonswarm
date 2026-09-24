@@ -1,0 +1,20 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing.
+
+HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74) — a cswarm command run without --url resolves its own target and contacts
+commonswarm.com, so never run one; run no ssh, supabase, vercel, swarm or cswarm command against a real workspace; do
+not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file
+reads; you may run pure tests with a temporary HOME (tests that spawn dist/ need `npm run build` first).
+
+LANE: item I, now at 25ac71b1 (fold 3, Codex) on 2dbbfe23. Your round-3 review of 2dbbfe23 was FAIL on one finding:
+the refusal "--profile is supported by: ..." named `session` although session enable|disable|recover refuse a profile.
+Fold 3: H1 builds that list per command pair from AGENT_COMMANDS; H2 restores `unknown option: --workspace-id` for
+session status|stop without --profile. Your current directory is a detached worktree at 25ac71b1.
+
+REVIEW `git diff 2dbbfe23..25ac71b1` only. CHECK: the new sentence is true for every listed and every unlisted command
+(derive it from the table yourself); the test derives its expected set from the table and fails if `session` returns;
+H2 matches 0260ab8d without --profile and still works with --profile; the 273 baseline row changes are only that
+sentence; nothing else changed. OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence. Final line
+exactly:
+VERDICT: PASS  or  VERDICT: FAIL
