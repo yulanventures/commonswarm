@@ -61,10 +61,9 @@ CREATE TABLE swarm.wake_path_release (
 INSERT INTO swarm.wake_path_release (singleton) VALUES (true);
 ALTER TABLE swarm.wake_path_release OWNER TO swarm_admin;
 
--- One private eligible-row source feeds both the roster and receipts. Its
--- release cutoff is redundant by construction: a known seat has an observed
--- ACK after the cutoff, and that later observation excludes older mail. Keep
--- the cutoff as an explicit release guard; no independent test can reach it.
+-- One private eligible-row source feeds both the roster and receipts. The
+-- release cutoff is load-bearing: a seat that is behind at release can ACK old
+-- mail first, and only the cutoff then keeps its remaining old mail out.
 CREATE VIEW swarm.wake_path_eligible_deliveries WITH (security_barrier = true) AS
 SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
        d.enqueued_at

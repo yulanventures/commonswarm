@@ -702,8 +702,9 @@ test("check order wins when an older signal gains its recipient after newer mail
     last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
   await sql.begin(async (tx) => {
     await tx`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() - interval '2 hours' WHERE singleton`;
-    // The older signal already exists. Adding this recipient later creates its delivery then.
-    // Today's trigger refuses a late recipient; this rolled-back fixture models a historical row.
+    // Production inverts signal order and enqueue order only inside one posting transaction
+    // (milliseconds). This rolled-back fixture widens that gap to minutes by adding a recipient
+    // late, which signal_recipients_same_transaction refuses outside this fixture.
     await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_same_transaction`;
     await tx`INSERT INTO swarm.signal_recipients
       (signal_id, workspace_id, recipient_agent_principal_id, position)
@@ -752,7 +753,8 @@ test("an observed non-ask/note delivery cannot heal directed mail", { timeout: 3
   assert.equal(posted.status, 200, JSON.stringify(posted.body));
   const later = (posted.body.signal as { id: string }).id;
   await sql.begin(async (tx) => {
-    // A malformed historical row can exist even though today's command edge refuses this ACK.
+    // Production cannot hold this row: the trigger refuses a late recipient and the command edge
+    // refuses this ACK. The rolled-back fixture isolates the view's kind filter.
     await tx`ALTER TABLE swarm.signal_recipients DISABLE TRIGGER signal_recipients_same_transaction`;
     await tx`INSERT INTO swarm.signal_recipients
       (signal_id, workspace_id, recipient_agent_principal_id, position)
@@ -882,6 +884,71 @@ test("wake catalog validates the lease-free observed shape and hides private rec
   await assert.rejects(sql`UPDATE swarm.signal_deliveries SET ack_outcome = 'replied'
     WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`,
   { code: "23514" });
+});
+
+const WAKE_MIGRATION = fileURLToPath(new URL("../../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url));
+function eligibleViewBody(): string {
+  const migration = readFileSync(WAKE_MIGRATION, "utf8");
+  return migration.split("CREATE VIEW swarm.wake_path_eligible_deliveries", 2)[1]!
+    .split("ALTER VIEW swarm.wake_path_eligible_deliveries", 1)[0]!;
+}
+function replaceOnce(text: string, find: string, replacement: string): string {
+  assert.equal(text.split(find).length, 2, `the mutation must find ${JSON.stringify(find)} once`);
+  return text.replace(find, replacement);
+}
+
+test("section 5 catalog proof accepts the installed view and refuses an old heal rule", { timeout: 30_000 }, async () => {
+  const proof = readFileSync(fileURLToPath(new URL("../../deploy/release-proofs/item-g/20260925000001-catalog.sql", import.meta.url)), "utf8")
+    .replace(/\\gset\s*$/, "");
+  const view = eligibleViewBody();
+  const cases: Array<[string, string, boolean]> = [
+    ["installed", view, true],
+    ["enqueue-order heal", replaceOnce(view, "AND (later_signal.created_at, later_signal.id) > (s.created_at, s.id)",
+      "AND later.enqueued_at > d.enqueued_at"), false],
+    ["no later kind filter", replaceOnce(view, "      AND later_signal.kind IN ('ask', 'note')\n", ""), false],
+    ["no release cutoff", replaceOnce(view,
+      "  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)\n", ""), false],
+  ];
+  for (const [name, body, expected] of cases) {
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries${body}`);
+      const [row] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
+      assert.equal(row?.catalog_ok, expected, `catalog proof on ${name}`);
+      throw new Error("ROLLBACK_CATALOG_CASE");
+    }).catch(error => {
+      if (!(error instanceof Error) || error.message !== "ROLLBACK_CATALOG_CASE") throw error;
+    });
+  }
+});
+
+test("the release cutoff alone keeps pre-release backlog out after an old ACK", { timeout: 30_000 }, async () => {
+  const [cutoff] = await sql<{ applied_at: Date }[]>`SELECT applied_at FROM swarm.wake_path_release WHERE singleton`;
+  assert.ok(cutoff);
+  const agent = await seedAgent("wake-cutoff-backlog");
+  // A seat behind at release: two pre-release asks, read oldest first.
+  const read = await postAsk(agent.principalId);
+  const backlog = await postAsk(agent.principalId);
+  await sql`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() WHERE singleton`;
+  try {
+    assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: read,
+      lease_id: null, listener_instance_id: null, outcome: "observed",
+      last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+    assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), [], "pre-release backlog is not stale");
+    assert.equal(await receiptWakePath(backlog, agent.principalId), false);
+    const noCutoff = replaceOnce(eligibleViewBody(),
+      "  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)\n", "");
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries${noCutoff}`);
+      const rows = await tx<{ signal_id: string }[]>`SELECT signal_id::text FROM swarm.wake_path_eligible_deliveries
+        WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+      assert.deepEqual(rows.map(row => row.signal_id), [backlog], "only the cutoff excludes the backlog");
+      throw new Error("ROLLBACK_NO_CUTOFF");
+    }).catch(error => {
+      if (!(error instanceof Error) || error.message !== "ROLLBACK_NO_CUTOFF") throw error;
+    });
+  } finally {
+    await sql`UPDATE swarm.wake_path_release SET applied_at = ${cutoff.applied_at} WHERE singleton`;
+  }
 });
 
 test("same-transaction validation retains the exclusive lock described by the migration", { timeout: 10_000 }, async () => {

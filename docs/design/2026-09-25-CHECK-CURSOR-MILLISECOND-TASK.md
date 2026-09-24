@@ -11,5 +11,11 @@ test with the inverted UUIDs and a one-row page, proving the next page returns
 the second signal exactly once. Review the wire cursor representation so it
 preserves the comparison precision used by the query.
 
+A second skip comes from commit order (reasoned from code, not measured; Opus
+round-4 review of item G lane 1). A posting transaction stamps `created_at` at
+the signal INSERT and commits later. A check that reads a later-created signal
+that committed first moves its cursor past the uncommitted one, so check never
+shows that signal. The same fix lane must cover both skips.
+
 Item G lane 1 only changes the wake eligibility rule. Its later-observed heal
 is safe only when check's cursor has shown every earlier signal in that order.

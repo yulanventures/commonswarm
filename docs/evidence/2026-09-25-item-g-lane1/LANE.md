@@ -103,7 +103,7 @@ The Opus round-3 review failed on agent-sender receipts. The lead's `fad542e0` a
 | Ruling | Change | Test and mutation |
 |---|---|---|
 | I1 | `swarm.wake_path_eligible_deliveries` holds the sole eligibility predicate, owned by `swarm_admin` with no client-role SELECT grants. The receipt SECURITY DEFINER wrapper reads it after its existing author check. `swarm_read.agent_wake_path_deliveries` adds `swarm.is_member(workspace_id, auth.uid())` for the roster. The catalog proof checks the private ACLs and both dependencies. | New server test posts directed signals as an agent and as the owner, makes their delivery rows stale for a known seat, and checks each sender's authorized receipt bit. It also checks that a nonmember receives no receipt or roster row. Reverting the receipt query to the member-gated view makes the agent assertion false; removing the roster membership gate makes the nonmember assertion fail; granting SELECT on the private view fails the catalog test. Reset-stack execution pending. |
-| I2 | Kept the release-cutoff predicate as an explicit guard. It is redundant by construction with a known seat's post-cutoff observed ACK and the later-observed rule. Removed tests that claimed to isolate the cutoff when they actually passed through the known-seat or later-observed filters. | No independent cutoff mutation test is claimed. |
+| I2 | Kept the release-cutoff predicate as an explicit guard. ~~It is redundant by construction with a known seat's post-cutoff observed ACK and the later-observed rule.~~ **CORRECTED in the lead fold below: the cutoff is load-bearing.** Removed tests that claimed to isolate the cutoff when they actually passed through the known-seat or later-observed filters. | No independent cutoff mutation test is claimed. (Superseded: the lead fold adds one.) |
 | I3 | The functional box proof selects the seed and competing mail from the same private eligibility view. Its separate owner-membership check remains. | Server proof test now marks a later signal observed with `delivered_at` and `surfaced_at`; the seed must fail with `seed signal is not an eligible live unobserved delivery for a known, active seat`. Reverting to the copied predicate makes that assertion fail with the old `wake-path view omitted exact seeded unobserved delivery` message. Reset-stack execution pending. |
 | I4 | Added no index. | Opus measured 36 ms with 50,000 observed rows, 200 known seats, and five stale rows per seat in one workspace. Its plan showed a sequential scan of 50,000 `signal_deliveries later` rows feeding a hash anti join, plus 50,000 indexed observed-seat reads through `signal_deliveries_terminal_acked`. Follow up with HezLead for the production row count before deciding on the proposed `(workspace_id, recipient_agent_principal_id, enqueued_at)` partial index for unclaimed observed rows. |
 
@@ -139,3 +139,30 @@ All test commands used a process-group timeout and a temporary `HOME`; the wrapp
 - `git diff --check origin/main...HEAD`: exit 0 after the fold commits.
 
 The served server tests, box migration and command release, production cursor safety, production lock window, and live behavior remain unestablished. No production host was contacted.
+
+## Lead fold — 2026-09-24 (a3736201 and the next commit)
+
+The lead ran the fold-4 server tests on the reset local stack. Three fixtures could not pass as the Maker wrote them;
+`a3736201` fixes them. The Opus round-4 review of `a3736201` (FAIL) found one PRODUCTION and four RIGOUR defects; the
+next commit fixes all five. This section supersedes Fold 4's "reasoned, not measured" mutation claims and I2's
+redundancy claim.
+
+| Finding | Change | Test and mutation (measured on the reset local stack) |
+|---|---|---|
+| Fixtures (`a3736201`) | The late-recipient fixtures disable `signal_recipients_same_transaction` inside their rolled-back transaction; the non-ask/note fixture marks its enqueued delivery observed instead of inserting a duplicate row; the functional-proof mutations target the member gate as a `WHERE` clause and assert that they find it once. | `managed-delivery.test.ts` 20/20. A migration whose heal rule compares `enqueued_at` instead of `(created_at, id)` fails only "check order wins ..."; a migration without the later ask/note filter fails only "an observed non-ask/note delivery cannot heal directed mail". The migration was restored (`cmp` equal) and the stack reset again. |
+| R4-F1 PRODUCTION | The catalog proof pinned the fold-2 text `later.enqueued_at > d.enqueued_at` and returned `f` on the fold-4 view, so section 5 would stop after the migration. It now requires the release cutoff, the `(created_at, id)` tuple, the later kind filter, and the absence of the old enqueue rule. | New server test runs the proof file on the installed view (`t`) and on three rolled-back view mutations: enqueue-order heal, no later kind filter, no release cutoff (each `f`). Restoring the old proof line fails the test at "catalog proof on installed". |
+| R4-F2 RIGOUR | The migration comment and I2 said the release cutoff was redundant. It is load-bearing: a seat that is behind at release can ACK old mail first, and only the cutoff keeps its next old message out. The comment now says so. | New server test: two pre-release asks, cutoff set after both, the older one ACKed observed; the newer one is not eligible and its receipt is not observing. In a rolled-back transaction the view without the cutoff returns exactly that message. A migration without the cutoff was not reset and run (the in-test mutation measures the same predicate). |
+| R4-F3 RIGOUR | LANE.md did not record the lead's fixture fix. | This section. |
+| R4-F4 RIGOUR | Fixture comments called the late-recipient and non-ask/note rows "historical". Production inverts signal and enqueue order only inside one posting transaction (milliseconds) and cannot hold the non-ask/note row. The comments now say so. | Comment only. The Opus arm answered the brief's question: the rule is not over-constrained, because `(created_at, id)` is `cswarm check`'s own order. |
+| R4-F5 RIGOUR | The check-cursor follow-up task named only the same-millisecond skip. It now also names the commit-order skip (reasoned from code by the Opus arm, not measured). | Doc only. |
+
+### Lead fold gates (a3736201; reset local stack)
+
+- `test:p1-server`: 257 tests, 256 pass, 1 fail: "B1 21 brain puts ..." got a 502 from the local edge runtime
+  (`file-artifacts.test.ts:534`). That file rerun alone: 21/21. The lane does not touch brain or file code.
+- `npm test`: the ten failures are `host-acp-*` timing tests under parallel file runs at load 4-12. The four
+  `host-acp-*` files with `--test-concurrency=1` pass 84/84 on the lane and on main `4d4cb3f7`.
+- After the R4 fixes: `managed-delivery.test.ts` 22/22. The full gates for the new commit are in its landing record.
+
+Not established: the box migration and command release, the production row count and query cost of the heal join,
+the commit-order cursor skip (reasoned only), and live behavior. No production host was contacted.
