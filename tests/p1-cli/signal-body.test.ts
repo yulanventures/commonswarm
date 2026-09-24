@@ -87,8 +87,9 @@ test("signal sanitising keeps tabs and line feeds but removes terminal controls"
 });
 
 test("write surfaces share one body cap while the read client stays forward-compatible", async () => {
-  const [cli, cloud, command, migration, historical, dashboard] = await Promise.all([
+  const [cli, limits, cloud, command, migration, historical, dashboard] = await Promise.all([
     readFile("src/cli.ts", "utf8"),
+    readFile("src/cloud/signal-limits.ts", "utf8"),
     readFile("src/cloud/signals.ts", "utf8"),
     readFile("supabase/functions/command/index.ts", "utf8"),
     readFile("supabase/migrations/20260827000001_expand_signal_body.sql", "utf8"),
@@ -96,8 +97,9 @@ test("write surfaces share one body cap while the read client stays forward-comp
     readFile("site/src/components/app/LiveDashboard.astro", "utf8"),
   ]);
   const cliCap = numberLiteral(
-    /const SIGNAL_BODY_MAX = ([\d_]+);/u.exec(cli)?.[1] ?? "missing",
+    /const SIGNAL_BODY_MAX = ([\d_]+);/u.exec(limits)?.[1] ?? "missing",
   );
+  assert.match(cli, /import \{ SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX \} from "\.\/cloud\/signal-limits\.js"/u);
   const dbCap = numberLiteral(
     /char_length\(body\) BETWEEN 1 AND ([\d_]+)/u.exec(migration)?.[1] ?? "missing",
   );

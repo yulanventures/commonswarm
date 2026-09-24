@@ -49,10 +49,20 @@ appears in a tool argument, a tool result, or a model turn. The profile is writt
      to the tool form (`check {message_id}`); no profile path.
    - `ask`/`note`/`reply`/`working_on`: `{signal_id, kind, created_at, in_reply_to, channel_id, replayed}`.
    - A stated byte cap on every result, with `truncated: true` when applied.
+   **Correction (fold 1, 2026-09-23):** The retired result wording was
+   “`{signal_id, kind, created_at, in_reply_to, channel_id, replayed}`.”
+   `replayed` is removed: the server response has no replay marker. The result is
+   `{signal_id, kind, created_at, in_reply_to, channel_id}`.
 6. **Idempotency.** `request_id` becomes the signal command's `command_id`. It takes priority over the pending-intent
    id (`pending-command.ts`). A tool call that was cancelled or lost its answer after the send started returns
    `{outcome: "unknown", retry_with_same_request_id: true}`, never "not done". A 409 `command_id_conflict` stops: do
    not mint a new id. (Whether hosts retry with the same arguments is unmeasured: the tool descriptions say to.)
+   **Correction (fold 1, 2026-09-23):** The retired wording was “A tool call that was
+   cancelled or lost its answer after the send started returns `{outcome: "unknown",
+   retry_with_same_request_id: true}`.” Per MCP cancellation, a cancelled call gets no
+   result. The tool descriptions carry the same-id, same-arguments retry contract.
+   Other failures after send starts return the unknown outcome unless a typed 4xx
+   command refusal establishes a definitive result.
 7. **`check` retry contract.** The cursor advances only after the SDK has written the response. A result lost after
    that is read again with `check {message_id}` from the local cache; the description says so.
 8. **Credentials and errors.** One-shot renewal per call through the file store and lock, exactly the one-shot

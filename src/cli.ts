@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
+import { signalDuration } from "./cloud/signal-duration.js";
+import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
+export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
 import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
@@ -840,6 +843,7 @@ Usage:
   cswarm target clear [--json]
   cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
   cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
+  cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
   cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
   cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
   cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
@@ -1226,8 +1230,6 @@ async function agentCredential(
     "provide the agent credential with --agent-token-file <path> or --agent-token-stdin",
   );
 }
-
-export const SIGNAL_BODY_MAX = 8000;
 
 export type BodyFileErrorCode =
   | "body_file_missing"
@@ -3268,24 +3270,6 @@ function unknownChannelReadMessage(
   return `There is no channel named ${slug} in this workspace. Nothing was read. Create it with cswarm channel create ${slug}, or drop --channel to read everything.`;
 }
 
-function signalDuration(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  const match = /^([1-9]\d*)(m|h|d)$/.exec(value);
-  if (!match) {
-    throw new Error("--until must be a duration such as 90m, 24h, or 7d");
-  }
-  const unit = match[2] === "m"
-    ? 60_000
-    : match[2] === "h"
-    ? 3_600_000
-    : 86_400_000;
-  const milliseconds = Number(match[1]) * unit;
-  if (!Number.isSafeInteger(milliseconds) || milliseconds > 30 * 86_400_000) {
-    throw new Error("--until must be no more than 30d");
-  }
-  return milliseconds;
-}
-
 /**
  * One worker prompt turn's budget. Default is LISTENER_PROMPT_TIMEOUT_MS; the
  * floor keeps a typo from making every turn time out instantly, and the cap
@@ -3393,10 +3377,8 @@ export function resolveTurnBudgetOrDefer(
 /* Signal body / --about caps, mirrored by the DB CHECK in the signals migration
  * (char_length(body) BETWEEN 1 AND 8000; about <= 500). Hardcoded in several
  * places (file-store.ts, signals.ts) — no shared module across the protocol
- * boundary; if the DB cap moves, grep 8000/500 for the signal body/about. Named
- * here so the usage text below and the validator cannot drift from each other. */
-const SIGNAL_ABOUT_MAX = 500;
-
+ * boundary; if the DB cap moves, grep 8000/500 for the signal body/about.
+ * The CLI and MCP import the same client limits. */
 function signalText(value: string, label: "body" | "about"): string {
   const maximum = label === "body" ? SIGNAL_BODY_MAX : SIGNAL_ABOUT_MAX;
   if (value.length < (label === "body" ? 1 : 0) || value.length > maximum) {
@@ -9392,6 +9374,11 @@ const inboxVariants = {
  * while flag-selected modes stay behind one key and are chosen by select().
  */
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
+  mcp: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
+    handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
+    description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
+    flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
+    visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]"], bootstrap: true }),
   setup: commandEntry({
     ...noTool("bootstrap imports a credential before an MCP tool session exists"),
     ...selectedVariants(setupVariants, (args) => args.has("check-version") ? "version" : args.positionals[1] === "guide" ? "guide" : "import"),
@@ -9751,6 +9738,11 @@ export function isCliMain(): boolean {
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
+    if (selected?.args.positionals[0] === "mcp") {
+      process.stderr.write(`cswarm: [${error instanceof AgentSetupError ? error.code : "mcp_start_failed"}] ${safeError(error)}\n`);
+      process.exitCode = 1;
+      return;
+    }
     if (selected?.entry.errorMode === "onboarding" && selected.args.has("json")) {
       process.stdout.write(`${JSON.stringify({ ok: false, error: {
         code: error instanceof AgentSetupError ? error.code : "onboarding_failed", message: safeError(error),

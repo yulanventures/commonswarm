@@ -103,7 +103,9 @@ export const H0_MAX_CONCURRENT_WAITS = 1;
 export const H0_POLL_RETRY_AFTER_SECONDS = 5;
 
 /** Shared with the command envelope and H0 parser; rendered by the agent document. */
-export const H0_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
+export const H0_REQUEST_ID_MIN = 8;
+export const H0_REQUEST_ID_MAX = 72;
+export const H0_REQUEST_ID_RE = new RegExp(`^[A-Za-z0-9_-]{${H0_REQUEST_ID_MIN},${H0_REQUEST_ID_MAX}}$`);
 export const H0_REGISTRATION_NAME_MAX = 80;
 
 const requestIdField = (): H0Field => ({

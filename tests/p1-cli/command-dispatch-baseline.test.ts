@@ -78,6 +78,7 @@ const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
   ...["show", "set", "clear", "refusal"].map(key => ({ key: `target.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   { key: "status", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: true },
   { key: "whoami", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
+  { key: "mcp", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   { key: "resume", variants: ["inspect", "profile"], profile: "native", hostSessionId: "keep", errorMode: "standard", workspaceErrorJson: false },
   { key: "feedback", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
   ...["create", "ls", "rename", "archive", "refusal"].map(key => ({ key: `channel.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
@@ -304,6 +305,10 @@ function coreFixtures(): Fixture[] {
     { id: "meta.no-positional-json", argv: ["--json"] },
     { id: "meta.no-positional-profile", argv: profile },
     { id: "meta.bare", argv: [] },
+    { id: "mcp", argv: ["mcp", "extra"] },
+    { id: "mcp.missing-profile", argv: ["mcp"] },
+    { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
+    { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
 
     { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },
@@ -498,6 +503,7 @@ function selectedErrorSource(
       "receive.idle.default": ["receive", "idle"],
       "receive.serve.default": ["receive", "serve", "extra"],
       "receive.refusal.default": ["receive"],
+      "mcp.default": ["mcp", "extra"],
     };
     const route = `${entry.key}.${variant}`;
     const argv = argvByKey[route];

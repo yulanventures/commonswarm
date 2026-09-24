@@ -236,6 +236,13 @@ export class SignalMalformedError extends Error {
   }
 }
 
+export class SignalRecipientError extends Error {
+  readonly name = "SignalRecipientError";
+  constructor(readonly code: "recipient_unknown" | "recipient_ambiguous" | "recipient_invalid", message: string) {
+    super(message);
+  }
+}
+
 /** Retry-After attached to plain Errors thrown by the shared read path. */
 const plainHttpRetryAfterMs = new WeakMap<Error, number | null>();
 const plainHttpStatus = new WeakMap<Error, number>();
@@ -1483,13 +1490,9 @@ export function resolveSignalRecipient(
     if (member && !agent) return { kind: "user", id: member.user_id };
     if (agent && !member) return { kind: "agent", id: agent.principal_id };
     if (member && agent) {
-      throw new Error(
-        `signal recipient id matches both a member and an agent; use a unique id`,
-      );
+      throw new SignalRecipientError("recipient_ambiguous", "signal recipient id matches both a member and an agent; use a unique id");
     }
-    throw new Error(
-      "signal recipient is not a live member or agent of this workspace",
-    );
+    throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
   }
 
   const memberMatches = resolved.members.filter(
@@ -1510,15 +1513,9 @@ export function resolveSignalRecipient(
       ...memberMatches.map((member) => `user ${member.user_id}`),
       ...agentMatches.map((agent) => `agent ${agent.principal_id}`),
     ];
-    throw new Error(
-      `signal recipient name is ambiguous; use one of these ids: ${
-        choices.join(", ")
-      }`,
-    );
+    throw new SignalRecipientError("recipient_ambiguous", `signal recipient name is ambiguous; use one of these ids: ${choices.join(", ")}`);
   }
-  throw new Error(
-    "signal recipient is not a live member or agent of this workspace",
-  );
+  throw new SignalRecipientError("recipient_unknown", "signal recipient is not a live member or agent of this workspace");
 }
 
 /** Parse --wait as an integer number of seconds in 1..300. */
