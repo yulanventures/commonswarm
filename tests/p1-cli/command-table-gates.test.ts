@@ -249,9 +249,12 @@ test("AGENT_PROFILE_COMMANDS is derived from table order data", () => {
     .filter((row): row is { verb: string; order: number } => row.order !== undefined)
     .sort((left, right) => left.order - right.order)
     .map(row => row.verb);
-  const verbs = AGENT_PROFILE_COMMANDS.map(entry => entry.split(" ")[0]!)
-    .filter((verb, index, all) => all.indexOf(verb) === index);
+  const entryVerbs = AGENT_PROFILE_COMMANDS.map(entry => entry.split(" ")[0]!);
+  const verbs = entryVerbs.filter((verb, index, all) => all.indexOf(verb) === index);
   assert.deepEqual(verbs, expected);
+  // Every entry, not only the first per verb, follows the order: a verb's pairs stay together in its slot.
+  const orders = entryVerbs.map(verb => expected.indexOf(verb));
+  assert.deepEqual(orders, [...orders].sort((left, right) => left - right));
 });
 
 test("main has one direct lookup and only allowlisted meta and selected-entry statements", async () => {
