@@ -19,7 +19,7 @@ import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
-import { DeliveryCommandClient, DeliveryHttpError, DeliveryTransportError } from "./delivery.js";
+import { DeliveryCommandClient, DeliveryHttpError } from "./delivery.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -33,8 +33,9 @@ export const AGENT_CHECK_BODY_BUDGET = 4_000;
 export const AGENT_CHECK_CACHE_LIMIT = 200;
 export const AGENT_CHECK_ACK_BATCH_LIMIT = AGENT_CHECK_PAGE_SIZE;
 export const AGENT_CHECK_ACK_MIN_REMAINING_MS = 50;
-export const AGENT_CHECK_ACK_MAX_ATTEMPTS = 3;
 export const AGENT_CHECK_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+export const AGENT_CHECK_ACK_RETRY_BASE_MS = 250;
+export const AGENT_CHECK_ACK_RETRY_MAX_MS = 60_000;
 
 export interface AgentCheckMessage {
   id: string;
@@ -74,7 +75,7 @@ interface CheckState {
   pending_observed_ids?: string[];
   /** Rotates transient retries so one slow row cannot starve later mail. */
   pending_observed_next?: number;
-  pending_observed_retries?: Record<string, { attempts: number; first_at: number }>;
+  pending_observed_retries?: Record<string, { attempts: number; first_at: number; next_at?: number }>;
 }
 
 function checkTimeoutError(): AgentSetupError {
@@ -146,7 +147,8 @@ async function readCheckState(path: string): Promise<CheckState> {
         (typeof state.pending_observed_retries !== "object" || state.pending_observed_retries === null ||
           Object.entries(state.pending_observed_retries).some(([id, retry]) =>
             !ONBOARDING_UUID.test(id) || !retry || !Number.isSafeInteger(retry.attempts) ||
-            retry.attempts < 0 || !Number.isFinite(retry.first_at)))) ||
+            retry.attempts < 0 || !Number.isFinite(retry.first_at) ||
+            (retry.next_at !== undefined && !Number.isFinite(retry.next_at))))) ||
       (state.cursor !== null && (!state.cursor || !ONBOARDING_UUID.test(state.cursor.id) || !Number.isFinite(Date.parse(state.cursor.created_at))))) {
     throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing.");
   }
@@ -248,51 +250,61 @@ export async function checkAgentMessages(options: {
         const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
         const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
         const ackPending = async () => {
-          const removed: string[] = [];
-          const retryUpdates: Record<string, { attempts: number; first_at: number }> = {};
           const committed = await readCheckState(path);
           const queued = committed.pending_observed_ids ?? [];
           const start = queued.length === 0 ? 0 : (committed.pending_observed_next ?? 0) % queued.length;
           const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
-          let attempted = 0;
+          const removed = new Set<string>();
+          const retryUpdates = new Map<string, { attempts: number; first_at: number; next_at: number }>();
+          const persist = async (attempt?: { id: string; retry: { attempts: number; first_at: number; next_at: number } }, rotate = false) => {
+            await withFileLock(dirname(path), "check", async () => {
+              const current = await readCheckState(path);
+              const remaining = (current.pending_observed_ids ?? []).filter(value => !removed.has(value));
+              const retries = { ...(current.pending_observed_retries ?? {}) };
+              for (const id of removed) delete retries[id];
+              for (const [id, retry] of retryUpdates) retries[id] = retry;
+              if (attempt) retries[attempt.id] = attempt.retry;
+              await writeSecureJsonFile(path, JSON.stringify({ ...current,
+                pending_observed_ids: remaining, pending_observed_retries: retries,
+                ...(rotate ? { pending_observed_next: remaining.length === 0 ? 0 : (start + batch.length) % remaining.length } : {}) }));
+            }, { timeoutMs: Math.max(1, Math.floor(deadlineMs - Date.now())) });
+            removed.clear();
+            retryUpdates.clear();
+          };
           for (const id of batch) {
             const now = Date.now();
             const remainingMs = deadlineMs - now;
             if (remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) break;
             const prior = committed.pending_observed_retries?.[id] ?? { attempts: 0, first_at: now };
-            if (prior.attempts >= AGENT_CHECK_ACK_MAX_ATTEMPTS || now - prior.first_at >= AGENT_CHECK_ACK_MAX_AGE_MS) {
-              removed.push(id);
+            if (now - prior.first_at >= AGENT_CHECK_ACK_MAX_AGE_MS) {
+              removed.add(id);
               continue;
             }
-            attempted++;
+            if ((prior.next_at ?? 0) > now) continue;
+            // Commit before transport: a request that consumes the deadline still counts.
+            const attempts = prior.attempts + 1;
+            const backoff = Math.min(AGENT_CHECK_ACK_RETRY_MAX_MS,
+              AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 8));
+            await persist({ id, retry: { attempts, first_at: prior.first_at, next_at: now + remainingMs + backoff } });
             try {
               const client = new DeliveryCommandClient(target, fetcher, {
-                deadlineMs: Math.min(AGENT_CHECK_TIMEOUT_MS, remainingMs),
+                deadlineMs: Math.min(AGENT_CHECK_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now())),
               });
               await client.observeUnclaimedAgentDelivery({ workspaceId: profile.workspace_id,
                 credential: token, commandId: randomUUID(), signalId: id });
-              removed.push(id);
+              removed.add(id);
             } catch (error) {
-              const transient = error instanceof DeliveryTransportError ||
-                (error instanceof DeliveryHttpError && error.status >= 500 && error.status < 600);
-              const next = { attempts: prior.attempts + 1, first_at: prior.first_at };
-              if (!transient || next.attempts >= AGENT_CHECK_ACK_MAX_ATTEMPTS) removed.push(id);
-              else retryUpdates[id] = next;
+              const terminal = error instanceof DeliveryHttpError &&
+                (error.status === 403 || error.status === 404 || error.status === 409 ||
+                  (error.status === 400 && error.code === "invalid_request"));
+              if (terminal) removed.add(id);
+              else if (deadlineMs - Date.now() >= AGENT_CHECK_ACK_MIN_REMAINING_MS)
+                retryUpdates.set(id, { attempts, first_at: prior.first_at, next_at: Date.now() + backoff });
             }
           }
-          if (attempted === 0 && removed.length === 0) return;
           const writeBudgetMs = Math.floor(deadlineMs - Date.now());
           if (writeBudgetMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) return;
-          await withFileLock(dirname(path), "check", async () => {
-            const current = await readCheckState(path);
-            const remaining = (current.pending_observed_ids ?? []).filter(id => !removed.includes(id));
-            const retries = { ...(current.pending_observed_retries ?? {}), ...retryUpdates };
-            for (const id of removed) delete retries[id];
-            await writeSecureJsonFile(path, JSON.stringify({ ...current,
-              pending_observed_ids: remaining,
-              pending_observed_retries: retries,
-              pending_observed_next: remaining.length === 0 ? 0 : (start + attempted) % remaining.length }));
-          }, { timeoutMs: writeBudgetMs });
+          if (batch.length > 0 || removed.size > 0 || retryUpdates.size > 0) await persist(undefined, true);
         };
         if (presented.length > 0) {
           if (options.deferCursorCommit) {

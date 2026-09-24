@@ -4,11 +4,12 @@
  * Reached by `npm run test:p1-server` (globs tests/p1-server/**).
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
@@ -250,6 +251,27 @@ async function wakePathRows(principalId: string, userId = shared.ownerId): Promi
       WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${principalId}::uuid
     `;
     return rows.map(row => row.oldest_unobserved_at);
+  });
+}
+
+async function receiptWakePath(signalId: string, principalId: string): Promise<boolean> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
+    const [row] = await tx<{ value: { receipts: Array<{ recipient_agent_principal_id?: string; wake_path_observing?: boolean }> } }[]>`
+      SELECT swarm_read.signal_delivery_receipts(${shared.workspace}::uuid, ${signalId}::uuid, NULL) AS value`;
+    const receipt = row?.value.receipts.find(value => value.recipient_agent_principal_id === principalId);
+    assert.ok(receipt, "directed agent receipt");
+    return receipt.wake_path_observing === true;
+  });
+}
+
+async function eligibleWakePathSignalIds(principalId: string): Promise<string[]> {
+  return sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
+    const rows = await tx<{ signal_id: string }[]>`
+      SELECT signal_id::text FROM swarm_read.agent_wake_path_deliveries
+      WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${principalId}::uuid`;
+    return rows.map(row => row.signal_id);
   });
 }
 
@@ -558,12 +580,17 @@ test("unclaimed check observation accepts only untouched directed rows and is id
 });
 
 test("wake mark ignores pre-cutoff and expired mail, then ages and clears live mail", { timeout: 30_000 }, async () => {
+  const [cutoff] = await sql<{ applied_at: Date }[]>`SELECT applied_at FROM swarm.wake_path_release WHERE singleton`;
+  assert.ok(cutoff);
+  await sql`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() - interval '1 hour' WHERE singleton`;
+  try {
   const agent = await seedAgent("wake-states");
   const preCutoff = await postAsk(agent.principalId);
   await sql`UPDATE swarm.signal_deliveries SET enqueued_at =
     (SELECT applied_at - interval '1 minute' FROM swarm.wake_path_release WHERE singleton)
     WHERE signal_id = ${preCutoff}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
   assert.equal((await wakePathRows(agent.principalId)).length, 0, "unknown seat stays neutral");
+  assert.equal(await receiptWakePath(preCutoff, agent.principalId), false);
   const first = await postAsk(agent.principalId);
   assert.equal((await wakePathRows(agent.principalId)).length, 0, "no observed ACK means unknown");
   const command = { kind: "ack_agent_delivery", signal_id: first, lease_id: null,
@@ -572,6 +599,7 @@ test("wake mark ignores pre-cutoff and expired mail, then ages and clears live m
   assert.equal((await runCmd(agent.token, command)).status, 200);
   assert.equal((await wakePathRows(agent.principalId)).length, 0,
     "old pre-cutoff mail cannot make a known seat stale");
+  assert.equal(await receiptWakePath(preCutoff, agent.principalId), false);
   const expired = await postAsk(agent.principalId);
   // signals is append-only; expire the row the way tests/p1-server/command.test.ts does.
   await sql`ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only`;
@@ -584,14 +612,232 @@ test("wake mark ignores pre-cutoff and expired mail, then ages and clears live m
     await sql`ALTER TABLE swarm.signals ENABLE TRIGGER signals_append_only`;
   }
   assert.equal((await wakePathRows(agent.principalId)).length, 0, "expired mail cannot make a seat stale");
+  assert.equal(await receiptWakePath(expired, agent.principalId), false);
   const live = await postAsk(agent.principalId);
   await sql`UPDATE swarm.signal_deliveries SET enqueued_at = statement_timestamp() - interval '4 minutes'
     WHERE signal_id = ${live}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`;
+  await sql`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() WHERE singleton`;
+  assert.equal((await wakePathRows(agent.principalId)).length, 0,
+    "a seconds-old cutoff excludes the four-minute-old row");
+  await sql`UPDATE swarm.wake_path_release SET applied_at = statement_timestamp() - interval '1 hour' WHERE singleton`;
   const stale = await wakePathRows(agent.principalId);
   assert.equal(stale.length, 1);
   assert.ok(Date.now() - stale[0]!.getTime() >= WAKE_STALE_MS);
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), [live]);
+  assert.equal(await receiptWakePath(live, agent.principalId), true);
   assert.equal((await runCmd(agent.token, { ...command, signal_id: live })).status, 200);
   assert.equal((await wakePathRows(agent.principalId)).length, 0, "observed ACK clears stale");
+  assert.equal(await receiptWakePath(live, agent.principalId), false);
+  } finally {
+    await sql`UPDATE swarm.wake_path_release SET applied_at = ${cutoff.applied_at} WHERE singleton`;
+  }
+});
+
+test("later observed mail heals older unobserved mail in view and receipt", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-later-observed");
+  const first = await postAsk(agent.principalId);
+  const second = await postAsk(agent.principalId);
+  const command = { kind: "ack_agent_delivery", signal_id: second, lease_id: null,
+    listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true };
+  assert.equal((await runCmd(agent.token, command)).status, 200);
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), []);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0);
+  assert.equal(await receiptWakePath(first, agent.principalId), false);
+  const third = await postAsk(agent.principalId);
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), [third]);
+  assert.equal(await receiptWakePath(third, agent.principalId), true);
+  assert.equal(await receiptWakePath(first, agent.principalId), false);
+});
+
+test("revoked principal has no wake row or observing receipt", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-revoked");
+  const observed = await postAsk(agent.principalId);
+  const command = { kind: "ack_agent_delivery", signal_id: observed, lease_id: null,
+    listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true };
+  assert.equal((await runCmd(agent.token, command)).status, 200);
+  const pending = await postAsk(agent.principalId);
+  assert.equal(await receiptWakePath(pending, agent.principalId), true);
+  await sql`UPDATE swarm.agent_principals SET revoked_at = statement_timestamp()
+    WHERE principal_id = ${agent.principalId}::uuid`;
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), []);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0);
+  assert.equal(await receiptWakePath(pending, agent.principalId), false);
+});
+
+test("a claimed delivery leaves both wake eligibility surfaces", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-leased");
+  const known = await postAsk(agent.principalId);
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  const pending = await postAsk(agent.principalId);
+  assert.equal(await receiptWakePath(pending, agent.principalId), true);
+  const claimed = await runCmd(agent.token, { kind: "claim_agent_inbox", listener_instance_id: randomUUID() });
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.deepEqual(await eligibleWakePathSignalIds(agent.principalId), []);
+  assert.equal((await wakePathRows(agent.principalId)).length, 0);
+  assert.equal(await receiptWakePath(pending, agent.principalId), false);
+});
+
+test("a departed owner cannot view a seat that a remaining member can inspect", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-owner-left");
+  const known = await postAsk(agent.principalId);
+  assert.equal((await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: known,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true })).status, 200);
+  await postAsk(agent.principalId);
+  const other = await createUser("wake-remaining-member");
+  await sql`INSERT INTO swarm.users (user_id, display_name)
+    VALUES (${other.id}::uuid, 'RemainingWakeMember')`;
+  await sql`INSERT INTO swarm.memberships (workspace_id, user_id, role)
+    VALUES (${shared.workspace}::uuid, ${other.id}::uuid, 'member')`;
+  assert.equal((await wakePathRows(agent.principalId, other.id)).length, 1);
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM swarm.memberships
+      WHERE workspace_id = ${shared.workspace}::uuid AND user_id = ${shared.ownerId}::uuid`;
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: shared.ownerId, role: "authenticated" })}, true)`;
+    const departed = await tx`SELECT * FROM swarm_read.agent_wake_path
+      WHERE principal_id = ${agent.principalId}::uuid`;
+    assert.equal(departed.length, 0);
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: other.id, role: "authenticated" })}, true)`;
+    const remaining = await tx`SELECT * FROM swarm_read.agent_wake_path
+      WHERE principal_id = ${agent.principalId}::uuid`;
+    assert.equal(remaining.length, 1);
+    throw new Error("ROLLBACK_OWNER_LEFT_PROBE");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_OWNER_LEFT_PROBE") throw error;
+  });
+});
+
+test("wake catalog validates the lease-free observed shape and hides the renamed receipt function", { timeout: 10_000 }, async () => {
+  const [row] = await sql<{ definition: string; validated: boolean; inner_exposed: boolean; read_exposed: boolean; anon_exposed: boolean; public_exposed: boolean }[]>`
+    SELECT pg_get_constraintdef(c.oid) AS definition, c.convalidated AS validated,
+      has_function_privilege('authenticated',
+        'swarm_read.signal_delivery_receipts_without_wake_path(uuid,uuid,bytea)', 'EXECUTE') AS inner_exposed,
+      has_function_privilege('swarm_read',
+        'swarm_read.signal_delivery_receipts_without_wake_path(uuid,uuid,bytea)', 'EXECUTE') AS read_exposed,
+      has_function_privilege('anon',
+        'swarm_read.signal_delivery_receipts_without_wake_path(uuid,uuid,bytea)', 'EXECUTE') AS anon_exposed,
+      EXISTS (SELECT 1 FROM pg_proc AS p, aclexplode(p.proacl) AS acl
+        WHERE p.oid = 'swarm_read.signal_delivery_receipts_without_wake_path(uuid,uuid,bytea)'::regprocedure
+          AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE') AS public_exposed
+    FROM pg_constraint AS c WHERE c.conrelid = 'swarm.signal_deliveries'::regclass
+      AND c.conname = 'signal_deliveries_check9'`;
+  assert.ok(row);
+  assert.equal(row.validated, true);
+  assert.match(row.definition, /ack_outcome = 'observed'.*last_error_code IS NULL/);
+  assert.equal(row.inner_exposed, false);
+  assert.equal(row.read_exposed, false);
+  assert.equal(row.anon_exposed, false);
+  assert.equal(row.public_exposed, false);
+  const agent = await seedAgent("wake-constraint");
+  const signalId = await postAsk(agent.principalId);
+  const accepted = await runCmd(agent.token, { kind: "ack_agent_delivery", signal_id: signalId,
+    lease_id: null, listener_instance_id: null, outcome: "observed",
+    last_error_code: null, surfaced: true, unclaimed: true });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  await assert.rejects(sql`UPDATE swarm.signal_deliveries SET last_error_code = 'provider_refused'
+    WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`,
+  { code: "23514" });
+  await assert.rejects(sql`UPDATE swarm.signal_deliveries SET ack_outcome = 'replied'
+    WHERE signal_id = ${signalId}::uuid AND recipient_agent_principal_id = ${agent.principalId}::uuid`,
+  { code: "23514" });
+});
+
+test("same-transaction validation retains the exclusive lock described by the migration", { timeout: 10_000 }, async () => {
+  const migration = readFileSync(fileURLToPath(new URL("../../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url)), "utf8");
+  assert.match(migration, /holds ACCESS EXCLUSIVE through\s*-- VALIDATE and commit/);
+  const agent = await seedAgent("wake-lock-probe");
+  await postAsk(agent.principalId);
+  await sql.begin(async (tx) => {
+    await tx`CREATE TEMP TABLE itemg_lock_probe AS SELECT * FROM swarm.signal_deliveries WHERE false`;
+    await tx`INSERT INTO itemg_lock_probe
+      SELECT d.* FROM (SELECT * FROM swarm.signal_deliveries WHERE acked_at IS NULL LIMIT 1) AS d
+      CROSS JOIN generate_series(1, 100000)`;
+    const [size] = await tx<{ count: number }[]>`SELECT count(*)::int AS count FROM itemg_lock_probe`;
+    assert.equal(size?.count, 100000);
+    await tx`ALTER TABLE itemg_lock_probe ADD CONSTRAINT itemg_probe
+      CHECK (acked_at IS NULL OR (ack_outcome = 'observed' AND last_error_code IS NULL)) NOT VALID`;
+    await tx`ALTER TABLE itemg_lock_probe VALIDATE CONSTRAINT itemg_probe`;
+    const locks = await tx<{ mode: string }[]>`
+      SELECT mode FROM pg_locks WHERE pid = pg_backend_pid()
+        AND relation = 'itemg_lock_probe'::regclass`;
+    assert.ok(locks.some(lock => lock.mode === "AccessExclusiveLock"));
+    throw new Error("ROLLBACK_LOCK_PROBE");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_LOCK_PROBE") throw error;
+  });
+});
+
+test("box functional proof exits nonzero for missing and ineligible seeds", { timeout: 30_000 }, async () => {
+  const containers = execFileSync("docker", ["ps", "--format", "{{.Names}}"], { encoding: "utf8" })
+    .trim().split("\n").filter(name => /^supabase_db_/.test(name));
+  assert.equal(containers.length, 1, "one local Supabase database container");
+  const proof = fileURLToPath(new URL("../../deploy/release-proofs/item-g/20260925000001-functional.sql", import.meta.url));
+  const proofSql = readFileSync(proof, "utf8");
+  const runProof = (seed?: string, setup = "") => {
+    const args = ["exec", "-i", containers[0]!, "psql", "-X", "-U", "postgres", "-d", "postgres",
+      "-v", "ON_ERROR_STOP=1", ...(seed ? ["-v", `item_g_seed_signal_id=${seed}`] : [])];
+    const script = `BEGIN;\n${setup}\n${proofSql}\nROLLBACK;\n`;
+    const result = spawnSync("docker", args, { input: script, encoding: "utf8", timeout: 5_000 });
+    assert.ifError(result.error);
+    return { code: result.status, output: result.stdout + result.stderr };
+  };
+  const missing = runProof();
+  assert.notEqual(missing.code, 0);
+  assert.match(missing.output, /item_g_seed_signal_id is required/);
+  const agent = await seedAgent("proof-seed");
+  const known = await postAsk(agent.principalId);
+  const command = { kind: "ack_agent_delivery", signal_id: known, lease_id: null,
+    listener_instance_id: null, outcome: "observed", last_error_code: null,
+    surfaced: true, unclaimed: true };
+  assert.equal((await runCmd(agent.token, command)).status, 200);
+  const seed = await postAsk(agent.principalId);
+  assert.equal(runProof(seed).code, 0, "the exact eligible seed is a positive control");
+  const eligibility = /seed signal is not an eligible live unobserved delivery for a known, active seat/;
+  for (const setup of [
+    `UPDATE swarm.agent_principals SET revoked_at = statement_timestamp() WHERE principal_id = '${agent.principalId}'::uuid;`,
+    `DELETE FROM swarm.memberships WHERE workspace_id = '${shared.workspace}'::uuid AND user_id = '${shared.ownerId}'::uuid;`,
+    `UPDATE swarm.signal_deliveries SET enqueued_at = (SELECT applied_at - interval '1 minute' FROM swarm.wake_path_release WHERE singleton) WHERE signal_id = '${seed}'::uuid;`,
+    `UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(), ack_outcome = 'observed', last_error_code = NULL WHERE signal_id = '${seed}'::uuid;`,
+    `ALTER TABLE swarm.signals DISABLE TRIGGER signals_append_only; UPDATE swarm.signals SET created_at = statement_timestamp() - interval '10 seconds', until = statement_timestamp() - interval '1 second' WHERE id = '${seed}'::uuid;`,
+  ]) {
+    const result = runProof(seed, setup);
+    assert.notEqual(result.code, 0, setup);
+    assert.match(result.output, eligibility, setup);
+  }
+  const unknown = runProof(randomUUID());
+  assert.notEqual(unknown.code, 0);
+  assert.match(unknown.output, eligibility);
+  const competitor = await postAsk(agent.principalId);
+  const competing = runProof(seed);
+  assert.notEqual(competing.code, 0);
+  assert.match(competing.output, /seed seat has other eligible mail/);
+  assert.ok(competitor);
+  const removeCompetitor = `UPDATE swarm.signal_deliveries SET enqueued_at =
+    (SELECT applied_at - interval '1 minute' FROM swarm.wake_path_release WHERE singleton)
+    WHERE signal_id = '${competitor}'::uuid;`;
+  const viewOmitted = runProof(seed, `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
+    SELECT workspace_id, principal_id, min(enqueued_at) AS oldest_unobserved_at
+    FROM swarm_read.agent_wake_path_deliveries WHERE false GROUP BY workspace_id, principal_id;`);
+  assert.notEqual(viewOmitted.code, 0);
+  assert.match(viewOmitted.output, /wake-path view omitted exact seeded unobserved delivery/);
+  const migration = readFileSync(fileURLToPath(new URL("../../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url)), "utf8");
+  const detailView = migration.split("CREATE VIEW swarm_read.agent_wake_path_deliveries", 2)[1]!
+    .split("ALTER VIEW swarm_read.agent_wake_path_deliveries", 1)[0]!;
+  const noMemberGate = runProof(seed,
+    `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries${detailView.replace(
+      "AND swarm.is_member(d.workspace_id, auth.uid())", "AND true")}`);
+  assert.notEqual(noMemberGate.code, 0);
+  assert.match(noMemberGate.output, /wake-path view exposed a row to a nonmember/);
+  const noAnonymousGate = runProof(seed,
+    `${removeCompetitor} CREATE OR REPLACE VIEW swarm_read.agent_wake_path_deliveries${detailView.replace(
+      "AND swarm.is_member(d.workspace_id, auth.uid())",
+      "AND (swarm.is_member(d.workspace_id, auth.uid()) OR auth.uid() IS NULL)")}`);
+  assert.notEqual(noAnonymousGate.code, 0);
+  assert.match(noAnonymousGate.output, /wake-path view exposed a row without member identity/);
 });
 
 test("unclaimed check observation cannot change a claimed queued row", async () => {

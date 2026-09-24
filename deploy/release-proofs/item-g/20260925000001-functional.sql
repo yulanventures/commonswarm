@@ -4,8 +4,7 @@
 -- particular note unchecked. A dedicated test seat avoids older competing mail.
 \if :{?item_g_seed_signal_id}
 \else
-\echo 'item_g_seed_signal_id is required'
-\quit 1
+DO $$ BEGIN RAISE EXCEPTION 'item_g_seed_signal_id is required'; END $$;
 \endif
 SELECT set_config('item_g.seed_signal_id', :'item_g_seed_signal_id', false);
 DO $proof$

@@ -53,7 +53,7 @@ head -c 20 "$OUT/cswarm" | grep -q '^#!/usr/bin/env node' \
 # directory with no node_modules. Building something that does not run is the
 # failure this check exists to make impossible.
 tmp="$(mktemp -d)"; cp "$OUT/cswarm" "$tmp/"
-got="$("$tmp/cswarm" --version 2>/dev/null || "$tmp/cswarm" --help 2>&1 | head -1)"
+got="$("$tmp/cswarm" --version --url http://127.0.0.1:54321 2>/dev/null || "$tmp/cswarm" --help --url http://127.0.0.1:54321 2>&1 | head -1)"
 rm -rf "$tmp"
 case "$got" in
   *"$VERSION"*) ;;

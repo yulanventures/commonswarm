@@ -194,6 +194,7 @@ test("failed observation leaves check successful and retries after a later empty
   const first = await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
   assert.equal(first.messages.length, 1);
   assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
+  await new Promise(resolve => setTimeout(resolve, 270));
   const recovered = fixture([row(1)]);
   const second = await checkAgentMessages({ profilePath, fetcher: recovered.fetcher, present: async () => {} });
   assert.equal(second.messages.length, 0);
@@ -249,20 +250,81 @@ test("terminal observation refusals leave the queue after one request each", { t
   assert.deepEqual(acks.map(r => (r.command as { signal_id: string }).signal_id), rows.map(row => row.id));
 });
 
-test("transient observation retries stop at the attempt and age caps", { timeout: 10_000 }, async () => {
+test("transient observation retries use backoff until the age cap", { timeout: 10_000 }, async () => {
   const { profilePath } = await setup();
   const failed = fixture([row(1)], AGENT, 503);
-  for (let check = 0; check < 5; check++)
-    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
-  const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
-  assert.equal(acks().length, 3);
   const path = join(dirname(profilePath), "check.json");
+  for (let check = 0; check < 5; check++) {
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(path, "utf8"));
+    assert.ok(state.pending_observed_retries[row(1).id].next_at > Date.now());
+    if (check < 4) {
+      const before = failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length;
+      await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+      assert.equal(failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length,
+        before, "backoff defers an immediate retry");
+      state.pending_observed_retries[row(1).id].next_at = 0;
+      await writeFile(path, JSON.stringify(state), { mode: 0o600 });
+    }
+  }
+  const acks = () => failed.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery");
+  assert.equal(acks().length, 5, "an outage cannot exhaust an attempt cap");
   const state = JSON.parse(await readFile(path, "utf8"));
   state.pending_observed_ids = [row(2).id];
   state.pending_observed_retries = { [row(2).id]: { attempts: 1, first_at: Date.now() - 2 * 24 * 60 * 60 * 1_000 } };
   await writeFile(path, JSON.stringify(state), { mode: 0o600 });
   await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
-  assert.equal(acks().length, 3, "an aged retry is dropped without a request");
+  assert.equal(acks().length, 5, "an aged retry is dropped without a request");
+  assert.deepEqual(JSON.parse(await readFile(path, "utf8")).pending_observed_ids, []);
+});
+
+test("deadline timeout counts the attempt and preserves an earlier 409 removal", { timeout: 5_000 }, async () => {
+  const { profilePath } = await setup();
+  const base = fixture([row(1), row(2)]);
+  const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    if (body.command?.kind === "ack_agent_delivery") {
+      if (body.command.signal_id === row(1).id)
+        return new Response(JSON.stringify({ error: "delivery_ack_conflict" }), { status: 409 });
+      return await new Promise<Response>(() => {});
+    }
+    return base.fetcher(input, init);
+  }) as typeof fetch;
+  await checkAgentMessages({ profilePath, fetcher, deadlineAtMs: Date.now() + 450, present: async () => {} });
+  const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+  assert.deepEqual(state.pending_observed_ids, [row(2).id]);
+  assert.equal(state.pending_observed_retries[row(2).id].attempts, 1);
+  assert.ok(Number.isFinite(state.pending_observed_retries[row(2).id].first_at));
+  assert.ok(state.pending_observed_retries[row(2).id].next_at > Date.now(),
+    "a timed-out request retains backoff after the deadline");
+});
+
+test("401 and 429 observation refusals stay queued for retry", { timeout: 5_000 }, async () => {
+  for (const status of [401, 429]) {
+    const { profilePath } = await setup();
+    const failed = fixture([row(1)], AGENT, status);
+    await checkAgentMessages({ profilePath, fetcher: failed.fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [row(1).id]);
+    assert.equal(state.pending_observed_retries[row(1).id].attempts, 1);
+  }
+});
+
+test("typed 403, 404, session conflict, and invalid request leave the queue", { timeout: 5_000 }, async () => {
+  for (const [status, code] of [[403, "delivery_unavailable"], [404, "delivery_unavailable"],
+    [409, "session_conflict"], [400, "invalid_request"]] as const) {
+    const { profilePath } = await setup();
+    const base = fixture([row(1)]);
+    const fetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.command?.kind === "ack_agent_delivery")
+        return new Response(JSON.stringify({ error: code }), { status });
+      return base.fetcher(input, init);
+    }) as typeof fetch;
+    await checkAgentMessages({ profilePath, fetcher, present: async () => {} });
+    const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
+    assert.deepEqual(state.pending_observed_ids, [], `${status} ${code}`);
+  }
 });
 
 test("check stops at wrong-recipient and out-of-order pages without consuming them", async () => {

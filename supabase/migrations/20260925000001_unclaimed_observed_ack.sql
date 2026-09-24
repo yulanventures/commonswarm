@@ -12,6 +12,8 @@
 --
 -- Widen check9 for exactly that case and no other. `observed` already passes the ack_outcome
 -- enum; this is only about the lease columns.
+-- This migration is one transaction. DROP/ADD holds ACCESS EXCLUSIVE through
+-- VALIDATE and commit, so the validation scan is inside the exclusive window.
 --
 -- Deliberately NOT widened: 'replied' and 'failed_terminal' still require the lease pair, so a
 -- worker cannot report work it never claimed. The pairing constraint below check9
@@ -59,11 +61,10 @@ CREATE TABLE swarm.wake_path_release (
 INSERT INTO swarm.wake_path_release (singleton) VALUES (true);
 ALTER TABLE swarm.wake_path_release OWNER TO swarm_admin;
 
--- A member-readable aggregate for the app roster. The browser never reads the
--- authority table directly, and an ACK makes the principal disappear from this view.
-CREATE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
-SELECT d.workspace_id, d.recipient_agent_principal_id AS principal_id,
-       min(d.enqueued_at) AS oldest_unobserved_at
+-- One eligible-row source feeds both the roster aggregate and receipts.
+CREATE VIEW swarm_read.agent_wake_path_deliveries WITH (security_barrier = true) AS
+SELECT d.workspace_id, d.signal_id, d.recipient_agent_principal_id AS principal_id,
+       d.enqueued_at
 FROM swarm.signal_deliveries AS d
 JOIN swarm.signals AS s
   ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
@@ -85,8 +86,20 @@ WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
       AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
       AND observed.last_leased_by IS NULL
       AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
-  AND swarm.is_member(d.workspace_id, auth.uid())
-GROUP BY d.workspace_id, d.recipient_agent_principal_id;
+  AND NOT EXISTS (SELECT 1 FROM swarm.signal_deliveries AS later
+    WHERE later.workspace_id = d.workspace_id
+      AND later.recipient_agent_principal_id = d.recipient_agent_principal_id
+      AND later.enqueued_at > d.enqueued_at
+      AND later.ack_outcome = 'observed' AND later.last_lease_id IS NULL
+      AND later.last_leased_by IS NULL)
+  AND swarm.is_member(d.workspace_id, auth.uid());
+ALTER VIEW swarm_read.agent_wake_path_deliveries OWNER TO swarm_admin;
+
+-- The browser only sees this member-readable aggregate. An ACK removes its row.
+CREATE VIEW swarm_read.agent_wake_path WITH (security_barrier = true) AS
+SELECT workspace_id, principal_id, min(enqueued_at) AS oldest_unobserved_at
+FROM swarm_read.agent_wake_path_deliveries
+GROUP BY workspace_id, principal_id;
 ALTER VIEW swarm_read.agent_wake_path OWNER TO swarm_admin;
 GRANT SELECT ON swarm_read.agent_wake_path TO authenticated;
 
@@ -94,6 +107,9 @@ GRANT SELECT ON swarm_read.agent_wake_path TO authenticated;
 -- clients ignore it; new clients never infer observation from row age alone.
 ALTER FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
   RENAME TO signal_delivery_receipts_without_wake_path;
+REVOKE ALL ON FUNCTION
+  swarm_read.signal_delivery_receipts_without_wake_path(uuid, uuid, bytea)
+  FROM PUBLIC, anon, authenticated, swarm_read;
 CREATE FUNCTION swarm_read.signal_delivery_receipts(
   p_workspace_id uuid, p_signal_id uuid, p_agent_token_hash bytea DEFAULT NULL
 ) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
@@ -108,23 +124,9 @@ BEGIN
   SELECT COALESCE(jsonb_agg(
     CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
       receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
-        SELECT 1 FROM swarm.signal_deliveries AS d
-        JOIN swarm.signals AS s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
-        JOIN swarm.agent_principals AS p ON p.workspace_id = d.workspace_id
-          AND p.principal_id = d.recipient_agent_principal_id
+        SELECT 1 FROM swarm_read.agent_wake_path_deliveries AS d
         WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
-          AND d.recipient_agent_principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
-          AND d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
-          AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
-          AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
-          AND s.until > statement_timestamp() AND s.kind IN ('ask', 'note')
-          AND p.revoked_at IS NULL
-          AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
-            WHERE observed.workspace_id = d.workspace_id
-              AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
-              AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
-              AND observed.last_leased_by IS NULL
-              AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
+          AND d.principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
       ))
     ELSE receipt.value END ORDER BY receipt.ordinality), '[]'::jsonb)
   INTO v_receipts FROM jsonb_array_elements(v_result -> 'receipts')

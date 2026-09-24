@@ -999,8 +999,12 @@ SQL
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
   test "$CATALOG_AFTER" = t
-  release_psql_ro --file "/proof/${VERSION}-functional.sql" \
-    >"$PROOF_DIR/${VERSION}-functional.txt"
+  # Item G's functional proof needs an observation from the NEW edge. Its
+  # version runs after section 6 and the seeded note, never at this step.
+  if [ "$VERSION" != 20260925000001 ]; then
+    release_psql_ro --file "/proof/${VERSION}-functional.sql" \
+      >"$PROOF_DIR/${VERSION}-functional.txt"
+  fi
 )
 ```
 
@@ -1268,6 +1272,24 @@ both loopback and staging probes finish, capture the log window that began at
 ```
 
 The log is box-only and must not appear in `copy-back.list`.
+
+For migration `20260925000001`, run its functional proof only after this edge
+release is verified. HezLead supplies a dedicated active test seat with its
+owner still in the workspace. On the box, use the owner credential against
+`http://127.0.0.1:9000/functions/v1/command` to post a directed note to that
+seat. Then use the seat's credential and, if managed, its current session-proof
+headers against that same loopback command endpoint to send
+`ack_agent_delivery` for the first note with `lease_id: null`,
+`listener_instance_id: null`, `outcome: "observed"`, `last_error_code: null`,
+`surfaced: true`, and `unclaimed: true`. Require HTTP 200 and verify the
+delivery row's unclaimed `observed` ACK. Finally post a second directed note
+to the same seat, leave it unchecked, and record that note's exact signal UUID
+as `SEED_SIGNAL_ID`. Keep credentials in root-owned files, as with the other
+section 6 probes; do not put them in arguments or logs.
+Anvil runs `release_psql_ro -v item_g_seed_signal_id="$SEED_SIGNAL_ID" --file
+"/proof/20260925000001-functional.sql"` and saves its nonzero-sensitive output
+as section 5 does. A missing seed is a failed proof. Do not run this proof in
+section 5's pre-edge Verify step.
 
 If the recycle timer was stopped, restart and verify it before closing a
 successful release:

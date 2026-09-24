@@ -1029,36 +1029,6 @@ test("queued observation replay stays idempotent across a new session", { timeou
   assert.equal(result.status, "idempotent");
 });
 
-test("migration admits only error-free unclaimed observed rows without a validation lock", { timeout: 5_000 }, async () => {
-  const migration = await readFile(new URL("../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url), "utf8");
-  const catalog = await readFile(new URL("../deploy/release-proofs/item-g/20260925000001-catalog.sql", import.meta.url), "utf8");
-  assert.match(migration, /OR \(ack_outcome = 'observed' AND last_error_code IS NULL\)/);
-  assert.match(migration, /\) NOT VALID;\s*ALTER TABLE swarm\.signal_deliveries VALIDATE CONSTRAINT signal_deliveries_check9;/);
-  assert.match(catalog, /pg_get_constraintdef\(c\.oid\) LIKE '%last_error_code IS NULL%'/);
-  assert.match(catalog, /c\.convalidated/);
-});
-
-test("box proof requires an exact live seed and checks member exclusions", { timeout: 5_000 }, async () => {
-  const proof = await readFile(new URL("../deploy/release-proofs/item-g/20260925000001-functional.sql", import.meta.url), "utf8");
-  assert.match(proof, /item_g_seed_signal_id is required/);
-  assert.match(proof, /d\.signal_id = v_seed/);
-  assert.match(proof, /d\.signal_id <> v_seed/);
-  assert.match(proof, /p\.revoked_at IS NULL AND swarm\.is_member\(d\.workspace_id, p\.owner_user_id\)/);
-  assert.match(proof, /w\.oldest_unobserved_at = v_enqueued/);
-  assert.match(proof, /wake-path view exposed a row to a nonmember/);
-  assert.match(proof, /wake-path view exposed a row without member identity/);
-});
-
-test("wake view uses the recorded cutoff, live expiry, and observed seat evidence", { timeout: 5_000 }, async () => {
-  const migration = await readFile(new URL("../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url), "utf8");
-  const view = migration.split("CREATE VIEW swarm_read.agent_wake_path", 2)[1]?.split("ALTER VIEW swarm_read.agent_wake_path", 1)[0] ?? "";
-  assert.match(migration, /CREATE TABLE swarm\.wake_path_release/);
-  assert.match(view, /d\.enqueued_at >= \(SELECT applied_at FROM swarm\.wake_path_release WHERE singleton\)/);
-  assert.match(view, /s\.until > statement_timestamp\(\)/);
-  assert.match(view, /observed\.ack_outcome = 'observed' AND observed\.last_lease_id IS NULL/);
-  assert.match(view, /observed\.acked_at >= \(SELECT applied_at FROM swarm\.wake_path_release WHERE singleton\)/);
-});
-
 test("absent-listener copy scopes its claim to the checked state directory", { timeout: 5_000 }, async () => {
   const routing = await readFile(new URL("../src/listener/main-routing.ts", import.meta.url), "utf8");
   assert.match(routing, /No listener is running for this agent in \{stateDirectory\}/);
