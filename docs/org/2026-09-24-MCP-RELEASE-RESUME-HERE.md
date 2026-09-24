@@ -13,6 +13,26 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
+## Update 2026-09-24 ~22:00Z: item G lane 1 landed on main (e3076c7a) — waiting for its box release
+
+- Item G lane 1: `cswarm check` sends an unclaimed `observed` ACK for each directed ask/note it showed; the roster and
+  the sender's receipt mark a stale wake path (180 s). Check order is now `(created_at cut to milliseconds, id)` in the
+  read edge, its cursor, the client and the heal (this fixed a same-millisecond skip in check). Record:
+  `docs/evidence/2026-09-25-item-g-lane1/LANDING.md` and `LANE.md` (seven review rounds; final Opus PASS + Grok PASS
+  on a1a3fd74; 36c36228 is text only).
+- Box release OFFERED to HezLead for tonight's window, batched with J (CommonSwarm ask 6cc2fe06 + native message):
+  SHA e3076c7a8d4e781c28d38109d7247eefd9d1827b (J + G); gate evidence (untracked, 0600, in the mini's main checkout)
+  `docs/evidence/2026-09-24-release-e3076c7a8d4e/` and `2026-09-25-release-e3076c7a8d4e/`. Option B: J alone at
+  4ef0f300 tonight, G next window. G needs migration `20260925000001`, the command AND read edges, the section-5
+  catalog proof (precondition: the section-5 role's `search_path` must not contain `swarm`), and the section-6 steps in
+  LANE.md "Box release order".
+- NOT established: the box release, production row counts and heal-join cost (asked HezLead for counts ~00:30Z), live
+  stale marks. OPEN follow-ups in `docs/design/2026-09-25-CHECK-CURSOR-MILLISECOND-TASK.md`: the commit-order skip
+  and the human PostgREST same-millisecond skip.
+- 0.1.77 is PREPARED (not pushed) in the lead's scratchpad worktree `wt-rel0177` (branch `land/rel-0177`, 4d4cb3f7 +
+  bump + NOTES.md draft). If G is in tonight's window, rebuild it on main e3076c7a so the CLI carries G's client ACK.
+- Next items after G lane 1: G lanes 2-3, then L, M, K, E, F (Strategist order).
+
 ## Update 2026-09-24 (later): item J landed on main (4ef0f300) — waiting for its box release
 
 - Item J (option A, Strategist ruling: no setup-error text; that is its own item later): members see pending seats and
