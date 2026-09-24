@@ -685,7 +685,7 @@ export class Arguments {
       sawOption = true;
       const name = value.slice(2);
       if (!name || name.includes("=")) {
-        throw new Error(`invalid option: ${value}`);
+        throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
       if (BOOLEAN_FLAGS.has(name)) {
         this.push(name, "true");
@@ -852,6 +852,8 @@ Usage:
   cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
   cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
   cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
+  cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]
+  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]
   cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
   cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
   cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
@@ -9389,16 +9391,55 @@ const inboxVariants = {
   follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow"]),
 };
 
+async function runMcpCode(args: Arguments): Promise<void> {
+  args.assertShape([...TARGET_FLAGS, "workspace-id"], 2);
+  const cloud = await target(args);
+  const human = await humanCredential(args, cloud);
+  const workspace = await workspaceId(args, cloud, human);
+  const { mintMcpCode, renderMcpCode } = await import("./cloud/mcp-connect.js");
+  const result = await mintMcpCode(cloud, human.accessToken, workspace);
+  process.stdout.write(renderMcpCode(result, cloud));
+}
+
+async function runMcpConnect(args: Arguments): Promise<void> {
+  args.assertShape(["url", "anon-key", "profile", "name"], 2);
+  if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
+  const explicitUrl = args.required("url");
+  const explicitAnonKey = args.optional("anon-key");
+  if (explicitAnonKey === undefined) {
+    const saved = await readCurrentTarget();
+    if (saved === null || cloudTarget(explicitUrl, saved.anonKey).url !== saved.url) {
+      throw new AgentSetupError("connect_anon_key_required", "Pass --anon-key for this URL on the agent host.");
+    }
+  }
+  const cloud = await resolveCloudTarget({ explicitUrl, explicitAnonKey, mode: "human" });
+  const { connectMcp, renderMcpConnect } = await import("./cloud/mcp-connect.js");
+  const result = await connectMcp({ target: cloud, profilePath: args.optional("profile"), name: args.optional("name") });
+  process.stdout.write(renderMcpConnect(result));
+}
+
 /**
  * The command table is the only verb dispatcher. Closed sub-actions are nested,
  * while flag-selected modes stay behind one key and are chosen by select().
  */
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
-  mcp: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
-    handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
-    description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
-    flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
-    visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]"], bootstrap: true }),
+  mcp: group({
+    serve: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
+      handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
+      description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
+      flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
+      visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]"], bootstrap: true }),
+    code: commandEntry({ ...noTool("human bootstrap code; never a model tool"), handler: runMcpCode,
+      description: "Mint a one-hour single-seat connect code.", mutates: true,
+      flags: [...TARGET_FLAGS, "workspace-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE,
+      visible: true, help: ["cswarm mcp code"], bootstrap: true }),
+    connect: commandEntry({ ...noTool("operator enters a code in a hidden terminal prompt"), handler: runMcpConnect,
+      description: "Redeem a connect code on the agent host.", mutates: true,
+      flags: ["url", "anon-key", "profile", "name"], transports: STDIO_ONLY,
+      profile: "native", hostSessionId: "drop", visible: true, help: ["cswarm mcp connect"], bootstrap: true }),
+  }, args => args.positionals[1] ?? "serve", () => new UsageError("mcp requires code or connect, or --profile to serve tools"), {
+    refusalPolicy: { flags: ["profile", "host-session-id", "url", "anon-key", "name"], ...NATIVE_PROFILE },
+  }),
   setup: commandEntry({
     ...noTool("bootstrap imports a credential before an MCP tool session exists"),
     ...selectedVariants(setupVariants, (args) => args.has("check-version") ? "version" : args.positionals[1] === "guide" ? "guide" : "import"),
@@ -9767,11 +9808,17 @@ export function isCliMain(): boolean {
   }
 }
 
+export function mcpFailureCode(error: unknown, subcommand: string | undefined): string {
+  if (error instanceof AgentSetupError) return error.code;
+  return subcommand === "code" ? "mcp_code_failed"
+    : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
+}
+
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
     if (selected?.args.positionals[0] === "mcp") {
-      process.stderr.write(`cswarm: [${error instanceof AgentSetupError ? error.code : "mcp_start_failed"}] ${safeError(error)}\n`);
+      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${safeError(error)}\n`);
       process.exitCode = 1;
       return;
     }

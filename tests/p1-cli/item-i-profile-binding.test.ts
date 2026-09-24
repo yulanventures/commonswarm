@@ -216,10 +216,13 @@ test("every table row that accepts --profile refuses B and parses A's id", { tim
     const rows: Array<{ command: string[]; entry: AgentCommandEntry }> = [];
     for (const [verb, root] of Object.entries(AGENT_COMMANDS)) {
       if ("subcommands" in root) {
-        for (const [action, entry] of Object.entries((root as AgentCommandGroup).subcommands)) rows.push({ command: [verb, action], entry });
+        for (const [action, entry] of Object.entries((root as AgentCommandGroup).subcommands)) {
+          rows.push({ command: verb === "mcp" && action === "serve" ? [verb] : [verb, action], entry });
+        }
       } else rows.push({ command: [verb], entry: root });
     }
-    const accepting = rows.filter(({ entry }) => entry.flags.includes("profile") && entry.profile !== "refuse");
+    // mcp connect uses --profile as a destination for a new profile, not as an opener.
+    const accepting = rows.filter(({ command, entry }) => command.join(" ") !== "mcp connect" && entry.flags.includes("profile") && entry.profile !== "refuse");
     assert.equal(accepting.length, 39, "reconcile the generated profile rows when the command table changes");
     for (const { command, entry } of accepting) {
       const extra = [

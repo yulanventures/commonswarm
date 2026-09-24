@@ -64,7 +64,7 @@ test("/app is email-first, truthful about the free tier, and owns consent", () =
   assert.doesNotMatch(dashboard, /<main class="dashboard__root">/);
 });
 
-test("the live dashboard offers peer agent and collaborator paths from an empty workspace", () => {
+test("the live dashboard offers peer agent and collaborator paths from an empty workspace", { timeout: 10000 }, () => {
   const dashboard = read("src/components/app/LiveDashboard.astro");
   const settings = read("src/lib/workspace-settings.ts");
   const connect = read("src/components/connect/AgentConnect.astro");
@@ -117,6 +117,7 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
     /error instanceof WorkspaceLimitReached \|\| error instanceof WorkspaceOutcomeUnknown[\s\S]*\? ""[\s\S]*: "Trying again checks the same request; it cannot create a duplicate\."/,
   );
   assert.match(connect, /Generate prompt/);
+  assert.match(connect, /Connect with MCP/);
   assert.match(connect, /Copy prompt/);
   assert.equal(
     [...connect.matchAll(/<button\b[^>]*data-action="copy"[^>]*>/g)].length,

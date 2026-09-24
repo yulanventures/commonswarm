@@ -80,7 +80,10 @@ const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
   ...["show", "set", "clear", "refusal"].map(key => ({ key: `target.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   { key: "status", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: true },
   { key: "whoami", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
-  { key: "mcp", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.serve", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.code", variants: ["default"], profile: "refuse", hostSessionId: "drop", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.connect", variants: ["default"], profile: "native", hostSessionId: "drop", errorMode: "onboarding", workspaceErrorJson: false },
+  { key: "mcp.refusal", variants: ["default"], profile: "native", hostSessionId: "keep", errorMode: "standard", workspaceErrorJson: false },
   { key: "resume", variants: ["inspect", "profile"], profile: "native", hostSessionId: "keep", errorMode: "standard", workspaceErrorJson: false },
   { key: "feedback", variants: ["default"], profile: "expand", hostSessionId: "drop", errorMode: "standard", workspaceErrorJson: false },
   ...["create", "ls", "rename", "archive", "refusal"].map(key => ({ key: `channel.${key}`, variants: ["default"], profile: "expand" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
@@ -150,6 +153,7 @@ async function commandEntryCoverage(): Promise<readonly CommandEntryCoverage[]> 
  * refusal coverage.
  */
 const GROUP_REFUSAL_SITES = [
+  "mcp",
   "receive",
   "hook",
   "listen",
@@ -308,6 +312,8 @@ function coreFixtures(): Fixture[] {
     { id: "meta.no-positional-profile", argv: profile },
     { id: "meta.bare", argv: [] },
     { id: "mcp", argv: ["mcp", "extra"] },
+    { id: "mcp.code", argv: ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"] },
+    { id: "mcp.connect", argv: ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"] },
     { id: "mcp.missing-profile", argv: ["mcp"] },
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
@@ -417,12 +423,14 @@ function coreFixtures(): Fixture[] {
 const GROUP_NAMES = new Set<string>(GROUP_REFUSAL_SITES);
 
 function canonicalFixtureId(key: string): string {
+  if (key === "mcp.refusal") return "mcp";
   if (key.endsWith(".refusal")) {
     const groupName = key.slice(0, -".refusal".length);
     assert.ok(GROUP_NAMES.has(groupName), `no refusal fixture group for ${key}`);
     return `refusal.group.${groupName}.missing.plain`;
   }
   const overrides: Record<string, string> = {
+    "mcp.serve": "refusal.group.mcp.missing.plain",
     setup: "setup.import",
     check: "check.default",
     "__listen-supervisor": "internal.listen-supervisor",
@@ -505,7 +513,9 @@ function selectedErrorSource(
       "receive.idle.default": ["receive", "idle"],
       "receive.serve.default": ["receive", "serve", "extra"],
       "receive.refusal.default": ["receive"],
-      "mcp.default": ["mcp", "extra"],
+      "mcp.serve.default": ["mcp"],
+      "mcp.code.default": ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
+      "mcp.connect.default": ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
     };
     const route = `${entry.key}.${variant}`;
     const argv = argvByKey[route];
@@ -567,6 +577,13 @@ async function fixtures(): Promise<Fixture[]> {
   assert.equal(new Set(ids).size, ids.length, "baseline fixture ids must be unique");
   return [...core, ...generated];
 }
+
+test("MCP baseline row names select the route they claim", { timeout: 10000 }, async () => {
+  const rows = new Map((await fixtures()).map(row => [row.id, row.argv]));
+  assert.deepEqual(rows.get("policy.host-session.mcp.serve.keep"), ["mcp", "--profile", "<PROFILE>", "--host-session-id", "fixture-host"]);
+  assert.deepEqual(rows.get("policy.host-session.mcp.refusal.keep"), ["mcp", "extra", "--profile", "<PROFILE>", "--host-session-id", "fixture-host"]);
+  assert.deepEqual(rows.get("selected-error.mcp.serve.json-before"), ["--json", "mcp"]);
+});
 
 async function prepareRow(root: string, origin: string, fixture: Fixture) {
   const rowRoot = join(root, fixture.id.replace(/[^a-z0-9.-]/gi, "_"));

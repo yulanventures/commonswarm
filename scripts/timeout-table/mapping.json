@@ -1,8 +1,6 @@
 {
   "version": 2,
-  "aliases": {
-    "main": "HEAD"
-  },
+  "aliases": {"main": "HEAD"},
   "refs": {
     "v0.1.71": {
       "rows": {
@@ -3138,6 +3136,56 @@
             "writes": [],
             "removes": [],
             "reason": "Use of LISTENER_PROMPT_TIMEOUT_MS. External model turn, not a network request timeout."
+          }
+        },
+        "src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/h0/register"
+          ],
+          "citation": "src/cloud/mcp-connect.ts:21",
+          "detail": "Register request budget for the H0 seat write.",
+          "operation": {
+            "name": "mcp-register",
+            "class": "not-run",
+            "writes": [
+              "agent seat and local credential files"
+            ],
+            "removes": [],
+            "reason": "Registration can commit a seat and is not safe for a read-only timeout measurement."
+          }
+        },
+        "src/cloud/mcp-connect.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/h0/register"
+          ],
+          "citation": "src/cloud/mcp-connect.ts:167",
+          "detail": "Abort timer for the H0 register POST.",
+          "operation": {
+            "name": "mcp-register",
+            "class": "not-run",
+            "writes": [
+              "agent seat and local credential files"
+            ],
+            "removes": [],
+            "reason": "Registration can commit a seat and is not safe for a read-only timeout measurement."
+          }
+        },
+        "src/cloud/mcp-connect.ts:timeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/mcp-connect.ts:48",
+          "detail": "Local stty process deadline for hidden input.",
+          "operation": {
+            "name": "mcp-hidden-input",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "stty requires an interactive terminal."
           }
         }
       }

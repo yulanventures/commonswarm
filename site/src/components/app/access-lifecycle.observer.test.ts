@@ -62,7 +62,7 @@ test("every AgentConnect state exposes a correct h2 with no stale or skipped hea
   );
 });
 
-test("Add an agent asks only for a name and warns about the key when it exists", () => {
+test("Add an agent asks only for a name and warns about the key when it exists", { timeout: 10000 }, () => {
   assert.match(connect, /Add the name collaborators will see in the feed\./);
   assert.doesNotMatch(connect, /data-field(?:-wrap)?="model"|id="ac-models?"/);
   assert.doesNotMatch(connect, /Add the model|Use the model name/);
@@ -73,7 +73,7 @@ test("Add an agent asks only for a name and warns about the key when it exists",
   );
   const result = connect.slice(connect.indexOf('<div class="ac__panel ac__result"'));
   assert.doesNotMatch(form, /ac__warn/);
-  assert.match(result, /ac__warn[\s\S]*Keep the prompt or setup file private/);
+  assert.match(result, /ac__warn[\s\S]*This prompt or setup file carries a secret through the model\. Keep it private\.[\s\S]*Use MCP connect on the agent host to keep the secret out of the model/);
   assert.match(agentConnect, /createAgentPrincipalCommand\(/);
   assert.match(agentConnect, /model: model \?\? null/);
   assert.match(

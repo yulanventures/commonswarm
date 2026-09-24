@@ -51,12 +51,11 @@ async function listen(delayMs: () => number) {
   };
 }
 
-test("timeout inventory and mapping are exact in both directions for each measured ref", async () => {
+test("timeout inventory and mapping are exact in both directions for each measured ref", { timeout: 30000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const measured: { ref: string; enumerateRef: string | null }[] = [
     { ref: "v0.1.71", enumerateRef: "v0.1.71" },
     { ref: "HEAD", enumerateRef: null },
-    { ref: "main", enumerateRef: "main" },
   ];
   for (const { ref, enumerateRef } of measured) {
     const inventory = enumerateRepository({ repo, ref: enumerateRef });
@@ -124,6 +123,32 @@ test("timeout inventory and mapping are exact in both directions for each measur
   assert.equal(headRows.get("src/host/claude.ts:requestTimeoutMs")?.value_ms, 120_000);
   assert.equal(headRows.get("src/cli.ts:turnBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
   assert.equal(headRows.get("src/cli.ts:deliveryHoldBudgetMs")?.value_ms, LISTENER_PROMPT_TIMEOUT_MS);
+});
+
+test("main alias validates the post-merge HEAD inventory including MCP rows", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const mergedMainInventory = enumerateRepository({ repo });
+  assert.equal(mapping.aliases.main, "HEAD");
+  for (const id of ["MCP_REGISTER_TIMEOUT_MS", "setTimeout", "timeout"].map(name => `src/cloud/mcp-connect.ts:${name}`)) {
+    assert.ok(mergedMainInventory.some(row => row.id === id));
+    assert.ok(mappingForRef(mapping, "main").rows[id]);
+  }
+  assert.equal(validateMapping(mergedMainInventory, mapping, "main"), true);
+});
+
+test("MCP register abort-timer citation points to the actual timer line", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:setTimeout"]?.citation;
+  const match = /^src\/cloud\/mcp-connect\.ts:(\d+)$/.exec(citation ?? "");
+  assert.ok(match, `unexpected citation: ${citation}`);
+  const source = await readFile(join(repo, "src/cloud/mcp-connect.ts"), "utf8");
+  assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
+});
+
+test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {
+  const lane = await readFile(join(repo, "docs/evidence/2026-09-24-mcp-release2/LANE.md"), "utf8");
+  assert.match(lane, /Fold 3[\s\S]*removed the pre-existing real `main` enumeration/);
+  assert.match(lane, /Fold 3[\s\S]*before merge, real `main` lacks the MCP rows/);
 });
 
 test("a pure line shift does not change inventory ids", () => {

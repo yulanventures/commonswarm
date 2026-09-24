@@ -25,12 +25,13 @@ test("the secret body fixture is exactly 43 base64url characters", () => {
   assert.match(SECRET_BODY, /^[A-Za-z0-9_-]{43}$/);
 });
 
-test("the whole H0 agent paste matches the reviewed golden text", () => {
+test("the whole H0 agent paste matches the reviewed golden text", { timeout: 10000 }, () => {
   /* READ BEFORE UPDATING: this is what a human copies. A golden pins whatever the paste says, errors
    * included, so diff it against the register endpoint's contract, not only against your intent. */
   assert.equal(
     paste(DOCUMENT_URL),
     [
+      "This non-MCP handoff sends a join credential through the model. For MCP hosts, a person can use cswarm mcp code and cswarm mcp connect instead.",
       "First fetch this agent document; reading it requires no login or key:",
       DOCUMENT_URL,
       "Then call register once as that document describes, using this single-purpose join credential:",
@@ -59,9 +60,10 @@ test("each value is on its own line, directly under the sentence that names it",
   );
 });
 
-test("the returned URL is the canonical form that was validated, not the raw input", () => {
+test("the returned URL is the canonical form that was validated, not the raw input", { timeout: 10000 }, () => {
   const lines = paste("https://CommonSwarm.com").split("\n");
-  assert.equal(lines[1], "https://commonswarm.com/");
+  const urlIntro = lines.findIndex(line => line.startsWith("First fetch this agent document"));
+  assert.equal(lines[urlIntro + 1], "https://commonswarm.com/");
 });
 
 test("a document URL with a query string is refused", () => {

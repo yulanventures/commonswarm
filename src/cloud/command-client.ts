@@ -51,6 +51,7 @@ export interface CommandHttpResponse extends StoredResponse {
   token_id?: string;
   run_id?: string;
   agent_token?: string;
+  join_credential?: string;
   workspace_id?: string;
   stream_id?: string;
   signal?: SignalRecord;
@@ -81,6 +82,7 @@ export interface CommandResult {
 }
 
 export type ConnectCommand =
+  | { kind: "mint_agent_join_credential"; seat_cap: number; ttl_hours: number }
   | { kind: "invite_member"; email: string; ttl_ms?: number }
   | { kind: "revoke_invitation"; invitation_id: string }
   | { kind: "accept_invitation"; token: string }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
-import { dashboardAgentConnection, dashboardAgentFilePrompt, dashboardAgentPrompt, promptCopyPayload} from "./agent-prompt";
+import { dashboardAgentConnection, dashboardAgentFilePrompt, dashboardAgentPrompt, dashboardMcpPrompt, promptCopyPayload} from "./agent-prompt";
 import { parseAgentConnection } from "../../../../src/cloud/agent-profile";
 import { AGENT_CONNECTION_FIELDS } from "../../../../src/cloud/agent-onboarding-contract";
 import { decodeAgentConnectionToken } from "../../../../src/cloud/agent-connection-token";
@@ -18,6 +18,27 @@ const INPUT = {
   workspaceId: "44444444-4444-4444-8444-444444444444", workspaceName: "Observer room",
   deploymentUrl: "https://example.supabase.co", anonKey: "TEST_ONLY_PUBLIC_KEY",
 };
+
+test("MCP handoff contains only operator terminal steps; legacy prompt discloses its secret path", { timeout: 10000 }, () => {
+  const mcp = dashboardMcpPrompt();
+  assert.match(mcp, /cswarm mcp code/);
+  assert.match(mcp, /cswarm mcp connect --url/);
+  assert.match(mcp, /hidden prompt/);
+  assert.match(mcp, /claude mcp add --scope user --transport stdio cswarm/);
+  assert.match(mcp, /\[mcp_servers\.cswarm\]/);
+  assert.match(mcp, /Codex config:\n\[mcp_servers\.cswarm\]\ncommand = "cswarm"\nargs = \["mcp", "--profile", "<path>"\]/);
+  assert.doesNotMatch(mcp, /swm_join_|swm_agt_|CSWARMA\./);
+  assert.match(dashboardAgentPrompt(INPUT), /fallback passes a credential through the model/);
+  assert.match(dashboardAgentFilePrompt(INPUT), /fallback passes a credential through the model/);
+  assert.match(dashboardAgentPrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
+  assert.match(dashboardAgentFilePrompt(INPUT), /If its host is blocked, use npm install -g commonswarm/);
+  for (const prompt of [dashboardAgentPrompt(INPUT), dashboardAgentFilePrompt(INPUT)]) {
+    for (const phrase of ["Connect to CommonSwarm. Keep the file private", "Confirm cswarm setup --check-version", "Run setup --json. Reuse its --profile", "the local Grok Bot gateway; Codex supports turn checks", "Read brain topics; post intent and reply"]) assert.ok(prompt.includes(phrase), `fallback wording missing: ${phrase}`);
+  }
+  const component = readFileSync(new URL("./AgentConnect.astro", import.meta.url), "utf8");
+  assert.match(component, /<summary>Connect with MCP<\/summary>/);
+  assert.match(component, /\{dashboardMcpPrompt\(\)\}/);
+});
 
 test("the generated connection is accepted by the CLI without changing the credential schema", () => {
   const raw = dashboardAgentConnection(INPUT);
@@ -157,4 +178,20 @@ test("the payload is returned byte for byte: no underscore escaping, no link rew
   assert.ok(!promptCopyPayload(hostile, "WHOLE").includes("]("), "a URL must not become a Markdown link");
   const whole = 'save {"anon_key":"a_b"} to https://api.commonswarm.com';
   assert.equal(promptCopyPayload("", whole), whole);
+});
+
+test("Fold 3 keeps the version remedy and gateway wording in both fallback prompt and lane evidence", { timeout: 10000 }, () => {
+  const lane = readFileSync(new URL("../../../../docs/evidence/2026-09-24-mcp-release2/LANE.md", import.meta.url), "utf8");
+  const prompt = dashboardAgentFilePrompt(INPUT);
+  for (const sentence of [
+    "Connect to CommonSwarm. Keep the file private; never echo its contents or put them in commands, logs, URLs, or environment variables.",
+    "The installer reuses a matching build. If its host is blocked, use npm install -g commonswarm.",
+    "Confirm cswarm setup --check-version returns setup_version 1; otherwise report that the release needs updating.",
+    "Run setup --json. Reuse its --profile and this session's --host-session-id.",
+    "Ask once: enable wakeups in this same session, or check at each turn's start and whenever asked? Wake works with Claude Code preview channels or the local Grok Bot gateway; Codex supports turn checks. Explain approval or restart needs. Use cswarm receive configure with the user's choice; reuse a saved choice. Never start another model.",
+    "Run cswarm check --profile <saved-profile> --host-session-id <this-session-id> before work. Read brain topics; post intent and reply. Use cswarm setup guide only when needed. Report connection, receive mode, and next step; claim wake only after its idle test passes.",
+  ]) {
+    assert.ok(prompt.includes(sentence), `fallback prompt changed: ${sentence}`);
+    assert.ok(lane.includes(sentence), `Fold 2 evidence omitted: ${sentence}`);
+  }
 });
