@@ -62,6 +62,14 @@ empty. Signals went to the seat itself only, plus one `working_on`.
 build 0; npm test 962/962; test:p1-cli 876/876; check:tests 0; check:edge 0; build-release 0; bundle `mcp --help` from
 a directory outside the repo 0; diff-check 0.
 
+## Gates on the merged tree (lead)
+
+build 0; npm test 962/962; test:p1-cli 876/876; check:tests 0; check:edge 0; test:p1-server 242/242 (the first run had
+4 failures in one file, `tests/p1-server/standing-grant-resume.test.ts`, all `AuthRetryableFetchError: fetch failed`
+against local Supabase auth, with R2-R4 depending on R1; that file then passed 4/4 twice on the merged tree and 4/4 on
+main adef94b4, and the full suite rerun passed 242/242); build-release 0; site build 0; site test 567 pass, 1 skipped;
+diff-check 0.
+
 ## Not established
 
 - The Claude Code live run (above).
