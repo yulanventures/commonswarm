@@ -833,6 +833,9 @@ test("the Agents dialog carries Pending access at every width from one renderer"
   );
   /* The dialog is the only pending surface at every width. */
   const visibleAtEveryWidth = /\.dashboard__roster-dialog-pending\s*\{\s*display: grid;/;
+  // Discriminating control: the pre-item-J base rule hid the section at desktop.
+  assert.doesNotMatch(dashboard, /\.dashboard__roster-dialog-pending\s*\{\s*display:\s*none/,
+    "no base rule hides the only pending surface at desktop");
   assert.match(
     dashboard,
     visibleAtEveryWidth,

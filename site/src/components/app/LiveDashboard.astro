@@ -1086,11 +1086,10 @@ import "../../styles/tokens.css";
         </div>
       </section>
 
-      {/* Pending access lives here only where the rail's own details are hidden:
-          at ≤52rem this dialog is the ONLY reachable pending surface, so the
-          section must exist — and at desktop the rail keeps it and the dialog
-          stays quiet, so there is never a second, competing control. Both lists
-          render from the same pendingAccessRows call, so they cannot disagree. */}
+      {/* Pending access lives in this dialog at every width. The rail's own pending
+          details were removed when the secondary rail controls moved into this dialog
+          (b7977ad3), so this section is the only pending surface: it must not be hidden
+          at desktop (item J). */}
       <section
         class="dashboard__roster-dialog-pending"
         data-dialog-access-section
