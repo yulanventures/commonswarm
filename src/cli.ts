@@ -7349,7 +7349,7 @@ async function runListenStatusOrStop(
     } else {
       process.stdout.write(
         command === "status"
-          ? `${NO_LISTENER_STATUS_SENTENCE} Checked ${paths.instanceDirectory} for profile ${cloud.profileId}.\n`
+          ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", paths.instanceDirectory)} Checked profile ${cloud.profileId}.\n`
           : `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.\n`,
       );
     }

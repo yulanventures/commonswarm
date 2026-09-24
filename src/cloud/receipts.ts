@@ -170,7 +170,7 @@ export function renderSignalReceiptReport(
   const sections = agentReceipts.map((receipt) => {
     const state = deliveryReceiptState(receipt, nowMs);
     if (state === "enqueued") {
-      if (nowMs - Date.parse(receipt.enqueued_at) >= WAKE_STALE_MS) {
+      if (receipt.wake_path_observing === true && nowMs - Date.parse(receipt.enqueued_at) >= WAKE_STALE_MS) {
         return [
           `Accepted ${relativeAge(receipt.enqueued_at, nowMs)}. The recipient's session has not checked this in ${WAKE_STALE_LABEL}.`,
           `Next: ask the recipient's operator to run ${listenerStatusCommand(report, receipt)} and check the attended session.`,

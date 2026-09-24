@@ -64,7 +64,7 @@ export const LISTENER_ROUTE_RULING =
 export const LISTENER_ATTENDANCE_SURFACES = ["hook", "watcher"] as const;
 export const NO_LISTENER_STATUS = "no_listener" as const;
 export const NO_LISTENER_STATUS_SENTENCE =
-  "No listener is running for this seat. Attended seats are reached through their session check.";
+  "No listener is running for this agent in {stateDirectory}. Attended seats are reached through their session check.";
 export type ListenerAttendanceSurface = (typeof LISTENER_ATTENDANCE_SURFACES)[number];
 
 export const LISTENER_ALLOW_UNATTENDED_CLAUSE =

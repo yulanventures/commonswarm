@@ -19,7 +19,7 @@ import { bindSessionProof } from "./session-proof.js";
 import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
-import { DeliveryCommandClient } from "./delivery.js";
+import { DeliveryCommandClient, DeliveryHttpError, DeliveryTransportError } from "./delivery.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -32,6 +32,9 @@ export const AGENT_CHECK_PREVIEW_CHARS = 1_000;
 export const AGENT_CHECK_BODY_BUDGET = 4_000;
 export const AGENT_CHECK_CACHE_LIMIT = 200;
 export const AGENT_CHECK_ACK_BATCH_LIMIT = AGENT_CHECK_PAGE_SIZE;
+export const AGENT_CHECK_ACK_MIN_REMAINING_MS = 50;
+export const AGENT_CHECK_ACK_MAX_ATTEMPTS = 3;
+export const AGENT_CHECK_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 
 export interface AgentCheckMessage {
   id: string;
@@ -69,8 +72,9 @@ interface CheckState {
   messages: SignalRecord[];
   /** Only rows that were successfully presented and locally committed enter this retry queue. */
   pending_observed_ids?: string[];
-  /** Rotates bounded retries so one permanently refused row cannot starve later mail. */
+  /** Rotates transient retries so one slow row cannot starve later mail. */
   pending_observed_next?: number;
+  pending_observed_retries?: Record<string, { attempts: number; first_at: number }>;
 }
 
 function checkTimeoutError(): AgentSetupError {
@@ -138,6 +142,11 @@ async function readCheckState(path: string): Promise<CheckState> {
         state.pending_observed_ids.some(id => typeof id !== "string" || !ONBOARDING_UUID.test(id)))) ||
       (state.pending_observed_next !== undefined &&
         (!Number.isSafeInteger(state.pending_observed_next) || state.pending_observed_next < 0)) ||
+      (state.pending_observed_retries !== undefined &&
+        (typeof state.pending_observed_retries !== "object" || state.pending_observed_retries === null ||
+          Object.entries(state.pending_observed_retries).some(([id, retry]) =>
+            !ONBOARDING_UUID.test(id) || !retry || !Number.isSafeInteger(retry.attempts) ||
+            retry.attempts < 0 || !Number.isFinite(retry.first_at)))) ||
       (state.cursor !== null && (!state.cursor || !ONBOARDING_UUID.test(state.cursor.id) || !Number.isFinite(Date.parse(state.cursor.created_at))))) {
     throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing.");
   }
@@ -239,32 +248,51 @@ export async function checkAgentMessages(options: {
         const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
         const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
         const ackPending = async () => {
-          const client = new DeliveryCommandClient(target, fetcher, {
-            deadlineMs: Math.max(1, Math.min(AGENT_CHECK_TIMEOUT_MS, deadlineMs - Date.now())),
-          });
-          const succeeded: string[] = [];
+          const removed: string[] = [];
+          const retryUpdates: Record<string, { attempts: number; first_at: number }> = {};
           const committed = await readCheckState(path);
           const queued = committed.pending_observed_ids ?? [];
           const start = queued.length === 0 ? 0 : (committed.pending_observed_next ?? 0) % queued.length;
           const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
           let attempted = 0;
           for (const id of batch) {
-            if (Date.now() >= deadlineMs) break;
+            const now = Date.now();
+            const remainingMs = deadlineMs - now;
+            if (remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) break;
+            const prior = committed.pending_observed_retries?.[id] ?? { attempts: 0, first_at: now };
+            if (prior.attempts >= AGENT_CHECK_ACK_MAX_ATTEMPTS || now - prior.first_at >= AGENT_CHECK_ACK_MAX_AGE_MS) {
+              removed.push(id);
+              continue;
+            }
             attempted++;
             try {
+              const client = new DeliveryCommandClient(target, fetcher, {
+                deadlineMs: Math.min(AGENT_CHECK_TIMEOUT_MS, remainingMs),
+              });
               await client.observeUnclaimedAgentDelivery({ workspaceId: profile.workspace_id,
                 credential: token, commandId: randomUUID(), signalId: id });
-              succeeded.push(id);
-            } catch { /* Observation is best effort; the committed queue retries on a later check. */ }
+              removed.push(id);
+            } catch (error) {
+              const transient = error instanceof DeliveryTransportError ||
+                (error instanceof DeliveryHttpError && error.status >= 500 && error.status < 600);
+              const next = { attempts: prior.attempts + 1, first_at: prior.first_at };
+              if (!transient || next.attempts >= AGENT_CHECK_ACK_MAX_ATTEMPTS) removed.push(id);
+              else retryUpdates[id] = next;
+            }
           }
-          if (attempted === 0) return;
+          if (attempted === 0 && removed.length === 0) return;
+          const writeBudgetMs = Math.floor(deadlineMs - Date.now());
+          if (writeBudgetMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) return;
           await withFileLock(dirname(path), "check", async () => {
             const current = await readCheckState(path);
-            const remaining = (current.pending_observed_ids ?? []).filter(id => !succeeded.includes(id));
+            const remaining = (current.pending_observed_ids ?? []).filter(id => !removed.includes(id));
+            const retries = { ...(current.pending_observed_retries ?? {}), ...retryUpdates };
+            for (const id of removed) delete retries[id];
             await writeSecureJsonFile(path, JSON.stringify({ ...current,
               pending_observed_ids: remaining,
+              pending_observed_retries: retries,
               pending_observed_next: remaining.length === 0 ? 0 : (start + attempted) % remaining.length }));
-          });
+          }, { timeoutMs: writeBudgetMs });
         };
         if (presented.length > 0) {
           if (options.deferCursorCommit) {

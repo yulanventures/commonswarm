@@ -730,8 +730,8 @@ export async function ackAgentDelivery(
     if (row.last_lease_id !== null || row.last_leased_by !== null) return { status: "conflict" };
     if (managed && (
       args.proof == null ||
-      row.session_id !== args.proof.session_id ||
-      Number(row.session_generation) !== args.proof.generation
+      (row.session_id !== null && (row.session_id !== args.proof.session_id ||
+        Number(row.session_generation) !== args.proof.generation))
     )) return { status: "session_conflict" };
     const directed = await tx<{ allowed: boolean }[]>`
       SELECT EXISTS (
@@ -788,14 +788,14 @@ export async function ackAgentDelivery(
   }
   if (queuedObservation) {
     if (row.acked_at === null) return { status: "unavailable" };
-    if (managed && (
-      args.proof == null || row.session_id !== args.proof.session_id ||
-      Number(row.session_generation) !== args.proof.generation
-    )) return { status: "session_conflict" };
     if (row.ack_outcome === "observed") return {
       status: "idempotent",
       response: { ok: true, event_ids: [], signal_id: args.signalId, outcome: "observed" },
     };
+    if (managed && (
+      args.proof == null || row.session_id !== args.proof.session_id ||
+      Number(row.session_generation) !== args.proof.generation
+    )) return { status: "session_conflict" };
     if (row.ack_outcome !== "queued") return { status: "conflict" };
     await tx`
       UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(),

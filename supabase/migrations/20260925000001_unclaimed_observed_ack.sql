@@ -25,9 +25,10 @@ ALTER TABLE swarm.signal_deliveries ADD CONSTRAINT signal_deliveries_check9 CHEC
   OR (last_lease_id IS NOT NULL AND last_leased_by IS NOT NULL)
   OR ack_outcome = 'expired'
   -- An attended seat observing its own mail: no lease was ever taken.
-  OR ack_outcome = 'observed'
+  OR (ack_outcome = 'observed' AND last_error_code IS NULL)
   OR (ack_outcome = 'failed_terminal' AND last_error_code = 'delivery_attempts_exhausted')
-);
+) NOT VALID;
+ALTER TABLE swarm.signal_deliveries VALIDATE CONSTRAINT signal_deliveries_check9;
 
 DO $$
 DECLARE
@@ -40,7 +41,7 @@ BEGIN
   IF v_def IS NULL THEN
     RAISE EXCEPTION 'signal_deliveries_check9 is missing after the rewrite';
   END IF;
-  IF v_def NOT LIKE '%observed%' THEN
+  IF v_def NOT LIKE '%observed%' OR v_def NOT LIKE '%last_error_code IS NULL%' THEN
     RAISE EXCEPTION 'signal_deliveries_check9 does not admit an unclaimed observed ack: %', v_def;
   END IF;
   -- The narrowing half: a replied ack must still carry its lease pair.
@@ -48,6 +49,15 @@ BEGIN
     RAISE EXCEPTION 'signal_deliveries_check9 now admits a lease-free replied ack: %', v_def;
   END IF;
 END $$;
+
+-- The migration itself records the release boundary; old mail cannot become a
+-- permanent false stale mark when a seat's existing cursor is already past it.
+CREATE TABLE swarm.wake_path_release (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  applied_at timestamptz NOT NULL DEFAULT statement_timestamp()
+);
+INSERT INTO swarm.wake_path_release (singleton) VALUES (true);
+ALTER TABLE swarm.wake_path_release OWNER TO swarm_admin;
 
 -- A member-readable aggregate for the app roster. The browser never reads the
 -- authority table directly, and an ACK makes the principal disappear from this view.
@@ -61,13 +71,68 @@ JOIN swarm.agent_principals AS p
   ON p.workspace_id = d.workspace_id AND p.principal_id = d.recipient_agent_principal_id
 WHERE d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
   AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+  AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
+  AND s.until > statement_timestamp()
   AND s.kind IN ('ask', 'note')
   AND (s.to_agent_principal_id = d.recipient_agent_principal_id
     OR EXISTS (SELECT 1 FROM swarm.signal_recipients AS r
       WHERE r.workspace_id = s.workspace_id AND r.signal_id = s.id
         AND r.recipient_agent_principal_id = d.recipient_agent_principal_id))
   AND p.revoked_at IS NULL
+  AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
+    WHERE observed.workspace_id = d.workspace_id
+      AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
+      AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
+      AND observed.last_leased_by IS NULL
+      AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
   AND swarm.is_member(d.workspace_id, auth.uid())
 GROUP BY d.workspace_id, d.recipient_agent_principal_id;
 ALTER VIEW swarm_read.agent_wake_path OWNER TO swarm_admin;
 GRANT SELECT ON swarm_read.agent_wake_path TO authenticated;
+
+-- Add one server-authoritative eligibility bit to directed receipts. Old
+-- clients ignore it; new clients never infer observation from row age alone.
+ALTER FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
+  RENAME TO signal_delivery_receipts_without_wake_path;
+CREATE FUNCTION swarm_read.signal_delivery_receipts(
+  p_workspace_id uuid, p_signal_id uuid, p_agent_token_hash bytea DEFAULT NULL
+) RETURNS jsonb LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = swarm, pg_catalog AS $$
+DECLARE
+  v_result jsonb;
+  v_receipts jsonb;
+BEGIN
+  v_result := swarm_read.signal_delivery_receipts_without_wake_path(
+    p_workspace_id, p_signal_id, p_agent_token_hash);
+  IF v_result IS NULL OR v_result ->> 'addressed' <> 'true' THEN RETURN v_result; END IF;
+  SELECT COALESCE(jsonb_agg(
+    CASE WHEN receipt.value ? 'recipient_agent_principal_id' THEN
+      receipt.value || jsonb_build_object('wake_path_observing', EXISTS (
+        SELECT 1 FROM swarm.signal_deliveries AS d
+        JOIN swarm.signals AS s ON s.workspace_id = d.workspace_id AND s.id = d.signal_id
+        JOIN swarm.agent_principals AS p ON p.workspace_id = d.workspace_id
+          AND p.principal_id = d.recipient_agent_principal_id
+        WHERE d.workspace_id = p_workspace_id AND d.signal_id = p_signal_id
+          AND d.recipient_agent_principal_id = (receipt.value ->> 'recipient_agent_principal_id')::uuid
+          AND d.acked_at IS NULL AND d.lease_id IS NULL AND d.leased_by IS NULL
+          AND d.last_lease_id IS NULL AND d.last_leased_by IS NULL
+          AND d.enqueued_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton)
+          AND s.until > statement_timestamp() AND s.kind IN ('ask', 'note')
+          AND p.revoked_at IS NULL
+          AND EXISTS (SELECT 1 FROM swarm.signal_deliveries AS observed
+            WHERE observed.workspace_id = d.workspace_id
+              AND observed.recipient_agent_principal_id = d.recipient_agent_principal_id
+              AND observed.ack_outcome = 'observed' AND observed.last_lease_id IS NULL
+              AND observed.last_leased_by IS NULL
+              AND observed.acked_at >= (SELECT applied_at FROM swarm.wake_path_release WHERE singleton))
+      ))
+    ELSE receipt.value END ORDER BY receipt.ordinality), '[]'::jsonb)
+  INTO v_receipts FROM jsonb_array_elements(v_result -> 'receipts')
+    WITH ORDINALITY AS receipt(value, ordinality);
+  RETURN jsonb_set(v_result, '{receipts}', v_receipts, false);
+END;
+$$;
+ALTER FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea) OWNER TO swarm_admin;
+REVOKE ALL ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
+  TO authenticated, swarm_read;

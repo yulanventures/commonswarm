@@ -2026,7 +2026,7 @@ import "../../styles/tokens.css";
             .from("agent_wake_path")
             .select("principal_id,oldest_unobserved_at")
             .eq("workspace_id", workspaceId);
-          if (wakeError) throw new Error(wakeError.message);
+          if (wakeError) return result;
           const oldest = new Map((wakeRows ?? []).map(row => [row.principal_id, row.oldest_unobserved_at]));
           return result.map(agent => ({ ...agent, oldestUnobservedAt: oldest.get(agent.principalId) ?? null }));
         }
