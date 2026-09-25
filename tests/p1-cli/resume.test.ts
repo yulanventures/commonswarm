@@ -65,7 +65,7 @@ const OLD_SIGNAL = "11111111-1111-4111-8111-111111111111";
 const NEW_SIGNAL = "22222222-2222-4222-8222-222222222222";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
 
-test("printed listener restart waits for a slow stop in its explicit state directory", { timeout: 20_000 }, async () => {
+for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed listener restart works when listener is ${mode}`, { timeout: 20_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-restart-wait-"));
   const bin = join(root, "bin");
   const stateDirectory = join(root, "listener state");
@@ -93,15 +93,19 @@ test("printed listener restart waits for a slow stop in its explicit state direc
     status.profileId = target.profileId;
     status.workspaceId = WORKSPACE;
     status.principalId = PRINCIPAL;
-    status.pid = process.pid;
+    status.pid = 999_999_999;
     status.provider = "claude";
     await writeListenerStatus(paths, status);
-    control = await startListenerControlServer({ paths, status: () => status, stop: () => {
+    if (mode !== "dead") control = await startListenerControlServer({ paths, status: () => status, stop: () => {
       status.state = "stopping";
       setTimeout(() => {
+        if (mode === "dies_during_stop") {
+          void control?.close();
+          return;
+        }
         status.state = "stopped";
         status.stoppedAt = new Date().toISOString();
-        void writeListenerStatus(paths, status).then(() => control?.close());
+        void writeListenerStatus(paths, status).then(() => setTimeout(() => void control?.close(), 300));
       }, 1_200);
     } });
     await writeFile(credentialFile, credentialArtifact(), { mode: 0o600 });
@@ -110,7 +114,7 @@ test("printed listener restart waits for a slow stop in its explicit state direc
     await mkdir(join(root, ".claude"), { recursive: true });
     await writeFile(join(root, ".claude", "settings.json"), JSON.stringify(claudeUserPromptHookSnippet(PRINCIPAL)));
     const report: Parameters<typeof renderResume>[0] = { identity: { displayName: "Fixture", principalId: PRINCIPAL },
-      listener: { checkedDirectory: paths.instanceDirectory, status, source: "live_process" },
+      listener: { checkedDirectory: paths.instanceDirectory, status, source: mode === "dead" ? "recorded_file" : "live_process" },
       watchers: [], brain: { digest: null, highWaterFile: join(root, "brain") },
       inbox: { count: 0, exact: true }, target, workspaceId: WORKSPACE, credentialFile,
       installedVersion: "0.1.77", stateDirectory };

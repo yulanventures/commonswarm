@@ -1219,9 +1219,10 @@ export async function runListenerSupervisor(
  */
 export async function effectiveListenerStatus(
   paths: ListenerPaths,
+  timeoutMs?: number,
 ): Promise<ListenerStatus | null> {
   try {
-    return await queryListenerControl(paths, "status");
+    return await queryListenerControl(paths, "status", timeoutMs);
   } catch {
     const stored = await readListenerStatus(paths);
     if (
@@ -1253,11 +1254,12 @@ export async function effectiveListenerStatus(
 
 export async function stopListener(
   paths: ListenerPaths,
+  timeoutMs?: number,
 ): Promise<ListenerStatus | null> {
   try {
-    return await queryListenerControl(paths, "stop");
+    return await queryListenerControl(paths, "stop", timeoutMs);
   } catch {
-    return await effectiveListenerStatus(paths);
+    return await effectiveListenerStatus(paths, timeoutMs);
   }
 }
 

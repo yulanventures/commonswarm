@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import { renderResume, type ResumeInspection } from "../../src/resume.js";
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
-type FixtureMode = "refuse" | "takeover" | "supersede" | "status" | "lifecycle" | "claim_retry" | "claim_inflight" |
+type FixtureMode = "refuse" | "takeover" | "supersede" | "status" | "status_controls" | "lifecycle" | "claim_retry" | "claim_inflight" |
   "unmanaged" | "h0_holder" | "session_conflict" | "session_expired" | "session_retired" |
   "session_proof_invalid" | "session_proof_missing" | "profile_unauthorized" | "profile_forbidden" | "profile_unreachable" | "profile_transport" | "profile_renewed";
 async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
@@ -117,7 +117,7 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
       if (body.resource === "agent_wake_lease") {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
           lease: { watcher_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
-            host_label: "remote-host", generation: 3, renewed_age_ms: 1200 },
+            host_label: mode === "status_controls" ? "remote-\u0085\u202e\u001b[31mhost" : "remote-host", generation: 3, renewed_age_ms: 1200 },
         }));
         return;
       }
@@ -180,11 +180,11 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
     return { exit, stop: () => running.kill("SIGTERM"), interrupt: () => running.kill("SIGINT"),
       crash: () => running.kill("SIGKILL") };
   };
-  const status = async () => {
+  const status = async (json = true) => {
     const running = spawn(process.execPath, ["--import", "tsx", resolve("src/cli.ts"),
       "listen", "status", "--agent-token-file", credential,
       "--url", `http://127.0.0.1:${address.port}`, "--anon-key", anonKey,
-      "--workspace-id", workspace, "--state-dir", join(root, "listeners"), "--json"], {
+      "--workspace-id", workspace, "--state-dir", join(root, "listeners"), ...(json ? ["--json"] : [])], {
       env: { ...process.env, HOME: root, XDG_STATE_HOME: join(root, "state") },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -461,12 +461,13 @@ test("stdin holder and supersession refusals give words and no pasteable command
       const result = await f.start(false, undefined, undefined, undefined, true).exit;
       assert.equal(result.code, 76, result.stderr);
       assert.match(result.stderr, new RegExp(code));
-      assert.match(result.stderr, mode === "refuse" ? /same way it was started, with the agent token on stdin/ : /same credential source/);
+      assert.match(result.stderr, mode === "refuse" ? /same way it was started, with the agent token on stdin/ : /use the surface that holds the lease/);
       assert.doesNotMatch(result.stderr, /<credential-file>|^cswarm inbox --notify/gm);
       if (mode === "refuse") {
         assert.match(result.stderr, /adding --take-over/);
       } else {
         assert.ok(f.seen.some(command => command.kind === "renew_wake_lease"));
+        assert.doesNotMatch(result.stderr, /start it again/);
       }
     } finally { await f.cleanup(); }
   }
@@ -610,6 +611,20 @@ test("two verified files are named as ambiguous and never produce a restart comm
     assert.equal(resumed.code, 0, resumed.stderr);
     assert.ok(resumed.stdout.includes(`Live session context on this host: ${contextPath}`));
     assert.ok(resumed.stdout.includes(`Live session context on this host: ${copyPath}`));
+  } finally { await f.cleanup(); }
+});
+
+test("listen status sanitizes C1, bidi and CSI in the printed host label", { timeout: 8_000 }, async () => {
+  const f = await fixture("status_controls");
+  try {
+    const result = await f.status(false);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Server wake lease: remote-  host, generation 3/);
+    assert.doesNotMatch(result.stdout, /\u0085|\u202e|\u001b/);
+    const json = await f.status();
+    assert.equal(json.code, 0, json.stderr);
+    assert.equal((JSON.parse(json.stdout) as { wake_lease: { host_label: string } }).wake_lease.host_label,
+      "remote-  host");
   } finally { await f.cleanup(); }
 });
 
@@ -882,6 +897,37 @@ test("profile resume verifies with the renewed lineage token before the setup to
     const resumed = await runProfileResume(f, profilePath, "renewed-host");
     assert.equal(resumed.code, 0, resumed.stderr);
     assert.deepEqual(JSON.parse(resumed.stdout).live_session_context_paths, [contextPath]);
+  } finally { await f.cleanup(); }
+});
+
+test("profile resume falls back when the renewal record is insecure", { timeout: 10_000 }, async () => {
+  const f = await fixture("profile_renewed");
+  try {
+    const profileDir = join(f.root, "profile");
+    await mkdir(profileDir, { mode: 0o700 });
+    const profilePath = join(profileDir, "profile.json");
+    const credential = join(profileDir, "credential.json");
+    await writeFile(credential, await readFile(f.credential), { mode: 0o600 });
+    await writeFile(profilePath, JSON.stringify({ version: 1, url: f.url, anon_key: f.anonKey,
+      workspace_id: workspace, principal_id: principal, credential_file: credential, host_session_id: "renewed-host" }), { mode: 0o600 });
+    const store = await agentCredentialStore({ target: cloudTarget(f.url, f.anonKey),
+      lineageKey: credentialLineageKey(`swm_agt_${"A".repeat(43)}`),
+      stateDirectory: join(f.root, "state", "cswarm", "agent-credentials") });
+    const missing = await agentCredentialStore({ target: cloudTarget(f.url, f.anonKey),
+      lineageKey: credentialLineageKey(`swm_agt_${"A".repeat(43)}`),
+      stateDirectory: join(f.root, "missing-renewal-directory") });
+    assert.equal(await missing.read(), null);
+    await assert.rejects(access(dirname(missing.location)), { code: "ENOENT" });
+    await mkdir(dirname(store.location), { recursive: true, mode: 0o700 });
+    await writeFile(store.location, "{broken", { mode: 0o600 });
+    const before = await readFile(store.location);
+    const beforeMode = (await stat(dirname(store.location))).mode & 0o777;
+    const resumed = await runProfileResume(f, profilePath, "renewed-host");
+    assert.equal(resumed.code, 0, resumed.stderr);
+    const snapshot = JSON.parse(resumed.stdout);
+    assert.match(snapshot.live_session_context_lines[0], /renewal record could not be read.*using the profile credential file/);
+    assert.deepEqual(await readFile(store.location), before);
+    assert.equal((await stat(dirname(store.location))).mode & 0o777, beforeMode);
   } finally { await f.cleanup(); }
 });
 

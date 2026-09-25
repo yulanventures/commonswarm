@@ -282,7 +282,8 @@ import {
 } from "./cloud/arrival-watch.js";
 import { lsofStdoutConsumer } from "./stdout-consumer.js";
 import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseTransientError } from "./cloud/wake-lease.js";
-import { WAKE_LEASE_STALE_LABEL } from "./cloud/wake-lease-constants.js";
+import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
+const LISTENER_STOP_WAIT_MS = 30_000;
 import {
   IDLE_POLL_DEFAULT_MS,
   idlePollHelpSentence,
@@ -7498,7 +7499,7 @@ async function runListenStatusOrStop(
     ? await arrivalWatchLockIdentity(arrivalWatchLockPath(cloud, workspaceId, principalId))
     : null;
   const leaseStatus = wakeLease === null ? null : {
-    host_label: wakeLease.host_label,
+    host_label: sanitizeWakeHostLabel(wakeLease.host_label),
     generation: wakeLease.generation,
     renewed_age_ms: wakeLease.renewed_age_ms,
     held_by_this_host: localWatcherId === wakeLease.watcher_id,
@@ -7507,7 +7508,7 @@ async function runListenStatusOrStop(
   const leaseLine = leaseReadFailed
     ? "Server wake lease: unavailable; check again when the read service is reachable."
     : wakeLease === null ? "Server wake lease: none."
-    : `Server wake lease: ${wakeLease.host_label}, generation ${wakeLease.generation}, renewed ${Math.floor(wakeLease.renewed_age_ms / 1000)}s ago; this host holds it: ${localWatcherId === wakeLease.watcher_id ? "yes" : "no"}. Renewal does not prove this session reads its mail; observed ACK does. Stale after ${WAKE_LEASE_STALE_LABEL}.`;
+    : `Server wake lease: ${sanitizeWakeHostLabel(wakeLease.host_label)}, generation ${wakeLease.generation}, renewed ${Math.floor(wakeLease.renewed_age_ms / 1000)}s ago; this host holds it: ${localWatcherId === wakeLease.watcher_id ? "yes" : "no"}. Renewal does not prove this session reads its mail; observed ACK does. Stale after ${WAKE_LEASE_STALE_LABEL}.`;
   const paths = listenerPaths({
     profileId: cloud.profileId,
     workspaceId,
@@ -7520,21 +7521,32 @@ async function runListenStatusOrStop(
       await releaseSessionReceiverLock(stopContextPath);
     }
   }
+  const stopWait = command === "stop" && args.has("wait");
+  const stopWaitMs = LISTENER_STOP_WAIT_MS;
+  const stopDeadline = stopWait ? Date.now() + stopWaitMs : 0;
+  const remainingStopMs = () => Math.max(1, stopDeadline - Date.now());
   let status = command === "stop"
-    ? await stopListener(paths)
+    ? await stopListener(paths, stopWait ? Math.min(1_000, remainingStopMs()) : undefined)
     : await effectiveListenerStatus(paths);
-  if (command === "stop" && args.has("wait") && status !== null) {
-    const deadline = Date.now() + 30_000;
-    while (status.state !== "stopped") {
-      if (status.state === "failed") {
-        throw new Error(`listener stop failed; state failed under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
+  if (stopWait && status !== null) {
+    for (;;) {
+      // A failed record from effectiveListenerStatus means the socket is already gone.
+      // A stopped record can precede socket close and process exit.
+      const socketStatus = await queryListenerControl(paths, "status", Math.min(250, remainingStopMs())).catch(() => null);
+      if (socketStatus !== null) status = socketStatus;
+      else status = await effectiveListenerStatus(paths, Math.min(250, remainingStopMs()));
+      if (socketStatus === null && (status === null || status.state === "failed")) break;
+      let pidAlive = false;
+      if (status !== null && status.pid > 0) {
+        try { process.kill(status.pid, 0); pidAlive = true; }
+        catch (error) { pidAlive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
       }
-      if (Date.now() >= deadline) {
-        throw new Error(`listener stop timed out after 30 seconds; state ${status.state} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
+      if (socketStatus === null && !pidAlive) break;
+      if (Date.now() >= stopDeadline) {
+        throw new Error(`listener stop timed out after ${stopWaitMs / 1000} seconds; state ${status?.state ?? "absent"}, pid ${status?.pid ?? "absent"} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
-      status = await queryListenerControl(paths, "status", 1_000).catch(() => readListenerStatusIfPresent(paths));
-      if (status === null) break;
+      if (remainingStopMs() >= 100) await new Promise(resolve => setTimeout(resolve, 100));
+      else await new Promise(resolve => setTimeout(resolve, remainingStopMs()));
     }
   }
   if (status === null) {

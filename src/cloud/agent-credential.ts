@@ -26,7 +26,7 @@ import { isAbsolute, join } from "node:path";
 import type { CloudTarget } from "./config.js";
 import {
   deleteSecureJsonFile,
-  readSecureJsonFile,
+  readSecureJsonFileIfPresent,
   withFileLock,
   writeSecureJsonFile,
 } from "./storage.js";
@@ -194,7 +194,7 @@ export async function agentCredentialStore(options: {
   return {
     location,
     async read(): Promise<AgentCredentialRecord | null> {
-      const raw = await readSecureJsonFile(location, MAX_RECORD_BYTES);
+      const raw = await readSecureJsonFileIfPresent(location, MAX_RECORD_BYTES);
       return raw === null ? null : parseAgentCredentialRecord(raw);
     },
     async write(record: AgentCredentialRecord): Promise<void> {

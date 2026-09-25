@@ -290,10 +290,14 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
       : `the credential file could not be read: ${profile.credential_file}. Check its permissions, then resume.`;
     return null;
   });
+  let renewalStoreReason: string | null = null;
   const renewed = credential === null ? null : await (async () => {
     const store = await agentCredentialStore({ target: cloudTarget(profile.url, profile.anon_key),
       lineageKey: credentialLineageKey(credential.token) });
-    return await store.read();
+    return await store.read().catch(() => {
+      renewalStoreReason = "the saved renewal record could not be read; using the profile credential file";
+      return null;
+    });
   })();
   const contexts = credential === null ? null : await verifiedLiveSessionContexts({
     target: cloudTarget(profile.url, profile.anon_key),
@@ -312,6 +316,7 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
     : contexts.paths.length === 0
     ? ["Live session context on this host: no live session on this host was verified for this seat."]
     : contexts.paths.map(contextPath => `Live session context on this host: ${contextPath}`);
+  if (renewalStoreReason) liveContextLines.unshift(`Credential renewal: ${renewalStoreReason}.`);
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
     authenticated_now: false, ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
     live_session_context_lines: liveContextLines,
