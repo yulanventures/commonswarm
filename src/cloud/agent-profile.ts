@@ -59,7 +59,7 @@ export function requireProfileHost(profile: AgentProfile, hostSessionId?: string
 export function privatePath(path: string): string {
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
   if (!isAbsolute(path) || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new AgentSetupError("profile_path_invalid", `Use an absolute private file path outside a repository, for example ${join(agentProfileRoot(), "agents", "<deployment>", "<workspace-id>", "<principal-id>", "profile.json")}. Run cswarm profile ls to find saved profiles.`);
+    throw new AgentSetupError("profile_path_invalid", `Use an absolute private file path outside a repository, for example ${agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>")}. Run cswarm profile ls to find saved profiles.`);
   }
   return resolve(path);
 }
@@ -146,7 +146,11 @@ function checkedTarget(url: string, anonKey: string): CloudTarget {
 
 export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "anon_key" | "workspace_id" | "principal_id">): string {
   const target = checkedTarget(connection.url, connection.anon_key);
-  return join(agentProfileRoot(), "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
+  return agentProfilePath(target.profileId, connection.workspace_id, connection.principal_id);
+}
+
+function agentProfilePath(deployment: string, workspace: string, principal: string): string {
+  return join(agentProfileRoot(), "agents", deployment, workspace, principal, "profile.json");
 }
 
 /** Shared root for automatic setup and MCP connect profiles. Explicit paths under this root are included too. */
