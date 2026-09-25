@@ -17,6 +17,7 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CloudTarget } from "./config.js";
+import { CONNECT_PROFILE_FILES } from "./connect-profile-files.js";
 
 // Renamed from "io.ridge.coswarm" with the CommonSwarm rename. An install that predates
 // the rename keeps its old keychain record; nothing reads it, so that install reports
@@ -458,7 +459,7 @@ export async function writeSecureJsonFile(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
   const handle = await open(temporary, "wx", 0o600);
   try {
     await write(handle, serialized);
@@ -479,9 +480,10 @@ export async function writeSecureJsonFile(
 export async function writeSecureJsonFileExclusive(
   path: string, serialized: string,
   write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
+  publishLink: typeof link = link,
 ): Promise<void> {
   await secureDirectory(dirname(path));
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
   const handle = await open(temporary, "wx", 0o600);
   try {
     await write(handle, serialized);
@@ -489,7 +491,21 @@ export async function writeSecureJsonFileExclusive(
     await handle.sync();
     await handle.close();
     // Hard-link publication is atomic and fails with EEXIST even across different locks.
-    await link(temporary, path);
+    try { await publishLink(temporary, path); }
+    catch (error) {
+      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      const final = await open(path, "wx", 0o600);
+      try {
+        await write(final, serialized);
+        await final.chmod(0o600);
+        await final.sync();
+      } catch (writeError) {
+        const own = await final.stat().catch(() => null);
+        const current = await lstat(path).catch(() => null);
+        if (own && current && own.dev === current.dev && own.ino === current.ino) await unlink(path).catch(() => undefined);
+        throw writeError;
+      } finally { await final.close(); }
+    }
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;

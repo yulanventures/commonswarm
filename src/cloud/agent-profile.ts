@@ -8,6 +8,7 @@ import { agentCredentialStore, credentialLineageKey } from "./agent-credential.j
 import { AgentCredentialSession } from "./renewal.js";
 import { assertLocalSessionBinding, defaultSessionContextPath, listSessionContexts, sessionProofOf } from "./session-context.js";
 import { readSecureJsonFileIfPresent, writeSecureJsonFile, writeSecureJsonFileExclusive, withFileLock } from "./storage.js";
+import { CONNECT_PROFILE_FILES } from "./connect-profile-files.js";
 import {
   AGENT_CONNECTION_FIELDS, AGENT_CONNECTION_VERSION,
   type AgentConnectionEnvelope,
@@ -171,7 +172,7 @@ export async function readAgentProfile(path: string, hostSessionId?: string): Pr
       typeof p.url !== "string" || typeof p.anon_key !== "string" ||
       typeof p.workspace_id !== "string" || !ONBOARDING_UUID.test(p.workspace_id) ||
       typeof p.principal_id !== "string" || !ONBOARDING_UUID.test(p.principal_id) ||
-      p.credential_file !== join(dirname(path), "credential.json")) {
+      p.credential_file !== join(dirname(path), CONNECT_PROFILE_FILES.credential)) {
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget(p.url, p.anon_key);
@@ -194,19 +195,19 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
     workspace_id: connection.workspace_id, principal_id: connection.principal_id,
-    credential_file: join(dirname(path), "credential.json"),
+    credential_file: join(dirname(path), CONNECT_PROFILE_FILES.credential),
     /* Only when the server actually gave one. The key is omitted rather than written null, so
      * a profile from a deployment that does not send the name keeps exactly the six keys every
      * released client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
     ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
   };
-  await withFileLock(dirname(path), "setup", async () => {
+  await withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
@@ -232,7 +233,7 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }
     if (existingCredential === null && refuseExisting) {
-      await writeSecureJsonFileExclusive(profile.credential_file, JSON.stringify(connection.credential));
+      await exclusiveWrite(profile.credential_file, JSON.stringify(connection.credential));
     } else if (existingCredential === null) {
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }

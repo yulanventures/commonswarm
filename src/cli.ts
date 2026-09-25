@@ -9911,6 +9911,7 @@ export function isCliMain(): boolean {
 
 export function mcpFailureCode(error: unknown, subcommand: string | undefined): string {
   if (error instanceof AgentSetupError) return error.code;
+  if (subcommand === "connect" && ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "")) return "connect_state_unavailable";
   return subcommand === "code" ? "mcp_code_failed"
     : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
 }

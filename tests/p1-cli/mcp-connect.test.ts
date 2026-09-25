@@ -15,8 +15,9 @@ import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
-import { writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
+import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
+import { CONNECT_PROFILE_FILES, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -25,6 +26,136 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+
+test("Fold 9 reserved profile basenames refuse before POST and name the writer set", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const names = [CONNECT_PROFILE_FILES.pending, CONNECT_PROFILE_FILES.complete, CONNECT_PROFILE_FILES.credential,
+      CONNECT_PROFILE_FILES.setupLock, CONNECT_PROFILE_FILES.connectLock,
+      ...CONNECT_PROFILE_FILES.temporaryBases.map(base => `${base}.123.abcdefabcdef.tmp`),
+      "custom.123.abcdefabcdef.tmp"];
+    for (const name of names) {
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: join(f.root, "reserved", name), readCode: async () => JOIN,
+        fetcher: f.fetcher }), error => {
+        assert.equal((error as { code: string }).code, "profile_path_reserved");
+        assert.ok(String(error).includes(reservedConnectProfileNames()));
+        return true;
+      });
+    }
+    assert.equal(f.calls(), 0);
+  } finally { await f.close(); }
+});
+
+test("Fold 9 unsupported hard links use exclusive final creation and recover a working profile", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "no-links", "profile.json");
+    const attempts = new Set<string>();
+    let posts = 0;
+    const fetcher: typeof fetch = async (_input, init) => {
+      posts++;
+      attempts.add(JSON.parse(String(init?.body)).attemptId);
+      return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+        run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
+    };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher,
+      saveProfile: async () => { throw new Error("interrupted save"); } }), { code: "register_outcome_unknown" });
+    const refusedLink = async () => { throw Object.assign(new Error("hard links unavailable"), { code: "EPERM" }); };
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher,
+      saveProfile: (file, connection, workspace, session, exclusive, orphan, principal) =>
+        saveAgentProfile(file, connection, workspace, session, exclusive, orphan, principal,
+          (credential, serialized) => writeSecureJsonFileExclusive(credential, serialized, undefined, refusedLink)),
+    });
+    assert.equal(posts, 2);
+    assert.equal(attempts.size, 1, "retry reuses one seat attempt");
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, TOKEN);
+    assert.deepEqual((await readdir(dirname(path))).filter(name => name === CONNECT_PROFILE_FILES.credential), [CONNECT_PROFILE_FILES.credential]);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "profile_exists" });
+    assert.equal(posts, 2);
+    for (const code of ["ENOTSUP", "ENOSYS", "EXDEV"] as const) {
+      const file = join(dirname(path), `${code}.json`);
+      await writeSecureJsonFileExclusive(file, `{ "code": "${code}" }`, undefined,
+        async () => { throw Object.assign(new Error("hard links unavailable"), { code }); });
+      assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { code });
+    }
+  } finally { await f.close(); }
+});
+
+test("Fold 9 permission diagnosis covers outside-home ancestors and unclassified denial", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const outside = join(f.root, "outside-home", "child");
+    await mkdir(outside, { recursive: true, mode: 0o700 });
+    const ownerUid = process.getuid?.() ?? 501;
+    const denied = Object.assign(new Error("denied"), { code: "EACCES" });
+    const inspect = async (file: string) => Object.assign(await stat(file), { uid: file === dirname(outside) ? ownerUid + 1 : ownerUid });
+    const wrongMode = async (file: string) => {
+      const info = await stat(file);
+      return Object.assign(info, { uid: ownerUid,
+        mode: (info.mode & ~0o777) | (file === dirname(outside) ? 0o400 : 0o700) });
+    };
+    await assert.rejects(classifyDirectoryFailure(outside, denied, wrongMode, ownerUid), error => {
+      assert.equal((error as { code: string }).code, "connect_directory_mode");
+      assert.ok(String(error).includes(dirname(outside)));
+      return true;
+    });
+    await assert.rejects(classifyDirectoryFailure(outside, denied, inspect, ownerUid), error => {
+      assert.equal((error as { code: string }).code, "connect_directory_unowned");
+      assert.ok(String(error).includes(dirname(outside)));
+      return true;
+    });
+    await assert.rejects(classifyDirectoryFailure(outside, denied, async file => Object.assign(await stat(file), { uid: ownerUid }), ownerUid), error => {
+      assert.equal((error as { code: string }).code, "connect_state_unavailable");
+      assert.match(String(error), /Inspect its access/);
+      return true;
+    });
+    for (const code of ["EACCES", "EPERM"]) {
+      assert.equal(mcpFailureCode(Object.assign(new Error("permission denied"), { code }), "connect"), "connect_state_unavailable");
+    }
+  } finally { await f.close(); }
+});
+
+test("Fold 9 completion write failure reports a saved usable profile and resumes without POST", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "completion-write", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
+      writeCompletion: async () => { throw Object.assign(new Error("write failed"), { code: "EIO" }); } }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_write_failed");
+      assert.match(String(error), /profile .*saved and usable/);
+      assert.match(String(error), /completion record .*was not written/);
+      assert.match(String(error), /run the same command again/);
+      assert.doesNotMatch(String(error), /outcome is unknown/);
+      return true;
+    });
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("Fold 9 stale-temp cleanup waits for the setup writer lock", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "cleanup-lock", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost reply"); } }), { code: "register_outcome_unknown" });
+    const temp = join(dirname(path), "credential.json.99999999.abcdefabcdef.tmp");
+    await writeFile(temp, "{}", { mode: 0o600 });
+    let started = false;
+    let pending!: Promise<unknown>;
+    await withFileLock(dirname(path), "setup", async () => {
+      pending = connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher: async () => { started = true; throw new Error("lost reply"); } });
+      await new Promise(resolve => setTimeout(resolve, 250));
+      assert.equal((await stat(temp)).isFile(), true, "cleanup must wait while setup holds the lock");
+      assert.equal(started, false);
+    });
+    await assert.rejects(pending, { code: "register_outcome_unknown" });
+    await assert.rejects(stat(temp), { code: "ENOENT" });
+  } finally { await f.close(); }
+});
 
 test("mcp code uses the human bearer and one-seat, one-hour mint", { timeout: 10000 }, async () => {
   let calls = 0;
@@ -655,12 +786,16 @@ test("Fold 8 cleanup keeps live temps and removes dead credential and profile te
     const live = join(dirname(path), `credential.json.${process.pid}.abcdefabcdef.tmp`);
     const deadCredential = join(dirname(path), "credential.json.99999999.abcdefabcdef.tmp");
     const deadProfile = join(dirname(path), "profile.json.99999999.abcdefabcdef.tmp");
-    for (const file of [live, deadCredential, deadProfile]) await writeFile(file, "{}", { mode: 0o600 });
+    const deadPending = join(dirname(path), "connect-pending.json.99999999.abcdefabcdef.tmp");
+    const deadComplete = join(dirname(path), "connect-complete.json.99999999.abcdefabcdef.tmp");
+    for (const file of [live, deadCredential, deadProfile, deadPending, deadComplete]) await writeFile(file, "{}", { mode: 0o600 });
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
       fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
     assert.equal((await stat(live)).isFile(), true);
     await assert.rejects(stat(deadCredential), { code: "ENOENT" });
     await assert.rejects(stat(deadProfile), { code: "ENOENT" });
+    await assert.rejects(stat(deadPending), { code: "ENOENT" });
+    await assert.rejects(stat(deadComplete), { code: "ENOENT" });
   } finally { await f.close(); }
 });
 
