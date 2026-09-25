@@ -320,6 +320,9 @@ function coreFixtures(): Fixture[] {
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
 
+    { id: "profile.ls", argv: ["profile", "ls", "--url", "<ORIGIN>", "--json"] },
+    { id: "profile.refusal", argv: ["profile"] },
+
     { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--host-session-id", "manual", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },
     { id: "setup.guide", argv: ["setup", "guide"] },
@@ -426,6 +429,7 @@ const GROUP_NAMES = new Set<string>(GROUP_REFUSAL_SITES);
 
 function canonicalFixtureId(key: string): string {
   if (key === "mcp.refusal") return "mcp";
+  if (key === "profile.refusal") return "profile.refusal";
   if (key.endsWith(".refusal")) {
     const groupName = key.slice(0, -".refusal".length);
     assert.ok(GROUP_NAMES.has(groupName), `no refusal fixture group for ${key}`);
@@ -518,6 +522,7 @@ function selectedErrorSource(
       "mcp.serve.default": ["mcp"],
       "mcp.code.default": ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
       "mcp.connect.default": ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
+      "profile.ls.default": ["profile", "ls", "--url", "<ORIGIN>"],
     };
     const route = `${entry.key}.${variant}`;
     const argv = argvByKey[route];
@@ -571,10 +576,9 @@ function selectedErrorFixtures(
 async function fixtures(): Promise<Fixture[]> {
   const core = coreFixtures();
   const coverage = await commandEntryCoverage();
-  const historicalCoverage = coverage.filter(entry => !entry.key.startsWith("profile."));
   const generated = [
-    ...hostSessionFixtures(historicalCoverage, core),
-    ...selectedErrorFixtures(historicalCoverage, core),
+    ...hostSessionFixtures(coverage, core),
+    ...selectedErrorFixtures(coverage, core),
   ];
   const ids = [...core, ...generated].map(fixture => fixture.id);
   assert.equal(new Set(ids).size, ids.length, "baseline fixture ids must be unique");
@@ -734,8 +738,17 @@ test("profile dispatcher baseline covers listing and refusal routes", { timeout:
     for (const row of rows.slice(1)) assert.notEqual(row.exitCode, 0, row.id);
     assert.match(rows[1]!.stderr, /profile requires ls/);
     assert.match(rows[2]!.stderr, /profile requires ls/);
-    assert.match(rows[3]!.stderr, /profile|unknown option/);
+    assert.match(rows[3]!.stderr, /--profile is supported by:/);
   } finally { removeLaneTempHome(root); }
+});
+
+test("profile variants are part of the main dispatcher fixture inventory", { timeout: 10_000 }, async () => {
+  const ids = new Set((await fixtures()).map(row => row.id));
+  for (const id of [
+    "profile.ls", "profile.refusal",
+    "policy.host-session.profile.ls.drop", "policy.host-session.profile.refusal.drop",
+    "selected-error.profile.ls.json-before", "selected-error.profile.ls.host-before",
+  ]) assert.ok(ids.has(id), id);
 });
 
 async function runFixture(root: string, origin: string, fixture: Fixture): Promise<BaselineRow> {
