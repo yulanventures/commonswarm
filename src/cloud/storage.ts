@@ -8,7 +8,9 @@ import {
   mkdir,
   open,
   readFile,
+  readdir,
   rename,
+  rmdir,
   stat,
   unlink,
 } from "node:fs/promises";
@@ -324,15 +326,15 @@ export class FileLockTimeoutError extends Error {
   readonly name = "FileLockTimeoutError";
   readonly code = "file_lock_timeout";
 
-  constructor(readonly lockName: string, readonly lockPath?: string) {
+  constructor(readonly lockName: string, readonly lockPath?: string, readonly ownerPid?: number) {
     super(lockName === "host-id-rotation"
-      ? `timed out waiting for the host-id rotation lock at ${lockPath}. Wait for its owner to exit, then retry. If its owner is gone, remove ${lockPath} and retry.`
+      ? `timed out waiting for the host-id rotation lock at ${lockPath} (owner pid ${ownerPid ?? "unknown"}). Wait for its owner to exit, then retry. If its owner is gone, remove ${lockPath} and retry.`
       : `timed out waiting for the credential refresh lock`);
   }
 }
 
-/** Locks this process holds right now: path -> the createdAt it wrote. */
-const heldFileLocks = new Map<string, number>();
+/** Locks this process holds right now: path -> unique owner record. */
+const heldFileLocks = new Map<string, { createdAt: number; ownerId: string }>();
 let heldFileLockExitHookInstalled = false;
 
 /**
@@ -341,10 +343,10 @@ let heldFileLockExitHookInstalled = false;
  * recorded pid and createdAt so a lock another process took after ours is never removed.
  */
 function releaseHeldFileLocksSync(): void {
-  for (const [lockPath, createdAt] of heldFileLocks) {
+  for (const [lockPath, { createdAt, ownerId }] of heldFileLocks) {
     try {
-      const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; createdAt?: unknown };
-      if (owner.pid === process.pid && owner.createdAt === createdAt) unlinkSync(lockPath);
+      const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; createdAt?: unknown; ownerId?: unknown };
+      if (owner.pid === process.pid && owner.createdAt === createdAt && owner.ownerId === ownerId) unlinkSync(lockPath);
     } catch {
       // Missing or unreadable: nothing of ours to remove.
     }
@@ -381,11 +383,11 @@ async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
 const THIS_PROCESS_START_MS = Date.now() - process.uptime() * 1_000;
 
 /** A successful pid probe does not prove that the recorded process still owns the pid. */
-function pidStartMs(pid: number): number | null {
+export function pidStartMs(pid: number, runPs: typeof execFileSync = execFileSync): number | null {
   if (pid === process.pid) return THIS_PROCESS_START_MS;
   try {
-    const text = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
-      { encoding: "utf8", timeout: 1_000 }).trim();
+    const text = runPs("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 1_000, env: { ...process.env, LC_ALL: "C" } }).trim();
     const parsed = Date.parse(text);
     return Number.isFinite(parsed) ? parsed : null;
   } catch { return null; }
@@ -413,11 +415,25 @@ async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<
   catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null; }
 }
 
+async function cleanupDeadHostIdTemps(stateDirectory: string, lockName: string): Promise<void> {
+  const prefix = `${lockName}.lock.`;
+  for (const name of await readdir(stateDirectory)) {
+    const match = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)\\.[0-9a-f]+\\.tmp$`).exec(name);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid) continue;
+    try { process.kill(pid, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") await unlink(join(stateDirectory, name)).catch(() => undefined);
+    }
+  }
+}
+
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
   work: () => Promise<T>,
-  options: { timeoutMs?: number; stalePolicy?: "host-id" } = {},
+  options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link } = {},
 ): Promise<T> {
   await secureDirectory(stateDirectory);
   const lockPath = join(stateDirectory, `${lockName}.lock`);
@@ -429,6 +445,7 @@ export async function withFileLock<T>(
   let handle: Awaited<ReturnType<typeof open>> | null = null;
 
   let createdAt = 0;
+  const ownerId = randomBytes(8).toString("hex");
   while (handle === null) {
     try {
       createdAt = Date.now();
@@ -436,17 +453,38 @@ export async function withFileLock<T>(
         const tempPath = `${lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
         const temp = await open(tempPath, "wx", 0o600);
         try {
-          await temp.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
-            createdAt, startTime: THIS_PROCESS_START_MS }), "utf8");
-          await link(tempPath, lockPath);
-          handle = temp;
+          const record = JSON.stringify({ pid: process.pid, host: hostname(),
+            createdAt, startTime: THIS_PROCESS_START_MS, ownerId });
+          await temp.writeFile(record, "utf8");
+          await temp.sync();
+          try {
+            await (options.publishLink ?? link)(tempPath, lockPath);
+            handle = temp;
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code === "EEXIST" && await readFile(lockPath, "utf8").catch(() => null) === record) {
+              handle = temp; // A retransmitted LINK published our complete record.
+            } else if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(code ?? "")) {
+              const final = await open(lockPath, "wx", 0o600);
+              try {
+                await final.writeFile(record, "utf8");
+                await final.sync();
+                handle = final;
+              } catch (writeError) {
+                await final.close();
+                await unlink(lockPath).catch(() => undefined);
+                throw writeError;
+              }
+            } else throw error;
+          }
         } catch (error) {
           await temp.close();
           throw error;
         } finally { await unlink(tempPath).catch(() => undefined); }
+        if (handle !== temp) await temp.close();
       } else {
         handle = await open(lockPath, "wx", 0o600);
-        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), createdAt }), "utf8");
+        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), createdAt, ownerId }), "utf8");
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -459,25 +497,52 @@ export async function withFileLock<T>(
         ? await staleHostIdOwnerRecord(lockPath, Date.now() - lockInfo.mtimeMs)
         : await deadLockOwnerRecord(lockPath) : null;
       if (deadRecord !== null) {
-        // Re-read immediately before removing: another waiter may already have replaced the dead owner's lock with its
-        // own, and that live lock must not be unlinked. The window left is the gap between this read and the unlink.
-        const current = await readFile(lockPath, "utf8").catch(() => null);
-        if (current === deadRecord) await unlink(lockPath).catch(() => undefined);
+        // Serialize stale contenders, then move the stale inode out of the publication path.
+        // Never unlink the publication path after deciding from an earlier read.
+        const reclaimPath = `${lockPath}.reclaim`;
+        try { await mkdir(reclaimPath, { mode: 0o700 }); }
+        catch (gateError) {
+          if ((gateError as NodeJS.ErrnoException).code !== "EEXIST") throw gateError;
+          await delay(25);
+          continue;
+        }
+        try {
+          const freshInfo = await stat(lockPath).catch(() => null);
+          const stillStale = freshInfo && (options.stalePolicy === "host-id"
+            ? await staleHostIdOwnerRecord(lockPath, Date.now() - freshInfo.mtimeMs)
+            : await deadLockOwnerRecord(lockPath));
+          if (stillStale === deadRecord) {
+            const moved = `${lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
+            const movedOwner = await rename(lockPath, moved).then(() => true).catch(error => {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              return false;
+            });
+            if (!movedOwner) continue;
+            if (await readFile(moved, "utf8").catch(() => null) === deadRecord) {
+              await unlink(moved).catch(() => undefined);
+            } else {
+              await link(moved, lockPath).catch(() => undefined);
+              throw new Error("host-id lock owner changed during stale takeover");
+            }
+          }
+        } finally { await rmdir(reclaimPath).catch(() => undefined); }
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new FileLockTimeoutError(lockName, lockPath);
+        const owner = await readFile(lockPath, "utf8").then(raw => JSON.parse(raw) as { pid?: number }).catch(() => null);
+        throw new FileLockTimeoutError(lockName, lockPath, owner?.pid);
       }
       await delay(25 + randomBytes(1)[0]! % 75);
     }
   }
 
-  heldFileLocks.set(lockPath, createdAt);
+  heldFileLocks.set(lockPath, { createdAt, ownerId });
   if (!heldFileLockExitHookInstalled) {
     heldFileLockExitHookInstalled = true;
     process.on("exit", releaseHeldFileLocksSync);
   }
   try {
+    if (options.stalePolicy === "host-id") await cleanupDeadHostIdTemps(stateDirectory, lockName);
     return await work();
   } finally {
     heldFileLocks.delete(lockPath);
@@ -486,8 +551,8 @@ export async function withFileLock<T>(
     const current = await readFile(lockPath, "utf8").catch(() => null);
     const ours = current === null ? false : (() => {
       try {
-        const owner = JSON.parse(current) as { pid?: unknown; createdAt?: unknown };
-        return owner.pid === process.pid && owner.createdAt === createdAt;
+        const owner = JSON.parse(current) as { pid?: unknown; createdAt?: unknown; ownerId?: unknown };
+        return owner.pid === process.pid && owner.createdAt === createdAt && owner.ownerId === ownerId;
       } catch {
         return false;
       }

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { spawn, type execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
-import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, withFileLock } from "../../src/cloud/storage.js";
+import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, pidStartMs, withFileLock } from "../../src/cloud/storage.js";
 
 test("concurrent copied host-id rotations return the id kept in the file", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-host-id-rotation-"));
@@ -64,6 +65,7 @@ test("a live host-id lock times out with its own name", { timeout: 2_000 }, asyn
       { stalePolicy: "host-id", timeoutMs: 50 }), error => {
       assert.ok(error instanceof FileLockTimeoutError);
       assert.match(error.message, /host-id rotation lock/);
+      assert.match(error.message, new RegExp(`owner pid ${process.pid}`));
       assert.match(error.message, new RegExp(root));
       assert.match(error.message, /If its owner is gone, remove .* and retry/);
       assert.doesNotMatch(error.message, /credential refresh lock/);
@@ -126,4 +128,68 @@ test("host-id lock distinguishes pid reuse, incomplete records, and EPERM", { ti
         { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
     } finally { process.kill = probe; }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("two stale-lock contenders rotate once", { timeout: 8_000 }, async () => {
+  const source = await readFile(new URL("../../src/cloud/storage.ts", import.meta.url), "utf8");
+  assert.match(source, /await rename\(lockPath, moved\)/, "stale reclaim must move its old inode before discarding it");
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stale-race-"));
+  const machineHash = "a".repeat(64);
+  try {
+    await writeFile(join(root, "host-id"), JSON.stringify({ host_id: "11111111-1111-4111-8111-111111111111",
+      machine_hash: "b".repeat(64) }), { mode: 0o600 });
+    await writeFile(join(root, "host-id-rotation.lock"), JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
+    const results = await Promise.all([arrivalHostId(join(root, "seat.lock"), machineHash),
+      arrivalHostId(join(root, "seat.lock"), machineHash)]);
+    const persisted = JSON.parse(await readFile(join(root, "host-id"), "utf8")) as { host_id: string };
+    assert.deepEqual(results, [persisted.host_id, persisted.host_id]);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("host-id publication falls back on unsupported links and accepts retransmitted LINK", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-lock-fallback-"));
+  try {
+    for (const code of ["EPERM", "ENOTSUP", "ENOSYS", "EXDEV"]) {
+      await withFileLock(root, "host-id-rotation", async () => {
+        const path = join(root, "host-id-rotation.lock");
+        assert.equal((await stat(path)).mode & 0o777, 0o600);
+        assert.equal((JSON.parse(await readFile(path, "utf8")) as { pid: number }).pid, process.pid);
+      }, { stalePolicy: "host-id", publishLink: async () => { throw Object.assign(new Error(code), { code }); } });
+    }
+    await withFileLock(root, "host-id-rotation", async () => undefined, {
+      stalePolicy: "host-id", publishLink: async (source, destination) => {
+        await writeFile(destination, await readFile(source), { mode: 0o600 });
+        throw Object.assign(new Error("retransmitted LINK"), { code: "EEXIST" });
+      },
+    });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 0);
+    await writeFile(join(root, "host-id-rotation.lock.999999999.abcdef.tmp"), "abandoned", { mode: 0o600 });
+    await withFileLock(root, "host-id-rotation", async () => undefined, { stalePolicy: "host-id" });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 0);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-lock-ps-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    assert.ok(child.pid);
+    await writeFile(join(root, "host-id-rotation.lock"), JSON.stringify({ pid: child.pid,
+      host: hostname(), createdAt: Date.now(), startTime: 0 }), { mode: 0o600 });
+    let called = false;
+    const parsed = pidStartMs(child.pid, ((executable: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+      called = true;
+      assert.equal(executable, "/bin/ps");
+      assert.deepEqual(args, ["-o", "lstart=", "-p", String(child.pid)]);
+      assert.equal(options.env?.LC_ALL, "C");
+      return "Wed Sep 25 12:00:00 2024\n";
+    }) as typeof execFileSync);
+    assert.equal(called, true);
+    assert.ok(parsed);
+  } finally {
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
 });

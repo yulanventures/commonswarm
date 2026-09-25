@@ -156,9 +156,10 @@ test("stdin retry is stated once and supersession shares one remedy", { timeout:
   assert.equal(stdin.split("agent token on stdin").length - 1, 1);
   const file = wakeLeaseExitSentence("wake_lease_superseded", "watcher", "holder", "cswarm inbox --notify");
   const pipe = wakeLeaseExitSentence("wake_lease_superseded", "watcher", "holder", null);
-  assert.match(file, /stop this watcher and use that surface there; start it again with the same credential source/);
-  assert.match(pipe, /stop this watcher and use that surface there; start it again with the same credential source/);
-  assert.equal(pipe.split("start it again").length - 1, 1);
+  assert.match(file, /stop this watcher and use the surface that holds the lease/);
+  assert.match(pipe, /stop this watcher and use the surface that holds the lease/);
+  assert.doesNotMatch(pipe, /start it again/);
+  assert.doesNotMatch(file, /start it again/);
 });
 
 test("server host label is bounded and has no terminal controls", { timeout: 1000 }, () => {

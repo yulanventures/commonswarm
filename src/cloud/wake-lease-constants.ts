@@ -15,12 +15,14 @@ const proofRemedy = (sessionContextPath?: string, remedyCommand?: string, contex
   `${sessionContextPath ? `${contextSource === "profile" ? "the profile's host session context" : "the operator's --session-context path"} ${sessionContextPath} was refused; ` : ""}` +
   (remedyCommand ? printedCommand("run this watcher with the verified context.", remedyCommand) : fallback ??
     "inspect this seat's resume output for a verified live context on this host, then retry from that host session");
+export function sanitizeWakeHostLabel(host: string): string {
+  return host.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 120);
+}
 const holder = (surface: "watcher" | "h0_poll", host: string | null) => surface === "h0_poll"
-  ? "an H0 poll" : `a watcher on ${host === null ? "another host" : host
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 120)}`;
+  ? "an H0 poll" : `a watcher on ${host === null ? "another host" : sanitizeWakeHostLabel(host)}`;
 
-const supersessionStep = "stop this watcher and use that surface there; start it again with the same credential source";
+const supersessionStep = "stop this watcher and use the surface that holds the lease";
 
 /** One source for each code's exit and operator sentence. Proof errors differ by phase. */
 export const NOTIFY_LEASE_RULES = {
