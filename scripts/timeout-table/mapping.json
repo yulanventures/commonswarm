@@ -3221,6 +3221,20 @@
             "removes": [],
             "reason": "The app's authenticated browser timer is not a CLI operation."
           }
+        },
+        "src/stdout-consumer.ts:timeoutMs": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/stdout-consumer.ts:24-35",
+          "detail": "Bounded local lsof child used by notify and resume to inspect stdout.",
+          "operation": {
+            "name": "notify-stdout-inspection",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The local process inspection has no client HTTP endpoint."
+          }
         }
       }
     }

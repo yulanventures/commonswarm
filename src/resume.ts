@@ -1,4 +1,8 @@
 import { execFile, spawn } from "node:child_process";
+import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
+import { notifyRestartCommand } from "./cloud/arrival-watch.js";
+export { lsofStdoutConsumer } from "./stdout-consumer.js";
+export type { StdoutConsumerAdapter, StdoutConsumerState } from "./stdout-consumer.js";
 import type { BrainTopicSnapshot } from "./cloud/brain.js";
 import type { CloudTarget } from "./cloud/config.js";
 import {
@@ -55,20 +59,16 @@ export class ProcessTableError extends Error {
   }
 }
 
-export type StdoutConsumerState =
-  | "live_reader"
-  | "orphaned"
-  | "not_pipe"
-  | "cannot_determine";
-
-export interface StdoutConsumerAdapter {
-  inspect(pid: number): Promise<StdoutConsumerState>;
+export type ParentState = "parent_alive" | "parent_is_init" | "parent_missing" | "cannot_determine";
+export interface ParentProcessAdapter {
+  inspect(pid: number): Promise<ParentState>;
 }
 
 export interface NotifyWatcher {
   pid: number;
   matchedBy: Array<"agent_token_file" | "principal_id">;
   stdout: StdoutConsumerState;
+  parent: ParentState;
 }
 
 export interface ResumeListenerInspection {
@@ -106,6 +106,7 @@ export interface ResumeInspectionAdapters {
   ): Promise<ResumeInboxCount>;
   processTable?: ProcessTableAdapter;
   stdoutConsumer?: StdoutConsumerAdapter;
+  parentProcess?: ParentProcessAdapter;
   queryStatus?: (
     paths: ListenerPaths,
     command: "status",
@@ -238,31 +239,41 @@ export function systemProcessTable(
   };
 }
 
-/** macOS lsof can distinguish a live unix-pipe peer from `->(none)`. */
-export function lsofStdoutConsumer(): StdoutConsumerAdapter {
+/** Classify a ps parent row without depending on the host process table. */
+export function parseParentProcessOutput(
+  output: string,
+  checkAlive: (pid: number) => void = (pid) => process.kill(pid, 0),
+): ParentState {
+  const parent = Number(output.trim());
+  if (!Number.isSafeInteger(parent) || parent <= 0) return "cannot_determine";
+  if (parent === 1) return "parent_is_init";
+  try {
+    checkAlive(parent);
+    return "parent_alive";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return "parent_missing";
+    if (code === "EPERM") return "parent_alive";
+    return "cannot_determine";
+  }
+}
+
+/** A missing or init parent is independent evidence when stdout is unproved. */
+export function systemParentProcess(adapters: {
+  ps?: (pid: number) => Promise<string>;
+  checkAlive?: (pid: number) => void;
+} = {}): ParentProcessAdapter {
   return {
     async inspect(pid) {
       let output: string;
       try {
-        output = await execFileText(
-          process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
-          ["-nP", "-a", "-p", String(pid), "-d", "1", "-F", "pftan"],
-        );
+        output = adapters.ps
+          ? await adapters.ps(pid)
+          : await execFileText("ps", ["-o", "ppid=", "-p", String(pid)]);
       } catch {
         return "cannot_determine";
       }
-      const lines = output.split("\n");
-      const type = lines.find((line) => line.startsWith("t"))?.slice(1) ?? "";
-      const names = lines.filter((line) => line.startsWith("n")).map((line) => line.slice(1));
-      if (type === "unix") {
-        if (names.some((name) => name === "->(none)")) return "orphaned";
-        if (names.some((name) => name.startsWith("->") && name !== "->(none)")) {
-          return "live_reader";
-        }
-        return "cannot_determine";
-      }
-      if (type === "PIPE" || type === "FIFO") return "cannot_determine";
-      return type.length === 0 ? "cannot_determine" : "not_pipe";
+      return parseParentProcessOutput(output, adapters.checkAlive);
     },
   };
 }
@@ -298,6 +309,7 @@ export async function findNotifyWatchers(options: {
   processTable?: ProcessTableAdapter;
   processTableCommand?: ProcessTableCommand;
   stdoutConsumer?: StdoutConsumerAdapter;
+  parentProcess?: ParentProcessAdapter;
 }): Promise<NotifyWatcher[]> {
   const processTable = options.processTable ?? systemProcessTable({
     retain: isNotifyCommand,
@@ -306,8 +318,9 @@ export async function findNotifyWatchers(options: {
       : {}),
   });
   const stdoutConsumer = options.stdoutConsumer ?? lsofStdoutConsumer();
+  const parentProcess = options.parentProcess ?? systemParentProcess();
   const rows = await processTable.list();
-  const matches = rows.flatMap((row): Array<Omit<NotifyWatcher, "stdout">> => {
+  const matches = rows.flatMap((row): Array<Pick<NotifyWatcher, "pid" | "matchedBy">> => {
     if (!isNotifyCommand(row.command)) return [];
     const matchedBy: NotifyWatcher["matchedBy"] = [];
     if (commandHasFlagValue(row.command, "--agent-token-file", options.credentialPaths)) {
@@ -323,6 +336,7 @@ export async function findNotifyWatchers(options: {
   return await Promise.all(unique.map(async (row) => ({
     ...row,
     stdout: await stdoutConsumer.inspect(row.pid),
+    parent: await parentProcess.inspect(row.pid),
   })));
 }
 
@@ -368,6 +382,7 @@ export async function inspectResume(
     principalId,
     ...(adapters.processTable ? { processTable: adapters.processTable } : {}),
     ...(adapters.stdoutConsumer ? { stdoutConsumer: adapters.stdoutConsumer } : {}),
+    ...(adapters.parentProcess ? { parentProcess: adapters.parentProcess } : {}),
   });
   const topics = await adapters.readBrainTopics();
   const digestStore = new FileBrainDigestStore(paths.instanceDirectory, principalId);
@@ -411,6 +426,15 @@ function commonCommandArgs(report: ResumeInspection): string {
   ].join(" ");
 }
 
+function watcherRestartCommand(report: ResumeInspection): string {
+  return notifyRestartCommand({
+    agentTokenFile: report.credentialFile,
+    workspaceId: report.workspaceId,
+    url: report.target.url,
+    anonKey: report.target.anonKey,
+  });
+}
+
 function restartCommand(report: ResumeInspection, status: ListenerStatus): string {
   const common = commonCommandArgs(report);
   const start = [
@@ -421,6 +445,13 @@ function restartCommand(report: ResumeInspection, status: ListenerStatus): strin
     "--route main",
   ].join(" ");
   return `cswarm listen stop ${common} && ${start}`;
+}
+
+function watcherState(watcher: NotifyWatcher): StdoutConsumerState {
+  if (watcher.stdout === "live_reader" || watcher.stdout === "orphaned") return watcher.stdout;
+  if (watcher.parent === "parent_is_init" || watcher.parent === "parent_missing") return "orphaned";
+  if (watcher.stdout === "cannot_determine" || watcher.parent === "cannot_determine") return "cannot_determine";
+  return watcher.stdout;
 }
 
 function watcherStateLine(watcher: NotifyWatcher): string {
@@ -434,7 +465,12 @@ function watcherStateLine(watcher: NotifyWatcher): string {
     : watcher.stdout === "not_pipe"
     ? "stdout is not a pipe; the dead-reader check does not apply"
     : "stdout reader cannot be determined on this host";
-  return `- PID ${watcher.pid}: ${state}; matched ${matched}.`;
+  const orphanPrefix = watcher.stdout === "live_reader" ? "" : "ORPHAN: ";
+  const parent = watcher.parent === "parent_is_init" ? `${orphanPrefix}parent PID is 1`
+    : watcher.parent === "parent_missing" ? `${orphanPrefix}parent process no longer exists`
+    : watcher.parent === "parent_alive" ? "parent process is live"
+    : "parent process cannot be determined";
+  return `- PID ${watcher.pid}: ${state}; ${parent}; matched ${matched}.`;
 }
 
 /** Stable human output: identity, listener, watchers, brain, then inbox. */
@@ -494,19 +530,24 @@ export function renderResume(report: ResumeInspection): string {
   if (report.watchers.length === 0) {
     lines.push(
       "Found: 0.",
-      `Next: start one watcher under a live Monitor: cswarm inbox --notify ${commonCommandArgs(report)}`,
+      `Next: start one watcher under a live Monitor: ${watcherRestartCommand(report)}`,
     );
   } else {
     lines.push(`Found: ${report.watchers.length}.`);
     lines.push(...report.watchers.map(watcherStateLine));
-    const orphans = report.watchers.filter((watcher) => watcher.stdout === "orphaned");
+    const orphans = report.watchers.filter((watcher) => watcherState(watcher) === "orphaned");
     if (orphans.length > 0) {
       lines.push(
-        `Next: stop only the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}`,
+        `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}; then restart ${watcherRestartCommand(report)} under the session's Monitor.`,
       );
-    } else if (report.watchers.some((watcher) => watcher.stdout === "cannot_determine")) {
+    } else if (report.watchers.some((watcher) => watcherState(watcher) === "cannot_determine")) {
+      const unknown = report.watchers.filter((watcher) => watcherState(watcher) === "cannot_determine");
+      const evidence = [
+        ...(unknown.some((watcher) => watcher.stdout === "cannot_determine") ? ["stdout reader"] : []),
+        ...(unknown.some((watcher) => watcher.parent === "cannot_determine") ? ["parent process"] : []),
+      ].join(" and ");
       lines.push(
-        "Next: verify each unknown stdout reader in the host Monitor before you start another watcher.",
+        `Next: verify each unknown ${evidence} in the host Monitor before you start another watcher.`,
       );
     } else {
       lines.push("Next: keep one watcher with a live output surface; do not start a duplicate.");
@@ -569,6 +610,8 @@ export function resumeJson(report: ResumeInspection): Record<string, unknown> {
       pid: watcher.pid,
       matched_by: watcher.matchedBy,
       stdout: watcher.stdout,
+      parent: watcher.parent,
+      state: watcherState(watcher),
     })),
     brain: {
       high_water_file: report.brain.highWaterFile,

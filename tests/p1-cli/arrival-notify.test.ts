@@ -12,6 +12,8 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import {
   fileArrivalCursorStore,
+  NOTIFY_SIGNAL_EXIT_CODES,
+  notifySignalStopSentence,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 
@@ -23,7 +25,7 @@ const NEW_SIGNAL = "22222222-2222-4222-8222-222222222222";
 const BROADCAST_SIGNAL = "55555555-5555-4555-8555-555555555555";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
 
-test("inbox --notify flushes readable lines and best-effort attests only the rendered broadcast", async () => {
+test("inbox --notify flushes readable lines and best-effort attests only the rendered broadcast", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-arrival-cli-"));
   const xdg = join(root, "state");
   const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
@@ -178,7 +180,11 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
       });
     });
 
-    assert.equal(code, 0, stderr);
+    assert.equal(code, NOTIFY_SIGNAL_EXIT_CODES.SIGTERM, stderr);
+    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
+      agentTokenStdin: true,
+      arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE],
+    })}`);
     const lines = stdout.trimEnd().split("\n");
     assert.equal(lines.length, 2, stdout);
     assert.match(lines[0]!, new RegExp(SENDER));
@@ -223,7 +229,7 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
  * equals the posted body. The factory tests cannot see the CLI drop the field before writing,
  * so this runs the real command. The body is over the snippet cap so the readable phrase's
  * command is also checked: it names the workspace the child was started with. */
-test("inbox --notify --json carries the whole body; the readable line names a runnable inbox command", async () => {
+test("inbox --notify --json carries the whole body; the readable line names a runnable inbox command", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-arrival-cli-json-"));
   const xdg = join(root, "state");
   const longBody = `Please review\n${"x".repeat(2_000)}`;
@@ -333,7 +339,11 @@ test("inbox --notify --json carries the whole body; the readable line names a ru
         reject(error);
       });
     });
-    assert.equal(code, 0, stderr);
+    assert.equal(code, NOTIFY_SIGNAL_EXIT_CODES.SIGTERM, stderr);
+    assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
+      agentTokenStdin: true,
+      arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE, ...extra],
+    })}`);
     return stdout.trimEnd().split("\n")[0]!;
   };
   try {

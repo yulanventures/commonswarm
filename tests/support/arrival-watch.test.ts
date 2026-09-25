@@ -21,6 +21,7 @@ import {
   ARRIVAL_RETRY_NOTICE_THRESHOLD_MS,
   ARRIVAL_SNIPPET_MAX,
   ARRIVAL_WATCH_POLL_MS,
+  NotifyStdoutClosedError,
   createArrivalRetryNoticePolicy,
   formatArrivalNotification,
   formatArrivalRetryNotice,
@@ -1015,6 +1016,76 @@ test("a server response without wake keeps today's poll and never joins", async 
   assert.deepEqual(sleeps, [ARRIVAL_WATCH_POLL_MS]);
   assert.equal(reads, 1);
 });
+
+test("a subscribed wake wait still checks the reader before reconcile", { timeout: 5_000 }, async () => {
+  const fake = new FakeRealtime();
+  fake.autoSubscribe = true;
+  const wake = createWakeSubscriber({ target: CLOUD, createRealtime: () => fake });
+  const checks: number[] = [];
+  const abort = new AbortController();
+  const deadline = setTimeout(() => abort.abort(), 800);
+  let reads = 0;
+  try {
+    const stop = await runArrivalWatch({
+      workspaceId: WORKSPACE, principalId: AGENT,
+      store: memoryStore(EXISTING_CURSOR).store,
+      signal: abort.signal, wake, reconcileMs: 3_000,
+      stdoutCheckIntervalMs: 100,
+      stdoutConsumer: { async inspect() {
+        checks.push(Date.now());
+        return checks.length === 3 ? "orphaned" : "live_reader";
+      } },
+      readPage: async () => { reads += 1; return page([], { wake: WAKE_HINT }); },
+      emit: async () => assert.fail("no signal was sent"),
+    });
+    assert.equal(stop.reason, "error");
+    assert.ok(stop.error instanceof NotifyStdoutClosedError);
+    assert.ok(reads <= 2, "the watcher stayed in the wake wait after its initial topic transition");
+    assert.equal(checks.length, 3);
+    assert.ok(checks[2]! - checks[0]! < 3_000);
+    assert.equal(wake.snapshot(Date.now()).mode, LISTENER_WAKE_MODE_PUSH);
+  } finally {
+    clearTimeout(deadline);
+    abort.abort();
+    await wake.close();
+  }
+});
+
+for (const state of ["live_reader", "not_pipe", "cannot_determine", "throw"] as const) {
+  test(`${state} from the idle inspector does not stop or write a notification`, { timeout: 5_000 }, async () => {
+    const abort = new AbortController();
+    let checks = 0;
+    let emitted = 0;
+    const stderr: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      stderr.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    let stop: Awaited<ReturnType<typeof runArrivalWatch>>;
+    try {
+      stop = await runArrivalWatch({
+        workspaceId: WORKSPACE, principalId: AGENT,
+        store: memoryStore(EXISTING_CURSOR).store,
+        signal: abort.signal, pollMs: 100, stdoutCheckIntervalMs: 100,
+        stdoutConsumer: { async inspect() {
+          checks += 1;
+          if (checks === 3) abort.abort();
+          if (state === "throw") throw new Error("inspector unavailable");
+          return state;
+        } },
+        readPage: async () => page([]),
+        emit: async () => { emitted += 1; },
+      });
+    } finally {
+      process.stderr.write = originalWrite;
+    }
+    assert.equal(stop.reason, "cancelled");
+    assert.equal(checks, 3);
+    assert.equal(emitted, 0);
+    assert.deepEqual(stderr, [], "idle inspections must not log on stderr");
+  });
+}
 
 test("arrival-watch source never imports claim or ack", async () => {
   const src = await readFile("src/cloud/arrival-watch.ts", "utf8");

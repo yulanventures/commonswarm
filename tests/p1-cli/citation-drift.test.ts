@@ -26,6 +26,20 @@ import { test } from "node:test";
 
 const root = new URL("../../", import.meta.url);
 
+test("lane record marks the retired parent rule and reconciles Fold 1 probe counts", { timeout: 1_000 }, () => {
+  const record = readFileSync(new URL("docs/evidence/2026-09-24-item-g-lane2a/LANE.md", root), "utf8");
+  assert.match(record, /^\| Parent orphan evidence \(superseded by Fold 1 F3\) \|/m);
+  const fold1 = record.split("## Fold 1\n")[1]?.split("The test controls live")[0];
+  assert.ok(fold1);
+  const rows = fold1.match(/^\| F\d+ \|.*$/gm) ?? [];
+  assert.equal(rows.length, 7);
+  const listed = rows.reduce((count, row) => count + (row.match(/exit 1/g)?.length ?? 0), 0);
+  const counts = record.match(/table lists (\d+) reverted behaviours;.*there were (\d+) unique probes/);
+  assert.ok(counts);
+  assert.equal(Number(counts[1]), listed);
+  assert.equal(Number(counts[2]), listed - 1, "F3 and F4 share the EPERM probe");
+});
+
 interface Citation {
   /** Where the citing comment lives, for the failure message. */
   citedBy: string;
@@ -41,43 +55,43 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (lazy host/claude load)",
     file: "src/cli.ts",
-    lines: [404, 404],
+    lines: [409, 409],
     contains: "import(\"./host/claude.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/codex load)",
     file: "src/cli.ts",
-    lines: [408, 408],
+    lines: [413, 413],
     contains: "import(\"./host/codex.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/opencode load)",
     file: "src/cli.ts",
-    lines: [412, 412],
+    lines: [417, 417],
     contains: "import(\"./host/opencode.js\")",
   },
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [397, 397],
+    lines: [402, 402],
     contains: "classifyClaudeCanaryFailure",
   },
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6391, 6391],
+    lines: [6428, 6428],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6417, 6417],
+    lines: [6454, 6454],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7053, 7053],
+    lines: [7090, 7090],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
@@ -207,4 +221,13 @@ test("every file:line this lane cites still points at what it claims", { timeout
     0,
     `citations drifted:\n\n${failures.join("\n\n")}\n`,
   );
+});
+
+test("stdout inspection timeout citation includes the bounded exec option", { timeout: 1_000 }, () => {
+  const mapping = JSON.parse(readFileSync(fileURLToPath(new URL("scripts/timeout-table/mapping.json", root)), "utf8"));
+  const citation = mapping.refs.HEAD.rows["src/stdout-consumer.ts:timeoutMs"].citation as string;
+  const match = citation.match(/^src\/stdout-consumer\.ts:(\d+)-(\d+)$/);
+  assert.ok(match, citation);
+  const source = readFileSync(fileURLToPath(new URL("src/stdout-consumer.ts", root)), "utf8").split("\n");
+  assert.match(source.slice(Number(match[1]) - 1, Number(match[2])).join("\n"), /timeout: timeoutMs/);
 });
