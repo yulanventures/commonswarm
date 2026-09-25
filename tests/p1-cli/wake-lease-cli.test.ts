@@ -7,15 +7,17 @@ import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { EXIT_NOTIFY_LEASE_LOST } from "../../src/cloud/wake-lease-constants.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+import { agentCredentialStore, credentialLineageKey } from "../../src/cloud/agent-credential.js";
 import { defaultSessionContextPath, newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { AGENT_SESSION_ID_HEADER } from "../../src/cloud/session-contract.js";
+import { renderResume, type ResumeInspection } from "../../src/resume.js";
 
 const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 type FixtureMode = "refuse" | "takeover" | "supersede" | "status" | "lifecycle" | "claim_retry" | "claim_inflight" |
-  "unmanaged" | "session_conflict" | "session_expired" | "session_retired" |
-  "session_proof_invalid" | "session_proof_missing" | "profile_unauthorized" | "profile_forbidden" | "profile_unreachable" | "profile_transport";
+  "unmanaged" | "h0_holder" | "session_conflict" | "session_expired" | "session_retired" |
+  "session_proof_invalid" | "session_proof_missing" | "profile_unauthorized" | "profile_forbidden" | "profile_unreachable" | "profile_transport" | "profile_renewed";
 async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
   const root = await mkdtemp(join(tmpdir(), "cswarm-wake-lease-cli-"));
   const credential = join(root, "agent.json");
@@ -90,6 +92,12 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
           }));
           return;
         }
+        if (command.kind === "claim_wake_lease" && mode === "h0_holder" && ++claimAttempts === 1) {
+          response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({
+            error: "notify_held_elsewhere", surface: "h0_poll", host_label: "poll-host",
+          }));
+          return;
+        }
         if (command.kind === "renew_wake_lease" && mode === "supersede") {
           response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({
             error: "wake_lease_superseded", surface: "watcher", host_label: "new-host",
@@ -119,6 +127,10 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
       }
       if (body.resource === "members") {
         membersReads += 1;
+        if (mode === "profile_renewed" && request.headers.authorization !== `Bearer swm_agt_${"B".repeat(43)}`) {
+          response.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ error: "unauthenticated" }));
+          return;
+        }
         if (mode === "profile_transport") { response.destroy(); return; }
         if (mode === "profile_unauthorized" || mode === "profile_forbidden" || mode === "profile_unreachable") {
           response.writeHead(mode === "profile_unauthorized" ? 401 : mode === "profile_forbidden" ? 403 : 503,
@@ -246,6 +258,67 @@ test("the non-stdin holder command runs exactly as printed through the shell", {
     running.kill("SIGTERM");
     assert.equal(await exit, 143, stderr);
   } finally { if (child?.exitCode === null) child.kill("SIGKILL"); await f.cleanup(); }
+});
+
+test("the H0 poll holder command runs exactly as printed through the shell", { timeout: 9_000 }, async () => {
+  const f = await fixture("h0_holder");
+  let child: ChildProcess | null = null;
+  try {
+    const refusal = await f.start().exit;
+    assert.equal(refusal.code, 76, refusal.stderr);
+    const command = refusal.stderr.split("\n").find(line => line.startsWith("cswarm inbox --notify "));
+    assert.ok(command, refusal.stderr);
+    const bin = join(f.root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    child = spawn("/bin/sh", ["-c", command], { env: { ...process.env, HOME: f.root,
+      XDG_CONFIG_HOME: join(f.root, "config"), XDG_STATE_HOME: join(f.root, "state"),
+      NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"] });
+    const running = child;
+    let stderr = "";
+    running.stderr?.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const exit = new Promise<number | null>((done, reject) => {
+      const timer = setTimeout(() => { running.kill("SIGKILL"); reject(new Error("H0 command timeout")); }, 6_000);
+      running.once("exit", code => { clearTimeout(timer); done(code); });
+      running.once("error", reject);
+    });
+    const deadline = Date.now() + 4_000;
+    while (f.seen.filter(row => row.kind === "claim_wake_lease").length < 2 && Date.now() < deadline) {
+      await new Promise(done => setTimeout(done, 20));
+    }
+    assert.equal(f.seen.filter(row => row.kind === "claim_wake_lease").length, 2, stderr);
+    running.kill("SIGTERM");
+    assert.equal(await exit, 143, stderr);
+  } finally { if (child?.exitCode === null) child.kill("SIGKILL"); await f.cleanup(); }
+});
+
+test("the printed unread inbox command runs through the shell against loopback", { timeout: 8_000 }, async () => {
+  const f = await fixture("unmanaged");
+  try {
+    const report: ResumeInspection = {
+      identity: { displayName: "Fixture", principalId: principal },
+      listener: { checkedDirectory: join(f.root, "listeners"), status: null, source: "not_found" },
+      watchers: [], brain: { digest: null, highWaterFile: join(f.root, "brain") },
+      inbox: { count: 1, exact: true }, target: cloudTarget(f.url, f.anonKey),
+      workspaceId: workspace, credentialFile: f.credential, installedVersion: "0.1.77",
+    };
+    const command = renderResume(report).split("\n").find(line => line.startsWith("cswarm inbox "));
+    assert.ok(command);
+    const bin = join(f.root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    const child = spawn("/bin/sh", ["-c", command], { env: { ...process.env, HOME: f.root,
+      XDG_CONFIG_HOME: join(f.root, "config"), XDG_STATE_HOME: join(f.root, "state"),
+      PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const code = await new Promise<number | null>((done, reject) => {
+      const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error("inbox command timeout")); }, 6_000);
+      child.once("exit", result => { clearTimeout(timer); done(result); });
+      child.once("error", reject);
+    });
+    assert.equal(code, 0, stderr);
+  } finally { await f.cleanup(); }
 });
 
 test("unmanaged credential starts and holds a lease until clean stop", { timeout: 10_000 }, async () => {
@@ -388,7 +461,7 @@ test("stdin holder and supersession refusals give words and no pasteable command
       const result = await f.start(false, undefined, undefined, undefined, true).exit;
       assert.equal(result.code, 76, result.stderr);
       assert.match(result.stderr, new RegExp(code));
-      assert.match(result.stderr, /same way it was started, with the agent token on stdin/);
+      assert.match(result.stderr, mode === "refuse" ? /same way it was started, with the agent token on stdin/ : /same credential source/);
       assert.doesNotMatch(result.stderr, /<credential-file>|^cswarm inbox --notify/gm);
       if (mode === "refuse") {
         assert.match(result.stderr, /adding --take-over/);
@@ -766,8 +839,8 @@ test("profile resume keeps its snapshot when the credential file is missing", { 
 });
 
 test("profile resume distinguishes refused credentials from an unavailable service", { timeout: 10_000 }, async () => {
-  for (const [mode, pattern] of [["profile_unauthorized", /service refused this credential \(expired or revoked\).*turn check/],
-    ["profile_forbidden", /service refused this credential \(expired or revoked\).*turn check/],
+  for (const [mode, pattern] of [["profile_unauthorized", /service refused the saved credential \(expired or revoked\).*turn check.*setup again/],
+    ["profile_forbidden", /service refused the saved credential \(expired or revoked\).*turn check.*setup again/],
     ["profile_unreachable", /read service returned an error.*after it recovers/],
     ["profile_transport", /could not verify with the read service.*reachable/]] as const) {
     const f = await fixture(mode);
@@ -787,12 +860,61 @@ test("profile resume distinguishes refused credentials from an unavailable servi
   }
 });
 
+test("profile resume verifies with the renewed lineage token before the setup token", { timeout: 10_000 }, async () => {
+  const f = await fixture("profile_renewed");
+  try {
+    const profileDir = join(f.root, "profile");
+    await mkdir(profileDir, { mode: 0o700 });
+    const profilePath = join(profileDir, "profile.json");
+    const credential = join(profileDir, "credential.json");
+    await writeFile(credential, await readFile(f.credential), { mode: 0o600 });
+    await writeFile(profilePath, JSON.stringify({ version: 1, url: f.url, anon_key: f.anonKey,
+      workspace_id: workspace, principal_id: principal, credential_file: credential, host_session_id: "renewed-host" }), { mode: 0o600 });
+    const contextPath = await liveContext(f, credential, "renewed-host");
+    const store = await agentCredentialStore({ target: cloudTarget(f.url, f.anonKey),
+      lineageKey: credentialLineageKey(`swm_agt_${"A".repeat(43)}`),
+      stateDirectory: join(f.root, "state", "cswarm", "agent-credentials") });
+    await store.write({ version: 1, token: `swm_agt_${"B".repeat(43)}`,
+      tokenId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", principalId: principal,
+      runId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", rootTokenId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      generation: 1, issuedAt: Date.now(), expiresAt: Date.now() + 60_000,
+      horizonExpiresAt: null, successorsRemaining: null, pendingRenewal: null });
+    const resumed = await runProfileResume(f, profilePath, "renewed-host");
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.deepEqual(JSON.parse(resumed.stdout).live_session_context_paths, [contextPath]);
+  } finally { await f.cleanup(); }
+});
+
+test("profile resume reports wrong-agent and unparseable credentials as snapshots", { timeout: 12_000 }, async () => {
+  const f = await fixture("unmanaged");
+  try {
+    const profileDir = join(f.root, "profile");
+    await mkdir(profileDir, { mode: 0o700 });
+    const profilePath = join(profileDir, "profile.json");
+    const credential = join(profileDir, "credential.json");
+    await writeFile(profilePath, JSON.stringify({ version: 1, url: f.url, anon_key: f.anonKey,
+      workspace_id: workspace, principal_id: principal, credential_file: credential, host_session_id: "wrong-host" }), { mode: 0o600 });
+    for (const [body, reason] of [
+      [String(await readFile(f.credential)).replace(principal, "ffffffff-ffff-4fff-8fff-ffffffffffff"), "belongs to another agent"],
+      ["{broken", "cannot be parsed"],
+    ]) {
+      await writeFile(credential, body, { mode: 0o600 });
+      const resumed = await runProfileResume(f, profilePath, "wrong-host");
+      assert.equal(resumed.code, 0, resumed.stderr);
+      const snapshot = JSON.parse(resumed.stdout);
+      assert.equal(snapshot.authenticated_now, false);
+      assert.match(snapshot.live_session_context_lines[0], new RegExp(reason));
+    }
+  } finally { await f.cleanup(); }
+});
+
 test("stdin proof refusal explains the pipe step without an unverified command", { timeout: 8000 }, async () => {
   const f = await fixture("session_proof_missing");
   try {
     const refused = await f.start(false, undefined, undefined, undefined, true).exit;
     assert.equal(refused.code, 76, refused.stderr);
-    assert.match(refused.stderr, /pipe the same credential on stdin/);
+    assert.match(refused.stderr, /agent token on stdin/);
+    assert.equal((refused.stderr.match(/pipe the same credential on stdin|agent token on stdin/g) ?? []).length, 1);
     assert.doesNotMatch(refused.stderr, /run cswarm inbox --notify/);
   } finally { await f.cleanup(); }
 });

@@ -145,8 +145,40 @@ test("every exit-76 lease sentence carries the one supervisor stop clause", { ti
       const line = wakeLeaseExitSentence(code, "watcher", "other-host", "cswarm inbox --notify", phase);
       assert.equal(line.split(NOTIFY_NO_RESTART_CLAUSE).length - 1, 1, `${code}/${phase}: ${line}`);
       assert.match(line.split("\n")[0]!, /; exit 76\.$/);
+      assert.doesNotMatch(line, /\.; exit /);
     }
   }
+});
+
+test("stdin retry is stated once and supersession shares one remedy", { timeout: 1000 }, () => {
+  const stdin = wakeLeaseExitSentence("session_expired", "watcher", null, null, "start",
+    undefined, undefined, undefined, "retry from the live host session");
+  assert.equal(stdin.split("agent token on stdin").length - 1, 1);
+  const file = wakeLeaseExitSentence("wake_lease_superseded", "watcher", "holder", "cswarm inbox --notify");
+  const pipe = wakeLeaseExitSentence("wake_lease_superseded", "watcher", "holder", null);
+  assert.match(file, /stop this watcher and use that surface there; start it again with the same credential source/);
+  assert.match(pipe, /stop this watcher and use that surface there; start it again with the same credential source/);
+  assert.equal(pipe.split("start it again").length - 1, 1);
+});
+
+test("server host label is bounded and has no terminal controls", { timeout: 1000 }, () => {
+  const line = wakeLeaseExitSentence("notify_held_elsewhere", "watcher", `\u001b[31m\n${"x".repeat(500)}\u202e`, null);
+  assert.doesNotMatch(line, /\u001b|\u202e|\n/);
+  assert.ok(line.length < 500);
+  assert.doesNotMatch(line, /\.; exit /);
+});
+
+test("a server-supplied host label is sanitized in the lease error", { timeout: 1000 }, async () => {
+  const fetcher = (async () => new Response(JSON.stringify({ error: "notify_held_elsewhere", surface: "watcher",
+    host_label: `\u001b[31m\n${"x".repeat(500)}\u202e` }), { status: 409 })) as typeof fetch;
+  await assert.rejects(sendWakeLeaseCommand({ target, workspaceId, token: "synthetic",
+    command: { kind: "claim_wake_lease", watcher_id: watcher },
+    restartCommand: null, fetcher }), (error: unknown) => {
+      assert.ok(error instanceof WakeLeaseLostError);
+      assert.doesNotMatch(error.message, /\u001b|\u202e|\n/);
+      assert.ok(error.message.length < 500);
+      return true;
+    });
 });
 
 test("transport, 429 and 5xx retry while ordinary refusal stops", { timeout: 2000 }, async () => {

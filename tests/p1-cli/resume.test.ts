@@ -34,6 +34,9 @@ import {
   FileBrainDigestStore,
   FileHookSurfaceStore,
   listenerPaths,
+  startListenerControlServer,
+  readListenerStatusIfPresent,
+  LISTENER_RUNNING_STATES,
   writeListenerStatus,
   type ListenerStatus,
 } from "../../src/listener/index.js";
@@ -50,7 +53,7 @@ import {
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
 import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
-import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, notifyRestartOptions } from "../../src/cli.js";
+import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions } from "../../src/cli.js";
 import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { generateSessionKey } from "../../src/cloud/session-proof.js";
 
@@ -61,6 +64,95 @@ const SENDER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const OLD_SIGNAL = "11111111-1111-4111-8111-111111111111";
 const NEW_SIGNAL = "22222222-2222-4222-8222-222222222222";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
+
+test("printed listener restart waits for a slow stop in its explicit state directory", { timeout: 20_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-wait-"));
+  const bin = join(root, "bin");
+  const stateDirectory = join(root, "listener state");
+  const credentialFile = join(root, "agent.json");
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", chunk => raw += String(chunk));
+    request.on("end", () => {
+      const body = JSON.parse(raw) as { resource?: string };
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body.resource === "members"
+        ? { members: [], agents: [{ principal_id: PRINCIPAL, owner_user_id: OWNER, name: "Fixture seat" }],
+          identity: { credential_valid: true, owner_user_id: OWNER, principal_id: PRINCIPAL, workspace_id: WORKSPACE } }
+        : { signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }));
+    });
+  });
+  let control: Awaited<ReturnType<typeof startListenerControlServer>> | null = null;
+  let shell: ChildProcess | null = null;
+  let nextPid: number | null = null;
+  try {
+    const url = await listen(server);
+    const target = cloudTarget(url, "public-test-key");
+    const paths = listenerPaths({ profileId: target.profileId, workspaceId: WORKSPACE,
+      principalId: PRINCIPAL, stateDirectory });
+    const status = listenerStatus(paths.logPath);
+    status.profileId = target.profileId;
+    status.workspaceId = WORKSPACE;
+    status.principalId = PRINCIPAL;
+    status.pid = process.pid;
+    status.provider = "claude";
+    await writeListenerStatus(paths, status);
+    control = await startListenerControlServer({ paths, status: () => status, stop: () => {
+      status.state = "stopping";
+      setTimeout(() => {
+        status.state = "stopped";
+        status.stoppedAt = new Date().toISOString();
+        void writeListenerStatus(paths, status).then(() => control?.close());
+      }, 1_200);
+    } });
+    await writeFile(credentialFile, credentialArtifact(), { mode: 0o600 });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    await mkdir(join(root, ".claude"), { recursive: true });
+    await writeFile(join(root, ".claude", "settings.json"), JSON.stringify(claudeUserPromptHookSnippet(PRINCIPAL)));
+    const report: Parameters<typeof renderResume>[0] = { identity: { displayName: "Fixture", principalId: PRINCIPAL },
+      listener: { checkedDirectory: paths.instanceDirectory, status, source: "live_process" },
+      watchers: [], brain: { digest: null, highWaterFile: join(root, "brain") },
+      inbox: { count: 0, exact: true }, target, workspaceId: WORKSPACE, credentialFile,
+      installedVersion: "0.1.77", stateDirectory };
+    const printed = renderResume(report).split("\n").find(line => line.startsWith("cswarm listen stop "));
+    assert.ok(printed);
+    assert.match(printed, /--wait && cswarm listen start/);
+    assert.equal(printed.split("--state-dir").length - 1, 2);
+    shell = spawn("/bin/sh", ["-c", printed], { env: { ...process.env, HOME: root,
+      CLAUDE_CONFIG_DIR: join(root, ".claude"), XDG_CONFIG_HOME: join(root, "config"),
+      XDG_STATE_HOME: join(root, "state"), PATH: `${bin}:${process.env.PATH ?? ""}` },
+      stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    shell.stderr?.on("data", chunk => stderr += String(chunk));
+    const code = await new Promise<number | null>((done, reject) => {
+      const timer = setTimeout(() => { shell?.kill("SIGKILL"); reject(new Error("restart shell timeout")); }, 15_000);
+      shell!.once("exit", value => { clearTimeout(timer); done(value); });
+      shell!.once("error", reject);
+    });
+    assert.equal(code, 0, `${stderr}\n${JSON.stringify((await readListenerStatusIfPresent(paths))?.lastErrorCode)}\n${await readFile(paths.logPath, "utf8").catch(() => "no log")}`);
+    const restarted = await readListenerStatusIfPresent(paths);
+    assert.ok(restarted);
+    assert.ok(LISTENER_RUNNING_STATES.includes(restarted.state));
+    nextPid = restarted.pid;
+    assert.notEqual(nextPid, process.pid);
+    if (process.env.CSWARM_FOLD10_LISTENER_EVIDENCE) {
+      await writeFile(process.env.CSWARM_FOLD10_LISTENER_EVIDENCE, `${JSON.stringify(restarted, null, 2)}\n`);
+    }
+  } finally {
+    if (shell?.exitCode === null) shell.kill("SIGKILL");
+    if (nextPid !== null) {
+      try { process.kill(nextPid, "SIGTERM"); } catch { /* already gone */ }
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        try { process.kill(nextPid, 0); await new Promise(done => setTimeout(done, 50)); }
+        catch { break; }
+      }
+      try { process.kill(nextPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    await control?.close().catch(() => undefined);
+    await close(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("recorded lsof fd 1 shapes classify without a false orphan", { timeout: 1_000 }, () => {
   const cases = [

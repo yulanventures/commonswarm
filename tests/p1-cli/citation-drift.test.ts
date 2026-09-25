@@ -55,43 +55,43 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (lazy host/claude load)",
     file: "src/cli.ts",
-    lines: [416, 416],
+    lines: [418, 418],
     contains: "import(\"./host/claude.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/codex load)",
     file: "src/cli.ts",
-    lines: [420, 420],
+    lines: [422, 422],
     contains: "import(\"./host/codex.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/opencode load)",
     file: "src/cli.ts",
-    lines: [424, 424],
+    lines: [426, 426],
     contains: "import(\"./host/opencode.js\")",
   },
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [409, 409],
+    lines: [411, 411],
     contains: "classifyClaudeCanaryFailure",
   },
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6564, 6564],
+    lines: [6566, 6566],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6590, 6590],
+    lines: [6592, 6592],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7212, 7212],
+    lines: [7214, 7214],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
@@ -230,4 +230,13 @@ test("stdout inspection timeout citation includes the bounded exec option", { ti
   assert.ok(match, citation);
   const source = readFileSync(fileURLToPath(new URL("src/stdout-consumer.ts", root)), "utf8").split("\n");
   assert.match(source.slice(Number(match[1]) - 1, Number(match[2])).join("\n"), /timeout: timeoutMs/);
+});
+
+test("live-session timeout row includes resume and every context-file watcher start", { timeout: 1_000 }, () => {
+  const mapping = JSON.parse(readFileSync(fileURLToPath(new URL("scripts/timeout-table/mapping.json", root)), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/cloud/live-session-context.ts:timeoutMs"];
+  assert.match(row.detail, /every resume/);
+  assert.match(row.detail, /every watcher start with a context file on the host/);
+  const source = readFileSync(fileURLToPath(new URL("src/cli.ts", root)), "utf8");
+  assert.match(source, /verifiedLiveSessionContexts\(/);
 });
