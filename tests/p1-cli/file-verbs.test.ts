@@ -23,6 +23,7 @@ import {
   writeDestination,
 } from "../../src/cloud/files.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 
 const TARGET = cloudTarget("https://example.supabase.co", "anon-key");
 
@@ -513,6 +514,11 @@ async function startFakeCloud(): Promise<FakeCloud> {
       const raw = Buffer.concat(chunks);
       const url = request.url ?? "";
       if (request.method === "PUT" && url.startsWith("/storage/")) {
+        if (state.storagePuts.some(put => put.path === url)) {
+          response.writeHead(409, { "content-type": "application/json" });
+          response.end(JSON.stringify({ error: "Duplicate" }));
+          return;
+        }
         state.storagePuts.push({ path: url, bytes: raw });
         response.writeHead(200, { "content-type": "application/json" });
         response.end("{}");
@@ -666,6 +672,7 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 async function cliAgainst(
   cloud: FakeCloud,
   args: string[],
+  bareRequestId = false,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const child = spawn(process.execPath, [
     "--import",
@@ -683,23 +690,33 @@ async function cliAgainst(
     cwd: process.cwd(),
     env: {
       ...process.env,
+      HOME: scratch,
+      XDG_CONFIG_HOME: join(scratch, "config"),
+      SWARM_AGENT_STATE_DIR: join(scratch, "agent-state"),
       SWARM_CLOUD_URL: "",
       SWARM_CLOUD_ANON_KEY: "",
       SWARM_CLOUD_WORKSPACE_ID: "",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
-  child.stdin.end(AGENT_TOKEN);
+  child.stdin.end(args.includes("--request-id") && !bareRequestId ? JSON.stringify({
+    message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
+    principal_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    run_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    agent_token: AGENT_TOKEN, expires_at: "2099-01-01T00:00:00.000Z",
+  }) : AGENT_TOKEN);
   let stdout = "";
   let stderr = "";
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => stdout += chunk);
   child.stderr.on("data", (chunk: string) => stderr += chunk);
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
   const code = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (status) => resolve(status ?? 1));
-  });
+  }).finally(() => clearTimeout(timer));
   return { code, stdout, stderr };
 }
 
@@ -738,6 +755,67 @@ test("file put drives create -> PUT -> commit in order with the ★R10 echo", as
   } finally {
     await cloud.close();
   }
+});
+
+test("file put --request-id replays across CLI processes and conflicts before create", { timeout: 20_000 }, async () => {
+  const cloud = await startFakeCloud();
+  try {
+    const localPath = join(scratch, "exact-cli.md");
+    writeFileSync(localPath, "# first\n");
+    const args = ["file", "put", localPath, "--request-id", "cli-exact-01", "--json"];
+    const first = await cliAgainst(cloud, args);
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(JSON.parse(first.stdout).outcome, "committed");
+    assert.equal(JSON.parse(first.stdout).conflict_check, "unavailable");
+    const second = await cliAgainst(cloud, args);
+    assert.equal(second.code, 0, second.stderr);
+    assert.equal(JSON.parse(second.stdout).outcome, "replayed");
+    assert.equal(JSON.parse(second.stdout).conflict_check, "available");
+    assert.equal(cloud.storagePuts.length, 1);
+    const commands = cloud.commands.length;
+    writeFileSync(localPath, "# changed\n");
+    const conflict = await cliAgainst(cloud, args);
+    assert.notEqual(conflict.code, 0);
+    assert.equal(JSON.parse(conflict.stdout).code, "request_id_conflict");
+    assert.equal(conflict.stderr, "");
+    assert.equal(cloud.commands.length, commands);
+  } finally { await cloud.close(); }
+});
+
+test("legacy file put keeps credential errors first and its preflight copy", { timeout: 20_000 }, async () => {
+  const cloud = await startFakeCloud();
+  try {
+    const missing = join(scratch, "missing-legacy.md");
+    const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "file", "put", missing,
+      "--url", cloud.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE,
+      "--agent-token-file", join(scratch, "missing-credential")], {
+      cwd: process.cwd(), env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: join(scratch, "config") }, stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    const code = await new Promise<number>((done, fail) => { child.once("error", fail); child.once("close", value => done(value ?? 1)); }).finally(() => clearTimeout(timer));
+    assert.notEqual(code, 0);
+    assert.match(stderr, /credential/i);
+    assert.doesNotMatch(stderr, /could not read/);
+    const huge = join(scratch, "huge-legacy.md");
+    writeFileSync(huge, Buffer.alloc(25 * 1024 * 1024 + 1));
+    assert.match((await cliAgainst(cloud, ["file", "put", huge])).stderr, /per-file limit is/);
+    const unsupported = join(scratch, "legacy.sh");
+    writeFileSync(unsupported, "code");
+    assert.match((await cliAgainst(cloud, ["file", "put", unsupported])).stderr, /has no allowed file extension/);
+  } finally { await cloud.close(); }
+});
+
+test("request-id refuses a legacy bare agent token without a stable principal", { timeout: 10000 }, async () => {
+  const cloud = await startFakeCloud();
+  try {
+    const path = join(scratch, "bare-refusal.md");
+    writeFileSync(path, "# bare\n");
+    const result = await cliAgainst(cloud, ["file", "put", path, "--request-id", "bare-token-01"], true);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /minted agent credential with a principal id/);
+    assert.equal(cloud.commands.length, 0);
+  } finally { await cloud.close(); }
 });
 
 test("file put --json passes the commit body through", async () => {

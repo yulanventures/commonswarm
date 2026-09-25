@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { MCP_TOOLS } from "../../src/mcp/tools.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -6,7 +7,6 @@ import ts from "typescript";
 import {
   AGENT_COMMANDS,
   AGENT_PROFILE_COMMANDS,
-  CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER,
   agentToolsForTransport,
   usage,
   type AgentCommandEntry,
@@ -137,10 +137,9 @@ function namedCommandPairs(text: string): CommandPair[] {
   return [...pairs.values()];
 }
 
-function modelFacingCategory(entry: AgentCommandEntry): "tool" | "bootstrap" | "cli-only-until-item-l" | null {
+function modelFacingCategory(entry: AgentCommandEntry): "tool" | "bootstrap" | null {
   if (entry.tool !== null) return "tool";
   if (entry.bootstrap) return "bootstrap";
-  if (entry.reason.includes(CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER)) return "cli-only-until-item-l";
   return null;
 }
 
@@ -172,13 +171,13 @@ test("every model-facing command pair is a tool or a derived bootstrap entry", a
       assert.notEqual(
         modelFacingCategory(entry),
         null,
-        `${surface} names cswarm ${verb}${action ? ` ${action}` : ""}, but that pair is neither a tool, bootstrap, nor CLI-only until item L`,
+        `${surface} names cswarm ${verb}${action ? ` ${action}` : ""}, but that pair is neither a tool nor bootstrap`,
       );
     }
   }
 });
 
-test("the item-L brain put bridge stays on both model-facing surfaces", async () => {
+test("file and brain puts are model tools on the stdio transport", { timeout: 10000 }, async () => {
   const command = "cswarm brain put <topic> <markdown-path>";
   const skill = await readFile(resolve("site/public/skills/cswarm/SKILL.md"), "utf8");
   assert.ok(AGENT_QUICK_GUIDE.includes(command), `AGENT_QUICK_GUIDE must name ${command}`);
@@ -188,11 +187,15 @@ test("the item-L brain put bridge stays on both model-facing surfaces", async ()
   assert.ok(brain && isGroup(brain), "brain command group is missing");
   const put = brain.subcommands.put;
   assert.ok(put, "brain.put entry is missing");
-  assert.equal(put.tool, null, "retire the item-L bridge test when brain.put becomes a tool");
-  assert.ok(
-    put.reason.includes(CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER),
-    "brain.put item-L marker is gone; retire this bridge test when item L ships",
-  );
+  assert.equal(put.tool, "brain_put");
+  const file = AGENT_COMMANDS.file;
+  assert.ok(file && isGroup(file));
+  assert.equal(file.subcommands.put.tool, "file_put");
+  const served = entries().filter(({ entry }) => entry.mcp).map(({ entry }) => entry.tool).sort();
+  const mcp = MCP_TOOLS.map(tool => tool.name).sort();
+  assert.deepEqual(mcp, served, "the complete MCP tool set must match the command table's MCP entries");
+  assert.ok(mcp.includes(put.tool));
+  assert.ok(mcp.includes(file.subcommands.put.tool));
 });
 
 test("model-facing command parsing finds flags before a command pair", () => {
@@ -390,6 +393,7 @@ test("parsed-argument functions between lookup and handler are allowlisted", asy
       if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", \`Do not combine --profile with \${conflicts.map(flag => \`--\${flag}\`).join(", ")}.\`);
       const profile = await readAgentProfile(path, this.optional("host-session-id"));
       await readProfileCredential(profile);
+      this.expandedProfilePath = path;
       if (this.has("host-session-id") && hostSessionId === "drop") {
         const selected = await profileSessionContext(profile, this.required("host-session-id"));
         if (selected) {

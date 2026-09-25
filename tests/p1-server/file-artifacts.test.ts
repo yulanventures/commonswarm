@@ -1827,3 +1827,45 @@ test("workspace rate counter does not split on UUID letter case: uppercase and l
     WHERE bucket_key = ${idKey}
   `;
 });
+
+test("item L derived ids replay one live version and upsert-off Storage refuses a second PUT", { timeout: 30_000 }, async () => {
+  const { uuidV5 } = await import("../../src/cloud/exact-file-put.js");
+  const requestId = `server-${randomUUID()}`;
+  const name = `item-l-${randomUUID()}.md`;
+  const digest = sha256hex(PLAN_BYTES);
+  const identity = [f.workspaceA, f.agentPrincipal, requestId, name.toLowerCase(), digest].join("\0");
+  const fileId = uuidV5(`${identity}\0file`);
+  const versionId = uuidV5(`${identity}\0version`);
+  const createId = uuidV5(`${identity}\0create`);
+  const commitId = uuidV5(`${identity}\0commit`);
+  const createBody = { kind: "file_version_create", file_id: fileId, version_id: versionId,
+    name, declared_size_bytes: PLAN_BYTES.length, content_type: "text/markdown" };
+  const first = await postCommand(f.agentToken, createBody, f.workspaceA, createId);
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  const replay = await postCommand(f.agentToken, createBody, f.workspaceA, createId);
+  assert.equal(replay.status, 200, JSON.stringify(replay.body));
+  assert.equal(replay.body.version_id, first.body.version_id);
+  assert.equal(replay.body.upload_path, first.body.upload_path);
+  // Create assigns this storage key per version, not per mutable file name.
+  const pending = await sql<{ storage_path: string }[]>`
+    SELECT storage_path FROM swarm.file_versions WHERE workspace_id = ${f.workspaceA}::uuid AND version_id = ${versionId}::uuid
+  `;
+  assert.deepEqual(pending.map(row => row.storage_path), [`${f.workspaceA}/${fileId}/${first.body.version_n}`]);
+  const upload = `${local.API_URL}${String(first.body.upload_path)}`;
+  const put = await fetch(upload, { method: "PUT", headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
+  assert.equal(put.status, 200);
+  const duplicate = await fetch(upload, { method: "PUT", headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
+  assert.equal(duplicate.status, 400);
+  const duplicateBody = await duplicate.json() as Record<string, unknown>;
+  assert.deepEqual(duplicateBody, { statusCode: "409", error: "Duplicate", message: "The resource already exists" });
+  const commitBody = { kind: "file_version_commit", file_id: fileId, version_id: versionId, sha256: digest };
+  const commit = await postCommand(f.agentToken, commitBody, f.workspaceA, commitId);
+  assert.equal(commit.status, 200, JSON.stringify(commit.body));
+  const commitReplay = await postCommand(f.agentToken, commitBody, f.workspaceA, commitId);
+  assert.equal(commitReplay.status, 200, JSON.stringify(commitReplay.body));
+  assert.equal(commitReplay.body.version_id, versionId);
+  const rows = await sql<{ state: string }[]>`
+    SELECT state FROM swarm.file_versions WHERE workspace_id = ${f.workspaceA}::uuid AND version_id = ${versionId}::uuid
+  `;
+  assert.deepEqual(rows.map(row => row.state), ["live"]);
+});

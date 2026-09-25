@@ -1,4 +1,5 @@
 import { H0_REQUEST_ID_RE, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX } from "../h0/verbs.js";
+import { isAbsolute } from "node:path";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX, SIGNAL_RECIPIENT_MAX } from "../cloud/signal-limits.js";
 import { SIGNAL_DURATION_RE, signalDuration } from "../cloud/signal-duration.js";
 import { CHANNEL_SLUG_MAX, CHANNEL_SLUG_RE, RESERVED_CHANNEL_SLUGS } from "../cloud/channels.js";
@@ -20,8 +21,9 @@ const body = string(SIGNAL_BODY_MAX, 1);
 const requestId = string(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
 const UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
 const uuid = string(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
+const absolutePath = { ...string(4096, 1), description: "Absolute path on this host." };
 const common = { body, about: string(SIGNAL_ABOUT_MAX), channel: { ...string(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string(undefined, undefined, SIGNAL_DURATION_RE.source), request_id: requestId };
-const schema = (properties: Record<string, ReturnType<typeof string>>, required: string[] = []) => ({
+const schema = (properties: Record<string, object>, required: string[] = []) => ({
   type: "object" as const, properties, required, additionalProperties: false as const,
 });
 /** The only tool table: schemas and output projections live beside each other. */
@@ -33,6 +35,8 @@ export const MCP_TOOL_TABLE = [
   { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
   { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
   { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
+  { name: "file_put", description: "Upload a local file. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, path: absolutePath, name: string(255, 1) }, ["request_id", "path"]), mapResult: (value: object) => value },
+  { name: "brain_put", description: "Upload a local Markdown file as a brain topic. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, topic: string(200, 1), path: absolutePath, if_version: { type: "integer" as const, minimum: 0 } }, ["request_id", "topic", "path"]), mapResult: (value: object) => value },
 ] as const;
 export const MCP_TOOLS = MCP_TOOL_TABLE.map(({ mapResult: _mapResult, ...tool }) => tool);
 
@@ -46,6 +50,10 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
     const rule = (tool.inputSchema.properties as Record<string, ReturnType<typeof string> & { not?: { enum: readonly string[] } }>)[key];
     if (!rule) throw new Error(`Unknown argument: ${JSON.stringify(key.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
     const item = args[key];
+    if (key === "if_version") {
+      if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) throw new Error("Invalid argument: if_version.");
+      continue;
+    }
     if (typeof item !== "string" || (rule.minLength !== undefined && item.length < rule.minLength) ||
         (rule.maxLength !== undefined && item.length > rule.maxLength) ||
         (rule.pattern !== undefined && !new RegExp(rule.pattern).test(item)) ||
@@ -53,6 +61,7 @@ export function validateMcpArguments(name: McpToolName, value: unknown): Record<
     if (key === "until") {
       try { signalDuration(item); } catch { throw new Error("Invalid argument: until."); }
     }
+    if (key === "path" && !isAbsolute(item)) throw new Error("Invalid argument: path.");
   }
   for (const key of tool.inputSchema.required) if (!Object.hasOwn(args, key)) throw new Error(`Missing argument: ${key}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");

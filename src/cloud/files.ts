@@ -349,7 +349,8 @@ export async function putObject(
   bytes: Uint8Array,
   contentType: string,
   fetcher: typeof fetch = fetch,
-): Promise<void> {
+  allowExisting = false,
+): Promise<"uploaded" | "already_exists"> {
   let response: Response;
   try {
     response = await fetcher(absoluteStorageUrl(target, uploadPath), {
@@ -363,10 +364,20 @@ export async function putObject(
     throw new FileTransportError("the upload PUT failed before a response", true);
   }
   if (!response.ok) {
+    // Storage versions disagree on the HTTP status for an existing object.
+    // This is only a fast path; a resumed upload lets commit check the object.
+    if (allowExisting && (response.status === 409 || response.status === 400)) {
+      const body = await response.json().catch(() => null) as { statusCode?: unknown; error?: unknown } | null;
+      if ((response.status === 409 || body?.statusCode === "409") &&
+          (body?.error === "Duplicate" || body?.error === "ResourceAlreadyExists")) return "already_exists";
+    }
     throw new FileTransportError(
-      `the upload PUT was refused (HTTP ${response.status}). Nothing went live, and this attempt's pending slot expires on its own within three hours. Check cswarm file ls, then re-run cswarm file put — a re-run is a new upload attempt with fresh ids`,
+      allowExisting
+        ? `the upload PUT was refused (HTTP ${response.status}). Retry with the same request id; the pending slot expires within three hours`
+        : `the upload PUT was refused (HTTP ${response.status}). Nothing went live, and this attempt's pending slot expires on its own within three hours. Check cswarm file ls, then re-run cswarm file put — a re-run is a new upload attempt with fresh ids`,
     );
   }
+  return "uploaded";
 }
 
 /**
