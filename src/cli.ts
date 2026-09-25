@@ -230,6 +230,7 @@ import {
   postSignalTargets,
   readAgentSignalPage,
   readDirectedInboxSince,
+  checkedSince,
   readAgentSignalDirectory,
   readSignals,
   renderSignalStatus,
@@ -4566,11 +4567,16 @@ async function runSignalRead(
   const waitSeconds = inbox && args.optional("wait") !== undefined
     ? parseWaitSeconds(args.required("wait"))
     : undefined;
+  const since = checkedSince(args.optional("since"));
   const cloud = await target(args);
   const selected = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true,
   });
   const credential = signalCredentialOf(selected);
+  if (inbox && credential.kind === "agent" && since !== undefined) {
+    const directory = await readAgentSignalDirectory(cloud, credential.token, selected.selectedWorkspace);
+    assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
+  }
   /* Two paths, two shapes. The `read` edge resolves a slug itself, so an agent
    * sends the slug. PostgREST has no slug lookup on swarm_read.signals, so a
    * signed-in person resolves it against swarm_read.channels first and filters
@@ -4600,9 +4606,9 @@ async function runSignalRead(
     ...(args.optional("kind") === undefined
       ? {}
       : { kind: signalKind(args.required("kind")) }),
-    ...(args.optional("since") === undefined
+    ...(since === undefined
       ? {}
-      : { since: args.required("since") }),
+      : { since }),
     ...(args.optional("limit") === undefined
       ? {}
       : { limit: integer(args, "limit", { minimum: 1, maximum: 100 }) }),
@@ -4610,12 +4616,13 @@ async function runSignalRead(
   };
 
   let rows;
+  let moreSince: string | undefined;
   let timedOut = false;
   let waited = false;
   try {
     if (waitSeconds === undefined) {
       rows = inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
-        ? await readDirectedInboxSince(cloud, credential, queryBase)
+        ? await readDirectedInboxSince(cloud, credential, queryBase, { onTruncated: last => { moreSince = last.created_at; } })
         : await readSignals(cloud, credential, queryBase);
     } else {
       waited = true;
@@ -4624,7 +4631,7 @@ async function runSignalRead(
         deadlineMs,
         read: () =>
           inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
-            ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs })
+            ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs, onTruncated: last => { moreSince = last.created_at; } })
             : readSignals(cloud, credential, queryBase, { deadlineMs }),
       });
       rows = waitResult.signals;
@@ -4643,7 +4650,8 @@ async function runSignalRead(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
-      }), ...(inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
+      }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince) }
+        : inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
         ? { notice: INBOX_LIMIT_NOTICE } : {}) },
     );
     if (selected.kind === "agent") {
@@ -4691,6 +4699,7 @@ async function runSignalRead(
   if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
     process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
   }
+  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince)}\n`);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,

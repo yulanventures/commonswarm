@@ -874,11 +874,17 @@ function checkedLimit(value: number | undefined): number {
   return limit;
 }
 
-function checkedSince(value: string | undefined): string | undefined {
-  if (value !== undefined && !Number.isFinite(Date.parse(value))) {
-    throw new Error("--since must be an ISO-8601 timestamp");
+export const INBOX_SINCE_EXAMPLE = "2026-09-25T12:00:00+00:00";
+export class SignalSinceError extends Error {
+  readonly code = "since_offset_required";
+}
+
+export function checkedSince(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new SignalSinceError(`--since needs an ISO-8601 timestamp with an offset, for example ${INBOX_SINCE_EXAMPLE}.`);
   }
-  return value;
+  return new Date(value).toISOString();
 }
 
 export interface SignalReadOptions {
@@ -1683,26 +1689,49 @@ export async function readDirectedInboxSince(
   target: CloudTarget,
   credential: Extract<SignalCredential, { kind: "agent" }>,
   query: SignalQuery,
-  fetcherOrOptions: typeof fetch | SignalReadOptions = fetch,
+  fetcherOrOptions: typeof fetch | (SignalReadOptions & { onTruncated?: (last: SignalCursor) => void }) = fetch,
 ): Promise<SignalRecord[]> {
   const rows: SignalRecord[] = [];
   let after: SignalCursor | undefined;
   const pageSize = 100;
+  const options = normalizeReadOptions(fetcherOrOptions);
+  const started = options.now();
+  let pages = 0;
+  const deadlineMs = Math.min(options.deadlineMs ?? Infinity, started + INBOX_SINCE_TIME_CAP_MS);
   while (true) {
-    const page = await readAgentSignalPage(target, credential, {
+    let page: AgentSignalPage;
+    try { page = await readAgentSignalPage(target, credential, {
       ...query, inbox: true, ascending: true, limit: pageSize,
       ...(after ? { after } : {}),
-    }, fetcherOrOptions);
-    if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
-      throw new Error("This deployment cannot page inbox --since without gaps. Update the read service.");
+    }, { ...options, deadlineMs }); }
+    catch (error) {
+      if (error instanceof SignalReadTimeoutError && after && rows.length > 0) {
+        if (typeof fetcherOrOptions !== "function") fetcherOrOptions.onTruncated?.(after);
+        return rows.reverse();
+      }
+      throw error;
     }
+    if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
+      throw new InboxSinceError("inbox_paging_unsupported", "This deployment cannot page inbox --since without gaps. Update the read service.");
+    }
+    pages += 1;
     rows.push(...page.signals);
     if (page.rawCount < pageSize) return rows.reverse();
     if (page.nextCursor === null || (after && page.nextCursor.created_at === after.created_at && page.nextCursor.id === after.id)) {
-      throw new Error("The inbox page did not advance. Retry after the read service is updated.");
+      throw new InboxSinceError("inbox_page_stalled", "The inbox page did not advance. Retry after the read service is updated.");
     }
     after = page.nextCursor;
+    if (pages >= INBOX_SINCE_PAGE_CAP || options.now() - started >= INBOX_SINCE_TIME_CAP_MS) {
+      if (typeof fetcherOrOptions !== "function") fetcherOrOptions.onTruncated?.(after);
+      return rows.reverse();
+    }
   }
+}
+
+export const INBOX_SINCE_PAGE_CAP = 10;
+export const INBOX_SINCE_TIME_CAP_MS = 20_000;
+export class InboxSinceError extends Error {
+  constructor(readonly code: string, message: string) { super(message); }
 }
 
 export const SIGNAL_STATUS_UNAVAILABLE_MESSAGE =

@@ -2,8 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -11,7 +10,10 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages, type AgentCheckResult } from "../../src/cloud/agent-check.js";
+import { cloudTarget } from "../../src/cloud/config.js";
+import { readSignals } from "../../src/cloud/signals.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 type Local = { API_URL: string; ANON_KEY: string; DB_URL: string; SERVICE_ROLE_KEY: string };
 let local: Local;
@@ -88,7 +90,7 @@ function inbox(since: string, extra: string[] = []): { id: string }[] {
 
 before(async () => {
   local = localEnvironment();
-  root = mkdtempSync(join(tmpdir(), "cswarm-item-k-server-"));
+  root = createLaneTempHome("item-k-server-");
   const envFile = join(root, "edge.env");
   writeFileSync(envFile, "SWARM_ENV=test\n", { mode: 0o600 });
   sql = postgres(local.DB_URL, { prepare: false, max: 3 });
@@ -159,10 +161,10 @@ after(async () => {
     }
   }
   await sql?.end({ timeout: 5 });
-  if (root) rmSync(root, { recursive: true, force: true });
+  if (root) removeLaneTempHome(root);
 }, { timeout: 10_000 });
 
-test("check and inbox --since return the same directed ask across timestamps, filters, and default paging", { timeout: 120_000 }, async () => {
+test("check and inbox --since return the same directed ask across timestamps, filters, and default paging", { timeout: 240_000 }, async () => {
   assert.equal(functionReady, true);
   const ask = await postAsk("item-k directed ask");
   const [created] = await sql<{ created_at: string }[]>`SELECT created_at::text FROM swarm.signals WHERE id = ${ask}::uuid`;
@@ -186,12 +188,31 @@ test("check and inbox --since return the same directed ask across timestamps, fi
   assert.equal(staleCheck?.messages.some(message => message.id === stale), false);
   assert.equal(inbox(staleSince).some(row => row.id === stale), false);
   assert.ok(inbox(staleSince, ["--include-stale"]).some(row => row.id === stale));
-  // Fifty newer directed asks used to push this ask out of inbox's newest-50 default.
-  for (let index = 0; index < 50; index += 1) await postAsk(`item-k newer ${index}`);
+  // One hundred newer asks cross both the former newest-50 default and a 100-row cursor page.
+  for (let index = 0; index < 100; index += 1) await postAsk(`item-k newer ${index}`);
+  const formerDefault = await readSignals(cloudTarget(local.API_URL, local.ANON_KEY),
+    { kind: "agent", token }, { workspaceId: workspace, inbox: true, since: milli, limit: 50 });
+  assert.equal(formerDefault.length, 50);
+  assert.equal(formerDefault.some(row => row.id === ask), false,
+    "the former newest-50 read must reproduce the mismatch");
   assert.ok(inbox(milli).some(row => row.id === ask), "--since must drain past the first page");
   assert.ok(inbox(milli, ["--wait", "1"]).some(row => row.id === ask), "--wait must use the same complete read");
-  assert.equal(inbox(milli).length, 51);
+  assert.equal(inbox(milli).length, 101);
   assert.equal(inbox(milli, ["--limit", "50"]).some(row => row.id === ask), false,
     "an explicit limit still bounds the result");
   assert.match(inboxPayload(milli, ["--limit", "50"]).notice ?? "", /may omit older matching inbox messages/);
+  const naive = spawnSync(process.execPath, ["dist/cli.js", "inbox", "--url", local.API_URL,
+    "--anon-key", local.ANON_KEY, "--workspace-id", workspace, "--agent-token-file", credentialFile,
+    "--since", "2026-09-25T12:00:00", "--json"], {
+    cwd: resolve("."), encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: root },
+  });
+  assert.notEqual(naive.status, 0);
+  assert.match(naive.stderr, /2026-09-25T12:00:00\+00:00/);
+  const wrong = spawnSync(process.execPath, ["dist/cli.js", "inbox", "--url", local.API_URL,
+    "--anon-key", local.ANON_KEY, "--workspace-id", randomUUID(), "--agent-token-file", credentialFile,
+    "--since", milli, "--json"], {
+    cwd: resolve("."), encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: root },
+  });
+  assert.notEqual(wrong.status, 0);
+  assert.match(wrong.stderr, /workspace/i);
 });

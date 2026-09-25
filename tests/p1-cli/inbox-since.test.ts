@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { readDirectedInboxSince } from "../../src/cloud/signals.js";
+import { checkedSince, INBOX_SINCE_EXAMPLE, INBOX_SINCE_PAGE_CAP, readDirectedInboxSince, SignalSinceError, InboxSinceError } from "../../src/cloud/signals.js";
+import { assertInboxWorkspace, inboxMoreNotice } from "../../src/cli.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL = "22222222-2222-4222-8222-222222222222";
@@ -38,4 +39,64 @@ test("inbox --since drains beyond the default 50 and across a full cursor page",
   assert.equal(requests[0]?.limit, 100);
   assert.equal(requests[1]?.after_id, rows[99]!.id);
   assert.equal(requests[0]?.since, rows[0]!.created_at);
+});
+
+test("inbox --since refuses a naive timestamp and names an offset example", { timeout: 10_000 }, () => {
+  assert.throws(() => checkedSince("2026-09-25T12:00:00"), (error: unknown) =>
+    error instanceof SignalSinceError && error.message.includes(INBOX_SINCE_EXAMPLE));
+  assert.equal(checkedSince("2026-09-25T14:00:00+02:00"), "2026-09-25T12:00:00.000Z");
+});
+
+test("wrong agent workspace is a typed refusal, not an empty inbox", { timeout: 10_000 }, () => {
+  assert.doesNotThrow(() => assertInboxWorkspace(WORKSPACE, WORKSPACE));
+  assert.throws(() => assertInboxWorkspace(undefined, WORKSPACE), (error: unknown) =>
+    error instanceof Error && "code" in error && error.code === "inbox_workspace_mismatch");
+});
+
+test("inbox drain stops at the page cap and names a resumable since value", { timeout: 10_000 }, async () => {
+  assert.equal(INBOX_SINCE_PAGE_CAP, 10);
+  const many = Array.from({ length: (INBOX_SINCE_PAGE_CAP + 1) * 100 }, (_, index) => ({
+    ...rows[index % rows.length]!, id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
+    created_at: new Date(Date.UTC(2026, 8, 25, 1, 0, index)).toISOString(),
+  }));
+  let calls = 0;
+  let notice = "";
+  const fetcher = (async (_url: unknown, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { after_id?: string; limit: number };
+    calls += 1;
+    const start = request.after_id ? many.findIndex(row => row.id === request.after_id) + 1 : 0;
+    return new Response(JSON.stringify({ signals: many.slice(start, start + request.limit),
+      capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  const result = await readDirectedInboxSince(target, { kind: "agent", token: TOKEN }, {
+    workspaceId: WORKSPACE, inbox: true, since: many[0]!.created_at,
+  }, { fetcher, onTruncated: last => { notice = inboxMoreNotice(last.created_at); } });
+  assert.equal(calls, INBOX_SINCE_PAGE_CAP);
+  assert.equal(result.length, INBOX_SINCE_PAGE_CAP * 100);
+  assert.match(notice, /rerun with --since 2026-/);
+});
+
+test("inbox drain paging failures are typed", { timeout: 10_000 }, async () => {
+  const fetcher = (async () => new Response(JSON.stringify({ signals: [], capabilities: {} }), { status: 200 })) as typeof fetch;
+  await assert.rejects(readDirectedInboxSince(target, { kind: "agent", token: TOKEN }, {
+    workspaceId: WORKSPACE, inbox: true, since: rows[0]!.created_at,
+  }, { fetcher }), (error: unknown) => error instanceof InboxSinceError && error.code === "inbox_paging_unsupported");
+});
+
+test("inbox drain stops at its elapsed-time cap", { timeout: 10_000 }, async () => {
+  let now = 0;
+  let calls = 0;
+  let truncated = false;
+  const fetcher = (async () => {
+    calls += 1;
+    now = 20_000;
+    return new Response(JSON.stringify({ signals: rows.slice(0, 100),
+      capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+  }) as typeof fetch;
+  const result = await readDirectedInboxSince(target, { kind: "agent", token: TOKEN }, {
+    workspaceId: WORKSPACE, inbox: true, since: rows[0]!.created_at,
+  }, { fetcher, now: () => now, onTruncated: () => { truncated = true; } });
+  assert.equal(calls, 1);
+  assert.equal(result.length, 100);
+  assert.equal(truncated, true);
 });
