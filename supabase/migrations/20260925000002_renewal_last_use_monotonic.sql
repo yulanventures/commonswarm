@@ -208,4 +208,4 @@ ALTER FUNCTION swarm.agent_tokens_successor_fence() OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm.agent_tokens_successor_fence() FROM PUBLIC;
 
 COMMENT ON FUNCTION swarm.agent_tokens_successor_fence() IS
-  'Standing/timeboxed successor fence: validates predecessor lineage and liveness, grant revocation/active suspension/horizon/device binding, scope attenuation, short bearer TTL, and atomically records spend plus use.';
+  'Standing/timeboxed successor fence: validates predecessor lineage and liveness, grant revocation/active suspension/horizon/device binding, scope attenuation, short bearer TTL, and atomically records spend, plus use unless a newer use is already recorded.';

@@ -14,13 +14,13 @@ Source inventory: `rg -n 'last_used_at\s*=' supabase/migrations supabase/functio
 
 `tests/p1-server/renewal-last-use.test.ts` uses separate PostgreSQL connections. B locks the grant row; A starts a use and the test confirms its backend waits on B while holding a relation lock on `swarm.renewal_grants`. B records a later use and commits. The SQL test uses a different device and source for A, then requires A to succeed and leave B's timestamp, device, source, and new-host fields unchanged. A successor test checks the same stale-use rule while requiring `successors_used` to increment. A separate test starts the local served read edge under a temporary HOME and `SWARM_ENV=test`, repeats the lock order with an HTTP member read, and requires HTTP 200 and B's timestamp. The edge has a 60-second boot window, and all tests have bounded timeouts and process cleanup.
 
-HezLead ran the original race test at `e1cfd84c` on the reset local stack. It passed with the new body; reinstalling the old recorder body made it fail with `SWARM_RENEWAL_LAST_USE_REWOUND` (SQLSTATE 55000). The served-read assertion was after the SQL assertion, so that mutation did **not** measure a served HTTP 500. Fold 1 separates those assertions. With the Fold 1 SQL test, reverting only to the `GREATEST` body is expected to fail with `SWARM_RENEWAL_USE_WITHOUT_TIMESTAMP` (55000) when A supplies another device or source; this server mutation is reasoned until HezLead runs it. The source contract test verifies the migration body digests and release proof, and its GREATEST-only negative control fails the digest comparison.
+The lead (CSwarmDevLead) ran the original race test at `e1cfd84c` on the reset local stack. It passed with the new body; reinstalling the old recorder body made it fail with `SWARM_RENEWAL_LAST_USE_REWOUND` (SQLSTATE 55000). The served-read assertion was after the SQL assertion, so that mutation did **not** measure a served HTTP 500. Fold 1 separates those assertions. With the Fold 1 SQL test, reverting only to the `GREATEST` body is expected to fail with `SWARM_RENEWAL_USE_WITHOUT_TIMESTAMP` (55000) when A supplies another device or source; this server mutation is reasoned until HezLead runs it. The source contract test verifies the migration body digests and release proof, and its GREATEST-only negative control fails the digest comparison.
 
 ## Fold 1
 
 Opus and Grok both passed Round 1 with RIGOUR notes. Opus measured, in rolled-back local SQL probes, that the `GREATEST` body succeeds for a same-device/NULL-source stale use but raises `SWARM_RENEWAL_USE_WITHOUT_TIMESTAMP` for a different device or non-NULL source. Fold 1 changes both writers' use-update WHERE clauses to reject a row whose `last_used_at` exceeds the statement start. The successor writer still increments its spend counter; its own race test checks this. The SQL race now makes the field differences observable. The served-read race is its own test, with the blocked backend tied to the grant relation and B's PID. The boot deadline is 60 seconds. The catalog proof also checks each function's execution context and grants.
 
-HezLead's full gates at `e1cfd84c` on the reset local stack: `test:p1-server` 262/262, `npm test` 990/990, `test:p1-cli` 997/997, all other requested gates exit 0. These are **pre-Fold 1** results; the Fold 1 server tests and catalog proof have not been rerun against an installed Fold 1 migration. This lane has not applied a migration or contacted the box.
+The lead's full gates at `e1cfd84c` on the reset local stack: `test:p1-server` 262/262, `npm test` 990/990, `test:p1-cli` 997/997, all other requested gates exit 0. These are **pre-Fold 1** results; the Fold 1 server tests and catalog proof have not been rerun against an installed Fold 1 migration. This lane has not applied a migration or contacted the box.
 
 ## Initial lane gates at `e1cfd84c`
 
@@ -51,6 +51,29 @@ HezLead's full gates at `e1cfd84c` on the reset local stack: `test:p1-server` 26
 | `npm --prefix site run build` | 0 | 12 pages built. |
 | `git diff --check origin/main...HEAD` | 0 | No whitespace errors across the five branch commits. |
 
+## Lead measurements at d36e6d65 (reset local stack, 2026-09-25)
+
+- Full gates: `test:p1-server` 264/264 (with the three race tests), `npm test` 990/990, `test:p1-cli` 999/999, all
+  other gates exit 0.
+- Mutation to the round-1 GREATEST-only migration: "older SQL use with another device and source leaves the newer use
+  intact" and "older successor use preserves newer fields while still spending capacity" fail; the served-read test
+  passes (it uses one device). Restoring the fixed migration: 3/3.
+- Mutation to the ORIGINAL 20260904 recorder body: "served member read survives an older blocked use" fails with
+  HTTP 500 (the production symptom, reproduced end to end); the fixed body passes 3/3.
+- Review: Opus PASS and Grok PASS in round 1 (e1cfd84c) and round 2 (d36e6d65); the last commit is text only (this
+  record and one function comment).
+
+## Known limits (RIGOUR, recorded, not fixed here)
+
+- The stale-use predicate is `<=`: a use with exactly the same statement timestamp as the recorded one still enters the
+  update, and with a different device or source it raises `SWARM_RENEWAL_USE_WITHOUT_TIMESTAMP` (Grok round 2,
+  rolled-back probe). Today's callers send one device per grant and a NULL source, and equal microsecond timestamps
+  are rare; the next check succeeds.
+- An older use from another device is skipped and leaves no `new_host_at` trace (Opus round 2). Today's callers cannot
+  send another device for one grant.
+- `tests/p1-cli/renewal-last-use-contract.test.ts`: its "negative control" cannot fail, and its second test checks
+  another test file's text (Opus round 2); the digest and grant checks are the useful part.
+
 ## Not established
 
-The Fold 1 migration has not been applied to a database. Its revised server races and catalog proof remain unmeasured on the local stack. Whether production has the preceding `20260925000001` migration is unverified; the box has not been contacted or released. HezLead owns local-stack execution and review; only Anvil under HezLead may release a reviewed main SHA to the box. `pgrep` and `ps` cannot inspect processes in this sandbox (`sysmond service not found` and `operation not permitted`); the CLI gate's process session ended after the interrupt, and the server tests, which start a served function, were not run here.
+Whether production has the preceding `20260925000001` migration is unverified; the box has not been contacted or released. HezLead owns local-stack execution and review; only Anvil under HezLead may release a reviewed main SHA to the box. `pgrep` and `ps` cannot inspect processes in this sandbox (`sysmond service not found` and `operation not permitted`); the CLI gate's process session ended after the interrupt, and the server tests, which start a served function, were not run here.
