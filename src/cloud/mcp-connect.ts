@@ -84,6 +84,14 @@ async function checkedOrphan(path: string): Promise<{ principalId: string; raw: 
   if (!info.isFile() || info.isSymbolicLink() || info.size > ONBOARDING_MAX_FILE_BYTES) {
     throw new McpConnectError("profile_conflict", `The credential at ${file} is not a bounded regular file. Inspect the connection before retrying.`);
   }
+  // A killed wx fallback can leave its zero-length exclusive claim. A pending
+  // same-code attempt owns the retry; no credential bytes exist to preserve.
+  if (info.size === 0) {
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+      throw new McpConnectError("profile_conflict", `The credential at ${file} is not owned by the current user. Inspect the connection before retrying.`);
+    }
+    return null;
+  }
   let raw: string | null;
   try { raw = await readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES); }
   catch { throw new McpConnectError("profile_conflict", `The credential at ${file} cannot be read safely. Inspect the connection before retrying.`); }
@@ -160,21 +168,26 @@ async function wrongModeAncestor(path: string, inspect: (path: string) => Promis
   return null;
 }
 
-async function unownedAncestor(path: string, inspect: (path: string) => Promise<Stats> = lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined): Promise<string | null> {
+async function unownedAncestor(path: string, inspect: (path: string) => Promise<Stats> = lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined,
+  probeTraversal: (path: string) => Promise<void> = dir => access(dir, constants.X_OK)): Promise<string | null> {
   for (let dir = path; ; dir = dirname(dir)) {
     const info = await inspect(dir).catch(() => null);
-    if (info?.isDirectory() && !info.isSymbolicLink() && ownerUid !== undefined && info.uid !== ownerUid) return dir;
+    if (info?.isDirectory() && !info.isSymbolicLink() && ownerUid !== undefined && info.uid !== ownerUid) {
+      const denied = await probeTraversal(dir).then(() => false, isPermissionError);
+      if (denied) return dir;
+    }
     if (dirname(dir) === dir) break;
   }
   return null;
 }
 
 export async function classifyDirectoryFailure(path: string, error: unknown, inspect: (path: string) => Promise<Stats> = lstat,
-  ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined): Promise<never> {
+  ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined,
+  probeTraversal: (path: string) => Promise<void> = dir => access(dir, constants.X_OK)): Promise<never> {
   if (isPermissionError(error)) {
     const wrong = await wrongModeAncestor(path, inspect, ownerUid);
     if (wrong) throw directoryModeError(wrong);
-    const unowned = await unownedAncestor(path, inspect, ownerUid);
+    const unowned = await unownedAncestor(path, inspect, ownerUid, probeTraversal);
     if (unowned) throw new McpConnectError("connect_directory_unowned", `The directory at ${unowned} is not owned by the current user. Ask its owner to repair access, then rerun the same command.`);
   }
   if (isPermissionError(error)) throw new McpConnectError("connect_state_unavailable", `The connect directory at ${path} cannot be used safely. Inspect its access and rerun the same command.`);
@@ -324,6 +337,7 @@ export interface McpConnectOptions {
   saveProfile?: typeof saveAgentProfile;
   writeCompletion?: typeof writeSecureJsonFile;
   inspectCompletion?: (path: string) => Promise<Stats>;
+  checkProfileAccess?: typeof access;
   terminal?: HiddenTerminal;
   removeEmptyDirectory?: typeof rmdir;
 }
@@ -528,6 +542,12 @@ async function completedProfileAt(path: string): Promise<boolean> {
   }
 }
 
+async function repairableProfileAt(path: string): Promise<boolean> {
+  const info = await lstat(path).catch(() => null);
+  return info !== null && info.isFile() && !info.isSymbolicLink() && info.size <= ONBOARDING_MAX_FILE_BYTES &&
+    (info.mode & 0o777) === 0o600 && (typeof process.getuid !== "function" || info.uid === process.getuid());
+}
+
 /** Strategist ruling (2026-09-24): the printed lines name the profile path only; no id, code or token. */
 export function renderMcpConnect(result: McpConnectResult): string {
   return `Profile: ${result.profile}\n${result.install}\n`;
@@ -585,7 +605,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       throw new McpConnectError("connect_state_unavailable", `The connect directory at ${profileDir} cannot be used safely. Inspect the path and rerun the same command.`);
     }
     await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => { await cleanConnectTemps(path); });
-    await access(dirname(path), constants.W_OK);
+    try { await (options.checkProfileAccess ?? access)(dirname(path), constants.W_OK); }
+    catch (error) { await classifyDirectoryFailure(dirname(path), error); }
     const pending = await readPending(path);
     if (pending) {
       const credential = join(profileDir, CONNECT_PROFILE_FILES.credential);
@@ -596,8 +617,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     }
     // A pending record is the sole exception for an orphan credential.
     if (!pending && await pathExists(path)) {
-      await completedProfileAt(path);
-      throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+      if (await completedProfileAt(path) || !await repairableProfileAt(path) || !await readComplete(path)) {
+        throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+      }
     }
     if (!pending && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
       throw new McpConnectError("profile_exists", "This directory holds a credential without a profile. Keep the credential and use a new --profile path for a new agent.");
@@ -622,8 +644,10 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       await cleanConnectTemps(path);
       const current = await readPending(path);
       const complete = await readComplete(path, current !== null, options.inspectCompletion);
-      if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) && !await pathExists(path)) {
-        const state = `This directory has ${await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`}, no profile.json, and ${completePath(path)}.`;
+      if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
+          (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
+        const profileState = await pathExists(path) ? "damaged profile.json" : "no profile.json";
+        const state = `This directory has ${await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`}, ${profileState}, and ${completePath(path)}.`;
         const newPath = `Use --profile <new path> for a new agent.`;
         if (!complete.workspace_id || !complete.anon_key || !complete.principal_id || complete.anon_key !== options.target.anonKey) {
           throw new McpConnectError("connect_completion_incomplete", `${state} The completion record cannot rebuild the profile. ${newPath}`);
@@ -641,7 +665,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
           workspace_id: complete.workspace_id, principal_id: orphan.principalId,
           credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
-        await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
+        if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
+        else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
         return connectedResult(path, orphan.principalId);
       }
       if ((!current && await pathExists(path)) || (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))) {

@@ -220,7 +220,8 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     if (refuseExisting && existingCredential !== null && !allowOrphanCredential) {
       throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
     }
-    if (existingCredential !== null && existingCredential !== JSON.stringify(connection.credential)) {
+    const unfinishedClaim = refuseExisting && allowOrphanCredential && existingCredential === "";
+    if (existingCredential !== null && existingCredential !== JSON.stringify(connection.credential) && !unfinishedClaim) {
       if (!refuseExisting || !allowOrphanCredential || revokedOrphanPrincipalId !== connection.principal_id) {
         throw new AgentSetupError("profile_conflict", "The existing credential differs from the resumed attempt. Inspect the connection before retrying.");
       }
@@ -232,7 +233,11 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
       // a fresh token for this principal. Replace only that orphan, atomically.
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }
-    if (existingCredential === null && refuseExisting) {
+    if (unfinishedClaim) {
+      // Only mcp connect passes allowOrphanCredential after validating its pending
+      // same-code attempt. Replace the empty claim atomically after register succeeds.
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    } else if (existingCredential === null && refuseExisting) {
       await exclusiveWrite(profile.credential_file, JSON.stringify(connection.credential));
     } else if (existingCredential === null) {
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));

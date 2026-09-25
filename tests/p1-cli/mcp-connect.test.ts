@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { mcpFailureCode } from "../../src/cli.js";
+import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
@@ -82,6 +82,101 @@ test("Fold 9 unsupported hard links use exclusive final creation and recover a w
   } finally { await f.close(); }
 });
 
+test("Fold 10 killed wx claims and fallback temps recover the same pending connect", { timeout: 20000 }, async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  let posts = 0;
+  const fetcher: typeof fetch = async () => {
+    posts++;
+    return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL,
+      run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
+  };
+  try {
+    for (const killPoint of ["claim", "mid-temp"] as const) {
+      const path = join(f.root, killPoint, "profile.json");
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher, saveProfile: async () => { throw new Error("interrupted save"); } }), { code: "register_outcome_unknown" });
+      const credential = join(dirname(path), "credential.json");
+      const storageUrl = new URL("../../src/cloud/storage.ts", import.meta.url).href;
+      const script = `import { writeSecureJsonFileExclusive } from ${JSON.stringify(storageUrl)};
+        let writes = 0;
+        await writeSecureJsonFileExclusive(process.argv[1], '{}', async (handle, data) => {
+          writes++;
+          if (writes === 2) {
+            if (process.argv[2] === 'mid-temp') await handle.writeFile('{');
+            process.stdout.write('ready\\n');
+            await new Promise(() => {});
+          }
+          await handle.writeFile(data);
+        }, async () => { throw Object.assign(new Error('no links'), { code: 'EPERM' }); });`;
+      child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential, killPoint],
+        { stdio: ["ignore", "pipe", "pipe"] });
+      await once(child.stdout!, "data");
+      assert.equal((await readFile(credential)).length, 0, "the claimed path stays empty until rename");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      child = null;
+      assert.equal((await readFile(credential)).length, 0);
+      await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher });
+      assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+      assert.equal((await readProfileCredential(await readAgentProfile(path))).token, TOKEN);
+      assert.deepEqual((await readdir(dirname(path))).filter(name => name.endsWith(".tmp")), []);
+    }
+    assert.equal(posts, 4);
+  } finally {
+    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    await f.close();
+  }
+});
+
+test("Fold 10 two wx claimants publish one complete credential", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const file = join(f.root, "claimants", "credential.json");
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    const noLinks = async () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); };
+    const results = await Promise.allSettled([1, 2].map(writer =>
+      writeSecureJsonFileExclusive(file, JSON.stringify({ writer }), undefined, noLinks)));
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected" && (result.reason as { code?: string }).code === "EEXIST").length, 1);
+    assert.ok([1, 2].includes(JSON.parse(await readFile(file, "utf8")).writer));
+    assert.deepEqual((await readdir(dirname(file))).filter(name => name.endsWith(".tmp")), []);
+  } finally { await f.close(); }
+});
+
+test("Fold 10 changed wx claim preserves an intervening credential", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const file = join(f.root, "changed-claim", "credential.json");
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    let writes = 0;
+    await assert.rejects(writeSecureJsonFileExclusive(file, '{"writer":"first"}', async (handle, contents) => {
+      writes++;
+      await handle.writeFile(contents);
+      if (writes === 2) {
+        await unlink(file);
+        await writeFile(file, '{"writer":"intervening"}', { mode: 0o600 });
+      }
+    }, async () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); }), { code: "EEXIST" });
+    assert.equal((await readFile(file, "utf8")), '{"writer":"intervening"}');
+    assert.deepEqual((await readdir(dirname(file))).filter(name => name.endsWith(".tmp")), []);
+  } finally { await f.close(); }
+});
+
+test("Fold 10 explicit profile repairs an old interrupted rebuild without POST", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "rebuild-kill", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    for (const partial of ["{", ""]) {
+      await writeFile(path, partial, { mode: 0o600 });
+      await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+      assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    }
+    assert.equal(f.calls(), 1, "the completion record repairs the profile locally");
+  } finally { await f.close(); }
+});
+
 test("Fold 9 permission diagnosis covers outside-home ancestors and unclassified denial", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
@@ -100,19 +195,50 @@ test("Fold 9 permission diagnosis covers outside-home ancestors and unclassified
       assert.ok(String(error).includes(dirname(outside)));
       return true;
     });
-    await assert.rejects(classifyDirectoryFailure(outside, denied, inspect, ownerUid), error => {
+    await assert.rejects(classifyDirectoryFailure(outside, denied, inspect, ownerUid,
+      async file => { if (file === dirname(outside)) throw denied; }), error => {
       assert.equal((error as { code: string }).code, "connect_directory_unowned");
       assert.ok(String(error).includes(dirname(outside)));
       return true;
     });
-    await assert.rejects(classifyDirectoryFailure(outside, denied, async file => Object.assign(await stat(file), { uid: ownerUid }), ownerUid), error => {
+    await assert.rejects(classifyDirectoryFailure(outside, denied,
+      async file => Object.assign(await stat(file), { uid: file === outside ? ownerUid : 0 }), ownerUid), error => {
       assert.equal((error as { code: string }).code, "connect_state_unavailable");
       assert.match(String(error), /Inspect its access/);
       return true;
     });
-    for (const code of ["EACCES", "EPERM"]) {
-      assert.equal(mcpFailureCode(Object.assign(new Error("permission denied"), { code }), "connect"), "connect_state_unavailable");
+    for (const systemBase of ["/Users", "/home"]) {
+      const fakePath = join(systemBase, "test-user", "project");
+      await assert.rejects(classifyDirectoryFailure(fakePath, denied, async file => {
+        const info = await stat(outside);
+        const systemDirectory = file === "/" || file === systemBase;
+        return Object.assign(info, { uid: systemDirectory ? 0 : ownerUid,
+          mode: (info.mode & ~0o777) | (systemDirectory ? 0o755 : 0o700) });
+      }, ownerUid, async () => undefined), { code: "connect_state_unavailable" });
     }
+    for (const code of ["EACCES", "EPERM"]) {
+      const raw = Object.assign(new Error("raw permission denied"), { code });
+      assert.equal(mcpFailureCode(raw, "connect"), "connect_state_unavailable");
+      assert.match(mcpFailureMessage(raw, "connect"), /Inspect its access and rerun the same command/);
+      assert.doesNotMatch(mcpFailureMessage(raw, "connect"), /raw permission denied/);
+    }
+  } finally { await f.close(); }
+});
+
+test("Fold 10 profile access probe classifies both permission codes before POST", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "access-probe", "profile.json");
+    for (const code of ["EACCES", "EPERM"]) {
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher: f.fetcher, checkProfileAccess: async () => { throw Object.assign(new Error("raw probe failure"), { code }); } }), error => {
+        assert.equal((error as { code: string }).code, "connect_state_unavailable");
+        assert.match(String(error), /Inspect its access and rerun the same command/);
+        assert.doesNotMatch(String(error), /raw probe failure/);
+        return true;
+      });
+    }
+    assert.equal(f.calls(), 0);
   } finally { await f.close(); }
 });
 
@@ -837,7 +963,9 @@ test("Fold 8 ancestor diagnosis skips owned 0755 and names an unowned directory 
     };
     const ownerUid = process.getuid?.() ?? 501;
     assert.notEqual(ownerUid, 0);
-    await assert.rejects(classifyDirectoryFailure(foreign, Object.assign(new Error("access denied"), { code: "EACCES" }), inspect, ownerUid), error => {
+    const denied = Object.assign(new Error("access denied"), { code: "EACCES" });
+    const probe = async (file: string) => { if (file === foreign) throw denied; };
+    await assert.rejects(classifyDirectoryFailure(foreign, denied, inspect, ownerUid, probe), error => {
       assert.equal((error as { code: string }).code, "connect_directory_unowned");
       assert.match(String(error), new RegExp(foreign));
       assert.match(String(error), /not owned by the current user/);
@@ -845,7 +973,7 @@ test("Fold 8 ancestor diagnosis skips owned 0755 and names an unowned directory 
       return true;
     });
     await chmod(foreign, 0o000);
-    await assert.rejects(classifyDirectoryFailure(foreign, Object.assign(new Error("access denied"), { code: "EACCES" }), inspect, ownerUid), { code: "connect_directory_unowned" });
+    await assert.rejects(classifyDirectoryFailure(foreign, denied, inspect, ownerUid, probe), { code: "connect_directory_unowned" });
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; await f.close(); }
 });
 

@@ -9916,11 +9916,19 @@ export function mcpFailureCode(error: unknown, subcommand: string | undefined): 
     : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
 }
 
+export function mcpFailureMessage(error: unknown, subcommand: string | undefined): string {
+  if (subcommand === "connect" && !(error instanceof AgentSetupError) &&
+      ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "")) {
+    return "The connect state cannot be used safely. Inspect its access and rerun the same command.";
+  }
+  return safeError(error);
+}
+
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
     if (selected?.args.positionals[0] === "mcp") {
-      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${safeError(error)}\n`);
+      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${mcpFailureMessage(error, selected.args.positionals[1])}\n`);
       process.exitCode = 1;
       return;
     }
