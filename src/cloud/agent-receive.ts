@@ -198,15 +198,24 @@ async function installReceiveHooks(binding: ReceiveBinding, command: string): Pr
   return file;
 }
 
+export function parseReceiveMode(value: string): (typeof RECEIVE_MODES)[number] {
+  if (!(RECEIVE_MODES as readonly string[]).includes(value)) throw new AgentSetupError("receive_mode_invalid", `--mode must be ${RECEIVE_MODES.join(" or ")}.`);
+  return value as (typeof RECEIVE_MODES)[number];
+}
+
+export function parseReceiveProvider(value: string): (typeof RECEIVE_PROVIDERS)[number] {
+  if (!(RECEIVE_PROVIDERS as readonly string[]).includes(value)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+  return value as (typeof RECEIVE_PROVIDERS)[number];
+}
+
 export async function configureAgentReceive(options: {
   profilePath: string; mode: string; provider?: string; hostSessionId?: string; cwd?: string;
   grokBotAgentId?: string; gatewayPaths?: readonly string[];
   previewChannel?: boolean; execution: { command: string; args: string[] };
 }) {
   const profile = privatePath(options.profilePath);
-  if (!(RECEIVE_MODES as readonly string[]).includes(options.mode)) throw new AgentSetupError("receive_mode_invalid", `--mode must be ${RECEIVE_MODES.join(" or ")}.`);
-  const provider = options.provider ?? "instructions";
-  if (!(RECEIVE_PROVIDERS as readonly string[]).includes(provider)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+  parseReceiveMode(options.mode);
+  const provider = parseReceiveProvider(options.provider ?? "instructions");
   if (options.grokBotAgentId !== undefined && !ONBOARDING_UUID.test(options.grokBotAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID.");
   if (options.grokBotAgentId !== undefined && provider !== "grok-bot") throw new AgentSetupError("grok_bot_agent_id_unsupported", "Use --grok-bot-agent-id only with --provider grok-bot.");
   const openedProfile = await readAgentProfile(profile, options.hostSessionId);

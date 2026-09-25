@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { MCP_TOOLS } from "../../src/mcp/tools.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -10,12 +9,19 @@ import {
   AGENT_PROFILE_COMMANDS,
   agentToolsForTransport,
   commandHelpLines,
+  BOOLEAN_FLAGS,
+  KNOWN_FLAGS,
+  parseCommandOptions,
   usage,
   type AgentCommandEntry,
   type AgentCommandGroup,
 } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE } from "../../src/cloud/agent-onboarding-contract.js";
 import { onboardingUsage } from "../../src/onboarding-cli.js";
+import { CHANNEL_PURPOSE_MAX } from "../../src/cloud/channels.js";
+import { listenerRouteUsage } from "../../src/listener/index.js";
+import { parseSessionMode, parseSessionProvider } from "../../src/cloud/session-cli.js";
+import { parseReceiveMode, parseReceiveProvider } from "../../src/cloud/agent-receive.js";
 
 type EntryRow = { key: string; entry: AgentCommandEntry };
 
@@ -73,10 +79,11 @@ test("generated help covers every visible command, variant, and accepted flag", 
     if (!entry.visible) continue;
     const [verb, action] = key.split(".");
     const section = commandHelpLines(verb, action);
+    const namedFlags = new Set([...section.matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
     assert.ok(section.startsWith("  cswarm "), `${key} has no synopsis`);
     assert.ok(section.includes(entry.description), `${key} has no description`);
     for (const flag of entry.flags) {
-      assert.ok(section.includes(`--${flag}`), `${key} help omits --${flag}`);
+      assert.ok(namedFlags.has(flag), `${key} help omits --${flag}`);
     }
     for (const variant of Object.values(entry.variants)) {
       assert.ok(variant.help.length > 0, `${key}.${variant.id} has no variant synopsis`);
@@ -92,17 +99,60 @@ test("generated help covers every visible command, variant, and accepted flag", 
   assert.equal(all, expected.join("\n"), "help has a command outside the table or omits one");
 });
 
-test("each visible verb and action answers scoped --help without contacting a deployment", { timeout: 60_000 }, () => {
+test("rendered flags exactly match in-process command parser acceptance", { timeout: 10_000 }, () => {
+  const candidates = new Set([...KNOWN_FLAGS, "unrendered-control"]);
+  for (const { entry } of entries(true)) {
+    for (const flag of [...entry.flags, ...(entry.cliOnlyFlags ?? [])]) candidates.add(flag);
+  }
   for (const { key, entry } of entries()) {
     if (!entry.visible) continue;
     const path = key.split(".");
-    const run = spawnSync(process.execPath, ["dist/cli.js", ...path, "--url", "http://127.0.0.1:9", "--help"], {
-      encoding: "utf8", timeout: 5_000,
-    });
-    assert.equal(run.status, 0, `${key}: ${run.stderr}`);
-    assert.match(run.stdout, /^  cswarm /m, `${key} has no synopsis`);
-    assert.ok(run.stdout.includes(entry.description), `${key} has no description`);
+    const section = commandHelpLines(path[0], path[1]);
+    const rendered = new Set([...section.matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
+    for (const flag of new Set([...candidates, ...rendered])) {
+      const tokens = [...path, `--${flag}`, ...(BOOLEAN_FLAGS.has(flag) ? [] : ["test-value"])];
+      let accepted = true;
+      try { parseCommandOptions(tokens); } catch { accepted = false; }
+      assert.equal(accepted, rendered.has(flag), `${key} --${flag} drift`);
+    }
   }
+});
+
+test("each enumerated help flag uses its command's enforcement parser", { timeout: 10_000 }, () => {
+  const parsers: Record<string, Record<string, (value: string) => unknown>> = {
+    "session.start": { mode: parseSessionMode, provider: parseSessionProvider },
+    "session.status": { mode: parseSessionMode, provider: parseSessionProvider },
+    "session.stop": { mode: parseSessionMode, provider: parseSessionProvider },
+    "receive.configure": { mode: parseReceiveMode, provider: parseReceiveProvider },
+  };
+  for (const [key, flags] of Object.entries(parsers)) {
+    const [verb, action] = key.split(".");
+    const section = commandHelpLines(verb, action);
+    for (const [flag, parse] of Object.entries(flags)) {
+      const match = section.match(new RegExp(`--${flag} (?:<)?([a-z|-]+)(?:>)?`));
+      assert.ok(match, `${key} has no --${flag} enumeration`);
+      const values = match[1]!.split("|");
+      for (const value of values) assert.doesNotThrow(() => parse(value), `${key} --${flag} ${value}`);
+      assert.throws(() => parse("not-rendered-control"), `${key} --${flag} accepted an unrendered value`);
+    }
+  }
+});
+
+test("route and purpose guidance reads enforcement constants", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.match(source, /\[--route \$\{listenerRouteUsage\(\)\}\]/);
+  assert.match(source, /purpose: at most \$\{CHANNEL_PURPOSE_MAX\} characters/);
+  assert.ok(commandHelpLines("listen", "start").includes(`--route ${listenerRouteUsage()}`));
+  assert.ok(commandHelpLines("channel", "create").includes(`${CHANNEL_PURPOSE_MAX} characters`));
+});
+
+test("inbox guidance has its own heading before credential selection", { timeout: 10_000 }, () => {
+  const output = usage();
+  const inbox = output.indexOf("Inbox paging:");
+  const since = output.indexOf("inbox --since", inbox);
+  const limit = output.indexOf("--limit may omit", inbox);
+  const credentials = output.indexOf("Credential selection for command/dogfood:");
+  assert.ok(inbox >= 0 && inbox < since && since < limit && limit < credentials);
 });
 
 test("every multi-variant entry has help for each selected command shape", { timeout: 10_000 }, () => {
@@ -318,6 +368,7 @@ test("main has one direct lookup and only allowlisted meta and selected-entry st
       throw new UsageError(\`unknown command: \${verb}\`);
     }
     const entry = selectCommandEntry(root, args);
+    args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
     const variant = selectCommandVariant(entry, args);
     selectedCommandContext = { entry, variant, args };
     await args.expandAgentProfile(entry.profile, entry.hostSessionId);

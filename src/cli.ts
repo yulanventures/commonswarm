@@ -397,7 +397,7 @@ import {
   startManagedSession,
   stopManagedSession,
 } from "./cloud/session-cli.js";
-import { SESSION_MODES } from "./cloud/session-contract.js";
+import { SESSION_MODES, SESSION_PROVIDERS } from "./cloud/session-contract.js";
 import { AgentSessionManager } from "./cloud/session-manager.js";
 import { AgentSessionClient } from "./cloud/session-client.js";
 import { classifyClaudeCanaryFailure } from "./listener/claude-canary-classify.js";
@@ -814,6 +814,10 @@ export class Arguments {
         `too many positional arguments: expected ${positionals}, received ${this.positionals.length}`,
       );
     }
+    this.assertAcceptedFlags(allowedFlags);
+  }
+
+  assertAcceptedFlags(allowedFlags: readonly string[]): void {
     const allowed = new Set(allowedFlags);
     for (const name of this.flags.keys()) {
       if (!allowed.has(name)) throw new Error(`unknown option: --${name}`);
@@ -865,11 +869,14 @@ const TASK_FLAGS = [
 class UsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
+export const inboxMoreNotice = (last: string): string => `More inbox messages may remain; rerun with --since ${last}.`;
 
 /** Non-command guidance appended after the command table's generated synopses. */
-const USAGE_GUIDANCE = `Credential selection for command/dogfood:
-  inbox --since pages every matching directed signal for an agent unless --limit is set.
+const USAGE_GUIDANCE = `Inbox paging:
+  inbox --since pages matching directed signals for an agent unless --limit is set.
   ${INBOX_LIMIT_NOTICE}
+
+Credential selection for command/dogfood:
   default                 refresh the human login from secure storage
   --agent-token-file      read the credential from an owned 0600 regular file in an owned
                           0700 directory. The path may appear in argv; the secret never does.
@@ -9317,12 +9324,16 @@ function selectedVariants<const Variants extends Readonly<Record<string, AgentCo
 const HELP_FLAG_VALUES: Readonly<Record<string, string>> = {
   profile: "<absolute-path>", url: "<url>", "anon-key": "<key>",
   "workspace-id": "<uuid>", "host-session-id": "<id>",
-  since: "<timestamp>", limit: "<n>", mode: `<${RECEIVE_MODES.join("|")}>`,
-  provider: `<${RECEIVE_PROVIDERS.join("|")}>`,
+  since: "<timestamp>", limit: "<n>",
 };
 
-function helpFlag(flag: string): string {
-  return BOOLEAN_ARGUMENT_FLAGS.has(flag) ? `--${flag}` : `--${flag} ${HELP_FLAG_VALUES[flag] ?? "<value>"}`;
+function helpFlag(key: string, flag: string): string {
+  const enumeration = key === "receive.configure"
+    ? flag === "mode" ? RECEIVE_MODES : flag === "provider" ? RECEIVE_PROVIDERS : undefined
+    : key.startsWith("session.")
+    ? flag === "mode" ? SESSION_MODES : flag === "provider" ? SESSION_PROVIDERS : undefined
+    : undefined;
+  return BOOLEAN_ARGUMENT_FLAGS.has(flag) ? `--${flag}` : `--${flag} ${enumeration ? `<${enumeration.join("|")}>` : HELP_FLAG_VALUES[flag] ?? "<value>"}`;
 }
 
 /** Every synopsis starts with a variant declared in AGENT_COMMANDS and includes its accepted flags. */
@@ -9344,10 +9355,21 @@ export function commandHelpLines(verb?: string, action?: string): string {
       const shown = new Set(Object.values(entry.variants).flatMap(variant => variant.help)
         .flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
       const extra = [...entry.flags, ...(entry.cliOnlyFlags ?? [])].filter(flag => !shown.has(flag));
-      if (extra.length > 0) lines.push(`    Additional options: ${extra.map(helpFlag).join(", ")}`);
+      if (extra.length > 0) lines.push(`    Additional options: ${extra.map(flag => helpFlag(`${name}${subaction ? `.${subaction}` : ""}`, flag)).join(", ")}`);
     }
   }
   return lines.join("\n");
+}
+
+/** The command parser's option gate, shared by dispatch and in-process drift tests. */
+export function parseCommandOptions(tokens: string[]): AgentCommandEntry {
+  const args = new Arguments(tokens);
+  const verb = args.positionals[0];
+  const root = verb && Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
+  if (!root) throw new Error("unknown command");
+  const entry = selectCommandEntry(root, args);
+  args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
+  return entry;
 }
 
 function helpFor(verb: string | undefined, action: string | undefined): string {
@@ -9584,7 +9606,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runHook",
   }),
   listen: group({
-    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "grok-executable", "opencode-executable", "claude-executable", "codex-executable", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route main] [--allow-unattended] [--foreground] [--json]"] }),
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "grok-executable", "opencode-executable", "claude-executable", "codex-executable", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]`] }),
     status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
     stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
     canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] }),
@@ -9595,7 +9617,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => {
     const humanOnly = action === "enable" || action === "disable" || action === "recover";
-    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: humanOnly ? [...humanFlags, "principal-id"] : [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [`cswarm session ${action}`] })];
+    const synopsis = action === "start"
+      ? `cswarm session start --mode ${SESSION_MODES.join("|")} --provider ${SESSION_PROVIDERS.join("|")} --host-session-id <id> --workspace-id <uuid> [--host-label <label>] [--session-context <path>]`
+      : action === "status" || action === "stop"
+      ? `cswarm session ${action} --session-context <path> [--profile <absolute-path>] [--workspace-id <uuid>]`
+      : `cswarm session ${action} --principal-id <uuid> --workspace-id <uuid>`;
+    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: humanOnly ? [...humanFlags, "principal-id"] : [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [synopsis] })];
   })), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 14,
@@ -9635,7 +9662,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
   feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback \"<text>\" --kind bug|idea|friction [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   channel: group({
-    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most 500 characters"] }),
+    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
     ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
@@ -9821,6 +9848,7 @@ async function main(): Promise<void> {
     throw new UsageError(`unknown command: ${verb}`);
   }
   const entry = selectCommandEntry(root, args);
+  args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
   const variant = selectCommandVariant(entry, args);
   selectedCommandContext = { entry, variant, args };
   await args.expandAgentProfile(entry.profile, entry.hostSessionId);
