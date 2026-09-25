@@ -26,11 +26,17 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
   release request (SHA = main tip at that time; migration 20260925000001; edges command + read; the `search_path`
   preflight for Anvil; section-6 steps in `docs/evidence/2026-09-25-item-g-lane1/LANE.md`), window probably
   2026-09-25 after the 21:30Z recycle.
-- **G lane 2a** (client only: idle orphan exit 74, SIGINT/SIGTERM 130/143 with a runnable restart command, resume
-  parent evidence): Opus PASS + Grok PASS on 700f2927 (round 3); landing in progress (worktree `land-g2a`, merge
-  3ad8eb9f on ead907c7 — redo the merge on the current main before pushing).
-- G lane 2b (server wake lease) brief is DRAFTED in the lead's scratchpad (`itemG2b/BRIEF-draft.md`), with two open
-  questions for the Strategist/HezLead (per-seat lease vs H0 listener; renew cadence vs box load).
+- **G lane 2a LANDED** on main (merge 8245a43e, record 7c0bee1e): client only (idle orphan exit 74, SIGINT/SIGTERM
+  130/143 with a runnable restart command, resume parent evidence). Record:
+  `docs/evidence/2026-09-24-item-g-lane2a/LANDING.md` (live control with a positive control; three low follow-ups).
+- **G box release REQUESTED** from HezLead (CommonSwarm ask d2288912 + native message, ~00:50Z): SHA
+  7c0bee1e750450f305bab5ada68fb8f813a10c83, KIND_LIST `edge stack`, CHANGED_FUNCTIONS `command read`, migration
+  20260925000001, Anvil `search_path` preflight; gate evidence (untracked, 0600) under
+  `docs/evidence/2026-09-25-release-7c0bee1e7504/` and `2026-09-26-release-7c0bee1e7504/`. After the box: release
+  0.1.78 (G lanes 1 + 2a) from main, deploy the site, and run the stale-mark live control on production.
+- G lane 2b (server wake lease) brief is DRAFTED in the lead's scratchpad (`itemG2b/BRIEF-draft.md`); its two open
+  questions went to the Strategist in ask 1b468b73 (per-seat lease vs H0 listener; renew cadence vs box load).
+- Next in the queue while those wait: L (exactly-once file_put over MCP), M, K, E, F.
 
 ## Update 2026-09-24 ~22:00Z: item G lane 1 landed on main (e3076c7a) — waiting for its box release
 
