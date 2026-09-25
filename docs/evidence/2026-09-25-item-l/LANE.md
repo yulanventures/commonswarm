@@ -113,3 +113,47 @@ The commit handler checks that exact `storage_path` before changing the pending 
 The local-stack server test, production v1.77.5 Storage refusal shape, and a final process
 inventory (`pgrep` returned `sysmond service not found`) are not established here. The timeout wrapper killed its
 process group. No production host, real workspace, migration, or local stack lifecycle command was used.
+
+## Fold 2 — Round 1 rulings (2026-09-24)
+
+Starting point `444db2b7`. Opus's two production findings and all rigour findings, plus Grok's prune and CLI notes, were read in full. The lead had already measured the server file-artifacts test at 22/22 on the local stack at that SHA; this fold did not run or change the stack.
+
+| Ruling | Change | Regression and reverted-fix probe |
+|---|---|---|
+| P1 | `src/mcp/errors.ts` owns file refusal sentences and next steps. Missing bytes, transport, 429, and 5xx advise retrying the same `request_id`; even an `unknown` result takes its next step from that table. Argument refusals name an argument fix; actual 401/403 access loss names a person. | `every typed file refusal has an owned next step` checks each put refusal code and status; MCP 5xx and dropped-socket tests check the generated step on `unknown`. Removing the missing-bytes entry: exit 1, 0/1. The 5xx branch is separately killed below. |
+| P2 | Terminal commit codes are persisted as `refused` with code and status. A same-id retry throws that code before create or PUT. Missing bytes, HTTP 429, and access refusals remain retryable. | `terminal commit refusal replays without any network or PUT` checks the saved phase, exact code, and unchanged create/PUT/commit counts; removing the early refusal check: exit 1, 0/1. Rate-limit and restored-access retries each passed 1/1; classing access loss as terminal: exit 1, 0/1. |
+| R3 | Prune removes malformed or wrong-mode records under the lock and reports each removed record once to stderr. Other request IDs continue. | `bad JSON and wrong mode records do not block another request` checks both errors, removal, two warnings total, and another fresh request; restoring a throwing prune: exit 1, 0/1. |
+| R4 | MCP `file_put`/`brain_put` lstat, resolve, open nonblocking, fstat, and cap the file before reading. A regular file only; missing, directory, FIFO, and FIFO symlink are typed argument errors. Resolved paths inside the CLI state roots, profile directory, or credential file are refused. | `MCP path preflight refuses nonfiles and private state before network` checks each path plus a positive regular-file control and zero file commands on refusals. Removing private-root checking or the separate credential-file check: each exit 1, 0/1. |
+| R5 | Local name conflict comparison now ignores case, matching the server. Derived IDs and record keys retain workspace and principal. The created phase is persisted. File create 5xx remains `unknown`. | `if_version and name case`, `workspace and principal both namespace`, `created phase is durable`, and `MCP 5xx file create reports unknown` pass. The five surviving Opus mutations were rerun: if-version comparison off, derived ID seat removed, record key seat removed, created write removed, and 5xx-to-typed; **each exit 1, 0/1**. |
+| R6 | `request_id_conflict` tells the model new content needs a new `request_id`; the precondition refusal says to reread the topic and use a NEW request ID. | The typed-refusal test checks both. Restoring the old conflict step: exit 1, 0/1. |
+| R7 | CLI credential resolution again precedes file reading when `--request-id` is absent. Legacy size and extension messages are retained. JSON conflicts with `--request-id` emit `{code:"request_id_conflict"}` on stdout for both puts. | Legacy file and brain order tests, legacy file copy checks, and file/brain JSON conflict tests pass. Moving file or brain credential resolution after the read, or disabling the JSON conflict branch: each exit 1, 0/1. |
+| R8 | Command entries explicitly mark MCP-served tools; the agreement test compares the complete marked set with `MCP_TOOLS`. Removed the stale assertion text. | `file and brain puts are model tools on the stdio transport`; unmarking `file_put`: exit 1, 0/1. |
+| R9 | `replayed` now requires a previously saved completed commit. Storage's duplicate PUT proves bytes existed, but not a prior commit; a successful commit in the current call reports `committed`. The server commit response has no replay marker. | Killed-after-create and duplicate-PUT cases expect `committed`, while a saved committed record expects `replayed`. Restoring the prior-record-based label: exit 1, 0/1. |
+| R10 | Phase writes skip any earlier phase; an uploaded record never becomes created or putting again. | `an uploaded resume record never writes an earlier phase`; removing the phase guard: exit 1, 0/1. |
+| R11 | Prune exempts the record being checked for this request ID at the 200-record bound. | `prune protects the current request record at the 200-record bound`; removing the exemption: exit 1, 0/1. |
+
+All mutation probes changed one source condition at a time, ran the named focused test with a process timeout, and restored the source. The final focused file/brain/exact-put/MCP/command-table run passed **107/107**. `npm run check:tests` passed after the final source and test edits.
+
+### Fold 2 gates
+
+All commands used an isolated temporary HOME. Logs are local scratch artifacts under `/private/tmp/iteml-*` and are not committed.
+
+| Gate | Exit and count |
+|---|---|
+| `npm run build` | 0; TypeScript build. |
+| `env -u FORCE_COLOR npm test` | 1; 990 tests, 988 pass, 2 fail. Both failures are sandbox `spawn EPERM` for real `ps` in resume tests. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | 1; final exact run: 997 tests, 994 pass, 3 fail. All three failures are sandbox `ps` spawn `EPERM` in resume/process-table/whoami tests. Every Item L test passed. |
+| `npm run test:p1-cli -- --test-concurrency=4 --test-timeout=30000` | 124; bounded follow-up after the restored-access test, with 221 passing TAP lines and no suite total before the 240-second process-group timeout. No test assertion failure appeared before termination. The final focused Item L suite passed 107/107 separately. |
+| `npm run check:tests` | 0; rerun after final test additions. |
+| `npm run check:edge` | 0. |
+| `npm run build:command-core` and generated protocol diff | 0 and 0; bundle unchanged. |
+| `bash scripts/build-release.sh` | 0; single-file artifact built and version-checked. |
+| `npm --prefix site run build` | 0; 12 pages. |
+| `git diff --check origin/main...HEAD` | 0. |
+
+### Not established in Fold 2
+
+- No production Storage behavior was measured. The local-stack server test's 22/22 is the lead's pre-fold measurement at `444db2b7`; the server test was not rerun in this worktree. No production host or real workspace was contacted, and no migration or local-stack lifecycle command ran.
+- With a lost record or a crash after the server committed but before the client saved the result, the commit response cannot distinguish first commit from replay. The client now says `committed` because `replayed` would lack evidence. Exactly-once version creation still rests on the derived IDs and server ledger.
+- URL renewal after the two-hour expiry remains deferred as in the brief. `file_bytes_missing` is retryable with the same ID, but convergence after URL expiry is not established.
+- The final `pgrep` inventory could not run in this sandbox (`sysmond service not found`, exit 3). Test fixtures closed their children and the bounded suite's process group was killed, but an independent process-list proof is not established.
