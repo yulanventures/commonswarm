@@ -1,0 +1,23 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset, db:stop, supabase stop/start, and do not run test:p1-server (the lead owns the local stack);
+do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and
+file reads; pure tests with a temporary HOME (build first for dist/ tests). Kill every process you start.
+
+LANE: item L (exactly-once file_put and brain_put over MCP; CLI --request-id), branch lane/item-l at bd836290. Your
+directory is a detached worktree at bd836290. Base on main: 084f8a22. Spec:
+docs/design/2026-09-25-ITEM-L-EXACTLY-ONCE-FILE-PUT-BRIEF.md. Record: docs/evidence/2026-09-25-item-l/LANE.md (Folds
+1-2). Round 1 at 444db2b7: Opus FAIL (PRODUCTION: false "restore access" next step for retryable file refusals; a retry
+after a commit-time if_version refusal re-PUT to a purged path; RIGOUR: bad record blocks all, unsafe path reads, five
+surviving mutations, messages, legacy CLI changes, tool-set test, replayed label, phase regression). Grok PASS with
+RIGOUR notes. Fold 2 rulings P1, P2, R3-R11 are in LANE.md; round-1 reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemL/opus-r1.md and
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemL/grok-r1.md (Opus probes in /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemL/opus-r1-probes/).
+
+REVIEW `git diff 444db2b7..bd836290` closely and the whole lane (`git diff 084f8a22..bd836290`), skipping docs/design. CHECK that
+each round-1 finding is fixed as its ruling says without a new failure (for example a terminal refusal stored for a
+refusal that is actually retryable, a protected-path check bypassed by a symlink or relative path, a quarantined record
+that hid a real conflict), then the same six checks as round 1.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
