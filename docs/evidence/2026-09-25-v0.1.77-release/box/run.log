@@ -1,0 +1,11 @@
+2026-09-25T00:10:45Z preflight PASS sha=4ef0f3005a3981941512698a3e1e3e7641773f5b evidence=/Users/yulanbot/anvil-work/commonswarm-itemj/docs/evidence/2026-09-25-release-4ef0f3005a39 archive_sha256=6f8ee9a1a878d29af31d929f5e13a0751b380460e6e7e130d4810cde9565200d
+2026-09-25T00:10:45Z approvals HezLead SHA=4ef0f3005a3981941512698a3e1e3e7641773f5b KIND_LIST=edge\ stack backup_max_age=22h no recycle stop window=until-02:15Z
+2026-09-25T00:10:45Z surfaces edge-dir-prep stack-dir-prep migration-20260924000001 no-section-6
+2026-09-25T00:10:45Z env inventory inputs ROUTER_CHANGED=no CHANGED_FUNCTIONS=read ADDITIONAL_REQUIRED_ENV_NAMES=empty
+2026-09-25T00:10:59Z copied proof sql into EVIDENCE_DIR root (no secrets)
+2026-09-25T00:10:59Z env inventory PASS required names only written
+2026-09-25T00:11:49Z proof-transfer.list generated; HezLead pre-approved item-j sql + env inventory names
+2026-09-25T00:14:21Z STOP apply failed unbound ledger_shape; abort cleanup no-op timers; no migration write; no section 6
+2026-09-25T00:18:30Z section5 20260924000001 decision=0:f apply_exit=0 verify=1:t functional=DO cron_added=none cron_removed=none window_kept_open no_stack_current_switch no_abort_cleanup
+2026-09-25T00:22:51Z section6 STOP_GATE j2 FAIL loopback Bearer_x expected=401 unauthenticated got=400 invalid_request; rollback_exit=0 current=1200ebb19f56b3e154499ebb09963788d10e69ad health=ok mem=2147483648 net=commonswarm-net; migration left in place; recycle_timer left running; window kept open; no copy-back; no mac cleanup; positive read: CSwarmDevLead, reported separately to HezLead (not run; rolled back before)
+2026-09-25T00:30:34Z section6 RETRY PASS sha=4ef0f3005a3981941512698a3e1e3e7641773f5b current=/home/commonswarm/edge/releases/4ef0f3005a3981941512698a3e1e3e7641773f5b apply_exit=0 health=ok mem=2147483648 net=commonswarm-net working_dir=/home/commonswarm/edge/releases/4ef0f3005a3981941512698a3e1e3e7641773f5b/deploy/edge-runtime loopback=PASS staging=PASS metrics=yes log_check=PASS positive_read=CSwarmDevLead, reported separately to HezLead copy_back=/Users/yulanbot/anvil-work/commonswarm-itemj/docs/evidence/2026-09-25-release-4ef0f3005a39 window_closed=yes recycle_timer left running

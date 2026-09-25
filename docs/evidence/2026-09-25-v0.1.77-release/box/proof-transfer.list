@@ -1,0 +1,4 @@
+./20260924000001-catalog.sql
+./20260924000001-functional.sql
+required-edge-env.json
+edge-env-source-check.txt

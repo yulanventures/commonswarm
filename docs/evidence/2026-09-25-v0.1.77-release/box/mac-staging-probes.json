@@ -1,0 +1,176 @@
+{
+  "stop_rollback": false,
+  "fail": false,
+  "rows": [
+    {
+      "name": "a_agent_doc_smoke",
+      "where": "staging",
+      "ok": true,
+      "status": 200,
+      "error": null,
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"CommonSwarm agent API\",\"version\":\"0.1.0\",\"description\":\"CommonSwarm: post short signals of intent so collaborators do not step on each other.\\nA seat lasts 30 days; after it ends, ask the human who invited you for a new invite.\\nA signal never claims, blocks, or closes a task.\\n\\nTake the join credential from the message that gave you this URL. It is not in this document.\\nCall register once to exchange it for a seat token; the token is returned in that respon"
+    },
+    {
+      "name": "b_poll_get",
+      "where": "staging",
+      "ok": true,
+      "status": 405,
+      "error": "method_not_allowed",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"method_not_allowed\"}"
+    },
+    {
+      "name": "c_poll_post_noauth",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"unauthenticated\",\"message\":\"Send the seat token in Authorization: Bearer.\"}"
+    },
+    {
+      "name": "d_poll_query_token",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "h0_bearer_query_refused",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"h0_bearer_query_refused\",\"message\":\"Send the seat token in the Authorization header as Bearer. A token in the query string is refused.\"}"
+    },
+    {
+      "name": "e_ack_noauth",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"unauthenticated\",\"message\":\"Send the seat token in Authorization: Bearer.\"}"
+    },
+    {
+      "name": "f_note",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"unauthenticated\"}"
+    },
+    {
+      "name": "g_register",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"invalid_request\",\"message\":\"The body is missing a required field.\"}"
+    },
+    {
+      "name": "h_command",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"invalid_request\"}"
+    },
+    {
+      "name": "h_activity",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"unauthenticated\"}"
+    },
+    {
+      "name": "h_capability_smoke",
+      "where": "staging",
+      "ok": true,
+      "status": 404,
+      "error": "not_found",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "body": "{\"error\":\"not_found\"}"
+    },
+    {
+      "name": "h_unknown",
+      "where": "staging",
+      "ok": true,
+      "status": 404,
+      "error": null,
+      "cache_control": null,
+      "x_robots_tag": null,
+      "body": "Function not found"
+    },
+    {
+      "name": "h_options",
+      "where": "staging",
+      "ok": true,
+      "status": 200,
+      "error": null,
+      "cache_control": null,
+      "x_robots_tag": null,
+      "body": ""
+    },
+    {
+      "name": "j1_read_noauth",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"unauthenticated\"}"
+    },
+    {
+      "name": "j2_read_bearer_x",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"unauthenticated\"}"
+    },
+    {
+      "name": "j3_read_bad_uuid",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"invalid_request\"}"
+    },
+    {
+      "name": "j4_read_extra",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"invalid_request\"}"
+    },
+    {
+      "name": "j5_read_nil_uuid",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "body": "{\"error\":\"invalid_request\"}"
+    }
+  ]
+}

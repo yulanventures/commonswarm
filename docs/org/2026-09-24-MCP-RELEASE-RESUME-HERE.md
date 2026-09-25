@@ -13,6 +13,25 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
+## Update 2026-09-25 ~00:40Z: item J IN PRODUCTION; cswarm 0.1.77 released; G lane 2a reviewed
+
+- **Item J is live** (box 00:18Z migration, 00:30Z edge `4ef0f300`; CLI 0.1.77 on GitHub/npm; site
+  `20260925T003349Z-218cf921d07d-...`). Record: `docs/evidence/2026-09-25-v0.1.77-release/RELEASE.md` (with the box
+  copy-back and HezLead's procedure notes for the next RELEASE-TO-BOX fold). NOT established: J's done-test (a person
+  issues a code, sees it within one minute, connects, sees it clear) — needs a signed-in person.
+- 0.1.77 was built on branch `release/0.1.77` from 4d4cb3f7, so it does NOT carry item G's client (G's server is not on
+  the box yet); the branch merged into main as 5e50fc28. The next npm release (0.1.78) waits for G lane 1's box
+  release and will carry G lanes 1 and 2a.
+- **G sizing (HezLead, 00:18Z):** `swarm.signal_deliveries` 1879 rows, 584 kB; lock window trivial. Send G lane 1's box
+  release request (SHA = main tip at that time; migration 20260925000001; edges command + read; the `search_path`
+  preflight for Anvil; section-6 steps in `docs/evidence/2026-09-25-item-g-lane1/LANE.md`), window probably
+  2026-09-25 after the 21:30Z recycle.
+- **G lane 2a** (client only: idle orphan exit 74, SIGINT/SIGTERM 130/143 with a runnable restart command, resume
+  parent evidence): Opus PASS + Grok PASS on 700f2927 (round 3); landing in progress (worktree `land-g2a`, merge
+  3ad8eb9f on ead907c7 — redo the merge on the current main before pushing).
+- G lane 2b (server wake lease) brief is DRAFTED in the lead's scratchpad (`itemG2b/BRIEF-draft.md`), with two open
+  questions for the Strategist/HezLead (per-seat lease vs H0 listener; renew cadence vs box load).
+
 ## Update 2026-09-24 ~22:00Z: item G lane 1 landed on main (e3076c7a) — waiting for its box release
 
 - Item G lane 1: `cswarm check` sends an unclaimed `observed` ACK for each directed ask/note it showed; the roster and
