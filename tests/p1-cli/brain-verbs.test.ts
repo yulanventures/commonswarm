@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import {
   FILE_VERSION_PRECONDITION_FAILED,
   fileVersionPreconditionMessage,
@@ -207,6 +208,14 @@ const scratch = mkdtempSync(join(tmpdir(), "cswarm-brain-verbs-"));
 chmodSync(scratch, 0o700);
 const tokenPath = join(scratch, "agent.json");
 writeFileSync(tokenPath, TOKEN, { mode: 0o600 });
+const mintedTokenPath = join(scratch, "minted-agent.json");
+writeFileSync(mintedTokenPath, JSON.stringify({
+  message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
+  principal_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  token_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  run_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  agent_token: TOKEN, expires_at: "2099-01-01T00:00:00.000Z",
+}), { mode: 0o600 });
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
 async function cliAgainst(
@@ -226,11 +235,14 @@ async function cliAgainst(
     "--workspace-id",
     WORKSPACE,
     "--agent-token-file",
-    tokenPath,
+    args.includes("--request-id") ? mintedTokenPath : tokenPath,
   ], {
     cwd: process.cwd(),
     env: {
       ...process.env,
+      HOME: scratch,
+      XDG_CONFIG_HOME: join(scratch, "config"),
+      SWARM_AGENT_STATE_DIR: join(scratch, "agent-state"),
       SWARM_CLOUD_URL: "",
       SWARM_CLOUD_ANON_KEY: "",
       SWARM_CLOUD_WORKSPACE_ID: "",
@@ -244,10 +256,11 @@ async function cliAgainst(
   child.stderr.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => stdout += chunk);
   child.stderr.on("data", (chunk: string) => stderr += chunk);
+  const timer = setTimeout(() => child.kill("SIGKILL"), 15_000);
   const code = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (status) => resolve(status ?? 1));
-  });
+  }).finally(() => clearTimeout(timer));
   return { code, stdout, stderr };
 }
 
@@ -329,6 +342,23 @@ test("the v0.1.47 brain-put wire accepts additive retirement fields", async () =
   } finally {
     await cloud.close();
   }
+});
+
+test("brain put --request-id replays across CLI processes", { timeout: 20_000 }, async () => {
+  const cloud = await startFakeCloud();
+  const path = join(scratch, "exact-brain.md");
+  writeFileSync(path, "# Architecture\n\nExact content.\n");
+  try {
+    const args = ["brain", "put", "Architecture", path, "--request-id", "brain-cli-01", "--if-version", "2", "--json"];
+    const first = await cliAgainst(cloud, args);
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(JSON.parse(first.stdout).outcome, "committed");
+    const commands = cloud.commands.length;
+    const second = await cliAgainst(cloud, args);
+    assert.equal(second.code, 0, second.stderr);
+    assert.equal(JSON.parse(second.stdout).outcome, "replayed");
+    assert.equal(cloud.commands.length, commands);
+  } finally { await cloud.close(); }
 });
 
 test("the usage block names all three brain verbs", async () => {

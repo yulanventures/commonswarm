@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile, readFile, unlink } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile, readFile, readdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,7 @@ import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/clou
 import { mapMcpError, sendWithDeferredCommit } from "../../src/mcp/server.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
+import { Arguments } from "../../src/cli.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -44,6 +45,13 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-"));
   const posts: Array<Record<string, any>> = [];
   const observations: Array<Record<string, any>> = [];
+  const fileCommands: Array<Record<string, any>> = [];
+  const fileCreates = new Map<string, Record<string, any>>();
+  const fileCommits = new Map<string, Record<string, any>>();
+  const fileObjects = new Set<string>();
+  let filePrecondition: number | null = null;
+  let killPhase: "create" | "put" | "commit" | null = null;
+  let killMcp: (() => void) | null = null;
   let renewals = 0;
   const committed = new Map<string, object>();
   let readRefusal = false, sendRefusal = false, readError: { status: number; code: string } | null = null;
@@ -56,9 +64,44 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     let raw = "";
     req.on("data", chunk => raw += chunk);
     req.on("end", () => {
+      if (req.method === "PUT") {
+        if (fileObjects.has(req.url ?? "")) return res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: "Duplicate" }));
+        fileObjects.add(req.url ?? "");
+        if (killPhase === "put") { killPhase = null; setImmediate(() => killMcp?.()); }
+        return res.writeHead(200, { "content-type": "application/json" }).end("{}");
+      }
       assert.equal(req.headers.authorization, `Bearer ${TOKEN}`);
       const body = JSON.parse(raw);
       const send = (status: number, value: object) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (body.command?.kind === "file_version_create") {
+        fileCommands.push(body);
+        if (filePrecondition !== null && body.command.if_version !== filePrecondition) {
+          return send(409, { error: "file_version_precondition_failed", message: "newer live version" });
+        }
+        let created = fileCreates.get(body.command_id);
+        if (!created) {
+          const version = fileCreates.size + 1;
+          created = { file_id: body.command.file_id, version_id: body.command.version_id, version_n: version,
+            name: body.command.name, upload_path: `/storage/v1/object/upload/sign/swarm-files/${WS}/${body.command.file_id}/${version}?token=fake`,
+            upload_token: "SECRET-UPLOAD-TOKEN", upload_expires_in_seconds: 7200 };
+          fileCreates.set(body.command_id, created);
+        }
+        if (killPhase === "create") { killPhase = null; setImmediate(() => killMcp?.()); }
+        return send(200, created);
+      }
+      if (body.command?.kind === "file_version_commit") {
+        fileCommands.push(body);
+        let committed = fileCommits.get(body.command_id);
+        if (!committed) {
+          const created = [...fileCreates.values()].find(row => row.version_id === body.command.version_id)!;
+          committed = { file_id: created.file_id, version_id: created.version_id, version_n: created.version_n,
+            name: created.name, size_bytes: 7, sha256: body.command.sha256, sha256_note: "unverified client attestation",
+            reference: `file:${created.file_id}@v${created.version_n}` };
+          fileCommits.set(body.command_id, committed);
+        }
+        if (killPhase === "commit") { killPhase = null; setImmediate(() => killMcp?.()); }
+        return send(200, committed);
+      }
       if (body.resource === "members") {
         if (readError) return send(readError.status, { error: readError.code });
         if (readRefusal) return send(403, { error: "forbidden", message: "Read refused." });
@@ -115,22 +158,33 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       status: "accepted", principal_id: AGENT, token_id: "11111111-1111-4111-8111-111111111111",
       run_id: "22222222-2222-4222-8222-222222222222", agent_token: TOKEN,
       expires_at: expiresAt } })));
-  const client = new Client({ name: "mcp-test-host", version: "1" });
-  const transport = new StdioClientTransport({ command: process.execPath,
-    args: [resolve("dist/cli.js"), "mcp", "--profile", profile],
-    env: { PATH: process.env.PATH ?? "", HOME: root, SWARM_AGENT_STATE_DIR: join(root, "renewal"),
-      XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
+  let client: Client;
+  let transport: StdioClientTransport;
   let stderr = "";
   let stdout = "";
-  transport.stderr?.on("data", chunk => stderr += chunk);
-  const start = transport.start.bind(transport);
-  transport.start = async () => { await start(); (transport as any)._process.stdout.on("data", (chunk: Buffer) => stdout += chunk.toString()); };
-  await client.connect(transport);
+  const startMcp = async () => {
+    client = new Client({ name: "mcp-test-host", version: "1" });
+    transport = new StdioClientTransport({ command: process.execPath,
+      args: [resolve("dist/cli.js"), "mcp", "--profile", profile],
+      env: { PATH: process.env.PATH ?? "", HOME: root, SWARM_AGENT_STATE_DIR: join(root, "renewal"),
+        XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
+    transport.stderr?.on("data", chunk => stderr += chunk);
+    const start = transport.start.bind(transport);
+    transport.start = async () => { await start(); (transport as any)._process.stdout.on("data", (chunk: Buffer) => stdout += chunk.toString()); };
+    await client.connect(transport);
+    killMcp = () => (transport as any)._process.kill("SIGKILL");
+  };
+  await startMcp();
+  const restart = async () => {
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
+    await startMcp();
+  };
   let closed = false;
   const close = async () => {
     if (closed) return;
     closed = true;
-    await client.close(); await transport.close();
+    await client.close().catch(() => undefined); await transport.close().catch(() => undefined);
     await new Promise<void>(done => edge.close(() => done()));
     await rm(root, { recursive: true, force: true });
   };
@@ -145,7 +199,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     assert.ok(!text.text.includes("cswarm check --"));
     return { result, value: JSON.parse(text.text) as Record<string, any> };
   };
-  return { root, profile, posts, observations, created: () => committed.size, renewals: () => renewals, client, transport, call, close, stderr: () => stderr, stdout: () => stdout,
+  return { root, profile, posts, observations, fileCommands, fileCreates, fileCommits, fileObjects, created: () => committed.size, renewals: () => renewals, get client() { return client; }, get transport() { return transport; }, call, close, restart, killAfter: (phase: "create" | "put" | "commit") => { killPhase = phase; }, stderr: () => stderr, stdout: () => stdout,
     refuseReads: (value: boolean) => { readRefusal = value; }, refuseSends: (value: boolean) => { sendRefusal = value; },
     setReadError: (value: typeof readError) => { readError = value; }, setSendError: (value: typeof sendError) => { sendError = value; },
     loseNextAnswer: () => { lostAttempts = 3; }, delayNextAnswer: () => { delayAnswer = true; }, malformedNextAnswer: () => { malformedAnswer = true; },
@@ -154,6 +208,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setAmbiguousRecipient: (value: boolean) => { ambiguousRecipient = value; },
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
+    setFilePrecondition: (value: number | null) => { filePrecondition = value; },
     conflictNext: () => { serverConflict = true; } };
 }
 
@@ -172,6 +227,16 @@ test("an unknown argument name is echoed quoted and bounded", () => {
     error.message === `Unknown argument: "${"k".repeat(MCP_ARGUMENT_NAME_ECHO_MAX)}".`);
   assert.throws(() => validateMcpArguments("whoami", { "a\nb": "x" }), (error: Error) =>
     error.message === "Unknown argument: \"a\\nb\"." && !error.message.includes("\n"));
+});
+
+test("expanded CLI profile keeps its state location for request-id uploads", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const args = new Arguments(["file", "put", join(f.root, "plan.md"), "--profile", f.profile]);
+    await args.expandAgentProfile("expand", "drop");
+    assert.equal(args.expandedProfilePath, f.profile);
+    assert.equal(args.optional("profile"), undefined);
+  } finally { await f.close(); }
 });
 
 test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeout: 30_000 }, async () => {
@@ -235,6 +300,80 @@ test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeou
     assert.throws(() => [...rawLines, "Signal shared."].forEach(line => JSON.parse(line)), SyntaxError);
   } finally { await f.close(); }
 });
+
+test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const listed = (await f.client.listTools()).tools.map(tool => tool.name);
+    assert.ok(listed.includes("file_put"));
+    assert.ok(listed.includes("brain_put"));
+    assert.throws(() => validateMcpArguments("file_put", { request_id: "relative01", path: "relative.md" }), /Invalid argument: path/);
+    await assert.rejects(f.client.callTool({ name: "file_put", arguments: { request_id: "relative01", path: "relative.md" } }), (error: any) => error.code === -32602);
+    assert.equal(f.fileCommands.length, 0);
+    const path = join(f.root, "plan.md");
+    await writeFile(path, "# plan\n");
+    const first = (await f.call("file_put", { request_id: "fileput01", path })).value;
+    assert.equal(first.outcome, "committed");
+    assert.ok(first.reference.startsWith("file:"));
+    assert.equal((await f.call("file_put", { request_id: "fileput01", path })).value.outcome, "replayed");
+    assert.equal(f.fileCommits.size, 1);
+    assert.equal(f.fileCreates.size, 1);
+    const resumeDir = join(f.root, "profile", "file-put-resume");
+    const records = await readdir(resumeDir);
+    assert.equal(records.length, 1);
+    await unlink(join(resumeDir, records[0]!));
+    const withoutRecord = (await f.call("file_put", { request_id: "fileput01", path })).value;
+    assert.equal(withoutRecord.outcome, "replayed");
+    assert.equal(withoutRecord.conflict_check, "unavailable");
+    assert.equal(f.fileCommits.size, 1);
+    await writeFile(path, "# changed\n");
+    const createCount = f.fileCommands.length;
+    const conflict = await f.call("file_put", { request_id: "fileput01", path });
+    assert.equal(conflict.result.isError, true);
+    assert.equal(conflict.value.code, "request_id_conflict");
+    assert.equal(f.fileCommands.length, createCount);
+    const unsupported = join(f.root, "script.sh");
+    await writeFile(unsupported, "code");
+    const type = await f.call("file_put", { request_id: "badtype01", path: unsupported });
+    assert.equal(type.value.code, "file_type_refused");
+    assert.equal(f.fileCommands.length, createCount);
+    const oversized = join(f.root, "large.md");
+    await writeFile(oversized, Buffer.alloc(25 * 1024 * 1024 + 1));
+    const cap = await f.call("file_put", { request_id: "largefile01", path: oversized });
+    assert.equal(cap.value.code, "file_too_large");
+    assert.equal(f.fileCommands.length, createCount);
+    const brain = join(f.root, "brain.md");
+    await writeFile(brain, "# topic\n");
+    const saved = (await f.call("brain_put", { request_id: "brainput01", topic: "topic", path: brain, if_version: 0 })).value;
+    assert.equal(saved.topic, "topic");
+    assert.equal(saved.outcome, "committed");
+    assert.equal((await f.call("brain_put", { request_id: "brainput01", topic: "topic", path: brain, if_version: 0 })).value.outcome, "replayed");
+    assert.equal(f.fileCommits.size, 2);
+    f.setFilePrecondition(2);
+    const precondition = await f.call("brain_put", { request_id: "brain-old-02", topic: "topic", path: brain, if_version: 1 });
+    assert.equal(precondition.result.isError, true);
+    assert.equal(precondition.value.code, "file_version_precondition_failed");
+    assert.equal(f.fileCommits.size, 2);
+    assert.doesNotMatch(JSON.stringify({ first, saved }), /SECRET-UPLOAD-TOKEN|token=fake/);
+  } finally { await f.close(); }
+});
+
+for (const phase of ["create", "put", "commit"] as const) {
+  test(`MCP process killed after ${phase} resumes the same file version`, { timeout: 20_000 }, async () => {
+    const f = await fixture();
+    try {
+      const path = join(f.root, "restart.md");
+      await writeFile(path, "# restart\n");
+      f.killAfter(phase);
+      await assert.rejects(f.client.callTool({ name: "file_put", arguments: { request_id: `restart_${phase}`, path } }));
+      await f.restart();
+      const retried = (await f.call("file_put", { request_id: `restart_${phase}`, path })).value;
+      assert.equal(retried.outcome, "replayed");
+      assert.equal(f.fileCreates.size, 1);
+      assert.equal(f.fileCommits.size, 1);
+    } finally { await f.close(); }
+  });
+}
 
 test("MCP managed principal requires the current host session and renewal errors stay typed", { timeout: 15_000 }, async () => {
   const f = await fixture();
@@ -641,7 +780,10 @@ test("MCP partial check commits only the last visible message", { timeout: 15_00
     const first = (await f.call("check")).value;
     assert.ok(first.messages.length > 0 && first.messages.length < ids.length, "the cap must show a strict prefix");
     assert.equal(first.has_more, true);
-    for (let turn = 0; turn < 10 && f.observations.length < first.messages.length; turn++) await f.call("whoami");
+    for (let turn = 0; turn < 100 && f.observations.length < first.messages.length; turn++) {
+      await f.call("whoami");
+      await new Promise(done => setTimeout(done, 10));
+    }
     assert.deepEqual(f.observations.map(row => row.command.signal_id),
       first.messages.map((row: { id: string }) => row.id),
       "only the response's visible prefix may be observed");
