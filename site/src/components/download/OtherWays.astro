@@ -52,6 +52,7 @@ import Card from "../ui/Card.astro";
 import CodeBlock from "../ui/CodeBlock.astro";
 import { INSTALL_CMD_DIR } from "../../lib/install.ts";
 import { INSTALL_CMD_PINNED } from "../../lib/release.ts";
+import { SOURCE_REPOSITORY_URL } from "../../lib/repository.ts";
 
 interface Props {
   /** The same install command shown at the top of the page. */
@@ -74,7 +75,7 @@ const dirCmd = INSTALL_CMD_DIR;
  * both the visible lines and the Copy payload. The comment directly above says derivation exists
  * so "a change at the top of the page cannot leave this variant behind"; this was the one variant
  * that opted out, and it is the one that drifted. Nothing in site/scripts/ gates this string. */
-const SOURCE_REPO = "https://github.com/Ridge-io/commonswarm.git";
+const SOURCE_REPO = `${SOURCE_REPOSITORY_URL}.git`;
 const sourceDir = SOURCE_REPO.replace(/^.*\//, "").replace(/\.git$/, "");
 const sourceCmd = `git clone ${SOURCE_REPO}
 cd ${sourceDir}

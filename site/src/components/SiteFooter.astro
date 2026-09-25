@@ -75,10 +75,11 @@
  * the footer, the /download version example and the pinned installer command now share one
  * module, so a bump cannot leave one of them stale. */
 import { CLI_VERSION_LINE } from "../lib/release.ts";
+import { SOURCE_REPOSITORY_URL } from "../lib/repository.ts";
 
 import Wordmark from "./Wordmark.astro";
 
-const REPO = "https://github.com/Ridge-io/commonswarm";
+const REPO = SOURCE_REPOSITORY_URL;
 
 /*
  * THE VERSION LINE IS READ FROM THE BINARY'S OWN SOURCES AT BUILD TIME, NOT TYPED.

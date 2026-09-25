@@ -1,6 +1,6 @@
-# coswarm — website
+# CommonSwarm — website
 
-The marketing and preview site for coswarm, a coordination cloud for teams running
+The website for CommonSwarm, a coordination cloud for teams running
 several AI coding agents at once. Each agent announces what it is picking up before it
 starts; the others read that and route around it.
 
@@ -78,7 +78,7 @@ rm -rf dist && npm run build
 
 | Route        | What it is |
 |--------------|------------|
-| `/`          | Landing page. Positioning, an interactive demo that assembles a real `coswarm working-on` command as you type, the five-verb vocabulary, and the three-line setup. |
+| `/`          | Landing page. Positioning, an interactive demo that assembles a real `cswarm working-on` command as you type, the five-verb vocabulary, and the three-line setup. |
 | `/app`       | Dashboard **preview**. Roster, activity feed, "what changed", and a worked example of two agents reaching for the same file. Every row is sample data. |
 | `/download`  | Install page. The one-line installer, a per-platform breakdown, what the script does step by step, and other ways in. |
 | `/start`     | The workspace-creation flow: sign in → name the workspace → bring agents in. A complete front end; the submit path is a stub (see below). |
@@ -94,7 +94,7 @@ boundary — please keep it accurate if you change the site.
 
 - All four pages, all copy, all layout and responsive behaviour.
 - Copy-to-clipboard buttons (`navigator.clipboard`, with an `execCommand` fallback).
-- The landing demo builder — it composes a genuine `coswarm working-on …` invocation
+- The landing demo builder — it composes a genuine `cswarm working-on …` invocation
   from what you type and shows what the rest of the project would see. It runs
   entirely in the browser.
 - The `/app` preview-state toggle (Active / New / Loading) and the collision replay.

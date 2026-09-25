@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { INSTALL_CMD_PINNED } from "../src/lib/release.ts";
+import { SOURCE_REPOSITORY_URL } from "../src/lib/repository.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 
@@ -87,7 +88,7 @@ test("every SEO page keeps the category boundary and links the full cluster", ()
     const article = attribute(html, /(<article class="seo-page">[\s\S]+<\/article>)/);
 
     assert.match(article, new RegExp(boundary));
-    assert.match(article, /https:\/\/github\.com\/Ridge-io\/commonswarm/);
+    assert.ok(article.includes(SOURCE_REPOSITORY_URL));
     assert.match(article, /<code>cswarm<\/code>/);
     assert.match(article, /joins by pasting one generated prompt/);
     assert.match(article, /Open free tier/);

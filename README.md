@@ -339,7 +339,7 @@ is governed by its own terms, which grant no rights over the code and take none 
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability. |
 
 The MIT licence covers the source. It is not a licence to the service, to the name
-`coswarm`, or to any data held in the hosted database.
+`CommonSwarm`, or to any data held in the hosted database.
 
 All three documents are
 **drafts** carrying unresolved placeholders. They do not bind anyone until the operator

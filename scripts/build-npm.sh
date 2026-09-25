@@ -44,7 +44,9 @@ fs.writeFileSync('$OUT/package.json', JSON.stringify(manifest, null, 2) + '\n');
 # Verify the staged artifact runs and reports EXACTLY this version, from the staging dir
 # itself (its package.json has no "type", so the .cjs parse path is what a user gets).
 # Exact match, not substring: 0.1.1 must not accept a bundle reporting 0.1.10.
-got="$(node "$OUT/cswarm.cjs" --version | awk '{print $2}')"
+tmp_home="$(mktemp -d)"
+got="$(HOME="$tmp_home" node "$OUT/cswarm.cjs" --version --url http://127.0.0.1:54321 | awk '{print $2}')"
+rm -rf "$tmp_home"
 [ "$got" = "$VERSION" ] \
   || { echo "FAIL: staged cswarm.cjs reports version '$got', expected '$VERSION'" >&2; exit 1; }
 

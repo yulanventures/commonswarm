@@ -1,0 +1,2 @@
+# The checked-in esbuild artifact contains vendor template literals with significant spaces.
+dist-npm/cswarm.cjs -whitespace

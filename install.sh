@@ -10,11 +10,11 @@
 set -eu
 
 # Releases live beside their source, on the public repo. The old default was
-# Ridge-io/coswarm-dist — a repo that CARRIED THE RETIRED PRODUCT NAME AND NEVER EXISTED, so
+# the retired product's separate distribution repo — it NEVER EXISTED, so
 # this installer 404'd for every stranger who ran it. The separate -dist repo was specified
 # back when source was going to stay private; source is public now, so the reason is gone.
 #
-# Repointed from Ridge-io/cloud-swarm to Ridge-io/commonswarm on 2026-08-10. That was NOT a
+# Repointed from the original repo to the public source repo on 2026-08-10. That was NOT a
 # rename: cloud-swarm's history carried two operator work addresses in commit metadata, and a
 # force-push cannot purge them because GitHub keeps unreachable objects fetchable by SHA. A new
 # repo never receives them.
@@ -24,7 +24,7 @@ set -eu
 # ships on the next site deploy whether or not that deploy was about the installer. It was
 # changed only after commonswarm was public and serving all 14 releases, and after a real
 # install from it was verified with CSWARM_REPO= as an override.
-REPO="${CSWARM_REPO:-Ridge-io/commonswarm}"
+REPO="${CSWARM_REPO:-yulanventures/commonswarm}"
 VERSION="${CSWARM_VERSION:-latest}"
 # Accept both `0.1.12` and `v0.1.12`. The URL below adds its own `v`, so a value copied from the
 # releases page — where all 14 tags are displayed WITH the v — built `.../download/vv0.1.12` and

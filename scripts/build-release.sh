@@ -30,8 +30,11 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # The define is STILL called __COSWARM_VERSION__ on purpose: it is a build-time
 # identifier that src/cli.ts declares, so the two names must change together or the
 # injection silently stops happening. Nobody types it, so the rename can wait.
+# Minification drops esbuild's module path labels. Without it, the bundle embeds the
+# builder's absolute home path in hundreds of module keys and comments.
 npx esbuild src/cli.ts \
   --bundle --platform=node --target=node22 --format=cjs \
+  --minify --legal-comments=none \
   --define:__COSWARM_VERSION__="\"$VERSION\"" \
   --outfile="$OUT/cswarm"
 
@@ -53,7 +56,7 @@ head -c 20 "$OUT/cswarm" | grep -q '^#!/usr/bin/env node' \
 # directory with no node_modules. Building something that does not run is the
 # failure this check exists to make impossible.
 tmp="$(mktemp -d)"; cp "$OUT/cswarm" "$tmp/"
-got="$("$tmp/cswarm" --version --url http://127.0.0.1:54321 2>/dev/null || "$tmp/cswarm" --help --url http://127.0.0.1:54321 2>&1 | head -1)"
+got="$(HOME="$tmp" "$tmp/cswarm" --version --url http://127.0.0.1:54321 2>/dev/null || HOME="$tmp" "$tmp/cswarm" --help --url http://127.0.0.1:54321 2>&1 | head -1)"
 rm -rf "$tmp"
 case "$got" in
   *"$VERSION"*) ;;
