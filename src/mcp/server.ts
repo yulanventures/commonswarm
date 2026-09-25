@@ -1,4 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { AgentSetupError, openProfileCredential, privatePath, profileSessionContext, profileTarget, readAgentProfile } from "../cloud/agent-profile.js";
@@ -10,6 +12,9 @@ import { CommandHttpError, ThinCommandClient, type PostSignalCommand } from "../
 import { signalDuration } from "../cloud/signal-duration.js";
 import { MCP_TOOLS, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments } from "./tools.js";
 import { mapMcpError } from "./errors.js";
+import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
+import { exactPutStateDir, executeExactPut, prepareExactPut } from "../cloud/exact-file-put.js";
+import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
 
 export { mapMcpError } from "./errors.js";
 
@@ -94,6 +99,33 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
               commitAfterWrite.set(extra.requestId, () => commit(lastVisibleId ?? undefined));
               extra.signal.addEventListener("abort", () => commitAfterWrite.delete(extra.requestId), { once: true });
             }
+          }
+          break;
+        }
+        case "file_put":
+        case "brain_put": {
+          const topic = tool.name === "brain_put" ? canonicalBrainTopic(args.topic!) : null;
+          const name = topic === null ? args.name ?? basename(args.path!) : brainFileName(topic);
+          const bytes = await readFile(args.path!);
+          if (topic !== null) new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          // The profile was authenticated at startup. Persist the intent before
+          // opening a credential, which may itself contact the command edge.
+          const prepared = await prepareExactPut({ target: profileTarget(profile),
+            workspaceId: profile.workspace_id, principalId: profile.principal_id,
+            stateDir: exactPutStateDir(profilePath), requestId: args.request_id!,
+            name, bytes, ...(args.if_version === undefined ? {} : { ifVersion: Number(args.if_version) }),
+            credential: "" });
+          try {
+            const { fetcher, token } = await authenticated();
+            const done = await executeExactPut({ ...prepared, input: { ...prepared.input, credential: token, fetcher } });
+            output = { ...(topic === null ? {} : { topic }), ...done.result,
+              outcome: done.outcome, conflict_check: done.conflict_check };
+          } catch (error) {
+            if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500) throw error;
+            if (error instanceof FileTransportError || error instanceof FileCommandRefused) {
+              output = { outcome: "unknown", retry_with_same_request_id: true,
+                conflict_check: prepared.conflict_check };
+            } else throw error;
           }
           break;
         }

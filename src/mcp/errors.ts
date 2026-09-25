@@ -6,6 +6,8 @@ import { RenewalCredentialCheckError, RenewalOutcomeUnknown, RenewalReauthorisat
 import { SessionContextError } from "../cloud/session-context.js";
 import { AGENT_SESSION_PROOF_REFUSAL_CODES } from "../cloud/session-wire.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
+import { FileCommandRefused } from "../cloud/files.js";
+import { FilePutPreflightError, RequestIdConflict } from "../cloud/exact-file-put.js";
 
 type Action = "retry the same call" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
 type Sentence = { message: string; next_step: Action };
@@ -57,6 +59,12 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   recipient_ambiguous: entry("The to argument names more than one recipient; use a unique identifier.", FIX),
   recipient_invalid: entry("The to argument is invalid.", FIX),
   command_id_conflict: entry("This request id was used for different arguments.", STOP),
+  request_id_conflict: entry("This request id was used for different file content or arguments.", STOP),
+  request_id_invalid: entry("The request id is invalid.", FIX),
+  file_too_large: entry("The file exceeds the upload limit or is empty.", FIX),
+  file_type_refused: entry("The file name has an unsupported extension.", FIX),
+  if_version_invalid: entry("The if_version argument is invalid.", FIX),
+  file_version_precondition_failed: entry("The brain topic changed since the named version. Read it again before writing.", FIX),
   signal_refused: entry("The service refused this signal.", PERSON),
   // The post_signal edge uses this same bare code for an ineligible reply,
   // an expired reference, an inactive recipient, and the scope gate.
@@ -127,6 +135,9 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
   const code = error instanceof AgentSetupError ? error.code
     : error instanceof AgentCredentialInputError ? error.code
     : error instanceof CommandHttpError ? error.code ?? `http_${error.status}`
+    : error instanceof FileCommandRefused ? error.code
+    : error instanceof RequestIdConflict ? error.code
+    : error instanceof FilePutPreflightError ? error.code
     : error instanceof SignalRecipientError ? error.code
     : readHttp ? (readCode && (AGENT_SESSION_PROOF_REFUSAL_CODES as readonly string[]).includes(readCode) ? readCode
       : [401, 403, 426].includes(readHttp.status) ? "read_refused"
@@ -151,6 +162,6 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     ? MCP_ERROR_SENTENCES[safeCode]!
     : entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`,
       error instanceof CommandHttpError && error.status >= 500 ? RETRY : error instanceof CommandHttpError && error.status >= 400 && error.status < 500 ? CHECK_ARGUMENTS : PERSON);
-  const status = error instanceof CommandHttpError ? error.status : readHttp?.status ?? (error instanceof RenewalRefused || error instanceof RenewalCredentialCheckError ? error.status : undefined);
+  const status = error instanceof CommandHttpError || error instanceof FileCommandRefused ? error.status : readHttp?.status ?? (error instanceof RenewalRefused || error instanceof RenewalCredentialCheckError ? error.status : undefined);
   return { code: safeCode, ...sentence, ...(status !== undefined && status >= 400 ? { status } : {}) };
 }
