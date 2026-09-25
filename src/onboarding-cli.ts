@@ -15,6 +15,7 @@ import {
 } from "./cloud/agent-check-budget.js";
 import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile, readProfileCredential } from "./cloud/agent-profile.js";
 import { cloudTarget } from "./cloud/config.js";
+import { agentCredentialStore, credentialLineageKey } from "./cloud/agent-credential.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   checkedHostSessionId, configureAgentReceive, readReceiveBinding,
@@ -278,19 +279,32 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
     throw new AgentSetupError("profile_target_mismatch", "The supplied URL differs from this profile's URL.");
   }
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
+  let credentialReason: string | null = null;
   const credential = await readProfileCredential(profile).catch(error => {
-    if (error instanceof AgentSetupError && error.code === "profile_credential_missing") return null;
-    throw error;
+    credentialReason = error instanceof AgentSetupError && error.code === "profile_credential_missing"
+      ? `the credential file is missing: ${profile.credential_file}. Run setup again.`
+      : error instanceof AgentSetupError && error.code === "profile_identity_mismatch"
+      ? `the credential file belongs to another agent: ${profile.credential_file}. Run setup again.`
+      : error instanceof AgentCredentialInputError
+      ? `the credential file cannot be parsed: ${profile.credential_file}. Run setup again.`
+      : `the credential file could not be read: ${profile.credential_file}. Check its permissions, then resume.`;
+    return null;
   });
+  const renewed = credential === null ? null : await (async () => {
+    const store = await agentCredentialStore({ target: cloudTarget(profile.url, profile.anon_key),
+      lineageKey: credentialLineageKey(credential.token) });
+    return await store.read();
+  })();
   const contexts = credential === null ? null : await verifiedLiveSessionContexts({
     target: cloudTarget(profile.url, profile.anon_key),
-    workspaceId: profile.workspace_id, principalId: profile.principal_id, credential: credential.token,
+    workspaceId: profile.workspace_id, principalId: profile.principal_id,
+    credential: renewed?.token && renewed.principalId === profile.principal_id ? renewed.token : credential.token,
     tokenFile: profile.credential_file,
     ...(args.optional("host-session-id") === undefined ? {} : { hostSessionId: args.optional("host-session-id")! }) });
   const liveContextLines = contexts === null
-    ? [`Live session context on this host: could not verify because the credential file is missing: ${profile.credential_file}. Run setup again.`]
+    ? [`Live session context on this host: could not verify because ${credentialReason}`]
     : contexts.verificationRefused
-    ? ["Live session context on this host: the service refused this credential (expired or revoked). Run the profile's turn check to renew it, then resume."]
+    ? ["Live session context on this host: the service refused the saved credential (expired or revoked). Run the profile's turn check; if it cannot renew, run setup again, then resume."]
     : contexts.verificationServiceError
     ? ["Live session context on this host: the read service returned an error; try again after it recovers."]
     : contexts.verificationUnavailable
