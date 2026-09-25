@@ -199,6 +199,61 @@ test("Fold 10 explicit profile repairs an old interrupted rebuild without POST",
   } finally { await f.close(); }
 });
 
+test("Fold 11 setup-bound profile survives a same-code connect", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "setup-bound", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const original = await readAgentProfile(path);
+    await saveAgentProfile(path, { version: 1, url: original.url, anon_key: original.anon_key,
+      workspace_id: original.workspace_id, principal_id: original.principal_id,
+      credential: JSON.parse(await readFile(original.credential_file, "utf8")) }, undefined, "setup-session");
+    const boundBytes = await readFile(path);
+    assert.equal((await readAgentProfile(path, "setup-session")).host_session_id, "setup-session");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "profile_exists" });
+    assert.deepEqual(await readFile(path), boundBytes);
+    assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("Fold 11 default path repairs an empty profile claim without a move", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
+  try {
+    const connected = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    await writeFile(connected.profile, "", { mode: 0o600 });
+    const restored = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal(restored.profile, connected.profile);
+    assert.equal((await readAgentProfile(restored.profile)).principal_id, PRINCIPAL);
+    assert.equal(f.calls(), 1, "an empty rebuild claim needs no POST");
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
+});
+
+test("Fold 11 clear and later refusal name an empty credential claim", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "empty-credential-claim", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    const credential = join(dirname(path), "credential.json");
+    await writeFile(credential, "", { mode: 0o600 });
+    const cleared = await cli(["mcp", "connect", "--clear-pending", "--profile", path, "--url", TARGET.url], { HOME: f.root });
+    assert.equal(cleared.code, 0, cleared.stderr);
+    assert.match(cleared.stdout, /holds an empty claim file at credential\.json; the file was kept/);
+    assert.doesNotMatch(cleared.stdout, /holds a credential/);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "profile_exists");
+      assert.match(String(error), /holds an empty claim file without a profile/);
+      assert.doesNotMatch(String(error), /holds a credential/);
+      return true;
+    });
+    assert.equal((await readFile(credential)).length, 0);
+    assert.equal(f.calls(), 0);
+  } finally { await f.close(); }
+});
+
 test("Fold 9 permission diagnosis covers outside-home ancestors and unclassified denial", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {

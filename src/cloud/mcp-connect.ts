@@ -343,10 +343,10 @@ export interface McpConnectOptions {
 }
 
 /** Clear local connect records. A credential may be the only copy of a live seat. */
-export async function clearMcpConnect(profilePath: string, removeFile: typeof unlink = unlink): Promise<{ completedProfile: string | null; credentialPresent: boolean; profilePresent: boolean; removed: "pending record" | "completion record" | "pending record and completion record" | "nothing" }> {
+export async function clearMcpConnect(profilePath: string, removeFile: typeof unlink = unlink): Promise<{ completedProfile: string | null; credentialPresent: boolean; emptyClaimPresent: boolean; profilePresent: boolean; removed: "pending record" | "completion record" | "pending record and completion record" | "nothing" }> {
   const path = await privateConnectLocation(profilePath);
   const dir = dirname(path);
-  if (!await pathExists(dir)) return { completedProfile: null, credentialPresent: false, profilePresent: false, removed: "nothing" };
+  if (!await pathExists(dir)) return { completedProfile: null, credentialPresent: false, emptyClaimPresent: false, profilePresent: false, removed: "nothing" };
   try { await ensureSecureStateDirectory(dir); }
   catch {
     const info = await lstat(dir).catch(() => null);
@@ -358,7 +358,7 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
   return await withFileLock(dir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
     const hadPending = await pathExists(pendingPath(path));
     const hadComplete = await pathExists(completePath(path));
-    if (!hadPending && !hadComplete) return { completedProfile: null, credentialPresent: await pathExists(join(dir, CONNECT_PROFILE_FILES.credential)), profilePresent: await pathExists(path), removed: "nothing" as const };
+    if (!hadPending && !hadComplete) return { completedProfile: null, credentialPresent: await pathExists(join(dir, CONNECT_PROFILE_FILES.credential)), emptyClaimPresent: await emptyClaimAt(join(dir, CONNECT_PROFILE_FILES.credential)), profilePresent: await pathExists(path), removed: "nothing" as const };
     await cleanConnectTemps(path);
     const credential = join(dir, CONNECT_PROFILE_FILES.credential);
     let completedProfile: string | null = null;
@@ -405,9 +405,14 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
       }
     }
     if (hadPending ? !removedPending : !removedComplete) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
-    return { completedProfile, credentialPresent: await pathExists(credential), profilePresent: await pathExists(path),
+    return { completedProfile, credentialPresent: await pathExists(credential), emptyClaimPresent: await emptyClaimAt(credential), profilePresent: await pathExists(path),
       removed: removedPending && removedComplete ? "pending record and completion record" : removedPending ? "pending record" : "completion record" };
   });
+}
+
+async function emptyClaimAt(path: string): Promise<boolean> {
+  const info = await lstat(path).catch(() => null);
+  return info !== null && info.isFile() && !info.isSymbolicLink() && info.size === 0;
 }
 
 async function defaultPendingProfile(target: CloudTarget, code: string): Promise<string | null> {
@@ -436,7 +441,10 @@ async function defaultPendingProfile(target: CloudTarget, code: string): Promise
       await ensureSecureStateDirectory(dirname(path));
       const complete = await readComplete(path);
       if (complete?.url === target.url && complete.codeHash === codeHash(code, complete.attemptId)) {
-        if (await pathExists(path) && !await completedProfileAt(path)) throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
+        if (await pathExists(path) && !await completedProfileAt(path) &&
+            !(await repairableProfileAt(path) && await emptyClaimAt(path))) {
+          throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
+        }
         matches.push(path);
       }
       const pending = await readPending(path);
@@ -529,7 +537,9 @@ async function completedProfileAt(path: string): Promise<boolean> {
     throw new McpConnectError("connect_profile_mode", `The profile at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`);
   }
   try {
-    const profile = await readAgentProfile(path);
+    const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
+    const hostSessionId = raw === null ? undefined : record(JSON.parse(raw))?.host_session_id;
+    const profile = await readAgentProfile(path, typeof hostSessionId === "string" ? hostSessionId : undefined);
     const credentialInfo = await lstat(profile.credential_file).catch(() => null);
     if (credentialInfo?.isFile() && !credentialInfo.isSymbolicLink() && (credentialInfo.mode & 0o777) !== 0o600) {
       throw new McpConnectError("connect_credential_mode", `The credential at ${profile.credential_file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(profile.credential_file)}, then rerun the same command.`);
@@ -622,7 +632,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       }
     }
     if (!pending && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
-      throw new McpConnectError("profile_exists", "This directory holds a credential without a profile. Keep the credential and use a new --profile path for a new agent.");
+      throw new McpConnectError("profile_exists", await emptyClaimAt(join(profileDir, CONNECT_PROFILE_FILES.credential))
+        ? "This directory holds an empty claim file without a profile. Keep the file and use a new --profile path for a new agent."
+        : "This directory holds a credential without a profile. Keep the credential and use a new --profile path for a new agent.");
     }
     const name = options.name ?? "MCP agent";
     if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
@@ -646,28 +658,36 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       const complete = await readComplete(path, current !== null, options.inspectCompletion);
       if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
-        const profileState = await pathExists(path) ? "damaged profile.json" : "no profile.json";
-        const state = `This directory has ${await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`}, ${profileState}, and ${completePath(path)}.`;
-        const newPath = `Use --profile <new path> for a new agent.`;
-        if (!complete.workspace_id || !complete.anon_key || !complete.principal_id || complete.anon_key !== options.target.anonKey) {
-          throw new McpConnectError("connect_completion_incomplete", `${state} The completion record cannot rebuild the profile. ${newPath}`);
-        }
-        let orphan: { principalId: string; raw: string } | null;
-        try { orphan = await checkedOrphan(path); }
-        catch (error) {
-          if (error instanceof McpConnectError && error.code === "connect_credential_mode") throw error;
-          throw new McpConnectError("connect_completion_incomplete", `${state} The credential cannot rebuild the profile. ${newPath}`);
-        }
-        if (!orphan) throw new McpConnectError("connect_completion_incomplete", `${state} The credential is missing. ${newPath}`);
-        if (orphan.principalId !== complete.principal_id) {
-          throw new McpConnectError("connect_completion_principal_mismatch", `The credential at ${join(profileDir, CONNECT_PROFILE_FILES.credential)} belongs to a different principal than ${completePath(path)}. The profile was not rebuilt. Use --profile <new path> for a new agent.`);
-        }
-        const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
-          workspace_id: complete.workspace_id, principal_id: orphan.principalId,
-          credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
-        if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
-        else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
-        return connectedResult(path, orphan.principalId);
+        return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+          if (await completedProfileAt(path) || (await pathExists(path) && !await repairableProfileAt(path))) {
+            throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+          }
+          const profileState = await pathExists(path) ? await emptyClaimAt(path) ? "an empty profile.json claim file" : "damaged profile.json" : "no profile.json";
+          const credentialPath = join(profileDir, CONNECT_PROFILE_FILES.credential);
+          const credentialState = await emptyClaimAt(credentialPath) ? "an empty claim file at credential.json" :
+            await pathExists(credentialPath) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`;
+          const state = `This directory has ${credentialState}, ${profileState}, and ${completePath(path)}.`;
+          const newPath = `Use --profile <new path> for a new agent.`;
+          if (!complete.workspace_id || !complete.anon_key || !complete.principal_id || complete.anon_key !== options.target.anonKey) {
+            throw new McpConnectError("connect_completion_incomplete", `${state} The completion record cannot rebuild the profile. ${newPath}`);
+          }
+          let orphan: { principalId: string; raw: string } | null;
+          try { orphan = await checkedOrphan(path); }
+          catch (error) {
+            if (error instanceof McpConnectError && error.code === "connect_credential_mode") throw error;
+            throw new McpConnectError("connect_completion_incomplete", `${state} The credential cannot rebuild the profile. ${newPath}`);
+          }
+          if (!orphan) throw new McpConnectError("connect_completion_incomplete", `${state} ${await emptyClaimAt(credentialPath) ? "The empty claim file has no credential." : "The credential is missing."} ${newPath}`);
+          if (orphan.principalId !== complete.principal_id) {
+            throw new McpConnectError("connect_completion_principal_mismatch", `The credential at ${join(profileDir, CONNECT_PROFILE_FILES.credential)} belongs to a different principal than ${completePath(path)}. The profile was not rebuilt. Use --profile <new path> for a new agent.`);
+          }
+          const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
+            workspace_id: complete.workspace_id, principal_id: orphan.principalId,
+            credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
+          if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
+          else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
+          return connectedResult(path, orphan.principalId);
+        });
       }
       if ((!current && await pathExists(path)) || (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))) {
         throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");

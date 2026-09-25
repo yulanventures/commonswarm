@@ -9496,6 +9496,8 @@ async function runMcpConnect(args: Arguments): Promise<void> {
     const removed = cleared.removed === "nothing" ? "Nothing was removed." : `Removed ${cleared.removed}.`;
     process.stdout.write(cleared.removed === "nothing" ? `${removed}\n` : cleared.completedProfile
       ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.\n`
+      : cleared.emptyClaimPresent
+        ? `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
       : cleared.credentialPresent
         ? cleared.profilePresent
           ? `${removed} This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n`
