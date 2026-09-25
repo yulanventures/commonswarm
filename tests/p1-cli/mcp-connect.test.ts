@@ -163,6 +163,28 @@ test("Fold 10 changed wx claim preserves an intervening credential", { timeout: 
   } finally { await f.close(); }
 });
 
+test("Fold 11 open claim rejects a replacement before rename", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const file = join(f.root, "open-claim", "credential.json");
+    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    let checks = 0;
+    await assert.rejects(writeSecureJsonFileExclusive(file, '{"writer":"first"}', undefined,
+      async () => { throw Object.assign(new Error("no links"), { code: "EPERM" }); },
+      async handle => {
+        const identity = await handle.stat();
+        if (checks++ === 0) {
+          await unlink(file);
+          await writeFile(file, '{"writer":"replacement"}', { mode: 0o600 });
+        }
+        return identity;
+      }), { code: "EEXIST" });
+    assert.ok(checks >= 2, "the open descriptor also protects cleanup");
+    assert.equal(await readFile(file, "utf8"), '{"writer":"replacement"}');
+    assert.deepEqual((await readdir(dirname(file))).filter(name => name.endsWith(".tmp")), []);
+  } finally { await f.close(); }
+});
+
 test("Fold 10 explicit profile repairs an old interrupted rebuild without POST", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {

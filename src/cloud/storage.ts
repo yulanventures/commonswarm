@@ -481,6 +481,7 @@ export async function writeSecureJsonFileExclusive(
   path: string, serialized: string,
   write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
   publishLink: typeof link = link,
+  claimIdentity: (handle: import("node:fs/promises").FileHandle) => ReturnType<import("node:fs/promises").FileHandle["stat"]> = handle => handle.stat(),
 ): Promise<void> {
   await secureDirectory(dirname(path));
   const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
@@ -497,9 +498,7 @@ export async function writeSecureJsonFileExclusive(
       // Reserve the name exclusively. A killed process leaves an empty claim, never
       // a partial credential. The caller can identify that claim beside its pending record.
       const final = await open(path, "wx", 0o600);
-      const claim = await final.stat();
       try {
-        await final.close();
         // The first temp was prepared for link(). Write a second temp after the
         // claim so even a kill during this fallback leaves only the empty claim.
         const fallback = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
@@ -509,6 +508,7 @@ export async function writeSecureJsonFileExclusive(
           await fallbackHandle.chmod(0o600);
           await fallbackHandle.sync();
           await fallbackHandle.close();
+          const claim = await claimIdentity(final);
           const current = await lstat(path).catch(() => null);
           if (!current || current.dev !== claim.dev || current.ino !== claim.ino) {
             throw Object.assign(new Error("exclusive claim changed before publication"), { code: "EEXIST" });
@@ -520,6 +520,7 @@ export async function writeSecureJsonFileExclusive(
         } finally { await unlink(fallback).catch(() => undefined); }
       } catch (writeError) {
         const current = await lstat(path).catch(() => null);
+        const claim = await claimIdentity(final);
         if (current && claim.dev === current.dev && claim.ino === current.ino) await unlink(path).catch(() => undefined);
         throw writeError;
       } finally { await final.close().catch(() => undefined); }
