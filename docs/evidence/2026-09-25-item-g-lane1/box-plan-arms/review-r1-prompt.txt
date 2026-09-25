@@ -1,0 +1,36 @@
+You review one change of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset, db:stop, supabase stop/start; do not read ~/.cswarm or ~/.config/cswarm; start no other model;
+use no skill; print no secret. Read-only git and file reads. SQL against the local stack only inside a transaction you
+ROLL BACK (docker exec -i supabase_db_cloud-swarm psql -U postgres). Kill every process you start.
+
+CHANGE: commit e55deb3d on branch lane/g-box-plan (base main f7fa1227). Your directory is a detached worktree at it.
+It adds a production runbook for tonight's box window of item G lane 1 (release SHA 7c0bee1e, migration
+20260925000001_unclaimed_observed_ack.sql, command + read edges):
+- docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md (order, handoffs, Tom's mint block, failure table, rollback)
+- deploy/release-proofs/item-g/g-seed.sh (steps 1-3, run by the lead on the mini against production)
+- deploy/release-proofs/item-g/20260925000001-rollback.sql and -rollback-catalog.sql (reserve SQL rollback)
+Context: deploy/RELEASE-TO-BOX.md (sections 1, 5, 6; release_psql and release_psql_ro), the migration, the existing
+proofs 20260925000001-catalog.sql and -functional.sql, docs/evidence/2026-09-25-item-g-lane1/LANE.md and LANDING.md.
+
+CHECK, with file:line evidence:
+1. Rollback SQL: is it the exact inverse of the migration for every object (functions, grants, owner, comment, views,
+   table, index, check9, ledger row)? Is keeping check9 widened when unclaimed rows exist correct and safe? Could any
+   step fail on the box (locks, dependencies, a role that cannot DROP, release_psql's /proof mount, ON_ERROR_STOP,
+   psql \if with a \gset boolean)? Does the rollback catalog proof return t exactly when the rollback is complete and
+   f otherwise (think of each object left behind)?
+2. The edge-only rollback claim: with the migration in place, is the OLD edge (4ef0f300) plus old clients (<=0.1.77)
+   and the old site safe? Name anything the old code reads or writes that the migration changed.
+3. g-seed.sh: correct, safe with secrets (no token in argv, logs, or leftover files; permissions), and its STOP gates
+   can fail and fail for the stated reason. Any way it can print a false PASS? Any way it leaves a secret on disk
+   beyond the input files and the recipient profile copy?
+4. Tom's mint block: will it run as written in zsh and bash (the subshell, umask, uuidgen case, pid helper, redirects),
+   does it print nothing sensitive, and are the token mint flags valid for src/cli.ts at this commit?
+5. The order/handoff table and the failure table: runnable by the box operator, consistent with RELEASE-TO-BOX.md;
+   any step whose failure is not covered.
+6. Every claim in BOX-SECTION6.md's rehearsal table is consistent with the code (you cannot rerun the served edge; say
+   what you could verify by reading and by rolled-back SQL).
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence. Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

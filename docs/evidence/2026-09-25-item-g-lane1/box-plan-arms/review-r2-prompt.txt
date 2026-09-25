@@ -1,0 +1,29 @@
+You review one change of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset, db:stop, supabase stop/start; do not read ~/.cswarm or ~/.config/cswarm; start no other model;
+use no skill; print no secret. Read-only git and file reads. SQL against the local stack only inside a transaction you
+ROLL BACK (docker exec -i supabase_db_cloud-swarm psql -U postgres). Kill every process you start.
+
+CHANGE: branch lane/g-box-plan at e8c5fa70 (base main f7fa1227). Your directory is a detached worktree at it.
+Round 1 on e55deb3d: Opus FAIL (token expiry could fake a STOP and roll back a good edge; a curl failure left the
+bearer-header file and exited 7; failure-table gaps; rollback not aligned with the runbook; proof gaps; step 3 does not
+discriminate; SQL rollback limits; mint stderr). Grok PASS with RIGOUR (substring check9 match; header leftover; mint
+stderr; anon-key path; RELEASE-TO-BOX's on-box seed text conflicts; limit 50 vs 20). The lead's fixes are cb877d52 and
+e8c5fa70; the round-1 reviews are /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG/opus-box.md and /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG/grok-box.md.
+Files: docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md, deploy/release-proofs/item-g/g-seed.sh,
+deploy/release-proofs/item-g/20260925000001-rollback.sql, -rollback-catalog.sql.
+
+REVIEW `git diff e55deb3d..e8c5fa70` closely and the whole plan (`git diff f7fa1227..e8c5fa70`). CHECK that every
+round-1 finding is fixed, and then the same six checks as round 1:
+1. Rollback SQL and its proof (exact inverse; widened branch; proof t exactly when complete, f for each object or
+   grant left wrong; failure path exits non-zero and changes nothing).
+2. Edge-only rollback safety with the migration in place.
+3. g-seed.sh: correct; no secret in argv, logs or leftover files on any exit path; each STOP can fail and fails for
+   the stated reason; no false PASS; the 90-minute expiry guard.
+4. Tom's mint block in bash and zsh; prints nothing but OK; valid flags.
+5. Order, handoffs and failure table: every exit code and step covered; consistent with RELEASE-TO-BOX.md.
+6. Every rehearsal claim consistent with the code.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence. Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
