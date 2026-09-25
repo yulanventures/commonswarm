@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
-import { clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
+import { classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
 import { writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
@@ -565,6 +565,198 @@ test("Fold 7 completion rebuilds a missing profile locally or gives a new path f
   } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
 });
 
+test("Fold 8 completion binds a rebuild to its recorded principal", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "bound", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const record = join(dirname(path), "connect-complete.json");
+    const credential = join(dirname(path), "credential.json");
+    const original = JSON.parse(await readFile(credential, "utf8"));
+    const completed = JSON.parse(await readFile(record, "utf8"));
+    assert.equal(completed.principal_id, PRINCIPAL);
+    assert.equal(completed.run_id, RUN);
+    await unlink(path);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    await unlink(path);
+    const otherPrincipal = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    await writeSecureJsonFile(credential, JSON.stringify({ ...original, principal_id: otherPrincipal }));
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_completion_principal_mismatch");
+      assert.match(String(error), /credential\.json.*connect-complete\.json.*--profile <new path>/);
+      return true;
+    });
+    await assert.rejects(stat(path), { code: "ENOENT" });
+    await writeSecureJsonFile(credential, JSON.stringify(original));
+    delete completed.principal_id;
+    await writeSecureJsonFile(record, JSON.stringify(completed));
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_completion_incomplete");
+      assert.match(String(error), /--profile <new path>/);
+      return true;
+    });
+    assert.equal(f.calls(), 1);
+    await assert.rejects(stat(path), { code: "ENOENT" });
+  } finally { await f.close(); }
+});
+
+test("Fold 8 pending resume classifies completion and keeps a working profile on write failure", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "resume", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const complete = join(dirname(path), "connect-complete.json");
+    const pending = join(dirname(path), "connect-pending.json");
+    const record = JSON.parse(await readFile(complete, "utf8"));
+    await writeSecureJsonFile(pending, JSON.stringify({ attemptId: record.attemptId, url: record.url, name: "MCP agent",
+      codeHash: record.codeHash, createdAt: new Date().toISOString() }));
+    await chmod(complete, 0o644);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_mode");
+      assert.ok(String(error).includes(`chmod 600 '${complete}'`));
+      return true;
+    });
+    await chmod(complete, 0o600);
+    await unlink(complete);
+    await symlink(pending, complete);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_unsafe");
+      assert.match(String(error), /connect-complete\.json/);
+      assert.doesNotMatch(String(error), /mv .*profile\.json/);
+      return true;
+    });
+    await unlink(complete);
+    await writeSecureJsonFile(complete, JSON.stringify(record));
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
+      inspectCompletion: async file => Object.assign(await stat(file), { uid: 0 }) }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_unsafe");
+      assert.match(String(error), /connect-complete\.json/);
+      assert.doesNotMatch(String(error), /mv .*profile\.json/);
+      return true;
+    });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
+      writeCompletion: async () => { throw Object.assign(new Error("write refused"), { code: "EIO" }); } }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_write_failed");
+      assert.doesNotMatch(String(error), /damaged|mv /);
+      return true;
+    });
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("Fold 8 cleanup keeps live temps and removes dead credential and profile temps", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "temps", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    const live = join(dirname(path), `credential.json.${process.pid}.abcdefabcdef.tmp`);
+    const deadCredential = join(dirname(path), "credential.json.99999999.abcdefabcdef.tmp");
+    const deadProfile = join(dirname(path), "profile.json.99999999.abcdefabcdef.tmp");
+    for (const file of [live, deadCredential, deadProfile]) await writeFile(file, "{}", { mode: 0o600 });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    assert.equal((await stat(live)).isFile(), true);
+    await assert.rejects(stat(deadCredential), { code: "ENOENT" });
+    await assert.rejects(stat(deadProfile), { code: "ENOENT" });
+  } finally { await f.close(); }
+});
+
+test("Fold 8 exclusive first writes publish exactly one credential", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const dir = join(f.root, "exclusive");
+    await mkdir(dir, { mode: 0o700 });
+    const file = join(dir, "credential.json");
+    let waiting = 0;
+    let release!: () => void;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const write = async (handle: import("node:fs/promises").FileHandle, contents: string) => {
+      await handle.writeFile(contents);
+      if (++waiting === 2) release();
+      await barrier;
+    };
+    const results = await Promise.allSettled([writeSecureJsonFileExclusive(file, '{"writer":1}', write),
+      writeSecureJsonFileExclusive(file, '{"writer":2}', write)]);
+    assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(results.filter(result => result.status === "rejected" && (result.reason as { code?: string }).code === "EEXIST").length, 1);
+    assert.deepEqual((await readdir(dir)).filter(name => name === "credential.json"), ["credential.json"]);
+    assert.ok([1, 2].includes(JSON.parse(await readFile(file, "utf8")).writer));
+  } finally { await f.close(); }
+});
+
+test("Fold 8 ancestor diagnosis skips owned 0755 and names an unowned directory on EACCES", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const oldHome = process.env.HOME;
+  process.env.HOME = f.root;
+  try {
+    const owned = join(f.root, "owned");
+    const foreign = join(owned, "foreign");
+    await mkdir(foreign, { recursive: true, mode: 0o755 });
+    await chmod(owned, 0o755);
+    const inspect = async (file: string) => {
+      const info = await stat(file);
+      return file === foreign ? Object.assign(info, { uid: 0 }) : info;
+    };
+    const ownerUid = process.getuid?.() ?? 501;
+    assert.notEqual(ownerUid, 0);
+    await assert.rejects(classifyDirectoryFailure(foreign, Object.assign(new Error("access denied"), { code: "EACCES" }), inspect, ownerUid), error => {
+      assert.equal((error as { code: string }).code, "connect_directory_unowned");
+      assert.match(String(error), new RegExp(foreign));
+      assert.match(String(error), /not owned by the current user/);
+      assert.doesNotMatch(String(error), /chmod 700/);
+      return true;
+    });
+    await chmod(foreign, 0o000);
+    await assert.rejects(classifyDirectoryFailure(foreign, Object.assign(new Error("access denied"), { code: "EACCES" }), inspect, ownerUid), { code: "connect_directory_unowned" });
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; await f.close(); }
+});
+
+test("Fold 8 clear reports exactly the removed records and never selects a profile temp", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "clear-count", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const dir = dirname(path);
+    const complete = join(dir, "connect-complete.json");
+    const pending = join(dir, "connect-pending.json");
+    const sample = await readFile(path, "utf8");
+    await unlink(path);
+    const temp = join(dir, `profile.json.${process.pid}.abcdefabcdef.tmp`);
+    await writeFile(temp, sample, { mode: 0o600 });
+    let result = await clearMcpConnect(path);
+    assert.equal(result.removed, "completion record");
+    assert.equal(result.completedProfile, null);
+    assert.equal((await stat(temp)).isFile(), true);
+    result = await clearMcpConnect(path);
+    assert.equal(result.removed, "nothing");
+    await writeFile(pending, "{}", { mode: 0o600 });
+    result = await clearMcpConnect(path);
+    assert.equal(result.removed, "pending record");
+    await writeFile(pending, "{}", { mode: 0o600 });
+    await writeFile(complete, "{}", { mode: 0o600 });
+    result = await clearMcpConnect(path);
+    assert.equal(result.removed, "pending record and completion record");
+    for (const [label, files] of [
+      ["pending record", [pending]],
+      ["completion record", [complete]],
+      ["pending record and completion record", [pending, complete]],
+    ] as const) {
+      for (const file of files) await writeFile(file, "{}", { mode: 0o600 });
+      const cleared = await cli(["mcp", "connect", "--clear-pending", "--profile", path, "--url", TARGET.url], { HOME: f.root });
+      assert.equal(cleared.code, 0, cleared.stderr);
+      assert.ok(cleared.stdout.startsWith(`Removed ${label}.`));
+      assert.doesNotMatch(cleared.stdout, /working profile|cleared/);
+    }
+    const nothing = await cli(["mcp", "connect", "--clear-pending", "--profile", path, "--url", TARGET.url], { HOME: f.root });
+    assert.equal(nothing.code, 0);
+    assert.match(nothing.stdout, /^Nothing was removed\./);
+    assert.doesNotMatch(nothing.stdout, /cleared|working profile/);
+  } finally { await f.close(); }
+});
+
 test("Fold 7 damaged and unreadable completion records warn once and clear removes them", { timeout: 10000 }, async () => {
   const f = await fixture();
   const previousHome = process.env.HOME;
@@ -839,8 +1031,8 @@ test("clear requires pending and preserves every completed profile's credential"
     const sibling = join(dir, "codex-agent");
     const credential = join(dir, "credential.json");
     const missing = await cli(["mcp", "connect", "--clear-pending", "--profile", requested, "--url", TARGET.url], { HOME: f.root });
-    assert.equal(missing.code, 1);
-    assert.match(missing.stderr, /connect_pending_missing|no interrupted connect record/);
+    assert.equal(missing.code, 0);
+    assert.match(missing.stdout, /Nothing was removed/);
     assert.doesNotMatch(missing.stdout + missing.stderr, /files cleared/);
     await connectMcp({ target: TARGET, profilePath: sibling, readCode: async () => JOIN, fetcher: f.fetcher });
     const bound = JSON.parse(await readFile(sibling, "utf8"));
@@ -859,7 +1051,7 @@ test("clear requires pending and preserves every completed profile's credential"
     assert.doesNotMatch(blocked.stdout, /revoke/);
     assert.doesNotMatch(blocked.stdout, /revoke it before starting/);
     assert.equal((await readAgentProfile(sibling, "this-host-session")).credential_file, credential);
-    await assert.rejects(clearMcpConnect(requested), { code: "connect_pending_missing" });
+    assert.equal((await clearMcpConnect(requested)).removed, "nothing");
     assert.equal((await stat(credential)).isFile(), true);
     f.reset();
     const invalidProfile = join(f.root, "invalid-credential", "profile.json");

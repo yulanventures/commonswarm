@@ -1,6 +1,6 @@
 # Item M lane: crash-safe MCP connect (2026-09-25)
 
-The original sections below record historical lane states. Fold 7 at the end is the current client rule; it supersedes earlier credential deletion, mode, fresh-register escape, and revocation-advice rows.
+The original sections below record historical lane states. Fold 8 at the end is the current client rule; it supersedes earlier credential deletion, mode, fresh-register escape, and revocation-advice rows.
 
 Branch `lane/item-m`. Client commit `df609b6a`; test commit `fa2768aa`. Base brief: `docs/design/2026-09-25-ITEM-M-CRASH-SAFE-CONNECT-BRIEF.md`. No server, migration, or production change. No production host was contacted. Every register test used an injected fetcher or a loopback HTTP server and a temporary profile directory.
 
@@ -276,9 +276,9 @@ I1 remains the Fold 6 rule: a saved credential is replaced only after a successf
 | HH2 | The ancestor mode walk runs only for EACCES/EPERM. Repository and symlink path errors keep their typed refusal. | `Fold 7 typed repository and symlink refusals do not advise chmod`. | Removing the permission-code guard: baseline 1/1, revert 0/1. |
 | HH3 | A retry validates the orphan as a bounded regular file with a parseable durable principal before POST. Symlink, oversized, and missing-principal examples do not cost a token. | `Fold 7 retry checks every orphan form before register`; partial-file test above. | Disabling pre-POST orphan validation: baseline 1/1, revert 0/1. |
 | HH4 | Default scan preserves credential-mode errors and checks a credential without pending or a usable completion record, plus its directory, before a fresh register. | `Fold 7 default scan reports credential and directory modes before another register`. | Dropping the credential-mode rethrow: baseline 1/1, revert 0/1. |
-| HH5 | Completion records now carry the public target key and workspace ID. A matching record with no pending and no profile rebuilds `profile.json` from a validated credential, with no network or credential rewrite. An old/incomplete record or missing credential states all three file conditions and offers a new `--profile` path. | `Fold 7 completion rebuilds a missing profile locally or gives a new path for incomplete state`. | Restoring the missing-profile damaged step in the scan: baseline 1/1, revert 0/1. |
-| HH6 | Damaged or unreadable completion records produce one warning naming the record and are ignored for connect selection. Clear can remove a completion record even without pending and keeps credentials. If pending existed at clear's start, success still requires its actual removal. Wrong-mode records retain I3's chmod step. | `Fold 7 damaged and unreadable completion records warn once and clear removes them`; `clear reports success only when pending was actually removed`. | Restoring a throw on damaged completion: baseline 1/1, revert 0/1. Ignoring the pending-removal result when completion was removed: baseline 1/1, revert 0/1. |
-| HH7 | Replace still unlinks its temp on any error. A killed write leaves at most one matching temp; the next connect removes stale credential temps under the lock before reading state or posting. | `Fold 7 replace failure unlinks its temp and a killed replacement temp is removed next run`. | Removing the failure unlink: baseline 1/1, revert 0/1. Removing early stale-temp cleanup: baseline 1/1, revert 0/1. |
+| HH5 — superseded by Fold 8 KK1 | Completion records carry the public target key and workspace ID. The Fold 7 rebuild validated credential shape but did not compare its principal with the completed attempt. | `Fold 7 completion rebuilds a missing profile locally or gives a new path for incomplete state`. | Restoring the missing-profile damaged step in the scan: baseline 1/1, revert 0/1. |
+| HH6 — narrowed and extended by Fold 8 KK3/KK5 | Damaged or unreadable completion records produce one warning and are ignored for selection when there is no pending record. Wrong-mode records get the exact chmod step in that no-pending path; Fold 7 did **not** establish it for a resume with pending. Clear can remove a completion record without pending, and pending removal must actually succeed. | `Fold 7 damaged and unreadable completion records warn once and clear removes them`; `clear reports success only when pending was actually removed`. | Restoring a throw on damaged completion: baseline 1/1, revert 0/1. Ignoring the pending-removal result when completion was removed: baseline 1/1, revert 0/1. |
+| HH7 — extended by Fold 8 KK2/KK7 | Replace still unlinks its temp on any error. Fold 7 cleaned all matching credential temps under the connect lock, including a live writer's temp; Fold 8 narrows cleanup to dead PIDs under the setup lock and adds profile temps. | `Fold 7 replace failure unlinks its temp and a killed replacement temp is removed next run`. | Removing the failure unlink: baseline 1/1, revert 0/1. Removing early stale-temp cleanup: baseline 1/1, revert 0/1. |
 
 Each mutation restored the original source bytes in `finally`. Every focused test has a timeout; the two SIGKILL tests await their children and clean their temporary directories. Tests use injected fetchers, loopback targets, and temporary HOME/state. No full suite ran in this lane.
 The timeout-table mapping was updated to the moved register abort timer and `stty` deadline source lines; its separate test file is for the lead's full CLI gate.
@@ -295,3 +295,32 @@ The timeout-table mapping was updated to the moved register abort timer and `stt
 
 - The lead owns full pure, CLI, server, edge, release-bundle, and site gates at the Fold 7 tip. The lead's counts above are from before this fold. No migration was applied.
 - The tests model the server's rotating-token response with injected fetchers and inspect local files; they do not establish production or real-workspace behavior.
+
+## Fold 8 — Codex and Opus round 8 rulings
+
+At `47b26181`, Codex marked the missing principal proof PRODUCTION and Opus independently identified it as RIGOUR. Opus also identified the pending resume, ancestor advice, clear wording, exclusive publication, and temporary-file cases. The reviews are `scratchpad/itemM/codex-r8.md` and `scratchpad/itemM/opus-r8.md`. This fold changes client code, its focused CLI test file, and this evidence. No server, migration, production host, or real workspace was touched.
+
+| Ruling | Change | Focused test | Measured mutation |
+|---|---|---|---|
+| KK1 | Completion records store `principal_id` and the register response's `run_id`. HH5 rebuild requires the recorded principal to match the credential. A mismatch names `credential.json`, `connect-complete.json`, and the new `--profile` step; an older record without a principal cannot rebuild. **Supersedes HH5's unqualified validated-credential rebuild claim.** | `Fold 8 completion binds a rebuild to its recorded principal` checks matching, other-agent, and legacy records without another POST. | Removing the principal comparison: baseline 1/1, mutation 0/1. |
+| KK2 | Connect and clear remove a matching credential temporary file only if its PID is dead. Cleanup holds the same `setup` lock as the profile writer, nested under the connect lock. | `Fold 8 cleanup keeps live temps and removes dead credential and profile temps`. | Removing the live-PID guard: baseline 1/1, mutation 0/1. |
+| KK3 | A pending resume classifies the completion record under the connect lock. Wrong mode gives `chmod 600`; symlink or foreign owner gives `connect_complete_unsafe`. A completion write error gives `connect_complete_write_failed` and keeps the working profile. **Supersedes HH6's broad wrong-mode claim; the earlier claim was established only for the no-pending scan.** | `Fold 8 pending resume classifies completion and keeps a working profile on write failure` covers mode, symlink, simulated foreign owner, and injected EIO without another POST. | Restoring the pending-path skip of `readComplete`: baseline 1/1, mutation 0/1. |
+| KK4 | The ancestor walk offers chmod only when an owned directory lacks owner permissions. On EACCES, an unowned directory is named with ownership advice. | `Fold 8 ancestor diagnosis skips owned 0755 and names an unowned directory on EACCES` uses a synthetic root-owned stat for a temporary path. | Restoring the exact-0700 test: baseline 1/1, mutation 0/1. |
+| KK5 | Clear reports the exact removal: pending, completion, both, or nothing. An absent record does not produce a cleared claim. | `Fold 8 clear reports exactly the removed records and never selects a profile temp`; older clear tests now expect `nothing`. | Returning pending for the nothing case: baseline 1/1, mutation 0/1. |
+| KK6 | The first private file write publishes a synced temp with `link()`. A competing writer gets EEXIST and cannot replace the final file. | `Fold 8 exclusive first writes publish exactly one credential` synchronizes two first writes and checks one winner and one EEXIST. | Restoring rename publication: baseline 1/1, mutation 0/1. |
+| KK7 | Dead `profile.json` temps receive the same cleanup as credential temps. Clear skips temp names while finding a working profile, including a live writer's temp. | The Fold 8 cleanup and clear tests above. | Removing the clear-loop temp exclusion: baseline 1/1, mutation 0/1. |
+
+Each mutation changed one source fragment, ran the named lane test with a 30-second subprocess bound and a temporary HOME, then restored the original bytes in `finally`. Every new test has a timeout. The focused test file passed **67/67** after the changes. The synthetic owner stat and injected write error isolate fault paths that cannot be created with this unprivileged test user.
+
+### Fold 8 gates
+
+| Gate | Result |
+|---|---|
+| `npm run build` | Exit 0; TypeScript build. |
+| `npm run check:tests` | Exit 0; test type-check. |
+| `env HOME="$T" node --import tsx --test tests/p1-cli/mcp-connect.test.ts` | Exit 0; 67/67, with `T` created by `mktemp -d /tmp/lane-home.XXXXXX`. |
+
+### Fold 8 not established
+
+- The lead owns full pure, CLI, server, edge, release-bundle, and site gates at the Fold 8 tip. No migration was applied.
+- The focused tests use injected register responses and local files. They do not establish production, real-workspace, or release-bundle behavior. The foreign-owner and write-failure paths were simulated; no privileged ownership change was made.
