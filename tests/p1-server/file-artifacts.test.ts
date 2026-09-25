@@ -1846,13 +1846,18 @@ test("item L derived ids replay one live version and upsert-off Storage refuses 
   assert.equal(replay.status, 200, JSON.stringify(replay.body));
   assert.equal(replay.body.version_id, first.body.version_id);
   assert.equal(replay.body.upload_path, first.body.upload_path);
+  // Create assigns this storage key per version, not per mutable file name.
+  const pending = await sql<{ storage_path: string }[]>`
+    SELECT storage_path FROM swarm.file_versions WHERE workspace_id = ${f.workspaceA}::uuid AND version_id = ${versionId}::uuid
+  `;
+  assert.deepEqual(pending.map(row => row.storage_path), [`${f.workspaceA}/${fileId}/${first.body.version_n}`]);
   const upload = `${local.API_URL}${String(first.body.upload_path)}`;
   const put = await fetch(upload, { method: "PUT", headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
   assert.equal(put.status, 200);
   const duplicate = await fetch(upload, { method: "PUT", headers: { "content-type": "text/markdown" }, body: PLAN_BYTES });
-  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.status, 400);
   const duplicateBody = await duplicate.json() as Record<string, unknown>;
-  assert.ok(["Duplicate", "ResourceAlreadyExists"].includes(String(duplicateBody.error)), JSON.stringify(duplicateBody));
+  assert.deepEqual(duplicateBody, { statusCode: "409", error: "Duplicate", message: "The resource already exists" });
   const commitBody = { kind: "file_version_commit", file_id: fileId, version_id: versionId, sha256: digest };
   const commit = await postCommand(f.agentToken, commitBody, f.workspaceA, commitId);
   assert.equal(commit.status, 200, JSON.stringify(commit.body));

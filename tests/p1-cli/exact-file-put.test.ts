@@ -14,6 +14,7 @@ const bytes = Buffer.from("# plan\n");
 class FakeEdge {
   creates = 0; puts = 0; commits = 0; live = 0;
   loss: "create" | "put" | "commit" | null = null;
+  putRefusal: { status: number; body: object } | null = null;
   precondition: number | null = null;
   private created = new Map<string, any>();
   private committed = new Map<string, any>();
@@ -23,6 +24,7 @@ class FakeEdge {
     const url = String(input);
     if (init?.method === "PUT") {
       this.puts++;
+      if (this.putRefusal) return Response.json(this.putRefusal.body, { status: this.putRefusal.status });
       if (this.stored.has(url)) return Response.json({ error: "Duplicate", message: "The resource already exists" }, { status: 409 });
       this.stored.add(url);
       if (this.loss === "put") { this.loss = null; throw new Error("response lost after put"); }
@@ -49,6 +51,7 @@ class FakeEdge {
       if (!result) {
         const created = [...this.created.values()].find(row => row.version_id === cmd.version_id);
         assert.ok(created);
+        if (!this.stored.has(`${target.url}${created.upload_path}`)) return Response.json({ error: "file_bytes_missing", message: "no object was uploaded for this version" }, { status: 409 });
         result = { file_id: created.file_id, version_id: created.version_id, version_n: created.version_n,
           name: created.name, size_bytes: bytes.length, sha256: cmd.sha256,
           sha256_note: "unverified client attestation", reference: `file:${created.file_id}@v${created.version_n}` };
@@ -60,6 +63,11 @@ class FakeEdge {
     }
     throw new Error(`unexpected command ${cmd.kind}`);
   }) as typeof fetch;
+  seedCreatedObject() {
+    const created = [...this.created.values()].at(-1);
+    assert.ok(created);
+    this.stored.add(`${target.url}${created.upload_path}`);
+  }
 }
 
 function input(stateDir: string, edge: FakeEdge, overrides: Record<string, unknown> = {}) {
@@ -103,12 +111,43 @@ test("resume across a new client instance, conflict, and deleted record", { time
     await assert.rejects(prepareExactPut(input(dir, edge, { bytes: Buffer.from("different") })), RequestIdConflict);
     assert.equal(edge.creates, calls, "conflict refused before network");
     await unlink(original.path);
+    edge.putRefusal = { status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } };
     const noRecord = await executeExactPut(await prepareExactPut(input(dir, edge)));
     assert.equal(noRecord.outcome, "replayed");
     assert.equal(noRecord.conflict_check, "unavailable");
     assert.equal(edge.live, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+for (const [shape, refusal] of [
+  ["local 400 duplicate", { status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } }],
+  ["409 duplicate", { status: 409, body: { error: "Duplicate" } }],
+  ["expired 403", { status: 403, body: { error: "ExpiredToken" } }],
+] as const) {
+  test(`replayed PUT ${shape} follows commit truth`, { timeout: 10_000 }, async () => {
+    for (const present of [true, false]) {
+      const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+      const edge = new FakeEdge();
+      try {
+        edge.putRefusal = { status: 403, body: { error: "ExpiredToken" } };
+        const first = await prepareExactPut(input(dir, edge));
+        await assert.rejects(executeExactPut(first), /upload PUT was refused/);
+        assert.equal(edge.commits, 0, "first refused PUT never commits");
+        if (present) edge.seedCreatedObject();
+        edge.putRefusal = refusal;
+        const resumed = await prepareExactPut(input(dir, edge));
+        if (present) {
+          assert.equal((await executeExactPut(resumed)).outcome, "replayed");
+          assert.equal(edge.live, 1);
+        } else {
+          await assert.rejects(executeExactPut(resumed), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_bytes_missing");
+          assert.equal(edge.live, 0);
+        }
+        assert.equal(edge.uniqueCreates, 1);
+      } finally { await rm(dir, { recursive: true, force: true }); }
+    }
+  });
+}
 
 test("two concurrent contents for one request id cannot both prepare", { timeout: 10000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
@@ -157,7 +196,7 @@ test("cap and type refuse before network; brain precondition is typed", { timeou
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("expired upload URL remains an unknown retry rather than a new version", { timeout: 10000 }, async () => {
+test("expired upload URL reaches typed missing-bytes commit refusal on replay", { timeout: 10000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
   const edge = new FakeEdge();
   try {
@@ -171,13 +210,13 @@ test("expired upload URL remains an unknown retry rather than a new version", { 
     }) as typeof fetch;
     await assert.rejects(executeExactPut({ ...prepared, input: { ...prepared.input, fetcher: crashed } }));
     now += 2 * 60 * 60 * 1000 + 1;
-    // The same create id replays an expired signed URL, which must stay unknown.
+    // The same create id replays an expired signed URL; commit decides whether bytes exist.
     const expired = (async (url: URL | RequestInfo, init?: RequestInit) => {
       if (init?.method === "PUT") return Response.json({ error: "ExpiredToken" }, { status: 401 });
       return original(url, init);
     }) as typeof fetch;
     const retry = await prepareExactPut(input(dir, edge, { now: () => now, fetcher: expired }));
-    await assert.rejects(executeExactPut(retry), /upload PUT was refused/);
+    await assert.rejects(executeExactPut(retry), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_bytes_missing");
     assert.equal(edge.live, 0);
     assert.equal(edge.uniqueCreates, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -194,7 +233,7 @@ test("resume record advances after create, PUT, and commit", { timeout: 10000 },
       return original(url, init);
     }) as typeof fetch;
     await assert.rejects(executeExactPut({ ...prepared, input: { ...prepared.input, fetcher: brokenPut } }));
-    assert.equal(JSON.parse(await readFile(prepared.path, "utf8")).phase, "created");
+    assert.equal(JSON.parse(await readFile(prepared.path, "utf8")).phase, "uploaded");
     const brokenCommit = (async (url: URL | RequestInfo, init?: RequestInit) => {
       if (init?.method === "POST" && JSON.parse(String(init.body)).command.kind === "file_version_commit") throw new Error("command offline");
       return original(url, init);

@@ -50,6 +50,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const fileCommits = new Map<string, Record<string, any>>();
   const fileObjects = new Set<string>();
   let filePrecondition: number | null = null;
+  let putRefusal: { status: number; body: object } | null = null;
   let killPhase: "create" | "put" | "commit" | null = null;
   let killMcp: (() => void) | null = null;
   let renewals = 0;
@@ -65,6 +66,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     req.on("data", chunk => raw += chunk);
     req.on("end", () => {
       if (req.method === "PUT") {
+        if (putRefusal) return res.writeHead(putRefusal.status, { "content-type": "application/json" }).end(JSON.stringify(putRefusal.body));
         if (fileObjects.has(req.url ?? "")) return res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: "Duplicate" }));
         fileObjects.add(req.url ?? "");
         if (killPhase === "put") { killPhase = null; setImmediate(() => killMcp?.()); }
@@ -94,6 +96,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
         let committed = fileCommits.get(body.command_id);
         if (!committed) {
           const created = [...fileCreates.values()].find(row => row.version_id === body.command.version_id)!;
+          if (!fileObjects.has(created.upload_path as string)) return send(409, { error: "file_bytes_missing", message: "no object was uploaded for this version" });
           committed = { file_id: created.file_id, version_id: created.version_id, version_n: created.version_n,
             name: created.name, size_bytes: 7, sha256: body.command.sha256, sha256_note: "unverified client attestation",
             reference: `file:${created.file_id}@v${created.version_n}` };
@@ -209,6 +212,8 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
     setFilePrecondition: (value: number | null) => { filePrecondition = value; },
+    setPutRefusal: (value: typeof putRefusal) => { putRefusal = value; },
+    seedCreatedObject: () => { const created = [...fileCreates.values()][0]; assert.ok(created); fileObjects.add(created.upload_path as string); },
     conflictNext: () => { serverConflict = true; } };
 }
 
@@ -322,7 +327,9 @@ test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeo
     const records = await readdir(resumeDir);
     assert.equal(records.length, 1);
     await unlink(join(resumeDir, records[0]!));
+    f.setPutRefusal({ status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } });
     const withoutRecord = (await f.call("file_put", { request_id: "fileput01", path })).value;
+    f.setPutRefusal(null);
     assert.equal(withoutRecord.outcome, "replayed");
     assert.equal(withoutRecord.conflict_check, "unavailable");
     assert.equal(f.fileCommits.size, 1);
@@ -371,6 +378,42 @@ for (const phase of ["create", "put", "commit"] as const) {
       assert.equal(retried.outcome, "replayed");
       assert.equal(f.fileCreates.size, 1);
       assert.equal(f.fileCommits.size, 1);
+    } finally { await f.close(); }
+  });
+}
+
+for (const [shape, refusal] of [
+  ["local 400 duplicate", { status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } }],
+  ["409 duplicate", { status: 409, body: { error: "Duplicate", message: "The resource already exists" } }],
+  ["expired 403", { status: 403, body: { error: "ExpiredToken" } }],
+] as const) {
+  test(`MCP replayed PUT refused with ${shape} follows the commit result`, { timeout: 30_000 }, async () => {
+    const f = await fixture();
+    try {
+      const path = join(f.root, "refused.md");
+      await writeFile(path, "# plan\n");
+      for (const present of [true, false]) {
+        const request_id = `refused_${shape.replaceAll(/[^a-z0-9]/gi, "_")}_${present}`;
+        // A first PUT refusal has no earlier PUT evidence and must stop here.
+        f.setPutRefusal({ status: 403, body: { error: "ExpiredToken" } });
+        const first = await f.call("file_put", { request_id, path });
+        assert.equal(first.value.outcome, "unknown");
+        assert.equal(first.value.retry_with_same_request_id, true);
+        assert.equal(f.fileCommits.size, present ? 0 : 1);
+        if (present) f.seedCreatedObject();
+        f.setPutRefusal(refusal);
+        const resumed = await f.call("file_put", { request_id, path });
+        if (present) {
+          assert.equal(resumed.result.isError, undefined);
+          assert.equal(resumed.value.outcome, "replayed");
+          assert.equal(f.fileCommits.size, 1);
+        } else {
+          assert.equal(resumed.result.isError, true);
+          assert.equal(resumed.value.code, "file_bytes_missing");
+          assert.notEqual(resumed.value.outcome, "replayed");
+          assert.equal(f.fileCommits.size, 1);
+        }
+      }
     } finally { await f.close(); }
   });
 }
