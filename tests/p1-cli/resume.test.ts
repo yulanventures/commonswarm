@@ -50,6 +50,8 @@ import {
 } from "../../src/resume.js";
 import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
 import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, notifyRestartOptions } from "../../src/cli.js";
+import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
+import { generateSessionKey } from "../../src/cloud/session-proof.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -865,6 +867,63 @@ for (const startMode of ["stdin", "profile"] as const) {
     }
   });
 }
+
+test("a watcher started with session context prints that accepted flag", { timeout: 12_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-restart-context-"));
+  const xdg = join(root, "state");
+  let firstRead!: () => void;
+  const read = new Promise<void>((done) => { firstRead = done; });
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.on("data", (chunk) => raw += chunk);
+    request.on("end", () => {
+      const body = JSON.parse(raw) as { resource?: string };
+      response.writeHead(200, { "content-type": "application/json" });
+      if (body.resource === "members") response.end(JSON.stringify({
+        members: [], agents: [], identity: {
+          credential_valid: true, owner_user_id: OWNER, principal_id: PRINCIPAL, workspace_id: WORKSPACE,
+        },
+      }));
+      else if (body.resource === "signals") {
+        response.end(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }));
+        firstRead();
+      } else response.end(JSON.stringify({ error: "unexpected_resource" }));
+    });
+  });
+  const url = await listen(server);
+  let child: ChildProcess | undefined;
+  try {
+    const credential = await writeCredential(root);
+    const contextPath = join(root, "session.json");
+    await writeSessionContext(contextPath, {
+      ...newSessionBinding({
+        target: cloudTarget(url, "anon-context"), workspaceId: WORKSPACE, principalId: PRINCIPAL,
+        provider: "codex", mode: "interactive", hostSessionId: "test-session", tokenFile: credential,
+      }),
+      generation: 1, session_key: generateSessionKey(),
+    });
+    child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
+      "--url", url, "--anon-key", "anon-context", "--workspace-id", WORKSPACE,
+      "--session-context", contextPath], root, xdg);
+    let stderr = "";
+    child.stderr!.setEncoding("utf8");
+    child.stderr!.on("data", (chunk: string) => stderr += chunk);
+    const exit = waitForExit(child, () => stderr, 4_000);
+    await Promise.race([read, exit.then((code) => {
+      assert.fail(`session-bound watcher exited ${code} before reading: ${stderr}`);
+    })]);
+    child.kill("SIGTERM");
+    assert.equal(await exit, 143, stderr);
+    const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
+    assert.ok(match, stderr);
+    assert.ok(match[1]!.includes(`--session-context ${contextPath}`));
+    assert.equal(stderr.includes(TOKEN), false);
+  } finally {
+    if (child?.exitCode === null) child.kill("SIGKILL");
+    await close(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES) as Array<[keyof typeof NOTIFY_SIGNAL_EXIT_CODES, number]>) {
   test(`${signalName} stops an idle watcher with ${expectedCode} and one restart sentence`, { timeout: 8_000 }, async () => {
