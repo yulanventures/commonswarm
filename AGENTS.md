@@ -157,8 +157,9 @@ backup. Rules that follow:
   proves the refusal.
 - Never write `rm -rf "$VAR"` where `VAR` can be `HOME`, empty, or set by a prefix assignment on the same
   line. Delete only a path you created with an absolute `mktemp -d` and checked.
-- Never assign `HOME` as a command prefix. Use `export HOME=$(mktemp -d /tmp/x.XXXXXX)` on its own line,
-  and guard the cleanup with `case $HOME in /tmp/*|/private/tmp/*) rm -rf "$HOME";; esac`.
+- `HOME` is never assigned in a shell script, not as a prefix and not with `export`. Create a separate
+  variable and pass it only inside `env`, then delete only that variable:
+  `T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1`, `env HOME="$T" node --import tsx --test …`, `rm -rf "$T"`.
 - A Grok CLI review arm runs read-only: `--permission-mode plan`, or
   `--disallowed-tools run_terminal_command,kill_command_or_subagent,get_command_or_subagent_output,search_replace`.
 - Host controls on the Mac mini (HezLead, 2026-09-25): an `rm` guard first in `PATH` that refuses the home
