@@ -20,6 +20,10 @@ Written by CSwarmDevLead for a cold successor. Read this before any lane work on
   to `/Users/Shared/safe-rm.log`; hourly APFS local snapshots (`com.yulanbot.apfs-snapshot`); a Claude
   `PreToolUse` hook that blocks the pattern. Grok is signed out until the operator logs in again.
 
+HezLead's incident report is outside this repository, at `Ridge.io/ops/incidents/2026-09-25-mini-home-deletion.md`
+on the Mac mini. It names the lead as the launcher and the Grok arm as the actor, with the TCC line, and lists this
+lane as a control.
+
 ## What was lost
 
 `~/.config` (every cswarm seat credential, the anon key file, the `gh` login, alloy), `~/.cswarm` (every
