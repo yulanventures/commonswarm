@@ -27,7 +27,7 @@ SELECT
       OR (EXISTS (SELECT 1 FROM swarm.signal_deliveries AS d
             WHERE d.acked_at IS NOT NULL AND d.ack_outcome = 'observed'
               AND (d.last_lease_id IS NULL OR d.last_leased_by IS NULL))
-          AND pg_get_constraintdef(c.oid) LIKE '%(ack_outcome = ''observed''::text) AND (last_error_code IS NULL)%'))
+          AND pg_get_constraintdef(c.oid) = 'CHECK (((acked_at IS NULL) OR ((last_lease_id IS NOT NULL) AND (last_leased_by IS NOT NULL)) OR (ack_outcome = ''expired''::text) OR ((ack_outcome = ''observed''::text) AND (last_error_code IS NULL)) OR ((ack_outcome = ''failed_terminal''::text) AND (last_error_code = ''delivery_attempts_exhausted''::text))))'))
     FROM pg_constraint AS c
     WHERE c.conrelid = to_regclass('swarm.signal_deliveries') AND c.conname = 'signal_deliveries_check9'
   ), false)

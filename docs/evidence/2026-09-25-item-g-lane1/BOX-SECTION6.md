@@ -4,7 +4,9 @@ Written by CSwarmDevLead for HezLead and Anvil. Release SHA: `7c0bee1e750450f305
 KIND_LIST `edge stack`; CHANGED_FUNCTIONS `command read`; no router change; no new env names; migration
 `20260925000001_unclaimed_observed_ack.sql`. Agreed with HezLead on 2026-09-25 ~01:00Z: no credential goes to the box.
 The lead runs steps 1-3 from the mini against `https://api.commonswarm.com`, and Anvil runs only the read-only step 4.
-Everything below was rehearsed on the local stack; the results are in "Rehearsal".
+Everything below was rehearsed on the local stack; the results are in "Rehearsal". For this window this plan
+REPLACES `RELEASE-TO-BOX.md`'s item-G section-6 seed text (the paragraph that has Anvil post the seed on the box with
+credentials through loopback): no credential goes to the box, and Anvil runs only step 4.
 
 ## Correction to the lead's 01:00Z message
 
@@ -55,8 +57,7 @@ exists is refused).
   cswarm token mint --workspace-id "$WS" --principal-id "$(pid "$D/recipient-principal.json")" \
     --run-id "$(uuidgen | lower)" --task-id "$(uuidgen | lower)" --epoch 1 \
     --ttl-ms 21600000 --renewal-horizon-days 1 >"$D/recipient.json" 2>>"$D/mint.log"
-  cp "$HOME/.config/cswarm/anon-key.txt" "$D/anon-key.txt"
-  chmod 0600 "$D"/*.json "$D/anon-key.txt" "$D/mint.log"
+  chmod 0600 "$D"/*.json "$D/mint.log"
   echo OK
 )
 ```
@@ -66,6 +67,9 @@ Tom can revoke both with `cswarm principal revoke --workspace-id c2ea0541-f56d-4
 <id>` (the ids are in the two `*-principal.json` files).
 
 ## Steps 1-3 (lead, on the mini)
+
+Before the window the lead adds `anon-key.txt` (0600) to the seed directory: the public anon key fetched from the
+site's `/start` meta tag (never typed), checked by sha256 against the key the CLI already uses.
 
 `deploy/release-proofs/item-g/g-seed.sh <bundle> "$HOME/.config/cswarm/g-seed-20260925" https://api.commonswarm.com
 c2ea0541-f56d-4c73-bf71-56c5405c4934`, where `<bundle>` is cswarm built from the release SHA and copied outside the
@@ -78,7 +82,8 @@ and exit codes.
   `ack_outcome: observed`. The CLI swallows a refused ACK, so only the server's receipt proves that the new edge
   accepted the new shape. Failure exits 4 (`STOP step 1`).
 - Step 2: the sender posts note 2; the recipient does not check it.
-- Step 3: the read-edge probe with the recipient's credential, the exact body the CLI sends:
+- Step 3: the read-edge probe with the recipient's credential, with the keys the CLI sends (the CLI's `check` pages
+  20 at a time; this probe asks for 50, which the read edge accepts):
   `{"resource":"signals","workspace_id":"<ws>","inbox":true,"about":null,"kind":null,"since":null,"in_reply_to":null,"after_created_at":null,"after_id":null,"limit":50,"include_stale":false}`
   with headers `Authorization: Bearer <recipient token>`, `apikey: <anon key>`, `Content-Type: application/json`
   (from a 0600 file, deleted on every exit path), with a 30-second limit. Must return 200 and contain note 2; a
@@ -152,6 +157,7 @@ database the way `tests/p1-server/managed-delivery.test.ts` seeds them, and writ
 | Fixed `g-seed.sh` with a recipient credential 30 minutes from expiry | exit 2, `expires in 29 min (< 90); mint again`, before any network call |
 | Fixed `g-seed.sh` with step 3's URL mutated to a closed port | exit 5, `STOP step 3: read-edge probe failed (HTTP 000)`; `read-headers.txt` is gone |
 | Rollback, then the rollback catalog proof with EXECUTE granted to `anon` / with the function comment dropped | `rollback_ok=f` / `f`; unmutated `t` (each mutation inside a rolled-back transaction) |
+| After the Grok box review: full rollback with 5 unclaimed rows, the proof comparing the widened check9 exactly | committed (`check9 KEPT widened`); a different check9 containing the old substring gives `rollback_ok=f` inside a rolled-back transaction |
 
 Two defects in the first `g-seed.sh` were found by the rehearsal and fixed: a profile's `credential_file` must be
 `credential.json` beside `profile.json`, and `receipt --json` names the field `outcome`, not `ack_outcome`. The first
