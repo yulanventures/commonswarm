@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { cloudTarget, type CloudTarget } from "./config.js";
@@ -7,7 +7,7 @@ import { parseAgentCredentialInput, type AgentCredentialInput } from "./agent-cr
 import { agentCredentialStore, credentialLineageKey } from "./agent-credential.js";
 import { AgentCredentialSession } from "./renewal.js";
 import { assertLocalSessionBinding, defaultSessionContextPath, listSessionContexts, sessionProofOf } from "./session-context.js";
-import { readSecureJsonFileIfPresent, writeSecureJsonFile, withFileLock } from "./storage.js";
+import { readSecureJsonFileIfPresent, writeSecureJsonFile, writeSecureJsonFileExclusive, withFileLock } from "./storage.js";
 import {
   AGENT_CONNECTION_FIELDS, AGENT_CONNECTION_VERSION,
   type AgentConnectionEnvelope,
@@ -232,14 +232,7 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }
     if (existingCredential === null && refuseExisting) {
-      // MCP connect creates this path once. O_EXCL prevents a concurrent file from
-      // being replaced, including one left by a crash after register.
-      const file = await open(profile.credential_file, "wx", 0o600);
-      try {
-        await file.writeFile(JSON.stringify(connection.credential));
-        await file.chmod(0o600);
-        await file.sync();
-      } finally { await file.close(); }
+      await writeSecureJsonFileExclusive(profile.credential_file, JSON.stringify(connection.credential));
     } else if (existingCredential === null) {
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }

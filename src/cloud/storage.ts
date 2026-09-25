@@ -449,6 +449,7 @@ export async function withFileLock<T>(
 export async function writeSecureJsonFile(
   path: string,
   serialized: string,
+  write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
 ): Promise<void> {
   await secureDirectory(dirname(path));
   try {
@@ -459,7 +460,7 @@ export async function writeSecureJsonFile(
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(serialized, "utf8");
+    await write(handle, serialized);
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
@@ -471,6 +472,34 @@ export async function writeSecureJsonFile(
   }
   await chmod(path, 0o600);
   await secureCredentialFile(path);
+}
+
+/** Publish a new private file only after its contents are durable. Never replace an existing path. */
+export async function writeSecureJsonFileExclusive(
+  path: string, serialized: string,
+  write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
+): Promise<void> {
+  await secureDirectory(dirname(path));
+  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await write(handle, serialized);
+    await handle.chmod(0o600);
+    await handle.sync();
+    await handle.close();
+    // Callers hold the setup lock; preserve the exclusive first-write rule at this boundary too.
+    const existing = await lstat(path).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (existing) throw Object.assign(new Error("credential path already exists"), { code: "EEXIST" });
+    await rename(temporary, path);
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
 }
 
 /** Reads a 0600-verified JSON file, or null when it has never been written. */
