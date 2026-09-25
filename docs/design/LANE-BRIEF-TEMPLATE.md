@@ -25,7 +25,12 @@ Each decision has a test that fails when its fix is reverted; record the measure
   bypass or full-access flag, and it never inherits a bypass-permissions session.
 - The Maker and the arms do not run test suites. The lead runs the gates, in a sandbox or in a clean
   worktree with an absolute `HOME` the lead created. The brief names the exact gate commands.
-- Review arms are read-only. A Grok arm gets no shell until it has a permission mode.
+- Review arms are read-only. A Grok arm runs with `--permission-mode plan` or
+  `--disallowed-tools run_terminal_command,kill_command_or_subagent,get_command_or_subagent_output,search_replace`.
+- Every arm and Maker prompt carries these two sentences verbatim: "Never assign HOME as a command prefix;
+  use `export HOME=$(mktemp -d /tmp/x.XXXXXX)` on its own line, and guard the cleanup with
+  `case $HOME in /tmp/*|/private/tmp/*) rm -rf "$HOME";; esac`." and "Run no test suite; the lead runs
+  the gates."
 - Any script in the lane that removes a directory named from a variable resolves the path first and
   refuses `/`, the home directory, an empty value, and any path outside its own temporary root, with a
   control test.

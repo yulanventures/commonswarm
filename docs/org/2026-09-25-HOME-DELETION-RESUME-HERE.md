@@ -13,6 +13,12 @@ Written by CSwarmDevLead for a cold successor. Read this before any lane work on
   10:58:23Z.
 - ~11:00Z: the lead found it with `ps` and killed it (pid 76155). It had run about 1.5 minutes.
 - Root cause found by HezLead. The Opus arm, the Codex Makers, and the lane code are cleared.
+- The macOS TCC log at 10:58:24Z attributes the `rm` (pid 76155) to the responsible process
+  `com.anthropic.claude-code` pid 3713, the lead's Claude Code session, because the lead launched the Grok
+  CLI from its Bash tool. Cause settled (HezLead).
+- Host controls added by HezLead: an `rm` guard at `~/.local/bin/rm` (first in `PATH`) with refusals logged
+  to `/Users/Shared/safe-rm.log`; hourly APFS local snapshots (`com.yulanbot.apfs-snapshot`); a Claude
+  `PreToolUse` hook that blocks the pattern. Grok is signed out until the operator logs in again.
 
 ## What was lost
 

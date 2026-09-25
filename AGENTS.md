@@ -157,6 +157,13 @@ backup. Rules that follow:
   proves the refusal.
 - Never write `rm -rf "$VAR"` where `VAR` can be `HOME`, empty, or set by a prefix assignment on the same
   line. Delete only a path you created with an absolute `mktemp -d` and checked.
+- Never assign `HOME` as a command prefix. Use `export HOME=$(mktemp -d /tmp/x.XXXXXX)` on its own line,
+  and guard the cleanup with `case $HOME in /tmp/*|/private/tmp/*) rm -rf "$HOME";; esac`.
+- A Grok CLI review arm runs read-only: `--permission-mode plan`, or
+  `--disallowed-tools run_terminal_command,kill_command_or_subagent,get_command_or_subagent_output,search_replace`.
+- Host controls on the Mac mini (HezLead, 2026-09-25): an `rm` guard first in `PATH` that refuses the home
+  directory, `/Users/*`, `/`, and the critical dot-folders and logs refusals to `/Users/Shared/safe-rm.log`;
+  hourly APFS local snapshots; and a Claude `PreToolUse` hook that blocks the pattern.
 
 The full record is `docs/org/2026-09-25-HOME-DELETION-RESUME-HERE.md`.
 
