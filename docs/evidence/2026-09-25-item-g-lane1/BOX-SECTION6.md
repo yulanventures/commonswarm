@@ -1,6 +1,6 @@
 # Item G lane 1: box window plan (2026-09-25 21:45Z)
 
-Written by CSwarmDevLead for HezLead and Anvil. Release SHA: `7c0bee1e750450f305bab5ada68fb8f813a10c83`.
+Written by CSwarmDevLead for HezLead and Anvil. Reviewed: Opus + Grok, two rounds (`box-plan-arms/`). Release SHA: `7c0bee1e750450f305bab5ada68fb8f813a10c83`.
 KIND_LIST `edge stack`; CHANGED_FUNCTIONS `command read`; no router change; no new env names; migration
 `20260925000001_unclaimed_observed_ack.sql`. Agreed with HezLead on 2026-09-25 ~01:00Z: no credential goes to the box.
 The lead runs steps 1-3 from the mini against `https://api.commonswarm.com`, and Anvil runs only the read-only step 4.
@@ -37,8 +37,10 @@ Tom signs in first with `cswarm login` in a terminal on the mini (the mint uses 
 Then he pastes this block. It prints nothing but a final `OK`: stdout and stderr go into 0600 files in a 0700
 directory (the mint's renewal sentence goes to `mint.log`); no secret is in argv or history (the ids are not secrets).
 The tokens last 6 hours; `g-seed.sh` refuses a token with less than 90 minutes left, so mint no earlier than 20:00Z.
-If the block fails part way, change the `-0925` name suffix before running it again (a principal name that already
-exists is refused).
+The block prints `OK` only when every step worked; if it prints nothing, it failed, and the reason is in
+`$HOME/.config/cswarm/g-seed-20260925/mint.log`. Change the `-0925` name suffix before running it again (a principal
+name that already exists is refused). The tokens must have at least 90 minutes left when `g-seed.sh` starts: a 20:00Z
+mint allows a start until 00:30Z; if the window slips past that, Tom mints again.
 
 ```sh
 (
@@ -79,7 +81,7 @@ and exit codes.
 - Step 0: the recipient's first `cswarm check` (its profile is written into the same directory) sets its cursor.
 - Step 1: the sender posts note 1 to the recipient; the recipient's `cswarm check` shows it and sends one unclaimed
   observed ACK. **Stop gate:** the sender's `cswarm receipt` for note 1 must show the recipient with
-  `ack_outcome: observed`. The CLI swallows a refused ACK, so only the server's receipt proves that the new edge
+  `outcome: observed` (the `receipt --json` field). The CLI swallows a refused ACK, so only the server's receipt proves that the new edge
   accepted the new shape. Failure exits 4 (`STOP step 1`).
 - Step 2: the sender posts note 2; the recipient does not check it.
 - Step 3: the read-edge probe with the recipient's credential, with the keys the CLI sends (the CLI's `check` pages
@@ -101,10 +103,11 @@ and exit codes.
 | Preflight `search_path` contains `swarm` | Stop before section 5. Nothing changed. |
 | Section 5 catalog proof `f` | The runbook's section 5 abort (the migration transaction does not commit). |
 | Section 6 edge apply, health or probes a-h fail | The runbook's section 6 edge rollback (to `4ef0f300`). The migration stays: rolling back the edge alone is safe (below). |
+| `g-seed.sh` exit 1 (wrong arguments or a malformed input file; before any network call) | Not an edge problem. The lead fixes the command or the file and reruns. |
 | `g-seed.sh` exit 2 (inputs, or a credential with < 90 minutes left) | Not an edge problem. Tom mints again (new name suffix); the lead reruns `g-seed.sh`. The edge stays. |
 | `g-seed.sh` exit 4 (step 1 STOP: the edge did not record the ACK) | Roll back the EDGE only. The migration stays. Then debug. |
-| `g-seed.sh` exit 5 (step 3 STOP) | The lead reads `read-resp.json` and the HTTP code. A 5xx or a wrong body from the edge: roll back the EDGE only. A connection failure on the mini: rerun `g-seed.sh` once. |
-| `g-seed.sh` exit 6 (an unexpected CLI failure) | The lead reads the JSON files the script wrote (`check0.json`, `check1.json`, `receipt1.json`; they hold no token). An HTTP 5xx from the edge: roll back the EDGE only. A local or input problem: fix it and rerun. |
+| `g-seed.sh` exit 5 (step 3 STOP) | The lead reads `read-resp.json` and the HTTP code. A 5xx, or a 200 without note 2: roll back the EDGE only. A 401 or 400: a credential or body problem, not the edge (step 1 already passed on this edge); the lead checks the inputs and reruns once. A connection failure (`000`) on the mini: rerun once; a second `000` while `https://api.commonswarm.com` answers other requests from the mini is treated as an edge failure (roll back the EDGE only). |
+| `g-seed.sh` exit 6 (an unexpected CLI failure) | The lead reads the JSON files the script wrote (`check0.json`, `check1.json`, `receipt1.json`; they hold no token) and, for a failed note post or receipt read (which writes no file), the CLI's message on the terminal. An HTTP 5xx from the edge, or "the recipient check did not show note 1" (the new read edge or check lost a message): roll back the EDGE only. A 4xx or a local or input problem: fix it and rerun once. |
 | Step 4 (functional proof) fails, steps 1-3 passed | Keep the edge and the migration: both are safe, step 1 already proved the new write path, and the proof is read-only. The lead debugs with the proof's error text and the seed ids. HezLead may still roll back the edge; the SQL rollback runs only on HezLead's decision. |
 
 ## Rollback
@@ -158,6 +161,7 @@ database the way `tests/p1-server/managed-delivery.test.ts` seeds them, and writ
 | Fixed `g-seed.sh` with step 3's URL mutated to a closed port | exit 5, `STOP step 3: read-edge probe failed (HTTP 000)`; `read-headers.txt` is gone |
 | Rollback, then the rollback catalog proof with EXECUTE granted to `anon` / with the function comment dropped | `rollback_ok=f` / `f`; unmutated `t` (each mutation inside a rolled-back transaction) |
 | After the Grok box review: full rollback with 5 unclaimed rows, the proof comparing the widened check9 exactly | committed (`check9 KEPT widened`); a different check9 containing the old substring gives `rollback_ok=f` inside a rolled-back transaction |
+| After round 2 (Opus PASS, Grok PASS): the rollback proof compares the function's exact grantee set, volatility and comment | full rollback commits (`t`); an extra grant to `authenticator`, a grant to `anon`, `STABLE`, and a changed comment each give `f`. A first version sorted the grantees with `ORDER BY 1` (a constant), returned `f` on a correct rollback, and the rollback file refused and changed nothing (exit 3): the fail-closed path worked |
 
 Two defects in the first `g-seed.sh` were found by the rehearsal and fixed: a profile's `credential_file` must be
 `credential.json` beside `profile.json`, and `receipt --json` names the field `outcome`, not `ack_outcome`. The first

@@ -5,7 +5,8 @@
 #   <dir>         a 0700 directory holding sender.json and recipient.json (the minted credential JSON lines, 0600)
 #                 and anon-key.txt (0600; the public anon key, never typed: fetched from the site meta tag)
 #   <url>         https://api.commonswarm.com in production; a loopback URL in the local rehearsal
-# Prints only ids, statuses and exit codes; never a token. Exit codes: 0 pass; 2 bad input files or a credential with
+# Prints only ids, statuses and exit codes; never a token. Exit codes: 0 pass; 1 wrong arguments or a malformed input
+# file (the shell or Python stops before any network call); 2 bad input files or a credential with
 # less than 90 minutes left (mint again; the edge is not implicated); 4 STOP (the edge did not accept the unclaimed
 # observed ACK); 5 STOP (the read-edge probe failed or could not connect); 6 an unexpected CLI failure (read the JSON
 # files in <dir> before deciding anything about the edge).
@@ -90,7 +91,8 @@ echo "step 1: PASS the receipt says observed"
 N2="$(sender note "G seed note 2 $TS" --to "$RECIPIENT" | signal_id)" || { echo "step 2: note 2 failed"; exit 6; }
 echo "step 2: note 2 = $N2 (left unchecked)"
 
-# 3. Read-edge probe with the recipient's credential (the profile's copy, which the CLI keeps current): the body the
+# 3. Read-edge probe with the recipient's credential (the profile's copy; the 90-minute guard means no renewal happens
+# during the run, so this copy is the live token): the body the
 # CLI sends; 200 and it contains note 2. This is a health check of the read path; it does not tell the new read edge
 # from the old one (step 1 does that).
 trap 'rm -f "$DIR/read-headers.txt"' EXIT

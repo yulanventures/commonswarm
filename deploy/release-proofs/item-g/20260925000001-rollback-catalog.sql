@@ -12,12 +12,15 @@ SELECT
       AND p.prosecdef
       AND pg_get_functiondef(p.oid) NOT LIKE '%wake_path%'
       AND pg_get_functiondef(p.oid) LIKE '%signal_delivery_receipts_without_main_queue_count%'
-      AND has_function_privilege('authenticated', p.oid, 'EXECUTE')
-      AND has_function_privilege('swarm_read', p.oid, 'EXECUTE')
-      AND NOT has_function_privilege('anon', p.oid, 'EXECUTE')
+      AND p.provolatile = 'v'
       AND p.proacl IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) AS a WHERE a.grantee = 0)
-      AND obj_description(p.oid, 'pg_proc') LIKE 'Author-scoped directed receipts%'
+      -- Exactly the pre-G grantees: the owner, authenticated and swarm_read, each EXECUTE only; no PUBLIC.
+      AND (SELECT array_agg(g.grant_text ORDER BY g.grant_text)
+           FROM (SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
+                          || ':' || a.privilege_type AS grant_text
+                 FROM aclexplode(p.proacl) AS a) AS g)
+          = ARRAY['authenticated:EXECUTE', 'swarm_admin:EXECUTE', 'swarm_read:EXECUTE']
+      AND obj_description(p.oid, 'pg_proc') = 'Author-scoped directed receipts and live broadcast member/agent rosters. Agent seen_at is a CLI render or listener feed-consumption attestation; legacy agent keys remain additive through the 0.1.47 wire.'
     FROM pg_proc AS p
     WHERE p.oid = to_regprocedure('swarm_read.signal_delivery_receipts(uuid,uuid,bytea)')
   ), false)
