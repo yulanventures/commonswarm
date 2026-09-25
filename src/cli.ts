@@ -7527,10 +7527,10 @@ async function runListenStatusOrStop(
     const deadline = Date.now() + 30_000;
     while (status.state !== "stopped") {
       if (status.state === "failed") {
-        throw new Error(`listener stop failed; state failed under ${paths.instanceDirectory}. Inspect it with cswarm listen status using the same target and --state-dir.`);
+        throw new Error(`listener stop failed; state failed under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
       }
       if (Date.now() >= deadline) {
-        throw new Error(`listener stop timed out after 30 seconds; state ${status.state} under ${paths.instanceDirectory}. Run cswarm listen status with the same target and --state-dir to inspect it.`);
+        throw new Error(`listener stop timed out after 30 seconds; state ${status.state} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
       }
       await new Promise(resolve => setTimeout(resolve, 100));
       status = await queryListenerControl(paths, "status", 1_000).catch(() => readListenerStatusIfPresent(paths));
