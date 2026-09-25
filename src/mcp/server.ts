@@ -156,6 +156,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
             if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500) throw error;
             if (error instanceof FileTransportError || error instanceof FileCommandRefused) {
               output = { outcome: "unknown", retry_with_same_request_id: true,
+                next_step: mapMcpError(error).next_step,
                 conflict_check: prepared.conflict_check };
             } else throw error;
           }

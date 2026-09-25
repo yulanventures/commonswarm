@@ -18,7 +18,7 @@ import { CommandHttpError } from "../../src/cloud/command-client.js";
 import { AGENT_SESSION_PROOF_REFUSAL_CODES, agentSessionErrorStatus } from "../../src/cloud/session-wire.js";
 import { LocalCredentialSecretAbsentError, SignalMalformedError, SignalRecipientError, SignalTransportError } from "../../src/cloud/signals.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/cloud/storage.js";
-import { mapMcpError, sendWithDeferredCommit } from "../../src/mcp/server.js";
+import { mapMcpError, readMcpPutFile, sendWithDeferredCommit } from "../../src/mcp/server.js";
 import { FileCommandRefused, FileTransportError } from "../../src/cloud/files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
@@ -52,6 +52,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const fileObjects = new Set<string>();
   let filePrecondition: number | null = null;
   let fileCreateError: { status: number; code: string } | null = null;
+  let fileCreateDrop = false;
   let putRefusal: { status: number; body: object } | null = null;
   let killPhase: "create" | "put" | "commit" | null = null;
   let killMcp: (() => void) | null = null;
@@ -79,6 +80,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       const send = (status: number, value: object) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
       if (body.command?.kind === "file_version_create") {
         fileCommands.push(body);
+        if (fileCreateDrop) { req.socket.destroy(); return; }
         if (fileCreateError) return send(fileCreateError.status, { error: fileCreateError.code });
         if (filePrecondition !== null && body.command.if_version !== filePrecondition) {
           return send(409, { error: "file_version_precondition_failed", message: "newer live version" });
@@ -216,6 +218,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setRenewalReason: (value: string) => { renewalReason = value; },
     setFilePrecondition: (value: number | null) => { filePrecondition = value; },
     setFileCreateError: (value: typeof fileCreateError) => { fileCreateError = value; },
+    setFileCreateDrop: (value: boolean) => { fileCreateDrop = value; },
     setPutRefusal: (value: typeof putRefusal) => { putRefusal = value; },
     seedCreatedObject: () => { const created = [...fileCreates.values()][0]; assert.ok(created); fileObjects.add(created.upload_path as string); },
     conflictNext: () => { serverConflict = true; } };
@@ -399,8 +402,24 @@ test("MCP 5xx file create reports unknown with the same request id", { timeout: 
     assert.equal(response.result.isError, undefined);
     assert.equal(response.value.outcome, "unknown");
     assert.equal(response.value.retry_with_same_request_id, true);
+    assert.equal(response.value.next_step, "retry this call with the same request_id");
     f.setFileCreateError(null);
     assert.equal((await f.call("file_put", { request_id: "outage-create-01", path })).value.outcome, "committed");
+  } finally { await f.close(); }
+});
+
+test("MCP no-response file create gives the generated retry step", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "dropped.md");
+    await writeFile(path, "# dropped\n");
+    f.setFileCreateDrop(true);
+    const response = await f.call("file_put", { request_id: "dropped-create-01", path });
+    assert.equal(response.result.isError, undefined);
+    assert.equal(response.value.outcome, "unknown");
+    assert.equal(response.value.next_step, "retry this call with the same request_id");
+    f.setFileCreateDrop(false);
+    assert.equal((await f.call("file_put", { request_id: "dropped-create-01", path })).value.outcome, "committed");
   } finally { await f.close(); }
 });
 
@@ -423,6 +442,9 @@ test("MCP path preflight refuses nonfiles and private state before network", { t
     await writeFile(configFile, "private");
     const alias = join(f.root, "alias.md");
     await symlink(privateFile, alias);
+    const externalCredential = join(f.root, "outside-credential.md");
+    await writeFile(externalCredential, "private");
+    await assert.rejects(readMcpPutFile(externalCredential, f.profile, externalCredential), (error: any) => error.code === "file_path_protected");
     const cases: Array<[string, string]> = [
       [join(f.root, "missing.md"), "file_path_invalid"], [f.root, "file_path_invalid"],
       [fifo, "file_path_invalid"], [dangling, "file_path_invalid"],
