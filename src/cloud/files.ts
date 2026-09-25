@@ -364,11 +364,12 @@ export async function putObject(
     throw new FileTransportError("the upload PUT failed before a response", true);
   }
   if (!response.ok) {
-    // Storage's upsert-off signed upload reports an existing object with this
-    // structured code. A generic 409 (or an expired token) is not evidence.
-    if (allowExisting && response.status === 409) {
-      const body = await response.json().catch(() => null) as { error?: unknown } | null;
-      if (body?.error === "Duplicate" || body?.error === "ResourceAlreadyExists") return "already_exists";
+    // Storage versions disagree on the HTTP status for an existing object.
+    // This is only a fast path; a resumed upload lets commit check the object.
+    if (allowExisting && (response.status === 409 || response.status === 400)) {
+      const body = await response.json().catch(() => null) as { statusCode?: unknown; error?: unknown } | null;
+      if ((response.status === 409 || body?.statusCode === "409") &&
+          (body?.error === "Duplicate" || body?.error === "ResourceAlreadyExists")) return "already_exists";
     }
     throw new FileTransportError(
       allowExisting

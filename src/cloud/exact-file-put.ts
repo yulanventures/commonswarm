@@ -4,7 +4,7 @@ import { readdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { H0_REQUEST_ID_RE } from "../h0/verbs.js";
 import { ensureSecureStateDirectory, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
-import { FILE_MAX_VERSION_BYTES, allowedExtensionList, contentTypeForName, fileVersionCommit, fileVersionCreate, onceRetried, putObject, sha256Hex, type FileVersionCommitResult } from "./files.js";
+import { FILE_MAX_VERSION_BYTES, FileTransportError, allowedExtensionList, contentTypeForName, fileVersionCommit, fileVersionCreate, onceRetried, putObject, sha256Hex, type FileVersionCommitResult } from "./files.js";
 import type { CloudTarget } from "./config.js";
 
 const NAMESPACE = "1c20a85c-ff0f-4c85-90a3-83d83cfda936";
@@ -35,7 +35,7 @@ export interface ExactPutInput {
   stateDir: string; requestId: string; name: string; bytes: Uint8Array;
   ifVersion?: number; fetcher?: typeof fetch; now?: () => number;
 }
-type Phase = "prepared" | "created" | "uploaded" | "committed";
+type Phase = "prepared" | "created" | "putting" | "uploaded" | "committed";
 interface RecordFile {
   request_id: string; name: string; sha256: string; size: number; if_version: number | null;
   file_id: string; version_id: string; create_command_id: string; commit_command_id: string;
@@ -101,6 +101,7 @@ async function phase(prepared: PreparedPut, value: Phase, result: FileVersionCom
 export async function executeExactPut(prepared: PreparedPut): Promise<PutResult> {
   const { input, record } = prepared;
   if (record.phase === "committed" && record.result) return { result: record.result, outcome: "replayed", conflict_check: prepared.conflict_check };
+  const priorPut = record.phase === "putting" || record.phase === "uploaded";
   const send = { target: input.target, workspaceId: input.workspaceId, credential: input.credential, fetcher: input.fetcher };
   const created = await onceRetried(() => fileVersionCreate({ ...send, commandId: record.create_command_id }, {
     fileId: record.file_id, versionId: record.version_id, name: record.name,
@@ -108,7 +109,20 @@ export async function executeExactPut(prepared: PreparedPut): Promise<PutResult>
     ...(record.if_version === null ? {} : { ifVersion: record.if_version }),
   }));
   await phase(prepared, "created");
-  const put = await onceRetried(() => putObject(input.target, created.upload_path, input.bytes, prepared.contentType, input.fetcher, true));
+  // Persist before sending: a killed process cannot know whether Storage wrote
+  // the object. Only a later attempt may let a refused PUT reach the commit.
+  await phase(prepared, "putting");
+  let attempted = false;
+  const put = await onceRetried(async () => {
+    const replayedPut = priorPut || attempted;
+    attempted = true;
+    try {
+      return await putObject(input.target, created.upload_path, input.bytes, prepared.contentType, input.fetcher, true);
+    } catch (error) {
+      if (replayedPut && error instanceof FileTransportError) return "already_exists";
+      throw error;
+    }
+  });
   await phase(prepared, "uploaded");
   const result = await onceRetried(() => fileVersionCommit({ ...send, commandId: record.commit_command_id }, {
     fileId: created.file_id, versionId: created.version_id, sha256: record.sha256,
