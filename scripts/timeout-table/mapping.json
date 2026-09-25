@@ -2429,7 +2429,7 @@
             "/functions/v1/read"
           ],
           "citation": "src/cloud/live-session-context.ts:43",
-          "detail": "Live-session verification runs on every resume. Agent-token resume reuses its first members result; profile resume uses this five-second read when a local context file exists.",
+          "detail": "Live-session verification runs on every resume and on every watcher start with a context file on the host. Agent-token resume reuses its first members result; profile resume uses this five-second read when a local context file exists.",
           "operation": {
             "name": "verified-live-session-status",
             "class": "not-run",

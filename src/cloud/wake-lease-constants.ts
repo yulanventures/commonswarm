@@ -16,7 +16,11 @@ const proofRemedy = (sessionContextPath?: string, remedyCommand?: string, contex
   (remedyCommand ? printedCommand("run this watcher with the verified context.", remedyCommand) : fallback ??
     "inspect this seat's resume output for a verified live context on this host, then retry from that host session");
 const holder = (surface: "watcher" | "h0_poll", host: string | null) => surface === "h0_poll"
-  ? "an H0 poll" : `a watcher on ${host ?? "another host"}`;
+  ? "an H0 poll" : `a watcher on ${host === null ? "another host" : host
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 120)}`;
+
+const supersessionStep = "stop this watcher and use that surface there; start it again with the same credential source";
 
 /** One source for each code's exit and operator sentence. Proof errors differ by phase. */
 export const NOTIFY_LEASE_RULES = {
@@ -26,7 +30,7 @@ export const NOTIFY_LEASE_RULES = {
       : command === null ? "stop it there or start the watcher again the same way it was started, with the agent token on stdin, adding --take-over"
       : printedCommand("stop it there or run the watcher with --take-over.", command.includes("--take-over") ? command : `${command} --take-over`)}` },
   wake_lease_superseded: { exit: 76, sentence: (surface, host, command) =>
-    `${holder(surface, host)} took over this seat's wake surface; stop this watcher and use that surface there${command === null ? "; start it again the same way it was started, with the agent token on stdin" : ""}` },
+    `${holder(surface, host)} took over this seat's wake surface; ${supersessionStep}` },
   session_conflict: { exit: 76, sentence: () =>
     "Another live session owns this seat and its session moved elsewhere; stop this watcher" },
   session_expired: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) =>
@@ -71,10 +75,10 @@ export function wakeLeaseExitSentence(
   const rule = wakeLeaseRule(code, phase);
   const stop = rule.exit === 76 ? `${NOTIFY_NO_RESTART_CLAUSE}; ` : "";
   const sentence = rule.sentence(surface, host, restartCommand, sessionContextPath, remedyCommand, contextSource, fallback);
-  const stdinReminder = restartCommand === null && !sentence.includes("agent token on stdin")
+  const stdinReminder = restartCommand === null && !sentence.includes("agent token on stdin") && !sentence.includes(supersessionStep)
     ? "; start another watcher the same way it was started, with the agent token on stdin" : "";
   const boundary = sentence.lastIndexOf("\n");
   const prose = boundary < 0 ? sentence : sentence.slice(0, boundary);
   const command = boundary < 0 ? "" : sentence.slice(boundary);
-  return `[${code}] ${stop}${stop ? prose.replace(/^[A-Z]/, letter => letter.toLowerCase()) : prose}${stdinReminder}; exit ${rule.exit}.${command}`;
+  return `[${code}] ${stop}${(stop ? prose.replace(/^[A-Z]/, letter => letter.toLowerCase()) : prose).replace(/\.$/, "")}${stdinReminder}; exit ${rule.exit}.${command}`;
 }

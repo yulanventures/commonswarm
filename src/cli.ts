@@ -329,6 +329,8 @@ import {
   runListenerSupervisor,
   spawnDetachedListener,
   stopListener,
+  queryListenerControl,
+  readListenerStatusIfPresent,
   waitForListenerReady,
   LISTENER_PROMPT_TIMEOUT_MS,
   ListenerRenewalUnavailableError,
@@ -703,7 +705,8 @@ export class Arguments {
       if (!name || name.includes("=")) {
         throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
-      if (BOOLEAN_FLAGS.has(name)) {
+      if (BOOLEAN_FLAGS.has(name) || (name === "wait" &&
+          this.positionals[0] === "listen" && this.positionals[1] === "stop")) {
         this.push(name, "true");
         this.originalOptions.push({ name });
         continue;
@@ -918,7 +921,7 @@ Usage:
   cswarm listen start ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]
   cswarm listen canary ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]
   cswarm listen status ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm listen stop ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
+  cswarm listen stop ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--state-dir <path>] [--wait] [--json]
   cswarm session start --mode ${SESSION_MODES.join("|")} --provider grok|opencode|claude|codex --host-session-id <id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--session-context <absolute-path>] [--host-label <text>] [--foreground] [--json]
   cswarm session status --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
   cswarm session stop --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
@@ -4834,8 +4837,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     : sameContext
     ? "this context was refused; inspect this seat's resume output and the host session proof before retrying"
     : `a live session context for this seat was verified at ${liveContextPath}; retry from that host session using this path`;
-  const remedyFallback = optionTokens.includes("--agent-token-stdin")
-    ? `${fallback}; pipe the same credential on stdin when retrying the watcher` : fallback;
+  const remedyFallback = fallback;
 
   const httpClient = new ListenerHttpClient();
   const testCheckMs = process.env.NODE_ENV === "test" &&
@@ -7454,8 +7456,10 @@ async function runListenStatusOrStop(
     "principal-id",
     "state-dir",
     "json",
+    "wait",
     ...SESSION_CONTEXT_FLAGS,
   ], 2);
+  if (command === "status" && args.has("wait")) throw new Error("--wait is only valid for listen stop");
   requireProfileWithHostSessionId(args);
   const cloud = await target(args);
   const workspaceId = listenerUuid(args.optional("workspace-id"), "workspace-id");
@@ -7519,6 +7523,20 @@ async function runListenStatusOrStop(
   let status = command === "stop"
     ? await stopListener(paths)
     : await effectiveListenerStatus(paths);
+  if (command === "stop" && args.has("wait") && status !== null) {
+    const deadline = Date.now() + 30_000;
+    while (status.state !== "stopped") {
+      if (status.state === "failed") {
+        throw new Error(`listener stop failed; state failed under ${paths.instanceDirectory}. Inspect it with cswarm listen status using the same target and --state-dir.`);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`listener stop timed out after 30 seconds; state ${status.state} under ${paths.instanceDirectory}. Run cswarm listen status with the same target and --state-dir to inspect it.`);
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+      status = await queryListenerControl(paths, "status", 1_000).catch(() => readListenerStatusIfPresent(paths));
+      if (status === null) break;
+    }
+  }
   if (status === null) {
     if (args.has("json")) {
       printJson({
@@ -9696,7 +9714,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   listen: group({
     start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start"] }),
     status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status"] }),
-    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
     canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary"] }),
   }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },

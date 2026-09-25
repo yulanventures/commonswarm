@@ -104,6 +104,7 @@ export interface ResumeInspection {
   workspaceId: string;
   credentialFile: string;
   installedVersion: string;
+  stateDirectory?: string;
 }
 
 export interface ResumeInspectionAdapters {
@@ -432,6 +433,7 @@ export async function inspectResume(
     workspaceId: options.workspaceId,
     credentialFile: options.credentialFile,
     installedVersion: options.installedVersion,
+    ...(options.stateDirectory ? { stateDirectory: options.stateDirectory } : {}),
   };
 }
 
@@ -472,6 +474,7 @@ function watcherNextStep(report: ResumeInspection): string {
 
 function restartCommand(report: ResumeInspection, status: ListenerStatus): string {
   const common = commonCommandArgs(report);
+  const stateDir = report.stateDirectory ? ` --state-dir ${shellArg(report.stateDirectory)}` : "";
   const start = [
     "cswarm listen start",
     common,
@@ -479,7 +482,7 @@ function restartCommand(report: ResumeInspection, status: ListenerStatus): strin
     `--permissions ${shellArg(status.permissionMode ?? "allow")}`,
     "--route main",
   ].join(" ");
-  return `cswarm listen stop ${common} && ${start}`;
+  return `cswarm listen stop ${common}${stateDir} --wait && ${start}${stateDir}`;
 }
 
 function watcherState(watcher: NotifyWatcher): StdoutConsumerState {

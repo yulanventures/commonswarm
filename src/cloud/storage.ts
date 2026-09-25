@@ -1,8 +1,10 @@
 import { constants as fsConstants, readFileSync, unlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import {
   access,
   chmod,
   lstat,
+  link,
   mkdir,
   open,
   readFile,
@@ -22,8 +24,8 @@ import type { CloudTarget } from "./config.js";
 // "not logged in" until `cswarm login` runs once. No migration is attempted on purpose.
 const KEYCHAIN_SERVICE = "com.commonswarm.cli";
 const LOCK_STALE_MS = 60_000;
-/** Host-id rotation is local file I/O only; five minutes is far above its normal subsecond hold. */
-export const HOST_ID_LOCK_STALE_MS = 5 * 60_000;
+/** Longer than a local owner-record write, including a paused process. */
+export const HOST_ID_LOCK_INCOMPLETE_GRACE_MS = 2_000;
 const LOCK_TIMEOUT_MS = 30_000;
 const MAX_KEYCHAIN_RECORD_BYTES = 126;
 const MAX_PROFILE_BYTES = 64 * 1024;
@@ -322,8 +324,10 @@ export class FileLockTimeoutError extends Error {
   readonly name = "FileLockTimeoutError";
   readonly code = "file_lock_timeout";
 
-  constructor(readonly lockName: string) {
-    super(`timed out waiting for the ${lockName === "host-id-rotation" ? "host-id rotation" : "credential refresh"} lock`);
+  constructor(readonly lockName: string, readonly lockPath?: string) {
+    super(lockName === "host-id-rotation"
+      ? `timed out waiting for the host-id rotation lock at ${lockPath}. Wait for its owner to exit, then retry. If its owner is gone, remove ${lockPath} and retry.`
+      : `timed out waiting for the credential refresh lock`);
   }
 }
 
@@ -374,18 +378,38 @@ async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
   }
 }
 
+const THIS_PROCESS_START_MS = Date.now() - process.uptime() * 1_000;
+
+/** A successful pid probe does not prove that the recorded process still owns the pid. */
+function pidStartMs(pid: number): number | null {
+  if (pid === process.pid) return THIS_PROCESS_START_MS;
+  try {
+    const text = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
+      { encoding: "utf8", timeout: 1_000 }).trim();
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch { return null; }
+}
+
 /** Host-id locks copied from another machine or interrupted during creation cannot own this host. */
 async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<string | null> {
   const raw = await readFile(lockPath, "utf8").catch(() => null);
   if (raw === null) return null;
-  if (ageMs > HOST_ID_LOCK_STALE_MS) return raw;
   let owner: { pid?: unknown; host?: unknown; createdAt?: unknown };
   try { owner = JSON.parse(raw) as typeof owner; }
-  catch { return raw; }
-  if (!owner || owner.host !== hostname() || typeof owner.createdAt !== "number" ||
+  catch { return ageMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null; }
+  if (owner?.host !== undefined && owner.host !== hostname()) return raw;
+  if (!owner || typeof owner.createdAt !== "number" ||
       !Number.isSafeInteger(owner.createdAt) || typeof owner.pid !== "number" ||
-      !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return raw;
-  try { process.kill(owner.pid, 0); return null; }
+      !Number.isSafeInteger(owner.pid) || owner.pid <= 0 ||
+      typeof (owner as { startTime?: unknown }).startTime !== "number") {
+    return ageMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null;
+  }
+  try {
+    process.kill(owner.pid, 0);
+    const start = pidStartMs(owner.pid);
+    return start !== null && Math.abs(start - (owner as { startTime: number }).startTime) > 2_000 ? raw : null;
+  }
   catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null; }
 }
 
@@ -407,12 +431,23 @@ export async function withFileLock<T>(
   let createdAt = 0;
   while (handle === null) {
     try {
-      handle = await open(lockPath, "wx", 0o600);
       createdAt = Date.now();
-      await handle.writeFile(
-        JSON.stringify({ pid: process.pid, host: hostname(), createdAt }),
-        "utf8",
-      );
+      if (options.stalePolicy === "host-id") {
+        const tempPath = `${lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+        const temp = await open(tempPath, "wx", 0o600);
+        try {
+          await temp.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
+            createdAt, startTime: THIS_PROCESS_START_MS }), "utf8");
+          await link(tempPath, lockPath);
+          handle = temp;
+        } catch (error) {
+          await temp.close();
+          throw error;
+        } finally { await unlink(tempPath).catch(() => undefined); }
+      } else {
+        handle = await open(lockPath, "wx", 0o600);
+        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), createdAt }), "utf8");
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const lockInfo = await stat(lockPath).catch(() => null);
@@ -423,11 +458,6 @@ export async function withFileLock<T>(
       let deadRecord = lockInfo ? options.stalePolicy === "host-id"
         ? await staleHostIdOwnerRecord(lockPath, Date.now() - lockInfo.mtimeMs)
         : await deadLockOwnerRecord(lockPath) : null;
-      if (deadRecord === "" && options.stalePolicy === "host-id") {
-        // Let a just-created lock finish its owner write before treating an empty file as abandoned.
-        await delay(100);
-        deadRecord = await staleHostIdOwnerRecord(lockPath, Date.now() - lockInfo!.mtimeMs);
-      }
       if (deadRecord !== null) {
         // Re-read immediately before removing: another waiter may already have replaced the dead owner's lock with its
         // own, and that live lock must not be unlinked. The window left is the gap between this read and the unlink.
@@ -436,7 +466,7 @@ export async function withFileLock<T>(
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new FileLockTimeoutError(lockName);
+        throw new FileLockTimeoutError(lockName, lockPath);
       }
       await delay(25 + randomBytes(1)[0]! % 75);
     }
