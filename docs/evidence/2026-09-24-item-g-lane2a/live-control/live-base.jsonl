@@ -1,0 +1,2 @@
+{"mode":"orphan","fd1_before":"p65774 f1 tunix n->0x9844cfede11aa8ef","exit":{"code":null,"signal":"SIGKILL"},"seconds":"149.9","requests":3,"stdout_bytes":0,"stderr":""}
+{"mode":"sigterm","fd1_before":"p87592 f1 tunix n->0x15977a86d79b67ee","exit":{"code":0,"signal":null},"seconds":"0.0","requests":1,"stdout_bytes":0,"stderr":""}

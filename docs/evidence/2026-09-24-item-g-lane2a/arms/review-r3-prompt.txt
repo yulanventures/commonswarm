@@ -1,0 +1,28 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset or db:stop; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print
+no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests). Kill every
+process you start.
+
+LANE: item G lane 2a, branch lane/item-g-lane2a at 700f2927. Your current directory is a detached worktree at
+700f2927. Base on main: b3e9eab3. Spec: docs/design/2026-09-24-ITEM-G-LANE-2A-BRIEF.md. Maker: Codex gpt-6-sol.
+Record: docs/evidence/2026-09-24-item-g-lane2a/LANE.md ("Fold 1", "Fold 2").
+Round 2 on 5071a703: Grok FAIL (PRODUCTION: a --agent-token-stdin watcher printed a restart command with words
+inside it that the shell could not run); Opus PASS with RIGOUR (a hand-typed restart flag list dropped --json,
+--session-context, --force-file-store and turned --profile into expanded flags; relative paths; no test that cancel
+kills lsof; LANE.md markers). Fold 2 rulings H1-H5 are in LANE.md; the round-2 reviews are at
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG2a/grok-r2.md and /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG2a/opus-r2.md.
+
+REVIEW `git diff 5071a703..700f2927` closely and the whole lane (`git diff b3e9eab3..700f2927`). CHECK:
+1. H1-H3: for every start form (token file, token stdin, --profile, explicit --url/--anon-key, default target,
+   relative paths, paths with spaces/quotes/$/backticks, every flag notify accepts), the printed restart command is
+   the last thing in the sentence, runs through /bin/sh from another directory, and never contains a secret. Is the
+   "replay parsed flags" built from the parser's own data, and can it replay anything unsafe (e.g. a flag value that
+   is a secret on some path, or a flag that should not be repeated)?
+2. H4: cancel kills an in-flight lsof child; H5 docs.
+3. Everything from rounds 1-2 still holds (idle/push/retry checks, 74 only on proven orphan, 130/143, evidence order).
+4. Every claimed control fails on revert; every changed test file is in a gate; every LANE.md claim is true.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

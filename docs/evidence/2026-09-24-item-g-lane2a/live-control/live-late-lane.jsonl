@@ -1,0 +1,1 @@
+{"mode":"orphan-late","fd1_before":"p90327 f1 tunix n->0xdccf380f134a9d6f","exit":{"code":74,"signal":null},"seconds":"55.0","requests":1,"stdout_bytes":0,"stderr":"cswarm: [notify_stdout_closed] inbox --notify lost its stdout reader and stopped before advancing its cursor. Start one fresh watcher under a live Monitor."}

@@ -1,0 +1,28 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset or db:stop; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print
+no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests). Kill every
+process you start.
+
+LANE: item G lane 2a, branch lane/item-g-lane2a at 5071a703. Your current directory is a detached worktree at
+5071a703. Base on main: b3e9eab3. Spec: docs/design/2026-09-24-ITEM-G-LANE-2A-BRIEF.md. Maker: Codex gpt-6-sol.
+Record: docs/evidence/2026-09-24-item-g-lane2a/LANE.md ("Fold 1").
+Round 1 on 3d09d409: Opus FAIL (PRODUCTION: the printed restart command could not restart the watcher; RIGOUR: no
+parser tests, a test ran real ps on fake pids, parent pid 1 beat a proven live reader, unknown-parent wording, no
+check during retry backoff, a citation, two sentences). Grok FAIL (PRODUCTION: no stdout check during retry backoff;
+RIGOUR: EPERM parent classified unknown). Fold 1 rulings F1-F7 are in LANE.md; the round-1 reviews are at
+/private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG2a/opus-r1.md and /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemG2a/grok-r1.md.
+
+REVIEW `git diff 3d09d409..5071a703` closely and the whole lane (`git diff b3e9eab3..5071a703`). CHECK:
+1. F1: the printed restart command, for every way a watcher can be started (token file, token stdin, explicit
+   --url/--anon-key, default target, --profile if notify accepts it, paths with spaces or quotes), is runnable and
+   prints no secret; the test really runs the printed command.
+2. F2: the check runs during retry backoff at the bounded cadence; no second lsof at once; cancel still stops.
+3. F3: evidence order (proven stdout wins; parent only when stdout is unproven; EPERM = alive); report and next step.
+4. F4-F6: parser tests use real shapes; every claimed mutation fails; the old test no longer runs real ps.
+5. Round-1 checks still hold (idle and push checks, signals 130/143, no stdout keepalive, only a proven orphan exits).
+6. Every LANE.md claim is true; every changed test file is in a gate.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

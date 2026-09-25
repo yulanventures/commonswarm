@@ -1,0 +1,26 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset or db:stop; do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print
+no secret. Read-only git and file reads; pure tests with a temporary HOME (build first for dist/ tests). Kill every
+process you start.
+
+LANE: item G lane 2a, branch lane/item-g-lane2a at 3d09d409. Your current directory is a detached worktree at
+3d09d409. Base on main: b3e9eab3. Spec: docs/design/2026-09-24-ITEM-G-LANE-2A-BRIEF.md (commit ab21ad91). Maker: Codex
+gpt-6-sol. Record: docs/evidence/2026-09-24-item-g-lane2a/LANE.md.
+
+REVIEW `git diff b3e9eab3..3d09d409`. CHECK:
+1. Idle closed-reader check: runs while idle AND while blocked on wake.next, at the bounded cadence the brief sets;
+   never writes to stdout; never two lsof children at once; the child is bounded by a timeout and killed on cancel;
+   exits 74 ONLY on a proven orphan; live_reader / not_pipe / cannot_determine / inspector error never exit and never
+   log per check. Is lsof output parsing shared with resume (not copied)? Could a live watcher ever be killed by a
+   wrong "orphaned" (e.g. a unix socket whose peer name lsof prints differently, or a PIPE on Linux)?
+2. Signals: SIGTERM 143, SIGINT 130, one sentence, restart command generated from the parsed constant; a
+   programmatic cancel keeps its old code. Does any caller (tests, listener supervisors, docs, brain-topic copies in
+   the repo, the MCP server, hooks) depend on notify exiting 0 on SIGTERM? Enumerate them.
+3. resume ppid evidence: ppid 1, dead parent, live parent, unreadable parent; separate evidence; the next-step line.
+4. Every test the lane claims as a control fails on revert (read the test and code; run the pure tests).
+5. Every claim in LANE.md is true; every new test file is named by a gate (npm test is a literal list).
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
