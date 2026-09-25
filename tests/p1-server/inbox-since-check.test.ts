@@ -35,6 +35,7 @@ function localEnvironment(): Local {
   })) as Partial<Local>;
   assert.ok(parsed.API_URL?.startsWith("http://127.0.0.1:"));
   assert.ok(parsed.ANON_KEY && parsed.DB_URL && parsed.SERVICE_ROLE_KEY);
+  assert.equal(new URL(parsed.DB_URL).hostname, "127.0.0.1");
   return parsed as Local;
 }
 
@@ -98,8 +99,21 @@ before(async () => {
     cwd: process.cwd(), env: { ...process.env, SWARM_ENV: "test" },
     detached: true, stdio: ["ignore", "pipe", "pipe"],
   });
-  functionProcess.stdout?.on("data", () => {});
-  functionProcess.stderr?.on("data", () => {});
+  let startupOutput = "";
+  let startupSeen = false;
+  const observeStartup = (chunk: Buffer) => {
+    startupOutput = (startupOutput + chunk.toString("utf8")).slice(-1_000);
+    startupSeen ||= startupOutput.includes("Serving functions on");
+  };
+  functionProcess.stdout?.on("data", observeStartup);
+  functionProcess.stderr?.on("data", observeStartup);
+  const bootDeadline = Date.now() + 60_000;
+  while (!startupSeen) {
+    if (Date.now() >= bootDeadline || functionProcess.exitCode !== null) {
+      throw new Error("local functions serve did not start");
+    }
+    await delay(250);
+  }
   await awaitFunctionRunning({ url: `${local.API_URL}/functions/v1/command`, fetcher: fetch,
     timeoutMs: 30_000, sleep: ms => delay(ms), now: () => Date.now(),
     diagnostics: () => "local command function was not ready" });
@@ -134,7 +148,7 @@ before(async () => {
   writeFileSync(profilePath, JSON.stringify({ version: 1, url: local.API_URL,
     anon_key: local.ANON_KEY, workspace_id: workspace, principal_id: principal,
     credential_file: credentialFile }), { mode: 0o600 });
-}, { timeout: 90_000 });
+}, { timeout: 120_000 });
 
 after(async () => {
   if (functionProcess?.pid && functionProcess.exitCode === null) {
@@ -175,6 +189,7 @@ test("check and inbox --since return the same directed ask across timestamps, fi
   // Fifty newer directed asks used to push this ask out of inbox's newest-50 default.
   for (let index = 0; index < 50; index += 1) await postAsk(`item-k newer ${index}`);
   assert.ok(inbox(milli).some(row => row.id === ask), "--since must drain past the first page");
+  assert.ok(inbox(milli, ["--wait", "1"]).some(row => row.id === ask), "--wait must use the same complete read");
   assert.equal(inbox(milli).length, 51);
   assert.equal(inbox(milli, ["--limit", "50"]).some(row => row.id === ask), false,
     "an explicit limit still bounds the result");

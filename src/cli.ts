@@ -4616,7 +4616,9 @@ async function runSignalRead(
       const waitResult = await pollForSignals({
         deadlineMs,
         read: () =>
-          readSignals(cloud, credential, queryBase, { deadlineMs }),
+          inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
+            ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs })
+            : readSignals(cloud, credential, queryBase, { deadlineMs }),
       });
       rows = waitResult.signals;
       timedOut = waitResult.timedOut;
