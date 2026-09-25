@@ -138,6 +138,10 @@ interface ChannelReadRequest {
   resource: "channels";
   workspace_id: string;
 }
+interface WakeLeaseReadRequest {
+  resource: "agent_wake_lease";
+  workspace_id: string;
+}
 
 /**
  * Explicit read-contract capability markers for agent-authenticated signals.
@@ -214,9 +218,15 @@ function exactKeys(
 function parseBody(
   value: unknown,
 ): SignalReadRequest | MemberReadRequest | FileReadRequest | ReceiptReadRequest |
-  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest | null {
+  RenewalGrantReadRequest | PendingAccessReadRequest | ChannelReadRequest |
+  WakeLeaseReadRequest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const body = value as Record<string, unknown>;
+  if (body.resource === "agent_wake_lease" &&
+      exactKeys(body, ["resource", "workspace_id"]) &&
+      typeof body.workspace_id === "string" && UUID_RE.test(body.workspace_id)) {
+    return { resource: "agent_wake_lease", workspace_id: body.workspace_id.toLowerCase() };
+  }
   if (
     body.resource === "pending_access" &&
     exactKeys(body, ["resource", "workspace_id"]) &&
@@ -524,6 +534,7 @@ async function handle(
       if (body.resource === "channels") {
         return json(200, { channels: [] });
       }
+      if (body.resource === "agent_wake_lease") return json(200, { lease: null });
       return json(200, {
         signals: [],
         capabilities: SIGNAL_CAPABILITIES,
@@ -540,6 +551,12 @@ async function handle(
     `;
 
     setPhase("query");
+    if (body.resource === "agent_wake_lease") {
+      const leases = await tx<{watcher_id: string; host_label: string; generation: number; renewed_age_ms: number}[]>`
+        SELECT * FROM swarm.agent_wake_lease_for_token(${tokenHash!}, ${body.workspace_id}::uuid)
+      `;
+      return json(200, { lease: leases[0] ?? null });
+    }
     if (body.resource === "delivery_receipts") {
       // No request.jwt.claims are installed yet. That absence selects the
       // function's agent-token branch; a browser JWT instead selects its human

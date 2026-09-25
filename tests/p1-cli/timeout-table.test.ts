@@ -145,6 +145,15 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
+test("machine-id timeout citation points to the bounded ioreg call", { timeout: 1000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/arrival-watch.ts:timeout"]?.citation;
+  const match = /^src\/cloud\/arrival-watch\.ts:(\d+)$/.exec(citation ?? "");
+  assert.ok(match, `unexpected citation: ${citation}`);
+  const source = await readFile(join(repo, "src/cloud/arrival-watch.ts"), "utf8");
+  assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /runFile\("\/usr\/sbin\/ioreg".*timeout: 2000/);
+});
+
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {
   const lane = await readFile(join(repo, "docs/evidence/2026-09-24-mcp-release2/LANE.md"), "utf8");
   assert.match(lane, /Fold 3[\s\S]*removed the pre-existing real `main` enumeration/);

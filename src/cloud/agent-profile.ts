@@ -6,7 +6,7 @@ import { cloudTarget, type CloudTarget } from "./config.js";
 import { parseAgentCredentialInput, type AgentCredentialInput } from "./agent-credential-input.js";
 import { agentCredentialStore, credentialLineageKey } from "./agent-credential.js";
 import { AgentCredentialSession } from "./renewal.js";
-import { assertLocalSessionBinding, defaultSessionContextPath, listSessionContexts, sessionProofOf } from "./session-context.js";
+import { assertLocalSessionBinding, listSessionContextFiles, sessionProofOf } from "./session-context.js";
 import { readSecureJsonFileIfPresent, writeSecureJsonFile, withFileLock } from "./storage.js";
 import {
   AGENT_CONNECTION_FIELDS, AGENT_CONNECTION_VERSION,
@@ -235,14 +235,15 @@ export function profileTarget(profile: AgentProfile): CloudTarget {
 /** A supplied host ID may select its own managed proof; never take another session's proof. */
 export async function profileSessionContext(profile: AgentProfile, hostSessionId?: string) {
   if (hostSessionId === undefined || hostSessionId === "manual") return null;
-  const contexts = (await listSessionContexts(profile.workspace_id, profile.principal_id)).filter(c => sessionProofOf(c) !== null);
+  const contexts = (await listSessionContextFiles(profile.workspace_id, profile.principal_id))
+    .filter(({ context }) => sessionProofOf(context) !== null);
   if (contexts.length === 0) return null;
-  const matches = contexts.filter(c => c.host_session_id === hostSessionId);
+  const matches = contexts.filter(({ context }) => context.host_session_id === hostSessionId);
   if (matches.length !== 1) throw new AgentSetupError("profile_session_conflict", "This agent has no single managed context for this host session. Check cswarm session status; do not use another session's context.");
-  const context = matches[0]!;
+  const { context, path } = matches[0]!;
   assertLocalSessionBinding(context, {
     target: profileTarget(profile), tokenPrincipalId: profile.principal_id,
     flagWorkspaceId: profile.workspace_id, tokenFile: profile.credential_file, hostSessionId,
   });
-  return { context, path: defaultSessionContextPath(profile.workspace_id, profile.principal_id, context.session_id) };
+  return { context, path };
 }

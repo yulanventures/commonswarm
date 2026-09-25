@@ -40,6 +40,7 @@ import {
   type HydratedDelivery,
 } from "../command/durable-delivery.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
+import { WAKE_LEASE_STALE_MS } from "../../../src/cloud/wake-lease-constants.ts";
 import {
   H0_MAX_CONCURRENT_WAITS,
   H0_POLL_RETRY_AFTER_SECONDS,
@@ -862,6 +863,19 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
           acquired: false as const,
           response: json(session.status, { error: session.error }),
         };
+      }
+      await tx`SELECT swarm.wake_seat_lock(${auth.seat.workspaceId}::uuid, ${auth.seat.principalId}::uuid)`;
+      const watcher = await tx<{ host_label: string }[]>`
+        SELECT host_label FROM swarm.agent_wake_leases
+        WHERE workspace_id = ${auth.seat.workspaceId}::uuid
+          AND principal_id = ${auth.seat.principalId}::uuid
+          AND renewed_at > clock_timestamp() - (${WAKE_LEASE_STALE_MS} * interval '1 millisecond')
+      `;
+      if (watcher.length > 0) {
+        return { acquired: false as const, response: json(409, {
+          error: "notify_held_elsewhere", surface: "watcher",
+          host_label: watcher[0]!.host_label,
+        }) };
       }
       const lock = await acquireLock(tx, auth.seat, parsed.body.wait);
       if (lock === null) {

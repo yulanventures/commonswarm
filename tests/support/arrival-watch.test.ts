@@ -4,14 +4,20 @@
  * ★ Named by `npm test`; it needs no network or database.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import {
   acquireArrivalWatchLock,
+  acquireArrivalWatchSeatLocks,
+  arrivalHostId,
+  arrivalHostIdFileState,
+  arrivalMachineHash,
+  arrivalWatchLockPath,
   arrivalWatchLockHeld,
+  legacyArrivalWatchLockPath,
   arrivalNotification,
   arrivalFullTextCommand,
   arrivalReplyCommand,
@@ -26,6 +32,7 @@ import {
   formatArrivalNotification,
   formatArrivalRetryNotice,
   releaseArrivalWatchLock,
+  releaseArrivalWatchSeatLocks,
   runArrivalWatch,
   type ArrivalCursorStore,
 } from "../../src/cloud/arrival-watch.js";
@@ -59,6 +66,111 @@ const EXISTING_CURSOR = {
   created_at: "2026-08-28T10:04:00.000Z",
   id: "55555555-5555-4555-8555-555555555555",
 };
+
+test("arrival host id is stable and private in the state directory", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-id-"));
+  try {
+    const lockPath = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    const first = await arrivalHostId(lockPath);
+    const second = await arrivalHostId(lockPath);
+    assert.equal(first, second);
+    assert.deepEqual(new Set(await Promise.all(Array.from({ length: 8 }, () => arrivalHostId(lockPath)))), new Set([first]));
+    const info = await stat(join(root, "host-id"));
+    assert.equal(info.mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("one seat lock spans profile ids in the same state root", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-seat-lock-"));
+  const other = { ...CLOUD, profileId: "other-profile" };
+  const first = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  const second = arrivalWatchLockPath(other, WORKSPACE, AGENT, root);
+  try {
+    assert.equal(first, second);
+    await acquireArrivalWatchLock(first);
+    await assert.rejects(acquireArrivalWatchLock(second), ArrivalWatchAlreadyRunningError);
+  } finally {
+    await releaseArrivalWatchLock(first);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new watcher also holds the previous release's profile lock", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-upgrade-lock-"));
+  const oldPath = legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  try {
+    assert.equal(oldPath, join(root, `${CLOUD.profileId}-${WORKSPACE}-${AGENT}.lock`));
+    await acquireArrivalWatchLock(oldPath);
+    await assert.rejects(
+      acquireArrivalWatchSeatLocks(CLOUD, WORKSPACE, AGENT, process.pid, undefined, root),
+      ArrivalWatchAlreadyRunningError,
+    );
+    await releaseArrivalWatchLock(oldPath);
+    const locks = await acquireArrivalWatchSeatLocks(CLOUD, WORKSPACE, AGENT, process.pid, undefined, root);
+    try {
+      await assert.rejects(acquireArrivalWatchLock(oldPath), ArrivalWatchAlreadyRunningError);
+    } finally { await releaseArrivalWatchSeatLocks(locks); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("copied host id rotates on machine mismatch and survives unreadable machine id", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-copy-"));
+  try {
+    const path = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    const first = await arrivalHostId(path, "a".repeat(64));
+    assert.equal(await arrivalHostId(path, null), first);
+    const second = await arrivalHostId(path, "b".repeat(64));
+    assert.notEqual(second, first);
+    assert.equal(await arrivalHostId(path, "b".repeat(64)), second);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("host id gains a newly readable machine hash without changing identity", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-adopt-"));
+  try {
+    const lock = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    assert.equal(await arrivalHostIdFileState(lock), "missing");
+    const first = await arrivalHostId(lock, null);
+    assert.equal(await arrivalHostIdFileState(lock), "present");
+    assert.equal(await arrivalHostId(lock, "a".repeat(64)), first);
+    assert.deepEqual(JSON.parse(await readFile(join(root, "host-id"), "utf8")), {
+      host_id: first, machine_hash: "a".repeat(64),
+    });
+    assert.notEqual(await arrivalHostId(lock, "b".repeat(64)), first);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("machine hash lookup names the system tool by absolute path", { timeout: 2000 }, async () => {
+  const source = await readFile(new URL("../../src/cloud/arrival-watch.ts", import.meta.url), "utf8");
+  assert.match(source, /runFile\("\/usr\/sbin\/ioreg"/);
+  assert.match(source, /readFile\("\/etc\/machine-id"/);
+  const hash = await arrivalMachineHash();
+  assert.equal(hash === null || /^[0-9a-f]{64}$/.test(hash), true);
+});
+
+test("bad host id content or mode is replaced with one path-specific notice", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-repair-"));
+  const path = join(root, "host-id");
+  const lock = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  const originalWrite = process.stderr.write;
+  let notices = "";
+  process.stderr.write = ((chunk: string) => { notices += chunk; return true; }) as typeof process.stderr.write;
+  try {
+    await writeFile(path, "garbage", { mode: 0o600 });
+    const repaired = await arrivalHostId(lock, "a".repeat(64));
+    assert.match(repaired, /^[0-9a-f-]{36}$/);
+    assert.equal(notices.match(/replacing invalid or copied host id/g)?.length, 1);
+    assert.match(notices, /host-id/);
+    notices = "";
+    await chmod(path, 0o644);
+    assert.notEqual(await arrivalHostId(lock, "a".repeat(64)), repaired);
+    assert.equal(notices.match(/replacing invalid or copied host id/g)?.length, 1);
+    assert.match(notices, /host-id/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function row(id: string, body: string, createdAt: string): SignalRecord {
   return {
@@ -674,7 +786,7 @@ test("a second arrival watcher for the same agent names the other pid", async ()
   const root = await mkdtemp(join(tmpdir(), "cswarm-notify-lock-"));
   const lockPath = join(root, "watch.lock");
   const ownerPid = process.pid;
-  await acquireArrivalWatchLock(lockPath, ownerPid);
+  assert.equal(await acquireArrivalWatchLock(lockPath, ownerPid), false);
   await assert.rejects(
     () => acquireArrivalWatchLock(lockPath, ownerPid + 1),
     (error: unknown) => {
@@ -696,7 +808,7 @@ test("a stale arrival watch lock is stolen when the other pid is gone", async ()
   await writeFile(lockPath, `${JSON.stringify({ version: 1, pid: 999999 })}\n`, {
     mode: 0o600,
   });
-  await acquireArrivalWatchLock(lockPath, process.pid);
+  assert.equal(await acquireArrivalWatchLock(lockPath, process.pid), true);
   const raw = await readFile(lockPath, "utf8");
   assert.match(raw, new RegExp(`"pid":${process.pid}`));
   await releaseArrivalWatchLock(lockPath, process.pid);

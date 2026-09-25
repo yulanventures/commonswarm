@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer, type Server } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   access,
   mkdir,
@@ -345,6 +345,89 @@ test("the read-only listener fallback never rewrites a stale live-looking status
   }
 });
 
+test("resume prints lease age, generation and this-host ownership without calling renewal mail observation", { timeout: 1000 }, async () => {
+  const report = {
+    identity: { displayName: "Rivet", principalId: PRINCIPAL },
+    listener: { checkedDirectory: "/tmp/isolated", status: null, source: "not_found" as const },
+    watchers: [],
+    brain: { digest: null, highWaterFile: "/tmp/isolated/brain.json" },
+    inbox: { count: 0, exact: true },
+    wakeLease: { lease: { watcher_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      host_label: "host-a", generation: 4, renewed_age_ms: 1200 },
+      localWatcherId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      hostIdDirectory: "/tmp/isolated/state/cswarm/arrival-cursors" },
+    target: cloudTarget("http://127.0.0.1:54321", "public-test-key"),
+    workspaceId: WORKSPACE, credentialFile: "/tmp/isolated/agent.json", installedVersion: "0.1.77",
+  };
+  const human = renderResume(report);
+  assert.match(human, /host-a, generation 4, renewed 1s ago; this host holds it: yes/);
+  assert.match(human, /renewal does not prove this session reads its mail/i);
+  const json = resumeJson(report) as { wake_lease: Record<string, unknown> };
+  assert.equal(json.wake_lease.held_by_this_host, true);
+  assert.equal(json.wake_lease.renewal_is_mail_observation, false);
+  const unreadable = { ...report, wakeLease: { ...report.wakeLease, machineIdUnavailable: true,
+    hostIdFileState: "missing" as const } };
+  assert.match(renderResume(unreadable), /no host-id file exists yet/);
+  assert.match(renderResume(unreadable), /host-id state in \/tmp\/isolated\/state\/cswarm\/arrival-cursors separate on each machine/);
+  assert.doesNotMatch(renderResume(report), /sharing that directory across machines/);
+  assert.doesNotMatch(renderResume(unreadable), /existing host id was kept/);
+  assert.match(renderResume({ ...report, wakeLease: { ...unreadable.wakeLease,
+    hostIdFileState: "present" as const } }), /a host-id file exists but cannot be verified/);
+  assert.match(renderResume({ ...report, wakeLease: { ...unreadable.wakeLease,
+    hostIdFileState: "unreadable" as const } }), /could not read the machine id or verify the host-id file/);
+  const lane = await readFile(new URL("../../docs/evidence/2026-09-25-item-g-lane2b/LANE.md", import.meta.url), "utf8");
+  assert.match(lane, /state directory shared across machines is unsupported; each machine needs its own state directory/i);
+  assert.equal(resumeJson(unreadable).host_machine_id_unavailable, true);
+  assert.equal(resumeJson(unreadable).host_id_file_state, "missing");
+  assert.equal(resumeJson({ ...report, wakeLease: { ...unreadable.wakeLease,
+    hostIdFileState: "present" as const } }).host_id_file_state, "present");
+  assert.equal(resumeJson({ ...report, wakeLease: { ...report.wakeLease,
+    localWatcherId: null } }).wake_lease &&
+    (resumeJson({ ...report, wakeLease: { ...report.wakeLease,
+      localWatcherId: null } }).wake_lease as Record<string, unknown>).held_by_this_host, false);
+});
+
+test("lane labels the twelve client mutations as Fold 1 evidence", { timeout: 1000 }, async () => {
+  const lane = await readFile(new URL("../../docs/evidence/2026-09-25-item-g-lane2b/LANE.md", import.meta.url), "utf8");
+  assert.match(lane, /Fold 1 client mutations: twelve were run/);
+});
+
+test("resume reads host-id presence before describing an unreadable machine id", { timeout: 3000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-resume-host-id-"));
+  const oldXdg = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = root;
+  try {
+    const inspect = async () => await inspectResume({
+      target: cloudTarget("http://127.0.0.1:54321", "public-test-key"),
+      workspaceId: WORKSPACE,
+      credentialFile: join(root, "agent.json"),
+      installedVersion: "0.1.77",
+      stateDirectory: root,
+    }, {
+      async readIdentity() { return { displayName: "Rivet", principalId: PRINCIPAL }; },
+      async readBrainTopics() { return []; },
+      async readInboxCount() { return { count: 0, exact: true }; },
+      async readWakeLease() { return null; },
+      processTable: { async list() { return []; } },
+      async queryStatus() { throw new Error("no listener"); },
+      async readStatus() { return null; },
+    });
+    assert.equal((await inspect()).wakeLease?.hostIdFileState, "missing");
+    assert.equal((await inspect()).wakeLease?.hostIdDirectory, join(root, "cswarm", "arrival-cursors"));
+    const hostRoot = join(root, "cswarm", "arrival-cursors");
+    await mkdir(hostRoot, { recursive: true });
+    await writeFile(join(hostRoot, "host-id"), "{}\n");
+    assert.equal((await inspect()).wakeLease?.hostIdFileState, "present");
+    await rm(join(hostRoot, "host-id"));
+    await mkdir(join(hostRoot, "host-id"));
+    assert.equal((await inspect()).wakeLease?.hostIdFileState, "unreadable");
+  } finally {
+    if (oldXdg === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = oldXdg;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 function credentialArtifact(): string {
   return JSON.stringify({
     message: "Agent credential minted. It is bound to this run, so the agent's work is attributable to it.",
@@ -433,11 +516,35 @@ function signal(id = NEW_SIGNAL): Record<string, unknown> {
   };
 }
 
-test("the real resume CLI uses only read resources and leaves local files byte-identical", async () => {
+function refuseResumeCommand(request: IncomingMessage, response: ServerResponse,
+  requests: Array<{ path: string; resource: unknown }>): boolean {
+  if (request.url !== "/functions/v1/command") return false;
+  requests.push({ path: request.url, resource: "command POST" });
+  request.resume();
+  request.on("end", () => response.writeHead(409, { "content-type": "application/json" })
+    .end(JSON.stringify({ error: "unexpected_command" })));
+  return true;
+}
+
+test("resume fixture records and refuses a command POST", { timeout: 3000 }, async () => {
+  const requests: Array<{ path: string; resource: unknown }> = [];
+  const server = createServer((request, response) => {
+    if (!refuseResumeCommand(request, response, requests)) response.writeHead(500).end();
+  });
+  const url = await listen(server);
+  try {
+    const result = await fetch(`${url}/functions/v1/command`, { method: "POST", body: "{}" });
+    assert.equal(result.status, 409);
+    assert.deepEqual(requests, [{ path: "/functions/v1/command", resource: "command POST" }]);
+  } finally { await close(server); }
+});
+
+test("the real resume CLI uses only read resources and leaves local files byte-identical", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-resume-cli-"));
   const xdg = join(root, "state");
   const requests: Array<{ path: string; resource: unknown }> = [];
   const server = createServer((request, response) => {
+    if (refuseResumeCommand(request, response, requests)) return;
     let raw = "";
     request.on("data", (chunk) => raw += chunk);
     request.on("end", () => {
@@ -462,6 +569,8 @@ test("the real resume CLI uses only read resources and leaves local files byte-i
           signals: [signal(NEW_SIGNAL), signal(OLD_SIGNAL)],
           capabilities: { sender_owner_relation: 1, cursor_after: 1 },
         }));
+      } else if (body.resource === "agent_wake_lease") {
+        response.end(JSON.stringify({ lease: null }));
       } else {
         response.writeHead(500).end(JSON.stringify({ error: "unexpected_resource" }));
       }
@@ -511,7 +620,13 @@ test("the real resume CLI uses only read resources and leaves local files byte-i
       { path: "/functions/v1/read", resource: "members" },
       { path: "/functions/v1/read", resource: "files" },
       { path: "/functions/v1/read", resource: "signals" },
+      { path: "/functions/v1/read", resource: "agent_wake_lease" },
     ]);
+    const commandProbe = await fetch(`${url}/functions/v1/command`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    assert.equal(commandProbe.status, 409);
+    assert.deepEqual(requests.at(-1), { path: "/functions/v1/command", resource: "command POST" });
     assert.equal(await readFile(credential, "utf8"), credentialBefore);
     assert.equal(await readFile(hookSurfacePath, "utf8"), hookSurfaceBefore);
     await assert.rejects(access(join(paths.instanceDirectory, "brain-digest.json")));
@@ -526,6 +641,12 @@ test("a closed notify reader exits with its stable code and does not advance the
   const root = await mkdtemp(join(tmpdir(), "cswarm-notify-epipe-"));
   const xdg = join(root, "state");
   const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
     request.resume();
     request.on("end", () => {
       response.writeHead(200, { "content-type": "application/json" }).end(
@@ -590,6 +711,12 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
   const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
   let requests = 0;
   const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
     request.resume();
     request.on("end", () => {
       requests += 1;
@@ -633,6 +760,12 @@ test("a failed read still checks the stdout reader during retry backoff", { time
   const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
   let requests = 0;
   const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
     request.resume();
     request.on("end", () => {
       requests += 1;
@@ -712,6 +845,12 @@ test("the printed restart command starts a watcher against the same loopback rea
   const second = new Promise<void>((resolveRead) => { secondRead = resolveRead; });
   let requests = 0;
   const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
     request.resume();
     request.on("end", () => {
       requests += 1;
@@ -788,6 +927,12 @@ for (const startMode of ["stdin", "profile"] as const) {
     const second = new Promise<void>((resolveRead) => { secondRead = resolveRead; });
     let requests = 0;
     const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
       request.resume();
       request.on("end", () => {
         requests += 1;
@@ -874,6 +1019,12 @@ test("a watcher started with session context prints that accepted flag", { timeo
   let firstRead!: () => void;
   const read = new Promise<void>((done) => { firstRead = done; });
   const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
     let raw = "";
     request.on("data", (chunk) => raw += chunk);
     request.on("end", () => {
@@ -933,6 +1084,12 @@ for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES
     let firstRead!: () => void;
     const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
     const server = createServer((request, response) => {
+    if (request.url === "/functions/v1/command") {
+      request.resume();
+      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
+        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+      return;
+    }
       request.resume();
       request.on("end", () => {
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
@@ -1027,10 +1184,8 @@ test("resume uses parent evidence only when stdout is unproved", { timeout: 2_00
     const output = renderResume(report);
     assert.equal(output.includes("kill 123"), expected === "orphaned", `${stdout}/${parent}`);
     if (expected === "orphaned") {
-      assert.ok(output.includes(`then restart ${notifyRestartCommand({
-        agentTokenFile: base.credentialFile, workspaceId: WORKSPACE,
-        url: base.target.url, anonKey: base.target.anonKey,
-      })}`));
+      assert.match(output, /then start one watcher from this seat's live host session after its context is verified/);
+      assert.doesNotMatch(output, /cswarm inbox --notify/);
     }
     if (expected === "cannot_determine") {
       assert.match(output, stdout === "cannot_determine" ? /unknown stdout reader/ : /unknown parent process/);

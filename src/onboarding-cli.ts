@@ -13,7 +13,9 @@ import {
   hostHookCheckDeadlineAt,
   processDeadlineDelayMs,
 } from "./cloud/agent-check-budget.js";
-import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile } from "./cloud/agent-profile.js";
+import { AgentSetupError, privatePath, profileScopeKey, readAgentProfile, readProfileCredential } from "./cloud/agent-profile.js";
+import { cloudTarget } from "./cloud/config.js";
+import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   checkedHostSessionId, configureAgentReceive, readReceiveBinding,
   receiveHookEvent, receiveStatus, requestReceiveCanary,
@@ -269,12 +271,28 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
 
 export async function runResumeSnapshot(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:resume-profile");
-  args.assertShape(["profile", "host-session-id", "json"], 1);
+  args.assertShape(["profile", "host-session-id", "url", "json"], 1);
   const path = privatePath(args.required("profile"));
   const profile = await readAgentProfile(path, args.optional("host-session-id"));
+  if (args.optional("url") !== undefined && args.optional("url") !== profile.url) {
+    throw new AgentSetupError("profile_target_mismatch", "The supplied URL differs from this profile's URL.");
+  }
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
+  const credential = await readProfileCredential(profile);
+  const contexts = await verifiedLiveSessionContexts({ target: cloudTarget(profile.url, profile.anon_key),
+    workspaceId: profile.workspace_id, principalId: profile.principal_id, credential: credential.token,
+    tokenFile: profile.credential_file,
+    ...(args.optional("host-session-id") === undefined ? {} : { hostSessionId: args.optional("host-session-id")! }) });
+  const liveContextLines = contexts.verificationUnavailable
+    ? ["Live session context on this host: could not verify with the read service; check again when it is reachable."]
+    : contexts.paths.length === 0
+    ? ["Live session context on this host: no live session on this host was verified for this seat."]
+    : contexts.paths.map(contextPath => `Live session context on this host: ${contextPath}`);
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
     authenticated_now: false, ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
+    live_session_context_lines: liveContextLines,
+    live_session_context_paths: contexts.paths,
+    live_session_context_verification_unavailable: contexts.verificationUnavailable,
     instruction: turnCheckInstruction(path, profile.host_session_id ?? binding?.host_session_id),
   });
 }

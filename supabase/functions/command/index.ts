@@ -50,6 +50,7 @@ import {
   uuidFieldRuleText,
 } from "../_shared/channels.ts";
 import { optionalWake } from "../_shared/wake.ts";
+import { WAKE_LEASE_STALE_MS } from "../../../src/cloud/wake-lease-constants.ts";
 import {
   commandAllowedOrigins,
   commandPreflight,
@@ -982,6 +983,9 @@ const COMMAND_KINDS = [
   SIGNALS_SEEN_KIND,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
+  "claim_wake_lease",
+  "renew_wake_lease",
+  "release_wake_lease",
   ...FILE_COMMAND_KINDS,
 ] as const;
 const TASK_COMMAND_KINDS = [
@@ -1029,6 +1033,9 @@ const WORKSPACE_COMMAND_KINDS = [
   SIGNALS_SEEN_KIND,
   CLAIM_AGENT_INBOX_KIND,
   ACK_AGENT_DELIVERY_KIND,
+  "claim_wake_lease",
+  "renew_wake_lease",
+  "release_wake_lease",
   ...FILE_COMMAND_KINDS,
 ] as const;
 const P0_AGENT_SCOPES = [
@@ -7685,7 +7692,7 @@ async function resumeRenewalGrant(
    * was told 403; a retry then answered `renewal_grant_not_suspended`, because the resume it
    * had denied had in fact happened.
    *
-   * Same shape as the renewal preflight read at index.ts:3674 (`preflight[0]?.code ?? null`):
+   * Same shape as the renewal preflight read at index.ts:3676 (`preflight[0]?.code ?? null`):
    * preserve NULL, refuse only on a code we assign.
    *
    * WHY A REFUSAL BELOW STILL COMMITS, DELIBERATELY. `refuse` must commit — its whole job is
@@ -7913,8 +7920,8 @@ async function enforceFreeTierBudget(
     }
     await tx`
       SELECT pg_advisory_xact_lock(
-        hashtext(${route.workspaceId}::text),
-        hashtext(${command.name})
+        1936142698,
+        hashtext(${route.workspaceId}::text || ':' || ${command.name})
       )
     `;
     if (command.allow_duplicate_name !== true) {
@@ -9064,6 +9071,75 @@ async function handleTransaction(
        "unknown command kind". */
     if (kind === RESUME_RENEWAL_GRANT_KIND) {
       return await resumeRenewalGrant(tx, body, auth, route, ignoredIdentity);
+    }
+    if (kind === "claim_wake_lease" || kind === "renew_wake_lease" || kind === "release_wake_lease") {
+      const command = record(body.command);
+      const agent = auth.agent;
+      if (agent !== null && kind === "claim_wake_lease" && agent.managed_at === null) {
+        const poll = await tx<{ held: boolean }[]>`
+          SELECT EXISTS (SELECT 1 FROM swarm.h0_poll_locks
+            WHERE workspace_id = ${route.workspaceId}::uuid
+              AND principal_id = ${agent.principal_id}::uuid
+              AND expires_at > clock_timestamp()) AS held
+        `;
+        if (poll[0]?.held) {
+          return { status: 409, body: { error: "notify_held_elsewhere", surface: "h0_poll" } };
+        }
+      }
+      if (agent === null ||
+          route.workspaceId !== agent.principal_workspace_id ||
+          record(body.stream)?.kind !== "workspace" ||
+          !exactKeys(record(body.stream) ?? {}, ["kind"])) {
+        return { status: 403, body: { error: "notify_unavailable" } };
+      }
+      if (!command || typeof command.watcher_id !== "string" ||
+          !UUID_RE.test(command.watcher_id)) {
+        return { status: 400, body: { error: "invalid_request" } };
+      }
+      let result: Record<string, unknown>;
+      if (kind === "claim_wake_lease") {
+        const keys = ["kind", "watcher_id", "host_label", "host_id", "take_over"];
+        if (!exactKeys(command, keys) || typeof command.host_label !== "string" ||
+            command.host_label.length < 1 || command.host_label.length > 120 ||
+            /[\x00-\x1f\x7f]/.test(command.host_label) ||
+            typeof command.host_id !== "string" || !UUID_RE.test(command.host_id) ||
+            typeof command.take_over !== "boolean") {
+          return { status: 400, body: { error: "invalid_request" } };
+        }
+        const rows = await tx<{ result: Record<string, unknown> }[]>`
+          SELECT swarm.claim_agent_wake_lease(
+            ${route.workspaceId}::uuid, ${agent.principal_id}::uuid,
+            ${command.watcher_id}::uuid, ${command.host_label},
+            ${command.host_id}::uuid,
+            ${agent.managed_at === null ? null : sessionProofParse.ok ? sessionProofParse.proof.session_id : null},
+            ${command.take_over as boolean}, ${WAKE_LEASE_STALE_MS}
+          ) AS result
+        `;
+        result = rows[0]?.result ?? {};
+      } else {
+        if (!exactKeys(command, ["kind", "watcher_id", "generation"]) ||
+            !Number.isSafeInteger(command.generation) || (command.generation as number) < 1) {
+          return { status: 400, body: { error: "invalid_request" } };
+        }
+        const rows = kind === "release_wake_lease"
+          ? await tx<{ result: Record<string, unknown> }[]>`
+          SELECT swarm.release_agent_wake_lease(
+            ${route.workspaceId}::uuid, ${agent.principal_id}::uuid,
+            ${command.watcher_id}::uuid, ${command.generation as number}::bigint
+          ) AS result`
+          : await tx<{ result: Record<string, unknown> }[]>`
+          SELECT swarm.renew_agent_wake_lease(
+            ${route.workspaceId}::uuid, ${agent.principal_id}::uuid,
+            ${command.watcher_id}::uuid, ${command.generation as number}::bigint
+          ) AS result
+        `;
+        result = rows[0]?.result ?? {};
+      }
+      if (typeof result.error === "string") {
+        return { status: 409, body: result };
+      }
+      return { status: 200, body: { ok: true, status: "accepted", event_ids: [],
+        events: [], ...result } };
     }
     const validation = validateCommand(body.command);
     const configRows = await tx<{ value: unknown }[]>`

@@ -412,6 +412,199 @@ test("stale-generation claim is refused with session_conflict", async () => {
   assert.equal(claim.body.error, "session_conflict");
 });
 
+test("one managed wake lease fences fresh, stale, same-host and H0 claims", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-lease");
+  const held = await holdSession(agent);
+  const headers = proofHeaders(held.sessionId, held.generation, held.key);
+  const first = randomUUID();
+  const second = randomUUID();
+  const hostA = randomUUID();
+  const hostB = randomUUID();
+  const claim = (watcher: string, host: string, hostId = hostA, takeOver = false,
+    proof = headers) =>
+    runCmd(agent.token, { kind: "claim_wake_lease", watcher_id: watcher,
+      host_label: host, host_id: hostId, take_over: takeOver }, { headers: proof });
+  const renew = (watcher: string, generation: number) =>
+    runCmd(agent.token, { kind: "renew_wake_lease", watcher_id: watcher, generation }, { headers });
+  const noProof = await claim(first, "host-a", hostA, false, {});
+  assert.notEqual(noProof.status, 200, "managed session fence applies");
+  const empty = await claim(first, "host-a");
+  assert.equal(empty.status, 200, JSON.stringify(empty.body));
+  assert.equal(Number(empty.body.generation), 1);
+  const refused = await claim(second, "host-b", hostB);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "notify_held_elsewhere");
+  assert.equal(refused.body.surface, "watcher");
+  assert.equal(refused.body.host_label, "host-a");
+  assert.ok(Number(refused.body.lease_age_ms) >= 0);
+  assert.equal(JSON.stringify(refused.body).includes(held.sessionId), false);
+  const [stored] = await sql<{ host_session_ref: string | null }[]>`
+    SELECT host_session_ref FROM swarm.agent_wake_leases
+    WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+  assert.equal(stored?.host_session_ref, held.sessionId);
+  const renewed = await renew(first, 1);
+  assert.equal(renewed.status, 200);
+  const sameNameDifferentId = await claim(second, "host-a", hostB);
+  assert.equal(sameNameDifferentId.status, 409);
+  assert.equal(sameNameDifferentId.body.error, "notify_held_elsewhere");
+  const sameHost = await claim(second, "host-a");
+  assert.equal(sameHost.status, 200);
+  assert.equal(Number(sameHost.body.generation), 2);
+  assert.equal(sameHost.body.stolen, true);
+  const oldRenew = await renew(first, 1);
+  assert.equal(oldRenew.status, 409);
+  assert.equal(oldRenew.body.error, "wake_lease_superseded");
+  assert.equal(oldRenew.body.host_label, "host-a");
+  const forced = await claim(first, "host-b", hostB, true);
+  assert.equal(forced.status, 200);
+  assert.equal(Number(forced.body.generation), 3);
+  await sql`UPDATE swarm.agent_wake_leases SET renewed_at = clock_timestamp() - interval '4 minutes'
+    WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+  const stale = await claim(second, "host-c", hostB);
+  assert.equal(stale.status, 200);
+  assert.equal(Number(stale.body.generation), 4);
+  await sql`INSERT INTO swarm.h0_poll_locks
+    (workspace_id, principal_id, holder, listener_instance_id, acquired_at, expires_at)
+    VALUES (${shared.workspace}::uuid, ${agent.principalId}::uuid,
+      ${randomUUID()}::uuid, ${randomUUID()}::uuid, clock_timestamp(),
+      clock_timestamp() + interval '1 minute')`;
+  const h0 = await claim(first, "host-a", hostA, true);
+  assert.equal(h0.status, 409);
+  assert.equal(h0.body.error, "notify_held_elsewhere");
+  assert.equal(h0.body.surface, "h0_poll");
+  const h0Renew = await renew(second, 4);
+  assert.equal(h0Renew.status, 409);
+  assert.equal(h0Renew.body.error, "wake_lease_superseded");
+  assert.equal(h0Renew.body.surface, "h0_poll");
+  await sql`UPDATE swarm.h0_poll_locks SET expires_at = clock_timestamp()
+    WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+});
+
+test("unmanaged token seats claim, renew and conditionally release wake leases", { timeout: 20_000 }, async () => {
+  const agent = await seedAgent("unmanaged-wake");
+  const watcher = randomUUID();
+  const hostId = randomUUID();
+  const claim = await runCmd(agent.token, { kind: "claim_wake_lease", watcher_id: watcher,
+    host_label: "unmanaged-host", host_id: hostId, take_over: false });
+  assert.equal(claim.status, 200, JSON.stringify(claim.body));
+  const generation = Number(claim.body.generation);
+  const renew = await runCmd(agent.token, { kind: "renew_wake_lease", watcher_id: watcher, generation });
+  assert.equal(renew.status, 200, JSON.stringify(renew.body));
+  const wrongRelease = await runCmd(agent.token, { kind: "release_wake_lease",
+    watcher_id: randomUUID(), generation });
+  assert.equal(wrongRelease.status, 200);
+  assert.equal(wrongRelease.body.released, false);
+  const wrongGeneration = await runCmd(agent.token, { kind: "release_wake_lease",
+    watcher_id: watcher, generation: generation + 1 });
+  assert.equal(wrongGeneration.status, 200);
+  assert.equal(wrongGeneration.body.released, false);
+  const released = await runCmd(agent.token, { kind: "release_wake_lease", watcher_id: watcher, generation });
+  assert.equal(released.status, 200);
+  assert.equal(released.body.released, true);
+  const restart = await runCmd(agent.token, { kind: "claim_wake_lease", watcher_id: randomUUID(),
+    host_label: "unmanaged-host", host_id: hostId, take_over: false });
+  assert.equal(restart.status, 200, JSON.stringify(restart.body));
+  assert.equal(Number(restart.body.generation), 1);
+});
+
+test("wake seat advisory class is separate from the agent-name lock", { timeout: 10_000 }, async () => {
+  const workspace = randomUUID();
+  const principal = randomUUID();
+  const name = `name-${randomUUID()}`;
+  const [keys] = await sql<{ wake_class: number; name_class: number; wake_key: number; name_key: number }[]>`
+    SELECT 1936142697 AS wake_class, 1936142698 AS name_class,
+      hashtext(${workspace} || ':' || ${principal}) AS wake_key,
+      hashtext(${workspace} || ':' || ${name}) AS name_key`;
+  assert.ok(keys);
+  assert.notEqual(keys.wake_class, keys.name_class);
+  assert.notEqual(keys.wake_key, keys.name_key);
+  assert.notDeepEqual([keys.wake_class, keys.wake_key], [keys.name_class, keys.name_key]);
+  const [definition] = await sql<{ source: string }[]>`
+    SELECT pg_get_functiondef('swarm.wake_seat_lock(uuid,uuid)'::regprocedure) AS source`;
+  assert.match(definition?.source ?? "", /pg_advisory_xact_lock\(1936142697,/);
+  const edge = readFileSync(fileURLToPath(new URL(
+    "../../supabase/functions/command/index.ts", import.meta.url)), "utf8");
+  assert.match(edge, /pg_advisory_xact_lock\(\s*1936142698,\s*hashtext\(/);
+});
+
+test("wake lease view is member scoped and raw table is hidden from client roles", { timeout: 15_000 }, async () => {
+  const agent = await seedAgent("wake-lease-view");
+  const held = await holdSession(agent);
+  const watcher = randomUUID();
+  const claim = await runCmd(agent.token, { kind: "claim_wake_lease", watcher_id: watcher,
+    host_label: "visible-host", host_id: randomUUID(), take_over: false },
+    { headers: proofHeaders(held.sessionId, held.generation, held.key) });
+  assert.equal(claim.status, 200);
+  const readAs = async (userId: string) => await sql.begin(async (tx) => {
+    await tx`SELECT set_config('request.jwt.claims', ${JSON.stringify({ sub: userId, role: "authenticated" })}, true)`;
+    return await tx<Record<string, unknown>[]>`SELECT * FROM swarm_read.agent_wake_leases
+      WHERE workspace_id = ${shared.workspace}::uuid AND principal_id = ${agent.principalId}::uuid`;
+  });
+  const member = await readAs(shared.ownerId);
+  assert.equal(member.length, 1);
+  assert.equal(member[0]?.host_label, "visible-host");
+  assert.equal(Number(member[0]?.generation), 1);
+  assert.ok(Number(member[0]?.renewed_age_ms) >= 0);
+  assert.equal(JSON.stringify(member).includes(held.sessionId), false);
+  assert.deepEqual([...await readAs(randomUUID())], []);
+  const [privileges] = await sql<{ anon: boolean; authenticated: boolean }[]>`
+    SELECT has_table_privilege('anon', 'swarm.agent_wake_leases', 'SELECT') AS anon,
+      has_table_privilege('authenticated', 'swarm.agent_wake_leases', 'SELECT') AS authenticated`;
+  assert.equal(privileges?.anon, false);
+  assert.equal(privileges?.authenticated, false);
+  const response = await fetch(`${local.API_URL}/functions/v1/read`, { method: "POST",
+    headers: { authorization: `Bearer ${agent.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "agent_wake_lease", workspace_id: shared.workspace }) });
+  assert.equal(response.status, 200);
+  const payload = await response.json() as { lease?: Record<string, unknown> };
+  assert.equal(payload.lease?.host_label, "visible-host");
+  assert.equal(payload.lease?.watcher_id, watcher);
+});
+
+test("G2b catalog proof fails when member visibility is removed", { timeout: 15_000 }, async () => {
+  const proof = readFileSync(fileURLToPath(new URL(
+    "../../deploy/release-proofs/item-g2b/20260926000001-catalog.sql", import.meta.url)), "utf8")
+    .replace(/\\gset\s*$/, "");
+  const [positive] = await sql.unsafe<{ catalog_ok: boolean }[]>(proof);
+  assert.equal(positive?.catalog_ok, true);
+  await sql.begin(async (tx) => {
+    await tx`REVOKE SELECT ON swarm_read.agent_wake_leases FROM authenticated`;
+    const [mutated] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
+    assert.equal(mutated?.catalog_ok, false);
+    throw new Error("ROLLBACK_G2B_CATALOG_MUTATION");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_G2B_CATALOG_MUTATION") throw error;
+  });
+});
+
+test("G2b functional proof needs the exact fresh seeded lease", { timeout: 30_000 }, async () => {
+  const agent = await seedAgent("wake-proof");
+  const held = await holdSession(agent);
+  const claimed = await runCmd(agent.token, { kind: "claim_wake_lease", watcher_id: randomUUID(),
+    host_label: "proof-host", host_id: randomUUID(), take_over: false },
+    { headers: proofHeaders(held.sessionId, held.generation, held.key) });
+  assert.equal(claimed.status, 200);
+  const containers = execFileSync("docker", ["ps", "--format", "{{.Names}}"], { encoding: "utf8" })
+    .trim().split("\n").filter(name => /^supabase_db_/.test(name));
+  assert.equal(containers.length, 1);
+  const proof = readFileSync(fileURLToPath(new URL(
+    "../../deploy/release-proofs/item-g2b/20260926000001-functional.sql", import.meta.url)), "utf8");
+  const run = (principal?: string) => spawnSync("docker", ["exec", "-i", containers[0]!,
+    "psql", "-X", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
+    ...(principal ? ["-v", `item_g2b_principal_id=${principal}`] : [])], {
+    input: `BEGIN;\n${proof}\nROLLBACK;\n`, encoding: "utf8", timeout: 5_000,
+  });
+  const positive = run(agent.principalId);
+  assert.ifError(positive.error);
+  assert.equal(positive.status, 0, positive.stderr);
+  const missing = run();
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /item_g2b_principal_id is required/);
+  const wrong = run(randomUUID());
+  assert.notEqual(wrong.status, 0);
+  assert.match(wrong.stderr, /no fresh watcher lease/);
+});
+
 test("bare queued-to-observed is delivery_not_surfaced when managed", async () => {
   const agent = await seedAgent("bare-promote");
   const held = await holdSession(agent);

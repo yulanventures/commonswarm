@@ -10,6 +10,7 @@ import test from "node:test";
 import {
   acquireArrivalWatchLock,
   arrivalWatchLockPath,
+  legacyArrivalWatchLockPath,
   releaseArrivalWatchLock,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
@@ -487,9 +488,10 @@ test("listen start refuses unattended main routes unless the operator accepts th
   }
 });
 
-test("listen start accepts a hook or a watcher lock and names both when neither is present", async () => {
+test("listen start accepts a hook or either watcher lock and names both when neither is present", { timeout: 30_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-attendance-surfaces-"));
   const home = await mkdtemp(join(tmpdir(), "cswarm-attendance-surfaces-home-"));
+  const target = cloudTarget("http://127.0.0.1:9", "anon");
   const credentialPath = join(root, "agent.json");
   try {
     await writeFile(credentialPath, artifact(), { mode: 0o600 });
@@ -498,9 +500,9 @@ test("listen start accepts a hook or a watcher lock and names both when neither 
       "listen",
       "start",
       "--url",
-      TARGET.url,
+      target.url,
       "--anon-key",
-      TARGET.anonKey,
+      target.anonKey,
       "--workspace-id",
       WORKSPACE_ID,
       "--agent-token-file",
@@ -521,8 +523,11 @@ test("listen start accepts a hook or a watcher lock and names both when neither 
     assert.doesNotMatch(hookOnly.stderr, /listen_unattended_refused/);
     await rm(join(home, ".claude", "settings.json"));
 
+    const unattended = runCli(common, { cwd: root, home });
+    assert.match(unattended.stderr, /listen_unattended_refused/);
+
     const lockPath = arrivalWatchLockPath(
-      TARGET,
+      target,
       WORKSPACE_ID,
       PRINCIPAL_ID,
       join(home, "xdg-state", "cswarm", "arrival-cursors"),
@@ -534,6 +539,17 @@ test("listen start accepts a hook or a watcher lock and names both when neither 
       assert.doesNotMatch(watcherOnly.stderr, /listen_unattended_refused/);
     } finally {
       await releaseArrivalWatchLock(lockPath);
+    }
+
+    const oldLockPath = legacyArrivalWatchLockPath(target, WORKSPACE_ID, PRINCIPAL_ID,
+      join(home, "xdg-state", "cswarm", "arrival-cursors"));
+    await acquireArrivalWatchLock(oldLockPath);
+    try {
+      const oldWatcherOnly = runCli(common, { cwd: root, home });
+      assert.equal(oldWatcherOnly.status, 1);
+      assert.doesNotMatch(oldWatcherOnly.stderr, /listen_unattended_refused/);
+    } finally {
+      await releaseArrivalWatchLock(oldLockPath);
     }
 
     await writeFile(

@@ -1560,6 +1560,48 @@
     },
     "HEAD": {
       "rows": {
+        "src/cloud/arrival-watch.ts:timeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/arrival-watch.ts:253",
+          "detail": "macOS ioreg machine-id lookup has a two-second execFile timeout; an unreadable id keeps the existing host id and is reported by resume.",
+          "operation": {
+            "name": "arrival-host-machine-id",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The local machine-id utility is not a loopback network operation; pure tests inject a machine fingerprint."
+          }
+        },
+        "src/cloud/wake-lease.ts:setTimeout": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": ["/functions/v1/command"],
+          "citation": "src/cloud/wake-lease.ts:42-108; supabase/functions/command/index.ts:1499,9073-9150",
+          "detail": "Claim and 60-second timer renewal; 15-second client abort covers response body. Command-edge lock_timeout is 5 seconds. Staging renewal p50/p95 must be recorded before the box release; this lane may not contact staging.",
+          "operation": {
+            "name": "wake-lease-command",
+            "class": "not-run",
+            "writes": ["agent wake lease claimed_at or renewed_at"],
+            "removes": [],
+            "reason": "A claim or renewal writes durable lease state; no safe read-only proxy reaches this path."
+          }
+        },
+        "src/cloud/wake-lease.ts:setTimeout#2": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": ["/functions/v1/read"],
+          "citation": "src/cloud/wake-lease.ts:110-140",
+          "detail": "Agent lease status read; 15-second client abort covers response body.",
+          "operation": {
+            "name": "wake-lease-read",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "No isolated lease-status operation exists in the timeout-table harness."
+          }
+        },
         "site/src/lib/agent-connect.ts:COMMAND_TIMEOUT_MS": {
           "class": "network-api",
           "scope": "per-request",
@@ -1683,6 +1725,20 @@
             "writes": [],
             "removes": [],
             "reason": "Local stdin wait."
+          }
+        },
+        "src/cli.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": ["/functions/v1/command"],
+          "citation": "src/cli.ts:4951-4956; src/cloud/wake-lease.ts:50-53",
+          "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
+          "operation": {
+            "name": "wake-lease-release",
+            "class": "not-run",
+            "writes": ["agent wake lease deletion when watcher and generation match"],
+            "removes": [],
+            "reason": "Release changes durable lease state; the loopback CLI test exercises its request without contacting a real workspace."
           }
         },
         "src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS": {
@@ -2364,6 +2420,22 @@
             "reason": "There is no isolated CLI verb for this read that the table already measures.",
             "proxy_operation": "signal-read",
             "proxy": "signal-read is an authenticated read of a different resource; not a fair statement-count proxy."
+          }
+        },
+        "src/cloud/live-session-context.ts:timeoutMs": {
+          "class": "network-api",
+          "scope": "per-request",
+          "endpoints": [
+            "/functions/v1/read"
+          ],
+          "citation": "src/cloud/live-session-context.ts:36",
+          "detail": "Five-second session status read while verifying a local managed context before naming its path.",
+          "operation": {
+            "name": "verified-live-session-status",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "This lane exercises the read against loopback fixtures but does not measure the hosted request budget."
           }
         },
         "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": {

@@ -1,6 +1,9 @@
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { dirname, join } from "node:path";
-import { open, readFile, unlink } from "node:fs/promises";
+import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import type { SignalRecord } from "./command-client.js";
 import type { CloudTarget } from "./config.js";
 import {
@@ -15,6 +18,7 @@ import {
 import {
   ensureSecureStateDirectory,
   readSecureJsonFile,
+  withFileLock,
   writeSecureJsonFile,
 } from "./storage.js";
 import {
@@ -70,6 +74,13 @@ export function notifyRestartCommand(options: NotifyRestartOptions): string {
   if (options.url !== undefined) parts.push("--url", shellArg(options.url));
   if (options.anonKey !== undefined) parts.push("--anon-key", shellArg(options.anonKey));
   return parts.join(" ");
+}
+
+/** A refusal must show the credential pipe whenever its restart uses stdin. */
+export function notifyRefusalRestartCommand(options: NotifyRestartOptions): string {
+  const command = notifyRestartCommand(options);
+  return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
+    ? `cat '<credential-file>' | ${command}` : command;
 }
 
 export function notifySignalStopSentence(
@@ -218,10 +229,108 @@ export function arrivalWatchLockPath(
   principalId: string,
   root = stateRoot(),
 ): string {
-  return arrivalCursorPath(target, workspaceId, principalId, root).replace(
-    /\.json$/u,
-    ".lock",
-  );
+  void target;
+  return join(root, `${workspaceId.toLowerCase()}-${principalId.toLowerCase()}.lock`);
+}
+
+/** Earlier releases used the profile-specific cursor stem for the watcher lock. */
+export function legacyArrivalWatchLockPath(
+  target: CloudTarget,
+  workspaceId: string,
+  principalId: string,
+  root = stateRoot(),
+): string {
+  return arrivalCursorPath(target, workspaceId, principalId, root).replace(/\.json$/u, ".lock");
+}
+
+const runFile = promisify(execFile);
+/** A hash only: the raw machine identifier is never stored in the state root. */
+export async function arrivalMachineHash(): Promise<string | null> {
+  try {
+    let machineId: string | null = null;
+    if (platform() === "linux") machineId = (await readFile("/etc/machine-id", "utf8")).trim();
+    if (platform() === "darwin") {
+      const { stdout } = await runFile("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { timeout: 2000 });
+      machineId = /"IOPlatformUUID"\s*=\s*"([0-9a-f-]+)"/i.exec(stdout)?.[1] ?? null;
+    }
+    return machineId ? createHash("sha256").update(machineId).digest("hex") : null;
+  } catch { return null; }
+}
+
+/** Read-only host-id file inspection for resume's diagnostic wording. */
+export async function arrivalHostIdFileState(lockPath: string): Promise<"present" | "missing" | "unreadable"> {
+  try {
+    await readFile(join(dirname(lockPath), "host-id"), "utf8");
+    return "present";
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+  }
+}
+
+/** Stable across watcher restarts on this machine and state root. */
+export async function arrivalHostId(lockPath: string, machineHash?: string | null): Promise<string> {
+  machineHash = machineHash === undefined ? await arrivalMachineHash() : machineHash;
+  const path = join(dirname(lockPath), "host-id");
+  await ensureSecureStateDirectory(dirname(path));
+  return await withFileLock(dirname(path), "host-id-rotation", async () => {
+  let noticed = false;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    let exists = false;
+    let valid: { host_id: string; machine_hash: string | null } | null = null;
+    try {
+      const info = await lstat(path);
+      exists = true;
+      if (info.isFile() && (info.mode & 0o077) === 0 && info.size <= 256) {
+        const data: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (data && typeof data === "object" && !Array.isArray(data)) {
+          const row = data as Record<string, unknown>;
+          if (typeof row.host_id === "string" && UUID_RE.test(row.host_id) &&
+              (row.machine_hash === null ||
+                typeof row.machine_hash === "string" && /^[0-9a-f]{64}$/.test(row.machine_hash))) {
+            valid = { host_id: row.host_id.toLowerCase(), machine_hash: row.machine_hash as string | null };
+          }
+        }
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+    if (valid && (machineHash === null || valid.machine_hash === machineHash)) return valid.host_id;
+    if (valid && valid.machine_hash === null && machineHash !== null) {
+      const temporary = join(dirname(path), `.host-id-${randomUUID()}.tmp`);
+      const handle = await open(temporary, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify({ host_id: valid.host_id, machine_hash: machineHash })}\n`, "utf8");
+      } finally { await handle.close(); }
+      try {
+        // The host id is unchanged; the fingerprint only binds it from this start onward.
+        await rename(temporary, path);
+      } finally { await unlink(temporary).catch(() => undefined); }
+      return valid.host_id;
+    }
+    if (exists) {
+      if (!noticed) {
+        process.stderr.write(`cswarm: replacing invalid or copied host id at ${path}.\n`);
+        noticed = true;
+      }
+      await unlink(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+    const temporary = join(dirname(path), `.host-id-${randomUUID()}.tmp`);
+    const handle = await open(temporary, "wx", 0o600);
+    const hostId = randomUUID();
+    try {
+      await handle.writeFile(`${JSON.stringify({ host_id: hostId, machine_hash: machineHash })}\n`, "utf8");
+    } finally { await handle.close(); }
+    try {
+      await link(temporary, path);
+      return hostId;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    } finally { await unlink(temporary); }
+  }
+  throw new Error(`could not create host id at ${path}`);
+  });
 }
 
 export function arrivalWatchAlreadyRunningSentence(pid: number): string {
@@ -248,7 +357,7 @@ function pidIsAlive(pid: number): boolean {
   }
 }
 
-function parseWatchLock(raw: string): { pid: number } | null {
+function parseWatchLock(raw: string): { pid: number; watcherId: string | null } | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
@@ -260,18 +369,22 @@ function parseWatchLock(raw: string): { pid: number } | null {
   if (row.version !== 1 || !Number.isSafeInteger(row.pid) || (row.pid as number) <= 0) {
     return null;
   }
-  return { pid: row.pid as number };
+  return { pid: row.pid as number,
+    watcherId: typeof row.watcher_id === "string" && UUID_RE.test(row.watcher_id)
+      ? row.watcher_id.toLowerCase() : null };
 }
 
 export async function acquireArrivalWatchLock(
   path: string,
   pid: number = process.pid,
-): Promise<void> {
+  watcherId?: string,
+): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new Error("arrival watch lock pid must be a positive integer");
   }
   await ensureSecureStateDirectory(dirname(path));
-  const payload = `${JSON.stringify({ version: 1, pid })}\n`;
+  const payload = `${JSON.stringify({ version: 1, pid, ...(watcherId ? { watcher_id: watcherId } : {}) })}\n`;
+  let replacedDeadPredecessor = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(path, "wx", 0o600);
@@ -280,11 +393,11 @@ export async function acquireArrivalWatchLock(
       } finally {
         await handle.close();
       }
-      return;
+      return replacedDeadPredecessor;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
-    let existing: { pid: number } | null = null;
+    let existing: { pid: number; watcherId: string | null } | null = null;
     try {
       const raw = await readFile(path, "utf8");
       if (Buffer.byteLength(raw, "utf8") <= WATCH_LOCK_MAX_BYTES) {
@@ -297,9 +410,51 @@ export async function acquireArrivalWatchLock(
     if (existing !== null && pidIsAlive(existing.pid)) {
       throw new ArrivalWatchAlreadyRunningError(existing.pid);
     }
+    if (existing !== null) replacedDeadPredecessor = true;
     await unlink(path).catch(() => undefined);
   }
   throw new Error("arrival watch lock could not be acquired");
+}
+
+/** Hold both lock names while old and new watcher binaries may overlap. */
+export async function acquireArrivalWatchSeatLocks(
+  target: CloudTarget,
+  workspaceId: string,
+  principalId: string,
+  pid: number = process.pid,
+  watcherId?: string,
+  root = stateRoot(),
+): Promise<{ lockPath: string; legacyLockPath: string }> {
+  const lockPath = arrivalWatchLockPath(target, workspaceId, principalId, root);
+  const legacyLockPath = legacyArrivalWatchLockPath(target, workspaceId, principalId, root);
+  await acquireArrivalWatchLock(legacyLockPath, pid, watcherId);
+  try {
+    await acquireArrivalWatchLock(lockPath, pid, watcherId);
+  } catch (error) {
+    await releaseArrivalWatchLock(legacyLockPath, pid);
+    throw error;
+  }
+  return { lockPath, legacyLockPath };
+}
+
+export async function releaseArrivalWatchSeatLocks(
+  paths: { lockPath: string; legacyLockPath: string },
+  pid: number = process.pid,
+): Promise<void> {
+  await releaseArrivalWatchLock(paths.lockPath, pid);
+  await releaseArrivalWatchLock(paths.legacyLockPath, pid);
+}
+
+/** A matching live local lock plus the server's watcher id proves this host holds it. */
+export async function arrivalWatchLockIdentity(path: string): Promise<string | null> {
+  try {
+    const raw = await readFile(path, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > WATCH_LOCK_MAX_BYTES) return null;
+    const lock = parseWatchLock(raw);
+    return lock !== null && pidIsAlive(lock.pid) ? lock.watcherId : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function releaseArrivalWatchLock(
