@@ -1,0 +1,30 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset, db:stop, supabase stop/start, and do not run test:p1-server (the lead owns the local stack);
+do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file
+reads; SQL against the local stack only inside a transaction you ROLL BACK (docker exec -i supabase_db_cloud-swarm psql
+-U postgres); the lane's migration is applied there. Kill every process you start.
+
+LANE: production bug fix, branch lane/renewal-last-use at d36e6d65 (base main 5d603b8e). Your directory is a detached
+worktree at d36e6d65. Record: docs/evidence/2026-09-25-renewal-last-use/LANE.md ("Fold 1").
+The bug: overlapping reads by one seat hit SWARM_RENEWAL_LAST_USE_REWOUND (55000) from the no-rewind trigger, because
+swarm.record_renewal_grant_use wrote an older statement time after a later one committed. Round 1 at e1cfd84c: Opus PASS
+and Grok PASS; Opus RIGOUR 1: GREATEST kept last_used_at but still changed last_used_device_id / last_used_from, which
+another trigger check refuses. Fold 1 now skips the whole update for a stale (older) use, in both writers, while the
+successor writer still spends capacity. The lead measured at d36e6d65 on the reset stack: test:p1-server 264/264 with the three
+race tests; reinstalling the round-1 GREATEST-only migration fails "older SQL use with another device and source leaves
+the newer use intact" and "older successor use preserves newer fields while still spending capacity"; the fixed
+migration passes 3/3. Round-1 reviews: /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemRLU/opus-r1.md and /private/tmp/claude-501/-Users-yulanbot-Developer-Ridge-io-cloud-swarm/348bdb35-59a1-416f-9db8-84f388f5c3e0/scratchpad/itemRLU/grok-r1.md.
+
+REVIEW `git diff e1cfd84c..d36e6d65` closely and the whole lane (`git diff 5d603b8e..d36e6d65`). CHECK:
+1. The stale-use skip is correct under the READ COMMITTED re-check for both writers; the successor writer still counts
+   spend exactly once and never double-spends or skips spend; nothing the trigger guards can still rewind.
+2. Each replaced function matches its latest prior definition except for the intended change (line by line).
+3. The tests reproduce the race for the stated reason and fail on the prior bodies; the lock check targets the grant
+   row; the served-read test is meaningful.
+4. The catalog proof returns t only for the fixed bodies, with search_path, security, owner and grants.
+5. The migration is safe to apply on the box.
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL

@@ -1,0 +1,31 @@
+You review one lane of the CommonSwarm repo as one arm of a D-036 pair. You are a reviewer: change no file, commit
+nothing. HARD RULES: contact no production host (api.commonswarm.com, commonswarm.com, edge-staging.commonswarm.com,
+178.105.29.28, 100.115.66.74); never run a cswarm command without a loopback --url; no ssh, vercel, no remote supabase
+command; no db:reset, db:stop, supabase stop/start, and do not run test:p1-server (the lead owns the local stack);
+do not read ~/.cswarm or ~/.config/cswarm; start no other model; use no skill; print no secret. Read-only git and file
+reads; SQL against the local stack only inside a transaction you ROLL BACK (docker exec -i supabase_db_cloud-swarm psql
+-U postgres); the lane's migration is applied there. Kill every process you start.
+
+LANE: production bug fix, branch lane/renewal-last-use at e1cfd84c (base main 5d603b8e). Your directory is a detached
+worktree at e1cfd84c. Record: docs/evidence/2026-09-25-renewal-last-use/LANE.md.
+The bug (measured by HezLead from the box's logs): the read edge answered HTTP 500 in its membership phase when two
+reads by one seat overlapped:  (55000) from the no-rewind trigger
+swarm.renewal_grants_spend_or_revoke_only(), because swarm.record_renewal_grant_use set last_used_at =
+statement_timestamp() and a statement that waited on the row lock wrote an older time after a later one committed.
+The lead measured at e1cfd84c on the reset stack: the new test "blocked grant use stays monotonic through SQL and the served
+read edge" passes; with the OLD function body reinstalled it fails with SWARM_RENEWAL_LAST_USE_REWOUND (55000).
+
+REVIEW `git diff 5d603b8e..e1cfd84c`. CHECK with file:line evidence:
+1. The migration replaces each writer of renewal_grants.last_used_at with the same signature, owner, grants, security
+   and behaviour except monotonic last use; nothing else changes (compare every replaced function with its latest prior
+   definition, line by line); the trigger's rule is unchanged; is every writer of last_used_at covered (grep migrations
+   and supabase/functions)? Does new_host_at or last_used_device_id logic still behave as before under the race?
+2. Is GREATEST(existing, statement_timestamp()) correct under READ COMMITTED re-check (EvalPlanQual) — does the SET
+   expression see the committed newer row? Any other column the trigger guards that the race can still rewind?
+3. The test really reproduces the race (it confirms A is blocked before B commits) and fails for the stated reason on
+   the old body; the served read-edge part is meaningful.
+4. The catalog proof returns t only for the fixed body and f for the old one.
+5. The migration is safe to apply on the box (locks, CREATE OR REPLACE on a function in use).
+
+OUTPUT: findings with file:line, severity PRODUCTION or RIGOUR, evidence (quote the code). Final line exactly:
+VERDICT: PASS  or  VERDICT: FAIL
