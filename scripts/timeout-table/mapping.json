@@ -1727,6 +1727,20 @@
             "reason": "Local stdin wait."
           }
         },
+        "src/cli.ts:setTimeout#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:7548",
+          "detail": "Poll the listener stop while the one command deadline remains active.",
+          "operation": {
+            "name": "listener-stop-poll",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local listener control wait."
+          }
+        },
         "src/cli.ts:timeoutMs": {
           "class": "network-api",
           "scope": "per-request",
@@ -2504,6 +2518,20 @@
             "writes": [],
             "removes": [],
             "reason": "Local file lock."
+          }
+        },
+        "src/cloud/storage.ts:timeout": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cloud/storage.ts:390",
+          "detail": "Bounded local ps process-start probe for host-id lock ownership.",
+          "operation": {
+            "name": "host-id-pid-probe",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local process metadata read."
           }
         },
         "src/cloud/storage.ts:timeoutMs": {
