@@ -1,6 +1,6 @@
 # Item M lane: crash-safe MCP connect (2026-09-25)
 
-The original sections below record historical lane states. Fold 5 at the end is the current client rule; it supersedes earlier credential deletion, mode, fresh-register escape, and revocation-advice rows.
+The original sections below record historical lane states. Fold 7 at the end is the current client rule; it supersedes earlier credential deletion, mode, fresh-register escape, and revocation-advice rows.
 
 Branch `lane/item-m`. Client commit `df609b6a`; test commit `fa2768aa`. Base brief: `docs/design/2026-09-25-ITEM-M-CRASH-SAFE-CONNECT-BRIEF.md`. No server, migration, or production change. No production host was contacted. Every register test used an injected fetcher or a loopback HTTP server and a temporary profile directory.
 
@@ -236,11 +236,11 @@ I1 above is amended by FF1. The proof for replacement is a readable pending reco
 
 | Ruling | Change | Focused test | Measured single-change revert |
 |---|---|---|---|
-| FF1 / I1 | Atomic replacement after the server proof; completion record prevents a second default-path POST. | `rotating retry repairs a credential-only crash on explicit and default paths`; `a successful retry for another principal keeps the orphan bytes and pending record`. The fake revokes the old token, mints a new token, and retains one seat for the attempt. | Disabling orphan replacement: exit 1, 0/1. Disabling the completion record: exit 1, 0/1. |
-| FF2 / I4 | A failed profile validation beside pending names `profile.json` as damaged and gives an exact `mv` of that file only to a UTC-stamped name, followed by the same command. | `a damaged profile beside this code gives a profile-only move step`. | Restoring new-path advice: exit 1, 0/1. |
-| FF3 / I3 | An ancestor mode error names the actual directory, including `~/.cswarm` at 0000, with its `chmod 700` step. | `default scan names a mode-0000 ~/.cswarm directory`. | Disabling the ancestor check: exit 1, 0/1. |
-| FF4 | The private JSON writer and exclusive credential writer call `fchmod(0600)` on their open handles before sync. | `umask 0277 still creates mode 0600 pending, credential, profile and completion files`. | Removing exclusive credential fchmod: exit 1, 0/1. |
-| FF5 / I3 | The default scan classifies wrong modes for a same-URL possible pending record before validating its body or excluding another code. | `default scan repairs modes before calling same-URL malformed pending damaged` covers file 0644 and directory 0755; `owned pending with a wrong file or directory mode matches by HMAC and resumes after chmod` also checks a different code. | Restoring the parse-first mode condition: exit 1, 0/1. |
+| FF1 / I1 — extended by Fold 7 HH1, HH3, HH5, HH7 | Atomic replacement after the server proof; completion record prevents a second default-path POST. | `rotating retry repairs a credential-only crash on explicit and default paths`; `a successful retry for another principal keeps the orphan bytes and pending record`. The fake revokes the old token, mints a new token, and retains one seat for the attempt. | Disabling orphan replacement: exit 1, 0/1. Disabling the completion record: exit 1, 0/1. |
+| FF2 / I4 — extended by Fold 7 HH5 | A failed profile validation beside pending names `profile.json` as damaged and gives an exact `mv` of that file only to a UTC-stamped name, followed by the same command. | `a damaged profile beside this code gives a profile-only move step`. | Restoring new-path advice: exit 1, 0/1. |
+| FF3 / I3 — narrowed by Fold 7 HH2 | An ancestor mode error names the actual directory, including `~/.cswarm` at 0000, with its `chmod 700` step. | `default scan names a mode-0000 ~/.cswarm directory`. | Disabling the ancestor check: exit 1, 0/1. |
+| FF4 — superseded by Fold 7 HH1 | The private JSON writer and exclusive credential writer call `fchmod(0600)` on their open handles before sync. | `umask 0277 still creates mode 0600 pending, credential, profile and completion files`. | Removing exclusive credential fchmod: exit 1, 0/1. |
+| FF5 / I3 — extended by Fold 7 HH4 | The default scan classifies wrong modes for a same-URL possible pending record before validating its body or excluding another code. | `default scan repairs modes before calling same-URL malformed pending damaged` covers file 0644 and directory 0755; `owned pending with a wrong file or directory mode matches by HMAC and resumes after chmod` also checks a different code. | Restoring the parse-first mode condition: exit 1, 0/1. |
 
 DD3's unrelated wrong-mode profile behavior remains by design. The focused MCP suite passed **52/52** and the timeout-table suite passed **19/19** after these changes. Each focused test has a timeout. Each of the six final mutation probes ran its positive control in the same invocation: baseline exit 0, 1/1; revert exit 1, 0/1. Each was bounded to 30 seconds and restored the original source byte-for-byte in `finally`.
 
@@ -263,3 +263,35 @@ DD3's unrelated wrong-mode profile behavior remains by design. The focused MCP s
 - The lead owns local-stack server verification. No migration was applied in this lane.
 - No production, release, or real-workspace behavior was measured.
 - The full pure and CLI gates are not green in this sandbox because process inspection is denied. Their final TAP counts reconcile to the named failures. `pgrep` cannot inspect the sandbox process list (`sysmond service not found`); the bounded gate and mutation runners waited for their children and left no deliberately running process.
+
+## Fold 7 — Opus and Grok round 7 FAIL rulings
+
+The lane was recovered at `362de306`, carrying the content reviewed at `acbaca57`. The full reviews are `scratchpad/itemM/opus-r7.md` and `scratchpad/itemM/grok-r7.md` (Opus probes: `scratchpad/itemM/opus-r7-probes/`). The lead's **pre-fold** gates at `acbaca57` were server 262/262, pure 990/990 (one load flake rerun 60/60), and CLI 1028/1028. Fold 7 changes only client storage/connect code, its focused CLI test file, and this evidence. No server, migration, production host, or real workspace was touched.
+
+I1 remains the Fold 6 rule: a saved credential is replaced only after a successful same-attempt retry proves its old token revoked and the principal agrees. The first credential write now uses a private same-directory temporary file, `fchmod(0600)`, fsync, and rename while the setup lock is held. An existing final path is refused. I2 still gives no unproved revocation advice. I3 still gives exact chmod and same-command retry for mode faults. I4 still blocks a possible same-code pending record before a fresh POST; the completion-only escape below has no pending record.
+
+| Ruling | Change | Focused test | Single-change revert |
+|---|---|---|---|
+| HH1 | The first credential write publishes only a fully synced file and removes its temp on a write error. A partial JSON credential beside this code's readable pending record gets an exact file-only UTC-stamped `mv`, then same-command retry, before POST. | `Fold 7 first credential write leaves no partial final file on EIO and one retry recovers`; `Fold 7 kill before first credential write leaves no final file and one-request recovery`; `Fold 7 damaged partial credential gives its exact move step before POST`. | Changing the exclusive writer's temp open to the final path: baseline 1/1, revert 0/1. |
+| HH2 | The ancestor mode walk runs only for EACCES/EPERM. Repository and symlink path errors keep their typed refusal. | `Fold 7 typed repository and symlink refusals do not advise chmod`. | Removing the permission-code guard: baseline 1/1, revert 0/1. |
+| HH3 | A retry validates the orphan as a bounded regular file with a parseable durable principal before POST. Symlink, oversized, and missing-principal examples do not cost a token. | `Fold 7 retry checks every orphan form before register`; partial-file test above. | Disabling pre-POST orphan validation: baseline 1/1, revert 0/1. |
+| HH4 | Default scan preserves credential-mode errors and checks a credential without pending or a usable completion record, plus its directory, before a fresh register. | `Fold 7 default scan reports credential and directory modes before another register`. | Dropping the credential-mode rethrow: baseline 1/1, revert 0/1. |
+| HH5 | Completion records now carry the public target key and workspace ID. A matching record with no pending and no profile rebuilds `profile.json` from a validated credential, with no network or credential rewrite. An old/incomplete record or missing credential states all three file conditions and offers a new `--profile` path. | `Fold 7 completion rebuilds a missing profile locally or gives a new path for incomplete state`. | Restoring the missing-profile damaged step in the scan: baseline 1/1, revert 0/1. |
+| HH6 | Damaged or unreadable completion records produce one warning naming the record and are ignored for connect selection. Clear can remove a completion record even without pending and keeps credentials. Wrong-mode records retain I3's chmod step. | `Fold 7 damaged and unreadable completion records warn once and clear removes them`. | Restoring a throw on damaged completion: baseline 1/1, revert 0/1. |
+| HH7 | Replace still unlinks its temp on any error. A killed write leaves at most one matching temp; the next connect removes stale credential temps under the lock before reading state or posting. | `Fold 7 replace failure unlinks its temp and a killed replacement temp is removed next run`. | Removing the failure unlink: baseline 1/1, revert 0/1. Removing early stale-temp cleanup: baseline 1/1, revert 0/1. |
+
+Each mutation restored the original source bytes in `finally`. Every focused test has a timeout; the two SIGKILL tests await their children and clean their temporary directories. Tests use injected fetchers, loopback targets, and temporary HOME/state. No full suite ran in this lane.
+The timeout-table mapping was updated to the moved register abort timer and `stty` deadline source lines; its separate test file is for the lead's full CLI gate.
+
+### Fold 7 gates
+
+| Gate | Result |
+|---|---|
+| `npm run build` | Exit 0; TypeScript build. |
+| `npm run check:tests` | Exit 0; test type-check. |
+| `env HOME="$T" node --import tsx --test tests/p1-cli/mcp-connect.test.ts` | Exit 0; 61/61 after build completed. An earlier overlapping run hit missing `dist/cli.js` while build cleaned it; the solo rerun was green. |
+
+### Fold 7 not established
+
+- The lead owns full pure, CLI, server, edge, release-bundle, and site gates at the Fold 7 tip. The lead's counts above are from before this fold. No migration was applied.
+- The tests model the server's rotating-token response with injected fetchers and inspect local files; they do not establish production or real-workspace behavior.
