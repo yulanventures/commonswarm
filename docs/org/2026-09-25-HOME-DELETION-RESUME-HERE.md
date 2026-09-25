@@ -57,6 +57,16 @@ template line "pure tests with a temporary HOME" is retired: it is what produced
 Why the arm also ran background shell tasks with no permission mode; whether any earlier Grok arm's
 temporary-HOME run wrote into the real `~/.cswarm` (HezLead is checking each session's `updates.jsonl`).
 
+## Box windows moved (HezLead, 2026-09-25)
+
+The item G lane 1 window (SHA 9627cb37) and the renewal-fix window (a54afaf6, its migration follows G's) move
+from 2026-09-25 to **2026-09-26 21:45Z**, G first. Reasons: the G seed seats need `cswarm login` on the mini,
+which was deleted, and the gate-evidence files were in the deleted checkout. Conditions: the operator's
+`gh auth login` and `cswarm login`; the prevention and lane bundles pushed; gate evidence regenerated for
+9627cb37 and a54afaf6 under `docs/evidence/2026-09-26-release-<12sha>/` (this needs the test hold lifted);
+the operator mints the seed seats 20:00-21:30Z into `$HOME/.config/cswarm/g-seed-20260926` with the same
+block as before. HezLead's Anvil prompts are ready and unchanged.
+
 ## Next
 
 1. Operator: `gh auth login`; mint seat files for CSwarmDevLead (4989ea3b) and CSwarmStrategist (f5b46ef8)
