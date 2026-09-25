@@ -14,6 +14,7 @@ import { configureAgentReceive, mergeReceiveHooks, readReceiveBinding, receiveHo
 import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import type { DeliveryRow } from "../../src/cloud/delivery.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -89,6 +90,36 @@ async function setup(rows: SignalRecord[] = []) {
   const result = await setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath, fetcher: fake.fetcher });
   return { input, profilePath, fake, result };
 }
+
+test("setup reports success after a profile save when the optional inventory is unavailable", { timeout: 10_000 }, async () => {
+  const oldHome = process.env.HOME;
+  try {
+    for (const cause of ["mode", "damaged"] as const) {
+      const home = createLaneTempHome(`setup-inventory-${cause}-`);
+      try {
+        process.env.HOME = home;
+        const inventoryRoot = join(home, ".cswarm");
+        await mkdir(inventoryRoot, { mode: 0o700 });
+        if (cause === "mode") await chmod(inventoryRoot, 0o755);
+        else await writeFile(join(inventoryRoot, "profile-paths.json"), "{", { mode: 0o600 });
+        const input = await saveInput();
+        const profilePath = join(inventoryRoot, "agents", "test", "profile.json");
+        const warnings: string[] = [];
+        const write = process.stderr.write;
+        process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
+        let result;
+        try { result = await setupAgent({ hostSessionId: "manual", connectionFile: input, profilePath, fetcher: fixture().fetcher }); }
+        finally { process.stderr.write = write; }
+        assert.equal(result.connected, true);
+        assert.equal((await lstat(profilePath)).mode & 0o777, 0o600);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+      } finally { removeLaneTempHome(home); }
+    }
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+  }
+});
 
 async function cli(args: string[], input?: string) {
   const child = spawn(process.execPath, [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js")), ...args], {

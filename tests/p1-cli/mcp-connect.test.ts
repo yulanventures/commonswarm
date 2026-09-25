@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -233,6 +233,33 @@ test("connect saves an unbound private profile and never returns either secret",
     assert.equal(f.calls(), 2, "register must not retry");
     await assert.rejects(stat(second), { code: "ENOENT" });
   } finally { await f.close(); }
+});
+
+test("mcp connect succeeds after registration when the optional inventory is unavailable", { timeout: 10_000 }, async () => {
+  const oldHome = process.env.HOME;
+  try {
+    for (const cause of ["mode", "damaged"] as const) {
+      const f = await fixture();
+      try {
+        process.env.HOME = f.root;
+        const inventoryRoot = join(f.root, ".cswarm");
+        await mkdir(inventoryRoot, { mode: 0o700 });
+        if (cause === "mode") await chmod(inventoryRoot, 0o755);
+        else await writeFile(join(inventoryRoot, "profile-paths.json"), "{", { mode: 0o600 });
+        const warnings: string[] = [];
+        const write = process.stderr.write;
+        process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
+        const path = join(inventoryRoot, "connect-test", "profile.json");
+        let result;
+        try { result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }); }
+        finally { process.stderr.write = write; }
+        assert.equal(result.profile, path);
+        assert.equal((await stat(path)).mode & 0o777, 0o600);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+      } finally { await f.close(); }
+    }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }
 });
 
 test("generated register refusal inventory and typed remedies", { timeout: 10000 }, async () => {

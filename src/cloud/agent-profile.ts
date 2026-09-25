@@ -65,7 +65,7 @@ export function privatePath(path: string): string {
 }
 
 export function profilePathRemedy(): string {
-  return `Use an absolute private file path outside a repository, for example ${agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>")}. Run cswarm profile ls to find saved profiles.`;
+  return "Use an absolute private file path outside a repository, for example ~/.cswarm/agents/<deployment>/<workspace-id>/<principal-id>/profile.json. Run cswarm profile ls to find saved profiles.";
 }
 
 /** Check each existing ancestor, including repos reached through an ancestor symlink. */
@@ -191,9 +191,11 @@ export interface ListedAgentProfile {
 /** Inspect profile.json files only; credentials are never opened. Symlinked directories are skipped. */
 export async function listAgentProfiles(): Promise<{ searched_roots: string[]; profiles: ListedAgentProfile[] }> {
   const root = agentProfileRoot();
-  const registered = await registeredProfilePaths(root);
-  const paths = new Set(registered);
+  let registered: string[] = [];
   const failures: ListedAgentProfile[] = [];
+  try { registered = await registeredProfilePaths(root); }
+  catch { failures.push({ path: join(root, PROFILE_REGISTRY), error: "profile_registry_invalid" }); }
+  const paths = new Set(registered);
   const walk = async (directory: string): Promise<void> => {
     let entries;
     try { entries = await readdir(directory, { withFileTypes: true }); }
@@ -297,10 +299,18 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
   const root = agentProfileRoot();
-  await withFileLock(root, "profile-registry", async () => {
-    const paths = await registeredProfilePaths(root);
-    if (!paths.includes(path)) await writeSecureJsonFile(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
-  });
+  try {
+    await withFileLock(root, "profile-registry", async () => {
+      const paths = await registeredProfilePaths(root);
+      if (!paths.includes(path)) await writeSecureJsonFile(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
+    });
+  } catch {
+    let modeCause = false;
+    try { modeCause = ((await lstat(root)).mode & 0o777) !== 0o700; } catch { /* The inventory is optional. */ }
+    process.stderr.write(modeCause
+      ? "cswarm: Profile saved; inventory unavailable. Run chmod 700 ~/.cswarm to enable it.\n"
+      : "cswarm: Profile saved; inventory unavailable. Run cswarm profile ls to inspect saved profiles.\n");
+  }
   return profile;
 }
 

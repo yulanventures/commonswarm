@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { userInfo } from "node:os";
 import test from "node:test";
@@ -89,12 +89,83 @@ test("temporary home cleanup refuses outside paths", { timeout: 10_000 }, () => 
   assert.match(helper, /actual === "\/" \|\| actual === realHome/);
   assert.match(helper, /inside\.startsWith/);
   const home = createLaneTempHome("cleanup-control-");
+  const unowned = mkdtempSync("/tmp/lane-home-unowned-");
   try {
     assert.throws(() => removeLaneTempHome("/"));
     assert.throws(() => removeLaneTempHome(userInfo().homedir));
     assert.throws(() => removeLaneTempHome("/etc"));
-    assert.throws(() => removeLaneTempHome(join(resolve(home, ".."), "lane-home-never-created")));
+    assert.throws(() => removeLaneTempHome(unowned), /refusing to remove/);
+    assert.throws(() => removeLaneTempHome(""), /absolute path/);
   } finally {
+    rmSync(unowned, { recursive: true, force: true });
     removeLaneTempHome(home);
+  }
+});
+
+test("profile inventory failure cannot turn a saved profile into setup failure", { timeout: 10_000 }, async () => {
+  const oldHome = process.env.HOME;
+  const connection = { version: 1 as const, url: LOOPBACK, anon_key: "public-test-key",
+    workspace_id: WORKSPACE, principal_id: SEAT, credential: { test: true } };
+  try {
+    for (const cause of ["mode", "damaged", "unwritable"] as const) {
+      const home = createLaneTempHome(`inventory-${cause}-`);
+      try {
+        process.env.HOME = home;
+        const root = agentProfileRoot();
+        mkdirSync(root, { mode: 0o700 });
+        const walked = join(root, "agents", "walked", "profile.json");
+        profile(walked);
+        if (cause === "mode") chmodSync(root, 0o755);
+        if (cause === "damaged") writeFileSync(join(root, "profile-paths.json"), "{", { mode: 0o600 });
+        if (cause === "unwritable") chmodSync(root, 0o500);
+        const saved = join(home, "explicit", "profile.json");
+        const warnings: string[] = [];
+        const write = process.stderr.write;
+        process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
+        try { await saveAgentProfile(saved, connection); }
+        finally { process.stderr.write = write; }
+        assert.equal(statSync(saved).mode & 0o777, 0o600, cause);
+        assert.equal(warnings.length, 1, cause);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+        if (cause !== "unwritable") {
+          const listed = await listAgentProfiles();
+          assert.ok(listed.profiles.some(row => row.path === walked), cause);
+          if (cause === "damaged") {
+            assert.equal(listed.profiles.find(row => row.path === join(root, "profile-paths.json"))?.error, "profile_registry_invalid");
+          }
+        }
+        if (cause === "unwritable") chmodSync(root, 0o700);
+      } finally {
+        if (cause === "unwritable") chmodSync(join(home, ".cswarm"), 0o700);
+        removeLaneTempHome(home);
+      }
+    }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }
+});
+
+test("MCP profile remedy is generated for each call with a private example", { timeout: 10_000 }, () => {
+  const oldHome = process.env.HOME;
+  const one = createLaneTempHome("mcp-remedy-one-");
+  const two = createLaneTempHome("mcp-remedy-two-");
+  try {
+    process.env.HOME = one;
+    const first = mapMcpError(new Error("control"));
+    assert.equal(first.code, "mcp_call_failed");
+    // privatePath supplies the owned error class without touching a profile or network.
+    let invalid: unknown;
+    try { privatePath("relative-profile"); } catch (error) { invalid = error; }
+    const a = mapMcpError(invalid);
+    process.env.HOME = two;
+    const b = mapMcpError(invalid);
+    assert.equal(a.message, b.message);
+    assert.match(a.message, /~\/\.cswarm\/agents/);
+    assert.doesNotMatch(a.message, new RegExp(one));
+    assert.equal(mapMcpError(invalid).code, "profile_path_invalid");
+    assert.equal(mapMcpError({ code: "profile_registry_invalid" }).code, "mcp_call_failed");
+    assert.match(readFileSync(resolve("src/mcp/errors.ts"), "utf8"), /safeCode === "profile_path_invalid" \? entry\(profilePathRemedy\(\), PERSON\)/);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    removeLaneTempHome(one);
+    removeLaneTempHome(two);
   }
 });

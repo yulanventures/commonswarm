@@ -25,7 +25,8 @@ const entry = (message: string, next_step: Action): Sentence => ({ message, next
 
 /** The only model-visible error prose. No producer message is copied here. */
 export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
-  profile_path_invalid: entry(profilePathRemedy(), PERSON),
+  profile_path_invalid: entry("The profile path is invalid.", PERSON),
+  profile_registry_invalid: entry("The saved profile inventory is damaged.", PERSON),
   agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_not_object: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_missing_agent_token: entry("The saved agent credential is incomplete.", PERSON),
@@ -182,7 +183,7 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : fileStatus !== null && safeCode === "command_id_conflict"
     ? entry("This request id was used with different file arguments.", "use a new request_id for new content")
     : Object.hasOwn(MCP_ERROR_SENTENCES, safeCode)
-    ? MCP_ERROR_SENTENCES[safeCode]!
+    ? safeCode === "profile_path_invalid" ? entry(profilePathRemedy(), PERSON) : MCP_ERROR_SENTENCES[safeCode]!
     : entry(`The service returned ${safeCode}${error instanceof CommandHttpError ? ` with status ${error.status}` : ""}.`,
       fileStatus !== null ? fileStatus === 401 || fileStatus === 403 ? PERSON : FIX
         : error instanceof CommandHttpError && error.status >= 500 ? RETRY : error instanceof CommandHttpError && error.status >= 400 && error.status < 500 ? CHECK_ARGUMENTS : PERSON);
