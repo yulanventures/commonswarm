@@ -3,11 +3,10 @@ import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
 import { constants, lstatSync, rmdirSync } from "node:fs";
 import { access, lstat, mkdir, rmdir } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "./agent-credential-input.js";
-import { AgentSetupError, assertPrivateLocation, saveAgentProfile } from "./agent-profile.js";
+import { AgentSetupError, agentProfileRoot, assertPrivateLocation, saveAgentProfile } from "./agent-profile.js";
 import { ensureSecureStateDirectory } from "./storage.js";
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
 import { type CloudTarget } from "./config.js";
@@ -133,7 +132,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname))) {
     throw new McpConnectError("connect_url_invalid", "Use an HTTPS deployment URL or a loopback test URL.");
   }
-  const path = await assertPrivateLocation(options.profilePath ?? join(homedir(), ".cswarm", "agents", `mcp-${randomUUID()}`, "profile.json"));
+  const path = await assertPrivateLocation(options.profilePath ?? join(agentProfileRoot(), "agents", `mcp-${randomUUID()}`, "profile.json"));
   if (/swm_(?:join|agt)_/.test(path)) throw new McpConnectError("profile_path_invalid", "Use a profile path that contains no credential text.");
   if (basename(path).toLowerCase() === "credential.json" || path === join(dirname(path), "credential.json")) {
     throw new McpConnectError("profile_path_invalid", "The profile path cannot be credential.json.");

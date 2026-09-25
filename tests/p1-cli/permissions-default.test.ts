@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { listenerPermissionMode } from "../../src/cli.js";
+import { listenerPermissionMode, usage } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE, AGENT_SETUP_HOST_GUIDANCE, RECEIVE_PROVIDERS } from "../../src/cloud/agent-onboarding-contract.js";
 import { onboardingUsage } from "../../src/onboarding-cli.js";
 
@@ -70,7 +70,7 @@ test("onboarding does not ask agents to grant worker permissions", () => {
 });
 
 test("receive help names the available turn integrations and the limited wake path", () => {
-  const help = onboardingUsage();
+  const help = `${usage()}\n${onboardingUsage()}`;
   assert.ok(help.includes(`--provider ${RECEIVE_PROVIDERS.join("|")}`));
   assert.match(help, /Wake uses a Claude Code preview channel or the local Grok Bot gateway in this same session/);
   assert.match(help, /unverified until an idle canary is received/);

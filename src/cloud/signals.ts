@@ -1678,6 +1678,33 @@ export async function readSignals(
     )).signals;
 }
 
+/** Drain a directed agent inbox from --since; check also pages oldest first. */
+export async function readDirectedInboxSince(
+  target: CloudTarget,
+  credential: Extract<SignalCredential, { kind: "agent" }>,
+  query: SignalQuery,
+  fetcherOrOptions: typeof fetch | SignalReadOptions = fetch,
+): Promise<SignalRecord[]> {
+  const rows: SignalRecord[] = [];
+  let after: SignalCursor | undefined;
+  const pageSize = 100;
+  while (true) {
+    const page = await readAgentSignalPage(target, credential, {
+      ...query, inbox: true, ascending: true, limit: pageSize,
+      ...(after ? { after } : {}),
+    }, fetcherOrOptions);
+    if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
+      throw new Error("This deployment cannot page inbox --since without gaps. Update the read service.");
+    }
+    rows.push(...page.signals);
+    if (page.rawCount < pageSize) return rows.reverse();
+    if (page.nextCursor === null || (after && page.nextCursor.created_at === after.created_at && page.nextCursor.id === after.id)) {
+      throw new Error("The inbox page did not advance. Retry after the read service is updated.");
+    }
+    after = page.nextCursor;
+  }
+}
+
 export const SIGNAL_STATUS_UNAVAILABLE_MESSAGE =
   "Signal summary is temporarily unavailable; core workspace status is still shown.";
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { MCP_TOOLS } from "../../src/mcp/tools.js";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -8,6 +9,7 @@ import {
   AGENT_COMMANDS,
   AGENT_PROFILE_COMMANDS,
   agentToolsForTransport,
+  commandHelpLines,
   usage,
   type AgentCommandEntry,
   type AgentCommandGroup,
@@ -63,26 +65,43 @@ const SELECTED_VARIANT_HELP_SHAPES: Readonly<Record<string, Readonly<Record<stri
   },
 };
 
-test("every visible selected variant has a help line", () => {
-  const helpLines = new Set(`${usage()}\n${onboardingUsage()}`
-    .split("\n")
-    .filter(line => line.startsWith("  cswarm "))
-    .map(line => line.trim())
-    .filter(line => line.length > 0));
+test("generated help covers every visible command, variant, and accepted flag", () => {
+  const all = commandHelpLines();
+  assert.ok(usage().includes(all));
+  const expected: string[] = [];
   for (const { key, entry } of entries()) {
-    const declared = Object.values(entry.variants);
-    assert.ok(declared.length > 0, `${key} declares no selectable variants`);
-    assert.equal(new Set(declared).size, declared.length, `${key} repeats a variant object`);
-    assert.equal(new Set(declared.map(variant => variant.id)).size, declared.length, `${key} repeats a variant id`);
-    for (const variant of declared) {
-      assert.ok(variant.id.length > 0, `${key} has an empty variant id`);
-      if (!entry.visible) continue;
-      assert.ok(variant.help.length > 0, `${key}.${variant.id} has no help line`);
-      for (const marker of variant.help) {
-        assert.ok(marker.length > 0, `${key}.${variant.id} has an empty help marker`);
-        assert.ok(helpLines.has(marker), `${key}.${variant.id} help is not a whole usage line: ${marker}`);
+    if (!entry.visible) continue;
+    const [verb, action] = key.split(".");
+    const section = commandHelpLines(verb, action);
+    assert.ok(section.startsWith("  cswarm "), `${key} has no synopsis`);
+    assert.ok(section.includes(entry.description), `${key} has no description`);
+    for (const flag of entry.flags) {
+      assert.ok(section.includes(`--${flag}`), `${key} help omits --${flag}`);
+    }
+    for (const variant of Object.values(entry.variants)) {
+      assert.ok(variant.help.length > 0, `${key}.${variant.id} has no variant synopsis`);
+      for (const hint of variant.help) {
+        assert.ok(section.includes(hint.split("  #")[0]!), `${key}.${variant.id} hint is absent`);
+        for (const match of hint.matchAll(/--([a-z][a-z-]*)/g)) {
+          assert.ok([...entry.flags, ...(entry.cliOnlyFlags ?? [])].includes(match[1]!), `${key}.${variant.id} help names unaccepted --${match[1]}`);
+        }
       }
     }
+    expected.push(section);
+  }
+  assert.equal(all, expected.join("\n"), "help has a command outside the table or omits one");
+});
+
+test("each visible verb and action answers scoped --help without contacting a deployment", { timeout: 60_000 }, () => {
+  for (const { key, entry } of entries()) {
+    if (!entry.visible) continue;
+    const path = key.split(".");
+    const run = spawnSync(process.execPath, ["dist/cli.js", ...path, "--url", "http://127.0.0.1:9", "--help"], {
+      encoding: "utf8", timeout: 5_000,
+    });
+    assert.equal(run.status, 0, `${key}: ${run.stderr}`);
+    assert.match(run.stdout, /^  cswarm /m, `${key} has no synopsis`);
+    assert.ok(run.stdout.includes(entry.description), `${key} has no description`);
   }
 });
 
@@ -290,7 +309,7 @@ test("main has one direct lookup and only allowlisted meta and selected-entry st
     const verb = args.positionals[0];
     if (!verb || verb === "help" || args.has("help")) {
       if (verb === "help") args.assertShape([], 1);
-      process.stdout.write(\`\${usage()}\\n\${onboardingUsage()}\\n\`);
+      process.stdout.write(\`\${helpFor(verb, args.positionals[1])}\\n\`);
       return;
     }
     const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;

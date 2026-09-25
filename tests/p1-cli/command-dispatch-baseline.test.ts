@@ -63,6 +63,8 @@ const HUMAN_DEVICE = "99999999-9999-4999-8999-999999999999";
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
+  // Item K adds a local inventory; its behavior is covered by profile-ls.test.ts.
+  ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
   { key: "setup", variants: ["import", "version", "guide"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   { key: "check", variants: ["messages", "message", "hook"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   ...["configure", "status", "test", "confirm", "idle", "serve", "refusal"].map(key => ({ key: `receive.${key}`, variants: ["default"], profile: "native" as const, hostSessionId: "keep" as const, errorMode: "onboarding" as const, workspaceErrorJson: false })),
@@ -569,9 +571,10 @@ function selectedErrorFixtures(
 async function fixtures(): Promise<Fixture[]> {
   const core = coreFixtures();
   const coverage = await commandEntryCoverage();
+  const historicalCoverage = coverage.filter(entry => !entry.key.startsWith("profile."));
   const generated = [
-    ...hostSessionFixtures(coverage, core),
-    ...selectedErrorFixtures(coverage, core),
+    ...hostSessionFixtures(historicalCoverage, core),
+    ...selectedErrorFixtures(historicalCoverage, core),
   ];
   const ids = [...core, ...generated].map(fixture => fixture.id);
   assert.equal(new Set(ids).size, ids.length, "baseline fixture ids must be unique");

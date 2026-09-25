@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { recordDispatch } from "./dispatch-trace.js";
 import {
-  AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, RECEIVE_MODES, RECEIVE_PROVIDERS, turnCheckInstruction,
+  AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, turnCheckInstruction,
 } from "./cloud/agent-onboarding-contract.js";
 import { setupAgent } from "./cloud/agent-setup.js";
 import { AgentCredentialInputError } from "./cloud/agent-credential-input.js";
@@ -32,21 +32,7 @@ export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id
 export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
 
 export function onboardingUsage(): string {
-  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]
-  cswarm setup --check-version
-  cswarm setup guide
-  cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
-  cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]
-  cswarm check --profile <absolute-path> --host-session-id <id> --hook
-  cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]
-  cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]
-  cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive serve --profile <absolute-path> --host-session-id <id>
-
-setup imports a private connection file and checks the authenticated identity. It starts no listener.
+  return `setup imports a private connection file and checks the authenticated identity. It starts no listener.
 check reads new directed messages without a listener; --force also performs a fresh read (there is no cooldown).
 --message-id reads the full body from the bounded local preview cache. Fetching does not ACK a delivery.
 receive configure records the user's choice. Host hooks require the current session ID; inherited host variables are not trusted.

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { cloudTarget, type CloudTarget } from "./config.js";
@@ -59,7 +59,7 @@ export function requireProfileHost(profile: AgentProfile, hostSessionId?: string
 export function privatePath(path: string): string {
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
   if (!isAbsolute(path) || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new AgentSetupError("profile_path_invalid", "Use an absolute private file path outside a repository.");
+    throw new AgentSetupError("profile_path_invalid", `Use an absolute private file path outside a repository, for example ${join(agentProfileRoot(), "agents", "<deployment>", "<workspace-id>", "<principal-id>", "profile.json")}. Run cswarm profile ls to find saved profiles.`);
   }
   return resolve(path);
 }
@@ -146,10 +146,57 @@ function checkedTarget(url: string, anonKey: string): CloudTarget {
 
 export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "anon_key" | "workspace_id" | "principal_id">): string {
   const target = checkedTarget(connection.url, connection.anon_key);
-  return join(homedir(), ".cswarm", "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
+  return join(agentProfileRoot(), "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
 }
 
-export async function readAgentProfile(path: string, hostSessionId?: string): Promise<AgentProfile> {
+/** Shared root for automatic setup and MCP connect profiles. Explicit paths under this root are included too. */
+export function agentProfileRoot(): string {
+  return join(homedir(), ".cswarm");
+}
+
+export interface ListedAgentProfile {
+  path: string;
+  principal_id?: string;
+  principal_name?: string;
+  workspace_id?: string;
+  workspace_name?: string;
+  url_host?: string;
+  error?: string;
+}
+
+/** Inspect profile.json files only; credentials are never opened. Symlinked directories are skipped. */
+export async function listAgentProfiles(): Promise<{ searched_roots: string[]; profiles: ListedAgentProfile[] }> {
+  const root = agentProfileRoot();
+  const paths: string[] = [];
+  const walk = async (directory: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile() && entry.name === "profile.json") paths.push(path);
+    }
+  };
+  await walk(root);
+  const profiles: ListedAgentProfile[] = [];
+  for (const path of paths.sort()) {
+    try {
+      const profile = await readAgentProfile(path, undefined, true);
+      profiles.push({ path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
+        ...(profile.workspace_name ? { workspace_name: profile.workspace_name } : {}),
+        url_host: new URL(profile.url).host });
+    } catch (error) {
+      profiles.push({ path, error: error instanceof AgentSetupError ? error.code : "profile_unreadable" });
+    }
+  }
+  return { searched_roots: [root], profiles };
+}
+
+export async function readAgentProfile(path: string, hostSessionId?: string, listing = false): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
@@ -175,7 +222,7 @@ export async function readAgentProfile(path: string, hostSessionId?: string): Pr
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget(p.url, p.anon_key);
-  requireProfileHost(p, hostSessionId);
+  if (!listing) requireProfileHost(p, hostSessionId);
   return p;
 }
 

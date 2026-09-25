@@ -7,8 +7,8 @@ import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } 
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
-import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
-import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
+import { isBlobBody, RECEIVE_MODES, RECEIVE_PROVIDERS } from "./cloud/agent-onboarding-contract.js";
+import { AgentSetupError, listAgentProfiles, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
@@ -229,6 +229,7 @@ import {
   pollForSignals,
   postSignalTargets,
   readAgentSignalPage,
+  readDirectedInboxSince,
   readAgentSignalDirectory,
   readSignals,
   renderSignalStatus,
@@ -604,6 +605,7 @@ export const KNOWN_FLAGS = new Set([
   "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt",
+  "device", "to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -862,89 +864,20 @@ const TASK_FLAGS = [
  */
 class UsageError extends Error {}
 
+export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
+
 /** Exported so a claim made in help can be swept alongside the same claim in
  * status output; a correction that reaches one surface and not the other is the
  * failure this repo keeps measuring. */
 export function usage(): string {
-  const agentCredential = "[--agent-token-file <path> | --agent-token-stdin]";
-  const requiredAgentCredential = "(--agent-token-file <path> | --agent-token-stdin)";
-  const signalBody = formatBodyUsage("<text>");
-  const workingOnBody = formatBodyUsage("<what>");
   return `cswarm ${CLI_BUILD_VERSION} (protocol ${CLIENT_PROTOCOL_VERSION})
 
 Usage:
-  cswarm login [--url <project-url> --anon-key <key>] [--no-browser]
-  cswarm logout [--url <project-url> --anon-key <key>] [--all-devices] [--local]
-  cswarm target [show] [--json] [--reveal-anon-key]
-  cswarm target set --url <project-url> --anon-key <key> [--json]
-  cswarm target clear [--json]
-  cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
-  cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]
-  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]
-  cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
-  cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..8000 characters
-  cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..8000 characters
-  cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]
-  cswarm receipt <signal-id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]
-  cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]
-  cswarm inbox --notify ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]
-  cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters
-  cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm file put <local-path> [--name <name>] [--request-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm file ls [--include-tombstoned] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm file get <name|file-id> [--version <n>] [--out <local-path>] [--force] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm file rm <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm file restore <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm brain ls [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm brain get <topic>[@<version>] [--version <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm brain put <topic> [<markdown-path>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--if-version <n>] [--request-id <id>] [--json]  # without a path, reads Markdown from stdin; --if-version refuses the write unless the live version is still <n>
-  cswarm feedback "<text>" --kind bug|idea|friction [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
-  cswarm listen start ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]
-  cswarm listen canary ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]
-  cswarm listen status ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm listen stop ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm session start --mode ${SESSION_MODES.join("|")} --provider grok|opencode|claude|codex --host-session-id <id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--session-context <absolute-path>] [--host-label <text>] [--foreground] [--json]
-  cswarm session status --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
-  cswarm session stop --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
-  cswarm session enable --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm session disable --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm session recover --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>]
-  cswarm hook install claude [--principal-id <uuid>] [--write] [--user | --repo]
-  cswarm hook uninstall claude --write [--user | --repo]
-  cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]
-  cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]
-  cswarm workspaces [--url <url> --anon-key <key>] [--json]
-  cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]
-  cswarm invite [--url <url> --anon-key <key>] [--workspace-id <uuid>] --email <email>
-  cswarm invite revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --invitation-id <uuid> [--json]
-  cswarm member remove <full-user-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm workspace close <full-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--json]
-  cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]
-  cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]  # unsafe: shell history/process list
-  cswarm accept --invitation-token-stdin [--url <url> --anon-key <key>]
-  cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list
-  cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]
-  cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>
-  cswarm token mint [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid> --run-id <uuid> --task-id <uuid> --epoch <n> [--ttl-ms <ms>] [--renewal-horizon-days <1..90> | --standing --confirm-standing]
-  cswarm token revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --token-id <uuid>
-  cswarm token revoke ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--token-id <uuid>]
-  cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # lifts an idle pause; a REVOKED grant is refused
-  cswarm link new [--url <url> --anon-key <key>] [--workspace-id <uuid>] --task-id <uuid> [--ttl-ms <ms>] [--site <origin>] [--json]
-  cswarm link revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --capability-id <uuid> [--json]
-  cswarm command <kind> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [command fields]
-  cswarm dogfood [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} --slug <slug> --branch <branch> --head-sha <sha> --evidence <ref>
-  cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]
+${commandHelpLines()}
 
 Credential selection for command/dogfood:
+  inbox --since pages every matching directed signal for an agent unless --limit is set.
+  ${INBOX_LIMIT_NOTICE}
   default                 refresh the human login from secure storage
   --agent-token-file      read the credential from an owned 0600 regular file in an owned
                           0700 directory. The path may appear in argv; the secret never does.
@@ -4673,7 +4606,9 @@ async function runSignalRead(
   let waited = false;
   try {
     if (waitSeconds === undefined) {
-      rows = await readSignals(cloud, credential, queryBase);
+      rows = inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
+        ? await readDirectedInboxSince(cloud, credential, queryBase)
+        : await readSignals(cloud, credential, queryBase);
     } else {
       waited = true;
       const deadlineMs = waitDeadlineMs(waitSeconds);
@@ -4695,10 +4630,11 @@ async function runSignalRead(
 
   if (args.has("json")) {
     printJson(
-      signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
+      { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
-      }),
+      }), ...(inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
+        ? { notice: INBOX_LIMIT_NOTICE } : {}) },
     );
     if (selected.kind === "agent") {
       await reportRenderedBroadcasts(
@@ -4742,6 +4678,9 @@ async function runSignalRead(
       workspace: { id: selected.selectedWorkspace, name: authors.workspaceName },
     }),
   })}\n`);
+  if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
+    process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
+  }
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
@@ -9249,6 +9188,8 @@ export type AgentCommandEntry = AgentCommandTool & {
   argumentSchema: AgentCommandArgumentSchema;
   mutates: boolean;
   flags: readonly string[];
+  /** CLI-only options intentionally absent from model tool schemas. */
+  cliOnlyFlags?: readonly string[];
   transports: readonly AgentCommandTransport[];
   mcp: boolean;
   profile: AgentCommandProfileMode;
@@ -9287,6 +9228,7 @@ type AgentCommandCommonOptions = AgentCommandTool & {
   description: string;
   mutates: boolean;
   flags: readonly string[];
+  cliOnlyFlags?: readonly string[];
   transports: readonly AgentCommandTransport[];
   mcp?: boolean;
   profile: AgentCommandProfileMode;
@@ -9355,7 +9297,7 @@ function commandVariant(
   handler: AgentCommandHandler,
   help: readonly string[],
 ): AgentCommandVariant {
-  return { id, handler, help: help.map(resolveHelpLine) };
+  return { id, handler, help };
 }
 
 function selectedVariants<const Variants extends Readonly<Record<string, AgentCommandVariant>>>(
@@ -9369,22 +9311,47 @@ function selectedVariants<const Variants extends Readonly<Record<string, AgentCo
   };
 }
 
-function resolveHelpLine(marker: string): string {
-  const lines = `${usage()}\n${onboardingUsage()}`
-    .split("\n")
-    .filter(line => line.startsWith("  cswarm "))
-    .map(line => line.trim())
-    .filter(line => line.length > 0);
-  const exact = lines.find(line => line === marker);
-  if (exact !== undefined) return exact;
-  const matches = lines.filter(line =>
-    line.startsWith(marker) &&
-    (!/[a-z0-9]$/i.test(marker) || /^\s|^$/.test(line.slice(marker.length, marker.length + 1)))
-  );
-  if (matches.length !== 1) {
-    throw new Error(`help marker must identify one whole usage line: ${marker}`);
+const HELP_FLAG_VALUES: Readonly<Record<string, string>> = {
+  profile: "<absolute-path>", url: "<url>", "anon-key": "<key>",
+  "workspace-id": "<uuid>", "host-session-id": "<id>",
+  since: "<timestamp>", limit: "<n>", mode: `<${RECEIVE_MODES.join("|")}>`,
+  provider: `<${RECEIVE_PROVIDERS.join("|")}>`,
+};
+
+function helpFlag(flag: string): string {
+  return BOOLEAN_ARGUMENT_FLAGS.has(flag) ? `--${flag}` : `--${flag} ${HELP_FLAG_VALUES[flag] ?? "<value>"}`;
+}
+
+/** Every synopsis starts with a variant declared in AGENT_COMMANDS and includes its accepted flags. */
+export function commandHelpLines(verb?: string, action?: string): string {
+  const lines: string[] = [];
+  for (const [name, root] of Object.entries(AGENT_COMMANDS)) {
+    if (verb !== undefined && name !== verb) continue;
+    const commands = isCommandGroup(root) ? Object.entries(root.subcommands) : [["", root]] as const;
+    for (const [subaction, entry] of commands) {
+      if (action !== undefined && subaction !== action) continue;
+      if (!entry.visible) continue;
+      for (const variant of Object.values(entry.variants)) {
+        const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
+        for (const hint of hints) {
+          lines.push(`  ${hint}`);
+          lines.push(`    ${entry.description}`);
+        }
+      }
+      const shown = new Set(Object.values(entry.variants).flatMap(variant => variant.help)
+        .flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
+      const extra = [...entry.flags, ...(entry.cliOnlyFlags ?? [])].filter(flag => !shown.has(flag));
+      if (extra.length > 0) lines.push(`    Additional options: ${extra.map(helpFlag).join(", ")}`);
+    }
   }
-  return matches[0]!;
+  return lines.join("\n");
+}
+
+function helpFor(verb: string | undefined, action: string | undefined): string {
+  if (!verb || verb === "help") return `${usage()}\n${onboardingUsage()}`;
+  const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
+  if (!root) return `${usage()}\n${onboardingUsage()}`;
+  return commandHelpLines(verb, isCommandGroup(root) ? action : undefined);
 }
 
 function group(
@@ -9450,29 +9417,32 @@ const agentFlags = [
 ] as const;
 const noTool = (reason: string) => ({ tool: null, reason }) as const;
 
+const signalBody = formatBodyUsage("<text>");
+const workingOnBody = formatBodyUsage("<what>");
+
 const setupVariants = {
-  import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file"]),
+  import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]"]),
   version: commandVariant("version", runSetupVersion, ["cswarm setup --check-version"]),
   guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"]),
 };
 const checkVariants = {
   messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]"]),
-  message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id"]),
+  message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]"]),
   hook: commandVariant("hook", runCheckHook, ["cswarm check --profile <absolute-path> --host-session-id <id> --hook"]),
 };
 const resumeVariants = {
-  inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file"]),
-  profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile"]),
+  inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
+  profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]"]),
 };
 const acceptVariants = {
-  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin"]),
-  legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin"]),
-  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://", "cswarm accept <invitation-token>"]),
+  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]"]),
+  legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin [--url <url> --anon-key <key>]"]),
+  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]  # unsafe: shell history/process list", "cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list"]),
 };
 const inboxVariants = {
   read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]"]),
-  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify"]),
-  follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow"]),
+  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
+  follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]"]),
 };
 
 async function runMcpCode(args: Arguments): Promise<void> {
@@ -9502,25 +9472,55 @@ async function runMcpConnect(args: Arguments): Promise<void> {
   process.stdout.write(renderMcpConnect(result));
 }
 
+async function runProfileLs(args: Arguments): Promise<void> {
+  args.assertShape(["json", "url"], 2);
+  const all = await listAgentProfiles();
+  const host = args.optional("url") === undefined ? undefined : new URL(args.required("url")).host;
+  const result = { ...all, profiles: host === undefined ? all.profiles : all.profiles.filter(profile => profile.url_host === host) };
+  if (args.has("json")) {
+    printJson(result);
+    return;
+  }
+  process.stdout.write(`Searched: ${result.searched_roots.join(", ")}\n`);
+  for (const profile of result.profiles) {
+    if (profile.error) {
+      process.stdout.write(`${profile.path} · ${profile.error}\n`);
+    } else {
+      const seat = profile.principal_name ? `${profile.principal_name} (${profile.principal_id})` : profile.principal_id;
+      const workspace = profile.workspace_name ? `${profile.workspace_name} (${profile.workspace_id})` : profile.workspace_id;
+      process.stdout.write(`${seat} · ${workspace} · ${profile.url_host} · ${profile.path}\n`);
+    }
+  }
+  if (result.profiles.length === 0) process.stdout.write("No profiles found.\n");
+}
+
 /**
  * The command table is the only verb dispatcher. Closed sub-actions are nested,
  * while flag-selected modes stay behind one key and are chosen by select().
  */
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
+  profile: group({
+    ls: commandEntry({ ...noTool("local profile inventory; no network or credential read"), handler: runProfileLs,
+      description: "List saved agent profiles on this host.", mutates: false,
+      flags: ["json", "url"], transports: STDIO_ONLY, ...REFUSE_PROFILE,
+      visible: true, help: ["cswarm profile ls [--json] [--url <url>]"], bootstrap: true }),
+  }, args => args.positionals[1], () => new UsageError("profile requires ls"), {
+    refusalPolicy: { flags: ["json", "url"], ...REFUSE_PROFILE },
+  }),
   mcp: group({
     serve: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
       handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
       description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
       flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
-      visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]"], bootstrap: true }),
+      visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio"], bootstrap: true }),
     code: commandEntry({ ...noTool("human bootstrap code; never a model tool"), handler: runMcpCode,
       description: "Mint a one-hour single-seat connect code.", mutates: true,
       flags: [...TARGET_FLAGS, "workspace-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE,
-      visible: true, help: ["cswarm mcp code"], bootstrap: true }),
+      visible: true, help: ["cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]"], bootstrap: true }),
     connect: commandEntry({ ...noTool("operator enters a code in a hidden terminal prompt"), handler: runMcpConnect,
       description: "Redeem a connect code on the agent host.", mutates: true,
       flags: ["url", "anon-key", "profile", "name"], transports: STDIO_ONLY,
-      profile: "native", hostSessionId: "drop", visible: true, help: ["cswarm mcp connect"], bootstrap: true }),
+      profile: "native", hostSessionId: "drop", visible: true, help: ["cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]"], bootstrap: true }),
   }, args => args.positionals[1] ?? "serve", () => new UsageError("mcp requires code or connect, or --profile to serve tools"), {
     refusalPolicy: { flags: ["profile", "host-session-id", "url", "anon-key", "name"], ...NATIVE_PROFILE },
   }),
@@ -9547,12 +9547,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     errorMode: "onboarding",
   }),
   receive: group({
-    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive configure"], bootstrap: true }),
-    status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status"], bootstrap: true }),
-    test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test"], bootstrap: true }),
-    confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm"], bootstrap: true }),
-    idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle"], bootstrap: true }),
-    serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve"], bootstrap: true }),
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive configure --profile <absolute-path> --mode wake|turn [--provider claude|codex|instructions|grok-bot] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]"], bootstrap: true }),
+    status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]"], bootstrap: true }),
+    test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]"], bootstrap: true }),
+    idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve --profile <absolute-path> --host-session-id <id>"], bootstrap: true }),
   }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
     refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
     refusalTrace: "runOnboardingCommand:receive-refusal",
@@ -9561,18 +9561,18 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
 
   "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
   hook: group({
-    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check"], errorMode: "hook-check" }),
-    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install"] }),
-    uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall"] }),
+    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>]"], errorMode: "hook-check" }),
+    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install claude [--principal-id <uuid>] [--write] [--user | --repo]"] }),
+    uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall claude --write [--user | --repo]"] }),
   }, (args) => args.positionals[1], () => new UsageError("hook requires check, install, or uninstall"), {
     refusalPolicy: { flags: ["cooldown", "principal-id", "write", "user", "repo"], ...REFUSE_PROFILE },
     refusalTrace: "runHook",
   }),
   listen: group({
-    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start"] }),
-    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status"] }),
-    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
-    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary"] }),
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "grok-executable", "opencode-executable", "claude-executable", "codex-executable", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route main] [--allow-unattended] [--foreground] [--json]"] }),
+    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
+    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] }),
   }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 13,
@@ -9586,8 +9586,8 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 14,
     refusalTrace: "runSession",
   }),
-  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login"] }),
-  logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout"] }),
+  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login [--url <project-url> --anon-key <key>] [--no-browser]"] }),
+  logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout [--url <project-url> --anon-key <key>] [--all-devices] [--local]"] }),
   /*
    * These selectors deliberately preserve the old handlers' order. Invite sent
    * every action except "revoke" to its create path. Member, workspace, and
@@ -9597,96 +9597,96 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
    */
   invite: group({
     create: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Create an invitation.", mutates: true, flags: [...humanFlags, "email"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite [--url <url> --anon-key <key>] [--workspace-id <uuid>] --email <email>"] }),
-    revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke"] }),
+    revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --invitation-id <uuid> [--json]"] }),
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "create", () => new UsageError("unknown invite command"), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
-  member: group({ remove: commandEntry({ ...noTool("human membership administration; never a model tool"), handler: traced("runMember", runMember), description: "Remove a workspace member.", mutates: true, flags: [...humanFlags, "confirm"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm member remove"] }) }, () => "remove", (args) => new UsageError(`unknown member command: ${args.positionals[1] ?? "(missing)"}`), {
+  member: group({ remove: commandEntry({ ...noTool("human membership administration; never a model tool"), handler: traced("runMember", runMember), description: "Remove a workspace member.", mutates: true, flags: [...humanFlags, "confirm"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm member remove <full-user-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }) }, () => "remove", (args) => new UsageError(`unknown member command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
-  workspace: group({ close: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runWorkspace", runWorkspace), description: "Close a workspace.", mutates: true, flags: [...TARGET_FLAGS, "confirm", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspace close"] }) }, () => "close", (args) => new UsageError(`unknown workspace command: ${args.positionals[1] ?? "(missing)"}`), {
+  workspace: group({ close: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runWorkspace", runWorkspace), description: "Close a workspace.", mutates: true, flags: [...TARGET_FLAGS, "confirm", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspace close <full-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--json]"] }) }, () => "close", (args) => new UsageError(`unknown workspace command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: [...TARGET_FLAGS, "confirm", "json"], ...REFUSE_PROFILE },
   }),
   target: group({
-    show: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Show the saved Cloud target.", mutates: false, flags: ["json", "reveal-anon-key"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target [show]"] }),
-    set: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Save a Cloud target.", mutates: true, flags: ["url", "anon-key", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target set"] }),
-    clear: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Clear the saved Cloud target.", mutates: true, flags: ["json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target clear"] }),
+    show: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Show the saved Cloud target.", mutates: false, flags: ["json", "reveal-anon-key"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target [show] [--json] [--reveal-anon-key]"] }),
+    set: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Save a Cloud target.", mutates: true, flags: ["url", "anon-key", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target set --url <project-url> --anon-key <key> [--json]"] }),
+    clear: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Clear the saved Cloud target.", mutates: true, flags: ["json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target clear [--json]"] }),
   }, (args) => args.positionals[1] ?? "show", (args) => new Error(`unknown target command: ${args.positionals[1]}`), {
     refusalPolicy: { flags: [...TARGET_FLAGS, "json"], ...REFUSE_PROFILE },
     refusalTrace: "runTarget",
   }),
-  status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status"], workspaceErrorJson: true }),
-  whoami: commandEntry({ tool: "whoami", mcp: true, handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami"] }),
+  status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"], workspaceErrorJson: true }),
+  whoami: commandEntry({ tool: "whoami", mcp: true, handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
   resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
-  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback"] }),
+  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback \"<text>\" --kind bug|idea|friction [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   channel: group({
-    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel create"] }),
-    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls"] }),
-    rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename"] }),
-    archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive"] }),
+    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most 500 characters"] }),
+    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
+    rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 15,
     refusalTrace: "runChannel",
   }),
   file: group({
-    put: commandEntry({ tool: "file_put", mcp: true, handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put"], workspaceErrorJson: true }),
-    ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls"], workspaceErrorJson: true }),
-    get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get"], workspaceErrorJson: true }),
-    rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm"], workspaceErrorJson: true }),
-    restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore"], workspaceErrorJson: true }),
+    put: commandEntry({ tool: "file_put", mcp: true, handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put <local-path> [--name <name>] [--request-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls [--include-tombstoned] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get <name|file-id> [--version <n>] [--out <local-path>] [--force] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 10,
     refusalTrace: "runFile",
   }),
   brain: group({
-    ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls"], workspaceErrorJson: true }),
-    get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get"], workspaceErrorJson: true }),
-    put: commandEntry({ tool: "brain_put", mcp: true, handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put"], workspaceErrorJson: true }),
+    ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get <topic>[@<version>] [--version <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    put: commandEntry({ tool: "brain_put", mcp: true, handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put <topic> [<markdown-path>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--if-version <n>] [--request-id <id>] [--json]  # without a path, reads Markdown from stdin; --if-version refuses the write unless the live version is still <n>"], workspaceErrorJson: true }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 9,
     refusalTrace: "runBrain",
   }),
-  members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members"] }),
-  "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: ["cswarm working-on"], workspaceErrorJson: true }),
-  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: ["cswarm note"], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: ["cswarm ask"], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
-  receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt"], workspaceErrorJson: true }),
-  feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed"], workspaceErrorJson: true }),
+  members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
+  feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(NOTIFY_FLAG) ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
-  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces"], workspaceErrorJson: true }),
-  use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use"], workspaceErrorJson: true }),
-  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm new \"<workspace name>\"", "cswarm new --name"] }),
+  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
+  use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
+  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]`] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
   principal: group({
-    create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create"] }),
-    revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke"] }),
+    create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]"] }),
+    revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>"] }),
   }, (args) => args.positionals[1], (args) => new Error(`unknown principal command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
     refusalTrace: "runPrincipal",
   }),
   token: group({
-    mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint"] }),
-    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke [--url", "cswarm token revoke (--agent-token-file"] }),
+    mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid> --run-id <uuid> --task-id <uuid> --epoch <n> [--ttl-ms <ms>] [--renewal-horizon-days <1..90> | --standing --confirm-standing]"] }),
+    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --token-id <uuid>", "cswarm token revoke (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--token-id <uuid>]"] }),
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "mint", (args) => new Error(`unknown token command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
-  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
+  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # lifts an idle pause; a REVOKED grant is refused"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
   }),
   link: group({
-    new: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkNew), description: "Create a capability link.", mutates: true, flags: [...humanFlags, "task-id", "ttl-ms", "site"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link new"] }),
-    revoke: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkRevoke), description: "Revoke a capability link.", mutates: true, flags: [...humanFlags, "capability-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link revoke"] }),
+    new: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkNew), description: "Create a capability link.", mutates: true, flags: [...humanFlags, "task-id", "ttl-ms", "site"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link new [--url <url> --anon-key <key>] [--workspace-id <uuid>] --task-id <uuid> [--ttl-ms <ms>] [--site <origin>] [--json]"] }),
+    revoke: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkRevoke), description: "Revoke a capability link.", mutates: true, flags: [...humanFlags, "capability-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --capability-id <uuid> [--json]"] }),
   }, (args) => args.positionals[1], (args) => new UsageError(`unknown link command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
     refusalTrace: "runLink",
   }),
-  command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind>"] }),
-  dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood"] }),
-  "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture"] }),
+  command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [command fields]"] }),
+  dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] --slug <slug> --branch <branch> --head-sha <sha> --evidence <ref>"] }),
+  "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]"] }),
 };
 
 function isCommandGroup(root: AgentCommandRoot): root is AgentCommandGroup {
@@ -9796,7 +9796,7 @@ async function main(): Promise<void> {
   const verb = args.positionals[0];
   if (!verb || verb === "help" || args.has("help")) {
     if (verb === "help") args.assertShape([], 1);
-    process.stdout.write(`${usage()}\n${onboardingUsage()}\n`);
+    process.stdout.write(`${helpFor(verb, args.positionals[1])}\n`);
     return;
   }
   const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
