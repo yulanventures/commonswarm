@@ -292,7 +292,8 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
     throw new McpConnectError("connect_clear_unsafe", `The connect directory at ${dir} cannot be read safely.`);
   }
   return await withFileLock(dir, "mcp-connect", async () => {
-    if (!await pathExists(pendingPath(path)) && !await pathExists(completePath(path))) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
+    const hadPending = await pathExists(pendingPath(path));
+    if (!hadPending && !await pathExists(completePath(path))) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
     const credential = join(dir, "credential.json");
     let completedProfile: string | null = null;
     for (const entry of await readdir(dir)) {
@@ -323,6 +324,7 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
       }
     }
     let removedPending = false;
+    let removedComplete = false;
     for (const file of [pendingPath(path), completePath(path)]) {
       try {
         const info = await lstat(file);
@@ -330,12 +332,13 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
           throw new McpConnectError("connect_clear_unsafe", `Cannot clear unsafe file at ${file}.`);
         }
         await removeFile(file);
-        removedPending = true;
+        if (file === pendingPath(path)) removedPending = true;
+        else removedComplete = true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    if (!removedPending) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
+    if (hadPending ? !removedPending : !removedComplete) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
     return { completedProfile, credentialPresent: await pathExists(credential), profilePresent: await pathExists(path) };
   });
 }

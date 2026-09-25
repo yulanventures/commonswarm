@@ -1251,6 +1251,14 @@ test("clear reports success only when pending was actually removed", { timeout: 
     const pending = join(dirname(path), "connect-pending.json");
     await assert.rejects(clearMcpConnect(path, async () => { throw Object.assign(new Error("vanished"), { code: "ENOENT" }); }), { code: "connect_pending_missing" });
     assert.equal((await stat(pending)).isFile(), true);
+    const complete = join(dirname(path), "connect-complete.json");
+    await writeFile(complete, "{", { mode: 0o600 });
+    await assert.rejects(clearMcpConnect(path, async file => {
+      if (file === pending) throw Object.assign(new Error("vanished"), { code: "ENOENT" });
+      await unlink(file);
+    }), { code: "connect_pending_missing" });
+    await assert.rejects(stat(complete), { code: "ENOENT" });
+    assert.equal((await stat(pending)).isFile(), true);
     await clearMcpConnect(path);
     await assert.rejects(stat(pending), { code: "ENOENT" });
   } finally { await f.close(); }
