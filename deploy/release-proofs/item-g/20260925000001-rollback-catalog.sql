@@ -14,7 +14,10 @@ SELECT
       AND pg_get_functiondef(p.oid) LIKE '%signal_delivery_receipts_without_main_queue_count%'
       AND has_function_privilege('authenticated', p.oid, 'EXECUTE')
       AND has_function_privilege('swarm_read', p.oid, 'EXECUTE')
+      AND NOT has_function_privilege('anon', p.oid, 'EXECUTE')
+      AND p.proacl IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM aclexplode(p.proacl) AS a WHERE a.grantee = 0)
+      AND obj_description(p.oid, 'pg_proc') LIKE 'Author-scoped directed receipts%'
     FROM pg_proc AS p
     WHERE p.oid = to_regprocedure('swarm_read.signal_delivery_receipts(uuid,uuid,bytea)')
   ), false)

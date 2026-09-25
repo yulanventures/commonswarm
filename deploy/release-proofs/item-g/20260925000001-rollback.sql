@@ -9,6 +9,7 @@
 \set ON_ERROR_STOP 1
 BEGIN;
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 
 -- The receipts wrapper first, so nothing depends on the views when they are dropped.
 DROP FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea);
