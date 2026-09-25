@@ -51,10 +51,10 @@
  *     mint_agent_token, post_signal. Nothing reads code.
  *
  * WHAT I COULD NOT VERIFY FROM THIS REPOSITORY, marked as placeholders rather than guessed:
- *   - the hosting region of the production database. supabase/config.toml is the stock local
- *     template; the hosted project's region lives in the Supabase dashboard.
+ *   - (resolved 2026-09-24) the database runs on our server in Falkenstein, Germany; the
+ *     Cloudflare R2 storage region for files is not pinned and is not stated as one.
  *   - the exact OAuth scopes requested from GitHub. oauthUrl() sets no `scopes` parameter, so
- *     the provider defaults configured in the Supabase dashboard apply. The document
+ *     the provider defaults configured in GoTrue on our server apply. The document
  *     therefore describes WHAT WE RECEIVE (verified in code) and does not assert a scope
  *     string it cannot check.
  *
@@ -92,7 +92,7 @@ const choices = providerChoices(providers);
 const entities = providerEntities(providers);
 
 const EFFECTIVE = "27 July 2026";
-const UPDATED = "29 July 2026";
+const UPDATED = "24 September 2026";
 
 const sections: Section[] = [
   {
@@ -183,8 +183,9 @@ const sections: Section[] = [
       "Workspace administrators can read the audit records for their own workspace. Nobody can read another workspace's.",
       { sub: "Abuse counters and retry records" },
       "Counts of how many signals a credential and a workspace have posted in the current hour, used to enforce rate limits, and deleted automatically. Short-lived records of the requests your client sent, so that a retry after a dropped connection does not run the same command twice; these are kept for at least 30 days and then purged automatically.",
-      { sub: "Provider logs" },
-      "Our hosting and database providers keep their own operational logs — request logs, error logs, connection records — which can include IP addresses and timestamps, under their retention policies and not ours. We access them to investigate outages and abuse. This is ordinary infrastructure logging, and we cannot switch it off.",
+      { sub: "Server and provider logs" },
+      "We run the server ourselves. Its web server and services keep operational logs — request logs, error logs, connection records — which can include IP addresses and timestamps. We use them to investigate outages and abuse, and we keep them for a limited period.",
+      "Hetzner, which rents us the server, and Cloudflare, which carries traffic to it, keep their own operational records under their own policies. This is ordinary infrastructure logging, and we cannot switch it off.",
     ],
   },
   {
@@ -192,7 +193,7 @@ const sections: Section[] = [
     title: "This website",
     blocks: [
       { note: "**This website sets no cookies, runs no analytics, and loads nothing from a third party.** There is no tracking pixel, no advertising tag, no session recorder, and no consent banner — because there is nothing to consent to." },
-      "Every page is static. Fonts are served from our own origin rather than a font CDN, so viewing a page does not tell anyone else that you did. The only records of your visit are our host's standard server logs.",
+      "Every page is static. Fonts are served from our own origin rather than a font CDN. Requests to this website pass through Cloudflare, which processes them to deliver and protect the site; apart from that, the only records of your visit are our own server logs.",
     ],
   },
   {
@@ -234,8 +235,8 @@ const sections: Section[] = [
          * a reader: who receives their identity.
          *
          * The legal names come from AUTH_PROVIDERS, so enabling a provider adds its button and
-         * this entry together. Supabase and Vercel are hand-written because nothing in the code
-         * decides them; if that ever changes they belong in a constant too.
+         * this entry together. The server, Cloudflare and Resend entries are hand-written because
+         * nothing in the code decides them; if that ever changes they belong in a constant too.
          */
         ul: [
           ...(providers.length > 0
@@ -248,8 +249,9 @@ const sections: Section[] = [
                 `**Sign-in.** You sign in through ${entities}, and your identifier, email address, and name come back to us from there. Nothing else does. Each provider handles what it holds under its own privacy statement.`,
               ]
             : []),
-          "**Supabase.** Hosting for the database, the authentication service, and the server-side functions. Everything described in this policy that we store is stored there. The production database is hosted in the United States (East US, North Virginia).",
-          "**Vercel.** Hosting for this website only. Vercel serves static pages and is not in the path of your account data, your signals, or anything else the service holds.",
+          "**Our server.** The database, the sign-in service, the server-side functions, and this website run on a server we operate, rented from Hetzner Online GmbH in a data centre in Falkenstein, Germany. Everything described in this policy that we store is stored there, except files you attach and backup copies of the database and files, which are kept in Cloudflare R2.",
+          "**Cloudflare.** Traffic to this website and to the service passes through Cloudflare, which provides DNS, TLS, and network protection. Files you attach and our backups are stored in Cloudflare R2.",
+          "**Resend.** Sends the sign-in and invitation emails.",
         ],
       },
       "We use these providers to run the service on our behalf and under our instructions. We do not use any advertising, analytics, marketing, or data-broker service.",
@@ -312,10 +314,10 @@ const sections: Section[] = [
     id: "regional",
     title: "If you are outside the United States",
     blocks: [
-      "We operate from the United States and our providers store data there or in the region noted above. If you use the service from elsewhere, your data is transferred to and processed in the United States, which may not give it the same protection as your own country's law. By using the service you understand that.",
+      "We operate from the United States. The service and its database run on our server in Germany, and files you attach and our backups are stored in Cloudflare R2. Our providers, and we ourselves, may also process your data in the United States. If you use the service from elsewhere, your data may be transferred to and processed in those countries, which may not give it the same protection as your own country's law. By using the service you understand that.",
       { sub: "EEA, UK, and Switzerland" },
       "Where the GDPR or the UK GDPR applies, our legal bases are: **performance of a contract** with you, for running the service and your account; **legitimate interests**, for security, abuse prevention, and keeping the service working; and **legal obligation**, where the law requires it. You have the rights to access, rectification, erasure, restriction, portability, and objection, and the right to complain to your supervisory authority.",
-      "Transfers to the United States rely on the European Commission's and the UK's standard contractual clauses as implemented by our providers. We have not appointed an Article 27 representative.",
+      "Where our providers, such as Cloudflare and Resend, transfer personal data to the United States, they rely on the European Commission's and the UK's standard contractual clauses in their data-processing terms with us. We are a United States company and may access data from the United States; when we do, the protections in this policy apply. We have not appointed an Article 27 representative.",
       { sub: "California" },
       "California residents have the right to know what personal information we collect and why, to request deletion or correction, and not to be discriminated against for exercising those rights. **We do not sell personal information and we do not share it for cross-context behavioural advertising**, as those terms are defined in the CCPA. We have not disclosed personal information for a business purpose beyond the providers listed above.",
       "To exercise any of these rights, write to legal@commonswarm.com. We will verify your request against the account it concerns, and we will respond within the time the applicable law allows. We do not charge for this.",
