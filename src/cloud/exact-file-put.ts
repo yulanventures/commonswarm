@@ -1,10 +1,10 @@
 /** Durable, non-secret resume state for an explicitly identified file put. */
 import { createHash } from "node:crypto";
 import { readdir, unlink } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { H0_REQUEST_ID_RE } from "../h0/verbs.js";
 import { ensureSecureStateDirectory, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile } from "./storage.js";
-import { FILE_MAX_VERSION_BYTES, FileTransportError, allowedExtensionList, contentTypeForName, fileVersionCommit, fileVersionCreate, onceRetried, putObject, sha256Hex, type FileVersionCommitResult } from "./files.js";
+import { FILE_MAX_VERSION_BYTES, FileCommandRefused, FileTransportError, allowedExtensionList, contentTypeForName, fileVersionCommit, fileVersionCreate, onceRetried, putObject, sha256Hex, type FileVersionCommitResult } from "./files.js";
 import type { CloudTarget } from "./config.js";
 
 const NAMESPACE = "1c20a85c-ff0f-4c85-90a3-83d83cfda936";
@@ -34,12 +34,15 @@ export interface ExactPutInput {
   target: CloudTarget; workspaceId: string; principalId: string; credential: string;
   stateDir: string; requestId: string; name: string; bytes: Uint8Array;
   ifVersion?: number; fetcher?: typeof fetch; now?: () => number;
+  onPhasePersisted?: (phase: Phase) => void;
 }
-type Phase = "prepared" | "created" | "putting" | "uploaded" | "committed";
+type Phase = "prepared" | "created" | "putting" | "uploaded" | "committed" | "refused";
+const PHASE_ORDER: Record<Phase, number> = { prepared: 0, created: 1, putting: 2, uploaded: 3, committed: 4, refused: 4 };
+type TerminalRefusal = { status: number; code: string };
 interface RecordFile {
   request_id: string; name: string; sha256: string; size: number; if_version: number | null;
   file_id: string; version_id: string; create_command_id: string; commit_command_id: string;
-  phase: Phase; updated_at: number; result: FileVersionCommitResult | null;
+  phase: Phase; updated_at: number; result: FileVersionCommitResult | null; refusal?: TerminalRefusal;
 }
 export interface PreparedPut { input: ExactPutInput; record: RecordFile; path: string; existed: boolean; conflict_check: ConflictCheck; contentType: string }
 export interface PutResult { result: FileVersionCommitResult; outcome: PutOutcome; conflict_check: ConflictCheck }
@@ -48,15 +51,22 @@ function recordPath(input: ExactPutInput): string {
   const key = `${input.workspaceId}\0${input.principalId}\0${input.requestId}`;
   return join(input.stateDir, `${createHash("sha256").update(key).digest("hex")}.json`);
 }
-async function prune(dir: string, now: number): Promise<void> {
+async function prune(dir: string, now: number, preserve: string): Promise<void> {
   const names = (await readdir(dir)).filter(name => /^[a-f0-9]{64}\.json$/.test(name));
   const rows = await Promise.all(names.map(async name => {
-    const raw = await readSecureJsonFileIfPresent(join(dir, name), 8192);
-    const saved = raw === null ? null : JSON.parse(raw) as Partial<RecordFile>;
-    return { name, updated: typeof saved?.updated_at === "number" ? saved.updated_at : 0 };
-  }));
+    try {
+      const raw = await readSecureJsonFileIfPresent(join(dir, name), 8192);
+      const saved = raw === null ? null : JSON.parse(raw) as Partial<RecordFile>;
+      if (raw !== null && (typeof saved?.updated_at !== "number" || !Number.isFinite(saved.updated_at))) throw new Error("invalid record");
+      return { name, updated: saved?.updated_at ?? 0 };
+    } catch {
+      process.stderr.write(`cswarm: skipped unreadable file put resume record ${name}\n`);
+      await unlink(join(dir, name)).catch(() => undefined);
+      return null;
+    }
+  })).then(rows => rows.filter((row): row is { name: string; updated: number } => row !== null));
   rows.sort((a, b) => b.updated - a.updated);
-  await Promise.all(rows.filter((row, index) => index >= MAX_RECORDS - 1 || now - row.updated > RECORD_LIFETIME_MS)
+  await Promise.all(rows.filter((row, index) => row.name !== preserve && (index >= MAX_RECORDS - 1 || now - row.updated > RECORD_LIFETIME_MS))
     .map(row => unlink(join(dir, row.name)).catch(() => undefined)));
 }
 /** Preflight and persist before the command edge or Storage is contacted. */
@@ -76,10 +86,10 @@ export async function prepareExactPut(input: ExactPutInput): Promise<PreparedPut
   await ensureSecureStateDirectory(input.stateDir);
   const now = (input.now ?? Date.now)();
   return await withFileLock(input.stateDir, "file-put-resume", async () => {
-    await prune(input.stateDir, now);
+    await prune(input.stateDir, now, basename(path));
     const raw = await readSecureJsonFileIfPresent(path, 8192);
     const prior = raw === null ? null : JSON.parse(raw) as RecordFile;
-    if (prior && (prior.request_id !== input.requestId || prior.name !== input.name || prior.sha256 !== sha256 ||
+    if (prior && (prior.request_id !== input.requestId || prior.name.toLowerCase() !== input.name.toLowerCase() || prior.sha256 !== sha256 ||
         prior.size !== input.bytes.byteLength || prior.if_version !== (input.ifVersion ?? null))) throw new RequestIdConflict();
     const record: RecordFile = prior ?? {
       request_id: input.requestId, name: input.name, sha256, size: input.bytes.byteLength,
@@ -93,14 +103,17 @@ export async function prepareExactPut(input: ExactPutInput): Promise<PreparedPut
 }
 
 async function phase(prepared: PreparedPut, value: Phase, result: FileVersionCommitResult | null = null): Promise<void> {
+  if (PHASE_ORDER[value] < PHASE_ORDER[prepared.record.phase]) return;
   prepared.record.phase = value;
   prepared.record.updated_at = (prepared.input.now ?? Date.now)();
   prepared.record.result = result;
   await writeSecureJsonFile(prepared.path, JSON.stringify(prepared.record));
+  prepared.input.onPhasePersisted?.(value);
 }
 export async function executeExactPut(prepared: PreparedPut): Promise<PutResult> {
   const { input, record } = prepared;
   if (record.phase === "committed" && record.result) return { result: record.result, outcome: "replayed", conflict_check: prepared.conflict_check };
+  if (record.phase === "refused" && record.refusal) throw new FileCommandRefused(record.refusal.status, record.refusal.code, `The service refused this file put (${record.refusal.code}).`);
   const priorPut = record.phase === "putting" || record.phase === "uploaded";
   const send = { target: input.target, workspaceId: input.workspaceId, credential: input.credential, fetcher: input.fetcher };
   const created = await onceRetried(() => fileVersionCreate({ ...send, commandId: record.create_command_id }, {
@@ -113,7 +126,7 @@ export async function executeExactPut(prepared: PreparedPut): Promise<PutResult>
   // the object. Only a later attempt may let a refused PUT reach the commit.
   await phase(prepared, "putting");
   let attempted = false;
-  const put = await onceRetried(async () => {
+  await onceRetried(async () => {
     const replayedPut = priorPut || attempted;
     attempted = true;
     try {
@@ -124,10 +137,21 @@ export async function executeExactPut(prepared: PreparedPut): Promise<PutResult>
     }
   });
   await phase(prepared, "uploaded");
-  const result = await onceRetried(() => fileVersionCommit({ ...send, commandId: record.commit_command_id }, {
-    fileId: created.file_id, versionId: created.version_id, sha256: record.sha256,
-  }));
+  let result: FileVersionCommitResult;
+  try {
+    result = await onceRetried(() => fileVersionCommit({ ...send, commandId: record.commit_command_id }, {
+      fileId: created.file_id, versionId: created.version_id, sha256: record.sha256,
+    }));
+  } catch (error) {
+    if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500 && error.code !== "file_bytes_missing") {
+      record.refusal = { status: error.status, code: error.code };
+      await phase(prepared, "refused");
+    }
+    throw error;
+  }
   await phase(prepared, "committed", result);
-  return { result, outcome: prepared.existed || put === "already_exists" ? "replayed" : "committed",
+  // Storage can prove bytes existed, not that commit happened before this call.
+  // The command response has no replay marker, so only a saved commit may say replayed.
+  return { result, outcome: "committed",
     conflict_check: prepared.conflict_check };
 }

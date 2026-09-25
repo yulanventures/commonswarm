@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,7 @@ class FakeEdge {
   loss: "create" | "put" | "commit" | null = null;
   putRefusal: { status: number; body: object } | null = null;
   precondition: number | null = null;
+  commitRefusal: { status: number; code: string } | null = null;
   private created = new Map<string, any>();
   private committed = new Map<string, any>();
   private stored = new Set<string>();
@@ -47,6 +48,11 @@ class FakeEdge {
     }
     if (cmd.kind === "file_version_commit") {
       this.commits++;
+      if (this.commitRefusal) {
+        const refusal = this.commitRefusal;
+        this.stored.clear(); // Model the server's purge and Storage drain.
+        return Response.json({ error: refusal.code }, { status: refusal.status });
+      }
       let result = this.committed.get(envelope.command_id);
       if (!result) {
         const created = [...this.created.values()].find(row => row.version_id === cmd.version_id);
@@ -113,9 +119,85 @@ test("resume across a new client instance, conflict, and deleted record", { time
     await unlink(original.path);
     edge.putRefusal = { status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } };
     const noRecord = await executeExactPut(await prepareExactPut(input(dir, edge)));
-    assert.equal(noRecord.outcome, "replayed");
+    assert.equal(noRecord.outcome, "committed", "without a record or server replay marker, commit history is unknown");
     assert.equal(noRecord.conflict_check, "unavailable");
     assert.equal(edge.live, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("if_version and name case use the server's conflict semantics", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    const first = await prepareExactPut(input(dir, edge, { name: "PLAN.md", ifVersion: 2 }));
+    const same = await prepareExactPut(input(dir, edge, { name: "plan.md", ifVersion: 2 }));
+    assert.equal(same.record.version_id, first.record.version_id);
+    await assert.rejects(prepareExactPut(input(dir, edge, { name: "plan.md", ifVersion: 3 })), RequestIdConflict);
+    assert.equal(edge.creates, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("workspace and principal both namespace derived ids and record keys", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    const base = await prepareExactPut(input(dir, edge));
+    const otherWorkspace = await prepareExactPut(input(dir, edge, { workspaceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" }));
+    const otherPrincipal = await prepareExactPut(input(dir, edge, { principalId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }));
+    assert.equal(new Set([base.path, otherWorkspace.path, otherPrincipal.path]).size, 3);
+    assert.equal(new Set([base.record.version_id, otherWorkspace.record.version_id, otherPrincipal.record.version_id]).size, 3);
+    assert.equal(new Set([base.record.create_command_id, otherWorkspace.record.create_command_id, otherPrincipal.record.create_command_id]).size, 3);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("created phase is durable before PUT, and resume phases never regress", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    const first = await prepareExactPut(input(dir, edge, { onPhasePersisted: (value: string) => {
+      if (value === "created") throw new Error("process stopped after create");
+    } }));
+    await assert.rejects(executeExactPut(first), /process stopped after create/);
+    assert.equal(JSON.parse(await readFile(first.path, "utf8")).phase, "created");
+    const seen: string[] = [];
+    const second = await prepareExactPut(input(dir, edge, { onPhasePersisted: (value: string) => { seen.push(value); } }));
+    await executeExactPut(second);
+    assert.deepEqual(seen, ["created", "putting", "uploaded", "committed"]);
+    const third = await prepareExactPut(input(dir, edge));
+    assert.equal((await executeExactPut(third)).outcome, "replayed");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("terminal commit refusal replays without any network or PUT", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  edge.commitRefusal = { status: 409, code: "file_version_precondition_failed" };
+  try {
+    const first = await prepareExactPut(input(dir, edge, { ifVersion: 2 }));
+    await assert.rejects(executeExactPut(first), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_version_precondition_failed");
+    assert.equal(JSON.parse(await readFile(first.path, "utf8")).phase, "refused");
+    const counts = [edge.creates, edge.puts, edge.commits];
+    const retry = await prepareExactPut(input(dir, edge, { ifVersion: 2 }));
+    await assert.rejects(executeExactPut(retry), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_version_precondition_failed");
+    assert.deepEqual([edge.creates, edge.puts, edge.commits], counts);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("an uploaded resume record never writes an earlier phase", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    const first = await prepareExactPut(input(dir, edge));
+    const broken = (async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (init?.method === "POST" && JSON.parse(String(init.body)).command.kind === "file_version_commit") throw new Error("commit offline");
+      return edge.fetcher(url, init);
+    }) as typeof fetch;
+    await assert.rejects(executeExactPut({ ...first, input: { ...first.input, fetcher: broken } }));
+    assert.equal(JSON.parse(await readFile(first.path, "utf8")).phase, "uploaded");
+    const observed: string[] = [];
+    const resumed = await prepareExactPut(input(dir, edge, { onPhasePersisted: (phase: string) => { observed.push(phase); } }));
+    await executeExactPut(resumed);
+    assert.deepEqual(observed, ["uploaded", "committed"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -137,7 +219,7 @@ for (const [shape, refusal] of [
         edge.putRefusal = refusal;
         const resumed = await prepareExactPut(input(dir, edge));
         if (present) {
-          assert.equal((await executeExactPut(resumed)).outcome, "replayed");
+          assert.equal((await executeExactPut(resumed)).outcome, "committed");
           assert.equal(edge.live, 1);
         } else {
           await assert.rejects(executeExactPut(resumed), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_bytes_missing");
@@ -241,7 +323,7 @@ test("resume record advances after create, PUT, and commit", { timeout: 10000 },
     await assert.rejects(executeExactPut({ ...prepared, input: { ...prepared.input, fetcher: brokenCommit } }));
     assert.equal(JSON.parse(await readFile(prepared.path, "utf8")).phase, "uploaded");
     const done = await executeExactPut(prepared);
-    assert.equal(done.outcome, "replayed");
+    assert.equal(done.outcome, "committed");
     assert.equal(JSON.parse(await readFile(prepared.path, "utf8")).phase, "committed");
     assert.equal(edge.live, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -282,5 +364,33 @@ test("resume records stay bounded and expire at the server sweep window", { time
     await prepareExactPut(input(dir, edge, { requestId: "after-sweep", now: () => now }));
     assert.equal((await readdir(dir)).length, 1);
     assert.equal(edge.creates, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("prune protects the current request record at the 200-record bound", { timeout: 20000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    await prepareExactPut(input(dir, edge, { requestId: "bounded-000", now: () => 1000 }));
+    for (let index = 1; index < 200; index++) {
+      await prepareExactPut(input(dir, edge, { requestId: `bounded-${String(index).padStart(3, "0")}`, now: () => 1000 + index }));
+    }
+    await assert.rejects(prepareExactPut(input(dir, edge, { requestId: "bounded-000", bytes: Buffer.from("different"), now: () => 1300 })), RequestIdConflict);
+    assert.equal(edge.creates, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("bad JSON and wrong mode records do not block another request", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  try {
+    const badJson = await prepareExactPut(input(dir, edge, { requestId: "bad-json-01" }));
+    await writeFile(badJson.path, "{");
+    const badMode = await prepareExactPut(input(dir, edge, { requestId: "bad-mode-01" }));
+    await chmod(badMode.path, 0o644);
+    const good = await prepareExactPut(input(dir, edge, { requestId: "good-new-01" }));
+    assert.equal(good.record.phase, "prepared");
+    await assert.rejects(readFile(badJson.path), { code: "ENOENT" });
+    await assert.rejects(readFile(badMode.path), { code: "ENOENT" });
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
