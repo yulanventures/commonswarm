@@ -1,6 +1,7 @@
 -- A statement can start before another grant use, wait for that row's lock,
 -- then see the later use and try to replace it with its older start time.
--- Keep the no-rewind trigger. Clamp both active writers to the row they update.
+-- Keep the no-rewind trigger. Skip an older use on both active writers so
+-- its device, source, and new-host fields cannot replace the newer use.
 
 CREATE OR REPLACE FUNCTION swarm.record_renewal_grant_use(
   p_token_id uuid,
@@ -14,7 +15,7 @@ SET search_path = swarm, pg_catalog
 AS $$
 BEGIN
   UPDATE swarm.renewal_grants AS grant_row
-  SET last_used_at = GREATEST(grant_row.last_used_at, statement_timestamp()),
+  SET last_used_at = statement_timestamp(),
       last_used_device_id = p_device_id,
       last_used_from = COALESCE(p_last_used_from, grant_row.last_used_from),
       new_host_at = CASE
@@ -31,7 +32,9 @@ BEGIN
   WHERE token.token_id = p_token_id
     AND token.renewal_grant_id = grant_row.renewal_grant_id
     AND grant_row.revoked_at IS NULL
-    AND NOT grant_row.suspension_active;
+    AND NOT grant_row.suspension_active
+    AND (grant_row.last_used_at IS NULL
+         OR grant_row.last_used_at <= statement_timestamp());
 END;
 $$;
 
@@ -178,9 +181,14 @@ BEGIN
     RAISE EXCEPTION 'SWARM_RENEWAL_BEYOND_HORIZON' USING ERRCODE = '55000';
   END IF;
 
+  -- A successor spends capacity even when its use timestamp became stale
+  -- while waiting for the grant row. Do not skip this counter increment.
   UPDATE swarm.renewal_grants
-  SET successors_used = successors_used + 1,
-      last_used_at = GREATEST(last_used_at, statement_timestamp()),
+  SET successors_used = successors_used + 1
+  WHERE renewal_grant_id = grant_row.renewal_grant_id;
+
+  UPDATE swarm.renewal_grants
+  SET last_used_at = statement_timestamp(),
       last_used_device_id = run_device,
       new_host_at = CASE
         WHEN new_host_at IS NOT NULL THEN new_host_at
@@ -189,7 +197,8 @@ BEGIN
           THEN statement_timestamp()
         ELSE NULL
       END
-  WHERE renewal_grant_id = grant_row.renewal_grant_id;
+  WHERE renewal_grant_id = grant_row.renewal_grant_id
+    AND (last_used_at IS NULL OR last_used_at <= statement_timestamp());
 
   RETURN NEW;
 END
