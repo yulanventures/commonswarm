@@ -145,6 +145,15 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
+test("Fold 10 MCP register budget citation points to its constant", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS"]?.citation;
+  const match = /^src\/cloud\/mcp-connect\.ts:(\d+)$/.exec(citation ?? "");
+  assert.ok(match, `unexpected citation: ${citation}`);
+  const source = await readFile(join(repo, "src/cloud/mcp-connect.ts"), "utf8");
+  assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /^export const MCP_REGISTER_TIMEOUT_MS = 10_000;$/);
+});
+
 test("MCP hidden-input timeout citation points to the stty deadline", { timeout: 10000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:timeout"]?.citation;

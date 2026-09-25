@@ -3146,7 +3146,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:24",
+          "citation": "src/cloud/mcp-connect.ts:23",
           "detail": "Register request budget for the H0 seat write.",
           "operation": {
             "name": "mcp-register",
@@ -3164,7 +3164,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:675",
+          "citation": "src/cloud/mcp-connect.ts:700",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3180,7 +3180,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:254",
+          "citation": "src/cloud/mcp-connect.ts:267",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",
