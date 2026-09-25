@@ -10,6 +10,10 @@ import type { CloudTarget } from "./config.js";
 const NAMESPACE = "1c20a85c-ff0f-4c85-90a3-83d83cfda936";
 const RECORD_LIFETIME_MS = 3 * 60 * 60 * 1000;
 const MAX_RECORDS = 200;
+const TERMINAL_COMMIT_CODES = new Set([
+  "file_version_precondition_failed", "file_commit_conflict", "file_size_exceeds_declaration",
+  "file_not_found", "file_version_cap", "command_id_conflict",
+]);
 export type PutOutcome = "committed" | "replayed";
 export type ConflictCheck = "available" | "unavailable";
 export class RequestIdConflict extends Error {
@@ -143,7 +147,7 @@ export async function executeExactPut(prepared: PreparedPut): Promise<PutResult>
       fileId: created.file_id, versionId: created.version_id, sha256: record.sha256,
     }));
   } catch (error) {
-    if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500 && error.status !== 429 && error.code !== "file_bytes_missing") {
+    if (error instanceof FileCommandRefused && TERMINAL_COMMIT_CODES.has(error.code)) {
       record.refusal = { status: error.status, code: error.code };
       await phase(prepared, "refused");
     }

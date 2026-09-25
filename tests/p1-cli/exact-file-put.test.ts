@@ -197,6 +197,20 @@ test("commit rate limit remains retryable with the same request id", { timeout: 
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
+test("commit access refusal can succeed after access is restored", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  edge.commitRefusal = { status: 403, code: "forbidden" };
+  try {
+    const first = await prepareExactPut(input(dir, edge));
+    await assert.rejects(executeExactPut(first), (error: unknown) => error instanceof FileCommandRefused && error.status === 403);
+    assert.equal(JSON.parse(await readFile(first.path, "utf8")).phase, "uploaded");
+    edge.commitRefusal = null;
+    assert.equal((await executeExactPut(await prepareExactPut(input(dir, edge)))).outcome, "committed");
+    assert.equal(edge.live, 1);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("an uploaded resume record never writes an earlier phase", { timeout: 10000 }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
   const edge = new FakeEdge();
