@@ -103,12 +103,13 @@ The commit handler checks that exact `storage_path` before changing the pending 
 | Mutation: remove HTTP 400 structured duplicate fast path | 1; deleted-record test: 1 test, 0 pass, 1 fail. |
 | `npm run build` | 0. |
 | `env -u FORCE_COLOR npm test` | 1; 990 tests, 988 pass, 2 fail. Both are unrelated sandbox `spawn EPERM` in real `ps`/resume tests. |
-| `env -u FORCE_COLOR npm run test:p1-cli` | 124 after a 240-second process-group timeout; the partial log has 220 passing test lines and no suite total. The focused Item L tests passed separately. |
+| `env -u FORCE_COLOR npm run test:p1-cli` | Initial run: exit 124 after a 240-second process-group timeout, with 220 passing lines and no suite total. Bounded rerun with `--test-concurrency=4 --test-timeout=30000`: exit 1; 982 tests, 979 pass, 3 fail. All three are sandbox `ps` spawn `EPERM`; Item L tests passed. |
 | `npm run check:tests`; `npm run check:edge` | 0; 0. |
 | `npm run build:command-core`; generated bundle diff | 0; 0, unchanged. |
 | `bash scripts/build-release.sh` | 0; checked single-file bundle. |
 | `npm --prefix site run build` | Initial exit 1, Vite cache `EPERM` under the shared dependency symlink; exit 0 with a writable dependency copy, 12 pages. Original link restored. |
+| `git diff --check origin/main...HEAD` | 0; 15 paths in the committed range. |
 
-The local-stack server test, production v1.77.5 Storage refusal shape, full CLI gate completion, and a final process
+The local-stack server test, production v1.77.5 Storage refusal shape, and a final process
 inventory (`pgrep` returned `sysmond service not found`) are not established here. The timeout wrapper killed its
 process group. No production host, real workspace, migration, or local stack lifecycle command was used.
