@@ -13,6 +13,20 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
+## Update 2026-09-25 ~02:20Z: item G box window SET for 2026-09-25 21:45Z; G lane 2b Maker running
+
+- **G box window 2026-09-25 ~21:45Z** (HezLead confirmed): release SHA 9627cb37e697046d22ab02dd2b57bc56937afc14 (same
+  code as 7c0bee1e). Plan: `docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md` (rehearsed; Opus + Grok two rounds).
+  Tom mints the two seed seats 20:00-21:30Z (block in the doc). When HezLead says phase B passed, the LEAD runs
+  `deploy/release-proofs/item-g/g-seed.sh <bundle built from 9627cb37, copied outside the repo>
+  "$HOME/.config/cswarm/g-seed-20260925" https://api.commonswarm.com c2ea0541-f56d-4c73-bf71-56c5405c4934` after adding
+  `anon-key.txt` (0600, from the site meta, digest-checked) to that directory, and sends `SEED_NOTE_ID` natively.
+  Then 0.1.78 (G lanes 1 + 2a) and the site, and the stale-receipt read on production.
+- Local-stack trap measured today: the stack's own edge runtime fails DB lookups with ENOTFOUND; serve functions with
+  `supabase functions serve --no-verify-jwt --env-file <file with SWARM_ENV=test>` (as the server suite does).
+- **G lane 2b** (server wake lease): brief `docs/design/2026-09-25-ITEM-G-LANE-2B-BRIEF.md` (Strategist rulings in it),
+  Codex Maker running in the lead's worktree `wt-g2b` (branch lane/item-g-lane2b).
+
 ## Update 2026-09-25 ~00:40Z: item J IN PRODUCTION; cswarm 0.1.77 released; G lane 2a reviewed
 
 - **Item J is live** (box 00:18Z migration, 00:30Z edge `4ef0f300`; CLI 0.1.77 on GitHub/npm; site

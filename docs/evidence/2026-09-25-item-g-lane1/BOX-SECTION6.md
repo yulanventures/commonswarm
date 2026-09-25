@@ -1,6 +1,8 @@
 # Item G lane 1: box window plan (2026-09-25 21:45Z)
 
-Written by CSwarmDevLead for HezLead and Anvil. Reviewed: Opus + Grok, two rounds (`box-plan-arms/`). Release SHA: `7c0bee1e750450f305bab5ada68fb8f813a10c83`.
+Written by CSwarmDevLead for HezLead and Anvil. Reviewed: Opus + Grok, two rounds (`box-plan-arms/`). Release SHA: `9627cb37e697046d22ab02dd2b57bc56937afc14` (confirmed by HezLead 2026-09-25 ~02:15Z; its `src/`, `supabase/`,
+`deploy/edge-runtime` and `deploy/supabase-stack` are identical to the first-requested `7c0bee1e`, and it adds this plan
+and the proofs Anvil stages).
 KIND_LIST `edge stack`; CHANGED_FUNCTIONS `command read`; no router change; no new env names; migration
 `20260925000001_unclaimed_observed_ack.sql`. Agreed with HezLead on 2026-09-25 ~01:00Z: no credential goes to the box.
 The lead runs steps 1-3 from the mini against `https://api.commonswarm.com`, and Anvil runs only the read-only step 4.
