@@ -171,7 +171,7 @@ test("every model-facing command pair is a tool or a derived bootstrap entry", a
       assert.notEqual(
         modelFacingCategory(entry),
         null,
-        `${surface} names cswarm ${verb}${action ? ` ${action}` : ""}, but that pair is neither a tool, bootstrap, nor CLI-only until item L`,
+        `${surface} names cswarm ${verb}${action ? ` ${action}` : ""}, but that pair is neither a tool nor bootstrap`,
       );
     }
   }
@@ -191,10 +191,9 @@ test("file and brain puts are model tools on the stdio transport", { timeout: 10
   const file = AGENT_COMMANDS.file;
   assert.ok(file && isGroup(file));
   assert.equal(file.subcommands.put.tool, "file_put");
-  const stdio = agentToolsForTransport("stdio").map(tool => tool.name);
-  assert.ok(stdio.includes(put.tool));
-  assert.ok(stdio.includes(file.subcommands.put.tool));
-  const mcp = MCP_TOOLS.map(tool => tool.name);
+  const served = entries().filter(({ entry }) => entry.mcp).map(({ entry }) => entry.tool).sort();
+  const mcp = MCP_TOOLS.map(tool => tool.name).sort();
+  assert.deepEqual(mcp, served, "the complete MCP tool set must match the command table's MCP entries");
   assert.ok(mcp.includes(put.tool));
   assert.ok(mcp.includes(file.subcommands.put.tool));
 });

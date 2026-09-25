@@ -8364,6 +8364,7 @@ async function uploadNamedFile(
 async function runFilePut(args: Arguments): Promise<void> {
   const localPath = args.positionals[2];
   if (!localPath) throw new UsageError("cswarm file put needs a local path");
+  const context = await fileContext(args, ["name", "request-id"], 3);
   let bytes: Uint8Array;
   try {
     bytes = readFileSync(localPath);
@@ -8371,9 +8372,6 @@ async function runFilePut(args: Arguments): Promise<void> {
     throw new Error(`could not read ${localPath}; check the path and permissions`);
   }
   const name = args.optional("name") ?? basename(localPath);
-  if (bytes.byteLength > FILE_MAX_VERSION_BYTES) throw new Error(`this file exceeds the ${FILE_MAX_VERSION_BYTES / 1024 / 1024} MiB upload limit`);
-  if (contentTypeForName(name) === null) throw new Error(`the name needs an allowed extension: ${allowedExtensionList()}`);
-  const context = await fileContext(args, ["name", "request-id"], 3);
   const committed = await uploadNamedFile(context, name, bytes, {
     ...(args.optional("request-id") === undefined ? {} : { requestId: args.required("request-id") }),
     ...(args.expandedProfilePath === undefined ? {} : { profilePath: args.expandedProfilePath }),
@@ -8675,6 +8673,7 @@ async function runBrainPut(args: Arguments): Promise<void> {
   const ifVersion = args.optional("if-version") === undefined
     ? undefined
     : integer(args, "if-version", { minimum: 0 });
+  const context = await fileContext(args, ["if-version", "request-id"], args.positionals.length);
   let bytes: Uint8Array;
   if (localPath) {
     try {
@@ -8688,9 +8687,7 @@ async function runBrainPut(args: Arguments): Promise<void> {
   } else {
     bytes = await readBrainMarkdownFromStdin();
   }
-  if (bytes.byteLength > FILE_MAX_VERSION_BYTES) throw new Error(`this file exceeds the ${FILE_MAX_VERSION_BYTES / 1024 / 1024} MiB upload limit`);
   decodeBrainMarkdown(bytes);
-  const context = await fileContext(args, ["if-version", "request-id"], args.positionals.length);
   const committed = await uploadNamedFile(
     context,
     brainFileName(topic),
@@ -8702,7 +8699,7 @@ async function runBrainPut(args: Arguments): Promise<void> {
     /* D-053: classified by the server's stable code, never by its prose. The
      * server's own sentence carries the live version and is printed as data. */
     if (
-      error instanceof FileCommandRefused &&
+      args.optional("request-id") === undefined && error instanceof FileCommandRefused &&
       error.code === FILE_VERSION_PRECONDITION_FAILED
     ) {
       throw new Error(
@@ -9253,6 +9250,7 @@ export type AgentCommandEntry = AgentCommandTool & {
   mutates: boolean;
   flags: readonly string[];
   transports: readonly AgentCommandTransport[];
+  mcp: boolean;
   profile: AgentCommandProfileMode;
   hostSessionId: AgentCommandHostSessionPolicy;
   profileListOrder?: number;
@@ -9290,6 +9288,7 @@ type AgentCommandCommonOptions = AgentCommandTool & {
   mutates: boolean;
   flags: readonly string[];
   transports: readonly AgentCommandTransport[];
+  mcp?: boolean;
   profile: AgentCommandProfileMode;
   hostSessionId: AgentCommandHostSessionPolicy;
   profileListOrder?: number;
@@ -9325,6 +9324,7 @@ function commandEntry(
       select: () => "default",
       argumentSchema: commandArgumentSchema(flags),
       bootstrap: options.bootstrap ?? false,
+      mcp: options.mcp ?? false,
       errorMode: options.errorMode ?? (options.bootstrap ? "onboarding" : "standard"),
       workspaceErrorJson: options.workspaceErrorJson ?? false,
     };
@@ -9333,6 +9333,7 @@ function commandEntry(
   return {
     ...common,
     flags,
+    mcp: options.mcp ?? false,
     variants,
     select,
     argumentSchema: commandArgumentSchema(flags),
@@ -9535,7 +9536,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     bootstrap: true,
   }),
   check: commandEntry({
-    tool: "check",
+    tool: "check", mcp: true,
     ...selectedVariants(checkVariants, (args) => args.has("hook") ? "hook" : args.has("message-id") ? "message" : "messages"),
     description: "Read new directed messages for this agent.",
     mutates: true,
@@ -9615,7 +9616,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runTarget",
   }),
   status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status"], workspaceErrorJson: true }),
-  whoami: commandEntry({ tool: "whoami", handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami"] }),
+  whoami: commandEntry({ tool: "whoami", mcp: true, handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami"] }),
   resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
   feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback"] }),
   channel: group({
@@ -9629,7 +9630,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runChannel",
   }),
   file: group({
-    put: commandEntry({ tool: "file_put", handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put"], workspaceErrorJson: true }),
+    put: commandEntry({ tool: "file_put", mcp: true, handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put"], workspaceErrorJson: true }),
     ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls"], workspaceErrorJson: true }),
     get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get"], workspaceErrorJson: true }),
     rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm"], workspaceErrorJson: true }),
@@ -9642,17 +9643,17 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   brain: group({
     ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls"], workspaceErrorJson: true }),
     get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get"], workspaceErrorJson: true }),
-    put: commandEntry({ tool: "brain_put", handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put"], workspaceErrorJson: true }),
+    put: commandEntry({ tool: "brain_put", mcp: true, handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put"], workspaceErrorJson: true }),
   }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 9,
     refusalTrace: "runBrain",
   }),
-  members: commandEntry({ tool: "members", handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members"] }),
-  "working-on": commandEntry({ tool: "working_on", handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: ["cswarm working-on"], workspaceErrorJson: true }),
-  note: commandEntry({ tool: "note", handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: ["cswarm note"], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: ["cswarm ask"], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
+  members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members"] }),
+  "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: ["cswarm working-on"], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: ["cswarm note"], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: ["cswarm ask"], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(NOTIFY_FLAG) ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
@@ -9872,6 +9873,7 @@ function safeParagraph(message: string): string {
 }
 
 import { fileURLToPath } from "node:url";
+import { RequestIdConflict } from "./cloud/exact-file-put.js";
 
 export function isCliMain(): boolean {
   if (
@@ -9917,6 +9919,11 @@ if (isCliMain()) {
       selected.args.startsWithLeadingPositionals("hook", "check")
     ) {
       process.exitCode = 0;
+      return;
+    }
+    if (error instanceof RequestIdConflict && selected?.args.has("json") && selected.args.has("request-id")) {
+      process.stdout.write(`${JSON.stringify({ error: error.code, code: error.code, message: safeError(error) })}\n`);
+      process.exitCode = 1;
       return;
     }
     // The renewal horizon is not a malfunction; it is the periodic human checkpoint §2.3

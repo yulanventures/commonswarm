@@ -776,8 +776,33 @@ test("file put --request-id replays across CLI processes and conflicts before cr
     writeFileSync(localPath, "# changed\n");
     const conflict = await cliAgainst(cloud, args);
     assert.notEqual(conflict.code, 0);
-    assert.match(conflict.stderr, /request id was already used|RequestIdConflict/i);
+    assert.equal(JSON.parse(conflict.stdout).code, "request_id_conflict");
+    assert.equal(conflict.stderr, "");
     assert.equal(cloud.commands.length, commands);
+  } finally { await cloud.close(); }
+});
+
+test("legacy file put keeps credential errors first and its preflight copy", { timeout: 20_000 }, async () => {
+  const cloud = await startFakeCloud();
+  try {
+    const missing = join(scratch, "missing-legacy.md");
+    const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "file", "put", missing,
+      "--url", cloud.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE,
+      "--agent-token-file", join(scratch, "missing-credential")], {
+      cwd: process.cwd(), env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: join(scratch, "config") }, stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    const code = await new Promise<number>((done, fail) => { child.once("error", fail); child.once("close", value => done(value ?? 1)); }).finally(() => clearTimeout(timer));
+    assert.notEqual(code, 0);
+    assert.match(stderr, /credential/i);
+    assert.doesNotMatch(stderr, /could not read/);
+    const huge = join(scratch, "huge-legacy.md");
+    writeFileSync(huge, Buffer.alloc(25 * 1024 * 1024 + 1));
+    assert.match((await cliAgainst(cloud, ["file", "put", huge])).stderr, /per-file limit is/);
+    const unsupported = join(scratch, "legacy.sh");
+    writeFileSync(unsupported, "code");
+    assert.match((await cliAgainst(cloud, ["file", "put", unsupported])).stderr, /has no allowed file extension/);
   } finally { await cloud.close(); }
 });
 

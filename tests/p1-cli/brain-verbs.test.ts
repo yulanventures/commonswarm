@@ -358,6 +358,29 @@ test("brain put --request-id replays across CLI processes", { timeout: 20_000 },
     assert.equal(second.code, 0, second.stderr);
     assert.equal(JSON.parse(second.stdout).outcome, "replayed");
     assert.equal(cloud.commands.length, commands);
+    writeFileSync(path, "# changed content\n");
+    const conflict = await cliAgainst(cloud, args);
+    assert.notEqual(conflict.code, 0);
+    assert.equal(JSON.parse(conflict.stdout).code, "request_id_conflict");
+    assert.equal(conflict.stderr, "");
+    assert.equal(cloud.commands.length, commands);
+  } finally { await cloud.close(); }
+});
+
+test("legacy brain put checks credentials before a missing Markdown path", { timeout: 10000 }, async () => {
+  const cloud = await startFakeCloud();
+  try {
+    const child = spawn(process.execPath, ["--import", "tsx", "src/cli.ts", "brain", "put", "Architecture", join(scratch, "missing-brain.md"),
+      "--url", cloud.url, "--anon-key", "test-anon", "--workspace-id", WORKSPACE,
+      "--agent-token-file", join(scratch, "missing-credential")], {
+      cwd: process.cwd(), env: { ...process.env, HOME: scratch, XDG_CONFIG_HOME: join(scratch, "config") }, stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const timer = setTimeout(() => child.kill("SIGKILL"), 8000);
+    const code = await new Promise<number>((done, fail) => { child.once("error", fail); child.once("close", value => done(value ?? 1)); }).finally(() => clearTimeout(timer));
+    assert.notEqual(code, 0);
+    assert.match(stderr, /credential/i);
+    assert.doesNotMatch(stderr, /could not read/);
   } finally { await cloud.close(); }
 });
 
