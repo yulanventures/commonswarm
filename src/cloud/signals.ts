@@ -875,14 +875,15 @@ function checkedLimit(value: number | undefined): number {
 }
 
 export const INBOX_SINCE_EXAMPLE = "2026-09-25T12:00:00+00:00";
+export const SINCE_OFFSET_GUIDANCE = `--since needs an ISO-8601 date or timestamp with an explicit offset or Z, for example ${INBOX_SINCE_EXAMPLE}.`;
 export class SignalSinceError extends Error {
   readonly code = "since_offset_required";
 }
 
 export function checkedSince(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) {
-    throw new SignalSinceError(`--since needs an ISO-8601 timestamp with an offset, for example ${INBOX_SINCE_EXAMPLE}.`);
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) {
+    throw new SignalSinceError(SINCE_OFFSET_GUIDANCE);
   }
   return new Date(value).toISOString();
 }

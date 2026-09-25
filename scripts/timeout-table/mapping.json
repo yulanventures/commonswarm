@@ -121,7 +121,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7818-7843",
+          "citation": "src/cli.ts:7994-8010",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -135,7 +135,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7864-7871",
+          "citation": "src/cli.ts:8041-8043",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -150,7 +150,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3294",
+          "citation": "src/cli.ts:3300",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1532,7 +1532,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6496",
+          "citation": "src/cli.ts:6682",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -1546,7 +1546,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6693",
+          "citation": "src/cli.ts:6883",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -1675,7 +1675,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7818-7843",
+          "citation": "src/cli.ts:7994-8010",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1689,7 +1689,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3294",
+          "citation": "src/cli.ts:3300",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1775,7 +1775,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:7872; src/onboarding-cli.ts:106",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8043; src/onboarding-cli.ts:106",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -3116,7 +3116,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6517",
+          "citation": "src/cli.ts:6682",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3130,7 +3130,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6714",
+          "citation": "src/cli.ts:6883",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3146,7 +3146,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:21",
+          "citation": "src/cloud/mcp-connect.ts:20",
           "detail": "Register request budget for the H0 seat write.",
           "operation": {
             "name": "mcp-register",
@@ -3164,7 +3164,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:167",
+          "citation": "src/cloud/mcp-connect.ts:166",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3180,7 +3180,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:48",
+          "citation": "src/cloud/mcp-connect.ts:47",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",

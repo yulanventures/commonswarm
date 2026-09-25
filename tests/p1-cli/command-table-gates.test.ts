@@ -12,6 +12,16 @@ import {
   BOOLEAN_FLAGS,
   KNOWN_FLAGS,
   parseCommandOptions,
+  SESSION_HUMAN_ACCEPTED_FLAGS,
+  SESSION_START_ACCEPTED_FLAGS,
+  SESSION_STATUS_ACCEPTED_FLAGS,
+  SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  LISTEN_START_ACCEPTED_FLAGS,
+  LISTEN_STATUS_ACCEPTED_FLAGS,
+  LISTEN_CANARY_ACCEPTED_FLAGS,
+  FEEDBACK_KINDS,
+  LISTENER_PERMISSION_MODES,
+  listenerPermissionMode,
   usage,
   type AgentCommandEntry,
   type AgentCommandGroup,
@@ -21,7 +31,9 @@ import { onboardingUsage } from "../../src/onboarding-cli.js";
 import { CHANNEL_PURPOSE_MAX } from "../../src/cloud/channels.js";
 import { listenerRouteUsage } from "../../src/listener/index.js";
 import { parseSessionMode, parseSessionProvider } from "../../src/cloud/session-cli.js";
+import { SESSION_PROVIDERS } from "../../src/cloud/session-contract.js";
 import { parseReceiveMode, parseReceiveProvider } from "../../src/cloud/agent-receive.js";
+import { SINCE_OFFSET_GUIDANCE } from "../../src/cloud/signals.js";
 
 type EntryRow = { key: string; entry: AgentCommandEntry };
 
@@ -121,8 +133,6 @@ test("rendered flags exactly match in-process command parser acceptance", { time
 test("each enumerated help flag uses its command's enforcement parser", { timeout: 10_000 }, () => {
   const parsers: Record<string, Record<string, (value: string) => unknown>> = {
     "session.start": { mode: parseSessionMode, provider: parseSessionProvider },
-    "session.status": { mode: parseSessionMode, provider: parseSessionProvider },
-    "session.stop": { mode: parseSessionMode, provider: parseSessionProvider },
     "receive.configure": { mode: parseReceiveMode, provider: parseReceiveProvider },
   };
   for (const [key, flags] of Object.entries(parsers)) {
@@ -136,6 +146,107 @@ test("each enumerated help flag uses its command's enforcement parser", { timeou
       assert.throws(() => parse("not-rendered-control"), `${key} --${flag} accepted an unrendered value`);
     }
   }
+});
+
+test("session handler and help read the same accepted-flag constants", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  const ast = ts.createSourceFile("src/cli.ts", source, ts.ScriptTarget.Latest, true);
+  let runSession: ts.FunctionDeclaration | undefined;
+  ast.forEachChild(node => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === "runSession") runSession = node;
+  });
+  assert.ok(runSession);
+  const shapes: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && node.expression.getText(ast) === "args.assertShape") {
+      shapes.push(node.arguments[0]!.getText(ast));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(runSession);
+  assert.deepEqual(shapes, [
+    "SESSION_HUMAN_ACCEPTED_FLAGS",
+    "args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS",
+    "args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS",
+    "SESSION_START_ACCEPTED_FLAGS",
+  ]);
+  const expected: Record<string, readonly string[]> = {
+    start: [...SESSION_START_ACCEPTED_FLAGS, "profile"],
+    status: [...SESSION_PROFILE_STATUS_ACCEPTED_FLAGS, "profile"],
+    stop: [...SESSION_PROFILE_STATUS_ACCEPTED_FLAGS, "profile"],
+    enable: SESSION_HUMAN_ACCEPTED_FLAGS,
+    disable: SESSION_HUMAN_ACCEPTED_FLAGS,
+    recover: SESSION_HUMAN_ACCEPTED_FLAGS,
+  };
+  for (const [action, flags] of Object.entries(expected)) {
+    const rendered = new Set([...commandHelpLines("session", action).matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
+    assert.deepEqual([...rendered].sort(), [...new Set(flags)].sort(), action);
+  }
+  assert.deepEqual(SESSION_STATUS_ACCEPTED_FLAGS.filter(flag => ["mode", "provider", "principal-id", "host-label", "foreground"].includes(flag)), []);
+  const start = commandHelpLines("session", "start");
+  assert.match(start, /cswarm session start[^\n]*--foreground/);
+  assert.match(start, /cswarm session start[^\n]*--agent-token-file/);
+  for (const action of ["status", "stop"]) {
+    assert.match(commandHelpLines("session", action), /\[--profile [^\n]*\[--workspace-id/);
+  }
+});
+
+test("since guidance is one shared sentence for inbox, read and feed", { timeout: 10_000 }, () => {
+  assert.equal(usage().split(SINCE_OFFSET_GUIDANCE).length - 1, 1);
+  assert.match(commandHelpLines("inbox"), /--since/);
+  assert.match(commandHelpLines("feed"), /--since/);
+});
+
+test("listen handler shapes and help share accepted flags including state-dir", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.match(source, /handler: traced\("runListen", runListenStart\)[^\n]+flags: LISTEN_START_ACCEPTED_FLAGS/);
+  assert.match(source, /handler: traced\("runListen", \(args\) => runListenStatusOrStop\(args, "status"\)\)[^\n]+flags: LISTEN_STATUS_ACCEPTED_FLAGS/);
+  assert.match(source, /handler: traced\("runListen", \(args\) => runListenStatusOrStop\(args, "stop"\)\)[^\n]+flags: LISTEN_STATUS_ACCEPTED_FLAGS/);
+  assert.match(source, /handler: traced\("runListen", runListenCanary\)[^\n]+flags: LISTEN_CANARY_ACCEPTED_FLAGS/);
+  const ast = ts.createSourceFile("src/cli.ts", source, ts.ScriptTarget.Latest, true);
+  for (const [name, constant] of [
+    ["runListenStart", "LISTEN_START_ACCEPTED_FLAGS"],
+    ["runListenStatusOrStop", "LISTEN_STATUS_ACCEPTED_FLAGS"],
+    ["runListenCanary", "LISTEN_CANARY_ACCEPTED_FLAGS"],
+  ]) {
+    const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+    const calls: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && node.expression.getText(ast) === "args.assertShape") calls.push(node.arguments[0]!.getText(ast));
+      ts.forEachChild(node, visit);
+    };
+    visit(declaration);
+    assert.deepEqual(calls, [constant], name);
+  }
+  for (const [action, flags] of [
+    ["start", LISTEN_START_ACCEPTED_FLAGS],
+    ["status", LISTEN_STATUS_ACCEPTED_FLAGS],
+    ["stop", LISTEN_STATUS_ACCEPTED_FLAGS],
+    ["canary", LISTEN_CANARY_ACCEPTED_FLAGS],
+  ] as const) {
+    const rendered = new Set([...commandHelpLines("listen", action).matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
+    assert.deepEqual([...rendered].sort(), [...new Set([...flags, "profile"])].sort(), action);
+  }
+  assert.doesNotMatch(commandHelpLines("listen", "start"), /--session-context/);
+});
+
+test("provider, permissions and feedback kind help render enforcement values", { timeout: 10_000 }, async () => {
+  const listen = commandHelpLines("listen", "start");
+  const feedback = commandHelpLines("feedback");
+  assert.match(listen, new RegExp(`--provider ${SESSION_PROVIDERS.join("\\|")}`));
+  assert.match(listen, new RegExp(`--permissions ${LISTENER_PERMISSION_MODES.join("\\|")}`));
+  assert.match(feedback, new RegExp(`--kind ${FEEDBACK_KINDS.join("\\|")}`));
+  for (const value of LISTENER_PERMISSION_MODES) assert.equal(listenerPermissionMode(value), value);
+  assert.throws(() => listenerPermissionMode("not-rendered-control"));
+  for (const value of SESSION_PROVIDERS) assert.equal(parseSessionProvider(value), value);
+  assert.throws(() => parseSessionProvider("not-rendered-control"));
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.match(source, /FEEDBACK_KINDS as readonly string\[\]\)\.includes\(kind\)/);
+  assert.match(source, /function listenerProvider\(args: Arguments\): ListenerProviderId \{[\s\S]*?SESSION_PROVIDERS as readonly string\[\]\)\.includes\(provider\)/);
+  assert.match(source, /help: \[`cswarm listen start[^`]+--provider \$\{SESSION_PROVIDERS\.join\("\|"\)\}/);
+  assert.match(source, /help: \[`cswarm listen start[^`]+--permissions \$\{LISTENER_PERMISSION_MODES\.join\("\|"\)\}/);
+  assert.match(source, /help: \[`cswarm feedback[^`]+--kind \$\{FEEDBACK_KINDS\.join\("\|"\)\}/);
 });
 
 test("route and purpose guidance reads enforcement constants", { timeout: 10_000 }, async () => {
@@ -368,7 +479,6 @@ test("main has one direct lookup and only allowlisted meta and selected-entry st
       throw new UsageError(\`unknown command: \${verb}\`);
     }
     const entry = selectCommandEntry(root, args);
-    args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
     const variant = selectCommandVariant(entry, args);
     selectedCommandContext = { entry, variant, args };
     await args.expandAgentProfile(entry.profile, entry.hostSessionId);

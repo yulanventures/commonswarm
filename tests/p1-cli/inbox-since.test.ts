@@ -45,6 +45,11 @@ test("inbox --since refuses a naive timestamp and names an offset example", { ti
   assert.throws(() => checkedSince("2026-09-25T12:00:00"), (error: unknown) =>
     error instanceof SignalSinceError && error.message.includes(INBOX_SINCE_EXAMPLE));
   assert.equal(checkedSince("2026-09-25T14:00:00+02:00"), "2026-09-25T12:00:00.000Z");
+  assert.equal(checkedSince("2026-09-25T14:00+02:00"), "2026-09-25T12:00:00.000Z");
+  for (const dateOnly of ["2026-09-25Z", "2026-09-25+00:00"]) {
+    if (Number.isFinite(Date.parse(dateOnly))) assert.equal(checkedSince(dateOnly), new Date(dateOnly).toISOString());
+  }
+  assert.throws(() => checkedSince("2026-09-25"), SignalSinceError);
 });
 
 test("wrong agent workspace is a typed refusal, not an empty inbox", { timeout: 10_000 }, () => {

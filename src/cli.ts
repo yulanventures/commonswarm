@@ -231,6 +231,7 @@ import {
   readAgentSignalPage,
   readDirectedInboxSince,
   checkedSince,
+  SINCE_OFFSET_GUIDANCE,
   readAgentSignalDirectory,
   readSignals,
   renderSignalStatus,
@@ -875,6 +876,7 @@ export const inboxMoreNotice = (last: string): string => `More inbox messages ma
 /** Non-command guidance appended after the command table's generated synopses. */
 const USAGE_GUIDANCE = `Inbox paging:
   inbox --since pages matching directed signals for an agent unless --limit is set.
+  ${SINCE_OFFSET_GUIDANCE}
   ${INBOX_LIMIT_NOTICE}
 
 Credential selection for command/dogfood:
@@ -933,7 +935,7 @@ Signals (intention sharing) accept the same credential selection. Agent mode
 never opens a browser or infers a human's saved workspace. Durations use a whole
 number plus m, h, or d (for example 90m, 24h, or 7d) and are capped at 30d.
 Place -- before signal text that itself begins with -- to stop option parsing.
-Signal text is at most 8000 characters and --about at most 500; a longer body is
+Signal text is at most ${SIGNAL_BODY_MAX} characters and --about at most ${SIGNAL_ABOUT_MAX}; a longer body is
 refused locally before any network call, so compose within the limit.
 
 ${idlePollHelpSentence()}
@@ -5058,6 +5060,7 @@ function listenerUuid(value: string | undefined, flag: string): string {
 }
 
 /** Omitting --permissions means ALLOW. Operator direction 2026-08-11: low friction by default. */
+export const LISTENER_PERMISSION_MODES = ["deny", "allow"] as const;
 export function listenerPermissionMode(value: string | undefined): ListenerPermissionMode {
   /* ~~`if (value === undefined || value === "deny") return "deny";`~~ Dead 2026-08-11. The omitted
    * flag used to mean deny, which made the safe-looking default the one that quietly breaks the
@@ -5080,8 +5083,8 @@ export function listenerPermissionMode(value: string | undefined): ListenerPermi
    * against a CROSS-OWNER sender steering the worker is what this trades away; what remains is
    * sender provenance in the prompt plus the model's judgement. `--permissions deny` is unchanged
    * and is the answer for a listener taking work from outside your account. */
-  if (value === undefined || value === "allow") return "allow";
-  if (value === "deny") return "deny";
+  if (value === undefined) return "allow";
+  if ((LISTENER_PERMISSION_MODES as readonly string[]).includes(value)) return value as ListenerPermissionMode;
   throw new Error("--permissions must be deny or allow");
 }
 
@@ -5120,17 +5123,12 @@ function listenerProvider(args: Arguments): ListenerProviderId {
   if (provider === undefined) {
     throw new Error(`--provider is required; ${hints}`);
   }
-  if (
-    provider !== "grok" &&
-    provider !== "opencode" &&
-    provider !== "claude" &&
-    provider !== "codex"
-  ) {
+  if (!(SESSION_PROVIDERS as readonly string[]).includes(provider)) {
     throw new Error(
       `unsupported --provider; ${hints}`,
     );
   }
-  return provider;
+  return provider as ListenerProviderId;
 }
 
 function validateListenerProviderFlags(
@@ -6918,8 +6916,7 @@ async function liveManagedContextPath(
   );
 }
 
-async function runListenStart(args: Arguments): Promise<void> {
-  args.assertShape([
+export const LISTEN_START_ACCEPTED_FLAGS = [
     "host-session-id",
     ...TARGET_FLAGS,
     "workspace-id",
@@ -6941,7 +6938,16 @@ async function runListenStart(args: Arguments): Promise<void> {
     "allow-unattended",
     "foreground",
     "json",
-  ], 2);
+  ] as const;
+export const LISTEN_STATUS_ACCEPTED_FLAGS = [
+    "host-session-id", ...TARGET_FLAGS, ...CREDENTIAL_FLAGS, "workspace-id", "principal-id", "state-dir", "json", ...SESSION_CONTEXT_FLAGS,
+  ] as const;
+export const LISTEN_CANARY_ACCEPTED_FLAGS = [
+    "host-session-id", ...TARGET_FLAGS, ...CREDENTIAL_FLAGS, "workspace-id", "state-dir", "wait", "json",
+  ] as const;
+
+async function runListenStart(args: Arguments): Promise<void> {
+  args.assertShape(LISTEN_START_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
@@ -7282,16 +7288,7 @@ async function runListenStatusOrStop(
   args: Arguments,
   command: "status" | "stop",
 ): Promise<void> {
-  args.assertShape([
-    "host-session-id",
-    ...TARGET_FLAGS,
-    ...CREDENTIAL_FLAGS,
-    "workspace-id",
-    "principal-id",
-    "state-dir",
-    "json",
-    ...SESSION_CONTEXT_FLAGS,
-  ], 2);
+  args.assertShape(LISTEN_STATUS_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   const cloud = await target(args);
   const workspaceId = listenerUuid(args.optional("workspace-id"), "workspace-id");
@@ -7392,15 +7389,7 @@ async function runListenStatusOrStop(
 }
 
 async function runListenCanary(args: Arguments): Promise<void> {
-  args.assertShape([
-    "host-session-id",
-    ...TARGET_FLAGS,
-    ...CREDENTIAL_FLAGS,
-    "workspace-id",
-    "state-dir",
-    "wait",
-    "json",
-  ], 2);
+  args.assertShape(LISTEN_CANARY_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
@@ -7457,17 +7446,17 @@ async function runListenCanary(args: Arguments): Promise<void> {
   );
 }
 
+export const SESSION_HUMAN_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"] as const;
+export const SESSION_STATUS_ACCEPTED_FLAGS = ["host-session-id", ...TARGET_FLAGS, ...CREDENTIAL_FLAGS, "session-context", "json"] as const;
+export const SESSION_PROFILE_STATUS_ACCEPTED_FLAGS = [...SESSION_STATUS_ACCEPTED_FLAGS, "workspace-id"] as const;
+export const SESSION_START_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "mode", "provider", "host-session-id", "host-label", "session-context", "json", "foreground"] as const;
+
 async function runSession(args: Arguments): Promise<void> {
   const action = args.positionals[1];
   if (
     action === "enable" || action === "disable" || action === "recover"
   ) {
-    args.assertShape([
-      ...TARGET_FLAGS,
-      "workspace-id",
-      "principal-id",
-      "json",
-    ], 2);
+    args.assertShape(SESSION_HUMAN_ACCEPTED_FLAGS, 2);
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
@@ -7498,14 +7487,7 @@ async function runSession(args: Arguments): Promise<void> {
     return;
   }
   if (action === "status") {
-    args.assertShape([
-      "host-session-id",
-      ...TARGET_FLAGS,
-      ...CREDENTIAL_FLAGS,
-      ...(args.hadProfileOption ? ["workspace-id"] : []),
-      "session-context",
-      "json",
-    ], 2);
+    args.assertShape(args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS, 2);
     requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
@@ -7534,14 +7516,7 @@ async function runSession(args: Arguments): Promise<void> {
     return;
   }
   if (action === "stop") {
-    args.assertShape([
-      "host-session-id",
-      ...TARGET_FLAGS,
-      ...CREDENTIAL_FLAGS,
-      ...(args.hadProfileOption ? ["workspace-id"] : []),
-      "session-context",
-      "json",
-    ], 2);
+    args.assertShape(args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS, 2);
     requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
@@ -7565,18 +7540,7 @@ async function runSession(args: Arguments): Promise<void> {
       "session requires start, status, stop, enable, disable, or recover",
     );
   }
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "mode",
-    "provider",
-    "host-session-id",
-    "host-label",
-    "session-context",
-    "json",
-    "foreground",
-  ], 2);
+  args.assertShape(SESSION_START_ACCEPTED_FLAGS, 2);
   if (!hasAgentCredential(args)) {
     throw new UsageError(
       "cswarm session start needs --agent-token-file or --agent-token-stdin",
@@ -8684,16 +8648,18 @@ async function runBrainPut(args: Arguments): Promise<void> {
   );
 }
 
+export const FEEDBACK_KINDS = ["bug", "idea", "friction"] as const;
+
 async function runFeedback(args: Arguments): Promise<void> {
   const body = args.positionals[1];
   if (!body) {
     throw new UsageError(
-      'cswarm feedback needs the feedback text: cswarm feedback "<text>" --kind bug|idea|friction',
+      `cswarm feedback needs the feedback text: cswarm feedback "<text>" --kind ${FEEDBACK_KINDS.join("|")}`,
     );
   }
   const kind = args.required("kind");
-  if (kind !== "bug" && kind !== "idea" && kind !== "friction") {
-    throw new UsageError("--kind must be bug, idea, or friction");
+  if (!(FEEDBACK_KINDS as readonly string[]).includes(kind)) {
+    throw new UsageError(`--kind must be ${FEEDBACK_KINDS.join(", ")}`);
   }
   const about = args.optional("about");
   const context = await fileContext(args, ["kind", "about"], 2);
@@ -8705,7 +8671,7 @@ async function runFeedback(args: Arguments): Promise<void> {
     credential: context.selected.bearer,
     fetcher: context.selected.fetcher,
   }, {
-    category: kind,
+    category: kind as (typeof FEEDBACK_KINDS)[number],
     body,
     context: {
       surface: "cli",
@@ -9385,7 +9351,10 @@ function helpFor(verb: string | undefined, action: string | undefined): string {
   if (!verb || verb === "help") return `${usage()}\n${onboardingUsage()}`;
   const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
   if (!root) return `${usage()}\n${onboardingUsage()}`;
-  return commandHelpLines(verb, isCommandGroup(root) && action !== undefined && Object.hasOwn(root.subcommands, action) ? action : undefined);
+  const command = commandHelpLines(verb, isCommandGroup(root) && action !== undefined && Object.hasOwn(root.subcommands, action) ? action : undefined);
+  return verb === "ask" || verb === "note"
+    ? `${command}\nSignal text is at most ${SIGNAL_BODY_MAX} characters; --about is at most ${SIGNAL_ABOUT_MAX}.`
+    : command;
 }
 
 function group(
@@ -9615,10 +9584,10 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runHook",
   }),
   listen: group({
-    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "grok-executable", "opencode-executable", "claude-executable", "codex-executable", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]`] }),
-    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
-    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
-    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] }),
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: LISTEN_START_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider ${SESSION_PROVIDERS.join("|")} [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions ${LISTENER_PERMISSION_MODES.join("|")}] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--state-dir <path>] [--defer-over <duration>] [--allow-unattended] [--foreground] [--json]`] }),
+    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: LISTEN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: LISTEN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
+    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: LISTEN_CANARY_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] }),
   }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 13,
@@ -9627,11 +9596,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => {
     const humanOnly = action === "enable" || action === "disable" || action === "recover";
     const synopsis = action === "start"
-      ? `cswarm session start --mode ${SESSION_MODES.join("|")} --provider ${SESSION_PROVIDERS.join("|")} --host-session-id <id> --workspace-id <uuid> [--host-label <label>] [--session-context <path>]`
+      ? `cswarm session start --mode ${SESSION_MODES.join("|")} --provider ${SESSION_PROVIDERS.join("|")} --host-session-id <id> --workspace-id <uuid> --agent-token-file <absolute-path> [--host-label <label>] [--session-context <path>] [--foreground] [--json]`
       : action === "status" || action === "stop"
-      ? `cswarm session ${action} --session-context <path> [--profile <absolute-path>] [--workspace-id <uuid>]`
+      ? `cswarm session ${action} --session-context <path> (--agent-token-file <path> | --agent-token-stdin) [--profile <absolute-path> [--workspace-id <uuid>]] [--json]`
       : `cswarm session ${action} --principal-id <uuid> --workspace-id <uuid>`;
-    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: humanOnly ? [...humanFlags, "principal-id"] : [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [synopsis] })];
+    const flags = humanOnly ? SESSION_HUMAN_ACCEPTED_FLAGS : action === "start" ? SESSION_START_ACCEPTED_FLAGS : SESSION_PROFILE_STATUS_ACCEPTED_FLAGS;
+    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags, transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [synopsis] })];
   })), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 14,
@@ -9669,7 +9639,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"], workspaceErrorJson: true }),
   whoami: commandEntry({ tool: "whoami", mcp: true, handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
   resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
-  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback \"<text>\" --kind bug|idea|friction [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: [`cswarm feedback "<text>" --kind ${FEEDBACK_KINDS.join("|")} [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`] }),
   channel: group({
     create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
     ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
@@ -9857,7 +9827,6 @@ async function main(): Promise<void> {
     throw new UsageError(`unknown command: ${verb}`);
   }
   const entry = selectCommandEntry(root, args);
-  args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
   const variant = selectCommandVariant(entry, args);
   selectedCommandContext = { entry, variant, args };
   await args.expandAgentProfile(entry.profile, entry.hostSessionId);
