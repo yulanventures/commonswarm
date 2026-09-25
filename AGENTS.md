@@ -140,6 +140,26 @@ npm --prefix site test
 
 In zsh, brace every revision with a path: use `${rev}:path`, never `$rev:path`.
 
+## Sandbox and deletion rules (measured 2026-09-25)
+
+On 2026-09-25 an unsandboxed Grok review arm wrote `HOME="$(mktemp -d)" env HOME="$HOME" node --test …`
+and then `rm -rf "$HOME"`. A prefix assignment applies to that one command only, and `"$HOME"` on the same
+line expands before it, so the tests ran in the real home and the last line was `rm -rf /Users/<user>`.
+It deleted every credential, checkout, and tool configuration under the home directory. There was no
+backup. Rules that follow:
+
+- Every arm and Maker runs in a sandbox: Codex with `-s workspace-write`; Claude with a permission mode;
+  Grok not at all until it has one. An arm or Maker never inherits a bypass-permissions session.
+- Only the lead runs test suites, in a sandbox or in a clean worktree with an absolute `HOME` it created.
+  A brief that says "tests with a temporary HOME" is a defect; the brief names the exact command instead.
+- A script that removes a directory named from a variable resolves the path first and refuses `/`, the
+  home directory, an empty value, and any path outside its own temporary root, with a control test that
+  proves the refusal.
+- Never write `rm -rf "$VAR"` where `VAR` can be `HOME`, empty, or set by a prefix assignment on the same
+  line. Delete only a path you created with an absolute `mktemp -d` and checked.
+
+The full record is `docs/org/2026-09-25-HOME-DELETION-RESUME-HERE.md`.
+
 ## Git, review, and commits
 
 Follow the workspace process: Codex makes, Claude judges, one cross-family review round,
