@@ -29,6 +29,7 @@ import {
   fileArrivalCursorStore,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+import { readAgentSignalDirectory } from "../../src/cloud/signals.js";
 import {
   FileBrainDigestStore,
   FileHookSurfaceStore,
@@ -269,8 +270,9 @@ test("resume pins each section, reports version drift and orphan pids, and chang
     assert.match(output, /PID 5101: stdout has a live pipe reader/);
     assert.match(output, /PID 5101: stdout has a live pipe reader; parent process is live/);
     assert.match(output, /PID 5102: ORPHAN: stdout pipe has no reader/);
-    assert.match(output, /CommonSwarm did not kill anything: kill 5102/);
+    assert.match(output, /CommonSwarm did not kill anything\.\nkill 5102\n/);
     assert.match(output, /restart v2/);
+    assert.doesNotMatch(output, /cswarm brain get <topic>/);
     assert.match(output, /without advancing it/);
     assert.match(output, /Unread directed asks and notes.*: 2/);
     assert.match(output, /No cursor, brain high-water, listener status, receipt, acknowledgement, or process was changed/);
@@ -537,6 +539,49 @@ test("resume fixture records and refuses a command POST", { timeout: 3000 }, asy
     assert.equal(result.status, 409);
     assert.deepEqual(requests, [{ path: "/functions/v1/command", resource: "command POST" }]);
   } finally { await close(server); }
+});
+
+test("resume reuses the identity members response for session status", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-resume-members-"));
+  const previous = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = join(root, "config");
+  let reads = 0;
+  const server = createServer((request, response) => {
+    request.resume();
+    request.on("end", () => {
+      reads += 1;
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+        members: [], agents: [{ principal_id: PRINCIPAL, owner_user_id: OWNER, name: "Rivet",
+          managed_at: null }],
+        identity: { credential_valid: true, principal_id: PRINCIPAL, owner_user_id: OWNER,
+          workspace_id: WORKSPACE },
+      }));
+    });
+  });
+  const url = await listen(server);
+  try {
+    const target = cloudTarget(url, "public-test-key");
+    const report = await inspectResume({ target, workspaceId: WORKSPACE,
+      credentialFile: join(root, "agent.json"), sessionCredential: TOKEN,
+      installedVersion: "test", stateDirectory: join(root, "state") }, {
+      async readIdentity() {
+        const directory = await readAgentSignalDirectory(target, TOKEN, WORKSPACE);
+        return { displayName: "Rivet", principalId: PRINCIPAL, sessionStatus: directory.sessionStatus };
+      },
+      async readBrainTopics() { return []; },
+      async readInboxCount() { return { count: 0, exact: true }; },
+      processTable: { async list() { return []; } },
+      async queryStatus() { throw new Error("no listener"); },
+      async readStatus() { return null; },
+    });
+    assert.equal(report.sessionContexts?.managed, false);
+    assert.equal(reads, 1, "session status must use the first members response");
+  } finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previous;
+    await close(server);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the real resume CLI uses only read resources and leaves local files byte-identical", { timeout: 10_000 }, async () => {
@@ -807,7 +852,8 @@ test("the restart sentence uses the CLI's notify flag constant", { timeout: 1_00
   assert.equal(notifyRestartCommand({ agentTokenFile: "/tmp/agent.json", workspaceId: WORKSPACE }),
     `cswarm inbox --notify --agent-token-file /tmp/agent.json --workspace-id ${WORKSPACE}`);
   assert.match(notifySignalStopSentence("SIGTERM", { agentTokenStdin: true }),
-    /pipe the same credential on stdin, then restart .* with cswarm inbox --notify --agent-token-stdin\.$/);
+    /same way it was started, with the agent token on stdin\.$/);
+  assert.doesNotMatch(notifySignalStopSentence("SIGTERM", { agentTokenStdin: true }), /^cswarm /m);
 });
 
 test("every notify parser flag survives in parsed start order without a token", { timeout: 1_000 }, () => {
@@ -884,16 +930,16 @@ test("the printed restart command starts a watcher against the same loopback rea
     })]);
     original.kill("SIGTERM");
     assert.equal(await originalExit, 143, stderr);
-    const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
-    assert.ok(match, stderr);
-    assert.ok(match[1]!.includes("--agent-token-file"));
-    assert.ok(match[1]!.includes(root), "relative credential becomes absolute for another cwd");
-    assert.ok(match[1]!.includes("--json --force-file-store"));
-    assert.ok(match[1]!.includes("--workspace-id"));
-    assert.ok(match[1]!.includes(`--url ${url}`));
-    assert.ok(match[1]!.includes("--anon-key anon-restart"));
+    const printed = stderr.trim().split("\n").find(line => line.startsWith("cswarm inbox --notify "));
+    assert.ok(printed, stderr);
+    assert.ok(printed.includes("--agent-token-file"));
+    assert.ok(printed.includes(root), "relative credential becomes absolute for another cwd");
+    assert.ok(printed.includes("--json --force-file-store"));
+    assert.ok(printed.includes("--workspace-id"));
+    assert.ok(printed.includes(`--url ${url}`));
+    assert.ok(printed.includes("--anon-key anon-restart"));
     assert.equal(stderr.includes(TOKEN), false, "the command must not print credential contents");
-    restarted = spawn("/bin/sh", ["-c", match[1]!], {
+    restarted = spawn("/bin/sh", ["-c", printed], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ""}` },
       stdio: ["ignore", "pipe", "pipe"],
@@ -917,7 +963,7 @@ test("the printed restart command starts a watcher against the same loopback rea
 });
 
 for (const startMode of ["stdin", "profile"] as const) {
-  test(`the ${startMode} restart command runs through /bin/sh and makes a new read`, { timeout: 12_000 }, async () => {
+  test(`the ${startMode} signal stop gives an executable command only when its credential source is known`, { timeout: 12_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), `cswarm-restart-${startMode}-`));
     const xdg = join(root, "state");
     const bin = join(root, "bin");
@@ -978,22 +1024,22 @@ for (const startMode of ["stdin", "profile"] as const) {
       })]);
       original.kill("SIGTERM");
       assert.equal(await originalExit, 143, stderr);
-      const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
-      assert.ok(match, stderr);
+      const printed = stderr.trim().split("\n").find(line => line.startsWith("cswarm inbox --notify "));
       assert.equal(stderr.includes(TOKEN), false);
       if (startMode === "stdin") {
-        assert.ok(stderr.includes("pipe the same credential on stdin, then restart"));
-        assert.ok(match[1]!.includes("--agent-token-stdin"));
-      } else {
-        assert.ok(match[1]!.includes(`--profile ${profile}`));
-        assert.equal(match[1]!.includes("--agent-token-file"), false);
+        assert.match(stderr, /same way it was started, with the agent token on stdin/);
+        assert.equal(printed, undefined, stderr);
+        return;
       }
-      restarted = spawn("/bin/sh", ["-c", match[1]!], {
+      assert.ok(printed, stderr);
+      assert.ok(printed.includes(`--profile ${profile}`));
+      assert.equal(printed.includes("--agent-token-file"), false);
+      restarted = spawn("/bin/sh", ["-c", printed], {
         cwd: process.cwd(),
         env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ""}` },
         stdio: ["pipe", "pipe", "pipe"],
       });
-      restarted.stdin!.end(startMode === "stdin" ? credentialArtifact() : "");
+      restarted.stdin!.end("");
       let restartError = "";
       restarted.stderr!.setEncoding("utf8");
       restarted.stderr!.on("data", (chunk: string) => restartError += chunk);
@@ -1065,9 +1111,9 @@ test("a watcher started with session context prints that accepted flag", { timeo
     })]);
     child.kill("SIGTERM");
     assert.equal(await exit, 143, stderr);
-    const match = stderr.trim().match(/with (cswarm inbox --notify .*)\.$/);
-    assert.ok(match, stderr);
-    assert.ok(match[1]!.includes(`--session-context ${contextPath}`));
+    const printed = stderr.trim().split("\n").find(line => line.startsWith("cswarm inbox --notify "));
+    assert.ok(printed, stderr);
+    assert.ok(printed.includes(`--session-context ${contextPath}`));
     assert.equal(stderr.includes(TOKEN), false);
   } finally {
     if (child?.exitCode === null) child.kill("SIGKILL");
@@ -1184,7 +1230,7 @@ test("resume uses parent evidence only when stdout is unproved", { timeout: 2_00
     const output = renderResume(report);
     assert.equal(output.includes("kill 123"), expected === "orphaned", `${stdout}/${parent}`);
     if (expected === "orphaned") {
-      assert.match(output, /then start one watcher from this seat's live host session after its context is verified/);
+      assert.match(output, /Then start one watcher from this seat's live host session after its context is verified/);
       assert.doesNotMatch(output, /cswarm inbox --notify/);
     }
     if (expected === "cannot_determine") {
@@ -1192,6 +1238,27 @@ test("resume uses parent evidence only when stdout is unproved", { timeout: 2_00
       if (stdout === "not_pipe") assert.doesNotMatch(output, /unknown stdout reader/);
     }
   }
+});
+
+test("the orphan stop command runs exactly as printed", { timeout: 3_000 }, async () => {
+  const sleeper = spawn("/bin/sleep", ["30"], { stdio: "ignore" });
+  try {
+    assert.ok(sleeper.pid);
+    const report: Parameters<typeof renderResume>[0] = {
+      identity: { displayName: "Test", principalId: PRINCIPAL },
+      listener: { checkedDirectory: "/tmp/none", status: null, source: "not_found" },
+      watchers: [{ pid: sleeper.pid, matchedBy: ["agent_token_file"], stdout: "orphaned", parent: "parent_alive" }],
+      brain: { digest: null, highWaterFile: "/tmp/none" }, inbox: { count: 0, exact: true },
+      target: cloudTarget("http://127.0.0.1:1", "anon"), workspaceId: WORKSPACE,
+      credentialFile: "/tmp/fake-agent.json", installedVersion: "test",
+    };
+    const printed = renderResume(report).split("\n").find(line => line.startsWith("kill "));
+    assert.equal(printed, `kill ${sleeper.pid}`);
+    const sleeperExit = waitForExit(sleeper, () => "", 1_000);
+    const shell = spawn("/bin/sh", ["-c", printed], { stdio: "ignore" });
+    assert.equal(await waitForExit(shell, () => "", 1_000), 0);
+    await sleeperExit;
+  } finally { if (sleeper.exitCode === null) sleeper.kill("SIGKILL"); }
 });
 
 test("lane record names the Linux idle-check limit", { timeout: 1_000 }, async () => {

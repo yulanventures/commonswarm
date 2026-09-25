@@ -4535,6 +4535,7 @@ async function runResume(args: Arguments): Promise<void> {
       return {
         displayName: sanitizeDisplayLabel(principal.name, "Unnamed agent"),
         principalId: identity.principal_id,
+        ...(directory.sessionStatus === undefined ? {} : { sessionStatus: directory.sessionStatus }),
       };
     },
     readBrainTopics: async () => brainTopicSnapshots(await listBrainRowsAsAgent(
@@ -4820,7 +4821,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   }
   const remedyCommand = liveContextPath !== null && !sameContext &&
     !optionTokens.includes("--agent-token-stdin")
-    ? notifyRefusalRestartCommand({ arguments: [...withoutContext, "--session-context", liveContextPath] })
+    ? notifyRefusalRestartCommand({ arguments: [...withoutContext, "--session-context", liveContextPath] }) ?? undefined
     : undefined;
   const refusedContextSource = suppliedContextPath === undefined ? undefined : explicitContext
     ? "operator" : profileStarted ? "profile" : undefined;
@@ -9953,7 +9954,9 @@ function sanitizeForTerminal(value: string): string {
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown error";
-  const safe = sanitizeForTerminal(message);
+  const safe = error instanceof WakeLeaseLostError
+    ? message.split("\n").map(sanitizeForTerminal).join("\n")
+    : sanitizeForTerminal(message);
   // This sentence is assembled from bounded CLI inputs and can contain a runnable
   // restart command. Cutting it can turn that command into a different command.
   return error instanceof WakeLeaseLostError ? safe : safe.slice(0, 1000);

@@ -28,6 +28,7 @@ import {
   SignalAttachmentMalformedError,
 } from "./attachments.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
+import { parseServerSessionStatus, type ServerSessionStatus } from "./session-client.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -1321,6 +1322,8 @@ export interface SignalDirectory {
   agents: readonly SignalAgent[];
   /** Absent on older compatible deployments. */
   identity?: SignalAgentIdentity;
+  /** Session fields from this same members response, for read-only resume. */
+  sessionStatus?: ServerSessionStatus;
 }
 
 export type ResolvedSignalRecipient =
@@ -1449,7 +1452,10 @@ export async function readAgentSignalDirectory(
     agents,
     ...(payload.identity === undefined
       ? {}
-      : { identity: parseAgentIdentity(payload.identity) }),
+      : (() => {
+        const identity = parseAgentIdentity(payload.identity);
+        return { identity, sessionStatus: parseServerSessionStatus(body, identity.principal_id) };
+      })()),
   };
 }
 

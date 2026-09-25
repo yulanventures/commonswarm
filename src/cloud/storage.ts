@@ -22,6 +22,8 @@ import type { CloudTarget } from "./config.js";
 // "not logged in" until `cswarm login` runs once. No migration is attempted on purpose.
 const KEYCHAIN_SERVICE = "com.commonswarm.cli";
 const LOCK_STALE_MS = 60_000;
+/** Host-id rotation is local file I/O only; five minutes is far above its normal subsecond hold. */
+export const HOST_ID_LOCK_STALE_MS = 5 * 60_000;
 const LOCK_TIMEOUT_MS = 30_000;
 const MAX_KEYCHAIN_RECORD_BYTES = 126;
 const MAX_PROFILE_BYTES = 64 * 1024;
@@ -321,7 +323,7 @@ export class FileLockTimeoutError extends Error {
   readonly code = "file_lock_timeout";
 
   constructor(readonly lockName: string) {
-    super("timed out waiting for the credential refresh lock");
+    super(`timed out waiting for the ${lockName === "host-id-rotation" ? "host-id rotation" : "credential refresh"} lock`);
   }
 }
 
@@ -372,11 +374,26 @@ async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
   }
 }
 
+/** Host-id locks copied from another machine or interrupted during creation cannot own this host. */
+async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<string | null> {
+  const raw = await readFile(lockPath, "utf8").catch(() => null);
+  if (raw === null) return null;
+  if (ageMs > HOST_ID_LOCK_STALE_MS) return raw;
+  let owner: { pid?: unknown; host?: unknown; createdAt?: unknown };
+  try { owner = JSON.parse(raw) as typeof owner; }
+  catch { return raw; }
+  if (!owner || owner.host !== hostname() || typeof owner.createdAt !== "number" ||
+      !Number.isSafeInteger(owner.createdAt) || typeof owner.pid !== "number" ||
+      !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return raw;
+  try { process.kill(owner.pid, 0); return null; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null; }
+}
+
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
   work: () => Promise<T>,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; stalePolicy?: "host-id" } = {},
 ): Promise<T> {
   await secureDirectory(stateDirectory);
   const lockPath = join(stateDirectory, `${lockName}.lock`);
@@ -399,11 +416,18 @@ export async function withFileLock<T>(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const lockInfo = await stat(lockPath).catch(() => null);
-      if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
+      if (lockInfo && options.stalePolicy !== "host-id" && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
         await unlink(lockPath).catch(() => undefined);
         continue;
       }
-      const deadRecord = lockInfo ? await deadLockOwnerRecord(lockPath) : null;
+      let deadRecord = lockInfo ? options.stalePolicy === "host-id"
+        ? await staleHostIdOwnerRecord(lockPath, Date.now() - lockInfo.mtimeMs)
+        : await deadLockOwnerRecord(lockPath) : null;
+      if (deadRecord === "" && options.stalePolicy === "host-id") {
+        // Let a just-created lock finish its owner write before treating an empty file as abandoned.
+        await delay(100);
+        deadRecord = await staleHostIdOwnerRecord(lockPath, Date.now() - lockInfo!.mtimeMs);
+      }
       if (deadRecord !== null) {
         // Re-read immediately before removing: another waiter may already have replaced the dead owner's lock with its
         // own, and that live lock must not be unlinked. The window left is the gap between this read and the unlink.

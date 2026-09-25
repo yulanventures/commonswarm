@@ -15,7 +15,7 @@ const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 type FixtureMode = "refuse" | "takeover" | "supersede" | "status" | "lifecycle" | "claim_retry" | "claim_inflight" |
   "unmanaged" | "session_conflict" | "session_expired" | "session_retired" |
-  "session_proof_invalid" | "session_proof_missing";
+  "session_proof_invalid" | "session_proof_missing" | "profile_unauthorized" | "profile_forbidden" | "profile_unreachable" | "profile_transport";
 async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
   const root = await mkdtemp(join(tmpdir(), "cswarm-wake-lease-cli-"));
   const credential = join(root, "agent.json");
@@ -78,6 +78,12 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
           }
         }
         if (command.kind === "claim_wake_lease" && mode === "refuse") {
+          if (command.take_over === true) {
+            response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
+              ok: true, status: "accepted", generation: 2,
+            }));
+            return;
+          }
           response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({
             error: "notify_held_elsewhere", surface: "watcher", host_label: "other-host",
             lease_age_ms: 1000,
@@ -113,6 +119,12 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
       }
       if (body.resource === "members") {
         membersReads += 1;
+        if (mode === "profile_transport") { response.destroy(); return; }
+        if (mode === "profile_unauthorized" || mode === "profile_forbidden" || mode === "profile_unreachable") {
+          response.writeHead(mode === "profile_unauthorized" ? 401 : mode === "profile_forbidden" ? 403 : 503,
+            { "content-type": "application/json" }).end(JSON.stringify({ error: "refused" }));
+          return;
+        }
         const send = () => response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
           members: [], agents: [{ principal_id: principal, owner_user_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", name: "Fixture seat",
             ...(mode === "unmanaged" ? {} : { managed_at: "2026-09-25T00:00:00Z" }),
@@ -198,6 +210,42 @@ test("a fresh remote holder refuses start with host and takeover command", { tim
     assert.match(String(f.seen[0]?.host_id), /^[0-9a-f-]{36}$/);
     assert.equal(Object.hasOwn(f.seen[0] ?? {}, "local_lock_held"), false);
   } finally { await f.cleanup(); }
+});
+
+test("the non-stdin holder command runs exactly as printed through the shell", { timeout: 8_000 }, async () => {
+  const f = await fixture("refuse");
+  let child: ChildProcess | null = null;
+  try {
+    const refusal = await f.start().exit;
+    assert.equal(refusal.code, 76, refusal.stderr);
+    const command = refusal.stderr.split("\n").find(line => line.startsWith("cswarm inbox --notify "));
+    assert.ok(command, refusal.stderr);
+    assert.ok(command.endsWith("--take-over"), command);
+    const bin = join(f.root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    child = spawn("/bin/sh", ["-c", command], {
+      env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
+        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const running = child;
+    let stderr = "";
+    running.stderr?.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const exit = new Promise<number | null>((done, reject) => {
+      const timer = setTimeout(() => { running.kill("SIGKILL"); reject(new Error("holder command timeout")); }, 5000);
+      running.once("exit", code => { clearTimeout(timer); done(code); });
+      running.once("error", reject);
+    });
+    const deadline = Date.now() + 3000;
+    while (f.seen.filter(row => row.kind === "claim_wake_lease").length < 2 && Date.now() < deadline) {
+      await new Promise(done => setTimeout(done, 20));
+    }
+    assert.equal(f.seen.filter(row => row.kind === "claim_wake_lease").length, 2, stderr);
+    assert.equal(f.seen[1]?.take_over, true);
+    running.kill("SIGTERM");
+    assert.equal(await exit, 143, stderr);
+  } finally { if (child?.exitCode === null) child.kill("SIGKILL"); await f.cleanup(); }
 });
 
 test("unmanaged credential starts and holds a lease until clean stop", { timeout: 10_000 }, async () => {
@@ -333,18 +381,18 @@ test("timer renewal supersession exits with the holder and non-restartable code"
   } finally { await f.cleanup(); }
 });
 
-test("stdin holder and supersession refusals include the credential pipe step", { timeout: 16_000 }, async () => {
+test("stdin holder and supersession refusals give words and no pasteable command", { timeout: 16_000 }, async () => {
   for (const [mode, code] of [["refuse", "notify_held_elsewhere"], ["supersede", "wake_lease_superseded"]] as const) {
     const f = await fixture(mode);
     try {
       const result = await f.start(false, undefined, undefined, undefined, true).exit;
       assert.equal(result.code, 76, result.stderr);
       assert.match(result.stderr, new RegExp(code));
-      assert.match(result.stderr, /pipe|cat '<credential-file>' \|/);
+      assert.match(result.stderr, /same way it was started, with the agent token on stdin/);
+      assert.doesNotMatch(result.stderr, /<credential-file>|^cswarm inbox --notify/gm);
       if (mode === "refuse") {
-        assert.match(result.stderr, /cat '<credential-file>' \| cswarm inbox --notify.*--take-over/);
+        assert.match(result.stderr, /adding --take-over/);
       } else {
-        assert.match(result.stderr, /pipe the same credential on stdin/);
         assert.ok(f.seen.some(command => command.kind === "renew_wake_lease"));
       }
     } finally { await f.cleanup(); }
@@ -404,14 +452,15 @@ test("start refusal uses the non-default context file it read in a runnable reme
     const refused = await f.start().exit;
     assert.equal(refused.code, 76, refused.stderr);
     assert.doesNotMatch(refused.stderr, /cswarm session start/i);
-    const printed = /run (cswarm inbox --notify[^;\n]+)/.exec(refused.stderr)?.[1];
+    const printed = refused.stderr.split("\n").find(line => line.startsWith("cswarm inbox --notify "));
     assert.ok(printed, refused.stderr);
     assert.ok(printed.includes(`--session-context ${contextPath}`), printed);
-    const argv = printed!.split(" ");
-    assert.deepEqual(argv.slice(argv.indexOf("--url"), argv.indexOf("--url") + 2), ["--url", f.url]);
-    child = spawn(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), ...argv.slice(1)], {
+    const bin = join(f.root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    child = spawn("/bin/sh", ["-c", printed!], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
-        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"],
+        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"],
     });
     const running = child;
     let stderr = "";
@@ -444,14 +493,15 @@ test("a long exit-76 remedy prints a complete command that the real CLI accepts"
     assert.ok(result.stderr.length > 1100, "the command must exceed the generic CLI error cap");
     assert.match(result.stderr, /must not be restarted by a supervisor/);
     assert.match(result.stderr, /session_proof_missing/);
-    assert.match(result.stderr, /; exit 76\.\s*$/);
-    const printed = /run (cswarm inbox --notify[^;\n]+)/.exec(result.stderr)?.[1];
+    assert.match(result.stderr, /; exit 76\.\ncswarm inbox --notify /);
+    const printed = result.stderr.split("\n").find(line => line.startsWith("cswarm inbox --notify "));
     assert.ok(printed?.endsWith(`--session-context ${contextPath}`), result.stderr);
-    const argv = printed!.split(" ");
-    assert.deepEqual(argv.slice(argv.indexOf("--url"), argv.indexOf("--url") + 2), ["--url", f.url]);
-    child = spawn(process.execPath, ["--import", "tsx", resolve("src/cli.ts"), ...argv.slice(1)], {
+    const bin = join(f.root, "bin");
+    await mkdir(bin);
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    child = spawn("/bin/sh", ["-c", printed!], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
-        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test" }, stdio: ["ignore", "pipe", "pipe"],
+        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"],
     });
     const running = child;
     let stderr = "";
@@ -611,13 +661,39 @@ test("refusal fallback leads to real resume output with a verified path or expli
 
 test("unmanaged resume gives a runnable watcher command without context guidance", { timeout: 8_000 }, async () => {
   const f = await fixture("unmanaged");
+  let child: ChildProcess | null = null;
   try {
     const resumed = await runResume(f);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.match(resumed.stdout, new RegExp(`cswarm inbox --notify --agent-token-file .* --url http://127\\.0\\.0\\.1:`));
+    const command = resumed.stdout.split("\n").find(line => line.startsWith("cswarm inbox --notify "));
+    assert.ok(command, resumed.stdout);
+    assert.ok(command.includes(`--url ${f.url}`));
     assert.doesNotMatch(resumed.stdout, /after its context is verified/);
     assert.doesNotMatch(resumed.stdout, /--session-context/);
-  } finally { await f.cleanup(); }
+    const bin = join(f.root, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
+    child = spawn("/bin/sh", ["-c", command], {
+      env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
+        XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const running = child;
+    let stderr = "";
+    running.stderr?.on("data", (chunk: Buffer) => stderr += chunk.toString());
+    const exit = new Promise<number | null>((done, reject) => {
+      const timer = setTimeout(() => { running.kill("SIGKILL"); reject(new Error("resume command timeout")); }, 5000);
+      running.once("exit", code => { clearTimeout(timer); done(code); });
+      running.once("error", reject);
+    });
+    const deadline = Date.now() + 3000;
+    while (!f.seen.some(row => row.kind === "claim_wake_lease") && Date.now() < deadline) {
+      await new Promise(done => setTimeout(done, 20));
+    }
+    assert.equal(f.seen.filter(row => row.kind === "claim_wake_lease").length, 1, stderr);
+    running.kill("SIGTERM");
+    assert.equal(await exit, 143, stderr);
+  } finally { if (child?.exitCode === null) child.kill("SIGKILL"); await f.cleanup(); }
 });
 
 test("signals during the live-context verification read keep the stop sentence and exit code", { timeout: 16_000 }, async () => {
@@ -671,6 +747,46 @@ test("profile start names its host session context and never repeats the refused
   } finally { await f.cleanup(); }
 });
 
+test("profile resume keeps its snapshot when the credential file is missing", { timeout: 8_000 }, async () => {
+  const f = await fixture("unmanaged");
+  try {
+    const profileDir = join(f.root, "profile");
+    await mkdir(profileDir, { mode: 0o700 });
+    const profilePath = join(profileDir, "profile.json");
+    const missing = join(profileDir, "credential.json");
+    await writeFile(profilePath, JSON.stringify({ version: 1, url: f.url, anon_key: f.anonKey,
+      workspace_id: workspace, principal_id: principal, credential_file: missing, host_session_id: "missing-host" }), { mode: 0o600 });
+    const result = await runProfileResume(f, profilePath, "missing-host");
+    assert.equal(result.code, 0, result.stderr);
+    const snapshot = JSON.parse(result.stdout);
+    assert.equal(snapshot.authenticated_now, false);
+    assert.match(snapshot.live_session_context_lines[0], /could not verify because the credential file is missing/);
+    assert.ok(snapshot.live_session_context_lines[0].includes(missing));
+  } finally { await f.cleanup(); }
+});
+
+test("profile resume distinguishes refused credentials from an unavailable service", { timeout: 10_000 }, async () => {
+  for (const [mode, pattern] of [["profile_unauthorized", /service refused this credential \(expired or revoked\).*turn check/],
+    ["profile_forbidden", /service refused this credential \(expired or revoked\).*turn check/],
+    ["profile_unreachable", /read service returned an error.*after it recovers/],
+    ["profile_transport", /could not verify with the read service.*reachable/]] as const) {
+    const f = await fixture(mode);
+    try {
+      const profileDir = join(f.root, "profile");
+      await mkdir(profileDir, { mode: 0o700 });
+      const profilePath = join(profileDir, "profile.json");
+      const credential = join(profileDir, "credential.json");
+      await writeFile(credential, await readFile(f.credential), { mode: 0o600 });
+      await writeFile(profilePath, JSON.stringify({ version: 1, url: f.url, anon_key: f.anonKey,
+        workspace_id: workspace, principal_id: principal, credential_file: credential, host_session_id: "refusal-host" }), { mode: 0o600 });
+      await liveContext(f, credential, "refusal-host");
+      const result = await runProfileResume(f, profilePath, "refusal-host");
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(JSON.parse(result.stdout).live_session_context_lines[0], pattern);
+    } finally { await f.cleanup(); }
+  }
+});
+
 test("stdin proof refusal explains the pipe step without an unverified command", { timeout: 8000 }, async () => {
   const f = await fixture("session_proof_missing");
   try {
@@ -689,7 +805,7 @@ test("every stdin session refusal includes pipe guidance", { timeout: 30_000 }, 
       const refused = await f.start(false, undefined, undefined, undefined, true).exit;
       assert.equal(refused.code, 76, refused.stderr);
       assert.match(refused.stderr, new RegExp(mode));
-      assert.match(refused.stderr, /pipe the same credential on stdin/);
+      assert.match(refused.stderr, /agent token on stdin|pipe the same credential on stdin/);
       assert.doesNotMatch(refused.stderr, /run cswarm inbox --notify/);
     } finally { await f.cleanup(); }
   }

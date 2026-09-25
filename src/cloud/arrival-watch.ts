@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import type { SignalRecord } from "./command-client.js";
 import type { CloudTarget } from "./config.js";
+import { printedCommand } from "./wake-lease-constants.js";
 import {
   followHttpDetails,
   isRetryableFollowError,
@@ -76,19 +77,20 @@ export function notifyRestartCommand(options: NotifyRestartOptions): string {
   return parts.join(" ");
 }
 
-/** A refusal must show the credential pipe whenever its restart uses stdin. */
-export function notifyRefusalRestartCommand(options: NotifyRestartOptions): string {
-  const command = notifyRestartCommand(options);
+/** The origin of stdin is unknown, so no command can be offered for that form. */
+export function notifyRefusalRestartCommand(options: NotifyRestartOptions): string | null {
   return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
-    ? `cat '<credential-file>' | ${command}` : command;
+    ? null : notifyRestartCommand(options);
 }
 
 export function notifySignalStopSentence(
   signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES,
   options: NotifyRestartOptions,
 ): string {
-  const stdin = options.agentTokenStdin ? " pipe the same credential on stdin, then" : "";
-  return `inbox --notify stopped because of ${signal} and nothing is watching this inbox now;${stdin} restart it under the session's Monitor with ${notifyRestartCommand(options)}.`;
+  const prose = `inbox --notify stopped because of ${signal} and nothing is watching this inbox now; restart it under the session's Monitor`;
+  return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
+    ? `${prose} the same way it was started, with the agent token on stdin.`
+    : printedCommand(`${prose}.`, notifyRestartCommand(options));
 }
 
 /** Stable typed failure for a notify monitor whose stdout reader has closed. */
@@ -330,7 +332,7 @@ export async function arrivalHostId(lockPath: string, machineHash?: string | nul
     } finally { await unlink(temporary); }
   }
   throw new Error(`could not create host id at ${path}`);
-  });
+  }, { stalePolicy: "host-id" });
 }
 
 export function arrivalWatchAlreadyRunningSentence(pid: number): string {

@@ -20,7 +20,7 @@ export class WakeLeaseLostError extends Error {
     readonly code: NotifyLeaseCode,
     readonly surface: "watcher" | "h0_poll",
     readonly host: string | null,
-    restartCommand: string,
+    restartCommand: string | null,
     phase: WakeLeasePhase = "renew",
     sessionContextPath?: string,
     remedyCommand?: string,
@@ -50,7 +50,7 @@ export async function sendWakeLeaseCommand(options: {
   workspaceId: string;
   token: string;
   command: Record<string, unknown>;
-  restartCommand: string;
+  restartCommand: string | null;
   sessionContextPath?: string;
   remedyCommand?: string;
   contextSource?: "operator" | "profile";

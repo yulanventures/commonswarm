@@ -1,5 +1,5 @@
 import type { CloudTarget } from "./config.js";
-import { AgentSessionClient } from "./session-client.js";
+import { AgentSessionClient, SessionStatusHttpError, type ServerSessionStatus } from "./session-client.js";
 import {
   assertLocalSessionBinding,
   listSessionContextFiles,
@@ -16,7 +16,9 @@ export async function verifiedLiveSessionContexts(input: {
   tokenFile?: string;
   hostSessionId?: string;
   checkManagementWithoutFiles?: boolean;
-}): Promise<{ paths: string[]; verificationUnavailable: boolean; managed: boolean | null }> {
+  serverStatus?: ServerSessionStatus;
+}): Promise<{ paths: string[]; verificationUnavailable: boolean; managed: boolean | null;
+  verificationRefused: boolean; verificationServiceError: boolean }> {
   const contexts = (await listSessionContextFiles(input.workspaceId, input.principalId)).filter(({ context }) => {
     if (sessionProofOf(context) === null) return false;
     try {
@@ -32,11 +34,13 @@ export async function verifiedLiveSessionContexts(input: {
       return false;
     }
   });
-  if (contexts.length === 0 && !input.checkManagementWithoutFiles) {
-    return { paths: [], verificationUnavailable: false, managed: null };
+  if (contexts.length === 0 && (input.serverStatus !== undefined || !input.checkManagementWithoutFiles)) {
+    return { paths: [], verificationUnavailable: false,
+      managed: input.serverStatus === undefined ? null : input.serverStatus.managed_at !== null,
+      verificationRefused: false, verificationServiceError: false };
   }
   try {
-    const server = await new AgentSessionClient({ target: input.target, timeoutMs: 5_000 }).readStatus({
+    const server = input.serverStatus ?? await new AgentSessionClient({ target: input.target, timeoutMs: 5_000 }).readStatus({
       credential: input.credential,
       workspaceId: input.workspaceId,
       principalId: input.principalId,
@@ -50,8 +54,13 @@ export async function verifiedLiveSessionContexts(input: {
             current.session_key === context.session_key && sessionProofOf(current) !== null) paths.push(path);
       } catch { /* The file disappeared or changed after the first read. */ }
     }
-    return { paths, verificationUnavailable: false, managed: server.managed_at !== null };
-  } catch {
-    return { paths: [], verificationUnavailable: true, managed: null };
+    return { paths, verificationUnavailable: false, managed: server.managed_at !== null,
+      verificationRefused: false, verificationServiceError: false };
+  } catch (error) {
+    return { paths: [], verificationUnavailable: true, managed: null,
+      verificationRefused: error instanceof SessionStatusHttpError &&
+        (error.status === 401 || error.status === 403),
+      verificationServiceError: error instanceof SessionStatusHttpError &&
+        error.status !== 401 && error.status !== 403 };
   }
 }

@@ -1084,7 +1084,7 @@ test("the CLI sanitises the refusal's wire fields before they reach the terminal
   );
   assert.match(
     cli,
-    /const message = error instanceof Error \? error\.message : "unknown error";\s*\n\s*const safe = sanitizeForTerminal\(message\);[\s\S]*?return error instanceof WakeLeaseLostError \? safe : safe\.slice\(0, 1000\)/,
+    /const message = error instanceof Error \? error\.message : "unknown error";[\s\S]*?const safe = error instanceof WakeLeaseLostError[\s\S]*?message\.split\("\\n"\)\.map\(sanitizeForTerminal\)\.join\("\\n"\)[\s\S]*?: sanitizeForTerminal\(message\);[\s\S]*?return error instanceof WakeLeaseLostError \? safe : safe\.slice\(0, 1000\)/,
     "safeError no longer routes through sanitizeForTerminal",
   );
   assert.match(

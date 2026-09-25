@@ -278,12 +278,22 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
     throw new AgentSetupError("profile_target_mismatch", "The supplied URL differs from this profile's URL.");
   }
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
-  const credential = await readProfileCredential(profile);
-  const contexts = await verifiedLiveSessionContexts({ target: cloudTarget(profile.url, profile.anon_key),
+  const credential = await readProfileCredential(profile).catch(error => {
+    if (error instanceof AgentSetupError && error.code === "profile_credential_missing") return null;
+    throw error;
+  });
+  const contexts = credential === null ? null : await verifiedLiveSessionContexts({
+    target: cloudTarget(profile.url, profile.anon_key),
     workspaceId: profile.workspace_id, principalId: profile.principal_id, credential: credential.token,
     tokenFile: profile.credential_file,
     ...(args.optional("host-session-id") === undefined ? {} : { hostSessionId: args.optional("host-session-id")! }) });
-  const liveContextLines = contexts.verificationUnavailable
+  const liveContextLines = contexts === null
+    ? [`Live session context on this host: could not verify because the credential file is missing: ${profile.credential_file}. Run setup again.`]
+    : contexts.verificationRefused
+    ? ["Live session context on this host: the service refused this credential (expired or revoked). Run the profile's turn check to renew it, then resume."]
+    : contexts.verificationServiceError
+    ? ["Live session context on this host: the read service returned an error; try again after it recovers."]
+    : contexts.verificationUnavailable
     ? ["Live session context on this host: could not verify with the read service; check again when it is reachable."]
     : contexts.paths.length === 0
     ? ["Live session context on this host: no live session on this host was verified for this seat."]
@@ -291,8 +301,8 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
   await output({ profile: path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
     authenticated_now: false, ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
     live_session_context_lines: liveContextLines,
-    live_session_context_paths: contexts.paths,
-    live_session_context_verification_unavailable: contexts.verificationUnavailable,
+    live_session_context_paths: contexts?.paths ?? [],
+    live_session_context_verification_unavailable: contexts?.verificationUnavailable ?? true,
     instruction: turnCheckInstruction(path, profile.host_session_id ?? binding?.host_session_id),
   });
 }

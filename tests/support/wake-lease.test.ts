@@ -144,7 +144,7 @@ test("every exit-76 lease sentence carries the one supervisor stop clause", { ti
       if (wakeLeaseRule(code, phase).exit !== 76) continue;
       const line = wakeLeaseExitSentence(code, "watcher", "other-host", "cswarm inbox --notify", phase);
       assert.equal(line.split(NOTIFY_NO_RESTART_CLAUSE).length - 1, 1, `${code}/${phase}: ${line}`);
-      assert.match(line, /; exit 76\.$/);
+      assert.match(line.split("\n")[0]!, /; exit 76\.$/);
     }
   }
 });

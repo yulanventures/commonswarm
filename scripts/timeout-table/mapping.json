@@ -1564,7 +1564,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/arrival-watch.ts:253",
+          "citation": "src/cloud/arrival-watch.ts:255",
           "detail": "macOS ioreg machine-id lookup has a two-second execFile timeout; an unreadable id keeps the existing host id and is reported by resume.",
           "operation": {
             "name": "arrival-host-machine-id",
@@ -2428,8 +2428,8 @@
           "endpoints": [
             "/functions/v1/read"
           ],
-          "citation": "src/cloud/live-session-context.ts:36",
-          "detail": "Five-second session status read while verifying a local managed context before naming its path.",
+          "citation": "src/cloud/live-session-context.ts:43",
+          "detail": "Live-session verification runs on every resume. Agent-token resume reuses its first members result; profile resume uses this five-second read when a local context file exists.",
           "operation": {
             "name": "verified-live-session-status",
             "class": "not-run",
