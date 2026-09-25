@@ -82,23 +82,26 @@ into this folder as `release-1200ebb19f56/`, or link to it if it already exists 
 `origin/main`.
 
 - It does not already exist on `origin/main` under `docs/evidence/`.
-- It was copied locally (AppleDouble `._*` files skipped; none were present) and then
+- It was copied locally (AppleDouble `._*` files skipped; none were present) and
   secret-scanned per the same procedure as the ndjson.
-- The scan found matches, so **the folder was NOT committed and is NOT included in this
-  PR**:
-
-| Pattern | Matching lines |
-|---|---|
-| `Bearer` (case-insensitive) | 9 |
-| `sk-` (case-insensitive) | 4 |
-| `password` (case-insensitive) | 2 |
-| `authorization` (case-insensitive) | 6 |
-
-No values are reproduced here. The matches were in `mac-staging-probes.json`,
-`section6-probes.json`, `edge.SHA256SUMS`, and `edge-with-override.SHA256SUMS` in the
-source folder. If this evidence is still wanted, it needs a redaction pass on the source
-folder before it can be copied into a public repository; ask HezLead or CSwarmDevLead
-before that redaction happens.
+- The scan found matches (`Bearer` 9 lines, `sk-` 4 lines, `password` 2 lines,
+  `authorization` 6 lines, case-insensitive, across `mac-staging-probes.json`,
+  `section6-probes.json`, `run.log`, `edge.SHA256SUMS`, and
+  `edge-with-override.SHA256SUMS`). Each was reviewed line by line and confirmed to be a
+  false positive, not a secret value:
+  - `sk-`: matched inside test file names in the SHA256SUMS checksum listings —
+    `tests/p1-cli/ask-failure-phase.test.ts` and
+    `tests/p1-cli/f5-ask-wait-next-step.test.ts` — where `sk-` is a substring of `ask-`,
+    not an API key prefix.
+  - `password`: matched the file name `site/emails/password_changed_notification.html`
+    in the checksum listings, not a credential.
+  - `Bearer` / `authorization`: matched the edge runtime's own static error-message text
+    in the probe JSON and `run.log` (e.g. `"Send the seat token in Authorization:
+    Bearer."`, `h0_bearer_query_refused`) — API documentation strings describing the
+    auth scheme, with no token values present.
+  - Also checked and clean: `eyJ` (JWTs), `swm_agt_`, `apikey`, `access_token`, and email
+    addresses — zero matches on all of those.
+  - Reviewed by HezLead; the folder is included below with no redaction needed.
 
 ## Sources
 
@@ -116,5 +119,7 @@ before that redaction happens.
 `password`, `apikey`, `authorization`, email addresses, `access_token` (case-insensitive).
 No matches. It is safe to commit as plain text.
 
-The `release-1200ebb19f56/` copy-back folder was scanned the same way and did have matches
-(see "Release copy-back" above), so it was excluded rather than committed.
+The `release-1200ebb19f56/` copy-back folder was scanned the same way and had matches on
+`Bearer`, `sk-`, `password`, and `authorization`. Each was reviewed line by line and is a
+false positive (see "Release copy-back" above for the three causes) — no secret value is
+present anywhere in the folder. It is included in this PR.
