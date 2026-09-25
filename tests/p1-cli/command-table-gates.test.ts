@@ -65,7 +65,7 @@ const SELECTED_VARIANT_HELP_SHAPES: Readonly<Record<string, Readonly<Record<stri
   },
 };
 
-test("generated help covers every visible command, variant, and accepted flag", () => {
+test("generated help covers every visible command, variant, and accepted flag", { timeout: 10_000 }, () => {
   const all = commandHelpLines();
   assert.ok(usage().includes(all));
   const expected: string[] = [];
@@ -105,7 +105,7 @@ test("each visible verb and action answers scoped --help without contacting a de
   }
 });
 
-test("every multi-variant entry has help for each selected command shape", () => {
+test("every multi-variant entry has help for each selected command shape", { timeout: 10_000 }, () => {
   const multiVariantEntries = entries()
     .filter(({ entry }) => Object.keys(entry.variants).length > 1)
     .map(({ key }) => key)
@@ -162,7 +162,7 @@ function modelFacingCategory(entry: AgentCommandEntry): "tool" | "bootstrap" | n
   return null;
 }
 
-test("every model-facing command pair is a tool or a derived bootstrap entry", async () => {
+test("every model-facing command pair is a tool or a derived bootstrap entry", { timeout: 10_000 }, async () => {
   const surfaces = {
     AGENT_QUICK_GUIDE,
     "site/public/skills/cswarm/SKILL.md": await readFile(
@@ -217,7 +217,7 @@ test("file and brain puts are model tools on the stdio transport", { timeout: 10
   assert.ok(mcp.includes(file.subcommands.put.tool));
 });
 
-test("model-facing command parsing finds flags before a command pair", () => {
+test("model-facing command parsing finds flags before a command pair", { timeout: 10_000 }, () => {
   assert.deepEqual(
     namedCommandPairs("Run cswarm --profile p token mint only when instructed."),
     [{ verb: "token", action: "mint" }],
@@ -225,7 +225,7 @@ test("model-facing command parsing finds flags before a command pair", () => {
   assert.deepEqual(namedCommandPairs("Run npm test."), []);
 });
 
-test("tool metadata and flags are generated from entry policy", () => {
+test("tool metadata and flags are generated from entry policy", { timeout: 10_000 }, () => {
   for (const { key, entry } of entries(true)) {
     assert.equal(entry.argumentSchema.additionalProperties, false, `${key} schema must be closed`);
     if (entry.tool === null) {
@@ -264,7 +264,7 @@ test("tool metadata and flags are generated from entry policy", () => {
   }
 });
 
-test("AGENT_PROFILE_COMMANDS is derived from table order data", () => {
+test("AGENT_PROFILE_COMMANDS is derived from table order data", { timeout: 10_000 }, () => {
   // Item I fold 3: an entry is a verb or a "verb action" pair; the verbs still follow profileListOrder.
   const expected = Object.entries(AGENT_COMMANDS)
     .map(([verb, root]) => ({ verb, order: root.profileListOrder }))
@@ -279,7 +279,7 @@ test("AGENT_PROFILE_COMMANDS is derived from table order data", () => {
   assert.deepEqual(orders, [...orders].sort((left, right) => left - right));
 });
 
-test("main has one direct lookup and only allowlisted meta and selected-entry statements", async () => {
+test("main has one direct lookup and only allowlisted meta and selected-entry statements", { timeout: 10_000 }, async () => {
   const sourceText = await readFile(resolve("src/cli.ts"), "utf8");
   const source = ts.createSourceFile("src/cli.ts", sourceText, ts.ScriptTarget.Latest, true);
   const main = source.statements.find((statement): statement is ts.FunctionDeclaration =>
@@ -376,7 +376,7 @@ function assertStatementAllowlist(
   }
 }
 
-test("parsed-argument functions between lookup and handler are allowlisted", async () => {
+test("parsed-argument functions between lookup and handler are allowlisted", { timeout: 10_000 }, async () => {
   const sourceText = await readFile(resolve("src/cli.ts"), "utf8");
   const source = ts.createSourceFile("src/cli.ts", sourceText, ts.ScriptTarget.Latest, true);
   assertStatementAllowlist(source, functionBody(source, "selectCommandEntry"), `
@@ -437,7 +437,7 @@ test("parsed-argument functions between lookup and handler are allowlisted", asy
   `, "traced");
 });
 
-test("the process entry only runs main(), and no top-level statement reads process.argv", async () => {
+test("the process entry only runs main(), and no top-level statement reads process.argv", { timeout: 10_000 }, async () => {
   const sourceText = await readFile(resolve("src/cli.ts"), "utf8");
   const source = ts.createSourceFile("src/cli.ts", sourceText, ts.ScriptTarget.Latest, true);
   const entries = source.statements.filter((statement): statement is ts.IfStatement =>
@@ -507,7 +507,7 @@ async function typeScriptFiles(directory: string): Promise<string[]> {
   return files;
 }
 
-test("every export named runOnboardingCommand stays deleted", async () => {
+test("every export named runOnboardingCommand stays deleted", { timeout: 10_000 }, async () => {
   for (const path of await typeScriptFiles(resolve("src"))) {
     const sourceText = await readFile(path, "utf8");
     const source = ts.createSourceFile(path, sourceText, ts.ScriptTarget.Latest, true);

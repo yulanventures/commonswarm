@@ -866,16 +866,8 @@ class UsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
 
-/** Exported so a claim made in help can be swept alongside the same claim in
- * status output; a correction that reaches one surface and not the other is the
- * failure this repo keeps measuring. */
-export function usage(): string {
-  return `cswarm ${CLI_BUILD_VERSION} (protocol ${CLIENT_PROTOCOL_VERSION})
-
-Usage:
-${commandHelpLines()}
-
-Credential selection for command/dogfood:
+/** Non-command guidance appended after the command table's generated synopses. */
+const USAGE_GUIDANCE = `Credential selection for command/dogfood:
   inbox --since pages every matching directed signal for an agent unless --limit is set.
   ${INBOX_LIMIT_NOTICE}
   default                 refresh the human login from secure storage
@@ -1011,6 +1003,15 @@ from DATABASE_URL and writes a newly minted agent token only to the absolute
 create-new path in SEED_TOKEN_OUT. --workspace-id selects an explicit fixture
 workspace only for callers who already hold that full-database credential; it
 grants no new authority and is not a governed product workspace-creation path.`;
+
+/** Exported so user-facing help can be checked alongside status output. */
+export function usage(): string {
+  return `cswarm ${CLI_BUILD_VERSION} (protocol ${CLIENT_PROTOCOL_VERSION})
+
+Usage:
+${commandHelpLines()}
+
+${USAGE_GUIDANCE}`;
 }
 
 async function target(args: Arguments): Promise<CloudTarget> {
@@ -9351,7 +9352,7 @@ function helpFor(verb: string | undefined, action: string | undefined): string {
   if (!verb || verb === "help") return `${usage()}\n${onboardingUsage()}`;
   const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
   if (!root) return `${usage()}\n${onboardingUsage()}`;
-  return commandHelpLines(verb, isCommandGroup(root) ? action : undefined);
+  return commandHelpLines(verb, isCommandGroup(root) && action !== undefined && Object.hasOwn(root.subcommands, action) ? action : undefined);
 }
 
 function group(
@@ -9547,7 +9548,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     errorMode: "onboarding",
   }),
   receive: group({
-    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive configure --profile <absolute-path> --mode wake|turn [--provider claude|codex|instructions|grok-bot] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]"], bootstrap: true }),
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
     status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]"], bootstrap: true }),
     test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
     confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]"], bootstrap: true }),

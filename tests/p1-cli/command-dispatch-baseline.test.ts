@@ -703,6 +703,19 @@ function normalize(value: string, root: string, origin: string): string {
     .replace(/coverage-[0-9-]+\.json/g, "coverage-<ID>.json");
 }
 
+// Help has its own table-driven gate. Keep this dispatcher baseline focused on
+// routing, exit status, and the refusal prefix when usage is printed afterward.
+function withoutGeneratedHelp(value: string): string {
+  const start = value.indexOf("cswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n");
+  return start < 0 ? value : `${value.slice(0, start)}<GENERATED_HELP>\n`;
+}
+
+test("dispatcher baseline keeps refusal text while help has its own gate", { timeout: 1_000 }, () => {
+  assert.equal(withoutGeneratedHelp("cswarm: unknown command\ncswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n  cswarm new\n"),
+    "cswarm: unknown command\n<GENERATED_HELP>\n");
+  assert.equal(withoutGeneratedHelp("cswarm: unknown command\n"), "cswarm: unknown command\n");
+});
+
 async function runFixture(root: string, origin: string, fixture: Fixture): Promise<BaselineRow> {
   const prepared = await prepareRow(root, origin, fixture);
   return await new Promise<BaselineRow>((resolveRun, rejectRun) => {
@@ -839,7 +852,10 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
     }
     const expected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     const expectedCounts = JSON.parse(await readFile(baselineCountsPath, "utf8")) as typeof counts;
-    assert.deepEqual(rows, expected);
+    assert.deepEqual(
+      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+    );
     assert.deepEqual(counts, expectedCounts);
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
