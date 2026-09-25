@@ -1,0 +1,6 @@
+stop_request_unix=1790200189.205910683
+kill_unix=1790200189.2059107
+stop_unix=1790200189.551424
+die_unix=1790200189.556102037
+stop_duration_sec=0.350
+compose_elapsed_sec=1.16

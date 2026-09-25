@@ -1,0 +1,10 @@
+{
+  "required": [
+    "SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_URL",
+    "SWARM_DATABASE_URL|SUPABASE_DB_URL",
+    "SWARM_SELF_SERVE"
+  ],
+  "optional": []
+}

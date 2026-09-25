@@ -1,0 +1,37 @@
+utc=2026-09-23T21:53:45Z
+approver=HezLead
+sha=1200ebb19f56b3e154499ebb09963788d10e69ad
+kind_list=edge
+affected_surfaces=edge
+phase=complete
+router_changed=no
+changed_functions=
+additional_required_env_names=
+section1_preflight=PASS
+archive_sha256=fb55412fbe5bf9a9a1971dad875b0eb0a021b891768a581d3e21bac8cdd432d6  /tmp/commonswarm-1200ebb19f56b3e154499ebb09963788d10e69ad.tar
+section1_inventory=PASS
+required_edge_env_names=SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY SUPABASE_URL SWARM_DATABASE_URL|SUPABASE_DB_URL SWARM_SELF_SERVE
+optional_edge_env_names=
+section1_apply=PASS previous_edge=/home/commonswarm/edge/releases/30ba33f9202138b3ec59b968b6282cf76d3dc7f3 previous_stack=/home/commonswarm/stack/releases/e38b499fc29a01935333e38f66c4e68ac7e1f81e
+section1_verify=PASS edge_mode=750
+sections_2_5=SKIPPED kind_list=edge
+window_start=2026-09-23T21:41:00Z window_end=2026-09-23T23:41:00Z recycle_overlap=0 recycle_timer_stopped=0
+section6_preflight=PASS env_required_present_nonempty compose_config_q=0 override_copied=identical manifest_before_override=PASS edge-with-override.SHA256SUMS=PASS
+section6_apply=PASS current=/home/commonswarm/edge/releases/1200ebb19f56b3e154499ebb09963788d10e69ad
+old_container_stop_duration_sec=0.350 compose_elapsed_sec=1.16
+section6_health=PASS healthy mem=2147483648 net=commonswarm-net working_dir=/home/commonswarm/edge/releases/1200ebb19f56b3e154499ebb09963788d10e69ad/deploy/edge-runtime health_body_status=ok
+observe_events=PASS within_2min=yes started=2026-09-23T21:49:49Z captured=2026-09-23T21:51:37Z metrics=1 worker_started=11
+loopback_probes=PASS a=200 b=405 method_not_allowed c=401 unauthenticated d=400 h0_bearer_query_refused e=401 unauthenticated f=401 unauthenticated g=400 invalid_request h_command=400 invalid_request h_activity=401 unauthenticated h_capability_smoke=404 not_found h_unknown=404 Function not found h_options=200
+probe_f_h0_note=401 not_500
+authenticated_read=NOT VERIFIED no smoke credential
+database_path=NOT VERIFIED no DB probe token
+staging_from_mac=PASS same statuses as loopback
+log_check=PASS CONNECT_TIMEOUT=absent h0_command_configuration_missing=absent
+copy_back=PASS evidence=/Users/yulanbot/anvil-work/commonswarm-edge-obs/repo/docs/evidence/2026-09-23-release-1200ebb19f56
+window_closed=yes
+stop_request_unix=1790200189.205910683
+kill_unix=1790200189.2059107
+stop_unix=1790200189.551424
+die_unix=1790200189.556102037
+stop_duration_sec=0.350
+compose_elapsed_sec=1.16
