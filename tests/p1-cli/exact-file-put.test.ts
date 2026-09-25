@@ -400,11 +400,19 @@ test("bad JSON and wrong mode records do not block another request", { timeout: 
   try {
     const badJson = await prepareExactPut(input(dir, edge, { requestId: "bad-json-01" }));
     await writeFile(badJson.path, "{");
-    const badMode = await prepareExactPut(input(dir, edge, { requestId: "bad-mode-01" }));
-    await chmod(badMode.path, 0o644);
-    const good = await prepareExactPut(input(dir, edge, { requestId: "good-new-01" }));
-    assert.equal(good.record.phase, "prepared");
-    await assert.rejects(readFile(badJson.path), { code: "ENOENT" });
-    await assert.rejects(readFile(badMode.path), { code: "ENOENT" });
+    const warnings: string[] = [];
+    const originalWrite = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { warnings.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try {
+      const badMode = await prepareExactPut(input(dir, edge, { requestId: "bad-mode-01" }));
+      await chmod(badMode.path, 0o644);
+      const good = await prepareExactPut(input(dir, edge, { requestId: "good-new-01" }));
+      assert.equal(good.record.phase, "prepared");
+      await prepareExactPut(input(dir, edge, { requestId: "good-next-02" }));
+      await assert.rejects(readFile(badJson.path), { code: "ENOENT" });
+      await assert.rejects(readFile(badMode.path), { code: "ENOENT" });
+    } finally { process.stderr.write = originalWrite; }
+    assert.equal(warnings.length, 2, "each bad record is reported once and then quarantined");
+    for (const warning of warnings) assert.match(warning, /skipped unreadable file put resume record/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
