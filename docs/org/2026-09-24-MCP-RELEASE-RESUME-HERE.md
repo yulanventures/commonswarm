@@ -13,6 +13,22 @@ history: its "What is LIVE" for the box edge and H0, and its model rules, still 
 - **Box** unchanged since `2026-09-23-H0-LIVE-RESUME-HERE.md` (edge `releases/30ba33f9`; edge-memory step 1 is
   HezLead's).
 
+## Update 2026-09-25 ~08:30Z: item L landed; renewal 500 fix landed and requested; M and G lane 2b in review
+
+- **Item L LANDED** (main 5d603b8e, merge 12c676cd): exactly-once `file_put` / `brain_put` MCP tools and CLI
+  `--request-id` (client only; ships in 0.1.78). Record `docs/evidence/2026-09-25-item-l/LANDING.md`; RIGOUR
+  follow-ups filed as a task (path guard for relocated state roots and hard links, and others).
+- **Renewal last-use 500 fix LANDED** (main a54afaf6; migration 20260925000002; no edge change). HezLead traced the
+  production read-edge 500s (SWARM_RENEWAL_LAST_USE_REWOUND, 7 since 2026-09-18) to overlapping reads rewinding
+  renewal_grants.last_used_at. Box release REQUESTED from HezLead (after G's migration; migration only; gate evidence
+  `docs/evidence/<date>-release-a54afaf696ff/`). Record `docs/evidence/2026-09-25-renewal-last-use/LANE.md`.
+- **Item M** (crash-safe `mcp connect`, client only): folds 1-3; Opus PASS round 3; fold 3 (Grok's
+  principal_limit_reached + RIGOUR) running in the lead's worktree `wt-m`.
+- **G lane 2b** (server wake lease): folds 1-6; the remaining defects are remedy wording and one path; fold 6 running
+  in `wt-g2b`. Needs its own box window after review.
+- Local stack: the edge mount follows the worktree the stack was started from; restart the stack from the lane
+  worktree before a server run (`npx supabase stop; npm run db:start; npm run db:reset`).
+
 ## Update 2026-09-25 ~02:20Z: item G box window SET for 2026-09-25 21:45Z; G lane 2b Maker running
 
 - **G box window 2026-09-25 ~21:45Z** (HezLead confirmed): release SHA 9627cb37e697046d22ab02dd2b57bc56937afc14 (same
