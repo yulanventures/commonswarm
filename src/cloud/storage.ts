@@ -460,6 +460,7 @@ export async function writeSecureJsonFile(
   const handle = await open(temporary, "wx", 0o600);
   try {
     await handle.writeFile(serialized, "utf8");
+    await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
     await rename(temporary, path);

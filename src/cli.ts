@@ -595,7 +595,7 @@ export const KNOWN_FLAGS = new Set([
   ...ONBOARDING_BOOLEAN_FLAGS, ...ONBOARDING_VALUE_FLAGS,
   ...BODY_FLAGS,
   "about", "agent-token-file", "agent-token-stdin", "all-devices", "allow-unattended", "anon-key", "attach", "branch", "capability-id",
-  "claude-executable", "codex-executable", "confirm", "confirm-standing", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
+  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel",
   "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
@@ -613,7 +613,7 @@ export const BOOLEAN_FLAGS = new Set([
   "all-devices",
   "allow-unattended",
   "broadcast-to-channel",
-  "confirm-standing",
+  "confirm-standing", "clear-pending",
   "force-file-store",
   "follow",
   "force",
@@ -882,7 +882,7 @@ Usage:
   cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
   cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
   cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]
-  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]
+  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]  # --clear-pending --profile <path> clears an interrupted connect
   cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
   cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
   cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
@@ -9486,7 +9486,22 @@ async function runMcpCode(args: Arguments): Promise<void> {
 }
 
 async function runMcpConnect(args: Arguments): Promise<void> {
-  args.assertShape(["url", "anon-key", "profile", "name"], 2);
+  args.assertShape(["url", "anon-key", "profile", "name", "clear-pending"], 2);
+  if (args.has("clear-pending")) {
+    if (!args.has("profile") || args.has("anon-key") || args.has("name")) {
+      throw new AgentSetupError("connect_clear_options", "Pass --clear-pending and --profile <path> to clear an interrupted connect.");
+    }
+    const { clearMcpConnect } = await import("./cloud/mcp-connect.js");
+    const cleared = await clearMcpConnect(args.required("profile"));
+    process.stdout.write(cleared.completedProfile
+      ? `Interrupted connect record cleared. The working profile at ${cleared.completedProfile} and its credential were kept.\n`
+      : cleared.credentialPresent
+        ? cleared.profilePresent
+          ? "Interrupted connect record cleared. This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n"
+          : "Interrupted connect record cleared. This directory holds a credential without a profile; the credential was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n"
+        : "Interrupted connect record cleared. No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n");
+    return;
+  }
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
   const explicitUrl = args.required("url");
   const explicitAnonKey = args.optional("anon-key");
@@ -9519,7 +9534,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       visible: true, help: ["cswarm mcp code"], bootstrap: true }),
     connect: commandEntry({ ...noTool("operator enters a code in a hidden terminal prompt"), handler: runMcpConnect,
       description: "Redeem a connect code on the agent host.", mutates: true,
-      flags: ["url", "anon-key", "profile", "name"], transports: STDIO_ONLY,
+      flags: ["url", "anon-key", "profile", "name", "clear-pending"], transports: STDIO_ONLY,
       profile: "native", hostSessionId: "drop", visible: true, help: ["cswarm mcp connect"], bootstrap: true }),
   }, args => args.positionals[1] ?? "serve", () => new UsageError("mcp requires code or connect, or --profile to serve tools"), {
     refusalPolicy: { flags: ["profile", "host-session-id", "url", "anon-key", "name"], ...NATIVE_PROFILE },

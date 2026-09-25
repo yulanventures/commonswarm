@@ -1539,3 +1539,31 @@ test("registration retry recovers only an unused token and never stores a secret
     "no stored response may contain the fresh-only key",
   );
 });
+
+test("lost register response recovers one seat with the same attempt and revokes its first token", { timeout: 120000 }, async () => {
+  const g = await createFixture();
+  const credential = await mintJoinCredential(g, 1);
+  const attempt = randomUUID();
+  // The client loses this response after the server commits it.
+  const first = await registrationCommand(credential.secret, attempt, "lost response seat");
+  assert.equal(first.status, 200);
+  const firstToken = String(first.body.agent_token);
+  const firstTokenId = String(first.body.token_id);
+  const retry = await registrationCommand(credential.secret, attempt, "lost response seat");
+  assert.equal(retry.status, 200);
+  assert.equal(retry.body.principal_id, first.body.principal_id);
+  assert.equal(retry.body.run_id, first.body.run_id);
+  assert.ok(retry.body.agent_token !== firstToken, "retry must return a fresh token");
+  assert.equal(await attemptCount(credential.id), 1);
+  const rows = await sql<{ revoked_at: Date | null; first_used_at: Date | null; seats_used: number }[]>`
+    SELECT t.revoked_at, t.first_used_at, c.seats_used
+    FROM swarm.agent_tokens AS t
+    JOIN swarm.agent_join_credentials AS c ON c.id = ${credential.id}::uuid
+    WHERE t.token_id = ${firstTokenId}::uuid
+  `;
+  assert.ok(rows[0]?.revoked_at instanceof Date);
+  assert.equal(rows[0]?.first_used_at, null);
+  assert.equal(rows[0]?.seats_used, 1);
+  assert.notEqual((await useSeatToken(g, firstToken, "old-lost-response")).status, 200);
+  assert.equal((await useSeatToken(g, String(retry.body.agent_token), "recovered-lost-response")).status, 200);
+});

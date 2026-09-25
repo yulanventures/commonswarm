@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { cloudTarget, type CloudTarget } from "./config.js";
@@ -194,7 +194,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -215,10 +215,34 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
         throw new AgentSetupError("profile_conflict", "This profile belongs to another workspace or agent. Use a different profile path.");
       }
     }
-    if (refuseExisting && await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) !== null) {
+    const existingCredential = refuseExisting ? await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) : null;
+    if (refuseExisting && existingCredential !== null && !allowOrphanCredential) {
       throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
     }
-    await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    if (existingCredential !== null && existingCredential !== JSON.stringify(connection.credential)) {
+      if (!refuseExisting || !allowOrphanCredential || revokedOrphanPrincipalId !== connection.principal_id) {
+        throw new AgentSetupError("profile_conflict", "The existing credential differs from the resumed attempt. Inspect the connection before retrying.");
+      }
+      const old = parseAgentCredentialInput(existingCredential, { kind: "file", path: profile.credential_file });
+      if (!old.durable || old.principalId !== revokedOrphanPrincipalId) {
+        throw new AgentSetupError("profile_conflict", "The existing credential belongs to another agent. Inspect the connection before retrying.");
+      }
+      // The same-attempt register retry has revoked this unused token and returned
+      // a fresh token for this principal. Replace only that orphan, atomically.
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    }
+    if (existingCredential === null && refuseExisting) {
+      // MCP connect creates this path once. O_EXCL prevents a concurrent file from
+      // being replaced, including one left by a crash after register.
+      const file = await open(profile.credential_file, "wx", 0o600);
+      try {
+        await file.writeFile(JSON.stringify(connection.credential));
+        await file.chmod(0o600);
+        await file.sync();
+      } finally { await file.close(); }
+    } else if (existingCredential === null) {
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    }
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
   return profile;
