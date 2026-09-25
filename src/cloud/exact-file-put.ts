@@ -143,7 +143,7 @@ export async function executeExactPut(prepared: PreparedPut): Promise<PutResult>
       fileId: created.file_id, versionId: created.version_id, sha256: record.sha256,
     }));
   } catch (error) {
-    if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500 && error.code !== "file_bytes_missing") {
+    if (error instanceof FileCommandRefused && error.status >= 400 && error.status < 500 && error.status !== 429 && error.code !== "file_bytes_missing") {
       record.refusal = { status: error.status, code: error.code };
       await phase(prepared, "refused");
     }

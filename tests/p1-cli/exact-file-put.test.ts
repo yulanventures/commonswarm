@@ -50,7 +50,7 @@ class FakeEdge {
       this.commits++;
       if (this.commitRefusal) {
         const refusal = this.commitRefusal;
-        this.stored.clear(); // Model the server's purge and Storage drain.
+        if (refusal.code === "file_version_precondition_failed") this.stored.clear(); // Model the server's purge and Storage drain.
         return Response.json({ error: refusal.code }, { status: refusal.status });
       }
       let result = this.committed.get(envelope.command_id);
@@ -180,6 +180,20 @@ test("terminal commit refusal replays without any network or PUT", { timeout: 10
     const retry = await prepareExactPut(input(dir, edge, { ifVersion: 2 }));
     await assert.rejects(executeExactPut(retry), (error: unknown) => error instanceof FileCommandRefused && error.code === "file_version_precondition_failed");
     assert.deepEqual([edge.creates, edge.puts, edge.commits], counts);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("commit rate limit remains retryable with the same request id", { timeout: 10000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "cswarm-exact-put-"));
+  const edge = new FakeEdge();
+  edge.commitRefusal = { status: 429, code: "rate_limited" };
+  try {
+    const first = await prepareExactPut(input(dir, edge));
+    await assert.rejects(executeExactPut(first), (error: unknown) => error instanceof FileCommandRefused && error.status === 429);
+    assert.equal(JSON.parse(await readFile(first.path, "utf8")).phase, "uploaded");
+    edge.commitRefusal = null;
+    assert.equal((await executeExactPut(await prepareExactPut(input(dir, edge)))).outcome, "committed");
+    assert.equal(edge.live, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
