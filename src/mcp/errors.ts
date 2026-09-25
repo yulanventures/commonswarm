@@ -1,4 +1,4 @@
-import { AgentSetupError } from "../cloud/agent-profile.js";
+import { AgentSetupError, profilePathRemedy } from "../cloud/agent-profile.js";
 import { AgentCredentialInputError } from "../cloud/agent-credential-input.js";
 import { CommandHttpError } from "../cloud/command-client.js";
 import { classifySignalReadFailure, followErrorEnvelope, followHttpDetails, LocalCredentialSecretAbsentError, SignalRecipientError } from "../cloud/signals.js";
@@ -25,7 +25,7 @@ const entry = (message: string, next_step: Action): Sentence => ({ message, next
 
 /** The only model-visible error prose. No producer message is copied here. */
 export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
-  profile_path_invalid: entry("The profile location is invalid.", PERSON),
+  profile_path_invalid: entry(profilePathRemedy(), PERSON),
   agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_not_object: entry("The saved agent credential is damaged.", PERSON),
   agent_credential_missing_agent_token: entry("The saved agent credential is incomplete.", PERSON),

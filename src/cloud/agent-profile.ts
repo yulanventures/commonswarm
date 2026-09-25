@@ -59,9 +59,13 @@ export function requireProfileHost(profile: AgentProfile, hostSessionId?: string
 export function privatePath(path: string): string {
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
   if (!isAbsolute(path) || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new AgentSetupError("profile_path_invalid", `Use an absolute private file path outside a repository, for example ${agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>")}. Run cswarm profile ls to find saved profiles.`);
+    throw new AgentSetupError("profile_path_invalid", profilePathRemedy());
   }
   return resolve(path);
+}
+
+export function profilePathRemedy(): string {
+  return `Use an absolute private file path outside a repository, for example ${agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>")}. Run cswarm profile ls to find saved profiles.`;
 }
 
 /** Check each existing ancestor, including repos reached through an ancestor symlink. */
@@ -158,6 +162,22 @@ export function agentProfileRoot(): string {
   return join(homedir(), ".cswarm");
 }
 
+const PROFILE_REGISTRY = "profile-paths.json";
+const PROFILE_REGISTRY_MAX_BYTES = 1024 * 1024;
+
+async function registeredProfilePaths(root: string): Promise<string[]> {
+  const raw = await readSecureJsonFileIfPresent(join(root, PROFILE_REGISTRY), PROFILE_REGISTRY_MAX_BYTES);
+  if (raw === null) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  if (!Array.isArray(parsed) || parsed.some(path => typeof path !== "string" || !isAbsolute(path))) {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  return parsed;
+}
+
 export interface ListedAgentProfile {
   path: string;
   principal_id?: string;
@@ -171,23 +191,27 @@ export interface ListedAgentProfile {
 /** Inspect profile.json files only; credentials are never opened. Symlinked directories are skipped. */
 export async function listAgentProfiles(): Promise<{ searched_roots: string[]; profiles: ListedAgentProfile[] }> {
   const root = agentProfileRoot();
-  const paths: string[] = [];
+  const registered = await registeredProfilePaths(root);
+  const paths = new Set(registered);
+  const failures: ListedAgentProfile[] = [];
   const walk = async (directory: string): Promise<void> => {
     let entries;
     try { entries = await readdir(directory, { withFileTypes: true }); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && directory === root) return;
+      failures.push({ path: directory, error: code === "ENOENT" ? "directory_missing" : "directory_unreadable" });
+      return;
     }
     for (const entry of entries) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) await walk(path);
-      else if (entry.isFile() && entry.name === "profile.json") paths.push(path);
+      else if (entry.isFile() && entry.name === "profile.json") paths.add(path);
     }
   };
   await walk(root);
-  const profiles: ListedAgentProfile[] = [];
-  for (const path of paths.sort()) {
+  const profiles: ListedAgentProfile[] = [...failures];
+  for (const path of [...paths].sort()) {
     try {
       const profile = await readAgentProfile(path, undefined, true);
       profiles.push({ path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
@@ -271,6 +295,11 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     }
     await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     await writeSecureJsonFile(path, JSON.stringify(profile));
+  });
+  const root = agentProfileRoot();
+  await withFileLock(root, "profile-registry", async () => {
+    const paths = await registeredProfilePaths(root);
+    if (!paths.includes(path)) await writeSecureJsonFile(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
   });
   return profile;
 }

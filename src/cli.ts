@@ -9475,11 +9475,23 @@ async function runMcpConnect(args: Arguments): Promise<void> {
   process.stdout.write(renderMcpConnect(result));
 }
 
+export function assertInboxWorkspace(actual: string | undefined, selected: string): void {
+  if (actual !== selected) {
+    throw new AgentSetupError("inbox_workspace_mismatch", "--workspace-id does not match this agent's workspace. Use the workspace ID from its saved profile.");
+  }
+}
+
+export function parseProfileListUrl(url: string | undefined): void {
+  if (url !== undefined) {
+    try { new URL(url); } catch { throw new AgentSetupError("profile_url_invalid", "--url must be a valid URL."); }
+  }
+}
+
 async function runProfileLs(args: Arguments): Promise<void> {
   args.assertShape(["json", "url"], 2);
+  parseProfileListUrl(args.optional("url"));
   const all = await listAgentProfiles();
-  const host = args.optional("url") === undefined ? undefined : new URL(args.required("url")).host;
-  const result = { ...all, profiles: host === undefined ? all.profiles : all.profiles.filter(profile => profile.url_host === host) };
+  const result = all;
   if (args.has("json")) {
     printJson(result);
     return;

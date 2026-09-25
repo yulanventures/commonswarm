@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { encodeInviteLink, type InviteLinkPayload } from "../../src/cloud/invite-link.js";
 import { credentialStore } from "../../src/cloud/storage.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 type Fixture = {
   id: string;
@@ -63,7 +63,7 @@ const HUMAN_DEVICE = "99999999-9999-4999-8999-999999999999";
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
-  // Item K adds a local inventory; its behavior is covered by profile-ls.test.ts.
+  // Item K's profile routes run through the focused dispatcher baseline below.
   ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
   { key: "setup", variants: ["import", "version", "guide"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   { key: "check", variants: ["messages", "message", "hook"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
@@ -716,6 +716,28 @@ test("dispatcher baseline keeps refusal text while help has its own gate", { tim
   assert.equal(withoutGeneratedHelp("cswarm: unknown command\n"), "cswarm: unknown command\n");
 });
 
+test("profile dispatcher baseline covers listing and refusal routes", { timeout: 60_000 }, async () => {
+  const root = createLaneTempHome("profile-dispatch-");
+  const origin = "http://127.0.0.1:9";
+  const fixtures: Fixture[] = [
+    { id: "profile.ls", argv: ["profile", "ls", "--url", "<ORIGIN>", "--json"] },
+    { id: "profile.refusal.missing", argv: ["profile", "--url", "<ORIGIN>"] },
+    { id: "profile.refusal.unknown", argv: ["profile", "unknown", "--url", "<ORIGIN>"] },
+    { id: "profile.refusal.profile-before-action", argv: ["profile", "--profile", "<PROFILE>", "ls", "--url", "<ORIGIN>"] },
+  ];
+  try {
+    const rows: BaselineRow[] = [];
+    for (const fixture of fixtures) rows.push(await runFixture(root, origin, fixture));
+    assert.deepEqual(rows.map(row => row.id), fixtures.map(row => row.id));
+    assert.equal(rows[0]!.exitCode, 0);
+    assert.deepEqual(JSON.parse(rows[0]!.stdout).profiles, []);
+    for (const row of rows.slice(1)) assert.notEqual(row.exitCode, 0, row.id);
+    assert.match(rows[1]!.stderr, /profile requires ls/);
+    assert.match(rows[2]!.stderr, /profile requires ls/);
+    assert.match(rows[3]!.stderr, /profile|unknown option/);
+  } finally { removeLaneTempHome(root); }
+});
+
 async function runFixture(root: string, origin: string, fixture: Fixture): Promise<BaselineRow> {
   const prepared = await prepareRow(root, origin, fixture);
   return await new Promise<BaselineRow>((resolveRun, rejectRun) => {
@@ -770,20 +792,24 @@ async function runFixture(root: string, origin: string, fixture: Fixture): Promi
       }
     });
     child.once("error", rejectRun);
-    child.once("close", code => resolveRun({
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    child.once("close", code => {
+      clearTimeout(timeout);
+      resolveRun({
       id: fixture.id,
       argv: fixture.argv,
       exitCode: code ?? 1,
       stdout: normalize(stdout, root, origin),
       stderr: normalize(stderr, root, origin),
       handlers,
-    }));
+      });
+    });
     child.stdin!.end(prepared.input);
   });
 }
 
 test("the command dispatcher matches the recorded behavior baseline", { timeout: 600_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-dispatch-baseline-"));
+  const root = createLaneTempHome("dispatch-baseline-");
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/auth/v1/token") {
@@ -859,5 +885,6 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
     assert.deepEqual(counts, expectedCounts);
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+    removeLaneTempHome(root);
   }
 });
