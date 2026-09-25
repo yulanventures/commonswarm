@@ -1,7 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
-import { constants, lstatSync, rmdirSync } from "node:fs";
+import { constants, lstatSync, rmdirSync, type Stats } from "node:fs";
 import { access, lstat, mkdir, readFile, readdir, rmdir, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -25,7 +25,7 @@ const PENDING_FILE = "connect-pending.json";
 const COMPLETE_FILE = "connect-complete.json";
 
 interface PendingConnect { attemptId: string; url: string; name: string; codeHash: string; createdAt: string }
-interface CompleteConnect { attemptId: string; url: string; codeHash: string; workspace_id?: string; anon_key?: string }
+interface CompleteConnect { attemptId: string; url: string; codeHash: string; workspace_id?: string; anon_key?: string; principal_id?: string; run_id?: string }
 
 function parseComplete(raw: string): CompleteConnect | null {
   let value: Record<string, unknown> | null;
@@ -33,19 +33,34 @@ function parseComplete(raw: string): CompleteConnect | null {
   if (!value || typeof value.attemptId !== "string" || !ONBOARDING_UUID.test(value.attemptId) ||
       typeof value.url !== "string" || typeof value.codeHash !== "string" || !/^[0-9a-f]{64}$/.test(value.codeHash) ||
       (value.workspace_id !== undefined && (typeof value.workspace_id !== "string" || !ONBOARDING_UUID.test(value.workspace_id))) ||
+      (value.principal_id !== undefined && (typeof value.principal_id !== "string" || !ONBOARDING_UUID.test(value.principal_id))) ||
+      (value.run_id !== undefined && (typeof value.run_id !== "string" || !ONBOARDING_UUID.test(value.run_id))) ||
       (value.anon_key !== undefined && typeof value.anon_key !== "string")) return null;
   return value as unknown as CompleteConnect;
 }
 
-async function readComplete(path: string): Promise<CompleteConnect | null> {
+async function readComplete(path: string, strict = false, inspect: (path: string) => Promise<Stats> = lstat): Promise<CompleteConnect | null> {
   const file = completePath(path);
+  if (strict) {
+    const info = await inspect(file).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    });
+    if (info && (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()))) {
+      throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} is unsafe. Inspect that file before retrying.`);
+    }
+  }
   let raw: string | null;
   try { raw = await readSecureJsonFileIfPresent(file, 4096); }
   catch {
     const info = await lstat(file).catch(() => null);
-    if (info?.isFile() && !info.isSymbolicLink() && (info.mode & 0o777) !== 0o600) {
+    if (info?.isFile() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
       throw new McpConnectError("connect_complete_mode", `The completed connect record at ${file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(file)}, then rerun the same command.`);
     }
+    if (strict && info && (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()))) {
+      throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} is unsafe. Inspect that file before retrying.`);
+    }
+    if (strict) throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} cannot be written safely. Inspect that file before retrying.`);
     process.stderr.write(`Warning: completed connect record at ${file} cannot be read safely; continuing.\n`);
     return null;
   }
@@ -84,18 +99,28 @@ async function checkedOrphan(path: string): Promise<{ principalId: string; raw: 
   }
 }
 
-async function removeStaleCredentialTemps(path: string): Promise<void> {
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+}
+
+async function removeStaleConnectTemps(path: string): Promise<void> {
   const dir = dirname(path);
   for (const entry of await readdir(dir)) {
-    if (!/^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(entry)) continue;
+    const match = /^(credential|profile)\.json\.(\d+)\.[0-9a-f]{12}\.tmp$/.exec(entry);
+    if (!match || processIsAlive(Number(match[2]))) continue;
     const file = join(dir, entry);
     const info = await lstat(file);
     if (!info.isFile() || info.isSymbolicLink() ||
         (typeof process.getuid === "function" && info.uid !== process.getuid())) {
-      throw new McpConnectError("profile_conflict", `Unsafe credential temporary file at ${file}. Inspect it before retrying.`);
+      throw new McpConnectError("profile_conflict", `Unsafe temporary file at ${file}. Inspect it before retrying.`);
     }
     await unlink(file);
   }
+}
+
+async function cleanConnectTemps(path: string): Promise<void> {
+  await withFileLock(dirname(path), "setup", async () => removeStaleConnectTemps(path));
 }
 
 function codeHash(code: string, attemptId: string): string {
@@ -123,14 +148,34 @@ function isPermissionError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException)?.code === "EACCES" || (error as NodeJS.ErrnoException)?.code === "EPERM";
 }
 
-async function wrongModeAncestor(path: string): Promise<string | null> {
+async function wrongModeAncestor(path: string, inspect: (path: string) => Promise<Stats> = lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined): Promise<string | null> {
   const home = homedir();
   for (let dir = path; dir !== home && dir.startsWith(`${home}/`); dir = dirname(dir)) {
-    const info = await lstat(dir).catch(() => null);
+    const info = await inspect(dir).catch(() => null);
     if (info?.isDirectory() && !info.isSymbolicLink() &&
-        (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o700) return dir;
+        (ownerUid === undefined || info.uid === ownerUid) && (info.mode & 0o700) !== 0o700) return dir;
   }
   return null;
+}
+
+async function unownedAncestor(path: string, inspect: (path: string) => Promise<Stats> = lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined): Promise<string | null> {
+  const home = homedir();
+  for (let dir = path; dir !== home && dir.startsWith(`${home}/`); dir = dirname(dir)) {
+    const info = await inspect(dir).catch(() => null);
+    if (info?.isDirectory() && !info.isSymbolicLink() && ownerUid !== undefined && info.uid !== ownerUid) return dir;
+  }
+  return null;
+}
+
+export async function classifyDirectoryFailure(path: string, error: unknown, inspect: (path: string) => Promise<Stats> = lstat,
+  ownerUid = typeof process.getuid === "function" ? process.getuid() : undefined): Promise<never> {
+  if (isPermissionError(error)) {
+    const wrong = await wrongModeAncestor(path, inspect, ownerUid);
+    if (wrong) throw directoryModeError(wrong);
+    const unowned = await unownedAncestor(path, inspect, ownerUid);
+    if (unowned) throw new McpConnectError("connect_directory_unowned", `The directory at ${unowned} is not owned by the current user. Ask its owner to repair access, then rerun the same command.`);
+  }
+  throw error;
 }
 
 function directoryModeError(dir: string): McpConnectError {
@@ -144,7 +189,7 @@ async function privateConnectLocation(path: string): Promise<string> {
     let wrongAncestor: string | null = null;
     try { wrongAncestor = await wrongModeAncestor(dirname(privatePath(path))); } catch { /* Keep the original path refusal. */ }
     if (wrongAncestor) throw directoryModeError(wrongAncestor);
-    throw error;
+    return await classifyDirectoryFailure(dirname(privatePath(path)), error);
   }
 }
 
@@ -274,15 +319,17 @@ export interface McpConnectOptions {
   readCode?: () => Promise<string>;
   fetcher?: typeof fetch;
   saveProfile?: typeof saveAgentProfile;
+  writeCompletion?: typeof writeSecureJsonFile;
+  inspectCompletion?: (path: string) => Promise<Stats>;
   terminal?: HiddenTerminal;
   removeEmptyDirectory?: typeof rmdir;
 }
 
-/** Clear only the interrupted record. A credential may be the only copy of a live seat. */
-export async function clearMcpConnect(profilePath: string, removeFile: typeof unlink = unlink): Promise<{ completedProfile: string | null; credentialPresent: boolean; profilePresent: boolean }> {
+/** Clear local connect records. A credential may be the only copy of a live seat. */
+export async function clearMcpConnect(profilePath: string, removeFile: typeof unlink = unlink): Promise<{ completedProfile: string | null; credentialPresent: boolean; profilePresent: boolean; removed: "pending record" | "completion record" | "pending record and completion record" | "nothing" }> {
   const path = await privateConnectLocation(profilePath);
   const dir = dirname(path);
-  if (!await pathExists(dir)) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
+  if (!await pathExists(dir)) return { completedProfile: null, credentialPresent: false, profilePresent: false, removed: "nothing" };
   try { await ensureSecureStateDirectory(dir); }
   catch {
     const info = await lstat(dir).catch(() => null);
@@ -293,11 +340,13 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
   }
   return await withFileLock(dir, "mcp-connect", async () => {
     const hadPending = await pathExists(pendingPath(path));
-    if (!hadPending && !await pathExists(completePath(path))) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
+    const hadComplete = await pathExists(completePath(path));
+    if (!hadPending && !hadComplete) return { completedProfile: null, credentialPresent: await pathExists(join(dir, "credential.json")), profilePresent: await pathExists(path), removed: "nothing" as const };
+    await cleanConnectTemps(path);
     const credential = join(dir, "credential.json");
     let completedProfile: string | null = null;
     for (const entry of await readdir(dir)) {
-      if (entry === PENDING_FILE || entry === "credential.json") continue;
+      if (entry === PENDING_FILE || entry === COMPLETE_FILE || entry === "credential.json" || /^(credential|profile)\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(entry)) continue;
       const candidate = join(dir, entry);
       try {
         if (candidate === path) {
@@ -339,7 +388,8 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
       }
     }
     if (hadPending ? !removedPending : !removedComplete) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
-    return { completedProfile, credentialPresent: await pathExists(credential), profilePresent: await pathExists(path) };
+    return { completedProfile, credentialPresent: await pathExists(credential), profilePresent: await pathExists(path),
+      removed: removedPending && removedComplete ? "pending record and completion record" : removedPending ? "pending record" : "completion record" };
   });
 }
 
@@ -352,6 +402,7 @@ async function defaultPendingProfile(target: CloudTarget, code: string): Promise
     if (["ENOTDIR", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) {
       const wrongAncestor = isPermissionError(error) ? await wrongModeAncestor(base) : null;
       if (wrongAncestor) throw directoryModeError(wrongAncestor);
+      if (isPermissionError(error)) await classifyDirectoryFailure(base, error);
       const info = await lstat(base).catch(() => null);
       if (info?.isDirectory() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o700) {
         throw new McpConnectError("connect_directory_mode", `The default connect directory at ${base} needs mode 0700. Run chmod 700 ${quoteAgentArgument(base)}, then rerun the same command.`);
@@ -509,7 +560,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
   catch (error) {
     const wrongAncestor = isPermissionError(error) ? await wrongModeAncestor(profileDir) : null;
     if (wrongAncestor) throw directoryModeError(wrongAncestor);
-    throw error;
+    return await classifyDirectoryFailure(profileDir, error);
   }
   const createdInfo = createdDirectory ? await lstat(profileDir) : null;
   const cleanupOnSignal = () => {
@@ -524,13 +575,14 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     catch (error) {
       const wrongAncestor = isPermissionError(error) ? await wrongModeAncestor(profileDir) : null;
       if (wrongAncestor) throw directoryModeError(wrongAncestor);
+      if (isPermissionError(error)) await classifyDirectoryFailure(profileDir, error);
       const info = await lstat(profileDir).catch(() => null);
       if (info?.isDirectory() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o700) {
         throw new McpConnectError("connect_directory_mode", `The connect directory at ${profileDir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(profileDir)}, then rerun the same command.`);
       }
       throw new McpConnectError("connect_state_unavailable", `The connect directory at ${profileDir} cannot be used safely. Inspect the path and rerun the same command.`);
     }
-    await withFileLock(profileDir, "mcp-connect", async () => { await removeStaleCredentialTemps(path); });
+    await withFileLock(profileDir, "mcp-connect", async () => { await cleanConnectTemps(path); });
     await access(dirname(path), constants.W_OK);
     const pending = await readPending(path);
     if (pending) {
@@ -565,13 +617,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       throw new McpConnectError("connect_code_mismatch", `The record at ${pendingPath(path)} belongs to another code. Rerun with the original code; ask the operator to inspect the attempt before clearing it with ${clearCommand(path)}.`);
     }
     return await withFileLock(profileDir, "mcp-connect", async () => {
-      await removeStaleCredentialTemps(path);
+      await cleanConnectTemps(path);
       const current = await readPending(path);
-      const complete = !current ? await readComplete(path) : null;
+      const complete = await readComplete(path, current !== null, options.inspectCompletion);
       if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) && !await pathExists(path)) {
         const state = `This directory has ${await pathExists(join(profileDir, "credential.json")) ? "credential.json" : "no credential.json"}, no profile.json, and ${completePath(path)}.`;
         const newPath = `Use --profile <new path> for a new agent.`;
-        if (!complete.workspace_id || !complete.anon_key || complete.anon_key !== options.target.anonKey) {
+        if (!complete.workspace_id || !complete.anon_key || !complete.principal_id || complete.anon_key !== options.target.anonKey) {
           throw new McpConnectError("connect_completion_incomplete", `${state} The completion record cannot rebuild the profile. ${newPath}`);
         }
         let orphan: { principalId: string; raw: string } | null;
@@ -581,6 +633,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           throw new McpConnectError("connect_completion_incomplete", `${state} The credential cannot rebuild the profile. ${newPath}`);
         }
         if (!orphan) throw new McpConnectError("connect_completion_incomplete", `${state} The credential is missing. ${newPath}`);
+        if (orphan.principalId !== complete.principal_id) {
+          throw new McpConnectError("connect_completion_principal_mismatch", `The credential at ${join(profileDir, "credential.json")} belongs to a different principal than ${completePath(path)}. The profile was not rebuilt. Use --profile <new path> for a new agent.`);
+        }
         const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
           workspace_id: complete.workspace_id, principal_id: orphan.principalId,
           credential_file: join(profileDir, "credential.json") };
@@ -598,9 +653,11 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           await completedProfileAt(path);
           const profile = await readAgentProfile(path);
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
-          await readProfileCredential(profile);
-          await writeSecureJsonFile(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
-            workspace_id: profile.workspace_id, anon_key: profile.anon_key } satisfies CompleteConnect));
+          const credential = await readProfileCredential(profile);
+          try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
+            workspace_id: profile.workspace_id, anon_key: profile.anon_key, principal_id: profile.principal_id,
+            ...(credential.runId ? { run_id: credential.runId } : {}) } satisfies CompleteConnect)); }
+          catch { throw new McpConnectError("connect_complete_write_failed", `The working profile at ${path} was kept, but the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
           await deleteSecureJsonFile(pendingPath(path));
           return connectedResult(path, profile.principal_id);
         } catch (error) {
@@ -685,7 +742,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
         await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId);
         await writeSecureJsonFile(completePath(path), JSON.stringify({ attemptId, url: options.target.url, codeHash: codeHash(code, attemptId),
-          workspace_id: connection.workspace_id, anon_key: connection.anon_key } satisfies CompleteConnect));
+          workspace_id: connection.workspace_id, anon_key: connection.anon_key, principal_id: connection.principal_id, run_id: body.run_id } satisfies CompleteConnect));
         await deleteSecureJsonFile(pendingPath(path));
         return connectedResult(path, body.principal_id);
       } catch (error) {

@@ -9493,13 +9493,14 @@ async function runMcpConnect(args: Arguments): Promise<void> {
     }
     const { clearMcpConnect } = await import("./cloud/mcp-connect.js");
     const cleared = await clearMcpConnect(args.required("profile"));
-    process.stdout.write(cleared.completedProfile
-      ? `Interrupted connect record cleared. The working profile at ${cleared.completedProfile} and its credential were kept.\n`
+    const removed = cleared.removed === "nothing" ? "Nothing was removed." : `Removed ${cleared.removed}.`;
+    process.stdout.write(cleared.removed === "nothing" ? `${removed}\n` : cleared.completedProfile
+      ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.\n`
       : cleared.credentialPresent
         ? cleared.profilePresent
-          ? "Interrupted connect record cleared. This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n"
-          : "Interrupted connect record cleared. This directory holds a credential without a profile; the credential was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n"
-        : "Interrupted connect record cleared. No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n");
+          ? `${removed} This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n`
+          : `${removed} This directory holds a credential without a profile; the credential was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
+        : `${removed} No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n`);
     return;
   }
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");

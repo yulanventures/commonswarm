@@ -3,6 +3,7 @@ import {
   access,
   chmod,
   lstat,
+  link,
   mkdir,
   open,
   readFile,
@@ -487,13 +488,8 @@ export async function writeSecureJsonFileExclusive(
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
-    // Callers hold the setup lock; preserve the exclusive first-write rule at this boundary too.
-    const existing = await lstat(path).catch(error => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    });
-    if (existing) throw Object.assign(new Error("credential path already exists"), { code: "EEXIST" });
-    await rename(temporary, path);
+    // Hard-link publication is atomic and fails with EEXIST even across different locks.
+    await link(temporary, path);
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;
