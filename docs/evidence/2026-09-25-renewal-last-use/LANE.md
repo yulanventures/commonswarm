@@ -77,3 +77,14 @@ The lead's full gates at `e1cfd84c` on the reset local stack: `test:p1-server` 2
 ## Not established
 
 Whether production has the preceding `20260925000001` migration is unverified; the box has not been contacted or released. HezLead owns local-stack execution and review; only Anvil under HezLead may release a reviewed main SHA to the box. `pgrep` and `ps` cannot inspect processes in this sandbox (`sysmond service not found` and `operation not permitted`); the CLI gate's process session ended after the interrupt, and the server tests, which start a served function, were not run here.
+
+## Reserve rollback and proof name (after landing, at HezLead's request)
+
+- `deploy/release-proofs/renewal-last-use/20260925000002-rollback.sql` (reserve; HezLead's decision only): restores both
+  functions exactly as `20260904000001_standing_grant_resume.sql` defined them (bodies, owner, grants, comment, copied
+  verbatim) and deletes the ledger row, in one transaction. Measured on the local stack: after it runs, the md5 of both
+  `pg_get_functiondef` outputs, the fence's comment and the recorder's ACL equal those produced by applying the
+  20260904 blocks directly (MATCH); the catalog proof then returns `f` and the ledger row count is 0; reapplying
+  20260925000002 returns the proof to `t`.
+- The catalog proof is renamed `20260925000002-catalog.sql` (RELEASE-TO-BOX loads `/proof/<version>-catalog.sql`);
+  Anvil stages tonight's copy under that name from the release SHA a54afaf6.

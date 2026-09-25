@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const migration = readFileSync(new URL("../../supabase/migrations/20260925000002_renewal_last_use_monotonic.sql", import.meta.url), "utf8");
-const catalog = readFileSync(new URL("../../deploy/release-proofs/renewal-last-use/catalog.sql", import.meta.url), "utf8");
+const catalog = readFileSync(new URL("../../deploy/release-proofs/renewal-last-use/20260925000002-catalog.sql", import.meta.url), "utf8");
 const serverTest = readFileSync(new URL("../p1-server/renewal-last-use.test.ts", import.meta.url), "utf8");
 
 function bodies(source: string): string[] {
