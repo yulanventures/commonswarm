@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -15,6 +15,8 @@ import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
+import { writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
+import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -403,6 +405,257 @@ test("umask 0277 still creates mode 0600 pending, credential, profile and comple
   } finally { process.umask(old); await f.close(); }
 });
 
+test("Fold 7 first credential write leaves no partial final file on EIO and one retry recovers", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "first-atomic", "profile.json");
+    const credential = join(dirname(path), "credential.json");
+    let posts = 0;
+    const attempts: string[] = [];
+    const fetcher: typeof fetch = async (_input, init) => {
+      posts++;
+      attempts.push(JSON.parse(String(init?.body)).attemptId);
+      return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
+        token_id: posts === 1 ? TOKEN_ID : "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        agent_token: `swm_agt_${(posts === 1 ? "T" : "U").repeat(43)}`, expires_at: "2099-01-01T00:00:00Z" });
+    };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher,
+      saveProfile: async (_path, connection) => {
+        await writeSecureJsonFileExclusive(credential, JSON.stringify(connection.credential), async handle => {
+          await handle.writeFile("partial");
+          throw Object.assign(new Error("disk write failed"), { code: "EIO" });
+        });
+        throw new Error("write should fail");
+      } }), { code: "register_outcome_unknown" });
+    await assert.rejects(stat(credential), { code: "ENOENT" });
+    assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher });
+    assert.equal(posts, 2, "the rerun makes one request");
+    assert.equal(new Set(attempts).size, 1);
+    assert.equal((await readProfileCredential(await readAgentProfile(path))).token, `swm_agt_${"U".repeat(43)}`);
+  } finally { await f.close(); }
+});
+
+test("Fold 7 damaged partial credential gives its exact move step before POST", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "partial-old", "profile.json");
+    let posts = 0;
+    const fetcher: typeof fetch = async () => { posts++; throw new Error("response lost"); };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
+    const credential = join(dirname(path), "credential.json");
+    await writeFile(credential, "{", { mode: 0o600 });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_credential_damaged");
+      assert.match(String(error), new RegExp(`mv '${credential}' '${credential}\\.damaged-\\d{4}-`));
+      assert.match(String(error), /then run the same command again/);
+      return true;
+    });
+    assert.equal(posts, 1, "a partial orphan must not revoke another token");
+  } finally { await f.close(); }
+});
+
+test("Fold 7 typed repository and symlink refusals do not advise chmod", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
+  try {
+    const parent = join(f.root, "ordinary");
+    const repo = join(parent, "repo");
+    await mkdir(join(repo, ".git"), { recursive: true, mode: 0o755 });
+    await chmod(parent, 0o755);
+    await chmod(repo, 0o755);
+    const linked = join(parent, "linked");
+    await symlink(repo, linked);
+    for (const [path, code] of [[join(repo, "seat", "profile.json"), "profile_inside_repository"],
+      [join(linked, "seat", "profile.json"), "profile_symlink"]] as const) {
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+        assert.equal((error as { code: string }).code, code);
+        assert.doesNotMatch(String(error), /chmod/);
+        return true;
+      });
+    }
+    assert.equal(f.calls(), 0);
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
+});
+
+test("Fold 7 retry checks every orphan form before register", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "orphan-check", "profile.json");
+    let posts = 0;
+    const fetcher: typeof fetch = async () => { posts++; throw new Error("response lost"); };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
+    const credential = join(dirname(path), "credential.json");
+    const other = join(dirname(path), "other.json");
+    const valid = { message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
+      principal_id: "ffffffff-ffff-4fff-8fff-ffffffffffff", run_id: RUN, token_id: TOKEN_ID,
+      agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" };
+    for (const kind of ["symlink", "oversized", "no-principal"] as const) {
+      await rm(credential, { force: true });
+      if (kind === "symlink") { await writeFile(other, JSON.stringify(valid), { mode: 0o600 }); await symlink(other, credential); }
+      else if (kind === "oversized") await writeFile(credential, "x".repeat(16 * 1024 + 1), { mode: 0o600 });
+      else if (kind === "no-principal") await writeFile(credential, "{}", { mode: 0o600 });
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "profile_conflict" }, kind);
+      assert.equal(posts, 1, `${kind} must not make another POST`);
+    }
+  } finally { await f.close(); }
+});
+
+test("Fold 7 default scan reports credential and directory modes before another register", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
+  try {
+    const connected = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    const credential = join(dirname(connected.profile), "credential.json");
+    await chmod(credential, 0o644);
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_credential_mode");
+      assert.match(String(error), new RegExp(`chmod 600 '${credential}'`));
+      return true;
+    });
+    assert.equal(f.calls(), 1);
+    await chmod(credential, 0o600);
+    await chmod(dirname(connected.profile), 0o755);
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_directory_mode");
+      assert.match(String(error), /chmod 700/);
+      return true;
+    });
+    assert.equal(f.calls(), 1);
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
+});
+
+test("Fold 7 completion rebuilds a missing profile locally or gives a new path for incomplete state", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
+  try {
+    const connected = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    const profile = connected.profile;
+    const credential = join(dirname(profile), "credential.json");
+    const before = await readFile(credential);
+    await unlink(profile);
+    const rebuilt = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal(rebuilt.profile, profile);
+    assert.equal(f.calls(), 1, "rebuild uses no network");
+    assert.deepEqual(await readFile(credential), before);
+    assert.equal((await readAgentProfile(profile)).principal_id, PRINCIPAL);
+    await unlink(profile);
+    const completePath = join(dirname(profile), "connect-complete.json");
+    const incomplete = JSON.parse(await readFile(completePath, "utf8"));
+    delete incomplete.workspace_id;
+    await writeSecureJsonFile(completePath, JSON.stringify(incomplete));
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_completion_incomplete");
+      assert.match(String(error), /credential\.json.*no profile\.json.*connect-complete\.json/);
+      assert.match(String(error), /--profile <new path>/);
+      return true;
+    });
+    await writeSecureJsonFile(completePath, JSON.stringify({ ...incomplete, workspace_id: WS }));
+    await unlink(credential);
+    await assert.rejects(connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "connect_completion_incomplete");
+      assert.match(String(error), /no credential\.json, no profile\.json/);
+      assert.match(String(error), /--profile <new path>/);
+      return true;
+    });
+    assert.equal(f.calls(), 1);
+  } finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
+});
+
+test("Fold 7 damaged and unreadable completion records warn once and clear removes them", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
+  const originalWrite = process.stderr.write;
+  try {
+    const connected = await connectMcp({ target: TARGET, readCode: async () => JOIN, fetcher: f.fetcher });
+    const complete = join(dirname(connected.profile), "connect-complete.json");
+    const captured: string[] = [];
+    process.stderr.write = ((chunk: string | Uint8Array) => { captured.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    for (const kind of ["damaged", "unreadable"] as const) {
+      await rm(complete, { force: true });
+      if (kind === "damaged") await writeFile(complete, "{", { mode: 0o600 });
+      else await symlink(join(dirname(complete), "missing-record"), complete);
+      captured.length = 0;
+      await connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "damaged" ? "K" : "L").repeat(43)}`, fetcher: async () => {
+        return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
+          token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
+      } });
+      assert.equal(captured.filter(line => line.includes(complete)).length, 1);
+      assert.match(captured[0] ?? "", /Warning:/);
+      await clearMcpConnect(connected.profile);
+      await assert.rejects(stat(complete), { code: "ENOENT" });
+    }
+  } finally { process.stderr.write = originalWrite; if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await f.close(); }
+});
+
+test("Fold 7 kill before first credential write leaves no final file and one-request recovery", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const path = join(f.root, "first-kill", "profile.json");
+    let posts = 0;
+    const fetcher: typeof fetch = async () => {
+      posts++;
+      if (posts === 1) throw new Error("response lost");
+      return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
+        token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
+    };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "register_outcome_unknown" });
+    const credential = join(dirname(path), "credential.json");
+    const storageUrl = new URL("../../src/cloud/storage.ts", import.meta.url).href;
+    const script = `import { writeSecureJsonFileExclusive } from ${JSON.stringify(storageUrl)}; await writeSecureJsonFileExclusive(process.argv[1], '{}', async () => { process.stdout.write('ready\\n'); await new Promise(() => {}); });`;
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential], { stdio: ["ignore", "pipe", "pipe"] });
+    await once(child.stdout!, "data");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+    child = null;
+    await assert.rejects(stat(credential), { code: "ENOENT" });
+    assert.equal((await readdir(dirname(path))).filter(name => /^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(name)).length, 1);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher });
+    assert.equal(posts, 2);
+    assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
+  } finally {
+    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    await f.close();
+  }
+});
+
+test("Fold 7 replace failure unlinks its temp and a killed replacement temp is removed next run", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    const path = join(f.root, "replace-kill", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const credential = join(dirname(path), "credential.json");
+    const before = await readFile(credential);
+    await assert.rejects(writeSecureJsonFile(credential, "{}", async handle => {
+      await handle.writeFile("partial");
+      throw Object.assign(new Error("disk write failed"), { code: "EIO" });
+    }), { code: "EIO" });
+    assert.deepEqual(await readFile(credential), before);
+    assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
+    const storageUrl = new URL("../../src/cloud/storage.ts", import.meta.url).href;
+    const script = `import { writeSecureJsonFile } from ${JSON.stringify(storageUrl)}; await writeSecureJsonFile(process.argv[1], '{}', async handle => { await handle.writeFile('{}'); process.stdout.write('ready\\n'); await new Promise(() => {}); });`;
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, credential], { stdio: ["ignore", "pipe", "pipe"] });
+    await once(child.stdout!, "data");
+    child.kill("SIGKILL");
+    await once(child, "exit");
+    child = null;
+    assert.equal((await readdir(dirname(path))).filter(name => /^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(name)).length, 1);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "profile_exists" });
+    assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
+    assert.deepEqual(await readFile(credential), before);
+    assert.equal(f.calls(), 1);
+  } finally {
+    if (child) { child.kill("SIGKILL"); await once(child, "exit").catch(() => undefined); }
+    await f.close();
+  }
+});
+
 test("a different code is refused before POST with original-code advice", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
@@ -550,7 +803,9 @@ test("server revoked retry and clear preserve an orphan credential", { timeout: 
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
       fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
     const credential = join(dirname(path), "credential.json");
-    await writeFile(credential, "orphan", { mode: 0o600 });
+    await writeFile(credential, JSON.stringify({ message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
+      principal_id: PRINCIPAL, run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN,
+      expires_at: "2099-01-01T00:00:00Z" }), { mode: 0o600 });
     f.refuse("registration_seat_revoked");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
       assert.equal((error as { code: string }).code, "registration_seat_revoked");
