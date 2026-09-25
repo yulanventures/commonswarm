@@ -1,6 +1,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { readFile } from "node:fs/promises";
-import { basename } from "node:path";
+import { lstat, open, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { AgentSetupError, openProfileCredential, privatePath, profileSessionContext, profileTarget, readAgentProfile } from "../cloud/agent-profile.js";
@@ -13,12 +15,42 @@ import { signalDuration } from "../cloud/signal-duration.js";
 import { MCP_TOOLS, MCP_TOOL_TABLE, capFreshCheck, capMcpResult, validateMcpArguments } from "./tools.js";
 import { mapMcpError } from "./errors.js";
 import { brainFileName, canonicalBrainTopic } from "../cloud/brain.js";
-import { exactPutStateDir, executeExactPut, prepareExactPut } from "../cloud/exact-file-put.js";
-import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
+import { exactPutStateDir, executeExactPut, FilePutPreflightError, prepareExactPut } from "../cloud/exact-file-put.js";
+import { FILE_MAX_VERSION_BYTES, FileCommandRefused, FileTransportError } from "../cloud/files.js";
 
 export { mapMcpError } from "./errors.js";
 
 export interface McpServerOptions { profilePath: string; hostSessionId?: string }
+
+function inside(path: string, root: string): boolean {
+  const offset = relative(root, path);
+  return offset === "" || (offset !== ".." && !offset.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(offset));
+}
+
+/** Resolve the local path before opening it, and refuse private CLI state. */
+export async function readMcpPutFile(path: string, profilePath: string, credentialFile?: string): Promise<Uint8Array> {
+  try {
+    const initial = await lstat(path);
+    if (!initial.isFile() && !initial.isSymbolicLink()) throw new FilePutPreflightError("file_path_invalid", "The path is not a regular file.");
+    const resolved = await realpath(path);
+    const protectedRoots = await Promise.all([join(homedir(), ".cswarm"), join(homedir(), ".config", "cswarm"), dirname(profilePath)]
+      .map(root => realpath(root).catch(() => resolve(root))));
+    if (protectedRoots.some(root => inside(resolved, root)) ||
+        (credentialFile !== undefined && resolved === await realpath(credentialFile).catch(() => resolve(credentialFile)))) {
+      throw new FilePutPreflightError("file_path_protected", "The path is inside CommonSwarm's private state.");
+    }
+    const file = await open(resolved, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) throw new FilePutPreflightError("file_path_invalid", "The path is not a regular file.");
+      if (info.size > FILE_MAX_VERSION_BYTES) throw new FilePutPreflightError("file_too_large", "The file exceeds 25 MiB.");
+      return await file.readFile();
+    } finally { await file.close(); }
+  } catch (error) {
+    if (error instanceof FilePutPreflightError) throw error;
+    throw new FilePutPreflightError("file_path_invalid", "The path cannot be read as a regular file.");
+  }
+}
 
 /** Keep the write boundary observable: a failed write cannot advance a cursor. */
 export async function sendWithDeferredCommit<T extends object>(
@@ -106,7 +138,7 @@ export async function serveMcp(options: McpServerOptions): Promise<void> {
         case "brain_put": {
           const topic = tool.name === "brain_put" ? canonicalBrainTopic(args.topic!) : null;
           const name = topic === null ? args.name ?? basename(args.path!) : brainFileName(topic);
-          const bytes = await readFile(args.path!);
+          const bytes = await readMcpPutFile(args.path!, profilePath, profile.credential_file);
           if (topic !== null) new TextDecoder("utf-8", { fatal: true }).decode(bytes);
           // The profile was authenticated at startup. Persist the intent before
           // opening a credential, which may itself contact the command edge.

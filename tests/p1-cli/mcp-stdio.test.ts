@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile, readFile, readdir, unlink } from "node:fs/promises";
+import { spawn, execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile, readFile, readdir, unlink, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,7 @@ import { AGENT_SESSION_PROOF_REFUSAL_CODES, agentSessionErrorStatus } from "../.
 import { LocalCredentialSecretAbsentError, SignalMalformedError, SignalRecipientError, SignalTransportError } from "../../src/cloud/signals.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../../src/cloud/storage.js";
 import { mapMcpError, sendWithDeferredCommit } from "../../src/mcp/server.js";
+import { FileCommandRefused, FileTransportError } from "../../src/cloud/files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
 import { Arguments } from "../../src/cli.js";
@@ -50,6 +51,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   const fileCommits = new Map<string, Record<string, any>>();
   const fileObjects = new Set<string>();
   let filePrecondition: number | null = null;
+  let fileCreateError: { status: number; code: string } | null = null;
   let putRefusal: { status: number; body: object } | null = null;
   let killPhase: "create" | "put" | "commit" | null = null;
   let killMcp: (() => void) | null = null;
@@ -77,6 +79,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       const send = (status: number, value: object) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
       if (body.command?.kind === "file_version_create") {
         fileCommands.push(body);
+        if (fileCreateError) return send(fileCreateError.status, { error: fileCreateError.code });
         if (filePrecondition !== null && body.command.if_version !== filePrecondition) {
           return send(409, { error: "file_version_precondition_failed", message: "newer live version" });
         }
@@ -212,6 +215,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     setMalformedRead: (value: boolean) => { malformedRead = value; },
     setRenewalReason: (value: string) => { renewalReason = value; },
     setFilePrecondition: (value: number | null) => { filePrecondition = value; },
+    setFileCreateError: (value: typeof fileCreateError) => { fileCreateError = value; },
     setPutRefusal: (value: typeof putRefusal) => { putRefusal = value; },
     seedCreatedObject: () => { const created = [...fileCreates.values()][0]; assert.ok(created); fileObjects.add(created.upload_path as string); },
     conflictNext: () => { serverConflict = true; } };
@@ -330,7 +334,7 @@ test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeo
     f.setPutRefusal({ status: 400, body: { statusCode: "409", error: "Duplicate", message: "The resource already exists" } });
     const withoutRecord = (await f.call("file_put", { request_id: "fileput01", path })).value;
     f.setPutRefusal(null);
-    assert.equal(withoutRecord.outcome, "replayed");
+    assert.equal(withoutRecord.outcome, "committed");
     assert.equal(withoutRecord.conflict_check, "unavailable");
     assert.equal(f.fileCommits.size, 1);
     await writeFile(path, "# changed\n");
@@ -365,6 +369,78 @@ test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeo
   } finally { await f.close(); }
 });
 
+test("every typed file refusal has an owned next step", { timeout: 10000 }, () => {
+  const retry = "retry this call with the same request_id";
+  for (const code of ["file_bytes_missing", "file_transport"]) {
+    const error = code === "file_transport" ? new FileTransportError("offline") : new FileCommandRefused(409, code, "hidden");
+    assert.equal(mapMcpError(error).next_step, retry, code);
+  }
+  for (const status of [429, 500, 503]) assert.equal(mapMcpError(new FileCommandRefused(status, "temporary", "hidden")).next_step, retry);
+  for (const code of ["file_too_large", "file_type_refused", "if_version_invalid", "file_path_invalid", "file_path_protected",
+    "file_size_exceeds_declaration", "file_id_unavailable", "version_id_unavailable", "file_tombstoned", "file_version_cap",
+    "brain_version_in_flight_cap", "workspace_file_count", "workspace_quota_exceeded", "file_not_found"]) {
+    assert.equal(mapMcpError(new FileCommandRefused(409, code, "hidden")).next_step, "fix the named argument", code);
+  }
+  for (const status of [401, 403]) assert.equal(mapMcpError(new FileCommandRefused(status, "forbidden", "hidden")).next_step,
+    "a person must restore this agent's access outside this session");
+  assert.equal(mapMcpError(new FileCommandRefused(409, "file_commit_conflict", "hidden")).next_step, "use a new request_id for new content");
+  assert.equal(mapMcpError(new FileCommandRefused(409, "command_id_conflict", "hidden")).next_step, "use a new request_id for new content");
+  assert.match(mapMcpError(new FileCommandRefused(409, "file_version_precondition_failed", "hidden")).next_step, /read the topic again and use a NEW request_id/);
+  assert.match(MCP_ERROR_SENTENCES.request_id_conflict!.next_step, /new request_id/);
+});
+
+test("MCP 5xx file create reports unknown with the same request id", { timeout: 15000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "outage.md");
+    await writeFile(path, "# outage\n");
+    f.setFileCreateError({ status: 503, code: "temporary" });
+    const response = await f.call("file_put", { request_id: "outage-create-01", path });
+    assert.equal(response.result.isError, undefined);
+    assert.equal(response.value.outcome, "unknown");
+    assert.equal(response.value.retry_with_same_request_id, true);
+    f.setFileCreateError(null);
+    assert.equal((await f.call("file_put", { request_id: "outage-create-01", path })).value.outcome, "committed");
+  } finally { await f.close(); }
+});
+
+test("MCP path preflight refuses nonfiles and private state before network", { timeout: 20000 }, async () => {
+  const f = await fixture();
+  try {
+    const regular = join(f.root, "regular.md");
+    await writeFile(regular, "# safe\n");
+    const fifo = join(f.root, "fifo.md");
+    execFileSync("mkfifo", [fifo], { timeout: 2000 });
+    const dangling = join(f.root, "fifo-link.md");
+    await symlink(fifo, dangling);
+    const privateFile = join(f.root, "profile", "private.md");
+    await writeFile(privateFile, "private");
+    await mkdir(join(f.root, ".cswarm"));
+    const stateFile = join(f.root, ".cswarm", "state.md");
+    await writeFile(stateFile, "private");
+    await mkdir(join(f.root, ".config", "cswarm"), { recursive: true });
+    const configFile = join(f.root, ".config", "cswarm", "config.md");
+    await writeFile(configFile, "private");
+    const alias = join(f.root, "alias.md");
+    await symlink(privateFile, alias);
+    const cases: Array<[string, string]> = [
+      [join(f.root, "missing.md"), "file_path_invalid"], [f.root, "file_path_invalid"],
+      [fifo, "file_path_invalid"], [dangling, "file_path_invalid"],
+      [privateFile, "file_path_protected"], [stateFile, "file_path_protected"],
+      [configFile, "file_path_protected"], [alias, "file_path_protected"],
+      [f.profile, "file_path_protected"],
+    ];
+    for (const [index, [path, code]] of cases.entries()) {
+      const answer = await f.call("file_put", { request_id: `path-case-${index}x`, path, name: "safe.md" });
+      assert.equal(answer.result.isError, true, path);
+      assert.equal(answer.value.code, code, path);
+      assert.equal(answer.value.next_step, "fix the named argument", path);
+    }
+    assert.equal(f.fileCommands.length, 0);
+    assert.equal((await f.call("file_put", { request_id: "path-positive-01", path: regular })).value.outcome, "committed");
+  } finally { await f.close(); }
+});
+
 for (const phase of ["create", "put", "commit"] as const) {
   test(`MCP process killed after ${phase} resumes the same file version`, { timeout: 20_000 }, async () => {
     const f = await fixture();
@@ -375,7 +451,7 @@ for (const phase of ["create", "put", "commit"] as const) {
       await assert.rejects(f.client.callTool({ name: "file_put", arguments: { request_id: `restart_${phase}`, path } }));
       await f.restart();
       const retried = (await f.call("file_put", { request_id: `restart_${phase}`, path })).value;
-      assert.equal(retried.outcome, "replayed");
+      assert.equal(retried.outcome, "committed");
       assert.equal(f.fileCreates.size, 1);
       assert.equal(f.fileCommits.size, 1);
     } finally { await f.close(); }
@@ -405,7 +481,7 @@ for (const [shape, refusal] of [
         const resumed = await f.call("file_put", { request_id, path });
         if (present) {
           assert.equal(resumed.result.isError, undefined);
-          assert.equal(resumed.value.outcome, "replayed");
+          assert.equal(resumed.value.outcome, "committed");
           assert.equal(f.fileCommits.size, 1);
         } else {
           assert.equal(resumed.result.isError, true);
