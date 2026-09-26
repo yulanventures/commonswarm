@@ -1,25 +1,26 @@
 import assert from "node:assert/strict";
+import { createHmac, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
-import { classifyAttemptMarkerReadFailure, classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
+import { classifyAttemptMarkerReadFailure, classifyConnectReservedPath, classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { Arguments } from "../../src/cli.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
 import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
-import { CONNECT_PROFILE_FILES, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
+import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -29,6 +30,111 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+
+test("Fold 17 every reserved path refuses unsafe state before POST on explicit and default connect", { timeout: 60000 }, async () => {
+  const f = await fixture();
+  const defaultBase = join(homedir(), ".cswarm", "agents");
+  const ownedDefault: string[] = [];
+  const tempNames = [...CONNECT_PROFILE_FILES.temporaryBases, "profile.json"]
+    .map(base => CONNECT_PROFILE_FILES.temporaryName(base, 123, "abcdefabcdef"));
+  const names = connectProfileReservedPaths("profile.json", tempNames);
+  assert.equal(names.length, 12, "all seven fixed names and five temporary patterns are covered");
+  try {
+    const control = join(f.root, CONNECT_PROFILE_FILES.attemptMarker);
+    assert.equal((await classifyConnectReservedPath(control)).outcome, "absent");
+    await writeFile(control, "private test body");
+    await chmod(control, 0o600);
+    assert.equal((await classifyConnectReservedPath(control)).outcome, "ok");
+    await mkdir(defaultBase, { recursive: true, mode: 0o700 });
+    for (const route of ["explicit", "default"] as const) {
+      for (const name of names) {
+        for (const state of ["0644 file", "symlink", "directory", "other-owner", "unreadable body"] as const) {
+          const dir = route === "default" ? join(defaultBase, `mcp-${randomUUID()}`) : join(f.root, randomUUID());
+          if (route === "default") ownedDefault.push(dir);
+          await mkdir(dir, { mode: 0o700 });
+          const profile = join(dir, "profile.json");
+          const attemptId = randomUUID();
+          const pending = join(dir, CONNECT_PROFILE_FILES.pending);
+          await writeSecureJsonFile(pending, JSON.stringify({ attemptId, url: TARGET.url, name: "MCP agent",
+            codeHash: createHmac("sha256", attemptId).update(JOIN).digest("hex"), createdAt: new Date().toISOString() }));
+          const bad = join(dir, name);
+          if (name === CONNECT_PROFILE_FILES.pending && (state === "symlink" || state === "directory")) await unlink(bad);
+          if (state === "symlink") await symlink(join(f.root, "missing-target"), bad);
+          else if (state === "directory") await mkdir(bad);
+          else {
+            if (name !== CONNECT_PROFILE_FILES.pending) await writeFile(bad, "private test body");
+            if (state === "0644 file") await chmod(bad, 0o644);
+            else await chmod(bad, 0o600);
+          }
+          let posts = 0;
+          const options = { target: TARGET, readCode: async () => JOIN,
+            fetcher: (async () => { posts++; throw new Error("unexpected POST"); }) as typeof fetch,
+            ...(route === "explicit" ? { profilePath: profile } : {}),
+            ...(state === "other-owner" ? { inspectReserved: async (file: string) => {
+              const info = await lstat(file);
+              if (file === bad) Object.assign(info, { uid: info.uid + 1 });
+              return info;
+            } } : {}),
+            ...(state === "unreadable body" ? { readReserved: async (file: string) => {
+              if (file === bad) throw Object.assign(new Error("injected read failure"), { code: "EIO" });
+              return await readFile(file, "utf8");
+            } } : {}),
+          };
+          await assert.rejects(connectMcp(options), error => {
+            const message = String(error);
+            assert.ok(message.includes(bad), `${route} ${name} ${state}: names exact file`);
+            if (state === "0644 file") {
+              assert.ok(message.includes(`chmod 600 '${bad}'`), message);
+              assert.match(message, /rerun the same command/);
+            } else {
+              assert.match(message, /cannot be read safely/);
+              assert.match(message, /Inspect that file, then rerun the same command/);
+            }
+            return true;
+          }, `${route} ${name} ${state}`);
+          assert.equal(posts, 0, `${route} ${name} ${state}: zero POSTs`);
+          if (route === "default") {
+            await rm(dir, { recursive: true, force: true });
+            ownedDefault.pop();
+          }
+        }
+      }
+    }
+  } finally {
+    for (const dir of ownedDefault) await rm(dir, { recursive: true, force: true });
+    await f.close();
+  }
+});
+
+test("Fold 17 fresh connect checks marker before pending write or register", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const dir = join(f.root, "fresh-marker");
+    const profile = join(dir, "profile.json");
+    const marker = join(dir, CONNECT_PROFILE_FILES.attemptMarker);
+    await mkdir(dir, { mode: 0o700 });
+    await writeFile(marker, "private marker");
+    await chmod(marker, 0o644);
+    let posts = 0;
+    const attempt = () => connectMcp({ target: TARGET, profilePath: profile, readCode: async () => JOIN,
+      fetcher: async () => { posts++; throw new Error("unexpected POST"); } });
+    await assert.rejects(attempt(), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_mode");
+      assert.ok(String(error).includes(`chmod 600 '${marker}'`));
+      assert.match(String(error), /rerun the same command/);
+      return true;
+    });
+    await unlink(marker);
+    await symlink(join(f.root, "missing-marker"), marker);
+    await assert.rejects(attempt(), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_unreadable");
+      assert.ok(String(error).includes(marker));
+      return true;
+    });
+    assert.equal(posts, 0);
+    assert.equal(existsSync(join(dir, CONNECT_PROFILE_FILES.pending)), false);
+  } finally { await f.close(); }
+});
 
 test("Fold 9 reserved profile basenames refuse before POST and name the writer set", { timeout: 10000 }, async () => {
   const f = await fixture();
@@ -299,7 +405,8 @@ test("Fold 16 pending without profile classifies marker mode before register", {
     const marker = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
     const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
     const pendingBytes = await readFile(pending);
-    await writeFile(marker, JSON.stringify({ attemptId: JSON.parse(pendingBytes.toString()).attemptId }), { mode: 0o644 });
+    await writeFile(marker, JSON.stringify({ attemptId: JSON.parse(pendingBytes.toString()).attemptId }));
+    await chmod(marker, 0o644);
     let posts = 0;
     const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
@@ -469,16 +576,29 @@ test("Fold 14 setup and connect serialize the pending check with the profile wri
         agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" } };
     let connectWrite: Promise<void> | undefined;
     let pendingDuringWrite = false;
-    await saveAgentProfile(path, connection, undefined, "setup-session", false, false, undefined,
-      undefined, undefined, async (credential, serialized) => {
-        connectWrite = withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
-          await writeSecureJsonFile(pending, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111",
-            url: TARGET.url, name: "MCP agent", codeHash: "a".repeat(64), createdAt: new Date().toISOString() }));
-        });
-        await new Promise(resolve => setTimeout(resolve, 100));
-        pendingDuringWrite = existsSync(pending);
-        await writeSecureJsonFile(credential, serialized);
-      });
+    const probe = await open(join(f.root, "file-handle-probe"), "w", 0o600);
+    const prototype = Object.getPrototypeOf(probe) as object;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "writeFile");
+    const originalWrite = probe.writeFile;
+    await probe.close();
+    Object.defineProperty(prototype, "writeFile", { configurable: true, writable: true,
+      value: async function(this: unknown, ...args: unknown[]) {
+        if (typeof args[0] === "string" && args[0].includes(TOKEN)) {
+          connectWrite = withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+            await writeSecureJsonFile(pending, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111",
+              url: TARGET.url, name: "MCP agent", codeHash: "a".repeat(64), createdAt: new Date().toISOString() }));
+          });
+          await new Promise(resolve => setTimeout(resolve, 100));
+          pendingDuringWrite = existsSync(pending);
+        }
+        return Reflect.apply(originalWrite, this, args);
+      } });
+    try {
+      await saveAgentProfile(path, connection, undefined, "setup-session", false, false);
+    } finally {
+      if (descriptor) Object.defineProperty(prototype, "writeFile", descriptor);
+      else Reflect.deleteProperty(prototype, "writeFile");
+    }
     await connectWrite;
     assert.equal(pendingDuringWrite, false, "connect cannot write pending during setup's locked write");
     assert.equal(existsSync(pending), true);
@@ -800,6 +920,7 @@ test("preprompt directory and credential path checks refuse before consuming the
   try {
     const dir = join(f.root, "public");
     await mkdir(dir, { mode: 0o755 });
+    await chmod(dir, 0o755);
     const readonly = join(f.root, "readonly");
     await mkdir(readonly, { mode: 0o500 });
     const linked = join(f.root, "linked");
@@ -1197,7 +1318,8 @@ test("Fold 7 retry checks every orphan form before register", { timeout: 10000 }
       if (kind === "symlink") { await writeFile(other, JSON.stringify(valid), { mode: 0o600 }); await symlink(other, credential); }
       else if (kind === "oversized") await writeFile(credential, "x".repeat(16 * 1024 + 1), { mode: 0o600 });
       else if (kind === "no-principal") await writeFile(credential, "{}", { mode: 0o600 });
-      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "profile_conflict" }, kind);
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }),
+        { code: kind === "no-principal" ? "profile_conflict" : "connect_credential_unreadable" }, kind);
       assert.equal(posts, 1, `${kind} must not make another POST`);
     }
   } finally { await f.close(); }
@@ -1322,7 +1444,7 @@ test("Fold 8 pending resume classifies completion and keeps a working profile on
     await unlink(complete);
     await symlink(pending, complete);
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
-      assert.equal((error as { code: string }).code, "connect_complete_unsafe");
+      assert.equal((error as { code: string }).code, "connect_complete_unreadable");
       assert.match(String(error), /connect-complete\.json/);
       assert.doesNotMatch(String(error), /mv .*profile\.json/);
       return true;
@@ -1464,7 +1586,7 @@ test("Fold 8 clear reports exactly the removed records and never selects a profi
   } finally { await f.close(); }
 });
 
-test("Fold 7 damaged and unreadable completion records warn once and clear removes them", { timeout: 10000 }, async () => {
+test("Fold 7 damaged completion warns; unreadable completion refuses before register and clear removes both", { timeout: 10000 }, async () => {
   const f = await fixture();
   const previousHome = process.env.HOME;
   process.env.HOME = f.root;
@@ -1479,12 +1601,18 @@ test("Fold 7 damaged and unreadable completion records warn once and clear remov
       if (kind === "damaged") await writeFile(complete, "{", { mode: 0o600 });
       else await symlink(join(dirname(complete), "missing-record"), complete);
       captured.length = 0;
-      await connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "damaged" ? "K" : "L").repeat(43)}`, fetcher: async () => {
+      const attempt = () => connectMcp({ target: TARGET, readCode: async () => `swm_join_${(kind === "damaged" ? "K" : "L").repeat(43)}`, fetcher: async () => {
         return Response.json({ status: "accepted", workspace_id: WS, principal_id: PRINCIPAL, run_id: RUN,
           token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
       } });
-      assert.equal(captured.filter(line => line.includes(complete)).length, 1);
-      assert.match(captured[0] ?? "", /Warning:/);
+      if (kind === "damaged") {
+        await attempt();
+        assert.equal(captured.filter(line => line.includes(complete)).length, 1);
+        assert.match(captured[0] ?? "", /Warning:/);
+      } else {
+        await assert.rejects(attempt(), { code: "connect_complete_unreadable" });
+        assert.equal(captured.length, 0);
+      }
       await clearMcpConnect(connected.profile);
       await assert.rejects(stat(complete), { code: "ENOENT" });
     }
