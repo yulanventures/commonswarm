@@ -216,6 +216,32 @@ test("Fold 11 setup-bound profile survives a same-code connect", { timeout: 1000
   } finally { await f.close(); }
 });
 
+test("Fold 12 pending resume keeps a setup-bound working profile", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "pending-bound", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const original = await readAgentProfile(path);
+    await saveAgentProfile(path, { version: 1, url: original.url, anon_key: original.anon_key,
+      workspace_id: original.workspace_id, principal_id: original.principal_id,
+      credential: JSON.parse(await readFile(original.credential_file, "utf8")) }, undefined, "setup-session");
+    const boundBytes = await readFile(path);
+    const complete = join(dirname(path), "connect-complete.json");
+    const pending = join(dirname(path), "connect-pending.json");
+    const record = JSON.parse(await readFile(complete, "utf8"));
+    await writeSecureJsonFile(pending, JSON.stringify({ attemptId: record.attemptId, url: record.url,
+      name: "MCP agent", codeHash: record.codeHash, createdAt: new Date().toISOString() }));
+    let resumePosts = 0;
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { resumePosts++; throw new Error("unexpected POST"); } });
+    assert.equal(result.profile, path);
+    assert.equal(resumePosts, 0);
+    assert.equal(existsSync(pending), false);
+    assert.deepEqual(await readFile(path), boundBytes);
+    assert.doesNotMatch(renderMcpConnect(result), /damaged|mv /);
+  } finally { await f.close(); }
+});
+
 test("Fold 11 default path repairs an empty profile claim without a move", { timeout: 10000 }, async () => {
   const f = await fixture();
   const previousHome = process.env.HOME;
@@ -250,6 +276,27 @@ test("Fold 11 clear and later refusal name an empty credential claim", { timeout
       return true;
     });
     assert.equal((await readFile(credential)).length, 0);
+    assert.equal(f.calls(), 0);
+  } finally { await f.close(); }
+});
+
+test("Fold 12 clear names a kept unvalidated profile beside an empty credential claim", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "empty-claim-and-profile", "agent.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    const credential = join(dirname(path), "credential.json");
+    await writeFile(credential, "", { mode: 0o600 });
+    await writeFile(path, "{", { mode: 0o600 });
+    const profileBytes = await readFile(path);
+    const cleared = await cli(["mcp", "connect", "--clear-pending", "--profile", path, "--url", TARGET.url], { HOME: f.root });
+    assert.equal(cleared.code, 0, cleared.stderr);
+    assert.match(cleared.stdout, /empty claim file at credential\.json/);
+    assert.match(cleared.stdout, /profile at .*agent\.json that could not be validated/);
+    assert.match(cleared.stdout, /both files were kept/);
+    assert.equal((await readFile(credential)).length, 0);
+    assert.deepEqual(await readFile(path), profileBytes);
     assert.equal(f.calls(), 0);
   } finally { await f.close(); }
 });
@@ -334,6 +381,57 @@ test("Fold 9 completion write failure reports a saved usable profile and resumes
     });
     assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal(f.calls(), 1);
+  } finally { await f.close(); }
+});
+
+test("Fold 12 completion chmod failure leaves no record before reporting it unwritten", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "completion-chmod", "profile.json");
+    const complete = join(dirname(path), "connect-complete.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
+      writeCompletion: (file, serialized) => writeSecureJsonFile(file, serialized, async (handle, contents) => {
+        await handle.writeFile(contents, "utf8");
+        Object.defineProperty(handle, "chmod", { value: async () => { throw Object.assign(new Error("chmod failed"), { code: "EACCES" }); } });
+      }) }), error => {
+      assert.equal((error as { code: string }).code, "connect_complete_write_failed");
+      assert.match(String(error), /completion record .*was not written/);
+      return true;
+    });
+    assert.equal(existsSync(complete), false);
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    const source = await readFile(resolve("src/cloud/storage.ts"), "utf8");
+    const writer = source.slice(source.indexOf("export async function writeSecureJsonFile("), source.indexOf("/** Publish a new private file"));
+    const renameAt = writer.indexOf("await rename(temporary, path);");
+    assert.ok(renameAt > 0);
+    const chmodAt = writer.indexOf("await handle.chmod(0o600);");
+    const secureTempAt = writer.indexOf("await secureCredentialFile(temporary);");
+    assert.ok(chmodAt > 0 && chmodAt < renameAt);
+    assert.ok(secureTempAt > 0 && secureTempAt < renameAt);
+    assert.doesNotMatch(writer.slice(renameAt), /await (?:chmod\(path|secureCredentialFile\(path)/);
+  } finally { await f.close(); }
+});
+
+test("Fold 12 rebuild refusal names the explicit profile basename", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "custom-rebuild", "agent.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const complete = join(dirname(path), "connect-complete.json");
+    const record = JSON.parse(await readFile(complete, "utf8"));
+    delete record.workspace_id;
+    await writeSecureJsonFile(complete, JSON.stringify(record));
+    for (const [contents, state] of [[null, "no agent.json"], ["", "an empty agent.json claim file"], ["{", "damaged agent.json"]] as const) {
+      if (contents === null) await unlink(path).catch(() => undefined);
+      else await writeFile(path, contents, { mode: 0o600 });
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+        assert.equal((error as { code: string }).code, "connect_completion_incomplete");
+        assert.ok(String(error).includes(state));
+        assert.doesNotMatch(String(error), /profile\.json/);
+        return true;
+      });
+    }
     assert.equal(f.calls(), 1);
   } finally { await f.close(); }
 });
