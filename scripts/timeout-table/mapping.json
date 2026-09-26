@@ -1564,7 +1564,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/arrival-watch.ts:255",
+          "citation": "src/cloud/arrival-watch.ts:259",
           "detail": "macOS ioreg machine-id lookup has a two-second execFile timeout; an unreadable id keeps the existing host id and is reported by resume.",
           "operation": {
             "name": "arrival-host-machine-id",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7486",
+          "citation": "src/cli.ts:7490",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8276",
+          "citation": "src/cli.ts:8280",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -2534,11 +2534,11 @@
             "reason": "Local file lock."
           }
         },
-        "src/cloud/storage.ts:timeout": {
+        "src/cloud/storage.ts:timeoutMs": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:390",
+          "citation": "src/cloud/storage.ts:429",
           "detail": "Bounded local ps process-start probe for host-id lock ownership.",
           "operation": {
             "name": "host-id-pid-probe",
@@ -2548,11 +2548,11 @@
             "reason": "Local process metadata read."
           }
         },
-        "src/cloud/storage.ts:timeoutMs": {
+        "src/cloud/storage.ts:timeoutMs#2": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:383",
+          "citation": "src/cloud/storage.ts:525",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",
