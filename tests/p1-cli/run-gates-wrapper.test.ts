@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -21,6 +21,7 @@ test("the gate wrapper never reads the caller's HOME and only injects its own", 
   assert.match(source, /env -u FORCE_COLOR HOME="\$T" PATH="\$shims:\$PATH" perl -e 'setpgrp\(0,0\); exec @ARGV' bash -c/, "each gate runs under env HOME=$T in its own process group");
   assert.match(source, /mktemp -d \/tmp\/lane-home\.XXXXXX/, "the temp home comes from mktemp under /tmp");
   assert.match(source, /rm -rf -- "\$T"/, "only $T is deleted");
+  assert.doesNotMatch(source, /"npm --prefix site (run )?test"/, "no site test on this host: it starts a browser per case");
 });
 
 test("cli-file mode runs a test under a /tmp home and leaves the real home alone", { timeout: 120_000 }, () => {
@@ -79,6 +80,23 @@ test("a gate that calls docker gets the blocking stand-in, and the call is liste
     assert.match(body, /^ℹ pass 1$/m, "the probe really ran");
     assert.match(body, /^NOT RUN on this host \(docker blocked\): 1 blocked calls/m);
     assert.match(body, /^  blocked: docker version --format probe$/m);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("a docker in an ancestor node_modules/.bin is refused before any gate runs", () => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  try {
+    const worktree = join(scratch, "a", "wt");
+    mkdirSync(join(worktree, "site"), { recursive: true });
+    mkdirSync(join(scratch, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(scratch, "node_modules", ".bin", "docker"), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+    const log = join(scratch, "gate.log");
+    const result = spawnSync("bash", [script, worktree, log, "HEAD", "cli-file", "unused.test.mjs"], { encoding: "utf8", timeout: 30_000, env: wrapperEnv });
+    assert.equal(result.status, 3, result.stdout + result.stderr);
+    assert.match(result.stderr, /node_modules\/\.bin\/docker would shadow the blocking stand-in/);
+    assert.equal(existsSync(log), false, "no gate ran");
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

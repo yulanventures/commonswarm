@@ -11,8 +11,10 @@
 # test files that need a container call `docker version` or `docker image inspect` first to decide whether to
 # skip. Every gate runs with blocking stand-ins for docker, docker-compose, orb, orbctl and supabase first on
 # PATH: each one logs its argv and exits 1, so those tests skip and are listed as NOT RUN. `gates` runs the static
-# gates and `npm test` only; `npm run test:p1-cli` and the server suite run in .github/workflows/server-suite.yml
-# (suite p1-cli or server), and `server` mode is refused here.
+# gates and `npm test` only; `site` runs the site build only. No browser on this host either: the site tests start a
+# headless Chrome per case and each one raises a Keychain dialog on the operator's screen. `npm run test:p1-cli`,
+# the server suite and the site tests run in .github/workflows/server-suite.yml (suite p1-cli, server or site), and
+# `server` mode is refused here.
 set -uo pipefail
 wt=${1:?worktree}; log=${2:?log file}; base=${3:?base ref}; mode=${4:-gates}; extra=${5:-}
 real_home="$(eval printf '%s' "~$(id -un)")"
@@ -22,12 +24,14 @@ case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "refuse: temp home $T is not unde
 [ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; exit 3; }
 shims="$T/.gate-bin"; mkdir "$shims" || exit 1
 for b in docker docker-compose orb orbctl supabase; do
-  printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$*" >> "%s/calls"\necho "run-gates.sh: ${0##*/} is blocked on this host (no docker)" >&2\nexit 1\n' "$shims" > "$shims/$b"
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$(printf "%%s" "$*" | tr "\\n" " ")" >> "%s/calls"\necho "run-gates.sh: ${0##*/} is blocked on this host (no docker)" >&2\nexit 1\n' "$shims" > "$shims/$b"
   chmod 755 "$shims/$b"
-  # Positive control before any gate: the stand-in is what a gate finds, and no project bin directory shadows it.
+  # Positive control before any gate: the stand-in is what a gate finds, and no bin directory npm puts ahead of it
+  # (node_modules/.bin of the site, the worktree and every ancestor) shadows it.
   [ "$(cd "$wt" && env PATH="$shims:$PATH" bash -c "command -v $b")" = "$shims/$b" ] || { echo "refuse: $b does not resolve to the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
-  for d in "$wt/node_modules/.bin" "$wt/site/node_modules/.bin"; do
-    [ ! -e "$d/$b" ] || { echo "refuse: $d/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }; done
+  d="$wt/site"; while :; do
+    [ ! -e "$d/node_modules/.bin/$b" ] || { echo "refuse: $d/node_modules/.bin/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
+    [ "$d" != / ] || break; d=$(dirname "$d"); done
 done
 orb_running() { pgrep -f "OrbStack Helper" >/dev/null 2>&1 && echo yes || echo no; }
 orb_before=$(orb_running)
@@ -56,13 +60,15 @@ case "$mode" in
              "bash scripts/build-release.sh" "npm --prefix site run build" "git diff --check $base...HEAD"; do
       run "$c" || status=1; done ;;
   site)
-    for c in "npm --prefix site run build" "npm --prefix site test" "git diff --check $base...HEAD"; do
+    for c in "npm --prefix site run build" "git diff --check $base...HEAD"; do
       run "$c" || status=1; done ;;
   server) echo "refuse: no docker on this host; dispatch .github/workflows/server-suite.yml with the exact SHA" | tee -a "$log"; status=3 ;;
   cli-file) run "npx tsx --test --test-timeout=600000 \"$extra\"" || status=1 ;;
   *) echo "unknown mode $mode" >&2; status=3 ;;
 esac
 grep -E "^ℹ (tests|pass|fail)" "$log" | paste -sd' ' - ; grep "^✖" "$log" | grep -v failing | sed 's/ (.*//' | sort -u | head -12
+[ "$mode" != gates ] || echo "NOT RUN on this host by design: npm run test:p1-cli and npm run test:p1-server; dispatch .github/workflows/server-suite.yml (suite p1-cli, suite server) for the exact SHA" | tee -a "$log"
+[ "$mode" != site ] || echo "NOT RUN on this host by design: npm --prefix site test (it starts a browser); dispatch .github/workflows/server-suite.yml (suite site) for the exact SHA" | tee -a "$log"
 if [ -s "$shims/calls" ]; then
   echo "NOT RUN on this host (docker blocked): $(wc -l < "$shims/calls" | tr -d ' ') blocked calls; skipped tests:" | tee -a "$log"
   sort -u "$shims/calls" | cut -c1-160 | sed 's/^/  blocked: /' | tee -a "$log"

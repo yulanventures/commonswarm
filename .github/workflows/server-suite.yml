@@ -1,9 +1,11 @@
-# Runs one suite that needs docker for one ref, on demand only:
+# Runs one suite that cannot run on the Mac mini, for one ref, on demand only:
 # - suite server: the local-stack server suite (`npm run test:p1-server`);
-# - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers.
+# - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers;
+# - suite site: the site build, then `npm --prefix site test`, whose observer tests start a headless Chrome.
 #
 # Why it exists (HezLead rulings, 2026-09-26): the Mac mini runs no docker at all (any docker CLI call starts
-# OrbStack, which was stopped for memory), and no lane ships with an unrun suite, so lanes run these here.
+# OrbStack, which was stopped for memory) and no browser tests (each headless Chrome raises a Keychain dialog on the
+# operator's screen), and no lane ships with an unrun suite, so lanes run these here.
 #
 # Limits, all deliberate:
 # - workflow_dispatch ONLY. Never on push, pull_request or schedule: each run costs paid minutes.
@@ -28,6 +30,7 @@ on:
         options:
           - server
           - p1-cli
+          - site
         default: server
 
 concurrency:
@@ -71,6 +74,14 @@ jobs:
         run: |
           set -o pipefail
           npm run test:p1-cli 2>&1 | tee p1-cli.log
+      - name: Site build and site suite
+        if: inputs.suite == 'site'
+        # The observer tests read the built pages, so the build runs first; they find /usr/bin/google-chrome.
+        run: |
+          set -o pipefail
+          npm ci --prefix site
+          npm --prefix site run build
+          npm --prefix site test 2>&1 | tee site.log
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4
