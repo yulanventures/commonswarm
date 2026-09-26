@@ -1,17 +1,14 @@
 /** Reached by `npm --prefix site test` through the component observer glob. */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import { build } from "esbuild";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { workspaceStateAfterClose } from "../../lib/workspace-close-state.js";
 
-const run = promisify(execFile);
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 
@@ -79,10 +76,7 @@ async function renderSettingsFixture(): Promise<SettingsSnapshot> {
   try {
     await writeFile(fixture, html, "utf8");
     const chrome = await findChrome();
-    const { stdout } = await run(chrome, [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
+    const { stdout } = await launchChrome(chrome, [
       "--single-process",
       "--no-zygote",
       "--allow-file-access-from-files",

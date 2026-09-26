@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import type { Signal } from "../../lib/commonswarm";
 import {
@@ -14,9 +12,9 @@ import {
   signalIsDirectToViewer,
 } from "../../lib/signal-feed";
 import {
-  findChrome,
   renderParticipantRailFixture,
 } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 /*
  * Observer for the Slack-shaped workspace shell. The site gate reaches this file through
@@ -37,7 +35,6 @@ const builtAssets = assetPaths
   .map((assetPath) => readFileSync(join(siteRoot, "dist", assetPath), "utf8"))
   .join("\n");
 
-const run = promisify(execFile);
 type RailGeometry = {
   three: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string };
   fifty: { clientHeight: number; scrollHeight: number; railHeight: number; overflowY: string };
@@ -123,10 +120,7 @@ const renderRailGeometry = async (): Promise<RailGeometry> => {
   try {
     await writeFile(fixture, html, "utf8");
     const chrome = await findChrome();
-    const { stdout } = await run(chrome, [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
+    const { stdout } = await launchChrome(chrome, [
       "--single-process",
       "--no-zygote",
       "--window-size=1440,1000",

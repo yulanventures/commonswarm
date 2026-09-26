@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { providerFixtures } from "../../../scripts/provider-fixtures.js";
 import { AUTH_PROVIDERS, authProvider } from "../../lib/auth-providers.js";
 
 test("signed-out /app onramp is cold-stranger, email-first, free, draft-legal", async () => {
@@ -80,19 +81,22 @@ test("signed-out /app onramp is cold-stranger, email-first, free, draft-legal", 
  * The BUILT panel, because the label a reader sees exists only after the build.
  *
  * The source test above cannot say what the buttons read: the component renders one per
- * provider the deployment reported at build time. So this reads dist/app/index.html and asserts
+ * provider the fixture reported at build time. So this reads the all-providers fixture and asserts
  * the panel's buttons are exactly the providers AUTH_PROVIDERS names, with its labels character
- * for character. It does not require GitHub specifically — that would be the typed claim this
- * lane removed — but it does require the set to be non-empty, because site/.env points at a
- * deployment with a door open and an empty set here would mean the build silently lost it.
+ * for character. The ordinary offline build intentionally renders no provider buttons; this test
+ * asks the local GoTrue-shaped fixture for every provider so it never depends on site/.env or a
+ * deployment.
  */
 test("the built signed-out panel offers generated provider buttons", async () => {
+  const fixture = (await providerFixtures())
+    .find(({ enabled }) => enabled.length === AUTH_PROVIDERS.length);
+  assert.ok(fixture, "the provider fixtures must include the all-providers state");
   const html = await readFile(
-    new URL("../../../dist/app/index.html", import.meta.url),
+    new URL("app/index.html", fixture.dir),
     "utf8",
   );
   const start = html.indexOf('data-signed-out-onramp');
-  assert.ok(start >= 0, "dist/app/index.html has no signed-out panel; run `npm run build` in site/");
+  assert.ok(start >= 0, "the all-providers fixture has no signed-out panel");
   const end = html.indexOf('data-panel="create"', start);
   assert.ok(end > start, "the signed-out panel has no end in the built page");
   const panel = html.slice(start, end);
@@ -102,8 +106,7 @@ test("the built signed-out panel offers generated provider buttons", async () =>
   )];
   assert.ok(
     ids.length > 0,
-    "the built signed-out panel renders no provider button. site/.env points at a deployment " +
-      "that reports at least one enabled provider, so an empty set is a lost door, not a state.",
+    "the all-providers fixture must render a provider button",
   );
   for (const id of ids) {
     const provider = authProvider(id);

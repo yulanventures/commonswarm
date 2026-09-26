@@ -1,12 +1,8 @@
 /** Reached by `npm --prefix site test` through the recursive component-observer glob. */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { startComposerPolishServer } from "./composer-polish.fixture.js";
-
-const run = promisify(execFile);
 
 type Rect = {
   bottom: number;
@@ -312,10 +308,7 @@ const measure = async (
   height: number,
   variant: "current" | "reverted",
 ): Promise<PolishMeasurement> => {
-  const { stdout, stderr } = await run(chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  const { stdout, stderr } = await launchChrome(chrome, [
     "--single-process",
     "--no-zygote",
     "--run-all-compositor-stages-before-draw",

@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { findChrome } from "../app/participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = join(siteRoot, "dist");
 const storySource = readFileSync(join(import.meta.dirname, "ConsumerStory.astro"), "utf8");
@@ -131,10 +128,7 @@ const measureAt = async (
   origin: string,
   width: number,
 ): Promise<PageMeasurement> => {
-  const { stdout } = await run(chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  const { stdout } = await launchChrome(chrome, [
     "--single-process",
     "--no-zygote",
     "--window-size=1600,1400",

@@ -23,14 +23,12 @@
  * lane did not take.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { browserSignalCommand, browserSignalKind } from "../../lib/commonswarm.js";
 import { BROADCAST_CHIP_LABEL } from "../../lib/composer-address.js";
 import {
@@ -43,7 +41,6 @@ import {
   threadRootBlockText,
 } from "../../lib/thread-reply.js";
 
-const run = promisify(execFile);
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 const repoRoot = join(siteRoot, "..");
@@ -745,31 +742,13 @@ test("replies collapse under their root, and a reply carries no recipient", asyn
   const chrome = await findChrome();
   const server = await startDistServer();
   try {
-    /* ONE RETRY, AND ONLY WHEN THE BROWSER DIED ON A SIGNAL. Same bound and same reason as the
-       sibling harness: `--single-process --no-zygote` takes a SIGSEGV under memory pressure on
-       this host, a crash is not a measurement, and anything that is not a signal death is
-       rethrown untouched, so a real defect still fails on both attempts. */
-    const runChrome = async (attempt = 0): Promise<{ stdout: string; stderr: string }> => {
-      try {
-        return await run(chrome, [
-          "--headless=new",
-          "--disable-gpu",
-          "--no-sandbox",
-          "--single-process",
-          "--no-zygote",
-          "--virtual-time-budget=180000",
-          "--dump-dom",
-          `${server.origin}/__measure`,
-        ], { maxBuffer: 10 * 1024 * 1024, timeout: 180_000, killSignal: "SIGKILL" });
-      } catch (error) {
-        const signal = (error as { signal?: string | null }).signal ?? null;
-        if (attempt === 0 && signal !== null && signal !== "SIGKILL") {
-          return runChrome(attempt + 1);
-        }
-        throw error;
-      }
-    };
-    const { stdout, stderr } = await runChrome();
+    const { stdout, stderr } = await launchChrome(chrome, [
+      "--single-process",
+      "--no-zygote",
+      "--virtual-time-budget=180000",
+      "--dump-dom",
+      `${server.origin}/__measure`,
+    ], { maxBuffer: 10 * 1024 * 1024, timeout: 180_000, killSignal: "SIGKILL" });
     const encoded = stdout.match(/data-thread-measurement="([^"]+)"/)?.[1];
     const encodedError = stdout.match(/data-thread-error="([^"]+)"/)?.[1];
     assert.ok(

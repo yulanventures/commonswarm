@@ -1,14 +1,11 @@
 /** Reached by `npm --prefix site test` through the recursive component-observer glob. */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = join(siteRoot, "dist");
 
@@ -341,10 +338,7 @@ const measureAt = async (
   pending = false,
   more = false,
 ): Promise<LayoutMeasurement> => {
-  const { stdout, stderr } = await run(chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  const { stdout, stderr } = await launchChrome(chrome, [
     "--single-process",
     "--no-zygote",
     "--run-all-compositor-stages-before-draw",

@@ -12,16 +12,13 @@
  * checkbox the reader can click, which is exactly the shape the renderer refused to emit.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import { build } from "esbuild";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 
 /* Every new construct, each carrying a topic mention, plus the two mentions that must stay prose. */
@@ -172,10 +169,7 @@ const snapshotPromise = (async (): Promise<Snapshot> => {
   try {
     await writeFile(fixture, html, "utf8");
     const chrome = await findChrome();
-    const { stdout } = await run(chrome, [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
+    const { stdout } = await launchChrome(chrome, [
       "--single-process",
       "--no-zygote",
       "--allow-file-access-from-files",

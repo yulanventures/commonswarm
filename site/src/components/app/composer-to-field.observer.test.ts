@@ -11,13 +11,11 @@
  * where the served edge answers for that shape.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 import { browserSignalCommand, browserSignalKind } from "../../lib/commonswarm.js";
 import {
   COMPOSER_TO_MAX,
@@ -26,7 +24,6 @@ import {
   notifiedRecipients,
 } from "../../lib/composer-address.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = process.env.COMMONSWARM_COMPOSER_TO_DIST_ROOT ?? join(siteRoot, "dist");
 
@@ -779,37 +776,17 @@ test("the To: row is the address, and it says who is notified", async () => {
   const chrome = await findChrome();
   const server = await startDistServer();
   try {
-    /* ONE RETRY, AND ONLY WHEN THE BROWSER DIED ON A SIGNAL. `--single-process --no-zygote` is
-       cheap and is also the configuration that takes a SIGSEGV when this host is under memory
-       pressure: measured 2026-09-05, one crash in 58 mutation runs, in a RESTORE run whose
-       source was pristine. A crash is not a measurement, so retrying it does not weaken any
-       control here — a real defect fails on both attempts, and anything that is not a signal
-       death (an assertion, a timeout we asked for, a non-zero exit) is rethrown untouched. */
-    const runChrome = async (attempt = 0): Promise<{ stdout: string; stderr: string }> => {
-      try {
-        return await run(chrome, [
-          "--headless=new",
-          "--disable-gpu",
-          "--no-sandbox",
-          "--single-process",
-          "--no-zygote",
-          /* RAISED FROM 60000 for the in-flight steps: four sends hold windows open, the waits
-             around them are virtual-clock time too, and a MUTATED build leaves a frozen
-             composer in which every settleFor runs to its own ceiling instead of returning
-             early. */
-          "--virtual-time-budget=240000",
-          "--dump-dom",
-          `${server.origin}/__measure`,
-        ], { maxBuffer: 10 * 1024 * 1024, timeout: 180_000, killSignal: "SIGKILL" });
-      } catch (error) {
-        const signal = (error as { signal?: string | null }).signal ?? null;
-        if (attempt === 0 && signal !== null && signal !== "SIGKILL") {
-          return runChrome(attempt + 1);
-        }
-        throw error;
-      }
-    };
-    const { stdout, stderr } = await runChrome();
+    const { stdout, stderr } = await launchChrome(chrome, [
+      "--single-process",
+      "--no-zygote",
+      /* RAISED FROM 60000 for the in-flight steps: four sends hold windows open, the waits
+         around them are virtual-clock time too, and a MUTATED build leaves a frozen
+         composer in which every settleFor runs to its own ceiling instead of returning
+         early. */
+      "--virtual-time-budget=240000",
+      "--dump-dom",
+      `${server.origin}/__measure`,
+    ], { maxBuffer: 10 * 1024 * 1024, timeout: 180_000, killSignal: "SIGKILL" });
     const encoded = stdout.match(/data-to-measurement="([^"]+)"/)?.[1];
     const encodedError = stdout.match(/data-to-error="([^"]+)"/)?.[1];
     assert.ok(

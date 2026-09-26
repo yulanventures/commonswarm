@@ -27,16 +27,13 @@
  * the container, and no single override breaks it without also changing the box being measured.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import { build } from "esbuild";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const repoRoot = join(siteRoot, "..");
 const distRoot = join(siteRoot, "dist");
@@ -424,10 +421,7 @@ const fixtureUrl = (harness: Harness, load: Load): string =>
   `&width=${load.viewport.width}&theme=${load.theme}&control=${load.control}`;
 
 const measureOne = async (harness: Harness, load: Load): Promise<Measurement> => {
-  const { stdout, stderr } = await run(harness.chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  const { stdout, stderr } = await launchChrome(harness.chrome, [
     "--single-process",
     "--no-zygote",
     "--run-all-compositor-stages-before-draw",
@@ -447,10 +441,7 @@ const measureOne = async (harness: Harness, load: Load): Promise<Measurement> =>
 
 /** A separate Chrome process per image, as the spec requires; the DOM run never screenshots. */
 const screenshotOne = async (harness: Harness, load: Load, path: string): Promise<void> => {
-  await run(harness.chrome, [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-sandbox",
+  await launchChrome(harness.chrome, [
     "--single-process",
     "--no-zygote",
     "--hide-scrollbars",
