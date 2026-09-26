@@ -161,8 +161,8 @@ If the OFFICE moves, revisit the venue. If the FORMATION STATE changes, do not.
 
 ★ HALF DONE, and the half that is done is the half that does not create the safe harbour.
 
-Filled 2026-07-28 (operator): **Thomas Langridge, Yulan Ventures, LLC, 1200 W 6th St,
-Ste 600-188, Austin, TX 78703, legal@commonswarm.com**. That was the last placeholder
+Filled 2026-07-28 (operator): **Thomas Langridge, Yulan Ventures, LLC, 1211 W 6th St,
+Ste #600-188, Austin, TX 78703, legal@commonswarm.com**. That was the last placeholder
 anywhere on the legal surface — `[[...]]` now matches 0 times across all three documents
 and `SECURITY.md`.
 
