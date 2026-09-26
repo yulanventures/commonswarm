@@ -3348,9 +3348,10 @@ export const LISTEN_START_REFUSED_FLAGS = ["defer-over"] as const;
 export function listenerRouteConfiguration(
   routeValue: string | undefined,
   deferOverValue: string | undefined,
+  args?: Arguments,
 ): { routeMode: ListenerRouteMode; deferOverChars: number | null } {
   const supplied = { route: routeValue, "defer-over": deferOverValue } as Record<string, string | undefined>;
-  const refused = (LISTEN_START_REFUSED_FLAGS as readonly string[]).find(flag => supplied[flag] !== undefined);
+  const refused = (LISTEN_START_REFUSED_FLAGS as readonly string[]).find(flag => supplied[flag] !== undefined || args?.has(flag));
   if (refused !== undefined) {
     throw new Error(refused === "defer-over" ? listenerDeferOverRefusedSentence() : `listen start cannot be combined with --${refused}`);
   }
@@ -4580,7 +4581,7 @@ export const SIGNAL_READ_INBOX_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id"
 export const INBOX_FOLLOW_REFUSED_FLAGS = ["channel", "wait", "json"] as const;
 
 export function inboxFollowRefusal(args: Arguments): string | null {
-  const refused = (INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).find(flag => args.has(flag));
+  const refused = (INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).find(flag => flag === "wait" ? args.optional(flag) !== undefined : args.has(flag));
   /* The follow loop pages a backlog with its own query and cursor. A channel
    * filter it cannot apply must be refused rather than silently ignored.
    * Otherwise the stream could include signals outside the requested channel. */
@@ -4602,8 +4603,8 @@ async function runSignalRead(
     return;
   }
 
-  if (inbox && args.has("follow")) {
-    if (!args.has("ndjson")) {
+  if (inbox && args.has(INBOX_READ_SELECTOR_FLAGS[0])) {
+    if (!args.has(INBOX_READ_SELECTOR_FLAGS[1])) {
       throw new Error("inbox --follow requires --ndjson");
     }
     const refusal = inboxFollowRefusal(args);
@@ -4613,7 +4614,7 @@ async function runSignalRead(
     await runInboxFollowCommand(args);
     return;
   }
-  if (inbox && args.has("ndjson")) {
+  if (inbox && args.has(INBOX_READ_SELECTOR_FLAGS[1])) {
     throw new Error("inbox --ndjson requires --follow");
   }
 
@@ -7024,6 +7025,7 @@ async function runListenStart(args: Arguments): Promise<void> {
   const routing = listenerRouteConfiguration(
     args.optional("route"),
     args.optional("defer-over"),
+    args,
   );
   const cloud = await target(args);
   const workspaceId = listenerUuid(
@@ -7300,6 +7302,7 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
   const routing = listenerRouteConfiguration(
     args.optional("route"),
     args.optional("defer-over"),
+    args,
   );
   const cloud = await target(args);
   const workspaceId = listenerUuid(args.optional("workspace-id"), "workspace-id");
@@ -9401,6 +9404,25 @@ function helpFlag(key: string, flag: string): string {
 }
 
 /** Every synopsis starts with a variant declared in AGENT_COMMANDS and includes its accepted flags. */
+export function visibleUsageHint(hint: string, accepted: readonly string[]): string {
+  let result = hint;
+  let previous: string;
+  do {
+    previous = result;
+    result = result.replace(/\[[^\[\]]+\]/g, segment => {
+      const flags = [...segment.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1]!);
+      return flags.some(flag => !accepted.includes(flag)) ? "" : segment;
+    });
+  } while (result !== previous);
+  return result === hint ? hint : result.replace(/  +/g, " ");
+}
+
+export function helpDescription(entry: AgentCommandEntry): string {
+  return entry.cliOnlyFlags?.includes("attach")
+    ? `${entry.description} Use --attach to add files.`
+    : entry.description;
+}
+
 export function commandHelpLines(verb?: string, action?: string): string {
   const lines: string[] = [];
   for (const [name, root] of Object.entries(AGENT_COMMANDS)) {
@@ -9416,14 +9438,11 @@ export function commandHelpLines(verb?: string, action?: string): string {
         const accepted = entry.profile === "expand" ? [...handlerFlags, "profile", "host-session-id"] : handlerFlags;
         const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
         for (const hint of hints) {
-          const visibleHint = (key === "listen.start" || (key === "inbox" && variantName === "follow")) ? hint.replace(/\[[^\]]+\]/g, segment => {
-            const flags = [...segment.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1]!);
-            return flags.length === 1 && !accepted.includes(flags[0]!) ? "" : segment;
-          }).replace(/  +/g, " ") : hint;
+          const visibleHint = visibleUsageHint(hint, accepted);
           lines.push(`  ${visibleHint}`);
-          lines.push(`    ${entry.description}`);
+          lines.push(`    ${helpDescription(entry)}`);
         }
-        const shown = new Set(hints.flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
+        const shown = new Set(hints.flatMap(hint => [...visibleUsageHint(hint, accepted).matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
         const extra = [...new Set(accepted)].filter(flag => !shown.has(flag));
         if (extra.length > 0) lines.push(`    Additional options: ${extra.map(flag => helpFlag(key, flag)).join(", ")}`);
       }
@@ -9507,6 +9526,9 @@ const noTool = (reason: string) => ({ tool: null, reason }) as const;
 
 const signalBody = formatBodyUsage("<text>");
 const workingOnBody = formatBodyUsage("<what>");
+export const CHECK_MESSAGES_SELECTOR_FLAGS = ["message-id", "hook"] as const;
+const CHECK_MESSAGE_HIDDEN_FLAGS = ["force"] as const;
+export const INBOX_READ_SELECTOR_FLAGS = ["follow", "ndjson", NOTIFY_FLAG] as const;
 
 const setupVariants = {
   import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]"]),
@@ -9644,7 +9666,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   check: commandEntry({
     tool: "check", mcp: true,
-    ...selectedVariants(checkVariants, (args) => args.has("hook") ? "hook" : args.has("message-id") ? "message" : "messages"),
+    ...selectedVariants(checkVariants, (args) => args.has(CHECK_MESSAGES_SELECTOR_FLAGS[1]) ? "hook" : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[0]) ? "message" : "messages"),
     description: "Read new directed messages for this agent.",
     mutates: true,
     flags: ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"],
@@ -9764,12 +9786,12 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
-  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
-  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(NOTIFY_FLAG) ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
+  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
   workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]`] }),
@@ -9883,23 +9905,18 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "seed-fixture": RUN_SEED_1_ACCEPTED_FLAGS,
 };
 
-const CHECK_MESSAGES_SELECTOR_FLAGS = ["message-id", "hook"] as const;
-const CHECK_MESSAGE_SELECTOR_FLAGS = ["force", "hook"] as const;
-const INBOX_READ_SELECTOR_FLAGS = ["follow", "ndjson", NOTIFY_FLAG] as const;
-const INBOX_FOLLOW_SELECTOR_FLAGS = [NOTIFY_FLAG] as const;
-
 export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "setup.import": RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
   "setup.version": RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
   "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
-  "check.messages": CHECK_FLAGS.filter(flag => !(CHECK_MESSAGES_SELECTOR_FLAGS as readonly string[]).includes(flag)),
-  get "check.message"() { return CHECK_FLAGS.filter(flag => !(CHECK_MESSAGE_SELECTOR_FLAGS as readonly string[]).includes(flag) && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  get "check.messages"() { return CHECK_FLAGS.filter(flag => !(CHECK_MESSAGES_SELECTOR_FLAGS as readonly string[]).includes(flag)); },
+  get "check.message"() { return CHECK_FLAGS.filter(flag => flag !== CHECK_MESSAGES_SELECTOR_FLAGS[1] && !(CHECK_MESSAGE_HIDDEN_FLAGS as readonly string[]).includes(flag) && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   get "check.hook"() { return CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
-  "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_READ_SELECTOR_FLAGS as readonly string[]).includes(flag)),
+  get "inbox.read"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_READ_SELECTOR_FLAGS as readonly string[]).includes(flag)); },
   "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
-  get "inbox.follow"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_FOLLOW_SELECTOR_FLAGS as readonly string[]).includes(flag) && !(INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  get "inbox.follow"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== INBOX_READ_SELECTOR_FLAGS[2] && !(INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   get "accept.linkStdin"() { return RUN_ACCEPT_1_ACCEPTED_FLAGS.filter(flag => !(ACCEPT_LINK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
   "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS,
