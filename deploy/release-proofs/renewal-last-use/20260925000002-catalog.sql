@@ -45,4 +45,5 @@ SELECT
     WHERE t.tgrelid = to_regclass('swarm.renewal_grants')
       AND p.proname = 'renewal_grants_spend_or_revoke_only'
       AND NOT t.tgisinternal
-  ), false) AS catalog_ok;
+  ), false) AS catalog_ok
+\gset
