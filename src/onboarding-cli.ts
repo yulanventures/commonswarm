@@ -180,11 +180,12 @@ export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
 }
 
 export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"] as const;
 
 export async function runCheckHook(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-hook");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full") || args.has("message-id") || args.has("json")) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
+  if (CHECK_HOOK_REFUSED_FLAGS.some(flag => args.has(flag))) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
   await runTurnHook(args);
 }
 

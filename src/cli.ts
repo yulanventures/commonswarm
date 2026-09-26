@@ -13,6 +13,7 @@ import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
   CHECK_FLAGS,
+  CHECK_HOOK_REFUSED_FLAGS,
   RECEIVE_COMMON_FLAGS,
   RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
   RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
@@ -374,6 +375,7 @@ import {
   type ListenerPermissionMode,
   type ListenerProviderId,
   isListenerProvider,
+  LISTENER_PROVIDERS,
   type ListenerDeliveryJournal,
   type ListenerSenderProvenanceContext,
   type ListenerStatus,
@@ -9413,17 +9415,6 @@ export function commandHelpLines(verb?: string, action?: string): string {
   return lines.join("\n");
 }
 
-/** The command parser's option gate, shared by dispatch and in-process drift tests. */
-export function parseCommandOptions(tokens: string[]): AgentCommandEntry {
-  const args = new Arguments(tokens);
-  const verb = args.positionals[0];
-  const root = verb && Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
-  if (!root) throw new Error("unknown command");
-  const entry = selectCommandEntry(root, args);
-  args.assertAcceptedFlags([...entry.flags, ...(entry.cliOnlyFlags ?? [])]);
-  return entry;
-}
-
 function helpFor(verb: string | undefined, action: string | undefined): string {
   if (!verb || verb === "help") return `${usage()}\n${onboardingUsage()}`;
   const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : undefined;
@@ -9668,7 +9659,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     refusalTrace: "runHook",
   }),
   listen: group({
-    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: LISTEN_START_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider ${SESSION_PROVIDERS.join("|")} [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions ${LISTENER_PERMISSION_MODES.join("|")}] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--state-dir <path>] [--defer-over <duration>] [--allow-unattended] [--foreground] [--json]`] }),
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: LISTEN_START_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider ${LISTENER_PROVIDERS.join("|")} [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions ${LISTENER_PERMISSION_MODES.join("|")}] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--state-dir <path>] [--allow-unattended] [--foreground] [--json]`] }),
     status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: LISTEN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
     stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: LISTEN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
     canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: LISTEN_CANARY_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] }),
@@ -9812,7 +9803,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
   "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
   "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
-  "listen.start": LISTEN_START_ACCEPTED_FLAGS,
+  "listen.start": LISTEN_START_ACCEPTED_FLAGS.filter(flag => flag !== "defer-over"),
   "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.stop": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
@@ -9823,7 +9814,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "session.disable": SESSION_HUMAN_ACCEPTED_FLAGS,
   "session.recover": SESSION_HUMAN_ACCEPTED_FLAGS,
   login: RUN_LOGIN_1_ACCEPTED_FLAGS,
-  logout: RUN_LOGOUT_1_ACCEPTED_FLAGS,
+  logout: RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => flag !== "device"),
   "invite.create": RUN_INVITE_2_ACCEPTED_FLAGS,
   "invite.revoke": RUN_INVITE_1_ACCEPTED_FLAGS,
   "member.remove": RUN_MEMBER_1_ACCEPTED_FLAGS,
@@ -9877,13 +9868,13 @@ export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
   "check.messages": CHECK_FLAGS.filter(flag => flag !== "message-id" && flag !== "hook"),
   "check.message": CHECK_FLAGS.filter(flag => flag !== "force" && flag !== "full" && flag !== "hook"),
-  "check.hook": CHECK_FLAGS.filter(flag => flag !== "full" && flag !== "message-id" && flag !== "json"),
+  "check.hook": CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)),
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "follow" && flag !== "ndjson" && flag !== "notify"),
   "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
-  "inbox.follow": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "wait" && flag !== "notify"),
-  "accept.linkStdin": RUN_ACCEPT_1_ACCEPTED_FLAGS,
+  "inbox.follow": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !["wait", "notify", "channel", "json"].includes(flag)),
+  "accept.linkStdin": RUN_ACCEPT_1_ACCEPTED_FLAGS.filter(flag => flag !== "url" && flag !== "anon-key"),
   "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
   "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS,
 };
