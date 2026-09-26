@@ -1,5 +1,7 @@
--- Read-only proof. The release operator supplies one seeded human-authored
--- signal and one private reply to it after exercising the command edge.
+-- Read-only post-edge-switch proof. The release operator supplies one seeded
+-- human-authored signal and one private reply created through the NEW edge,
+-- then runs this with all four item_g3c_* -v values. Never run this proof in
+-- section 5's automatic functional step.
 \if :{?item_g3c_workspace_id}
 \else
 DO $$ BEGIN RAISE EXCEPTION 'item_g3c_workspace_id is required'; END $$;
@@ -20,8 +22,9 @@ DO $$ BEGIN RAISE EXCEPTION 'item_g3c_author_user_id is required'; END $$;
 SELECT set_config(
   'request.jwt.claims',
   jsonb_build_object('sub', :'item_g3c_author_user_id')::text,
-  true
-);
+  false
+)
+\gset
 
 SELECT EXISTS (
   SELECT 1
@@ -37,6 +40,7 @@ SELECT EXISTS (
 ) AS functional_ok
 \gset
 \if :functional_ok
+\echo t
 \else
 DO $$ BEGIN RAISE EXCEPTION 'reply-status functional proof FAILED'; END $$;
 \endif

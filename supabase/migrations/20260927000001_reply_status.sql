@@ -1,5 +1,3 @@
-BEGIN;
-
 ALTER TABLE swarm.signals
   ADD COLUMN reply_status text,
   ADD CONSTRAINT signals_reply_status_valid CHECK (
@@ -144,5 +142,3 @@ ALTER FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea) OWNER TO s
 REVOKE ALL ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION swarm_read.signal_delivery_receipts(uuid, uuid, bytea)
   TO authenticated, swarm_read;
-
-COMMIT;

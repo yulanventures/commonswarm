@@ -190,12 +190,8 @@ function signalId(result: { body: Record<string, unknown> }): string {
 async function askTo(principalIds: string[]): Promise<string> {
   const result = await send(fixture.ownerJwt, post({
     signal_kind: "ask",
-    ...(principalIds.length === 1
-      ? { to_agent_principal_id: principalIds[0] }
-      : {
-        to_agent_principal_id: principalIds[0],
-        to: principalIds.map((id) => ({ kind: "agent", id })),
-      }),
+    to_agent_principal_id: null,
+    to: principalIds.map((id) => ({ kind: "agent", id })),
   }));
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return signalId(result);
@@ -275,12 +271,26 @@ test("each status is stored and returned in receipt replies", async () => {
 });
 
 test("SQL CHECK refuses status on a non-reply", async () => {
+  await assert.rejects(
+    sql`INSERT INTO swarm.signals (
+      id, workspace_id, from_principal, from_kind,
+      to_user_id, to_agent_principal_id, in_reply_to,
+      about, kind, body, until, reply_status
+    ) VALUES (
+      ${randomUUID()}::uuid, ${fixture.workspace}::uuid, ${fixture.ownerId}::uuid, 'user',
+      NULL, NULL, NULL,
+      NULL, 'note', 'invalid direct non-reply status',
+      statement_timestamp() + interval '1 hour', 'answered'
+    )`,
+    { code: "23514" },
+  );
+
   const nonReply = await send(fixture.ownerJwt, post());
   assert.equal(nonReply.status, 200, JSON.stringify(nonReply.body));
   await assert.rejects(
     sql`UPDATE swarm.signals SET reply_status = 'answered'
       WHERE id = ${signalId(nonReply)}::uuid`,
-    /signals_reply_status_valid/,
+    /SWARM_APPEND_ONLY/,
   );
 });
 
@@ -352,7 +362,22 @@ test("G3c catalog and seeded functional release proofs pass", async () => {
     "-v", `item_g3c_signal_id=${original}`,
     "-v", `item_g3c_reply_id=${replyId}`,
     "-v", `item_g3c_author_user_id=${fixture.ownerId}`,
-  ], { input: `BEGIN;\n${functional}\nROLLBACK;\n`, encoding: "utf8", timeout: 10_000 });
+    "--file", "-",
+  ], { input: functional, encoding: "utf8", timeout: 10_000 });
   assert.ifError(run.error);
   assert.equal(run.status, 0, run.stderr);
+  assert.equal(run.stdout.trim(), "t");
+
+  const negative = spawnSync("docker", [
+    "exec", "-i", containers[0]!, "psql", "-X", "-U", "postgres", "-d", "postgres",
+    "-v", "ON_ERROR_STOP=1",
+    "-v", `item_g3c_workspace_id=${fixture.workspace}`,
+    "-v", `item_g3c_signal_id=${original}`,
+    "-v", `item_g3c_reply_id=${replyId}`,
+    "-v", `item_g3c_author_user_id=${randomUUID()}`,
+    "--file", "-",
+  ], { input: functional, encoding: "utf8", timeout: 10_000 });
+  assert.ifError(negative.error);
+  assert.notEqual(negative.status, 0);
+  assert.notEqual(negative.stdout.trim(), "t");
 });
