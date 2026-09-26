@@ -201,7 +201,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string, afterPendingCheck?: () => Promise<void>): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -215,7 +215,6 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
   };
   const save = async () => withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
     if (connectAttemptId === undefined) await refusePendingConnectProfile(path);
-    await afterPendingCheck?.();
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");

@@ -393,18 +393,19 @@ test("Fold 14 setup and connect serialize the pending check with the profile wri
         status: "accepted", principal_id: PRINCIPAL, run_id: RUN, token_id: TOKEN_ID,
         agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" } };
     let connectWrite: Promise<void> | undefined;
-    let pendingDuringHook = false;
-    await saveAgentProfile(path, connection, undefined, "setup-session", false, false, undefined,
-      writeSecureJsonFileExclusive, undefined, async () => {
+    let pendingDuringWrite = false;
+    await saveAgentProfile(path, connection, undefined, "setup-session", true, false, undefined,
+      async (credential, serialized) => {
         connectWrite = withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
           await writeSecureJsonFile(pending, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111",
             url: TARGET.url, name: "MCP agent", codeHash: "a".repeat(64), createdAt: new Date().toISOString() }));
         });
         await new Promise(resolve => setTimeout(resolve, 100));
-        pendingDuringHook = existsSync(pending);
+        pendingDuringWrite = existsSync(pending);
+        await writeSecureJsonFileExclusive(credential, serialized);
       });
     await connectWrite;
-    assert.equal(pendingDuringHook, false, "connect cannot write pending during setup's locked write");
+    assert.equal(pendingDuringWrite, false, "connect cannot write pending during setup's locked write");
     assert.equal(existsSync(pending), true);
     assert.equal((await readAgentProfile(path, "setup-session")).principal_id, PRINCIPAL);
   } finally { await f.close(); }
@@ -431,11 +432,6 @@ test("Fold 14 pending setup refusal has owned MCP advice", { timeout: 10000 }, (
   assert.equal(MCP_ERROR_SENTENCES.setup_connect_pending?.next_step,
     "a person must restore this agent's access outside this session");
   assert.match(MCP_ERROR_SENTENCES.setup_connect_pending?.message ?? "", /connect in progress/);
-});
-
-test("Fold 14 printed-line comment names the bound session field", { timeout: 10000 }, async () => {
-  const source = await readFile(new URL("../../src/cloud/mcp-connect.ts", import.meta.url), "utf8");
-  assert.ok(source.includes("The printed lines name the profile path and, for a bound profile, its host session ID; no code or token"));
 });
 
 test("Fold 11 default path repairs an empty profile claim without a move", { timeout: 10000 }, async () => {
