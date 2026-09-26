@@ -55,25 +55,25 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (lazy host/claude load)",
     file: "src/cli.ts",
-    lines: [419, 419],
+    lines: [423, 423],
     contains: "import(\"./host/claude.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/codex load)",
     file: "src/cli.ts",
-    lines: [423, 423],
+    lines: [427, 427],
     contains: "import(\"./host/codex.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/opencode load)",
     file: "src/cli.ts",
-    lines: [427, 427],
+    lines: [431, 431],
     contains: "import(\"./host/opencode.js\")",
   },
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [412, 412],
+    lines: [415, 415],
     contains: "classifyClaudeCanaryFailure",
   },
   {
