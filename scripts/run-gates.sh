@@ -21,7 +21,8 @@ real_home="$(eval printf '%s' "~$(id -un)")"
 T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1
 case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "refuse: temp home $T is not under /tmp" >&2; exit 3;; esac
 [ "$T" != "$real_home" ] || { echo "refuse: temp home equals the passwd home" >&2; exit 3; }
-[ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; exit 3; }
+[ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; rm -rf -- "$T"; exit 3; }
+wt=$(cd "$wt" && pwd -P) || { rm -rf -- "$T"; exit 3; }   # absolute, so the ancestor walk below ends at /
 shims="$T/.gate-bin"; mkdir "$shims" || exit 1
 for b in docker docker-compose orb orbctl supabase; do
   printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$(printf "%%s" "$*" | tr "\\n" " ")" >> "%s/calls"\necho "run-gates.sh: ${0##*/} is blocked on this host (no docker)" >&2\nexit 1\n' "$shims" > "$shims/$b"
@@ -31,7 +32,7 @@ for b in docker docker-compose orb orbctl supabase; do
   [ "$(cd "$wt" && env PATH="$shims:$PATH" bash -c "command -v $b")" = "$shims/$b" ] || { echo "refuse: $b does not resolve to the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
   d="$wt/site"; while :; do
     [ ! -e "$d/node_modules/.bin/$b" ] || { echo "refuse: $d/node_modules/.bin/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
-    [ "$d" != / ] || break; d=$(dirname "$d"); done
+    up=$(dirname "$d"); [ "$up" != "$d" ] || break; d=$up; done
 done
 orb_running() { pgrep -f "OrbStack Helper" >/dev/null 2>&1 && echo yes || echo no; }
 orb_before=$(orb_running)
@@ -63,7 +64,15 @@ case "$mode" in
     for c in "npm --prefix site run build" "git diff --check $base...HEAD"; do
       run "$c" || status=1; done ;;
   server) echo "refuse: no docker on this host; dispatch .github/workflows/server-suite.yml with the exact SHA" | tee -a "$log"; status=3 ;;
-  cli-file) run "npx tsx --test --test-timeout=600000 \"$extra\"" || status=1 ;;
+  cli-file)
+    case "$extra" in /*) f="$extra" ;; *) f="$wt/$extra" ;; esac
+    [ ! -f "$f" ] || f="$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")"   # physical, like $wt
+    if [ ! -f "$f" ]; then echo "refuse: no test file at $f" | tee -a "$log"; status=3
+    # No browser on this host: every browser test today is a site file or an *.observer.* file; they run in the
+    # workflow (suite site).
+    elif case "$f" in "$wt"/site/*|*.observer.*) true ;; *) false ;; esac; then
+      echo "refuse: $extra is a site or browser test; dispatch .github/workflows/server-suite.yml (suite site)" | tee -a "$log"; status=3
+    else run "npx tsx --test --test-timeout=600000 \"$f\"" || status=1; fi ;;
   *) echo "unknown mode $mode" >&2; status=3 ;;
 esac
 grep -E "^ℹ (tests|pass|fail)" "$log" | paste -sd' ' - ; grep "^✖" "$log" | grep -v failing | sed 's/ (.*//' | sort -u | head -12
@@ -72,7 +81,8 @@ grep -E "^ℹ (tests|pass|fail)" "$log" | paste -sd' ' - ; grep "^✖" "$log" | 
 if [ -s "$shims/calls" ]; then
   echo "NOT RUN on this host (docker blocked): $(wc -l < "$shims/calls" | tr -d ' ') blocked calls; skipped tests:" | tee -a "$log"
   sort -u "$shims/calls" | cut -c1-160 | sed 's/^/  blocked: /' | tee -a "$log"
-  grep -E "# SKIP" "$log" | sed 's/^[[:space:]]*//' | sort -u | head -20 | sed 's/^/  /' | tee -a "$log"; fi
+  # node's spec reporter prints a skipped test as "﹣ <name> (<ms>) # <reason>"; TAP prints "# SKIP".
+  grep -E "﹣ |# SKIP" "$log" | sed 's/^[[:space:]]*//; s/ ([0-9.]*ms)//' | sort -u | head -20 | sed 's/^/  skipped: /' | tee -a "$log"; fi
 orb_after=$(orb_running)
 echo "orbstack running: before=$orb_before after=$orb_after" | tee -a "$log"
 [ "$orb_before/$orb_after" != "no/yes" ] || echo "WARNING: OrbStack started during the run; the stand-ins block this run's gates, so check other sessions" | tee -a "$log"

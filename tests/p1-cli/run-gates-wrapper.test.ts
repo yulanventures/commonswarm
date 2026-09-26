@@ -70,6 +70,10 @@ test("a gate that calls docker gets the blocking stand-in, and the call is liste
       '  assert.equal(docker.status, 1);',
       '  assert.match(docker.stderr, /blocked on this host/);',
       '});',
+      'test("a docker-guarded probe skips", (t) => {',
+      '  if (spawnSync("docker", ["version"], { encoding: "utf8" }).status !== 0) { t.skip("Docker is absent"); return; }',
+      '  assert.fail("the stand-in let docker version succeed");',
+      '});',
       "",
     ].join("\n"));
     const log = join(scratch, "gate.log");
@@ -78,8 +82,10 @@ test("a gate that calls docker gets the blocking stand-in, and the call is liste
     const body = readFileSync(log, "utf8");
     assert.match(body, /EXIT 0 :: npx tsx --test/);
     assert.match(body, /^ℹ pass 1$/m, "the probe really ran");
-    assert.match(body, /^NOT RUN on this host \(docker blocked\): 1 blocked calls/m);
+    assert.match(body, /^ℹ skipped 1$/m);
+    assert.match(body, /^NOT RUN on this host \(docker blocked\): 2 blocked calls/m);
     assert.match(body, /^  blocked: docker version --format probe$/m);
+    assert.match(body, /^  skipped: ﹣ a docker-guarded probe skips # Docker is absent$/m);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -97,6 +103,42 @@ test("a docker in an ancestor node_modules/.bin is refused before any gate runs"
     assert.equal(result.status, 3, result.stdout + result.stderr);
     assert.match(result.stderr, /node_modules\/\.bin\/docker would shadow the blocking stand-in/);
     assert.equal(existsSync(log), false, "no gate ran");
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("cli-file refuses a site test and an observer test, before running anything", () => {
+  // Harmless stand-ins: if the refusal broke, these would run as plain passing tests; no browser could start.
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  try {
+    const worktree = join(scratch, "wt");
+    mkdirSync(join(worktree, "site", "src"), { recursive: true });
+    const harmless = 'import test from "node:test"; test("harmless", () => {});\n';
+    writeFileSync(join(worktree, "site", "src", "x.observer.test.mjs"), harmless);
+    writeFileSync(join(worktree, "y.observer.test.mjs"), harmless);
+    for (const file of ["site/src/x.observer.test.mjs", "y.observer.test.mjs"]) {
+      const log = join(scratch, "gate.log");
+      const result = spawnSync("bash", [script, worktree, log, "HEAD", "cli-file", file], { encoding: "utf8", timeout: 30_000, env: wrapperEnv });
+      assert.equal(result.status, 3, file + "\n" + result.stdout + result.stderr);
+      const body = readFileSync(log, "utf8");
+      assert.match(body, /refuse: .* is a site or browser test/);
+      assert.doesNotMatch(body, /EXIT/);
+    }
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("a relative worktree path ends the ancestor walk and runs the gate", { timeout: 120_000 }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  try {
+    const probe = join(scratch, "probe.test.mjs");
+    writeFileSync(probe, 'import test from "node:test"; test("ran", () => {});\n');
+    const log = join(scratch, "gate.log");
+    const result = spawnSync("bash", [script, ".", log, "HEAD", "cli-file", probe], { encoding: "utf8", timeout: 110_000, env: wrapperEnv, cwd: resolve(".") });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.match(readFileSync(log, "utf8"), /^ℹ pass 1$/m);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
