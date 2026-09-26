@@ -1,11 +1,18 @@
 #!/bin/bash
 # The ONE wrapper for every local gate run (HezLead ruling, 2026-09-26, after the 2026-09-25 home deletion).
 #
-#   scripts/run-gates.sh <worktree> <log-file> <base-ref> [gates|server|cli-file <path>]
+#   scripts/run-gates.sh <worktree> <log-file> <base-ref> [gates|site|cli-file <path>|server]
 #
 # It refuses to run a test with the passwd home as HOME. It creates the test home itself
 # (T under /tmp), runs every gate as `env HOME="$T" <cmd>`, and after the run it fails if anything
 # appeared under the real ~/.cswarm or ~/.config/cswarm. It deletes only $T. HOME is never assigned.
+#
+# No docker on this host (HezLead ruling, 2026-09-26): any call to the docker CLI starts OrbStack, and the
+# test files that need a container call `docker version` or `docker image inspect` first to decide whether to
+# skip. Every gate runs with blocking stand-ins for docker, docker-compose, orb, orbctl and supabase first on
+# PATH: each one logs its argv and exits 1, so those tests skip and are listed as NOT RUN. `gates` runs the static
+# gates and `npm test` only; `npm run test:p1-cli` and the server suite run in .github/workflows/server-suite.yml
+# (suite p1-cli or server), and `server` mode is refused here.
 set -uo pipefail
 wt=${1:?worktree}; log=${2:?log file}; base=${3:?base ref}; mode=${4:-gates}; extra=${5:-}
 real_home="$(eval printf '%s' "~$(id -un)")"
@@ -13,6 +20,17 @@ T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1
 case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "refuse: temp home $T is not under /tmp" >&2; exit 3;; esac
 [ "$T" != "$real_home" ] || { echo "refuse: temp home equals the passwd home" >&2; exit 3; }
 [ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; exit 3; }
+shims="$T/.gate-bin"; mkdir "$shims" || exit 1
+for b in docker docker-compose orb orbctl supabase; do
+  printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$*" >> "%s/calls"\necho "run-gates.sh: ${0##*/} is blocked on this host (no docker)" >&2\nexit 1\n' "$shims" > "$shims/$b"
+  chmod 755 "$shims/$b"
+  # Positive control before any gate: the stand-in is what a gate finds, and no project bin directory shadows it.
+  [ "$(cd "$wt" && env PATH="$shims:$PATH" bash -c "command -v $b")" = "$shims/$b" ] || { echo "refuse: $b does not resolve to the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
+  for d in "$wt/node_modules/.bin" "$wt/site/node_modules/.bin"; do
+    [ ! -e "$d/$b" ] || { echo "refuse: $d/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }; done
+done
+orb_running() { pgrep -f "OrbStack Helper" >/dev/null 2>&1 && echo yes || echo no; }
+orb_before=$(orb_running)
 snapshot() { # every write class: the two cswarm trees in full, plus the top-level names under the home, .config and .claude
   for d in "$real_home/.cswarm" "$real_home/.config/cswarm"; do [ -e "$d" ] && find "$d" -mindepth 1 -print 2>/dev/null; done
   # Top levels by NAME only: on this shared host other agents change mtimes under their own directories every
@@ -22,7 +40,7 @@ snapshot() { # every write class: the two cswarm trees in full, plus the top-lev
 before=$(snapshot | sort)
 run() { # run one gate command under the temp home, in its own process group; kill what it leaves behind
   echo "== $1" >> "$log"
-  ( cd "$wt" && exec env -u FORCE_COLOR HOME="$T" perl -e 'setpgrp(0,0); exec @ARGV' bash -c "$1" ) >> "$log" 2>&1 &
+  ( cd "$wt" && exec env -u FORCE_COLOR HOME="$T" PATH="$shims:$PATH" perl -e 'setpgrp(0,0); exec @ARGV' bash -c "$1" ) >> "$log" 2>&1 &
   local pgid=$!; wait "$pgid"; local rc=$?
   pkill -g "$pgid" 2>/dev/null; sleep 2
   if pgrep -g "$pgid" >/dev/null 2>&1; then
@@ -33,19 +51,25 @@ run() { # run one gate command under the temp home, in its own process group; ki
 status=0
 case "$mode" in
   gates)
-    for c in "npm run build" "npm test" "npm run test:p1-cli" "npm run check:tests" "npm run check:edge" \
+    for c in "npm run build" "npm test" "npm run check:tests" "npm run check:edge" \
              "npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js" \
              "bash scripts/build-release.sh" "npm --prefix site run build" "git diff --check $base...HEAD"; do
       run "$c" || status=1; done ;;
-  server)
-    # The local stack: a fresh volume has no swarm_read schema yet, PostgREST fails its health check, so start
-    # with --ignore-health-check and let db reset create the schemas.
-    ( cd "$wt" && npx supabase stop; npx supabase start --ignore-health-check; npm run db:reset ) >> "$log" 2>&1 || { echo "stack reset FAILED (see $log)" | tee -a "$log"; status=1; }
-    [ $status = 0 ] && { run "npm run build:command-core >/dev/null && npm run test:p1-server" || status=1; } ;;
+  site)
+    for c in "npm --prefix site run build" "npm --prefix site test" "git diff --check $base...HEAD"; do
+      run "$c" || status=1; done ;;
+  server) echo "refuse: no docker on this host; dispatch .github/workflows/server-suite.yml with the exact SHA" | tee -a "$log"; status=3 ;;
   cli-file) run "npx tsx --test --test-timeout=600000 \"$extra\"" || status=1 ;;
   *) echo "unknown mode $mode" >&2; status=3 ;;
 esac
 grep -E "^ℹ (tests|pass|fail)" "$log" | paste -sd' ' - ; grep "^✖" "$log" | grep -v failing | sed 's/ (.*//' | sort -u | head -12
+if [ -s "$shims/calls" ]; then
+  echo "NOT RUN on this host (docker blocked): $(wc -l < "$shims/calls" | tr -d ' ') blocked calls; skipped tests:" | tee -a "$log"
+  sort -u "$shims/calls" | cut -c1-160 | sed 's/^/  blocked: /' | tee -a "$log"
+  grep -E "# SKIP" "$log" | sed 's/^[[:space:]]*//' | sort -u | head -20 | sed 's/^/  /' | tee -a "$log"; fi
+orb_after=$(orb_running)
+echo "orbstack running: before=$orb_before after=$orb_after" | tee -a "$log"
+[ "$orb_before/$orb_after" != "no/yes" ] || echo "WARNING: OrbStack started during the run; the stand-ins block this run's gates, so check other sessions" | tee -a "$log"
 after=$(snapshot | sort)
 if [ "$before" != "$after" ]; then
   echo "GATE FAILED: the real home changed during the run:" | tee -a "$log"; diff <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tee -a "$log"; status=1; fi
