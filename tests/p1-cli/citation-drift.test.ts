@@ -73,25 +73,25 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [417, 417],
+    lines: [418, 418],
     contains: "classifyClaudeCanaryFailure",
   },
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6433, 6433],
+    lines: [6444, 6444],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6459, 6459],
+    lines: [6470, 6470],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7103, 7103],
+    lines: [7114, 7114],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
