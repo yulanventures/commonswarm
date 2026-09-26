@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawn, execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
-import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, fileLockTimeoutSentence, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
+import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, fileLockTimeoutSentence, generalLockOwnerStale, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
 import { listenerPaths, runListenerSupervisor } from "../../src/listener/index.js";
 
 const AGED_LOCK_MS = 61_000;
@@ -528,7 +528,7 @@ test("host, credential, and takeover locks serialize two dead-owner contenders a
       }, { ...policy, timeoutMs: 1_500 })));
       assert.equal(peak, 1, name);
       await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
-        createdAt: clock() - AGED_LOCK_MS,
+        createdAt: clock(),
         startTime: pidStartMs(process.pid), ownerId: "live" }));
       const original = await readFile(path, "utf8");
       Date.now = () => clock() + AGED_LOCK_MS;
@@ -558,7 +558,7 @@ test("general locks reclaim aged foreign hosts and reused pids, but keep a match
     Date.now = clock;
 
     await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
-      createdAt: clock(), startTime: startTime - 10_000, ownerId: "reused" }));
+      createdAt: startTime - 10_000, startTime, ownerId: "reused" }));
     assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
 
     await withFileLock(root, "check", async () => {
@@ -571,6 +571,79 @@ test("general locks reclaim aged foreign hosts and reused pids, but keep a match
     Date.now = () => clock() + AGED_LOCK_MS;
     await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 50 }), FileLockTimeoutError);
     assert.equal(await readFile(path, "utf8"), live);
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("a main-format general lock with a reused PID is reclaimed immediately", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-main-lock-reuse-"));
+  const path = join(root, "check.lock");
+  const start = pidStartMs(process.pid);
+  assert.ok(start !== null);
+  try {
+    const old = JSON.stringify({ pid: process.pid, host: hostname(), createdAt: start - 10_000 });
+    await writeFile(path, old);
+    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a live general lock survives its age limit despite an unrelated recorded startTime", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-live-lock-age-"));
+  const path = join(root, "check.lock");
+  const clock = Date.now;
+  const start = pidStartMs(process.pid);
+  assert.ok(start !== null);
+  const live = JSON.stringify({ pid: process.pid, host: hostname(),
+    createdAt: start + 10_000, startTime: start - 10_000 });
+  try {
+    await writeFile(path, live);
+    Date.now = () => clock() + AGED_LOCK_MS;
+    await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 60 }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), live);
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("an EPERM general-lock PID is reclaimed only when its start follows publication", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-eperm-lock-"));
+  const path = join(root, "check.lock");
+  const originalKill = process.kill;
+  const clock = Date.now;
+  const start = clock() - 20_000;
+  const lookup = (pid: number) => pid === 1 ? start : pidStartMs(pid);
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid === 1 && signal === 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+    return originalKill(pid, signal);
+  }) as typeof process.kill;
+  try {
+    await writeFile(path, JSON.stringify({ pid: 1, host: hostname(), createdAt: start - 10_000 }));
+    assert.equal(await withFileLock(root, "check", async () => "reclaimed",
+      { timeoutMs: 500, pidStartLookup: lookup }), "reclaimed");
+    const live = JSON.stringify({ pid: 1, host: hostname(), createdAt: start + 10_000 });
+    await writeFile(path, live);
+    Date.now = () => clock() + AGED_LOCK_MS;
+    await assert.rejects(withFileLock(root, "check", async () => "wrong",
+      { timeoutMs: 60, pidStartLookup: lookup }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), live);
+  } finally { process.kill = originalKill; Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("unreadable general-lock starts and missing creation times use the 60-second publication bound", { timeout: 1_000 }, () => {
+  for (const createdAt of [Date.now(), undefined]) {
+    assert.equal(generalLockOwnerStale(createdAt, null, 59_999), false);
+    assert.equal(generalLockOwnerStale(createdAt, null, 60_000), true);
+  }
+  assert.equal(generalLockOwnerStale(undefined, Date.now(), 59_999), false);
+  assert.equal(generalLockOwnerStale(undefined, Date.now(), 60_000), true);
+});
+
+test("a parsed but incomplete general-lock record uses publication age", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-incomplete-lock-age-"));
+  const path = join(root, "check.lock");
+  const clock = Date.now;
+  try {
+    await writeFile(path, "null");
+    await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 40 }), FileLockTimeoutError);
+    Date.now = () => clock() + AGED_LOCK_MS;
+    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
   } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 

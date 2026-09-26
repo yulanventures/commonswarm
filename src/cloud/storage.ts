@@ -456,30 +456,38 @@ function readlinkSyncSafe(path: string): string | null {
 }
 
 /**
- * A live local PID with the recorded start stays live. Foreign-host and incomplete
- * records use publication age; a dead or reused local PID is reclaimable immediately.
+ * A local PID that started before publication stays live. Foreign-host, incomplete,
+ * and uninspectable records use publication age; dead or reused PIDs are stale at once.
  */
-async function deadLockOwnerRecord(lockPath: string, publishedAgeMs: number): Promise<string | null> {
+async function deadLockOwnerRecord(
+  lockPath: string, publishedAgeMs: number, startLookup: typeof pidStartMs = pidStartMs,
+): Promise<string | null> {
   let raw: string | null = null;
-  let owner: { pid?: unknown; host?: unknown; startTime?: unknown };
+  let owner: { pid?: unknown; host?: unknown; createdAt?: unknown };
   try {
     raw = await readFile(lockPath, "utf8");
     owner = JSON.parse(raw) as typeof owner;
   } catch {
     return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   }
+  if (!owner || typeof owner !== "object") return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   if (owner.host !== hostname()) return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
     return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   }
-  try {
-    process.kill(owner.pid, 0);
-    const start = pidStartMs(owner.pid);
-    return start !== null && typeof owner.startTime === "number" &&
-      Math.abs(start - owner.startTime) > 2_000 ? raw : null;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null;
+  try { process.kill(owner.pid, 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return raw;
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
   }
+  return generalLockOwnerStale(owner.createdAt, startLookup(owner.pid), publishedAgeMs) ? raw : null;
+}
+
+export function generalLockOwnerStale(createdAt: unknown, pidStart: number | null, publishedAgeMs: number): boolean {
+  if (pidStart === null || typeof createdAt !== "number" || !Number.isFinite(createdAt)) {
+    return publishedAgeMs >= LOCK_STALE_MS;
+  }
+  return pidStart > createdAt + 2_000;
 }
 
 const THIS_PROCESS_START_MS = Date.now() - process.uptime() * 1_000;
@@ -579,6 +587,7 @@ export async function withFileLock<T>(
   lockName: string,
   work: () => Promise<T>,
   options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link;
+    pidStartLookup?: typeof pidStartMs;
     onBeforePublish?: () => Promise<void>;
     onBeforeStaleMove?: () => Promise<void>;
     onBeforeGatePublish?: () => Promise<void>;
@@ -620,7 +629,7 @@ export async function withFileLock<T>(
       const dangling = lockInfo === null && pathInfo !== null;
       let deadRecord = dangling ? "" : lockInfo ? options.stalePolicy === "host-id"
         ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs))
-        : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs)) : null;
+        : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), options.pidStartLookup) : null;
       if (deadRecord !== null) {
         // Serialize stale contenders, then move the stale inode out of the publication path.
         // Never unlink the publication path after deciding from an earlier read.
@@ -718,7 +727,7 @@ export async function withFileLock<T>(
           const freshDangling = freshInfo === null && freshPathInfo !== null;
           const stillStale = freshDangling ? "" : freshInfo && (options.stalePolicy === "host-id"
             ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs))
-            : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs)));
+            : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), options.pidStartLookup));
           if (stillStale === deadRecord) {
             await options.onBeforeStaleMove?.();
             if (!await removeObservedOwnerFile(lockPath, deadRecord === "" && freshDangling ? null : deadRecord)) {
