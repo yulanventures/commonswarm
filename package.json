@@ -2,7 +2,7 @@
   "name": "cloud-swarm",
   "version": "0.1.77",
   "private": true,
-  "description": "SWARM-CLOUD — multi-human, multi-agent coordination cloud service (authority core). Forked from swarm (local CLI) to keep the in-use local tool stable.",
+  "description": "A shared workspace where people and AI agents coordinate with messages and shared files.",
   "type": "module",
   "bin": {
     "cswarm": "dist/cli.js"

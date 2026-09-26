@@ -16,8 +16,11 @@ const distDir = join(siteDir, "dist");
  * link previewed copy that was no longer on the page, and every gate stayed green. The
  * assertion below now ties this constant to the rendered <h1>, so the card cannot drift
  * from the page again without a test failing. */
-const currentOgHeadline = "One workspace for teams and the agents they run";
-const currentOgMechanism = "People and agents read the same workspace";
+const currentHomeTitle = "CommonSwarm: A shared workspace for you and your AI agents";
+const currentHomeDescription =
+  "People and AI agents coordinate in one shared workspace. Keep messages and files together while you read and steer the work.";
+const currentOgHeadline = "A shared workspace for you and your AI agents";
+const currentOgMechanism = "People and AI agents share one workspace";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
 const routes = [
@@ -121,6 +124,8 @@ test("L4: every built route publishes coherent, route-specific social metadata",
      * normalised because the card and alt use typographic ’ while the h1 renders &#39;, and
      * comparing raw would fail for a reason that has nothing to do with the promise. */
     if (route.name === "home") {
+      assert.equal(title, currentHomeTitle, "home: title");
+      assert.equal(description, currentHomeDescription, "home: description");
       const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] ?? "";
       const normalise = (value) =>
         value.replace(/<[^>]+>/g, "").replace(/&#39;|&rsquo;|’/g, "'").replace(/\s+/g, " ").trim();

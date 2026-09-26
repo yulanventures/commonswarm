@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { providerFixtures } from "../../../scripts/provider-fixtures.js";
-import { AUTH_PROVIDERS, authProvider } from "../../lib/auth-providers.js";
+import {
+  AUTH_PROVIDERS,
+  authProvider,
+  signInDoors,
+} from "../../lib/auth-providers.js";
 
 test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal", async () => {
   const source = await readFile(
@@ -16,13 +20,15 @@ test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal
   const panel = source.slice(panelStart, panelEnd);
 
   assert.match(panel, /data-signed-out-onramp/);
-  assert.match(panel, /Sign up or log in<\/h1>/);
+  assert.match(panel, /Sign up free or log in<\/h1>/);
   assert.match(panel, /<p class="dashboard__eyebrow">CommonSwarm<\/p>/);
+  assert.match(panel, /Continue with \{signInMethods\}\./);
   assert.match(
-    panel,
-    /Use your email to create an account or log in\./,
+    source,
+    /const signInMethods = signInDoors\(await enabledProvidersForBuild\(\{/,
   );
-  assert.match(panel, /up to ten\s+workspaces, no card\./);
+  assert.match(panel, /The free plan includes 10 workspaces and requires no card\./);
+  assert.doesNotMatch(panel, /open the same account/);
   assert.doesNotMatch(panel, /workspaces you belong to/i);
   assert.doesNotMatch(panel, /invitation/i);
 
@@ -101,6 +107,15 @@ test("the built signed-out panel offers generated provider buttons", async () =>
   assert.ok(end > start, "the signed-out panel has no end in the built page");
   const panel = html.slice(start, end);
 
+  assert.match(
+    panel,
+    new RegExp(
+      `Continue with ${signInDoors(fixture.enabled.map(authProvider))}`
+        .replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    ),
+    "the sign-in sentence must name the same doors as the rendered provider buttons",
+  );
+
   const ids = [...new Set(
     [...panel.matchAll(/data-signin-provider="([^"]+)"/g)].map((match) => match[1] as string),
   )];
@@ -151,6 +166,11 @@ test("the signed-out divider disappears when no provider is enabled", async () =
     panel,
     /dashboard__auth-divider/,
     "the provider/email divider must not promise a choice when no OAuth provider rendered",
+  );
+  assert.match(
+    panel,
+    new RegExp(`Continue with ${signInDoors([])}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "the offline build must promise only the emailed-link door it renders",
   );
   assert.match(panel, /id="dashboard-email"/, "email remains available without OAuth providers");
 });
