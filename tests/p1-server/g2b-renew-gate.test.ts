@@ -162,13 +162,19 @@ test("box renew gate keeps every sample and leaves then releases its lease", { t
     timeout: 60_000,
   });
   assert.ifError(run.error);
-  assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+  assert.equal(run.status, 10, `${run.stdout}\n${run.stderr}`);
   assert.match(run.stdout, new RegExp(`G2B_PRINCIPAL_ID=${principalId}`));
-  assert.match(run.stdout, /GATE PASS/);
+  assert.equal(run.stdout.trimEnd().split("\n").at(-1),
+    "GATE NOT A RELEASE GATE n=3 PASS");
+  assert.doesNotMatch(run.stdout, /^GATE PASS$/m);
   assert.doesNotMatch(`${run.stdout}${run.stderr}`, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 
   const report = JSON.parse(readFileSync(join(seedDir, "renew-gate.json"), "utf8")) as {
     status: string;
+    header: string;
+    outcome: string;
+    release_gate: boolean;
+    rounds: number;
     thresholds: {
       renew_timeout_ms: number;
       renew_timeout_source: string;
@@ -179,7 +185,11 @@ test("box renew gate keeps every sample and leaves then releases its lease", { t
     renew: { n: number; first_call_ms: number; succeeded: number; calls: Array<{ ok: boolean }> };
     check: { n: number; first_call_ms: number; calls: Array<{ ok: boolean }> };
   };
-  assert.equal(report.status, "PASS");
+  assert.equal(report.status, "NOT_A_RELEASE_GATE");
+  assert.equal(report.header, "GATE NOT A RELEASE GATE n=3 PASS");
+  assert.equal(report.outcome, "PASS");
+  assert.equal(report.release_gate, false);
+  assert.equal(report.rounds, 3);
   assert.deepEqual(report.thresholds, {
     renew_timeout_ms: 15_000,
     renew_timeout_source: "src/cloud/wake-lease.ts:64",

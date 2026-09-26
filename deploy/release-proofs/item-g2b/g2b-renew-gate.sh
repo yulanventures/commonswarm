@@ -43,6 +43,7 @@ for name in credential.json principal.json anon-key.txt; do
   }
 done
 
+# Values below 50 are rehearsals only: the helper labels them non-release and exits 10.
 ROUNDS=${G2B_RENEW_GATE_ROUNDS:-50}
 case "$ROUNDS" in
   ''|*[!0-9]*) echo "input: G2B_RENEW_GATE_ROUNDS must be an integer from 1 to 50"; exit 2 ;;

@@ -10,8 +10,10 @@ export const RENEW_TIMEOUT_MS = 15_000;
 export const CHECK_BUDGET_MS = 3_900;
 export const RENEW_TIMEOUT_SOURCE = "src/cloud/wake-lease.ts:64";
 export const CHECK_BUDGET_SOURCE = "src/cloud/agent-check-budget.ts:22";
+export const RELEASE_GATE_ROUNDS = 50;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
+const STABLE_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const MIN_REMAINING_MS = 90 * 60 * 1_000;
 
 export function percentile(values, fraction) {
@@ -168,10 +170,16 @@ async function prepareProfile(input) {
   }));
 }
 
+function stableCode(value) {
+  return typeof value === "string" && STABLE_CODE_RE.test(value)
+    ? value
+    : "unrecognized_error";
+}
+
 function safeCode(error, observed) {
-  if (observed?.error) return String(observed.error).slice(0, 80);
+  if (typeof observed?.error === "string") return stableCode(observed.error);
   if (observed?.status) return `http_${observed.status}`;
-  if (typeof error?.code === "string" && /^[a-z0-9_-]{1,80}$/i.test(error.code)) return error.code;
+  if (typeof error?.code === "string") return stableCode(error.code);
   if (error?.name === "WakeLeaseTransientError") return "transport_failure";
   return "client_failure";
 }
@@ -256,7 +264,7 @@ async function releaseLease(input) {
 function markdown(report) {
   const row = (name, data, budget, source) =>
     `| ${name} | ${data.n} | ${data.first_call_ms} | ${data.p50_ms} | ${data.p95_ms} | ${data.max_ms} | ${budget} | \`${source}\` |`;
-  return `# G2b renew gate\n\nStatus: **${report.status}**\n\nPrincipal: \`${report.principal_id}\`\n\n` +
+  return `# ${report.header}\n\nStatus: **${report.status}**\n\nOutcome: **${report.outcome}**\n\nPrincipal: \`${report.principal_id}\`\n\n` +
     `## Timeout table\n\n| call | n | first (ms) | p50 (ms) | p95 (ms) | max (ms) | shipped budget (ms) | source |\n` +
     `|---|---:|---:|---:|---:|---:|---:|---|\n` +
     `${row("renew_wake_lease", report.renew, report.thresholds.renew_timeout_ms, report.thresholds.renew_timeout_source)}\n` +
@@ -330,9 +338,18 @@ async function runGate(input, rounds) {
   const reason = renew.succeeded !== rounds
     ? `${rounds - renew.succeeded}_renew_failed`
     : renew.p95_ms >= RENEW_TIMEOUT_MS ? "renew_p95_not_below_15000ms" : null;
+  const releaseGate = rounds === RELEASE_GATE_ROUNDS;
+  const outcome = passed ? "PASS" : `FAIL-${reason}`;
+  const header = releaseGate
+    ? passed ? "GATE PASS" : `GATE FAIL ${reason}`
+    : `GATE NOT A RELEASE GATE n=${rounds} ${outcome}`;
   const report = {
     version: 1,
-    status: passed ? "PASS" : "FAIL",
+    header,
+    status: releaseGate ? passed ? "PASS" : "FAIL" : "NOT_A_RELEASE_GATE",
+    outcome,
+    release_gate: releaseGate,
+    rounds,
     reason,
     started_at: startedAt,
     finished_at: new Date().toISOString(),
@@ -355,11 +372,9 @@ async function runGate(input, rounds) {
   await secureWrite(input.paths.markdownReport, markdown(report));
   process.stdout.write(`RENEW p50=${renew.p50_ms}ms p95=${renew.p95_ms}ms max=${renew.max_ms}ms n=${renew.n}\n`);
   process.stdout.write(`CHECK p50=${check.p50_ms}ms p95=${check.p95_ms}ms max=${check.max_ms}ms n=${check.n}\n`);
-  if (passed) process.stdout.write("GATE PASS\n");
-  else {
-    process.stdout.write(`GATE FAIL ${reason}\n`);
-    process.exitCode = 7;
-  }
+  process.stdout.write(`${header}\n`);
+  if (!releaseGate) process.exitCode = 10;
+  else if (!passed) process.exitCode = 7;
 }
 
 async function selfTest() {
