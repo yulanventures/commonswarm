@@ -590,6 +590,12 @@ export async function withFileLock<T>(
             }
           }
         } finally {
+          const currentOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
+          let ownedAtPath = false;
+          try { ownedAtPath = currentOwner !== null &&
+            (JSON.parse(currentOwner) as { ownerId?: string }).ownerId === ownerId; }
+          catch { /* A changed or incomplete gate is not ours. */ }
+          if (!ownedAtPath) throw new Error("host-id reclaim gate owner changed before release");
           const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.done`;
           const moved = await rename(reclaimPath, movedGate).then(() => true).catch(error => {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
