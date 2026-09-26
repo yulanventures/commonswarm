@@ -20,6 +20,7 @@ import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEA
 import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { CONNECT_PROFILE_FILES, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
+import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -32,7 +33,7 @@ const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
 test("Fold 9 reserved profile basenames refuse before POST and name the writer set", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
-    const names = [CONNECT_PROFILE_FILES.pending, CONNECT_PROFILE_FILES.complete, CONNECT_PROFILE_FILES.credential,
+    const names = [CONNECT_PROFILE_FILES.pending, CONNECT_PROFILE_FILES.complete, CONNECT_PROFILE_FILES.attemptMarker, CONNECT_PROFILE_FILES.credential,
       CONNECT_PROFILE_FILES.setupLock, CONNECT_PROFILE_FILES.connectLock,
       ...CONNECT_PROFILE_FILES.temporaryBases.map(base => `${base}.123.abcdefabcdef.tmp`),
       "custom.123.abcdefabcdef.tmp"];
@@ -225,7 +226,9 @@ test("Fold 12 pending resume keeps a host-bound working profile from this attemp
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
     const original = await readAgentProfile(path);
     const connectRecord = JSON.parse(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.complete), "utf8"));
-    assert.equal(original.connect_attempt_id, connectRecord.attemptId);
+    const markerPath = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
+    assert.equal(JSON.parse(await readFile(markerPath, "utf8")).attemptId, connectRecord.attemptId);
+    assert.equal((await stat(markerPath)).mode & 0o777, 0o600);
     await writeSecureJsonFile(path, JSON.stringify({ ...original, host_session_id: "setup-session" }));
     const boundBytes = await readFile(path);
     const complete = join(dirname(path), "connect-complete.json");
@@ -269,9 +272,10 @@ test("Fold 13 pending profile must belong to this connect attempt", { timeout: 1
       await writeSecureJsonFile(credential, JSON.stringify({ message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
         principal_id: principal, run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" }));
       await writeSecureJsonFile(path, JSON.stringify({ version: 1, url: TARGET.url, anon_key: TARGET.anonKey,
-        workspace_id: WS, principal_id: principal, credential_file: credential,
-        ...(kind === "another-attempt" ? { connect_attempt_id: "11111111-1111-4111-8111-111111111111" } : {}) }));
-      assert.notEqual(JSON.parse(await readFile(path, "utf8")).connect_attempt_id, attemptId);
+        workspace_id: WS, principal_id: principal, credential_file: credential }));
+      const marker = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
+      if (kind === "another-attempt") await writeSecureJsonFile(marker, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111" }));
+      assert.notEqual(existsSync(marker) ? JSON.parse(await readFile(marker, "utf8")).attemptId : undefined, attemptId);
       const profileBytes = await readFile(path);
       const credentialBytes = await readFile(credential);
       let posts = 0;
@@ -287,6 +291,7 @@ test("Fold 13 pending profile must belong to this connect attempt", { timeout: 1
       assert.deepEqual(await readFile(path), profileBytes);
       assert.deepEqual(await readFile(credential), credentialBytes);
       assert.deepEqual(await readFile(pending), pendingBytes);
+      if (kind === "another-attempt") assert.deepEqual(JSON.parse(await readFile(marker, "utf8")), { attemptId: "11111111-1111-4111-8111-111111111111" });
       assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.complete)), false);
     }
   } finally { await f.close(); }
@@ -316,6 +321,62 @@ test("Fold 13 setup refuses a directory with a connect pending record before net
     assert.deepEqual(await readFile(pending), pendingBytes);
     assert.equal(existsSync(path), false);
   } finally { await f.close(); }
+});
+
+test("Fold 14 setup and connect serialize the pending check with the profile write", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "interleaved", "profile.json");
+    const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const connection = { version: 1 as const, url: TARGET.url, anon_key: TARGET.anonKey,
+      workspace_id: WS, principal_id: PRINCIPAL, credential: { message: AGENT_CREDENTIAL_MESSAGE_D088,
+        status: "accepted", principal_id: PRINCIPAL, run_id: RUN, token_id: TOKEN_ID,
+        agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" } };
+    let connectWrite: Promise<void> | undefined;
+    let pendingDuringHook = false;
+    await saveAgentProfile(path, connection, undefined, "setup-session", false, false, undefined,
+      writeSecureJsonFileExclusive, undefined, async () => {
+        connectWrite = withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+          await writeSecureJsonFile(pending, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111",
+            url: TARGET.url, name: "MCP agent", codeHash: "a".repeat(64), createdAt: new Date().toISOString() }));
+        });
+        await new Promise(resolve => setTimeout(resolve, 100));
+        pendingDuringHook = existsSync(pending);
+      });
+    await connectWrite;
+    assert.equal(pendingDuringHook, false, "connect cannot write pending during setup's locked write");
+    assert.equal(existsSync(pending), true);
+    assert.equal((await readAgentProfile(path, "setup-session")).principal_id, PRINCIPAL);
+  } finally { await f.close(); }
+});
+
+test("Fold 14 connect writes a v0.1.77-shaped profile and keeps its attempt marker private", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "old-reader", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const profile = JSON.parse(await readFile(path, "utf8"));
+    const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
+    const keys = Object.keys(profile).sort().join();
+    assert.ok(keys === [...required].sort().join() || keys === [...required, "workspace_name"].sort().join(),
+      "released v0.1.77 key-set reader must accept the connect profile");
+    const marker = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
+    assert.equal((await stat(marker)).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(await readFile(marker, "utf8")).attemptId,
+      JSON.parse(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.complete), "utf8")).attemptId);
+  } finally { await f.close(); }
+});
+
+test("Fold 14 pending setup refusal has owned MCP advice", { timeout: 10000 }, () => {
+  assert.equal(MCP_ERROR_SENTENCES.setup_connect_pending?.next_step,
+    "a person must restore this agent's access outside this session");
+  assert.match(MCP_ERROR_SENTENCES.setup_connect_pending?.message ?? "", /connect in progress/);
+});
+
+test("Fold 14 printed-line comment names the bound session field", { timeout: 10000 }, async () => {
+  const source = await readFile(new URL("../../src/cloud/mcp-connect.ts", import.meta.url), "utf8");
+  assert.ok(source.includes("The printed lines name the profile path and, for a bound profile, its host session ID; no code or token"));
 });
 
 test("Fold 11 default path repairs an empty profile claim without a move", { timeout: 10000 }, async () => {

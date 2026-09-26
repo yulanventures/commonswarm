@@ -44,7 +44,6 @@ export interface AgentProfile {
    */
   workspace_name?: string;
   host_session_id?: string;
-  connect_attempt_id?: string;
 }
 
 /** Refuse a bound profile before any credential, cache, or network access. */
@@ -166,13 +165,12 @@ export async function readAgentProfile(path: string, hostSessionId?: string): Pr
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
   let p: AgentProfile;
   try { p = JSON.parse(raw); } catch { throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again."); }
-  /* Exactly the required keys, optionally plus the known metadata. */
+  /* Exactly the six required keys, optionally plus the older known metadata. */
   const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
   const keys = Object.keys(p ?? {});
   const keysAccepted = required.every(key => keys.includes(key)) &&
-    keys.every(key => required.includes(key) || ["workspace_name", "host_session_id", "connect_attempt_id"].includes(key));
+    keys.every(key => required.includes(key) || ["workspace_name", "host_session_id"].includes(key));
   if (!p || p.version !== 1 || !keysAccepted ||
-      (p.connect_attempt_id !== undefined && (typeof p.connect_attempt_id !== "string" || !ONBOARDING_UUID.test(p.connect_attempt_id))) ||
       (p.host_session_id !== undefined &&
         (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200)) ||
       (p.workspace_name !== undefined &&
@@ -203,7 +201,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string, afterPendingCheck?: () => Promise<void>): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -214,10 +212,10 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
      * released client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
     ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
-    ...(connectAttemptId === undefined ? {} : { connect_attempt_id: connectAttemptId }),
   };
-  await withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+  const save = async () => withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
     if (connectAttemptId === undefined) await refusePendingConnectProfile(path);
+    await afterPendingCheck?.();
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
@@ -252,8 +250,14 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     } else if (existingCredential === null) {
       await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }
+    if (connectAttemptId !== undefined) await writeSecureJsonFile(join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: connectAttemptId }));
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
+  if (connectAttemptId === undefined) {
+    await withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), save);
+  } else {
+    await save(); // connect already holds the connect lock, then takes the setup lock
+  }
   return profile;
 }
 

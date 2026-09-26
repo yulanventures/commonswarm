@@ -559,7 +559,7 @@ async function repairableProfileAt(path: string): Promise<boolean> {
     (info.mode & 0o777) === 0o600 && (typeof process.getuid !== "function" || info.uid === process.getuid());
 }
 
-/** Strategist ruling (2026-09-24): the printed lines name the profile path only; no id, code or token. */
+/** The printed lines name the profile path and, for a bound profile, its host session ID; no code or token. */
 export function renderMcpConnect(result: McpConnectResult): string {
   return `Profile: ${result.profile}\n${result.install}\n`;
 }
@@ -684,7 +684,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           }
           const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
-            credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential), connect_attempt_id: complete.attemptId };
+            credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
+          await writeSecureJsonFile(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: complete.attemptId }));
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
           return connectedResult(path, restored);
@@ -700,7 +701,10 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         try {
           const profile = await completedProfileAt(path);
           if (!profile) throw new Error("profile is incomplete");
-          if (profile.connect_attempt_id !== current.attemptId) {
+          const marker = await readSecureJsonFileIfPresent(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker), 4096).catch(() => null);
+          let markedAttempt: string | undefined;
+          try { markedAttempt = record(JSON.parse(marker ?? "null"))?.attemptId as string | undefined; } catch { /* Refuse an invalid marker. */ }
+          if (markedAttempt !== current.attemptId) {
             throw new McpConnectError("connect_profile_other_attempt", `The profile at ${path} was not written by the pending connect at ${pendingPath(path)}. Keep both files and use a new --profile path for a new agent.`);
           }
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
@@ -719,7 +723,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       let orphanPrincipalId: string | undefined;
       if (current) orphanPrincipalId = (await checkedOrphan(path))?.principalId;
       const attemptId = current?.attemptId ?? randomUUID();
-      if (!current) await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString() } satisfies PendingConnect));
+      if (!current) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+        await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString() } satisfies PendingConnect));
+      });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
       let redirected = false;

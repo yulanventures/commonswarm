@@ -1911,7 +1911,7 @@
             "/functions/v1/read",
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-setup.ts:17,37-66",
+          "citation": "src/cloud/agent-setup.ts:17,45-68",
           "detail": "Setup identity proof: credential renewal if due plus directory and inbox reads.",
           "operation": {
             "name": "agent-setup",
@@ -3164,7 +3164,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:724",
+          "citation": "src/cloud/mcp-connect.ts:730",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",

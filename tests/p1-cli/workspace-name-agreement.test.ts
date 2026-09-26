@@ -14,10 +14,14 @@
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { renderWorkspace, workspaceLabel } from "../../src/cli.js";
+import { readAgentProfile } from "../../src/cloud/agent-profile.js";
 import type { SignalDirectory } from "../../src/cloud/signals.js";
 
 const root = new URL("../../", import.meta.url);
@@ -125,18 +129,22 @@ test("an unknown workspace name degrades to the id, never to a guess", () => {
 /* The profile file caches the name. It must stay OPTIONAL: the parser compares the key set
  * exactly, so requiring it would declare every profile written before this release damaged, on
  * every host at once. */
-test("the profile file accepts a workspace name without requiring one", () => {
-  const profile = read("src/cloud/agent-profile.ts");
-  assert.match(
-    profile,
-    /workspace_name\?: string;/,
-    "workspace_name became required on AgentProfile; every profile written before this release would be rejected",
-  );
-  assert.match(
-    profile,
-    /keys === \[\.\.\.required\]\.sort\(\)\.join\(\) \|\|\s*\n?\s*keys === \[\.\.\.required, "workspace_name"\]\.sort\(\)\.join\(\)/,
-    "the profile key-set check no longer accepts BOTH shapes; one of the two is now rejected",
-  );
+test("the profile file accepts either released shape and rejects an extra key", { timeout: 10000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-profile-shapes-"));
+  try {
+    const path = join(root, "private", "profile.json");
+    await mkdir(dirname(path), { mode: 0o700 });
+    const base = { version: 1, url: "http://127.0.0.1:39876", anon_key: "public-test-key",
+      workspace_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      principal_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      credential_file: join(dirname(path), "credential.json") };
+    for (const shape of [base, { ...base, workspace_name: "CommonSwarm Build" }]) {
+      await writeFile(path, JSON.stringify(shape), { mode: 0o600 });
+      assert.deepEqual(await readAgentProfile(path), shape);
+    }
+    await writeFile(path, JSON.stringify({ ...base, unrecognized: true }), { mode: 0o600 });
+    await assert.rejects(readAgentProfile(path), { code: "profile_invalid" });
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 /* The app's switcher must show the id, because that is the half a person cannot otherwise see.

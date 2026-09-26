@@ -145,6 +145,17 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
+test("setup whole-operation timeout citation names the constant and deadline block", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/agent-setup.ts:AGENT_SETUP_TIMEOUT_MS"]?.citation;
+  const match = /^src\/cloud\/agent-setup\.ts:(\d+),(\d+)-(\d+)$/.exec(citation ?? "");
+  assert.ok(match, `unexpected citation: ${citation}`);
+  const lines = (await readFile(join(repo, "src/cloud/agent-setup.ts"), "utf8")).split("\n");
+  assert.match(lines[Number(match[1]) - 1] ?? "", /^export const AGENT_SETUP_TIMEOUT_MS = 10_000;/);
+  assert.match(lines[Number(match[2]) - 1] ?? "", /withAgentDeadline\(AGENT_SETUP_TIMEOUT_MS/);
+  assert.match(lines[Number(match[3]) - 1] ?? "", /}, options.fetcher\);/);
+});
+
 test("Fold 10 MCP register budget citation points to its constant", { timeout: 10000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS"]?.citation;
