@@ -145,6 +145,34 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
+test("every CLI timeout mapping citation points to its measured source line", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const lines = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
+  const patterns: Record<string, RegExp> = {
+    "src/cli.ts:setTimeout": /const timer = setTimeout\(done, 250\)/,
+    "src/cli.ts:setTimeout#2": /const hardExit = setTimeout\(/,
+    "src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS": /export const TURN_BUDGET_CREDENTIAL_MARGIN_MS/,
+    "src/cli.ts:turnBudgetMs": /const turnBudgetMs = options\.turnBudgetMs/,
+    "src/cli.ts:deliveryHoldBudgetMs": /deliveryHoldBudgetMs: turnBudgetMs/,
+    "src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS": /const hardExit = setTimeout\(/,
+  };
+  let count = 0;
+  for (const [ref, inventory] of Object.entries(mapping.refs as Record<string, { rows: Record<string, { citation: string }> }>)) {
+    for (const [id, row] of Object.entries(inventory.rows)) {
+      const part = row.citation.match(/src\/cli\.ts:(\d+)(?:-(\d+))?/);
+      if (!part) continue;
+      count++;
+      const pattern = patterns[id];
+      assert.ok(pattern, `${ref} ${id} has no citation assertion`);
+      const from = Number(part[1]);
+      const to = Number(part[2] ?? part[1]);
+      assert.ok(from > 0 && to >= from && to <= lines.length, `${ref} ${id}: ${row.citation}`);
+      assert.match(lines.slice(from - 1, to).join("\n"), pattern, `${ref} ${id}: ${row.citation}`);
+    }
+  }
+  assert.equal(count, 10, "reconcile every CLI citation across mapped refs");
+});
+
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {
   const lane = await readFile(join(repo, "docs/evidence/2026-09-24-mcp-release2/LANE.md"), "utf8");
   assert.match(lane, /Fold 3[\s\S]*removed the pre-existing real `main` enumeration/);

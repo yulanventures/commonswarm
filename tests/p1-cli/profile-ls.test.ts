@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { userInfo } from "node:os";
 import test from "node:test";
@@ -156,6 +156,30 @@ test("profile inventory failure cannot turn a saved profile into setup failure",
       }
     }
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }
+});
+
+test("a symlinked inventory root gives the real-directory remedy after profile save", { timeout: 10_000 }, async () => {
+  const home = createLaneTempHome("inventory-symlink-");
+  const oldHome = process.env.HOME;
+  try {
+    process.env.HOME = home;
+    const realRoot = join(home, "real-inventory");
+    mkdirSync(realRoot, { mode: 0o700 });
+    symlinkSync(realRoot, join(home, ".cswarm"));
+    const saved = join(home, "explicit", "profile.json");
+    const warnings: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
+    try {
+      await saveAgentProfile(saved, { version: 1, url: LOOPBACK, anon_key: "public-test-key",
+        workspace_id: WORKSPACE, principal_id: SEAT, credential: { test: true } });
+    } finally { process.stderr.write = write; }
+    assert.equal(statSync(saved).mode & 0o777, 0o600);
+    assert.deepEqual(warnings, ["cswarm: Profile saved; inventory unavailable. ~/.cswarm must be a real private directory.\n"]);
+  } finally {
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    removeLaneTempHome(home);
+  }
 });
 
 test("MCP profile remedy is generated for each call with a private example", { timeout: 10_000 }, () => {

@@ -4,6 +4,8 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import ts from "typescript";
+import * as cliAccepted from "../../src/cli.js";
+import * as onboardingAccepted from "../../src/onboarding-cli.js";
 import {
   AGENT_COMMANDS,
   AGENT_PROFILE_COMMANDS,
@@ -26,7 +28,7 @@ import {
   type AgentCommandGroup,
 } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE } from "../../src/cloud/agent-onboarding-contract.js";
-import { onboardingUsage } from "../../src/onboarding-cli.js";
+import { CHECK_HOOK_REFUSED_FLAGS, onboardingUsage } from "../../src/onboarding-cli.js";
 import { CHANNEL_PURPOSE_MAX } from "../../src/cloud/channels.js";
 import { listenerRouteUsage } from "../../src/listener/index.js";
 import { parseSessionMode, parseSessionProvider } from "../../src/cloud/session-cli.js";
@@ -135,6 +137,83 @@ test("multi-variant help prints each variant's own accepted flags", { timeout: 1
   }
 });
 
+test("variant help renders the flags bound to its handler shape", { timeout: 10_000 }, async () => {
+  const cliSource = await readFile(resolve("src/cli.ts"), "utf8");
+  const onboardingSource = await readFile(resolve("src/onboarding-cli.ts"), "utf8");
+  const cliAst = ts.createSourceFile("src/cli.ts", cliSource, ts.ScriptTarget.Latest, true);
+  const onboardingAst = ts.createSourceFile("src/onboarding-cli.ts", onboardingSource, ts.ScriptTarget.Latest, true);
+  const cases: { key: string; handler: string; shape: string; route?: string; excluded?: readonly string[]; extra?: readonly string[]; onboarding?: boolean }[] = [
+    { key: "setup.import", handler: "runSetupImport", shape: "RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS", onboarding: true },
+    { key: "setup.version", handler: "runSetupVersion", shape: "RUN_SETUP_VERSION_1_ACCEPTED_FLAGS", onboarding: true },
+    { key: "setup.guide", handler: "runSetupGuide", shape: "RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS", onboarding: true },
+    { key: "check.messages", handler: "runCheckMessages", shape: "CHECK_FLAGS", excluded: ["message-id", "hook"], onboarding: true },
+    { key: "check.message", handler: "runCheckMessage", shape: "CHECK_FLAGS", excluded: ["force", "full", "hook"], onboarding: true },
+    { key: "check.hook", handler: "runCheckHook", shape: "CHECK_FLAGS", excluded: CHECK_HOOK_REFUSED_FLAGS, onboarding: true },
+    { key: "resume.inspect", handler: "runResume", shape: "RUN_RESUME_1_ACCEPTED_FLAGS" },
+    { key: "resume.profile", handler: "runResumeSnapshot", shape: "RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS", onboarding: true },
+    { key: "inbox.read", handler: "runSignalRead", route: "runInboxReadMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: ["follow", "ndjson", "notify"] },
+    { key: "inbox.notify", handler: "runSignalRead", route: "runInboxNotifyMode", shape: "NOTIFY_ACCEPTED_FLAGS" },
+    { key: "inbox.follow", handler: "runSignalRead", route: "runInboxFollowMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: ["wait", "notify", "channel", "json"] },
+    { key: "accept.linkStdin", handler: "runAccept", route: "runAcceptLinkStdinMode", shape: "RUN_ACCEPT_1_ACCEPTED_FLAGS", excluded: ["url", "anon-key"] },
+    { key: "accept.legacyStdin", handler: "invitationCredential", route: "runAcceptLegacyStdinMode", shape: "INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS" },
+    { key: "accept.positional", handler: "runAccept", route: "runAcceptPositionalMode", shape: "RUN_ACCEPT_2_ACCEPTED_FLAGS" },
+  ];
+  assert.deepEqual(cases.map(row => row.key).sort(), Object.keys(VARIANT_HELP_FLAGS).sort());
+  for (const row of cases) {
+    const [verb, variantName] = row.key.split(".");
+    const variantDeclaration = cliSource.match(new RegExp(`\\b${variantName}: commandVariant\\([^\\n]+`));
+    assert.ok(variantDeclaration, `${row.key} has no AST visible variant declaration`);
+    assert.match(variantDeclaration[0], new RegExp(`\\b${row.route ?? row.handler}\\b`), `${row.key} is not routed to ${row.handler}`);
+    if (row.route) assert.match(cliSource, new RegExp(`const ${row.route}:[^\\n]+=> await ${row.handler === "invitationCredential" ? "runAccept" : row.handler}\\(`));
+    if (row.handler === "invitationCredential") assert.match(cliSource, /async function runLegacyAccept[\s\S]*?await invitationCredential\(args\)/);
+    const ast = row.onboarding ? onboardingAst : cliAst;
+    const declaration = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === row.handler);
+    assert.ok(declaration && ts.isFunctionDeclaration(declaration), row.handler);
+    assert.match(declaration.getText(ast), new RegExp(`args\\.assertShape\\([\\s\\S]*?\\b${row.shape}\\b`), row.key);
+    const exported = ast.statements.filter(ts.isVariableStatement)
+      .find(node => node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword)
+        && node.declarationList.declarations.some(item => item.name.getText(ast) === row.shape));
+    assert.ok(exported, `${row.key} shape ${row.shape} is not exported`);
+    const module = row.onboarding ? onboardingAccepted : cliAccepted;
+    const shape = (module as Record<string, unknown>)[row.shape];
+    assert.ok(Array.isArray(shape), row.shape);
+    const entry = entries().find(item => item.key === verb)?.entry;
+    assert.ok(entry);
+    const variants = Object.entries(entry.variants);
+    const index = variants.findIndex(([name]) => name === variantName);
+    assert.ok(index >= 0, row.key);
+    const section = commandHelpLines(verb);
+    const start = section.indexOf(`  ${variants[index]![1].help[0]}`);
+    const end = variants[index + 1] ? section.indexOf(`  ${variants[index + 1]![1].help[0]}`, start + 1) : section.length;
+    assert.ok(start >= 0 && end > start, row.key);
+    const rendered = [...new Set([...section.slice(start, end).matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
+    const expected = [...new Set([...(shape as string[]).filter(flag => !row.excluded?.includes(flag)), ...(row.extra ?? []),
+      ...(entry.profile === "expand" ? ["profile", "host-session-id"] : [])])].sort();
+    assert.deepEqual(rendered, expected, row.key);
+  }
+  assert.match(onboardingSource, /CHECK_HOOK_REFUSED_FLAGS\.some\(flag => args\.has\(flag\)\)/);
+  assert.match(cliSource, /"check\.hook": CHECK_FLAGS\.filter\(flag => !\(CHECK_HOOK_REFUSED_FLAGS/);
+});
+
+test("single command help omits flags the handler always refuses", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  const ast = ts.createSourceFile("src/cli.ts", source, ts.ScriptTarget.Latest, true);
+  const logout = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "runLogout");
+  assert.ok(logout && ts.isFunctionDeclaration(logout));
+  assert.match(logout.getText(ast), /args\.assertShape\(RUN_LOGOUT_1_ACCEPTED_FLAGS/);
+  assert.match(logout.getText(ast), /args\.optional\("device"\)[\s\S]*?throw new Error/);
+  const renderedLogout = [...new Set([...commandHelpLines("logout").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
+  assert.deepEqual(renderedLogout, [...cliAccepted.RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => flag !== "device")].sort());
+  const renderedListen = [...new Set([...commandHelpLines("listen", "start").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
+  assert.deepEqual(renderedListen, [...new Set([...LISTEN_START_ACCEPTED_FLAGS.filter(flag => flag !== "defer-over"), "profile"])].sort());
+  assert.match(source, /if \(deferOverValue !== undefined\) \{\s*throw new Error\(listenerDeferOverRefusedSentence\(\)\)/);
+});
+
+test("no unused parser option gate remains beside the help renderer", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.doesNotMatch(source, /parseCommandOptions/);
+});
+
 test("every handler shape reads an exported accepted-flag constant", { timeout: 10_000 }, async () => {
   let count = 0;
   for (const file of ["src/cli.ts", "src/onboarding-cli.ts"]) {
@@ -178,7 +257,7 @@ test("every handler shape reads an exported accepted-flag constant", { timeout: 
     };
     visit(source);
   }
-  assert.ok(count >= 60, `enumeration found only ${count} assertShape sites`);
+  assert.equal(count, 67, "the enumerated handler shape site count changed");
 });
 
 test("every help entry references a handler flag constant instead of a copied list", { timeout: 10_000 }, async () => {
@@ -193,8 +272,62 @@ test("every help entry references a handler flag constant instead of a copied li
   assert.deepEqual([...rows.keys()].sort(), entries().map(row => row.key).sort());
   for (const [key, value] of rows) {
     assert.match(value, /(?:ACCEPTED_FLAGS|CHECK_FLAGS|RECEIVE_COMMON_FLAGS)/, key);
-    if (key !== "session.start") assert.doesNotMatch(value, /"[a-z][a-z-]*"/, `${key} copied flag values`);
+    assert.doesNotMatch(value, /\["[a-z][a-z-]*",\s*"[a-z][a-z-]*"/, `${key} copied a flag list`);
   }
+});
+
+test("each direct help row names a constant read by its selected handler", { timeout: 10_000 }, async () => {
+  const cli = ts.createSourceFile("src/cli.ts", await readFile(resolve("src/cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const onboarding = ts.createSourceFile("src/onboarding-cli.ts", await readFile(resolve("src/onboarding-cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const declaration = (name: string) => cli.statements.filter(ts.isVariableStatement)
+    .flatMap(statement => [...statement.declarationList.declarations])
+    .find(item => item.name.getText(cli) === name);
+  const commands = declaration("AGENT_COMMANDS");
+  const help = declaration("HANDLER_HELP_FLAGS");
+  assert.ok(commands?.initializer && ts.isObjectLiteralExpression(commands.initializer));
+  assert.ok(help?.initializer && ts.isObjectLiteralExpression(help.initializer));
+  const helpRows = new Map(help.initializer.properties.filter(ts.isPropertyAssignment)
+    .map(item => [item.name.getText(cli).replace(/^"|"$/g, ""), item.initializer.getText(cli)]));
+  const shapeReaders = (source: ts.SourceFile, name: string): string => {
+    const functionNode = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
+    return functionNode?.getText(source) ?? "";
+  };
+  const inspectEntry = (key: string, call: ts.CallExpression): void => {
+    const config = call.arguments[0];
+    assert.ok(config && ts.isObjectLiteralExpression(config), key);
+    if (config.properties.some(item => ts.isSpreadAssignment(item) && item.expression.getText(cli).startsWith("selectedVariants("))) return;
+    const handler = config.properties.find(item => ts.isPropertyAssignment(item) && item.name.getText(cli) === "handler");
+    assert.ok(handler && ts.isPropertyAssignment(handler), `${key} has no handler`);
+    const names = [...handler.initializer.getText(cli).matchAll(/\brun[A-Z][A-Za-z0-9]+\b/g)].map(match => match[0]!);
+    const handlerName = names.at(-1);
+    let body = handlerName ? shapeReaders(cli, handlerName) || shapeReaders(onboarding, handlerName) : handler.initializer.getText(cli);
+    if (!body) body = handler.initializer.getText(cli);
+    if (handlerName === "runPostSignal") body += shapeReaders(cli, "postSignalAllowedFlags");
+    if (handlerName === "runReply") body += shapeReaders(cli, "replyAllowedFlags");
+    if (key === "token.revoke") body += shapeReaders(cli, "runTokenRevoke");
+    const flags = [...(helpRows.get(key) ?? "").matchAll(/\b[A-Z][A-Z0-9_]*_FLAGS\b/g)].map(match => match[0]!);
+    assert.ok(flags.length > 0, `${key} has no help shape constant`);
+    for (const flag of flags) assert.match(body, new RegExp(`\\b${flag}\\b`), `${key} help uses ${flag} but ${handlerName ?? "inline handler"} does not`);
+  };
+  let checked = 0;
+  for (const property of commands.initializer.properties.filter(ts.isPropertyAssignment)) {
+    const verb = property.name.getText(cli).replace(/^"|"$/g, "");
+    const value = property.initializer;
+    if (!ts.isCallExpression(value)) continue;
+    if (value.expression.getText(cli) === "commandEntry") {
+      inspectEntry(verb, value);
+      checked++;
+    } else if (value.expression.getText(cli) === "group" && value.arguments[0] && ts.isObjectLiteralExpression(value.arguments[0])) {
+      for (const child of value.arguments[0].properties.filter(ts.isPropertyAssignment)) {
+        const action = child.name.getText(cli).replace(/^"|"$/g, "");
+        if (ts.isCallExpression(child.initializer) && child.initializer.expression.getText(cli) === "commandEntry") {
+          inspectEntry(`${verb}.${action}`, child.initializer);
+          checked++;
+        }
+      }
+    }
+  }
+  assert.equal(checked, 67, "reconcile command table rows; dynamic session and selected variants have dedicated tests");
 });
 
 test("handler help omits refused resume, dogfood and command flags", { timeout: 10_000 }, () => {
@@ -302,7 +435,7 @@ test("listen handler shapes and help share accepted flags including state-dir", 
     assert.deepEqual(calls, [constant], name);
   }
   for (const [action, flags] of [
-    ["start", LISTEN_START_ACCEPTED_FLAGS],
+    ["start", LISTEN_START_ACCEPTED_FLAGS.filter(flag => flag !== "defer-over")],
     ["status", LISTEN_STATUS_ACCEPTED_FLAGS],
     ["stop", LISTEN_STATUS_ACCEPTED_FLAGS],
     ["canary", LISTEN_CANARY_ACCEPTED_FLAGS],
@@ -316,7 +449,7 @@ test("listen handler shapes and help share accepted flags including state-dir", 
 test("provider, permissions and feedback kind help render enforcement values", { timeout: 10_000 }, async () => {
   const listen = commandHelpLines("listen", "start");
   const feedback = commandHelpLines("feedback");
-  assert.match(listen, new RegExp(`--provider ${SESSION_PROVIDERS.join("\\|")}`));
+  assert.match(listen, new RegExp(`--provider ${LISTENER_PROVIDERS.join("\\|")}`));
   assert.match(listen, new RegExp(`--permissions ${LISTENER_PERMISSION_MODES.join("\\|")}`));
   assert.match(feedback, new RegExp(`--kind ${FEEDBACK_KINDS.join("\\|")}`));
   for (const value of LISTENER_PERMISSION_MODES) assert.equal(listenerPermissionMode(value), value);
@@ -329,7 +462,7 @@ test("provider, permissions and feedback kind help render enforcement values", {
   const source = await readFile(resolve("src/cli.ts"), "utf8");
   assert.match(source, /FEEDBACK_KINDS as readonly string\[\]\)\.includes\(kind\)/);
   assert.match(source, /function listenerProvider\(args: Arguments\): ListenerProviderId \{[\s\S]*?isListenerProvider\(provider\)/);
-  assert.match(source, /help: \[`cswarm listen start[^`]+--provider \$\{SESSION_PROVIDERS\.join\("\|"\)\}/);
+  assert.match(source, /help: \[`cswarm listen start[^`]+--provider \$\{LISTENER_PROVIDERS\.join\("\|"\)\}/);
   assert.match(source, /help: \[`cswarm listen start[^`]+--permissions \$\{LISTENER_PERMISSION_MODES\.join\("\|"\)\}/);
   assert.match(source, /help: \[`cswarm feedback[^`]+--kind \$\{FEEDBACK_KINDS\.join\("\|"\)\}/);
 });

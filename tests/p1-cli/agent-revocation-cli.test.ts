@@ -23,7 +23,7 @@ test("principal revoke is human-only and calm on success", async () => {
   assert.doesNotMatch(principalFn, /agent-token-stdin/);
 });
 
-test("token revoke supports human token-id and both agent secret channels", async () => {
+test("token revoke supports human token-id and both agent secret channels", { timeout: 10_000 }, async () => {
   const source = await readFile("src/cli.ts", "utf8");
   const start = source.indexOf("async function runTokenRevoke");
   const end = source.indexOf("\nasync function ", start + 1);
@@ -32,7 +32,8 @@ test("token revoke supports human token-id and both agent secret channels", asyn
   assert.match(revokeFn, /agent-token-file/);
   assert.match(revokeFn, /agent-token-stdin/);
   assert.match(revokeFn, /kind: "revoke_agent_token"/);
-  assert.match(revokeFn, /\.\.\.CREDENTIAL_FLAGS/);
+  assert.match(revokeFn, /RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS/);
+  assert.match(source, /export const RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS = \[[^\n]*\.\.\.CREDENTIAL_FLAGS/);
   assert.match(revokeFn, /agentCredential\(args\)/);
   assert.match(revokeFn, /has no token_id/);
   assert.match(revokeFn, /use the JSON artifact from token mint/);

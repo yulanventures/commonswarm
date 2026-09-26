@@ -73,11 +73,13 @@ test("inbox, notification, hook, and listener prompt surface attached files", ()
   }), /Attachments: 1/);
 });
 
-test("note, ask, and reply share the repeatable attachment parser", () => {
+test("note, ask, and reply share the repeatable attachment parser", { timeout: 10_000 }, () => {
   const source = readFileSync(new URL("../../src/cli.ts", import.meta.url), "utf8");
   const post = source.slice(source.indexOf("async function runPostSignal"), source.indexOf("export function replyRefusalHint"));
   const reply = source.slice(source.indexOf("async function runReply"), source.indexOf("async function runMembers"));
-  assert.match(post, /\.\.\.\(allowTo \? \["attach"\] : \[\]\)/);
+  assert.match(post, /postSignalAllowedFlags\(kind\)/);
+  assert.match(source, /export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = \[[^\n]*"attach"/);
+  assert.match(source, /export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = \[\.\.\.POST_SIGNAL_NOTE_ACCEPTED_FLAGS/);
   assert.match(post, /prepareSignalAttachments\(args\.all\("attach"\)\)/);
   assert.match(reply, /"attach"/);
   assert.match(reply, /prepareSignalAttachments\(args\.all\("attach"\)\)/);

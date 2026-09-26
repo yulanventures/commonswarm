@@ -22,7 +22,7 @@ const cli = resolve(root, "dist", "cli.js");
 
 function run(args: string[]): string {
   try {
-    return execFileSync(process.execPath, [cli, ...args], {
+    return execFileSync(process.execPath, [cli, ...args, ...(args.includes("--url") ? [] : ["--url", "http://127.0.0.1:9"])], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -78,10 +78,10 @@ test("a real flag missing its value still says so — the two must stay distingu
 });
 
 test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10_000 }, () => {
-  /* The list is for wording only, never for acceptance, so a stale entry cannot break a command
-   * — but it CAN word an error badly, telling someone a real flag does not exist. This derives
-   * the expectation from the help text itself, so adding a documented flag without listing it
-   * fails here rather than surfacing to a user as "unknown option --your-new-flag". */
+  /* These advertised flags retain the historical bare-form "unknown option" refusal.
+   * runLogout refuses --device; runTaskCommand handles --to-owner, --grant-id,
+   * --disposition and --repo-mapping-id; runSeed handles --display-name,
+   * --workspace-name and --agent-name. The recorded dispatcher rows control wording. */
   const help = run(["--help", "--url", "http://127.0.0.1:9"]);
   const advertised = [...new Set(
     (help.match(/--[a-z][a-z0-9-]*/g) ?? []).map((f) => f.slice(2)),
@@ -89,7 +89,24 @@ test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10
   assert.ok(advertised.length > 40, `usage parse looks wrong: ${advertised.length} flags`);
 
   const missing = advertised.filter((f) => !KNOWN_FLAGS.has(f));
-  assert.deepEqual(missing.sort(), ["device", "to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name", "repo-mapping-id"].sort());
+  assert.deepEqual(missing.sort(), ["to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name", "repo-mapping-id"].sort());
+  const refusingHandler: Record<string, { command: string; symbol: string }> = {
+    "to-owner": { command: "command", symbol: "runTaskCommand" },
+    "grant-id": { command: "command", symbol: "runTaskCommand" },
+    disposition: { command: "command", symbol: "runTaskCommand" },
+    "repo-mapping-id": { command: "command", symbol: "runTaskCommand" },
+    "display-name": { command: "seed-fixture", symbol: "runSeed" },
+    "workspace-name": { command: "seed-fixture", symbol: "runSeed" },
+    "agent-name": { command: "seed-fixture", symbol: "runSeed" },
+  };
+  assert.deepEqual(Object.keys(refusingHandler).sort(), missing);
+  for (const flag of missing) {
+    const { command, symbol } = refusingHandler[flag]!;
+    assert.match(run([command, `--${flag}`]), new RegExp(`unknown option --${flag}(?:;|\\s)`), symbol);
+  }
+  assert.doesNotMatch(run(["logout", "--help"]), /--device(?:\s|,|\]|$)/);
+  assert.equal(KNOWN_FLAGS.has("device"), false, "runLogout keeps the historical bare refusal");
+  assert.match(run(["target", "show", "--device"]), /unknown option --device/);
 });
 
 test("--help states the credential contract as a PROPERTY, and names both strict cases", () => {

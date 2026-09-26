@@ -331,7 +331,7 @@ test("drift test: site prompt and AGENT_QUICK_GUIDE both derive from AGENT_MESSA
   );
 });
 
-test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, per-command allowedFlags accept, and every source supplies a body end to end", async () => {
+test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, per-command allowedFlags accept, and every source supplies a body end to end", { timeout: 15_000 }, async () => {
   // 1. Structural check on src/cli.ts: ensure the four messages are generated from BODY_SOURCES, not typed literals
   const cliSource = await readFile(resolve(root, "src/cli.ts"), "utf8");
 
@@ -575,42 +575,25 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
     `BOOLEAN_FLAGS must derive body boolean flags via ...BODY_BOOLEAN_FLAGS, not literal strings: ${boolBodyStrings.join(", ")}`,
   );
 
-  // AST check: each allowedFlags function strictly scoped to its own body (not nested functions)
+  // AST check: each helper returns the accepted-flag constant whose body flags are enforced.
   for (const fn of ["postSignalAllowedFlags", "replyAllowedFlags"] as const) {
     const fnDecl = findTopLevelFunctionDeclaration(fn);
     assert.ok(fnDecl?.body, `${fn} definition with body must be found in src/cli.ts`);
-
-    const returnArrays: ts.ArrayLiteralExpression[] = [];
-    forEachChildInSameFunction(fnDecl.body, (node) => {
-      if (
-        ts.isReturnStatement(node) &&
-        node.expression &&
-        ts.isArrayLiteralExpression(node.expression)
-      ) {
-        returnArrays.push(node.expression);
-      }
-    });
-    assert.ok(returnArrays.length > 0, `${fn} must return an array literal in its own body`);
-
-    for (const returnArray of returnArrays) {
-      const spreads: string[] = [];
-      for (const elem of returnArray.elements) {
-        if (ts.isSpreadElement(elem) && ts.isIdentifier(elem.expression)) {
-          spreads.push(elem.expression.text);
-        }
-      }
-      assert.ok(
-        spreads.includes("BODY_FLAGS"),
-        `${fn} AST must directly spread ...BODY_FLAGS in return array`,
-      );
-      const foreignBodySpreads = spreads.filter(
-        (s) => s !== "BODY_FLAGS" && s.toLowerCase().includes("body"),
-      );
-      assert.deepEqual(
-        foreignBodySpreads,
-        [],
-        `${fn} must not spread alternative body flag lists: ${foreignBodySpreads.join(", ")}`,
-      );
+    const returned = fnDecl.body.getText(cliSourceFile);
+    const names = fn === "postSignalAllowedFlags"
+      ? ["POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS", "POST_SIGNAL_NOTE_ACCEPTED_FLAGS", "POST_SIGNAL_ASK_ACCEPTED_FLAGS"]
+      : ["REPLY_ACCEPTED_FLAGS"];
+    for (const name of names) assert.match(returned, new RegExp(`\\b${name}\\b`));
+    for (const name of ["POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS", "REPLY_ACCEPTED_FLAGS"]) {
+      if (!names.includes(name)) continue;
+      const declaration = cliSourceFile.statements.filter(ts.isVariableStatement)
+        .flatMap(statement => [...statement.declarationList.declarations])
+        .find(item => item.name.getText(cliSourceFile) === name);
+      assert.ok(declaration?.initializer && ts.isAsExpression(declaration.initializer), name);
+      assert.ok(ts.isArrayLiteralExpression(declaration.initializer.expression), name);
+      assert.ok(declaration.initializer.expression.elements.some(element =>
+        ts.isSpreadElement(element) && ts.isIdentifier(element.expression) && element.expression.text === "BODY_FLAGS"
+      ), `${name} must spread BODY_FLAGS`);
     }
 
     const bodyStringLiterals: string[] = [];
