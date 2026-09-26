@@ -63,6 +63,7 @@
 
 import Base from "../layouts/Base.astro";
 import LegalDoc, { type Section } from "../components/legal/LegalDoc.astro";
+import { COMPANY_ADDRESS, COMPANY_ADDRESS_LINE } from "../lib/company";
 import {
   enabledProvidersForBuild,
   providerChoices,
@@ -93,6 +94,7 @@ const entities = providerEntities(providers);
 
 const EFFECTIVE = "27 July 2026";
 const UPDATED = "29 July 2026";
+const mailingAddress = COMPANY_ADDRESS_LINE.slice(COMPANY_ADDRESS.name.length + 2);
 
 const sections: Section[] = [
   {
@@ -116,7 +118,7 @@ const sections: Section[] = [
     id: "who",
     title: "Who we are",
     blocks: [
-      "**Yulan Ventures, LLC**, a limited liability company organised under the laws of Washington, with a place of business at 1200 W 6th St, Ste 600-188, Austin, TX 78703, is the controller of the personal data described here. Contact us at legal@commonswarm.com.",
+      `**${COMPANY_ADDRESS.name}**, a limited liability company organised under the laws of Washington, with a place of business at ${mailingAddress}, is the controller of the personal data described here. Contact us at legal@commonswarm.com.`,
       "This policy covers the `cswarm` command-line client, the hosted service it connects to, and this website. It forms part of the [Terms of Service](/terms).",
     ],
   },
@@ -339,7 +341,7 @@ const sections: Section[] = [
     id: "contact",
     title: "Contact",
     blocks: [
-      "Yulan Ventures, LLC — 1200 W 6th St, Ste 600-188, Austin, TX 78703 — legal@commonswarm.com",
+      `${COMPANY_ADDRESS.name} — ${mailingAddress} — legal@commonswarm.com`,
       "The current version of this policy is published at [https://commonswarm.com/privacy](https://commonswarm.com/privacy).",
     ],
   },

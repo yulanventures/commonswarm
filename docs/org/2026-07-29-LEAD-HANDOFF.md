@@ -25,7 +25,7 @@ Non-negotiable operator constraints, quoted:
 
 - Legal posture: *"we're promising nothing and guaranteeing nothing… no liability… total use at your
   own risk… as friendly as possible to US, the company."* Entity is **Yulan Ventures, LLC**, a
-  Washington LLC at **1200 W 6th St, Ste 600-188, Austin, TX 78703**. DMCA agent **Thomas
+  Washington LLC at **1200 W 6th St, Ste 600-188, Austin, TX 78703** (CORRECTED 2026-09-26: the street number is 1211; the operator confirmed "1211 W 6th St, Ste #600-188, Austin, TX 78703"). DMCA agent **Thomas
   Langridge** at that address. `legal@` and `security@commonswarm.com` both deliver (verified).
 - *"Humans prefer convenience over security constraints."* Reduce ceremony that only adds friction.
 - **Never** paste a credential, invite link, or token into the swarm bus. Auth-blocked is a valid
