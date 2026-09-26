@@ -4798,11 +4798,15 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   const hostIndex = optionTokens.indexOf("--host-session-id");
   const controller = new AbortController();
   let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
+  let generation: number | null = null;
+  let watchFailure: unknown = null;
   const stopInt = () => { stopSignal = "SIGINT"; controller.abort(); };
   const stopTerm = () => { stopSignal = "SIGTERM"; controller.abort(); };
   const finishSignalStop = () => {
     if (stopSignal === null) return;
-    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions)}\n`);
+    const holder = watchFailure instanceof WakeLeaseLostError ? watchFailure.surface
+      : generation !== null ? "this watcher" : "unclaimed";
+    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, holder)}\n`);
     process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
   };
   process.on("SIGINT", stopInt);
@@ -4858,8 +4862,6 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   const { lockPath } = locks;
   const wake = createWakeSubscriber({ target: cloud });
   let stopRenewal: (() => void) | null = null;
-  let watchFailure: unknown = null;
-  let generation: number | null = null;
   let cleanStop = false;
   let leaseBearer = selected.bearer;
   try {
@@ -5012,9 +5014,8 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
           token: leaseBearer,
           command: { kind: "release_wake_lease", watcher_id: watcherId, generation },
           restartCommand: notifyRefusalRestartCommand(restartOptions),
-          sessionContextPath: suppliedContextPath, remedyCommand,
-          contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher,
-          timeoutMs: 2_000 });
+          sessionContextPath: suppliedContextPath, remedyCommand, timeoutMs: 2_000,
+          contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
       } catch { /* Best effort: the lease expires if release cannot reach the edge. */ }
     }
     await releaseArrivalWatchSeatLocks(locks);

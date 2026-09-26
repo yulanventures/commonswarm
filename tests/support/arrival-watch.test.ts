@@ -4,7 +4,8 @@
  * ★ Named by `npm test`; it needs no network or database.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -28,6 +29,7 @@ import {
   ARRIVAL_SNIPPET_MAX,
   ARRIVAL_WATCH_POLL_MS,
   NotifyStdoutClosedError,
+  notifySignalStopSentence,
   createArrivalRetryNoticePolicy,
   formatArrivalNotification,
   formatArrivalRetryNotice,
@@ -813,6 +815,103 @@ test("a stale arrival watch lock is stolen when the other pid is gone", async ()
   assert.match(raw, new RegExp(`"pid":${process.pid}`));
   await releaseArrivalWatchLock(lockPath, process.pid);
   await rm(root, { recursive: true, force: true });
+});
+
+test("two stale seat or legacy takeovers leave one watcher", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-takeover-"));
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      await writeFile(path, `${JSON.stringify({ version: 1, pid: 999_999_999 })}\n`, { mode: 0o600 });
+      let entered!: () => void;
+      let release!: () => void;
+      const atMove = new Promise<void>(resolve => { entered = resolve; });
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const first = acquireArrivalWatchLock(path, process.pid, undefined,
+        { onBeforeStaleMove: async () => { entered(); await blocked; } });
+      try {
+        await atMove;
+        let secondEntered = false;
+        const second = acquireArrivalWatchLock(path, process.pid, undefined,
+          { onBeforeStaleMove: async () => { secondEntered = true; } });
+        await new Promise(resolve => setTimeout(resolve, 60));
+        assert.equal(secondEntered, false, "the second takeover must wait for the first publication");
+        release();
+        assert.equal(await first, true);
+        await assert.rejects(second, ArrivalWatchAlreadyRunningError);
+        assert.equal(JSON.parse(await readFile(path, "utf8")).pid, process.pid);
+      } finally {
+        release();
+        await first.catch(() => undefined);
+        await releaseArrivalWatchLock(path);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a changed owner survives the stale watcher's moved-record check", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-moved-"));
+  const path = join(root, "watch.lock");
+  const replacement = `${JSON.stringify({ version: 1, pid: process.pid })}\n`;
+  try {
+    await writeFile(path, `${JSON.stringify({ version: 1, pid: 999_999_999 })}\n`);
+    await assert.rejects(acquireArrivalWatchLock(path, process.pid, undefined, {
+      onBeforeStaleMove: async () => {
+        await writeFile(`${path}.new`, replacement);
+        await rename(`${path}.new`, path);
+      },
+    }), ArrivalWatchAlreadyRunningError);
+    assert.equal(await readFile(path, "utf8"), replacement);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a future-dated incomplete watcher lock obeys one deadline", { timeout: 7_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-future-"));
+  const path = join(root, "watch.lock");
+  try {
+    await writeFile(path, "{partial");
+    const future = new Date(Date.now() + 60_000);
+    await utimes(path, future, future);
+    const start = Date.now();
+    await assert.rejects(acquireArrivalWatchLock(path), /could not be acquired/);
+    assert.ok(Date.now() - start < 6_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a killed watcher publisher's private temp is removed on the next start", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-temp-"));
+  const path = join(root, "watch.lock");
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+    `import { acquireArrivalWatchLock } from './src/cloud/arrival-watch.ts';
+     await acquireArrivalWatchLock(process.argv[1], process.pid, undefined,
+       { onBeforePublish: async () => { process.stdout.write('ready\\n'); await new Promise(() => {}); } });`,
+    path], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.once("data", () => resolve());
+      child.once("error", reject);
+      child.once("close", code => reject(new Error(`publisher exited early: ${code}`)));
+    });
+    assert.equal((await readdir(root)).filter(name => /^watch\.lock\.\d+\.[0-9a-f]+\.tmp$/.test(name)).length, 1);
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await acquireArrivalWatchLock(path);
+    assert.equal((await readdir(root)).filter(name => /^watch\.lock\.\d+\.[0-9a-f]+\.tmp$/.test(name)).length, 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise<void>(resolve => child.once("close", () => resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("signal stop names the current inbox surface", { timeout: 2_000 }, () => {
+  const options = { url: "http://127.0.0.1:1" };
+  assert.match(notifySignalStopSentence("SIGTERM", options, "this watcher"), /nothing is watching this inbox now/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "h0_poll"), /H0 poll holds this inbox now/);
+  assert.doesNotMatch(notifySignalStopSentence("SIGTERM", options, "watcher"), /nothing is watching/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "watcher"), /another watcher holds/);
 });
 
 test("seat and legacy watcher locks publish a complete owner before either contender can acquire", { timeout: 5_000 }, async () => {

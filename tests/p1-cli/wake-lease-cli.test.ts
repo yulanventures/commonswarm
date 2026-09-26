@@ -448,7 +448,7 @@ test("SIGTERM during claim backoff keeps exit 143 and one stop sentence", { time
     watch.stop();
     const result = await watch.exit;
     assert.equal(result.code, 143, result.stderr);
-    assert.equal(result.stderr.match(/nothing is watching this inbox now/g)?.length, 1);
+    assert.equal(result.stderr.match(/this watcher had not claimed the inbox lease/g)?.length, 1);
   } finally { await f.cleanup(); }
 });
 
@@ -462,7 +462,7 @@ test("SIGINT during an in-flight claim keeps exit 130 and one stop sentence", { 
     watch.interrupt();
     const result = await watch.exit;
     assert.equal(result.code, 130, result.stderr);
-    assert.equal(result.stderr.match(/nothing is watching this inbox now/g)?.length, 1);
+    assert.equal(result.stderr.match(/this watcher had not claimed the inbox lease/g)?.length, 1);
   } finally { await f.cleanup(); }
 });
 
@@ -833,7 +833,7 @@ test("signals during the live-context verification read keep the stop sentence a
       if (signal === "SIGTERM") watcher.stop(); else watcher.interrupt();
       const result = await watcher.exit;
       assert.equal(result.code, expected, result.stderr);
-      assert.equal((result.stderr.match(/nothing is watching this inbox now/g) ?? []).length, 1, result.stderr);
+      assert.equal((result.stderr.match(/this watcher had not claimed the inbox lease/g) ?? []).length, 1, result.stderr);
       assert.equal(f.seen.filter(command => command.kind === "claim_wake_lease").length, 0);
     } finally { await f.cleanup(); }
   }

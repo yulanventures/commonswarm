@@ -194,7 +194,7 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
       agentTokenStdin: true,
       arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE],
-    })}`);
+    }, "this watcher")}`);
     const lines = stdout.trimEnd().split("\n");
     assert.equal(lines.length, 2, stdout);
     assert.match(lines[0]!, new RegExp(SENDER));
@@ -362,7 +362,7 @@ test("inbox --notify --json carries the whole body; the readable line names a ru
     assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
       agentTokenStdin: true,
       arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE, ...extra],
-    })}`);
+    }, "this watcher")}`);
     return stdout.trimEnd().split("\n")[0]!;
   };
   try {
