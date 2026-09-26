@@ -11,7 +11,6 @@ import {
   readdir,
   rename,
   rm,
-  rmdir,
   stat,
   unlink,
 } from "node:fs/promises";
@@ -384,11 +383,11 @@ async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
 const THIS_PROCESS_START_MS = Date.now() - process.uptime() * 1_000;
 
 /** A successful pid probe does not prove that the recorded process still owns the pid. */
-export function pidStartMs(pid: number, runPs: typeof execFileSync = execFileSync): number | null {
+export function pidStartMs(pid: number, runPs: typeof execFileSync = execFileSync, timeoutMs = 1_000): number | null {
   if (pid === process.pid) return THIS_PROCESS_START_MS;
   try {
     const text = runPs("/bin/ps", ["-o", "lstart=", "-p", String(pid)],
-      { encoding: "utf8", timeout: 1_000, env: { ...process.env, LC_ALL: "C" } }).trim();
+      { encoding: "utf8", timeout: Math.max(1, Math.min(1_000, timeoutMs)), env: { ...process.env, LC_ALL: "C" } }).trim();
     const parsed = Date.parse(text);
     return Number.isFinite(parsed) ? parsed : null;
   } catch { return null; }
@@ -435,7 +434,9 @@ export async function withFileLock<T>(
   lockName: string,
   work: () => Promise<T>,
   options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link;
-    onBeforeStaleMove?: () => Promise<void> } = {},
+    onBeforeStaleMove?: () => Promise<void>;
+    onBeforeGatePublish?: () => Promise<void>;
+    onBeforeGateStaleMove?: () => Promise<void> } = {},
 ): Promise<T> {
   await secureDirectory(stateDirectory);
   const lockPath = join(stateDirectory, `${lockName}.lock`);
@@ -503,50 +504,68 @@ export async function withFileLock<T>(
         // Never unlink the publication path after deciding from an earlier read.
         const reclaimPath = `${lockPath}.reclaim`;
         const gateOwnerPath = join(reclaimPath, "owner.json");
-        let gateCreated = false;
+        const temporaryGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
         try {
-          await mkdir(reclaimPath, { mode: 0o700 });
-          gateCreated = true;
-          const ownerFile = await open(gateOwnerPath, "wx", 0o600);
+          await mkdir(temporaryGate, { mode: 0o700 });
+          const ownerFile = await open(join(temporaryGate, "owner.json"), "wx", 0o600);
           try {
             await ownerFile.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
               createdAt: Date.now(), startTime: THIS_PROCESS_START_MS, ownerId }));
             await ownerFile.sync();
           } finally { await ownerFile.close(); }
+          await options.onBeforeGatePublish?.();
+          if (await stat(reclaimPath).then(() => true).catch(() => false)) {
+            throw Object.assign(new Error("reclaim gate already exists"), { code: "EEXIST" });
+          }
+          await rename(temporaryGate, reclaimPath);
         }
         catch (gateError) {
-          if ((gateError as NodeJS.ErrnoException).code !== "EEXIST") {
-            if (gateCreated) {
-              await unlink(gateOwnerPath).catch(() => undefined);
-              await rmdir(reclaimPath).catch(() => undefined);
-            }
+          await rm(temporaryGate, { recursive: true, force: true });
+          if (!["EEXIST", "ENOTEMPTY"].includes((gateError as NodeJS.ErrnoException).code ?? "")) {
             throw gateError;
           }
           const gateInfo = await stat(reclaimPath).catch(() => null);
           const gateOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
           let abandoned = false;
+          let recordedPid: number | undefined;
+          let completeLocalOwner = false;
           if (gateOwner !== null) {
             try {
               const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number };
-              if (owner.host === hostname() && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+              if (Number.isSafeInteger(owner?.pid) && owner.pid > 0) recordedPid = owner.pid;
+              completeLocalOwner = owner.host === hostname() && recordedPid !== undefined &&
+                Number.isFinite(owner.startTime) && owner.startTime > 0;
+              if (completeLocalOwner) {
                 try {
                   process.kill(owner.pid, 0);
                   const start = pidStartMs(owner.pid);
                   abandoned = start !== null && Math.abs(start - owner.startTime) > 2_000;
                 } catch (error) { abandoned = (error as NodeJS.ErrnoException).code === "ESRCH"; }
               }
-            } catch { /* Incomplete record gets a grace period. */ }
-          } else if (gateInfo && Date.now() - gateInfo.mtimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS) {
-            abandoned = true;
+            } catch { /* Incomplete records become reclaimable after the stated grace. */ }
           }
+          if (gateInfo && Date.now() - gateInfo.mtimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS &&
+              !completeLocalOwner) abandoned = true;
           if (abandoned) {
+            await options.onBeforeGateStaleMove?.();
             const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
-            await rename(reclaimPath, movedGate).catch(error => {
+            const moved = await rename(reclaimPath, movedGate).then(() => true).catch(error => {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              return false;
             });
-            await rm(movedGate, { recursive: true, force: true });
+            if (moved) {
+              const movedOwner = await readFile(join(movedGate, "owner.json"), "utf8").catch(() => null);
+              if (movedOwner !== gateOwner) {
+                // Another contender published between our read and rename. Do not delete it.
+                if (!await stat(reclaimPath).then(() => true).catch(() => false)) {
+                  await rename(movedGate, reclaimPath).catch(() => undefined);
+                }
+                throw new Error("host-id reclaim gate owner changed during stale takeover");
+              }
+              await rm(movedGate, { recursive: true, force: true });
+            }
           }
-          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath);
+          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath, recordedPid);
           await delay(25);
           continue;
         }
@@ -571,8 +590,24 @@ export async function withFileLock<T>(
             }
           }
         } finally {
-          await unlink(gateOwnerPath).catch(() => undefined);
-          await rmdir(reclaimPath).catch(() => undefined);
+          const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.done`;
+          const moved = await rename(reclaimPath, movedGate).then(() => true).catch(error => {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return false;
+          });
+          if (moved) {
+            const raw = await readFile(join(movedGate, "owner.json"), "utf8").catch(() => null);
+            let ours = false;
+            try { ours = raw !== null && (JSON.parse(raw) as { ownerId?: string }).ownerId === ownerId; }
+            catch { /* A changed or incomplete gate is never ours to remove. */ }
+            if (ours) await rm(movedGate, { recursive: true, force: true });
+            else {
+              if (!await stat(reclaimPath).then(() => true).catch(() => false)) {
+                await rename(movedGate, reclaimPath).catch(() => undefined);
+              }
+              throw new Error("host-id reclaim gate owner changed before release");
+            }
+          }
         }
         continue;
       }

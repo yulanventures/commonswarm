@@ -5,7 +5,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawn, execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
-import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, pidStartMs, withFileLock } from "../../src/cloud/storage.js";
+import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
+
+test("secure JSON read rejects a 0755 parent without changing it", { timeout: 2_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-read-mode-"));
+  try {
+    await writeFile(join(root, "record.json"), "{}", { mode: 0o600 });
+    await import("node:fs/promises").then(fs => fs.chmod(root, 0o755));
+    await assert.rejects(readSecureJsonFile(join(root, "record.json"), 100), /mode 0700/);
+    assert.equal((await stat(root)).mode & 0o777, 0o755);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("concurrent copied host-id rotations return the id kept in the file", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-host-id-rotation-"));
@@ -180,6 +190,7 @@ test("dead reclaim gate is recovered and a live gate obeys its deadline", { time
       { stalePolicy: "host-id", timeoutMs: 150 }), error => {
       assert.ok(error instanceof FileLockTimeoutError);
       assert.match(error.message, /\.reclaim/);
+      assert.match(error.message, new RegExp(`owner pid ${child.pid}`));
       return true;
     });
     child.kill("SIGKILL");
@@ -192,6 +203,83 @@ test("dead reclaim gate is recovered and a live gate obeys its deadline", { time
     if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("gate creation publishes only a complete owner and survives an injected crash", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-atomic-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined, {
+      stalePolicy: "host-id", timeoutMs: 500, onBeforeGatePublish: async () => {
+        await assert.rejects(stat(gate), { code: "ENOENT" });
+        throw new Error("injected crash");
+      },
+    }), /injected crash/);
+    await assert.rejects(stat(gate), { code: "ENOENT" });
+    assert.equal((await readdir(root)).filter(name => name.includes(".reclaim.")).length, 0);
+    await withFileLock(root, "host-id-rotation", async () => undefined, { stalePolicy: "host-id", timeoutMs: 500 });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("empty, partial, and foreign reclaim gates recover after two-second grace", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-grace-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  try {
+    for (const owner of [null, "{partial", JSON.stringify({ pid: process.pid, host: "foreign-host", startTime: Date.now(), ownerId: "foreign" })]) {
+      await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
+      await mkdir(gate, { mode: 0o700 });
+      if (owner !== null) await writeFile(join(gate, "owner.json"), owner, { mode: 0o600 });
+      await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
+        { stalePolicy: "host-id", timeoutMs: 80 }), FileLockTimeoutError);
+      const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 100);
+      await utimes(gate, old, old);
+      await withFileLock(root, "host-id-rotation", async () => undefined, { stalePolicy: "host-id", timeoutMs: 600 });
+      await assert.rejects(stat(gate), { code: "ENOENT" });
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("reclaim checks the moved owner and preserves a replacement gate", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-race-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  const fresh = JSON.stringify({ pid: process.pid, host: hostname(), startTime: pidStartMs(process.pid), ownerId: "fresh" });
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
+    await mkdir(gate, { mode: 0o700 });
+    await writeFile(join(gate, "owner.json"), "{old", { mode: 0o600 });
+    const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 100);
+    await utimes(gate, old, old);
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined, {
+      stalePolicy: "host-id", timeoutMs: 500, onBeforeGateStaleMove: async () => {
+        await rename(gate, `${gate}.prior`);
+        await mkdir(gate, { mode: 0o700 });
+        await writeFile(join(gate, "owner.json"), fresh, { mode: 0o600 });
+      },
+    }), /gate owner changed/);
+    assert.equal(await readFile(join(gate, "owner.json"), "utf8"), fresh);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("gate release leaves a replacement owner untouched", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-release-race-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  const fresh = JSON.stringify({ pid: process.pid, host: hostname(), startTime: pidStartMs(process.pid), ownerId: "replacement" });
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined, {
+      stalePolicy: "host-id", timeoutMs: 500, onBeforeStaleMove: async () => {
+        await rename(gate, `${gate}.prior`);
+        await mkdir(gate, { mode: 0o700 });
+        await writeFile(join(gate, "owner.json"), fresh, { mode: 0o600 });
+      },
+    }), /gate owner changed before release/);
+    assert.equal(await readFile(join(gate, "owner.json"), "utf8"), fresh);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("host-id publication falls back on unsupported links and accepts retransmitted LINK", { timeout: 8_000 }, async () => {
@@ -218,6 +306,7 @@ test("host-id publication falls back on unsupported links and accepts retransmit
 });
 
 test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, async (t) => {
+  const spawnTimeMs = Date.now();
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   try {
     assert.ok(child.pid);
@@ -229,7 +318,7 @@ test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, 
       if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("sandbox denies /bin/ps"); return; }
       throw error;
     }
-    assert.equal(pidStartMs(child.pid), Date.parse(raw.trim()));
+    assert.ok(Math.abs(pidStartMs(child.pid)! - spawnTimeMs) < 2_000);
   } finally {
     child.kill("SIGKILL");
     await new Promise<void>(resolve => child.once("close", () => resolve()));
