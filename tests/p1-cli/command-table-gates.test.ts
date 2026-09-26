@@ -36,6 +36,7 @@ import { SESSION_PROVIDERS } from "../../src/cloud/session-contract.js";
 import { LISTENER_PROVIDERS, isListenerProvider, type ListenerProviderId } from "../../src/listener/control.js";
 import { parseReceiveMode, parseReceiveProvider } from "../../src/cloud/agent-receive.js";
 import { SINCE_OFFSET_GUIDANCE } from "../../src/cloud/signals.js";
+import { NOTIFY_FLAG } from "../../src/cloud/arrival-watch.js";
 
 type EntryRow = { key: string; entry: AgentCommandEntry };
 const sessionProvidersMustBeListenerProviders: readonly ListenerProviderId[] = SESSION_PROVIDERS;
@@ -153,7 +154,7 @@ test("variant help renders the flags bound to its handler shape", { timeout: 10_
     { key: "resume.profile", handler: "runResumeSnapshot", shape: "RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS", onboarding: true },
     { key: "inbox.read", handler: "runSignalRead", route: "runInboxReadMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: ["follow", "ndjson", "notify"] },
     { key: "inbox.notify", handler: "runSignalRead", route: "runInboxNotifyMode", shape: "NOTIFY_ACCEPTED_FLAGS" },
-    { key: "inbox.follow", handler: "runSignalRead", route: "runInboxFollowMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS },
+    { key: "inbox.follow", handler: "runSignalRead", route: "runInboxFollowMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: [...cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS, NOTIFY_FLAG] },
     { key: "accept.linkStdin", handler: "runAccept", route: "runAcceptLinkStdinMode", shape: "RUN_ACCEPT_1_ACCEPTED_FLAGS", excluded: cliAccepted.ACCEPT_LINK_REFUSED_FLAGS },
     { key: "accept.legacyStdin", handler: "invitationCredential", route: "runAcceptLegacyStdinMode", shape: "INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS" },
     { key: "accept.positional", handler: "runAccept", route: "runAcceptPositionalMode", shape: "RUN_ACCEPT_2_ACCEPTED_FLAGS" },
@@ -206,14 +207,14 @@ test("single command help omits flags the handler always refuses", { timeout: 10
   assert.deepEqual(renderedLogout, [...cliAccepted.RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LOGOUT_REFUSED_FLAGS as readonly string[]).includes(flag))].sort());
   const renderedListen = [...new Set([...commandHelpLines("listen", "start").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
   assert.deepEqual(renderedListen, [...new Set([...LISTEN_START_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LISTEN_START_REFUSED_FLAGS as readonly string[]).includes(flag)), "profile"])].sort());
-  assert.match(source, /if \(LISTEN_START_REFUSED_FLAGS\.length > 0 && deferOverValue !== undefined\) \{\s*throw new Error\(listenerDeferOverRefusedSentence\(\)\)/);
+  assert.match(source, /LISTEN_START_REFUSED_FLAGS as readonly string\[\]\)\.find\(flag => supplied\[flag\] !== undefined\)/);
 });
 
 test("removing a handler refusal makes its flag reappear in help", { timeout: 10_000 }, async () => {
   const cliSource = await readFile(resolve("src/cli.ts"), "utf8");
   const onboardingSource = await readFile(resolve("src/onboarding-cli.ts"), "utf8");
   for (const name of ["LISTEN_START_REFUSED_FLAGS", "SESSION_START_REFUSED_FLAGS", "LOGOUT_REFUSED_FLAGS", "INBOX_FOLLOW_REFUSED_FLAGS", "ACCEPT_LINK_REFUSED_FLAGS"]) {
-    assert.match(cliSource, new RegExp(`if \\([^\\n]*${name}\\.`), `${name} is not used by its handler`);
+    assert.match(cliSource, new RegExp(`${name}[\\s\\S]*?\\.find\\(|${name}\\.some\\(|${name}\\.includes\\(`), `${name} is not used by its handler`);
   }
   for (const name of ["CHECK_MESSAGE_REFUSED_FLAGS", "CHECK_HOOK_REFUSED_FLAGS"]) {
     assert.match(onboardingSource, new RegExp(`${name}\\.some\\(flag => args\\.has\\(flag\\)\\)`), `${name} is not used by its handler`);
@@ -248,6 +249,36 @@ test("removing a handler refusal makes its flag reappear in help", { timeout: 10
     try { assert.ok(rendered(key).includes(`--${flag}`), `${key} did not reveal removed --${flag}`); }
     finally { mutable.splice(0, 0, flag); }
   }
+});
+
+test("added refusal flags reach the listen and inbox handlers and disappear from help", { timeout: 10_000 }, () => {
+  const listen = cliAccepted.LISTEN_START_REFUSED_FLAGS as unknown as string[];
+  assert.deepEqual(cliAccepted.listenerRouteConfiguration("main", undefined).routeMode, "main");
+  listen.push("route");
+  try {
+    assert.throws(() => cliAccepted.listenerRouteConfiguration("main", undefined), /--route/);
+    assert.ok(!HANDLER_HELP_FLAGS["listen.start"]!.includes("route"));
+    assert.doesNotMatch(commandHelpLines("listen", "start"), /--route\b/);
+  } finally { listen.pop(); }
+
+  const follow = cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS as unknown as string[];
+  for (const [options, expected] of [
+    [["--channel", "fixture"], "inbox --follow cannot be combined with --channel"],
+    [["--wait", "1"], "inbox --follow cannot be combined with --wait"],
+    [["--json"], "inbox --follow --ndjson cannot be combined with --json"],
+    [["--wait", "1", "--channel", "fixture"], "inbox --follow cannot be combined with --channel"],
+  ] as const) {
+    assert.equal(cliAccepted.inboxFollowRefusal(new cliAccepted.Arguments(["inbox", "--follow", "--ndjson", ...options])), expected);
+  }
+  const args = new cliAccepted.Arguments(["inbox", "--follow", "--ndjson", "--about", "fixture"]);
+  assert.equal(cliAccepted.inboxFollowRefusal(args), null);
+  follow.push("about");
+  try {
+    assert.match(cliAccepted.inboxFollowRefusal(args) ?? "", /--about/);
+    assert.ok(!VARIANT_HELP_FLAGS["inbox.follow"]!.includes("about"));
+    const section = commandHelpLines("inbox").split("cswarm inbox --follow")[1] ?? "";
+    assert.doesNotMatch(section, /--about\b/);
+  } finally { follow.pop(); }
 });
 
 test("no unused parser option gate remains beside the help renderer", { timeout: 10_000 }, async () => {
@@ -317,9 +348,27 @@ test("every help entry references a handler flag constant instead of a copied li
     assert.ok(property && (ts.isPropertyAssignment(property) || ts.isGetAccessorDeclaration(property)));
     const visit = (node: ts.Node): void => {
       assert.ok(!ts.isArrayLiteralExpression(node), `${key} must not contain an array literal`);
+      assert.ok(!ts.isStringLiteral(node), `${key} must not copy a flag string literal`);
       ts.forEachChild(node, visit);
     };
-    visit(ts.isPropertyAssignment(property) ? property.initializer : property);
+    visit(ts.isPropertyAssignment(property) ? property.initializer : property.body!);
+  }
+});
+
+test("variant help exclusions contain no inline flag literals", { timeout: 10_000 }, async () => {
+  const source = ts.createSourceFile("src/cli.ts", await readFile(resolve("src/cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const declaration = source.statements.filter(ts.isVariableStatement)
+    .flatMap(statement => [...statement.declarationList.declarations])
+    .find(item => item.name.getText(source) === "VARIANT_HELP_FLAGS");
+  assert.ok(declaration?.initializer && ts.isObjectLiteralExpression(declaration.initializer));
+  for (const property of declaration.initializer.properties) {
+    assert.ok(ts.isPropertyAssignment(property) || ts.isGetAccessorDeclaration(property));
+    const key = property.name.getText(source);
+    const visit = (node: ts.Node): void => {
+      assert.ok(!ts.isStringLiteral(node), `${key} must read a selector or refusal constant`);
+      ts.forEachChild(node, visit);
+    };
+    visit(ts.isPropertyAssignment(property) ? property.initializer : property.body!);
   }
 });
 
@@ -443,6 +492,30 @@ test("multi-action handlers select the direct help shape for their branch", { ti
   const hook = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "runHook");
   assert.ok(hook && ts.isFunctionDeclaration(hook));
   assert.match(hook.getText(source), /args\.assertShape\(command === "install" \? HOOK_INSTALL_ACCEPTED_FLAGS : HOOK_UNINSTALL_ACCEPTED_FLAGS/);
+});
+
+test("post-signal kind branches select the matching help shape", { timeout: 10_000 }, async () => {
+  const source = ts.createSourceFile("src/cli.ts", await readFile(resolve("src/cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const declaration = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "postSignalAllowedFlags");
+  assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+  const returned = declaration.body?.statements.find(ts.isReturnStatement)?.expression;
+  assert.ok(returned && ts.isConditionalExpression(returned));
+  assert.equal(returned.condition.getText(source), 'kind === "working-on"');
+  assert.equal(returned.whenTrue.getText(source), "POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS");
+  assert.ok(ts.isConditionalExpression(returned.whenFalse));
+  assert.equal(returned.whenFalse.condition.getText(source), 'kind === "ask"');
+  assert.equal(returned.whenFalse.whenTrue.getText(source), "POST_SIGNAL_ASK_ACCEPTED_FLAGS");
+  assert.equal(returned.whenFalse.whenFalse.getText(source), "POST_SIGNAL_NOTE_ACCEPTED_FLAGS");
+  for (const [kind, flags] of [
+    ["working-on", cliAccepted.POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS],
+    ["note", cliAccepted.POST_SIGNAL_NOTE_ACCEPTED_FLAGS],
+    ["ask", cliAccepted.POST_SIGNAL_ASK_ACCEPTED_FLAGS],
+  ] as const) assert.deepEqual(cliAccepted.postSignalAllowedFlags(kind), flags);
+});
+
+test("public route comment documents its function", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.match(source, /export const LISTEN_START_REFUSED_FLAGS = [^\n]+;\s*\/\*\* Parse the public route before credentials or network work\. \*\/\s*export function listenerRouteConfiguration\(/);
 });
 
 test("handler help omits refused resume, dogfood and command flags", { timeout: 10_000 }, () => {

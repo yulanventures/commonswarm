@@ -3342,15 +3342,17 @@ export function listenerPollIntervalMs(value: string | undefined): number {
   return parseIdlePollIntervalMs(value);
 }
 
-/** Parse the public route before credentials or network work. */
 export const LISTEN_START_REFUSED_FLAGS = ["defer-over"] as const;
 
+/** Parse the public route before credentials or network work. */
 export function listenerRouteConfiguration(
   routeValue: string | undefined,
   deferOverValue: string | undefined,
 ): { routeMode: ListenerRouteMode; deferOverChars: number | null } {
-  if (LISTEN_START_REFUSED_FLAGS.length > 0 && deferOverValue !== undefined) {
-    throw new Error(listenerDeferOverRefusedSentence());
+  const supplied = { route: routeValue, "defer-over": deferOverValue } as Record<string, string | undefined>;
+  const refused = (LISTEN_START_REFUSED_FLAGS as readonly string[]).find(flag => supplied[flag] !== undefined);
+  if (refused !== undefined) {
+    throw new Error(refused === "defer-over" ? listenerDeferOverRefusedSentence() : `listen start cannot be combined with --${refused}`);
   }
   const routeMode = routeValue ?? LISTENER_ROUTE_MODES[0];
   if (!isLiveListenerRouteMode(routeMode)) {
@@ -4575,16 +4577,24 @@ async function runResume(args: Arguments): Promise<void> {
 
 export const SIGNAL_READ_FEED_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
 export const SIGNAL_READ_INBOX_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "wait", "follow", "ndjson", "notify", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
-export const INBOX_FOLLOW_REFUSED_FLAGS = ["wait", "notify", "channel", "json"] as const;
+export const INBOX_FOLLOW_REFUSED_FLAGS = ["channel", "wait", "json"] as const;
+
+export function inboxFollowRefusal(args: Arguments): string | null {
+  const refused = (INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).find(flag => args.has(flag));
+  /* The follow loop pages a backlog with its own query and cursor. A channel
+   * filter it cannot apply must be refused rather than silently ignored.
+   * Otherwise the stream could include signals outside the requested channel. */
+  if (refused === "channel") return "inbox --follow cannot be combined with --channel";
+  if (refused === "wait") return "inbox --follow cannot be combined with --wait";
+  if (refused === "json") return "inbox --follow --ndjson cannot be combined with --json";
+  return refused === undefined ? null : `inbox --follow cannot be combined with --${refused}`;
+}
 
 async function runSignalRead(
   args: Arguments,
   inbox: boolean,
 ): Promise<void> {
   const notify = inbox && args.has(NOTIFY_FLAG);
-  if (inbox && args.has("follow") && INBOX_FOLLOW_REFUSED_FLAGS.includes("notify") && notify) {
-    throw new Error("inbox --follow cannot be combined with --notify");
-  }
   args.assertShape(notify ? NOTIFY_ACCEPTED_FLAGS : inbox ? SIGNAL_READ_INBOX_ACCEPTED_FLAGS : SIGNAL_READ_FEED_ACCEPTED_FLAGS, 1);
 
   if (notify) {
@@ -4596,17 +4606,9 @@ async function runSignalRead(
     if (!args.has("ndjson")) {
       throw new Error("inbox --follow requires --ndjson");
     }
-    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("channel") && args.has("channel")) {
-      /* Refused rather than ignored. The follow loop pages a backlog with its
-       * own query and cursor, and accepting a filter it does not apply would
-       * hand a caller a stream that silently contains everything. */
-      throw new Error("inbox --follow cannot be combined with --channel");
-    }
-    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("wait") && args.optional("wait") !== undefined) {
-      throw new Error("inbox --follow cannot be combined with --wait");
-    }
-    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("json") && args.has("json")) {
-      throw new Error("inbox --follow --ndjson cannot be combined with --json");
+    const refusal = inboxFollowRefusal(args);
+    if (refusal !== null) {
+      throw new Error(refusal);
     }
     await runInboxFollowCommand(args);
     return;
@@ -9409,14 +9411,18 @@ export function commandHelpLines(verb?: string, action?: string): string {
       if (!entry.visible) continue;
       const key = `${name}${subaction ? `.${subaction}` : ""}`;
       for (const [variantName, variant] of Object.entries(entry.variants)) {
-        const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
-        for (const hint of hints) {
-          lines.push(`  ${hint}`);
-          lines.push(`    ${entry.description}`);
-        }
         const handlerFlags = VARIANT_HELP_FLAGS[`${key}.${variantName}`] ?? HANDLER_HELP_FLAGS[key];
         if (!handlerFlags) throw new Error(`missing handler help flags for ${key}.${variantName}`);
         const accepted = entry.profile === "expand" ? [...handlerFlags, "profile", "host-session-id"] : handlerFlags;
+        const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
+        for (const hint of hints) {
+          const visibleHint = (key === "listen.start" || (key === "inbox" && variantName === "follow")) ? hint.replace(/\[[^\]]+\]/g, segment => {
+            const flags = [...segment.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1]!);
+            return flags.length === 1 && !accepted.includes(flags[0]!) ? "" : segment;
+          }).replace(/  +/g, " ") : hint;
+          lines.push(`  ${visibleHint}`);
+          lines.push(`    ${entry.description}`);
+        }
         const shown = new Set(hints.flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
         const extra = [...new Set(accepted)].filter(flag => !shown.has(flag));
         if (extra.length > 0) lines.push(`    Additional options: ${extra.map(flag => helpFlag(key, flag)).join(", ")}`);
@@ -9818,7 +9824,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
   "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
   "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
-  get "listen.start"() { return LISTEN_START_ACCEPTED_FLAGS.filter(flag => !LISTEN_START_REFUSED_FLAGS.includes(flag as "defer-over")); },
+  get "listen.start"() { return LISTEN_START_ACCEPTED_FLAGS.filter(flag => !(LISTEN_START_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.stop": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
@@ -9829,7 +9835,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "session.disable": SESSION_HUMAN_ACCEPTED_FLAGS,
   "session.recover": SESSION_HUMAN_ACCEPTED_FLAGS,
   login: RUN_LOGIN_1_ACCEPTED_FLAGS,
-  get logout() { return RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !LOGOUT_REFUSED_FLAGS.includes(flag as "device")); },
+  get logout() { return RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !(LOGOUT_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "invite.create": RUN_INVITE_2_ACCEPTED_FLAGS,
   "invite.revoke": RUN_INVITE_1_ACCEPTED_FLAGS,
   "member.remove": RUN_MEMBER_1_ACCEPTED_FLAGS,
@@ -9877,18 +9883,23 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "seed-fixture": RUN_SEED_1_ACCEPTED_FLAGS,
 };
 
+const CHECK_MESSAGES_SELECTOR_FLAGS = ["message-id", "hook"] as const;
+const CHECK_MESSAGE_SELECTOR_FLAGS = ["force", "hook"] as const;
+const INBOX_READ_SELECTOR_FLAGS = ["follow", "ndjson", NOTIFY_FLAG] as const;
+const INBOX_FOLLOW_SELECTOR_FLAGS = [NOTIFY_FLAG] as const;
+
 export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "setup.import": RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
   "setup.version": RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
   "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
-  "check.messages": CHECK_FLAGS.filter(flag => flag !== "message-id" && flag !== "hook"),
-  get "check.message"() { return CHECK_FLAGS.filter(flag => flag !== "force" && flag !== "hook" && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  "check.messages": CHECK_FLAGS.filter(flag => !(CHECK_MESSAGES_SELECTOR_FLAGS as readonly string[]).includes(flag)),
+  get "check.message"() { return CHECK_FLAGS.filter(flag => !(CHECK_MESSAGE_SELECTOR_FLAGS as readonly string[]).includes(flag) && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   get "check.hook"() { return CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
-  "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "follow" && flag !== "ndjson" && flag !== "notify"),
+  "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_READ_SELECTOR_FLAGS as readonly string[]).includes(flag)),
   "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
-  get "inbox.follow"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  get "inbox.follow"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_FOLLOW_SELECTOR_FLAGS as readonly string[]).includes(flag) && !(INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   get "accept.linkStdin"() { return RUN_ACCEPT_1_ACCEPTED_FLAGS.filter(flag => !(ACCEPT_LINK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
   "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS,

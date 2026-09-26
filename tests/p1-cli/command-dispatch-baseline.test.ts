@@ -396,6 +396,7 @@ function coreFixtures(): Fixture[] {
     { id: "feed", argv: ["feed", ...agent, "--limit", "1", "--json"] },
     { id: "inbox.default", argv: ["inbox", ...agent, "--limit", "1", "--wait", "1", "--json"] },
     { id: "inbox.notify", argv: ["inbox", ...agent, "--notify", "--json"] },
+    { id: "inbox.notify-over-follow", argv: ["inbox", "--follow", "--notify", "--url", "<ORIGIN>"] },
     { id: "inbox.follow", argv: ["inbox", ...agent, "--follow", "--ndjson"] },
 
     { id: "workspaces", argv: ["workspaces", ...target, "--json"] },
@@ -737,6 +738,19 @@ test("recorded bare device refusal keeps its prior unknown-option wording", { ti
     const row = await runFixture(root, "http://127.0.0.1:9", fixture);
     assert.equal(row.exitCode, 1);
     assert.equal(row.stderr, "cswarm: unknown option --device; run cswarm --help to see the options this version accepts\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("notify mode keeps the main refusal when follow is also present", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("notify-follow-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "inbox.notify-over-follow");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: unknown option: --follow\n");
     const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     assert.deepEqual(recorded.find(value => value.id === row.id), row);
   } finally { removeLaneTempHome(root); }

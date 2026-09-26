@@ -12680,6 +12680,22 @@
     ]
   },
   {
+    "id": "inbox.notify-over-follow",
+    "argv": [
+      "inbox",
+      "--follow",
+      "--notify",
+      "--url",
+      "<ORIGIN>"
+    ],
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "cswarm: unknown option: --follow\n",
+    "handlers": [
+      "runSignalRead:inbox"
+    ]
+  },
+  {
     "id": "inbox.follow",
     "argv": [
       "inbox",
