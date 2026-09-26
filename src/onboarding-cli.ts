@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from "node:path";
 import { recordDispatch } from "./dispatch-trace.js";
 import {
-  AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, RECEIVE_MODES, RECEIVE_PROVIDERS, turnCheckInstruction,
+  AGENT_CONNECTION_VERSION, AGENT_QUICK_GUIDE, turnCheckInstruction,
 } from "./cloud/agent-onboarding-contract.js";
 import { setupAgent } from "./cloud/agent-setup.js";
 import { AgentCredentialInputError } from "./cloud/agent-credential-input.js";
@@ -35,21 +35,7 @@ export const ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id
 export const ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"] as const;
 
 export function onboardingUsage(): string {
-  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]
-  cswarm setup --check-version
-  cswarm setup guide
-  cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
-  cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]
-  cswarm check --profile <absolute-path> --host-session-id <id> --hook
-  cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]
-  cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]
-  cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive serve --profile <absolute-path> --host-session-id <id>
-
-setup imports a private connection file and checks the authenticated identity. It starts no listener.
+  return `setup imports a private connection file and checks the authenticated identity. It starts no listener.
 check reads new directed messages without a listener; --force also performs a fresh read (there is no cooldown).
 --message-id reads the full body from the bounded local preview cache. Fetching does not ACK a delivery.
 receive configure records the user's choice. Host hooks require the current session ID; inherited host variables are not trusted.
@@ -153,10 +139,12 @@ export function withSetupOperatorStep(message: string): string {
   return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;
 }
 
+export const RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS = ["connection-file", "profile", "host-session-id", "json"] as const;
+
 export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-import");
   // Argument errors are the caller's to fix; only a setup that ran and failed ends with the operator step.
-  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+  args.assertShape(RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, 1);
   const connectionFile = args.required("connection-file");
   const hostSessionId = args.optional("host-session-id");
   if (hostSessionId !== undefined) checkedHostSessionId(hostSessionId);
@@ -178,31 +166,37 @@ export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   }
 }
 
+export const RUN_SETUP_VERSION_1_ACCEPTED_FLAGS = ["check-version"] as const;
+
 export async function runSetupVersion(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-version");
-  args.assertShape(["check-version"], 1);
+  args.assertShape(RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, 1);
   await output({ setup_version: AGENT_CONNECTION_VERSION });
 }
 
+export const RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS = [] as const;
+
 export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-guide");
-  args.assertShape([], 2);
+  args.assertShape(RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS, 2);
   await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
 }
 
-const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"] as const;
+export const CHECK_MESSAGE_REFUSED_FLAGS = ["full"] as const;
 
 export async function runCheckHook(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-hook");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full") || args.has("message-id") || args.has("json")) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
+  if (CHECK_HOOK_REFUSED_FLAGS.some(flag => args.has(flag))) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
   await runTurnHook(args);
 }
 
 export async function runCheckMessage(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-message");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full")) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
+  if (CHECK_MESSAGE_REFUSED_FLAGS.some(flag => args.has(flag))) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
   const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
   await output({ source: "local_preview_cache", message });
 }
@@ -217,11 +211,13 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
   });
 }
 
-const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
+export const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
+
+export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"] as const;
 
 export async function runReceiveConfigure(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-configure");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS, 2);
   await output(await configureAgentReceive({
     profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
     hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
@@ -244,9 +240,11 @@ export async function runReceiveTest(args: OnboardingArguments): Promise<void> {
   await output(await requestReceiveCanary(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
 
+export const RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"] as const;
+
 export async function runReceiveConfirm(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-confirm");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS, 2);
   const { confirmAgentChannel } = await import("./cloud/agent-channel.js");
   await output(await confirmAgentChannel({ profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")), signalId: args.required("signal-id"), receipt: args.required("receipt") }));
 }
@@ -258,9 +256,11 @@ export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
   await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
 
+export const RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
+
 export async function runReceiveServe(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-serve");
-  args.assertShape(["profile", "host-session-id"], 2);
+  args.assertShape(RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS, 2);
   const { serveAgentChannel } = await import("./cloud/agent-channel.js");
   const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
   const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
@@ -270,9 +270,11 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
   } else await serveAgentChannel(options);
 }
 
+export const RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "url", "json"] as const;
+
 export async function runResumeSnapshot(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:resume-profile");
-  args.assertShape(["profile", "host-session-id", "url", "json"], 1);
+  args.assertShape(RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS, 1);
   const path = privatePath(args.required("profile"));
   const profile = await readAgentProfile(path, args.optional("host-session-id"));
   if (args.optional("url") !== undefined && args.optional("url") !== profile.url) {

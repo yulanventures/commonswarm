@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { encodeInviteLink, type InviteLinkPayload } from "../../src/cloud/invite-link.js";
 import { credentialStore } from "../../src/cloud/storage.js";
+import { usage } from "../../src/cli.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 type Fixture = {
   id: string;
@@ -63,6 +64,8 @@ const HUMAN_DEVICE = "99999999-9999-4999-8999-999999999999";
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
+  // Item K's profile routes run through the focused dispatcher baseline below.
+  ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
   { key: "setup", variants: ["import", "version", "guide"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   { key: "check", variants: ["messages", "message", "hook"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
   ...["configure", "status", "test", "confirm", "idle", "serve", "refusal"].map(key => ({ key: `receive.${key}`, variants: ["default"], profile: "native" as const, hostSessionId: "keep" as const, errorMode: "onboarding" as const, workspaceErrorJson: false })),
@@ -290,6 +293,9 @@ function coreFixtures(): Fixture[] {
   const agent = [...profile];
   return [
     { id: "refusal.unknown-verb", argv: ["invalidverb"] },
+    { id: "refusal.unknown-option.device", argv: ["target", "show", ...target, "--device"] },
+    { id: "feed.since.target-before-date", argv: ["feed", "--since", "yesterday", "--url", "<ORIGIN>"], env: { SWARM_CLOUD_ANON_KEY: "" } },
+    { id: "inbox.since.kind-before-date", argv: ["inbox", "--since", "yesterday", "--kind", "bogus", ...agent] },
     { id: "refusal.unknown-verb.profile-valid", argv: ["nonexistent_verb", ...profile] },
     { id: "refusal.unknown-verb.profile-missing", argv: ["nonexistent_verb", "--profile", "<MISSING_PROFILE>"] },
     ...prototypeVerbFixtures(),
@@ -317,6 +323,9 @@ function coreFixtures(): Fixture[] {
     { id: "mcp.missing-profile", argv: ["mcp"] },
     { id: "mcp.unreadable-profile", argv: ["mcp", "--profile", "<MISSING_PROFILE>"] },
     { id: "mcp.manual-host-session", argv: ["mcp", "--profile", "<PROFILE>", "--host-session-id", "manual"] },
+
+    { id: "profile.ls", argv: ["profile", "ls", "--url", "<ORIGIN>", "--json"] },
+    { id: "profile.refusal", argv: ["profile"] },
 
     { id: "setup.import", argv: ["setup", "--connection-file", "<CONNECTION>", "--profile", "<SETUP_PROFILE>", "--host-session-id", "manual", "--json"] },
     { id: "setup.check-version", argv: ["setup", "--check-version"] },
@@ -389,6 +398,8 @@ function coreFixtures(): Fixture[] {
     { id: "feed", argv: ["feed", ...agent, "--limit", "1", "--json"] },
     { id: "inbox.default", argv: ["inbox", ...agent, "--limit", "1", "--wait", "1", "--json"] },
     { id: "inbox.notify", argv: ["inbox", ...agent, "--notify", "--json"] },
+    { id: "inbox.notify-over-follow", argv: ["inbox", "--follow", "--notify", "--url", "<ORIGIN>"] },
+    { id: "inbox.follow.repeated-wait", argv: ["inbox", "--follow", "--ndjson", "--wait", "1", "--wait", "2", "--url", "<ORIGIN>"] },
     { id: "inbox.follow", argv: ["inbox", ...agent, "--follow", "--ndjson"] },
 
     { id: "workspaces", argv: ["workspaces", ...target, "--json"] },
@@ -424,6 +435,7 @@ const GROUP_NAMES = new Set<string>(GROUP_REFUSAL_SITES);
 
 function canonicalFixtureId(key: string): string {
   if (key === "mcp.refusal") return "mcp";
+  if (key === "profile.refusal") return "profile.refusal";
   if (key.endsWith(".refusal")) {
     const groupName = key.slice(0, -".refusal".length);
     assert.ok(GROUP_NAMES.has(groupName), `no refusal fixture group for ${key}`);
@@ -516,6 +528,7 @@ function selectedErrorSource(
       "mcp.serve.default": ["mcp"],
       "mcp.code.default": ["mcp", "code", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
       "mcp.connect.default": ["mcp", "connect", "--url", "<ORIGIN>", "--anon-key", "fixture-anon-key"],
+      "profile.ls.default": ["profile", "ls", "--url", "<ORIGIN>"],
     };
     const route = `${entry.key}.${variant}`;
     const argv = argvByKey[route];
@@ -700,6 +713,114 @@ function normalize(value: string, root: string, origin: string): string {
     .replace(/coverage-[0-9-]+\.json/g, "coverage-<ID>.json");
 }
 
+// Help has its own table-driven gate. Keep this dispatcher baseline focused on
+// routing, exit status, and the refusal prefix when usage is printed afterward.
+function withoutGeneratedHelp(value: string): string {
+  const start = value.indexOf("cswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n");
+  return start < 0 ? value : `${value.slice(0, start)}<GENERATED_HELP>\n`;
+}
+
+test("dispatcher baseline keeps refusal text while help has its own gate", { timeout: 1_000 }, () => {
+  assert.equal(withoutGeneratedHelp("cswarm: unknown command\ncswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n  cswarm new\n"),
+    "cswarm: unknown command\n<GENERATED_HELP>\n");
+  assert.equal(withoutGeneratedHelp("cswarm: unknown command\n"), "cswarm: unknown command\n");
+});
+
+test("profile refusal baseline records current help text", { timeout: 10_000 }, async () => {
+  const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+  const row = recorded.find(value => value.id === "profile.refusal");
+  assert.ok(row);
+  assert.equal(row.stderr, `cswarm: profile requires ls\n${usage().replace(/^cswarm [^ ]+/, "cswarm <VERSION>")}\n`);
+});
+
+test("recorded bare device refusal keeps its prior unknown-option wording", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("device-refusal-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "refusal.unknown-option.device");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: unknown option --device; run cswarm --help to see the options this version accepts\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("notify mode keeps the main refusal when follow is also present", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("notify-follow-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "inbox.notify-over-follow");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: unknown option: --follow\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("repeated follow wait keeps main's exact refusal", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("follow-repeated-wait-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "inbox.follow.repeated-wait");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: --wait may only be provided once\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("since validation preserves target and kind refusal order", { timeout: 20_000 }, async () => {
+  const root = createLaneTempHome("since-refusal-order-");
+  try {
+    const all = await fixtures();
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    for (const [id, sentence] of [
+      ["feed.since.target-before-date", "cswarm: no Cloud anon key is selected: pass --anon-key, set SWARM_CLOUD_ANON_KEY, or run cswarm target set with the complete target\n"],
+      ["inbox.since.kind-before-date", "cswarm: --kind must be working-on, note, or ask\n"],
+    ]) {
+      const fixture = all.find(row => row.id === id);
+      assert.ok(fixture);
+      const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+      assert.equal(row.stderr, sentence, id);
+      assert.deepEqual(recorded.find(value => value.id === id), row);
+    }
+  } finally { removeLaneTempHome(root); }
+});
+
+test("profile dispatcher baseline covers listing and refusal routes", { timeout: 60_000 }, async () => {
+  const root = createLaneTempHome("profile-dispatch-");
+  const origin = "http://127.0.0.1:9";
+  const fixtures: Fixture[] = [
+    { id: "profile.ls", argv: ["profile", "ls", "--url", "<ORIGIN>", "--json"] },
+    { id: "profile.refusal.missing", argv: ["profile", "--url", "<ORIGIN>"] },
+    { id: "profile.refusal.unknown", argv: ["profile", "unknown", "--url", "<ORIGIN>"] },
+    { id: "profile.refusal.profile-before-action", argv: ["profile", "--profile", "<PROFILE>", "ls", "--url", "<ORIGIN>"] },
+  ];
+  try {
+    const rows: BaselineRow[] = [];
+    for (const fixture of fixtures) rows.push(await runFixture(root, origin, fixture));
+    assert.deepEqual(rows.map(row => row.id), fixtures.map(row => row.id));
+    assert.equal(rows[0]!.exitCode, 0);
+    assert.deepEqual(JSON.parse(rows[0]!.stdout).profiles, []);
+    for (const row of rows.slice(1)) assert.notEqual(row.exitCode, 0, row.id);
+    assert.match(rows[1]!.stderr, /profile requires ls/);
+    assert.match(rows[2]!.stderr, /profile requires ls/);
+    assert.match(rows[3]!.stderr, /--profile is supported by:/);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("profile variants are part of the main dispatcher fixture inventory", { timeout: 10_000 }, async () => {
+  const ids = new Set((await fixtures()).map(row => row.id));
+  for (const id of [
+    "profile.ls", "profile.refusal",
+    "policy.host-session.profile.ls.drop", "policy.host-session.profile.refusal.drop",
+    "selected-error.profile.ls.json-before", "selected-error.profile.ls.host-before",
+  ]) assert.ok(ids.has(id), id);
+});
+
 async function runFixture(root: string, origin: string, fixture: Fixture): Promise<BaselineRow> {
   const prepared = await prepareRow(root, origin, fixture);
   return await new Promise<BaselineRow>((resolveRun, rejectRun) => {
@@ -754,20 +875,24 @@ async function runFixture(root: string, origin: string, fixture: Fixture): Promi
       }
     });
     child.once("error", rejectRun);
-    child.once("close", code => resolveRun({
+    const timeout = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    child.once("close", code => {
+      clearTimeout(timeout);
+      resolveRun({
       id: fixture.id,
       argv: fixture.argv,
       exitCode: code ?? 1,
       stdout: normalize(stdout, root, origin),
       stderr: normalize(stderr, root, origin),
       handlers,
-    }));
+      });
+    });
     child.stdin!.end(prepared.input);
   });
 }
 
 test("the command dispatcher matches the recorded behavior baseline", { timeout: 600_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-dispatch-baseline-"));
+  const root = createLaneTempHome("dispatch-baseline-");
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (url.pathname === "/auth/v1/token") {
@@ -836,9 +961,13 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
     }
     const expected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     const expectedCounts = JSON.parse(await readFile(baselineCountsPath, "utf8")) as typeof counts;
-    assert.deepEqual(rows, expected);
+    assert.deepEqual(
+      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+    );
     assert.deepEqual(counts, expectedCounts);
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+    removeLaneTempHome(root);
   }
 });

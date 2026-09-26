@@ -3,12 +3,11 @@ import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
 import { constants, lstatSync, rmdirSync, type Stats } from "node:fs";
 import { access, link, lstat, mkdir, readFile, readlink, readdir, rmdir, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { AGENT_CREDENTIAL_MESSAGE_D088, AgentCredentialInputError } from "./agent-credential-input.js";
 import { parseAgentCredentialInput } from "./agent-credential-input.js";
-import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
+import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, agentProfileRoot, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
 import { deleteSecureJsonFile, ensureSecureStateDirectory, isPublishedOwnerFileTarget, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "./storage.js";
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
 import { type CloudTarget } from "./config.js";
@@ -479,7 +478,7 @@ async function emptyClaimAt(path: string): Promise<boolean> {
 }
 
 async function defaultPendingProfile(target: CloudTarget, code: string, probe: ReservedProbe = {}): Promise<string | null> {
-  const base = join(homedir(), ".cswarm", "agents");
+  const base = join(agentProfileRoot(), "agents");
   let entries: string[];
   try { entries = await readdir(base); }
   catch (error) {
@@ -646,7 +645,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
     if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
     const match = await defaultPendingProfile(options.target, code, { inspect: options.inspectReserved, read: options.readReserved });
-    return await connectMcp({ ...options, profilePath: match ?? join(homedir(), ".cswarm", "agents", `mcp-${randomUUID()}`, "profile.json"), readCode: async () => code });
+    return await connectMcp({ ...options, profilePath: match ?? join(agentProfileRoot(), "agents", `mcp-${randomUUID()}`, "profile.json"), readCode: async () => code });
   }
   const path = await privateConnectLocation(options.profilePath);
   if (/swm_(?:join|agt)_/.test(path)) throw new McpConnectError("profile_path_invalid", "Use a profile path that contains no credential text.");

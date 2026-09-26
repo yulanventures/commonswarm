@@ -30,10 +30,16 @@ const connection = {
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "item-i-binding-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = dir;
   const profile = join(dir, "profile.json");
   const input = join(dir, "connection.json");
   await writeFile(input, JSON.stringify(connection), { mode: 0o600 });
-  return { dir, profile, input, cleanup: () => rm(dir, { recursive: true, force: true }) };
+  return { dir, profile, input, cleanup: async () => {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(dir, { recursive: true, force: true });
+  } };
 }
 
 function cli(dir: string, args: string[], input?: string) {
@@ -374,6 +380,7 @@ test("receive configure keeps an omitted id distinct from manual", { timeout: 10
   const f = await fixture();
   try {
     await saveAgentProfile(f.profile, connection, undefined, "session-A");
+    assert.deepEqual(JSON.parse(await readFile(join(f.dir, ".cswarm", "profile-paths.json"), "utf8")), [f.profile]);
     const options = { profilePath: f.profile, mode: "turn", execution: { command: process.execPath, args: [] } };
     await assert.rejects(configureAgentReceive(options), {
       code: "host_session_required",
@@ -404,7 +411,9 @@ test("receive test and idle leave B's profile folder byte-identical", { timeout:
   const f = await fixture();
   try {
     await saveAgentProfile(f.profile, connection, undefined, "session-A");
-    const snapshot = async () => Promise.all((await readdir(f.dir)).sort().map(async name => [name, await readFile(join(f.dir, name), "utf8")]));
+    const snapshot = async () => Promise.all((await readdir(f.dir, { withFileTypes: true }))
+      .filter(entry => entry.isFile()).sort((a, b) => a.name.localeCompare(b.name))
+      .map(async entry => [entry.name, await readFile(join(f.dir, entry.name), "utf8")]));
     const before = await snapshot();
     await assert.rejects(requestReceiveCanary(f.profile, "session-B"), { code: "profile_other_session" });
     assert.deepEqual(await snapshot(), before);

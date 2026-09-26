@@ -32,10 +32,10 @@ const repo = resolve(import.meta.dirname, "../..");
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5032-5034; src/cloud/wake-lease.ts:61,64");
+  assert.equal(row.citation, "src/cli.ts:5081-5083; src/cloud/wake-lease.ts:61,64");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5031, 5034).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(cli.slice(5080, 5083).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
   assert.match(lease[60]!, /timeoutMs\?: number/);
   assert.match(lease[63]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });
@@ -235,6 +235,93 @@ test("machine-id timeout citation points to the bounded ioreg call", { timeout: 
   assert.ok(match, `unexpected citation: ${citation}`);
   const source = await readFile(join(repo, "src/cloud/arrival-watch.ts"), "utf8");
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /runFile\("\/usr\/sbin\/ioreg".*timeout: 2000/);
+});
+
+function shippedMainRef(hasRef: (ref: string) => boolean = ref => {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: repo, timeout: 5_000 });
+    return true;
+  } catch { return false; }
+}): string {
+  if (hasRef("refs/heads/main")) return "main";
+  if (hasRef("refs/remotes/origin/main")) return "origin/main";
+  throw new Error("main or origin/main is required to pin the shipped timeout mapping");
+}
+
+test("shipped timeout mapping stays byte-identical to main", { timeout: 10_000 }, async () => {
+  const current = await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8");
+  const main = execFileSync("git", ["show", `${shippedMainRef()}:scripts/timeout-table/mapping.json`], { cwd: repo, encoding: "utf8", timeout: 5_000 });
+  const shipped = (source: string) => source.slice(source.indexOf('"v0.1.71"'), source.indexOf('"HEAD"', source.indexOf('"v0.1.71"')));
+  assert.equal(shipped(current), shipped(main));
+  assert.equal(shippedMainRef(ref => ref === "refs/heads/main" || ref === "refs/remotes/origin/main"), "main");
+  const fallback = shippedMainRef(ref => ref === "refs/remotes/origin/main");
+  assert.equal(fallback, "origin/main");
+});
+
+test("HEAD timeout mapping citations point to their measured source lines", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const sources: Record<string, string[]> = {
+    "src/cli.ts": (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n"),
+    "src/onboarding-cli.ts": (await readFile(join(repo, "src/onboarding-cli.ts"), "utf8")).split("\n"),
+  };
+  const patterns: Record<string, RegExp> = {
+    "src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS": /const LISTENER_STOP_WAIT_TIMEOUT_MS/,
+    "src/cli.ts:setTimeout": /setTimeout\(resolve, 100\)/,
+    "src/cli.ts:setTimeout#2": /const timer = setTimeout\(done, 250\)/,
+    "src/cli.ts:timeoutMs": /release_wake_lease[\s\S]*timeoutMs: 2_000/,
+    "src/cli.ts:TURN_BUDGET_CREDENTIAL_MARGIN_MS": /export const TURN_BUDGET_CREDENTIAL_MARGIN_MS/,
+    "src/cli.ts:turnBudgetMs": /const turnBudgetMs = options\.turnBudgetMs/,
+    "src/cli.ts:deliveryHoldBudgetMs": /deliveryHoldBudgetMs: turnBudgetMs/,
+    "src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS": /const hardExit = setTimeout\(/,
+  };
+  let cliCount = 0;
+  let onboardingCount = 0;
+  const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
+  for (const [id, row] of Object.entries(rows)) {
+    for (const match of row.citation.matchAll(/(src\/(?:cli|onboarding-cli)\.ts):(\d+)(?:-(\d+))?/g)) {
+      const [, file, first, last] = match;
+      const lines = sources[file!]!;
+      const from = Number(first);
+      const to = Number(last ?? first);
+      assert.ok(from > 0 && to >= from && to <= lines.length, `HEAD ${id}: ${row.citation}`);
+      const pattern = file === "src/onboarding-cli.ts"
+        ? id === "src/onboarding-cli.ts:setTimeout" ? /const timer = setTimeout\(/ : /const hardExit = setTimeout\(/
+        : patterns[id];
+      assert.ok(pattern, `HEAD ${id} has no citation assertion`);
+      assert.match(lines.slice(from - 1, to).join("\n"), pattern, `HEAD ${id}: ${row.citation}`);
+      if (file === "src/cli.ts") cliCount++; else onboardingCount++;
+    }
+  }
+  assert.equal(cliCount, 8, "reconcile HEAD CLI citations");
+  assert.equal(onboardingCount, 2, "reconcile HEAD onboarding citations");
+});
+
+test("HEAD signal read citations resolve for each mapped row", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const lines = (await readFile(join(repo, "src/cloud/signals.ts"), "utf8")).split("\n");
+  const expected: Record<string, { citation: string; sites: Array<[number, RegExp]> }> = {
+    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:39,882-930",
+      sites: [[39, /export const SIGNAL_READ_TIMEOUT_MS/], [930, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:930",
+      sites: [[930, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1043",
+      sites: [[1043, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+  };
+  const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
+  for (const [id, target] of Object.entries(expected)) {
+    const row = rows[id];
+    assert.ok(row, id);
+    assert.equal(row.citation, target.citation, id);
+    for (const [line, pattern] of target.sites) assert.match(lines[line - 1] ?? "", pattern, `${id}: ${line}`);
+  }
+  assert.equal(Object.keys(expected).length, 3);
+});
+
+test("HEAD onboarding stdin timer is labeled for hook input", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/onboarding-cli.ts:setTimeout"];
+  assert.equal(row.operation.name, "hook-stdin");
+  assert.match(row.detail, /hook-stdin/);
 });
 
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {

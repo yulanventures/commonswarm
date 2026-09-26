@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
@@ -33,14 +33,19 @@ const TOKEN = `swm_agt_${"A".repeat(43)}`;
 
 let root: string;
 let previousState: string | undefined;
+let previousHome: string | undefined;
 
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "cswarm-token-test-"));
+  previousHome = process.env.HOME;
+  process.env.HOME = root;
   previousState = process.env.SWARM_AGENT_STATE_DIR;
   process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
 });
 
 after(async () => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
   else process.env.SWARM_AGENT_STATE_DIR = previousState;
   await rm(root, { recursive: true, force: true });
@@ -475,7 +480,7 @@ test("a round trip: encode then decode returns the original bytes exactly", () =
   assert.deepEqual(payloadBytesFromStr, customBytes);
 });
 
-test("Control proving the OLD path still works: a plain JSON envelope file still sets up", async () => {
+test("Control proving the OLD path still works: a plain JSON envelope file still sets up", { timeout: 10_000 }, async () => {
   // 1. Write a valid plain JSON envelope to a private 0600 file in a 0700 dir.
   // Call setupAgent with a mock/fake fetcher and verify setup succeeds.
   const jsonDir = await mkdtemp(join(root, "json-setup-"));
@@ -519,6 +524,8 @@ test("Control proving the OLD path still works: a plain JSON envelope file still
   assert.equal(tokenResult.principal_id, AGENT);
   assert.equal(tokenResult.workspace_id, WS);
   assert.equal(fake2.requests.length, 2);
+  const registered = JSON.parse(await readFile(join(root, ".cswarm", "profile-paths.json"), "utf8")) as string[];
+  assert.deepEqual(registered.sort(), [jsonProfilePath, tokenProfilePath].sort());
 });
 
 test("missing marker token_marker_missing", () => {

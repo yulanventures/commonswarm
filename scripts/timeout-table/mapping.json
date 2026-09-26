@@ -1717,7 +1717,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:287",
+          "citation": "src/cli.ts:301",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7514",
+          "citation": "src/cli.ts:7574",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8304",
+          "citation": "src/cli.ts:8325",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5032-5034; src/cloud/wake-lease.ts:61,64",
+          "citation": "src/cli.ts:5081-5083; src/cloud/wake-lease.ts:61,64",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1773,7 +1773,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3294",
+          "citation": "src/cli.ts:3408",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1859,7 +1859,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:7872; src/onboarding-cli.ts:106",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8376; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2473,7 +2473,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:37,881-928",
+          "citation": "src/cloud/signals.ts:39,882-930",
           "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
@@ -2491,7 +2491,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:895",
+          "citation": "src/cloud/signals.ts:930",
           "detail": "fetchSignalRead default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -2509,7 +2509,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:1008",
+          "citation": "src/cloud/signals.ts:1043",
           "detail": "fetchSignalReadRetrying default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -3216,10 +3216,10 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/onboarding-cli.ts:61-70",
-          "detail": "Local stdin drain ceiling after setup input.",
+          "citation": "src/onboarding-cli.ts:76",
+          "detail": "Local hook-stdin drain ceiling before checking a host event.",
           "operation": {
-            "name": "setup-stdin",
+            "name": "hook-stdin",
             "class": "not-run",
             "writes": [],
             "removes": [],
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6517",
+          "citation": "src/cli.ts:6926",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6714",
+          "citation": "src/cli.ts:7127",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3260,7 +3260,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:23",
+          "citation": "src/cloud/mcp-connect.ts:22",
           "detail": "Register request budget for the H0 seat write.",
           "operation": {
             "name": "mcp-register",
@@ -3278,7 +3278,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:799",
+          "citation": "src/cloud/mcp-connect.ts:798",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3294,7 +3294,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:327",
+          "citation": "src/cloud/mcp-connect.ts:326",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",

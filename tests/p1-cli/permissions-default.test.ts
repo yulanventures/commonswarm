@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { listenerPermissionMode } from "../../src/cli.js";
+import { listenerPermissionMode, usage } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE, AGENT_SETUP_HOST_GUIDANCE, RECEIVE_PROVIDERS } from "../../src/cloud/agent-onboarding-contract.js";
 import { onboardingUsage } from "../../src/onboarding-cli.js";
 
@@ -35,11 +35,11 @@ import { onboardingUsage } from "../../src/onboarding-cli.js";
  * src/cli.ts say exactly that and remain true. This file pins the DEFAULT, not the safety of the
  * mode it selects. */
 
-test("omitting --permissions selects allow, not deny", () => {
+test("omitting --permissions selects allow, not deny", { timeout: 10_000 }, () => {
   assert.equal(listenerPermissionMode(undefined), "allow");
 });
 
-test("--permissions deny is still reachable, and still means deny", () => {
+test("--permissions deny is still reachable, and still means deny", { timeout: 10_000 }, () => {
   /* CONTROL, and the one that carries the weight. "Low friction by default" is satisfiable by
    * deleting deny entirely, which would pass the assertion above while removing the only answer
    * for a listener that takes work from outside your account. The harder mode has to survive its
@@ -48,7 +48,7 @@ test("--permissions deny is still reachable, and still means deny", () => {
   assert.equal(listenerPermissionMode("allow"), "allow");
 });
 
-test("an unrecognised value is still rejected rather than defaulted", () => {
+test("an unrecognised value is still rejected rather than defaulted", { timeout: 10_000 }, () => {
   /* A resolver written as `value === "deny" ? "deny" : "allow"` passes both tests above and
    * silently upgrades a TYPO to allow — `--permissions den` would grant tool use. That is a worse
    * defect than the one being fixed, because the operator asked for the safe mode and got the
@@ -61,7 +61,7 @@ test("an unrecognised value is still rejected rather than defaulted", () => {
 // Retired in 0.1.61: onboarding no longer launches ACP workers or chooses their
 // permissions. The earlier tests required --permissions allow and every bridge;
 // those assertions defended a setup path the listener no longer executes.
-test("onboarding does not ask agents to grant worker permissions", () => {
+test("onboarding does not ask agents to grant worker permissions", { timeout: 10_000 }, () => {
   const prompt = readFileSync(new URL("../../site/src/components/connect/agent-prompt.ts", import.meta.url), "utf8")
     .replace(/\/\*[\s\S]*?\*\//g, "");
   assert.doesNotMatch(prompt, /--permissions|claude-agent-acp|codex-acp/);
@@ -69,19 +69,19 @@ test("onboarding does not ask agents to grant worker permissions", () => {
   assert.match(AGENT_SETUP_HOST_GUIDANCE, /cswarm setup --connection-file/);
 });
 
-test("receive help names the available turn integrations and the limited wake path", () => {
-  const help = onboardingUsage();
+test("receive help names the available turn integrations and the limited wake path", { timeout: 10_000 }, () => {
+  const help = `${usage()}\n${onboardingUsage()}`;
   assert.ok(help.includes(`--provider ${RECEIVE_PROVIDERS.join("|")}`));
   assert.match(help, /Wake uses a Claude Code preview channel or the local Grok Bot gateway in this same session/);
   assert.match(help, /unverified until an idle canary is received/);
 });
 
-test("the bundled operating guide retains lasting brain notes without a long entry checkpoint", () => {
+test("the bundled operating guide retains lasting brain notes without a long entry checkpoint", { timeout: 10_000 }, () => {
   assert.match(AGENT_QUICK_GUIDE, /brain put/);
   assert.match(AGENT_QUICK_GUIDE, /only when needed/);
 });
 
-test("D-088: the CLI accepts both credential-message spellings, so the site can change one later", () => {
+test("D-088: the CLI accepts both credential-message spellings, so the site can change one later", { timeout: 10_000 }, () => {
   /* The artifact `message` is validated byte-for-byte, which makes it a PROTOCOL CONSTANT, not copy.
    * Measured against the shipped v0.1.15 binary: the current spelling passes the message check and
    * fails later on token format; the honest replacement is rejected as "agent credential JSON is

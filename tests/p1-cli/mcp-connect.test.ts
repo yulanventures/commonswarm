@@ -9,7 +9,7 @@ import { PassThrough } from "node:stream";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
@@ -22,6 +22,7 @@ import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from 
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -30,6 +31,18 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+let fileHome: string;
+let previousFileHome: string | undefined;
+before(() => {
+  fileHome = createLaneTempHome("mcp-connect-file-");
+  previousFileHome = process.env.HOME;
+  process.env.HOME = fileHome;
+});
+after(() => {
+  if (previousFileHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousFileHome;
+  removeLaneTempHome(fileHome);
+});
 
 test("connect accepts its symlink lock when hard-link publication is unavailable", { timeout: 10000 }, async () => {
   const f = await fixture();
@@ -1171,8 +1184,8 @@ test("hidden prompt rejects EOF and empty input, trims input, and restores echo 
   }
 });
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-connect-"));
+async function fixture(guardedRoot?: string) {
+  const root = guardedRoot ?? await mkdtemp(join(tmpdir(), "cswarm-mcp-connect-"));
   let calls = 0;
   let consumed = false;
   let refusal: string | null = null;
@@ -1191,11 +1204,13 @@ async function fixture() {
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
   };
   return { root, fetcher, calls: () => calls, refuse: (value: string) => { refusal = value; },
-    reset: () => { consumed = false; }, close: () => rm(root, { recursive: true, force: true }) };
+    reset: () => { consumed = false; }, close: () => guardedRoot ? removeLaneTempHome(root) : rm(root, { recursive: true, force: true }) };
 }
 
 test("connect saves an unbound private profile and never returns either secret", { timeout: 10000 }, async () => {
   const f = await fixture();
+  const oldHome = process.env.HOME;
+  process.env.HOME = f.root;
   try {
     const path = join(f.root, "seat", "profile.json");
     const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => `  ${JOIN}  `, fetcher: f.fetcher });
@@ -1229,7 +1244,34 @@ test("connect saves an unbound private profile and never returns either secret",
     await assert.rejects(connectMcp({ target: TARGET, profilePath: second, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "join_credential_seat_cap_reached", message: "The server reports that this code was already used. Ask the operator to inspect its seats before requesting a new code." });
     assert.equal(f.calls(), 2, "register must not retry");
     await assert.rejects(stat(second), { code: "ENOENT" });
-  } finally { await f.close(); }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; await f.close(); }
+});
+
+test("mcp connect succeeds after registration when the optional inventory is unavailable", { timeout: 10_000 }, async () => {
+  const oldHome = process.env.HOME;
+  try {
+    for (const cause of ["mode", "damaged"] as const) {
+      const f = await fixture(createLaneTempHome(`mcp-inventory-${cause}-`));
+      try {
+        process.env.HOME = f.root;
+        const inventoryRoot = join(f.root, ".cswarm");
+        await mkdir(inventoryRoot, { mode: 0o700 });
+        if (cause === "mode") await chmod(inventoryRoot, 0o755);
+        else await writeFile(join(inventoryRoot, "profile-paths.json"), "{", { mode: 0o600 });
+        const warnings: string[] = [];
+        const write = process.stderr.write;
+        process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
+        const path = join(inventoryRoot, "connect-test", "profile.json");
+        let result;
+        try { result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }); }
+        finally { process.stderr.write = write; }
+        assert.equal(result.profile, path);
+        assert.equal((await stat(path)).mode & 0o777, 0o600);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /damaged inventory moved to ~\/\.cswarm\/profile-paths\.json\.damaged-/);
+      } finally { await f.close(); }
+    }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }
 });
 
 test("a committed save failure resumes one seat with the same attempt and a private pending record", { timeout: 10000 }, async () => {

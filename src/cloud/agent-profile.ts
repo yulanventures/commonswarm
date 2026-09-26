@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, realpath, readdir, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { cloudTarget, type CloudTarget } from "./config.js";
@@ -60,9 +60,14 @@ export function requireProfileHost(profile: AgentProfile, hostSessionId?: string
 export function privatePath(path: string): string {
   if (path.startsWith("~/")) path = join(homedir(), path.slice(2));
   if (!isAbsolute(path) || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new AgentSetupError("profile_path_invalid", "Use an absolute private file path outside a repository.");
+    throw new AgentSetupError("profile_path_invalid", profilePathRemedy());
   }
   return resolve(path);
+}
+
+export function profilePathRemedy(): string {
+  const example = agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>", "~/.cswarm");
+  return `Use an absolute private file path outside a repository, for example ${example}. Run cswarm profile ls to find saved profiles.`;
 }
 
 /** Check each existing ancestor, including repos reached through an ancestor symlink. */
@@ -147,7 +152,7 @@ function checkedTarget(url: string, anonKey: string): CloudTarget {
 
 export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "anon_key" | "workspace_id" | "principal_id">): string {
   const target = checkedTarget(connection.url, connection.anon_key);
-  return join(homedir(), ".cswarm", "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
+  return agentProfilePath(target.profileId, connection.workspace_id, connection.principal_id);
 }
 
 export async function refusePendingConnectProfile(path: string): Promise<void> {
@@ -159,7 +164,80 @@ export async function refusePendingConnectProfile(path: string): Promise<void> {
   if (present) throw new AgentSetupError("setup_connect_pending", `This directory holds ${pending}. Keep it and use a new --profile path for setup.`);
 }
 
-export async function readAgentProfile(path: string, hostSessionId?: string): Promise<AgentProfile> {
+export function agentProfilePath(deployment: string, workspace: string, principal: string, root = agentProfileRoot()): string {
+  return join(root, "agents", deployment, workspace, principal, "profile.json");
+}
+
+/** Shared root for automatic setup and MCP connect profiles. Explicit paths under this root are included too. */
+export function agentProfileRoot(): string {
+  return join(homedir(), ".cswarm");
+}
+
+const PROFILE_REGISTRY = "profile-paths.json";
+const PROFILE_REGISTRY_MAX_BYTES = 1024 * 1024;
+
+async function registeredProfilePaths(root: string): Promise<string[]> {
+  const raw = await readSecureJsonFileIfPresent(join(root, PROFILE_REGISTRY), PROFILE_REGISTRY_MAX_BYTES);
+  if (raw === null) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  if (!Array.isArray(parsed) || parsed.some(path => typeof path !== "string" || !isAbsolute(path))) {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  return parsed;
+}
+
+export interface ListedAgentProfile {
+  path: string;
+  principal_id?: string;
+  principal_name?: string;
+  workspace_id?: string;
+  workspace_name?: string;
+  url_host?: string;
+  error?: string;
+}
+
+/** Inspect profile.json files only; credentials are never opened. Symlinked directories are skipped. */
+export async function listAgentProfiles(): Promise<{ searched_roots: string[]; profiles: ListedAgentProfile[] }> {
+  const root = agentProfileRoot();
+  let registered: string[] = [];
+  const failures: ListedAgentProfile[] = [];
+  try { registered = await registeredProfilePaths(root); }
+  catch { failures.push({ path: join(root, PROFILE_REGISTRY), error: "profile_registry_invalid" }); }
+  const paths = new Set(registered);
+  const walk = async (directory: string): Promise<void> => {
+    let entries;
+    try { entries = await readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && directory === root) return;
+      failures.push({ path: directory, error: code === "ENOENT" ? "directory_missing" : "directory_unreadable" });
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile() && entry.name === "profile.json") paths.add(path);
+    }
+  };
+  await walk(root);
+  const profiles: ListedAgentProfile[] = [...failures];
+  for (const path of [...paths].sort()) {
+    try {
+      const profile = await readAgentProfile(path, undefined, true);
+      profiles.push({ path, principal_id: profile.principal_id, workspace_id: profile.workspace_id,
+        ...(profile.workspace_name ? { workspace_name: profile.workspace_name } : {}),
+        url_host: new URL(profile.url).host });
+    } catch (error) {
+      profiles.push({ path, error: error instanceof AgentSetupError ? error.code : "profile_unreadable" });
+    }
+  }
+  return { searched_roots: [root], profiles };
+}
+
+export async function readAgentProfile(path: string, hostSessionId?: string, listing = false): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
@@ -182,7 +260,7 @@ export async function readAgentProfile(path: string, hostSessionId?: string): Pr
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget(p.url, p.anon_key);
-  requireProfileHost(p, hostSessionId);
+  if (!listing) requireProfileHost(p, hostSessionId);
   return p;
 }
 
@@ -201,7 +279,25 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
+/** registryWrite is a test-only failure seam; profile and credential writes always use the secure writer. */
+export async function saveAgentProfile(
+  path: string,
+  connection: AgentConnectionEnvelope,
+  workspaceName?: string,
+  hostSessionId?: string,
+  refuseExisting = false,
+  allowOrphanCredentialOrRegistryWrite: boolean | typeof writeSecureJsonFile = false,
+  revokedOrphanPrincipalId?: string,
+  exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive,
+  connectAttemptId?: string,
+  explicitRegistryWrite: typeof writeSecureJsonFile = writeSecureJsonFile,
+): Promise<AgentProfile> {
+  const allowOrphanCredential = typeof allowOrphanCredentialOrRegistryWrite === "boolean"
+    ? allowOrphanCredentialOrRegistryWrite
+    : false;
+  const registryWrite = typeof allowOrphanCredentialOrRegistryWrite === "function"
+    ? allowOrphanCredentialOrRegistryWrite
+    : explicitRegistryWrite;
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -256,6 +352,34 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     await withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), save);
   } else {
     await save(); // connect already holds the connect lock, then takes the setup lock
+  }
+  const root = agentProfileRoot();
+  let movedRegistry: string | undefined;
+  try {
+    await withFileLock(root, "profile-registry", async () => {
+      let paths: string[];
+      try { paths = await registeredProfilePaths(root); }
+      catch (error) {
+        if (!(error instanceof AgentSetupError) || error.code !== "profile_registry_invalid") throw error;
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        movedRegistry = join(root, `${PROFILE_REGISTRY}.damaged-${stamp}`);
+        await rename(join(root, PROFILE_REGISTRY), movedRegistry);
+        paths = [];
+      }
+      if (!paths.includes(path)) await registryWrite(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
+    });
+    if (movedRegistry) process.stderr.write(`cswarm: Profile saved; damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)} and rebuilt.\n`);
+  } catch {
+    let modeCause = false;
+    let symlinkCause = false;
+    try {
+      const stat = await lstat(root);
+      modeCause = (stat.mode & 0o777) !== 0o700;
+      symlinkCause = stat.isSymbolicLink();
+    } catch { /* The inventory is optional. */ }
+    process.stderr.write(modeCause
+      ? symlinkCause ? "cswarm: Profile saved; inventory unavailable. ~/.cswarm must be a real private directory.\n" : "cswarm: Profile saved; inventory unavailable. Run chmod 700 ~/.cswarm to enable it.\n"
+      : `cswarm: Profile saved; inventory unavailable.${movedRegistry ? ` Damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)}.` : ""} Run cswarm profile ls to inspect saved profiles.\n`);
   }
   return profile;
 }

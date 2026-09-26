@@ -30,7 +30,8 @@ test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default pa
     const builtHomes = calls.filter(call => call.stack.includes("mcp-connect")).map(call => call.path);
     assert.ok(builtHomes.length > 0, "the homedir spy observed default-path construction");
     assert.ok(builtHomes.every(path => path !== home), `default paths used the lane HOME: ${JSON.stringify(builtHomes)}`);
-    assert.ok(builtHomes.every(path => path.startsWith(join(tmpdir(), "cswarm-mcp-"))),
+    assert.ok(builtHomes.every(path => path.startsWith(join(tmpdir(), "cswarm-mcp-")) ||
+      path.startsWith("/private/tmp/lane-home-mcp-") || path.startsWith("/tmp/lane-home-mcp-")),
       `a homedir-derived path escaped temporary fixtures: ${JSON.stringify(builtHomes)}`);
   } finally { await rm(home, { recursive: true, force: true }); await rm(logs, { recursive: true, force: true }); }
 });
