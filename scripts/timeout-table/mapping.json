@@ -1564,7 +1564,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/arrival-watch.ts:259",
+          "citation": "src/cloud/arrival-watch.ts:264",
           "detail": "macOS ioreg machine-id lookup has a two-second execFile timeout; an unreadable id keeps the existing host id and is reported by resume.",
           "operation": {
             "name": "arrival-host-machine-id",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7490",
+          "citation": "src/cli.ts:7504",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8280",
+          "citation": "src/cli.ts:8294",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5011-5017; src/cloud/wake-lease.ts:60,63",
+          "citation": "src/cli.ts:5020-5025; src/cloud/wake-lease.ts:60,63",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -2552,7 +2552,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:525",
+          "citation": "src/cloud/storage.ts:589",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",
