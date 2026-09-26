@@ -36,13 +36,14 @@ for b in docker docker-compose orb orbctl supabase; do
     [ ! -e "$d/node_modules/.bin/$b" ] || { echo "refuse: $d/node_modules/.bin/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
     up=$(dirname "$d"); [ "$up" != "$d" ] || break; d=$up; done
 done
-# Any process whose executable is inside an OrbStack.app bundle always counts: the probe matches argv[0] as an
-# absolute path into OrbStack.app, not a substring anywhere in a command line (a substring also matched another
-# `pgrep -f "OrbStack Helper"` process and stopped a clean run on 2026-09-26). The controls may ADD a dummy process
+# Any process whose executable is inside an OrbStack.app bundle always counts. The probe reads each process's
+# argv[0] alone (`ps -o comm`: one line per process, spaces kept, no arguments), so an install path with spaces
+# matches and a command that only mentions OrbStack does not (a substring match on whole command lines also matched
+# another `pgrep -f "OrbStack Helper"` process and stopped a clean run on 2026-09-26). The controls may ADD a dummy process
 # name (control prefix only); an override can never replace or switch off the real probe.
 case "${RUN_GATES_ORB_PATTERN:-}" in run-gates-control-orb-*) extra_orb=$RUN_GATES_ORB_PATTERN ;; *) extra_orb= ;; esac
 orb_running() {
-  if pgrep -f '^/[^ ]*/OrbStack\.app/' >/dev/null 2>&1 || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
+  if ps -Ao comm= 2>/dev/null | grep -q '/OrbStack\.app/' || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
   then echo yes; else echo no; fi; }
 # Live runs of this wrapper other than this run. An ancestor wrapper is not "another run": this run was started
 # inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run, and

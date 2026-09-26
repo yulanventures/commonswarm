@@ -237,8 +237,8 @@ test("p1-cli mode refuses to start while OrbStack runs", { skip: p1CliSkip, time
 test("the OrbStack probe always checks the real helper and accepts only a control-prefixed extra name", () => {
   const source = readFileSync(script, "utf8");
   assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) extra_orb=\$RUN_GATES_ORB_PATTERN ;; \*\) extra_orb= ;; esac/);
-  // The real probe is unconditional and anchored to an executable path inside OrbStack.app.
-  assert.match(source, /orb_running\(\) \{\n  if pgrep -f '\^\/\[\^ \]\*\/OrbStack\\\.app\/' >\/dev\/null 2>&1 \|\| \{/);
+  // The real probe is unconditional and reads each process's executable path (argv[0]) alone.
+  assert.match(source, /orb_running\(\) \{\n  if ps -Ao comm= 2>\/dev\/null \| grep -q '\/OrbStack\\\.app\/' \|\| \{/);
   assert.match(source, /kern\.memorystatus_vm_pressure_level/);
 });
 
@@ -332,7 +332,8 @@ test("an executable inside an OrbStack.app bundle stops a p1-cli run", { skip: p
   try {
     const worktree = fakeP1CliWorktree(scratch, "sleep 40");
     const log = join(scratch, "gate.log");
-    const fakeApp = join(scratch, "OrbStack.app", "Contents", "MacOS", "run-gates-control-dummy");
+    // A space in the install path must still match (an app under "~/My Apps/" is a valid install).
+    const fakeApp = join(scratch, "My Apps", "OrbStack.app", "Contents", "MacOS", "run-gates-control-dummy");
     const wrapper = spawn("bash", [script, worktree, log, "HEAD", "p1-cli"], { env: wrapperEnv, stdio: "ignore" });
     const exited = new Promise<number | null>(done => wrapper.on("close", code => done(code)));
     await new Promise(done => setTimeout(done, 2_000));
