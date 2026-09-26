@@ -18,6 +18,7 @@ import { findGrokBotGateway } from "./agent-grok-bot-gateway.js";
 const exec = promisify(execFile);
 export const RECEIVE_HEARTBEAT_MAX_AGE_MS = 15_000;
 export const RECEIVE_HOOK_EVENTS = ["UserPromptSubmit", "SessionStart", "Stop"] as const;
+const CLAUDE_CHANNEL_RECEIPT_PERMISSION = "mcp__cswarm__cswarm_received";
 
 export interface ReceiveBinding {
   version: 1;
@@ -130,7 +131,7 @@ async function ownedRegular(path: string): Promise<boolean> {
 }
 
 /** Merge only our exact command. Never remove another agent's hooks. */
-export function mergeReceiveHooks(settings: Record<string, unknown>, command: string, previous: string | null, wake: boolean): Record<string, unknown> {
+export function mergeReceiveHooks(settings: Record<string, unknown>, command: string, previous: string | null, wake: boolean, provider: ReceiveProvider = "claude"): Record<string, unknown> {
   if (settings.hooks !== undefined && (!settings.hooks || typeof settings.hooks !== "object" || Array.isArray(settings.hooks))) {
     throw new AgentSetupError("hook_config_invalid", "The existing host hooks are not valid JSON settings. Repair them before installing turn checks.");
   }
@@ -151,7 +152,20 @@ export function mergeReceiveHooks(settings: Record<string, unknown>, command: st
     if (groups.length > 0) hooks[event] = groups;
     else delete hooks[event];
   }
-  return { ...settings, hooks };
+  const next = { ...settings, hooks };
+  if (provider !== "claude") return next;
+  if (settings.permissions !== undefined && (!settings.permissions || typeof settings.permissions !== "object" || Array.isArray(settings.permissions))) {
+    throw new AgentSetupError("receive_settings_invalid", "The existing Claude permissions must be a JSON object.");
+  }
+  const existingPermissions = settings.permissions as Record<string, unknown> | undefined;
+  if (existingPermissions?.allow !== undefined && !Array.isArray(existingPermissions.allow)) {
+    throw new AgentSetupError("receive_settings_invalid", "The existing Claude permissions.allow must be a list.");
+  }
+  if (!wake && existingPermissions?.allow === undefined) return next;
+  const allow = (existingPermissions?.allow as unknown[] | undefined ?? [])
+    .filter(entry => entry !== CLAUDE_CHANNEL_RECEIPT_PERMISSION);
+  if (wake) allow.push(CLAUDE_CHANNEL_RECEIPT_PERMISSION);
+  return { ...next, permissions: { ...existingPermissions, allow } };
 }
 
 async function ignoreLocalHook(cwd: string, file: string): Promise<void> {
@@ -187,7 +201,7 @@ async function installReceiveHooks(binding: ReceiveBinding, command: string): Pr
     let settings: Record<string, unknown>;
     try { settings = JSON.parse(before); } catch { throw new AgentSetupError("hook_config_invalid", "The host settings file is not valid JSON. Repair it before installing turn checks."); }
     if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new AgentSetupError("hook_config_invalid", "The host settings file must be a JSON object.");
-    const next = `${JSON.stringify(mergeReceiveHooks(settings, command, binding.hook_command, binding.requested_mode === "wake"), null, 2)}\n`;
+    const next = `${JSON.stringify(mergeReceiveHooks(settings, command, binding.hook_command, binding.requested_mode === "wake", binding.provider), null, 2)}\n`;
     await ignoreLocalHook(binding.cwd, file);
     if (before === next) return;
     if (before !== "{}") await writeSecureJsonFile(join(dirname(binding.profile), "hook-backups", `${lock}-${randomUUID()}.json`), before);
