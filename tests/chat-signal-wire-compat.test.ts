@@ -68,6 +68,9 @@ function postAllowList(body: Record<string, unknown>): string[] {
     ...(Object.hasOwn(body, "attachments") ? ["attachments"] : []),
     ...(Object.hasOwn(body, "until_ms") ? ["until_ms"] : []),
     ...chatSignalKeys(body),
+    ...(Object.hasOwn(body, "parent_signal_id") && body.signal_kind === "ask"
+      ? ["parent_signal_id"]
+      : []),
   ];
 }
 
@@ -120,6 +123,29 @@ test("an unknown key is still rejected, so the allow-list is doing work", () => 
    * that accepts anything. */
   const body = { ...installedPostBody, about: null, nope: 1 };
   assert.equal(exactKeys(body, postAllowList(body)), false);
+});
+
+test("parent_signal_id is ask-only, optional, and intentionally rejected by an old server", () => {
+  const rootAsk = { ...installedPostBody, signal_kind: "ask", about: null };
+  const chainedAsk = {
+    ...rootAsk,
+    parent_signal_id: "22222222-2222-4222-8222-222222222222",
+  };
+  assert.equal(exactKeys(rootAsk, postAllowList(rootAsk)), true,
+    "an installed client that omits the new field still posts a root ask");
+  assert.equal(exactKeys(chainedAsk, postAllowList(chainedAsk)), true);
+
+  const oldServerAllowList = postAllowList(rootAsk);
+  assert.equal(exactKeys(chainedAsk, oldServerAllowList), false,
+    "the client lane must wait because an old exact-key server rejects the new field");
+  assert.equal(exactKeys(
+    { ...installedPostBody, about: null, parent_signal_id: chainedAsk.parent_signal_id },
+    postAllowList({ ...installedPostBody, about: null, parent_signal_id: chainedAsk.parent_signal_id }),
+  ), false, "a note does not acquire a parent field");
+  for (const key of ["chain_root_id", "chain_hop", "chain_participants"]) {
+    const hostile = { ...rootAsk, [key]: key === "chain_hop" ? 0 : chainedAsk.parent_signal_id };
+    assert.equal(exactKeys(hostile, postAllowList(hostile)), false, key);
+  }
 });
 
 test("the agent read body, which always carries in_reply_to, is unaffected", () => {
