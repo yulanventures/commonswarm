@@ -1201,6 +1201,11 @@ import "../../styles/tokens.css";
   import { isInviteSubmitCurrent } from "../../lib/invite-submit";
   import { PendingRefreshGate } from "../../lib/pending-refresh";
   import { wakePathMark, WAKE_ROSTER_REFRESH_TIMEOUT_MS } from "../../lib/wake-path";
+  import {
+    agentPresenceLine,
+    browserAgentPresenceRows,
+  } from "../../lib/agent-presence";
+  import type { AgentPresenceRow } from "../../../../src/cloud/agent-presence";
   import { BootFocusGate } from "../../lib/boot-focus";
   import { renderWorkspaceSettings } from "../../lib/workspace-settings";
   import {
@@ -1328,6 +1333,7 @@ import "../../styles/tokens.css";
     model: string | null;
     ownerUserId: string;
     oldestUnobservedAt?: string | null;
+    presence?: AgentPresenceRow | null;
   }
 
   interface Member {
@@ -2025,13 +2031,56 @@ import "../../styles/tokens.css";
         const page = data ?? [];
         result.push(...rosterAgentsFromRows(page));
         if (page.length < pageSize) {
-          const { data: wakeRows, error: wakeError } = await api.schema("swarm_read")
-            .from("agent_wake_path")
-            .select("principal_id,oldest_unobserved_at")
-            .eq("workspace_id", workspaceId);
-          if (wakeError) return result;
-          const oldest = new Map((wakeRows ?? []).map(row => [row.principal_id, row.oldest_unobserved_at]));
-          return result.map(agent => ({ ...agent, oldestUnobservedAt: oldest.get(agent.principalId) ?? null }));
+          const readPresence = async (): Promise<{
+            available: boolean;
+            rows: Map<string, AgentPresenceRow>;
+          }> => {
+            const rows: unknown[] = [];
+            for (let presenceOffset = 0; ; presenceOffset += pageSize) {
+              const { data: presencePage, error: presenceError } = await api
+                .schema("swarm_read")
+                .from("agent_presence")
+                .select(
+                  "principal_id,last_command_at,client_build,watcher_at,channel_at,listener_at,turn_at,last_ack_via,last_ack_at,current_client_build",
+                )
+                .eq("workspace_id", workspaceId)
+                .order("principal_id", { ascending: true })
+                .range(presenceOffset, presenceOffset + pageSize - 1);
+              if (presenceError) {
+                return { available: false, rows: new Map() };
+              }
+              const next = presencePage ?? [];
+              rows.push(...next);
+              if (next.length < pageSize) {
+                return { available: true, rows: browserAgentPresenceRows(rows) };
+              }
+            }
+          };
+          const [wakeRead, presenceRead] = await Promise.all([
+            api.schema("swarm_read")
+              .from("agent_wake_path")
+              .select("principal_id,oldest_unobserved_at")
+              .eq("workspace_id", workspaceId),
+            readPresence(),
+          ]);
+          let enriched = result;
+          if (!wakeRead.error) {
+            const oldest = new Map((wakeRead.data ?? []).map(row => [
+              row.principal_id,
+              row.oldest_unobserved_at,
+            ]));
+            enriched = enriched.map(agent => ({
+              ...agent,
+              oldestUnobservedAt: oldest.get(agent.principalId) ?? null,
+            }));
+          }
+          if (presenceRead.available) {
+            enriched = enriched.map(agent => ({
+              ...agent,
+              presence: presenceRead.rows.get(agent.principalId) ?? null,
+            }));
+          }
+          return enriched;
         }
       }
     };
@@ -4134,6 +4183,13 @@ import "../../styles/tokens.css";
             people.get(agent.ownerUserId) ?? "Workspace member"
           }`;
         copy.append(name, state);
+        const presenceLine = agentPresenceLine(agent.presence);
+        if (presenceLine) {
+          const presence = document.createElement("span");
+          presence.className = "dashboard__agent-presence";
+          presence.textContent = presenceLine;
+          copy.append(presence);
+        }
         const wakeMark = wakePathMark(agent.oldestUnobservedAt);
         if (wakeMark) {
           const wake = document.createElement("span");

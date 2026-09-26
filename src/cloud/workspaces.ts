@@ -1,4 +1,5 @@
 import type { CloudTarget } from "./config.js";
+import type { AgentPresenceRow } from "./agent-presence.js";
 import { sanitizeDisplayLabel } from "./invite-link.js";
 import {
   describeRenewalGrant,
@@ -280,6 +281,176 @@ async function rows(
     throw new Error("workspace read returned malformed JSON");
   }
   return body as Array<Record<string, unknown>>;
+}
+
+export interface WorkspaceAgentPresence extends AgentPresenceRow {
+  principal_id: string;
+}
+
+export type WorkspaceAgentPresenceRead =
+  | { available: true; rows: WorkspaceAgentPresence[] }
+  | { available: false; rows: [] };
+
+const AGENT_MEMBER_PRESENCE_FIELDS = [
+  "last_command_at",
+  "client_build",
+  "watcher_at",
+  "channel_at",
+  "listener_at",
+  "turn_at",
+  "last_ack_via",
+  "last_ack_at",
+  "current_client_build",
+] as const;
+
+const AGENT_PRESENCE_SELECT = [
+  "workspace_id",
+  "principal_id",
+  "last_command_at",
+  "client_build",
+  "watcher_at",
+  "channel_at",
+  "listener_at",
+  "turn_at",
+  "last_ack_via",
+  "last_ack_at",
+  "current_client_build",
+].join(",");
+
+function checkedNullableString(value: unknown, field: string): string | null {
+  if (value === null) return null;
+  return checkedString(value, field);
+}
+
+function missingAgentPresenceView(status: number, body: unknown): boolean {
+  if (status === 404) return true;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const code = (body as Record<string, unknown>).code;
+  return code === "PGRST205" || code === "42P01";
+}
+
+/**
+ * Recover the presence projection included by the authenticated agent members
+ * read. Older read edges omit the whole projection, which is a compatibility
+ * signal rather than a malformed roster.
+ */
+export function agentPresenceFromMembersPayload(
+  payload: unknown,
+): WorkspaceAgentPresenceRead {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { available: false, rows: [] };
+  }
+  const agents = (payload as Record<string, unknown>).agents;
+  if (!Array.isArray(agents)) {
+    return { available: false, rows: [] };
+  }
+  if (agents.length === 0) return { available: true, rows: [] };
+  const records = agents.filter(
+    (value): value is Record<string, unknown> =>
+      Boolean(value) && typeof value === "object" && !Array.isArray(value),
+  );
+  if (
+    records.length !== agents.length ||
+    records.some((row) =>
+      AGENT_MEMBER_PRESENCE_FIELDS.some((field) => !(field in row)))
+  ) {
+    return { available: false, rows: [] };
+  }
+  return {
+    available: true,
+    rows: records.map((row) => {
+      const ackVia = row.last_ack_via;
+      if (ackVia !== null && ackVia !== "leased" && ackVia !== "unclaimed") {
+        throw new Error("workspace read returned a malformed last_ack_via");
+      }
+      return {
+        principal_id: checkedUuid(row.principal_id, "principal_id"),
+        last_command_at: checkedNullableTimestamp(row.last_command_at, "last_command_at"),
+        client_build: checkedNullableString(row.client_build, "client_build"),
+        watcher_at: checkedNullableTimestamp(row.watcher_at, "watcher_at"),
+        channel_at: checkedNullableTimestamp(row.channel_at, "channel_at"),
+        listener_at: checkedNullableTimestamp(row.listener_at, "listener_at"),
+        turn_at: checkedNullableTimestamp(row.turn_at, "turn_at"),
+        last_ack_via: ackVia,
+        last_ack_at: checkedNullableTimestamp(row.last_ack_at, "last_ack_at"),
+        current_client_build: checkedNullableString(
+          row.current_client_build,
+          "current_client_build",
+        ),
+      };
+    }),
+  };
+}
+
+/** Read all member-visible seat presence in one workspace-scoped request. */
+export async function readWorkspaceAgentPresence(
+  target: CloudTarget,
+  bearer: string,
+  workspaceId: string,
+  fetcher: typeof fetch = fetch,
+): Promise<WorkspaceAgentPresenceRead> {
+  const selected = checkedUuid(workspaceId, "workspace_id");
+  const url = new URL("/rest/v1/agent_presence", target.url);
+  url.searchParams.set("select", AGENT_PRESENCE_SELECT);
+  url.searchParams.set("workspace_id", `eq.${selected}`);
+  url.searchParams.set("order", "principal_id.asc");
+  let response: Response;
+  try {
+    response = await fetcher(url, {
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        apikey: target.anonKey,
+        "accept-profile": "swarm_read",
+      },
+    });
+  } catch {
+    throw new Error("agent presence read could not reach the cloud service");
+  }
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (missingAgentPresenceView(response.status, body)) {
+      return { available: false, rows: [] };
+    }
+    throw new Error(`agent presence read failed (HTTP ${response.status})`);
+  }
+  if (
+    !Array.isArray(body) ||
+    body.some((entry) => !entry || typeof entry !== "object" || Array.isArray(entry))
+  ) {
+    throw new Error("agent presence read returned malformed JSON");
+  }
+  const seen = new Set<string>();
+  const presenceRows = body.map((value): WorkspaceAgentPresence => {
+    const row = value as Record<string, unknown>;
+    if (checkedUuid(row.workspace_id, "workspace_id") !== selected) {
+      throw new Error("agent presence read returned a cross-workspace row");
+    }
+    const principalId = checkedUuid(row.principal_id, "principal_id");
+    if (seen.has(principalId)) {
+      throw new Error("agent presence read returned a duplicate principal");
+    }
+    seen.add(principalId);
+    const ackVia = row.last_ack_via;
+    if (ackVia !== null && ackVia !== "leased" && ackVia !== "unclaimed") {
+      throw new Error("agent presence read returned a malformed last_ack_via");
+    }
+    return {
+      principal_id: principalId,
+      last_command_at: checkedNullableTimestamp(row.last_command_at, "last_command_at"),
+      client_build: checkedNullableString(row.client_build, "client_build"),
+      watcher_at: checkedNullableTimestamp(row.watcher_at, "watcher_at"),
+      channel_at: checkedNullableTimestamp(row.channel_at, "channel_at"),
+      listener_at: checkedNullableTimestamp(row.listener_at, "listener_at"),
+      turn_at: checkedNullableTimestamp(row.turn_at, "turn_at"),
+      last_ack_via: ackVia,
+      last_ack_at: checkedNullableTimestamp(row.last_ack_at, "last_ack_at"),
+      current_client_build: checkedNullableString(
+        row.current_client_build,
+        "current_client_build",
+      ),
+    };
+  });
+  return { available: true, rows: presenceRows };
 }
 
 export interface WorkspaceDirectory {

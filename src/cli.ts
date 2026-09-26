@@ -5,6 +5,12 @@ import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main
 import { signalDuration } from "./cloud/signal-duration.js";
 import { CLI_BUILD_VERSION } from "./cloud/client-build.js";
 import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } from "./cloud/pending-access.js";
+import {
+  AGENT_PRESENCE_LABELS,
+  classifyAgentPresence,
+  type AgentPresenceRow,
+  type ClassifiedAgentPresence,
+} from "./cloud/agent-presence.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
@@ -213,8 +219,10 @@ import {
   clearWorkspaceDefault,
   cloudWorkspaceDirectory,
   DEFAULT_MEMBERSHIP_REVOKED,
+  agentPresenceFromMembersPayload,
   renderStatus,
   renderWorkspaces,
+  readWorkspaceAgentPresence,
   resolveWorkspace,
   resolveWorkspaceSelector,
   selectWorkspace,
@@ -226,6 +234,7 @@ import {
   workspaceOverride,
   writeWorkspaceDefault,
   type WorkspaceDirectory,
+  type WorkspaceAgentPresenceRead,
   type WorkspaceStatus,
   type WorkspaceSummary,
   type WorkspaceWarning,
@@ -4249,11 +4258,80 @@ export function renderWorkspace(id: string, name: string | null): string {
   return name === null ? id : `${name} (${id})`;
 }
 
+export interface StructuredAgentPresence extends ClassifiedAgentPresence {
+  client_build: string | null;
+}
+
+export interface RosterPresence {
+  available: boolean;
+  rows: ReadonlyMap<string, AgentPresenceRow>;
+  now: number;
+}
+
+function escapedClientBuild(value: string | null): string | null {
+  if (value === null) return null;
+  const quoted = JSON.stringify(value);
+  return quoted.slice(1, -1).replace(
+    /[\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+function presenceAge(ageMs: number): string {
+  const minutes = Math.max(0, Math.floor(ageMs / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+export function structuredAgentPresence(
+  row: AgentPresenceRow | null,
+  now = Date.now(),
+): StructuredAgentPresence {
+  return {
+    ...classifyAgentPresence(row, now),
+    client_build: escapedClientBuild(row?.client_build ?? null),
+  };
+}
+
+export function renderAgentPresence(
+  row: AgentPresenceRow | null,
+  now = Date.now(),
+): string {
+  const presence = structuredAgentPresence(row, now);
+  const wake = presence.wake.route === "turn" && presence.wake.age_ms !== null
+    ? `${presence.wake.label}, last ${presenceAge(presence.wake.age_ms)}`
+    : presence.wake.label;
+  const lastCall = presence.last_call === null
+    ? `${AGENT_PRESENCE_LABELS.lastCall}: never`
+    : `${presence.last_call.label}: ${presenceAge(presence.last_call.age_ms)}`;
+  const clientBuild = presence.client_build ?? AGENT_PRESENCE_LABELS.client.unknown;
+  const clientState = presence.client.kind === "current" ||
+      (presence.client.kind === "unknown" && presence.client_build === null)
+    ? ""
+    : ` · ${presence.client.label}`;
+  return `presence: ${wake} · ${lastCall} · client build: ${clientBuild}${clientState}`;
+}
+
+function rosterPresence(
+  read: WorkspaceAgentPresenceRead,
+  now = Date.now(),
+): RosterPresence {
+  return {
+    available: read.available,
+    rows: new Map(read.rows.map((row) => [row.principal_id, row])),
+    now,
+  };
+}
+
 export function renderRoster(
   directory: SignalDirectory,
   memberNames: ReadonlyMap<string, string>,
   workspace?: { workspaceId: string; workspaceName: string | null },
   pending: readonly PendingAgentAccess[] | null = [],
+  presence?: RosterPresence,
 ): string {
   /* FM-1, found by Verity: an EMPTY roster is ambiguous and must not be reported as emptiness.
    *
@@ -4319,6 +4397,12 @@ export function renderRoster(
         owner === undefined ? "" : ` — ${owner}`
       }`,
     );
+    if (presence?.available) {
+      lines.push(`  ${renderAgentPresence(presence.rows.get(agent.principal_id) ?? null, presence.now)}`);
+    }
+  }
+  if (presence && !presence.available) {
+    lines.push("presence: not available on this server");
   }
   lines.push("");
   lines.push(pending === null ? "Invited, not connected: could not load" : "Invited, not connected:");
@@ -4356,14 +4440,36 @@ async function runMembers(args: Arguments): Promise<void> {
   const selected = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true,
   });
-  const directory = await signalDirectory(
-    cloud,
-    selected.selectedWorkspace,
-    selected,
-  );
-  const pending = await readPendingAccessOptional(
-    cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher,
-  );
+  let agentMembersPayload: unknown;
+  const directory = selected.kind === "agent"
+    ? await readAgentSignalDirectory(
+      cloud,
+      selected.bearer,
+      selected.selectedWorkspace,
+      (async (input, init) => {
+        const response = await selected.fetcher(input, init);
+        if (response.ok) {
+          agentMembersPayload = await response.clone().json().catch(() => undefined);
+        }
+        return response;
+      }) as typeof fetch,
+    )
+    : await signalDirectory(
+      cloud,
+      selected.selectedWorkspace,
+      selected,
+    );
+  const [pending, presenceRead] = await Promise.all([
+    readPendingAccessOptional(
+      cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher,
+    ),
+    selected.kind === "agent"
+      ? Promise.resolve(agentPresenceFromMembersPayload(agentMembersPayload))
+      : readWorkspaceAgentPresence(
+        cloud, selected.bearer, selected.selectedWorkspace, selected.fetcher,
+      ),
+  ]);
+  const presence = rosterPresence(presenceRead);
 
   const memberNames = new Map(
     directory.members.map((member) => [
@@ -4385,18 +4491,29 @@ async function runMembers(args: Arguments): Promise<void> {
               user_id: member.user_id,
               name: memberNames.get(member.user_id) ?? null,
             })),
-            agents: directory.agents.map((agent) => ({
-              principal_id: agent.principal_id,
-              name: sanitizeDisplayLabel(agent.name, "Unnamed agent"),
-              /* `owner_user_id` is optional on the read contract — an older deployment omits
-               * it. Report null rather than inventing an owner. */
-              owner_user_id: agent.owner_user_id ?? null,
-              owner_name: agent.owner_user_id === undefined
-                ? null
-                : memberNames.get(agent.owner_user_id) ?? null,
-            })),
+            agents: directory.agents.map((agent) => {
+              const row = presence.available
+                ? presence.rows.get(agent.principal_id) ?? null
+                : null;
+              return {
+                principal_id: agent.principal_id,
+                name: sanitizeDisplayLabel(agent.name, "Unnamed agent"),
+                /* `owner_user_id` is optional on the read contract — an older deployment omits
+                 * it. Report null rather than inventing an owner. */
+                owner_user_id: agent.owner_user_id ?? null,
+                owner_name: agent.owner_user_id === undefined
+                  ? null
+                  : memberNames.get(agent.owner_user_id) ?? null,
+                presence: presence.available
+                  ? structuredAgentPresence(row, presence.now)
+                  : null,
+              };
+            }),
             pending,
             ...(pending === null ? { pending_error: "could not load" } : {}),
+            ...(!presence.available
+              ? { presence_error: "not available on this server" }
+              : {}),
           },
           null,
           2,
@@ -4409,7 +4526,7 @@ async function runMembers(args: Arguments): Promise<void> {
   process.stdout.write(renderRoster(directory, memberNames, {
     workspaceId: selected.selectedWorkspace,
     workspaceName: workspaceLabel(directory),
-  }, pending));
+  }, pending, presence));
 }
 
 /** Show the identity authenticated by this request, never a saved human profile. */

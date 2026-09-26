@@ -24,6 +24,6 @@ test("the live roster reads the aggregate and renders its stale mark", () => {
   assert.equal(reachesView(dashboard), true);
   assert.equal(reachesView(dashboard.replace('.from("agent_wake_path")', '.from("agent_principals")')), false,
     "mutation control: a roster read that skips the aggregate must fail");
-  assert.ok(dashboard.includes('if (wakeError) return result;'),
+  assert.ok(dashboard.includes('if (!wakeRead.error) {'),
     "a missing wake view must leave the roster visible");
 });

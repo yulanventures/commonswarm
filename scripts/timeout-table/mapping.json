@@ -1717,7 +1717,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:310",
+          "citation": "src/cli.ts:319",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7575",
+          "citation": "src/cli.ts:7692",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8326",
+          "citation": "src/cli.ts:8443",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5082-5084; src/cloud/wake-lease.ts:62,65",
+          "citation": "src/cli.ts:5199-5201; src/cloud/wake-lease.ts:62,65",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1773,7 +1773,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3395",
+          "citation": "src/cli.ts:3404",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1859,7 +1859,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8377; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8494; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6927",
+          "citation": "src/cli.ts:7044",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7128",
+          "citation": "src/cli.ts:7245",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
