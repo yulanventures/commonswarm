@@ -337,6 +337,86 @@ test("three contenders inspect a live gate in place without moving it", { timeou
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("released and replaced gate is not mistaken for the first inode", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-replace-stat-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now() }));
+    await mkdir(gate);
+    const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 500);
+    await utimes(gate, old, old);
+    let replaced = false;
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong", {
+      stalePolicy: "host-id", timeoutMs: 150, onAfterGateStat: async () => {
+        if (replaced) return;
+        replaced = true;
+        await rm(gate, { recursive: true, force: true });
+        await mkdir(gate);
+      },
+    }), FileLockTimeoutError);
+    assert.equal(replaced, true);
+    assert.ok((await stat(gate)).isDirectory(), "the replacement gate stays at its path");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a gate's maximum hold starts at rename publication", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-publication-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  const fakePid = 999_999_997;
+  let atPublishedGate!: () => void;
+  let release!: () => void;
+  const publishedGate = new Promise<void>(resolve => { atPublishedGate = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid === fakePid && signal === 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+    return originalKill(pid, signal);
+  }) as typeof process.kill;
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now() }));
+    const publisher = withFileLock(root, "host-id-rotation", async () => undefined, {
+      stalePolicy: "host-id", timeoutMs: 2_000,
+      onBeforeGatePublish: async () => {
+        const temp = (await readdir(root)).find(name => name.includes(".reclaim.") && name.endsWith(".tmp"));
+        assert.ok(temp);
+        const ownerPath = join(root, temp, "owner.json");
+        const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+        await writeFile(ownerPath, JSON.stringify({ ...owner, pid: fakePid,
+          createdAt: Date.now() - HOST_ID_LOCK_MAX_HOLD_MS - 1_000 }));
+      },
+      onBeforeStaleMove: async () => { atPublishedGate(); await blocked; },
+    });
+    await publishedGate;
+    assert.ok((await stat(gate)).isDirectory());
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong",
+      { stalePolicy: "host-id", timeoutMs: 100 }), FileLockTimeoutError);
+    assert.equal(JSON.parse(await readFile(join(gate, "owner.json"), "utf8")).pid, fakePid);
+    release();
+    await publisher;
+  } finally { release(); process.kill = originalKill; await rm(root, { recursive: true, force: true }); }
+});
+
+test("credential lock path stays absent while its complete owner is being written", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-credential-publish-"));
+  const path = join(root, "credential.lock");
+  let entered!: () => void;
+  let release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  try {
+    const first = withFileLock(root, "credential", async () => "held",
+      { onBeforePublish: async () => { entered(); await blocked; } });
+    await paused;
+    await assert.rejects(stat(path), { code: "ENOENT" });
+    release();
+    assert.equal(await first, "held");
+  } finally { release(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("reclaim checks the moved owner and preserves a replacement gate", { timeout: 3_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-race-"));
   const lock = join(root, "host-id-rotation.lock");

@@ -460,8 +460,8 @@ async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<
   return Date.now() - owner.createdAt >= HOST_ID_LOCK_MAX_HOLD_MS ? raw : null;
 }
 
-async function cleanupDeadHostIdTemps(stateDirectory: string, lockName: string): Promise<void> {
-  const prefix = `${lockName}.lock.`;
+export async function cleanupDeadOwnerTemps(stateDirectory: string, lockFileName: string): Promise<void> {
+  const prefix = `${lockFileName}.`;
   for (const name of await readdir(stateDirectory)) {
     const match = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:reclaim\\.)?(\\d+)\\.[0-9a-f]+\\.(?:tmp|stale|done)$`).exec(name);
     if (!match) continue;
@@ -516,8 +516,10 @@ export async function withFileLock<T>(
   lockName: string,
   work: () => Promise<T>,
   options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link;
+    onBeforePublish?: () => Promise<void>;
     onBeforeStaleMove?: () => Promise<void>;
     onBeforeGatePublish?: () => Promise<void>;
+    onAfterGateStat?: () => Promise<void>;
     onBeforeGateStaleMove?: () => Promise<void> } = {},
 ): Promise<T> {
   await secureDirectory(stateDirectory);
@@ -538,11 +540,14 @@ export async function withFileLock<T>(
       if (options.stalePolicy === "host-id") {
         const record = JSON.stringify({ pid: process.pid, host: hostname(),
           createdAt, startTime: THIS_PROCESS_START_MS, ownerId });
-        await publishCompleteOwnerFile(lockPath, record, { publishLink: options.publishLink });
+        await publishCompleteOwnerFile(lockPath, record,
+          { publishLink: options.publishLink, onBeforePublish: options.onBeforePublish });
         handle = await open(lockPath, "r");
       } else {
-        handle = await open(lockPath, "wx", 0o600);
-        await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), createdAt, ownerId }), "utf8");
+        await publishCompleteOwnerFile(lockPath,
+          JSON.stringify({ pid: process.pid, host: hostname(), createdAt, ownerId }),
+          { publishLink: options.publishLink, onBeforePublish: options.onBeforePublish });
+        handle = await open(lockPath, "r");
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -565,7 +570,8 @@ export async function withFileLock<T>(
           const ownerFile = await open(join(temporaryGate, "owner.json"), "wx", 0o600);
           try {
             await ownerFile.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
-              createdAt: Date.now(), startTime: THIS_PROCESS_START_MS, ownerId }));
+              createdAt: Date.now(), publishedByRename: true,
+              startTime: THIS_PROCESS_START_MS, ownerId }));
             await ownerFile.sync();
           } finally { await ownerFile.close(); }
           await options.onBeforeGatePublish?.();
@@ -580,13 +586,15 @@ export async function withFileLock<T>(
             throw gateError;
           }
           const gateInfo = await stat(reclaimPath).catch(() => null);
+          await options.onAfterGateStat?.();
           const gateOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
           let abandoned = false;
           let recordedPid: number | undefined;
           let completeLocalOwner = false;
           if (gateOwner !== null) {
             try {
-              const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number; createdAt?: number };
+              const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number;
+                createdAt?: number; publishedByRename?: boolean };
               if (Number.isSafeInteger(owner?.pid) && owner.pid > 0) recordedPid = owner.pid;
               completeLocalOwner = owner.host === hostname() && recordedPid !== undefined &&
                 Number.isFinite(owner.startTime) && owner.startTime > 0;
@@ -601,12 +609,17 @@ export async function withFileLock<T>(
                 abandoned = gone || (start !== null
                   ? Math.abs(start - owner.startTime) > 2_000
                   : Date.now() - (typeof owner.createdAt === "number" && Number.isFinite(owner.createdAt)
-                    ? owner.createdAt : gateInfo?.mtimeMs ?? Date.now()) >= HOST_ID_LOCK_MAX_HOLD_MS);
+                    ? owner.publishedByRename === true ? gateInfo?.ctimeMs ?? Date.now() : owner.createdAt
+                    : gateInfo?.mtimeMs ?? Date.now()) >= HOST_ID_LOCK_MAX_HOLD_MS);
               }
             } catch { /* Incomplete records become reclaimable after the stated grace. */ }
           }
           if (gateInfo && Date.now() - gateInfo.mtimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS &&
-              !completeLocalOwner) abandoned = true;
+              !completeLocalOwner) {
+            // A released gate can be replaced between the first stat and owner read.
+            const currentInfo = await stat(reclaimPath).catch(() => null);
+            if (currentInfo?.ino === gateInfo.ino && currentInfo.dev === gateInfo.dev) abandoned = true;
+          }
           if (abandoned) {
             await options.onBeforeGateStaleMove?.();
             const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
@@ -668,7 +681,7 @@ export async function withFileLock<T>(
     process.on("exit", releaseHeldFileLocksSync);
   }
   try {
-    if (options.stalePolicy === "host-id") await cleanupDeadHostIdTemps(stateDirectory, lockName);
+    if (options.stalePolicy === "host-id") await cleanupDeadOwnerTemps(stateDirectory, `${lockName}.lock`);
     return await work();
   } finally {
     heldFileLocks.delete(lockPath);
