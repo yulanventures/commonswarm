@@ -26,7 +26,8 @@
  */
 import { spawn } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { copyFile } from "node:fs/promises";
+import { copyFile, mkdir, rmdir } from "node:fs/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { AUTH_PROVIDERS, AUTH_SETTINGS_PATH } from "../src/lib/auth-providers.js";
 
 /** The site package root, from this file's own location. */
@@ -35,6 +36,14 @@ const SITE_ROOT = new URL("../", import.meta.url);
 const ASTRO_BIN = new URL("node_modules/astro/bin/astro.mjs", SITE_ROOT);
 /** Where the per-state builds land. Gitignored; never deployed. */
 export const FIXTURE_ROOT = new URL("dist-providers/", SITE_ROOT);
+/**
+ * Each test-file process gets its own outputs. Astro still shares its caches, so the lock below
+ * serializes builds; separate outputs keep a process reading its fixtures from racing another
+ * process that starts its own build after releasing the lock.
+ */
+const PROCESS_FIXTURE_ROOT = new URL(`${process.pid}/`, FIXTURE_ROOT);
+const BUILD_LOCK = new URL(".build-lock", FIXTURE_ROOT);
+const BUILD_LOCK_TIMEOUT_MS = 120_000;
 
 /**
  * A public identifier the stub does not check, spelled so it cannot be mistaken for a real
@@ -143,6 +152,53 @@ async function buildAgainst(origin: string, dir: URL): Promise<void> {
 
 let building: Promise<readonly ProviderFixture[]> | null = null;
 
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  return typeof error.code === "string" ? error.code : undefined;
+}
+
+async function withBuildLock<T>(build: () => Promise<T>): Promise<T> {
+  await mkdir(FIXTURE_ROOT, { recursive: true });
+  const deadline = Date.now() + BUILD_LOCK_TIMEOUT_MS;
+  while (true) {
+    try {
+      await mkdir(BUILD_LOCK);
+      break;
+    } catch (error) {
+      if (errorCode(error) !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `provider fixture build waited ${BUILD_LOCK_TIMEOUT_MS}ms for ${BUILD_LOCK.pathname}`,
+          { cause: error },
+        );
+      }
+      await delay(50);
+    }
+  }
+  try {
+    return await build();
+  } finally {
+    await rmdir(BUILD_LOCK);
+  }
+}
+
+async function buildFixture(enabled: readonly string[], dir: URL): Promise<ProviderFixture> {
+  const state = fixtureStateName(enabled);
+  const stub = await startSettingsStub(enabled);
+  try {
+    await buildAgainst(stub.origin, dir);
+  } finally {
+    await stub.close();
+  }
+  if (!stub.requested.includes(AUTH_SETTINGS_PATH)) {
+    throw new Error(
+      `provider fixture "${state}": the build never asked ${AUTH_SETTINGS_PATH}, so it did ` +
+        `not read this fixture's providers. PUBLIC_SUPABASE_URL did not reach the build.`,
+    );
+  }
+  return { state, enabled, dir };
+}
+
 /**
  * Build every state, once per process.
  *
@@ -151,29 +207,17 @@ let building: Promise<readonly ProviderFixture[]> | null = null;
  * build is about two seconds, so three of them cost less than the suite that reads them.
  */
 export function providerFixtures(): Promise<readonly ProviderFixture[]> {
-  building ??= (async () => {
+  building ??= withBuildLock(async () => {
     // The build copies the repo-root installer into public/. Doing it here too means these
     // fixtures do not depend on `npm run build` having been run first.
     await copyFile(new URL("../install.sh", SITE_ROOT), new URL("public/install.sh", SITE_ROOT));
     const built: ProviderFixture[] = [];
     for (const enabled of FIXTURE_STATES) {
       const state = fixtureStateName(enabled);
-      const dir = new URL(`${state}/`, FIXTURE_ROOT);
-      const stub = await startSettingsStub(enabled);
-      try {
-        await buildAgainst(stub.origin, dir);
-      } finally {
-        await stub.close();
-      }
-      if (!stub.requested.includes(AUTH_SETTINGS_PATH)) {
-        throw new Error(
-          `provider fixture "${state}": the build never asked ${AUTH_SETTINGS_PATH}, so it did ` +
-            `not read this fixture's providers. PUBLIC_SUPABASE_URL did not reach the build.`,
-        );
-      }
-      built.push({ state, enabled, dir });
+      const dir = new URL(`${state}/`, PROCESS_FIXTURE_ROOT);
+      built.push(await buildFixture(enabled, dir));
     }
     return built;
-  })();
+  });
   return building;
 }

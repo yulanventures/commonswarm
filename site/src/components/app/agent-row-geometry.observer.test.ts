@@ -1,36 +1,13 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const dashboard = await readFile(new URL("./LiveDashboard.astro", import.meta.url), "utf8");
 const style = dashboard.match(/<style\b[^>]*>([\s\S]*?)<\/style>/)?.[1];
 assert.ok(style, "LiveDashboard must expose its component stylesheet to the geometry fixture");
-
-const chromeCandidates = [
-  process.env.CHROME_BIN,
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/usr/bin/google-chrome",
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-].filter((candidate): candidate is string => Boolean(candidate));
-
-const findChrome = async (): Promise<string> => {
-  for (const candidate of chromeCandidates) {
-    try {
-      await access(candidate);
-      return candidate;
-    } catch {
-      // Keep looking: the gate must use a real layout engine, never a source-only fallback.
-    }
-  }
-  throw new Error("Chrome or Chromium is required for rendered dashboard geometry tests");
-};
 
 type Geometry = {
   member: {
@@ -131,10 +108,7 @@ const renderGeometry = async (): Promise<Geometry> => {
   try {
     await writeFile(fixture, html, "utf8");
     const chrome = await findChrome();
-    const { stdout } = await run(chrome, [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
+    const { stdout } = await launchChrome(chrome, [
       "--allow-file-access-from-files",
       "--dump-dom",
       `file://${fixture}`,
@@ -199,8 +173,8 @@ test("Pending access is rendered in the dialog at narrow and desktop widths", { 
     </script></body></html>`, "utf8");
     const chrome = await findChrome();
     for (const width of [600, 1200]) {
-      const { stdout } = await run(chrome, [
-        "--headless=new", "--disable-gpu", "--no-sandbox", "--allow-file-access-from-files",
+      const { stdout } = await launchChrome(chrome, [
+        "--allow-file-access-from-files",
         `--window-size=${width},700`, "--dump-dom", `file://${fixture}`,
       ], { maxBuffer: 10 * 1024 * 1024, timeout: 15_000, killSignal: "SIGKILL" });
       const encoded = stdout.match(/data-pending="([^"]+)"/)?.[1];

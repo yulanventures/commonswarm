@@ -49,7 +49,6 @@ import {
 import { providerFixtures, fixtureStateName } from "../../../scripts/provider-fixtures.js";
 
 const INVITE_HTML = new URL("../../../dist/invite/index.html", import.meta.url);
-const APP_HTML = new URL("../../../dist/app/index.html", import.meta.url);
 const COMMONSWARM = new URL("../../lib/commonswarm.ts", import.meta.url);
 const ONRAMP = new URL("../invite/InviteOnramp.astro", import.meta.url);
 const BUTTONS = new URL("./ProviderButtons.astro", import.meta.url);
@@ -223,6 +222,13 @@ async function inviteHtml(): Promise<string> {
         `these controls compare the array against BUILT output, not the template.`,
     );
   }
+}
+
+async function allProvidersFixture(): Promise<{ readonly dir: URL; readonly state: string }> {
+  const fixture = (await providerFixtures())
+    .find(({ enabled }) => enabled.length === AUTH_PROVIDERS.length);
+  assert.ok(fixture, "the provider fixtures must include the all-providers state");
+  return fixture;
 }
 
 function renderedProviderIds(html: string): string[] {
@@ -493,7 +499,8 @@ async function allSourceExtensions(dir: URL): Promise<Set<string>> {
 }
 
 test("CONTROL: every rendered sign-in button is a provider the constant names", async () => {
-  const html = await inviteHtml();
+  const fixture = await allProvidersFixture();
+  const html = await readFile(new URL("invite/index.html", fixture.dir), "utf8");
   const rendered = renderedProviderIds(html);
   const known = AUTH_PROVIDERS.map((provider) => provider.id);
   for (const id of rendered) {
@@ -505,8 +512,8 @@ test("CONTROL: every rendered sign-in button is a provider the constant names", 
   }
   assert.ok(
     rendered.length > 0,
-    `The invite page offers no OAuth provider. This suite builds with site/.env, so the ` +
-      `deployment named by PUBLIC_SUPABASE_URL reported no enabled provider at build time.`,
+    `The all-providers fixture offers no OAuth provider. Its local settings stub enabled every ` +
+      `provider, so the build lost every configured door.`,
   );
 });
 
@@ -528,12 +535,12 @@ test("CONTROL: every button label is the label the constant carries, character f
 });
 
 /**
- * Every state the sweep runs against: the three built fixtures, plus the real `site/dist`.
+ * Every state the sweep runs against: the three built fixtures, plus the ordinary `site/dist`.
  *
  * The fixtures are what makes the dual-state claim measurable — nothing enabled, one provider,
  * every provider — each a real `astro build` against a GoTrue that reports that state. The real
- * dist is kept beside them because it is the artifact a deploy publishes, and it is the only
- * one whose provider set is the LIVE deployment's answer rather than a fixture's.
+ * dist is kept beside them because it is the artifact a deploy publishes. In CI it is built
+ * offline without site/.env, so its provider set is intentionally empty.
  */
 async function sweepStates(): Promise<
   readonly { readonly state: string; readonly dir: URL; readonly rendered: string[] }[]
@@ -546,16 +553,24 @@ async function sweepStates(): Promise<
       .map((provider) => provider.name)
       .sort(),
   }));
-  const live = renderedProviderIds(await inviteHtml());
+  const ordinary = renderedProviderIds(await inviteHtml());
   return [
     ...states,
     {
-      state: `site/dist (${fixtureStateName(live)})`,
+      state: `site/dist (${fixtureStateName(ordinary)})`,
       dir: DIST,
-      rendered: live.map((id) => authProvider(id).name).sort(),
+      rendered: ordinary.map((id) => authProvider(id).name).sort(),
     },
   ];
 }
+
+test("CONTROL: the ordinary offline build renders no provider buttons", async () => {
+  assert.deepEqual(
+    renderedProviderIds(await inviteHtml()),
+    [],
+    "site/dist must stay the offline no-provider build; provider-button assertions use local fixtures",
+  );
+});
 
 /**
  * Comments removed: braced template comments, block comments, and whole-line `//` comments.
@@ -1417,7 +1432,7 @@ test("CONTROL: every OAuth call site is an id read at runtime", async () => {
   );
 });
 
-test("CONTROL: /app's built page hand-writes NO provider control", async () => {
+test("CONTROL: /app's all-providers fixture hand-writes NO provider control", async () => {
   /*
    * THE SOURCE SWEEP ABOVE IS NOT ENOUGH ON ITS OWN, which is the whole lesson of this file:
    * a template proves nothing about the artifact a reader receives. This reads the BUILT /app
@@ -1435,15 +1450,9 @@ test("CONTROL: /app's built page hand-writes NO provider control", async () => {
    * ProviderButtons now, so the label and the set come from AUTH_PROVIDERS. Write one by hand
    * and this goes red.
    */
-  let app: string;
-  try {
-    app = await readFile(APP_HTML, "utf8");
-  } catch {
-    assert.fail(
-      `dist/app/index.html is missing. Run \`npm run build\` in site/ before this suite; ` +
-        `this control reads BUILT output, not the template.`,
-    );
-  }
+  const fixture = await allProvidersFixture();
+  const app = await readFile(new URL("app/index.html", fixture.dir), "utf8");
+  const invite = await readFile(new URL("invite/index.html", fixture.dir), "utf8");
 
   /*
    * POSITIVE CONTROL. Every assertion below is a count, and a count over a page that failed
@@ -1476,8 +1485,8 @@ test("CONTROL: /app's built page hand-writes NO provider control", async () => {
   const rendered = renderedProviderIds(app);
   assert.deepEqual(
     rendered,
-    renderedProviderIds(await inviteHtml()),
-    "/app and /invite must offer the same doors: both read the same deployment",
+    renderedProviderIds(invite),
+    "/app and /invite must offer the same doors: both read the same fixture settings",
   );
   assert.ok(
     rendered.length > 0,

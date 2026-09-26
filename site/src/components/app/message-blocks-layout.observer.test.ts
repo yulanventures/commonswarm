@@ -24,16 +24,13 @@
  * table might simply be narrow.
  */
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createReadStream, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize } from "node:path";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import { build } from "esbuild";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
-const run = promisify(execFile);
 const siteRoot = join(import.meta.dirname, "..", "..", "..");
 const distRoot = join(siteRoot, "dist");
 
@@ -270,10 +267,7 @@ const measureAll = async (): Promise<Record<string, Measurement>> => {
     /* Sequential, not parallel: the host runs many agents and three small Chrome loads in a row
      * cost less than three at once, and nothing here depends on them overlapping. */
     for (const variant of ["", ...Object.keys(REVERTED_CSS)]) {
-      const { stdout, stderr } = await run(chrome, [
-        "--headless=new",
-        "--disable-gpu",
-        "--no-sandbox",
+      const { stdout, stderr } = await launchChrome(chrome, [
         "--single-process",
         "--no-zygote",
         "--run-all-compositor-stages-before-draw",

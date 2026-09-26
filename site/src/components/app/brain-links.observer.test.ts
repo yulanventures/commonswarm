@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { test } from "node:test";
 import { build } from "esbuild";
-import { findChrome } from "./participant-rail.fixture.js";
+import { findChrome, launchChrome } from "../../../tests/chrome.js";
 
 /* Reached by site/package.json's recursive component observer-test glob.
  *
@@ -17,7 +15,6 @@ import { findChrome } from "./participant-rail.fixture.js";
  * leaking across a <br> -- only exist in a real document. So the live message renderer and the
  * live linkifier both run in a browser. */
 
-const run = promisify(execFile);
 const componentDir = dirname(fileURLToPath(import.meta.url));
 const siteRoot = join(componentDir, "..", "..", "..");
 
@@ -146,10 +143,7 @@ const snapshotPromise = (async (): Promise<Snapshot> => {
   try {
     await writeFile(fixture, html, "utf8");
     const chrome = await findChrome();
-    const { stdout } = await run(chrome, [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
+    const { stdout } = await launchChrome(chrome, [
       "--single-process",
       "--no-zygote",
       "--allow-file-access-from-files",
