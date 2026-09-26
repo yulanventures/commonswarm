@@ -466,14 +466,13 @@ export async function writeSecureJsonFile(
     await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
+    await secureCredentialFile(temporary);
     await rename(temporary, path);
   } catch (error) {
     await handle.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
-  await chmod(path, 0o600);
-  await secureCredentialFile(path);
 }
 
 /** Publish a new private file only after its contents are durable. Never replace an existing path. */

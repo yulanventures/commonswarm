@@ -9492,12 +9492,15 @@ async function runMcpConnect(args: Arguments): Promise<void> {
       throw new AgentSetupError("connect_clear_options", "Pass --clear-pending and --profile <path> to clear an interrupted connect.");
     }
     const { clearMcpConnect } = await import("./cloud/mcp-connect.js");
-    const cleared = await clearMcpConnect(args.required("profile"));
+    const profilePath = args.required("profile");
+    const cleared = await clearMcpConnect(profilePath);
     const removed = cleared.removed === "nothing" ? "Nothing was removed." : `Removed ${cleared.removed}.`;
     process.stdout.write(cleared.removed === "nothing" ? `${removed}\n` : cleared.completedProfile
       ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.\n`
       : cleared.emptyClaimPresent
-        ? `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
+        ? cleared.profilePresent
+          ? `${removed} This directory holds an empty claim file at credential.json and a profile at ${profilePath} that could not be validated; both files were kept. Ask the operator to inspect them before another connect.\n`
+          : `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
       : cleared.credentialPresent
         ? cleared.profilePresent
           ? `${removed} This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n`

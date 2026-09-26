@@ -530,8 +530,8 @@ function connectedResult(path: string, principalId: string): McpConnectResult {
   return { profile: path, principal_id: principalId, install: `${claude}\n${codex}` };
 }
 
-async function completedProfileAt(path: string): Promise<boolean> {
-  if (!await pathExists(path)) return false;
+async function completedProfileAt(path: string): Promise<AgentProfile | null> {
+  if (!await pathExists(path)) return null;
   const profileInfo = await lstat(path);
   if (profileInfo.isFile() && !profileInfo.isSymbolicLink() && (profileInfo.mode & 0o777) !== 0o600) {
     throw new McpConnectError("connect_profile_mode", `The profile at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`);
@@ -545,10 +545,10 @@ async function completedProfileAt(path: string): Promise<boolean> {
       throw new McpConnectError("connect_credential_mode", `The credential at ${profile.credential_file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(profile.credential_file)}, then rerun the same command.`);
     }
     await readProfileCredential(profile);
-    return true;
+    return profile;
   } catch (error) {
     if (error instanceof McpConnectError) throw error;
-    return false;
+    return null;
   }
 }
 
@@ -662,7 +662,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           if (await completedProfileAt(path) || (await pathExists(path) && !await repairableProfileAt(path))) {
             throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
           }
-          const profileState = await pathExists(path) ? await emptyClaimAt(path) ? "an empty profile.json claim file" : "damaged profile.json" : "no profile.json";
+          const profileState = await pathExists(path) ? await emptyClaimAt(path) ? `an empty ${basename(path)} claim file` : `damaged ${basename(path)}` : `no ${basename(path)}`;
           const credentialPath = join(profileDir, CONNECT_PROFILE_FILES.credential);
           const credentialState = await emptyClaimAt(credentialPath) ? "an empty claim file at credential.json" :
             await pathExists(credentialPath) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`;
@@ -697,8 +697,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       }
       if (current && await pathExists(path)) {
         try {
-          await completedProfileAt(path);
-          const profile = await readAgentProfile(path);
+          const profile = await completedProfileAt(path);
+          if (!profile) throw new Error("profile is incomplete");
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
           const credential = await readProfileCredential(profile);
           try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
