@@ -298,9 +298,7 @@ export class AgentSessionClient {
       body = null;
     }
     if (!response.ok) {
-      throw new CommandTransportError(
-        `session status read failed (HTTP ${response.status})`,
-      );
+      throw new SessionStatusHttpError(response.status);
     }
     return parseServerSessionStatus(body, input.principalId);
   }
@@ -321,7 +319,14 @@ function optionalGeneration(value: unknown): number | null {
   return null;
 }
 
-function parseServerSessionStatus(
+export class SessionStatusHttpError extends Error {
+  readonly name = "SessionStatusHttpError";
+  constructor(readonly status: number) {
+    super(`session status read failed (HTTP ${status})`);
+  }
+}
+
+export function parseServerSessionStatus(
   body: unknown,
   principalId: string,
 ): ServerSessionStatus {

@@ -40,6 +40,17 @@ test("lane record marks the retired parent rule and reconciles Fold 1 probe coun
   assert.equal(Number(counts[2]), listed - 1, "F3 and F4 share the EPERM probe");
 });
 
+test("Fold 16 evidence describes the edge release and file age actually exercised", { timeout: 1_000 }, () => {
+  const record = readFileSync(new URL("docs/evidence/2026-09-25-item-g-lane2b/LANE.md", root), "utf8");
+  const fold16 = record.split("## Fold 16\n")[1]?.split("## Fold 17\n")[0];
+  assert.ok(fold16);
+  assert.match(fold16, /superseded release with `released: false`/);
+  assert.match(fold16, /managed-seat session fence can refuse release/);
+  assert.match(fold16, /incomplete host-id lock grace uses the published path's mtime/);
+  assert.match(fold16, /aged self-PID records/);
+  assert.doesNotMatch(fold16, /Release 409 selects watcher or H0 poll|retain aged live records/);
+});
+
 interface Citation {
   /** Where the citing comment lives, for the failure message. */
   citedBy: string;
@@ -55,56 +66,56 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (lazy host/claude load)",
     file: "src/cli.ts",
-    lines: [409, 409],
+    lines: [423, 423],
     contains: "import(\"./host/claude.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/codex load)",
     file: "src/cli.ts",
-    lines: [413, 413],
+    lines: [427, 427],
     contains: "import(\"./host/codex.js\")",
   },
   {
     citedBy: "identity client r6 C9 (lazy host/opencode load)",
     file: "src/cli.ts",
-    lines: [417, 417],
+    lines: [431, 431],
     contains: "import(\"./host/opencode.js\")",
   },
   {
     citedBy: "identity client r6 C9 (claude canary classifier, host-free)",
     file: "src/cli.ts",
-    lines: [402, 402],
+    lines: [415, 415],
     contains: "classifyClaudeCanaryFailure",
   },
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6428, 6428],
+    lines: [6591, 6591],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6454, 6454],
+    lines: [6617, 6617],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7090, 7090],
+    lines: [7239, 7239],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [10830, 10835],
+    lines: [10906, 10906],
     contains: "horizon_expires_at: prepared.command.renewal_horizon_ms === null",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (mintedHorizon, replay)",
     file: "supabase/functions/command/index.ts",
-    lines: [2705, 2708],
+    lines: [2712, 2712],
     contains: "horizon_expires_at: response.horizon_expires_at as string | null",
   },
   /* Two citations in agent-connect.ts had NO entry here, and both had drifted on main before the
@@ -113,57 +124,57 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "site/src/lib/agent-connect.ts (the mint's device binding)",
     file: "supabase/functions/command/index.ts",
-    lines: [3239, 3248],
+    lines: [3241, 3250],
     contains: "device.revoked_at !== null",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (the agent scope check)",
     file: "supabase/functions/command/index.ts",
-    lines: [9244, 9250],
+    lines: [9321, 9321],
     contains: "!auth.agent.scopes.includes(validation.command.kind)",
   },
   {
     citedBy: "site/src/lib/agent-connect.ts (the 400 message)",
     file: "supabase/functions/command/index.ts",
-    lines: [2463, 2479],
+    lines: [2465, 2481],
     contains: "const valid = exactKeys(cmd, [",
   },
   // site/src/components/connect/agent-connect-mint.observer.test.ts
   {
     citedBy: "agent-connect-mint.observer.test.ts (timeboxed fallback, validator)",
     file: "supabase/functions/command/index.ts",
-    lines: [2461, 2464],
+    lines: [2468, 2468],
     contains: '? "timeboxed"',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (timeboxed fallback, prepared)",
     file: "supabase/functions/command/index.ts",
-    lines: [3419, 3422],
+    lines: [3427, 3427],
     contains: 'renewal_kind: wire.renewal_kind ?? "timeboxed"',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing needs an ABSENT horizon)",
     file: "supabase/functions/command/index.ts",
-    lines: [2467, 2467],
+    lines: [2474, 2474],
     contains: 'renewalKind === "standing" && cmd.renewal_horizon_ms === undefined',
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (the 400)",
     file: "supabase/functions/command/index.ts",
-    lines: [2521, 2521],
+    lines: [2528, 2528],
     contains: "mint_agent_token fields are malformed or out of bounds",
   },
   {
     citedBy: "agent-connect-mint.observer.test.ts (standing binds to the request device)",
     file: "supabase/functions/command/index.ts",
-    lines: [4623, 4623],
+    lines: [4630, 4630],
     contains: "standing ? prepared.wire.device_id : null",
   },
   // supabase/functions/command/index.ts — the resume handler's own comment
   {
     citedBy: "command/index.ts (resume handler, the pattern it copies)",
     file: "supabase/functions/command/index.ts",
-    lines: [3674, 3674],
+    lines: [3681, 3681],
     contains: "grant_preflight_code: (preflight[0]?.code ?? null)",
   },
   {
@@ -230,4 +241,13 @@ test("stdout inspection timeout citation includes the bounded exec option", { ti
   assert.ok(match, citation);
   const source = readFileSync(fileURLToPath(new URL("src/stdout-consumer.ts", root)), "utf8").split("\n");
   assert.match(source.slice(Number(match[1]) - 1, Number(match[2])).join("\n"), /timeout: timeoutMs/);
+});
+
+test("live-session timeout row includes resume and every context-file watcher start", { timeout: 1_000 }, () => {
+  const mapping = JSON.parse(readFileSync(fileURLToPath(new URL("scripts/timeout-table/mapping.json", root)), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/cloud/live-session-context.ts:timeoutMs"];
+  assert.match(row.detail, /every resume/);
+  assert.match(row.detail, /every watcher start with a context file on the host/);
+  const source = readFileSync(fileURLToPath(new URL("src/cli.ts", root)), "utf8");
+  assert.match(source, /verifiedLiveSessionContexts\(/);
 });

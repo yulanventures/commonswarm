@@ -27,6 +27,7 @@ import type { CloudTarget } from "./config.js";
 import {
   deleteSecureJsonFile,
   readSecureJsonFile,
+  readSecureJsonFileIfPresent,
   withFileLock,
   writeSecureJsonFile,
 } from "./storage.js";
@@ -181,6 +182,7 @@ export async function agentCredentialStore(options: {
   target: CloudTarget;
   lineageKey: string;
   stateDirectory?: string;
+  readOnly?: boolean;
 }): Promise<AgentCredentialStore> {
   if (!/^[0-9a-f]{32}$/.test(options.lineageKey)) {
     throw new Error("agent credential lineage key must be 32 lowercase hex characters");
@@ -194,7 +196,7 @@ export async function agentCredentialStore(options: {
   return {
     location,
     async read(): Promise<AgentCredentialRecord | null> {
-      const raw = await readSecureJsonFile(location, MAX_RECORD_BYTES);
+      const raw = await (options.readOnly ? readSecureJsonFileIfPresent : readSecureJsonFile)(location, MAX_RECORD_BYTES);
       return raw === null ? null : parseAgentCredentialRecord(raw);
     },
     async write(record: AgentCredentialRecord): Promise<void> {

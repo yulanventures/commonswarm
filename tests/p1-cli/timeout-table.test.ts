@@ -29,6 +29,39 @@ import { LISTENER_PROMPT_TIMEOUT_MS } from "../../src/listener/types.js";
 
 const repo = resolve(import.meta.dirname, "../..");
 
+test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
+  assert.equal(row.citation, "src/cli.ts:5032-5034; src/cloud/wake-lease.ts:61,64");
+  const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
+  const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
+  assert.match(cli.slice(5031, 5034).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(lease[60]!, /timeoutMs\?: number/);
+  assert.match(lease[63]!, /setTimeout\(\(\) => controller\.abort\(\)/);
+});
+
+test("HEAD timeout citations resolve to their exact operations", { timeout: 2_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const rows = mapping.refs.HEAD.rows;
+  const checks = [
+    [rows["src/cli.ts:setTimeout"].citation, "setTimeout(resolve, 100)"],
+    [rows["src/cli.ts:setTimeout#2"].citation, "setTimeout(done, 250)"],
+    [rows["src/cloud/storage.ts:timeoutMs#2"].citation, "options.timeoutMs ?? LOCK_TIMEOUT_MS"],
+    [rows["src/cloud/storage.ts:timeoutMs"].citation, "export function pidStartMs"],
+  ] as const;
+  for (const [citation, token] of checks) {
+    const match = /^(src\/[^:]+):(\d+)$/.exec(citation);
+    assert.ok(match, citation);
+    const lines = (await readFile(join(repo, match[1]!), "utf8")).split("\n");
+    assert.ok(lines[Number(match[2]) - 1]?.includes(token), citation);
+  }
+  const lockCitation = rows["src/cloud/storage.ts:LOCK_TIMEOUT_MS"].citation;
+  assert.equal(lockCitation, "src/cloud/storage.ts:35,631-632");
+  const storage = (await readFile(join(repo, "src/cloud/storage.ts"), "utf8")).split("\n");
+  assert.match(storage[34]!, /const LOCK_TIMEOUT_MS = 30_000/);
+  assert.match(storage.slice(630, 632).join("\n"), /options.timeoutMs \?\? LOCK_TIMEOUT_MS[\s\S]*timeoutMs > LOCK_TIMEOUT_MS/);
+});
+
 async function listen(delayMs: () => number) {
   let requests = 0;
   let receivedSecret = false;
@@ -86,6 +119,12 @@ test("timeout inventory and mapping are exact in both directions for each measur
     true,
   );
   const headRows = new Map(enumerateRepository({ repo }).map(row => [row.id, row]));
+  const headMapping = mappingForRef(mapping, "HEAD").rows;
+  assert.equal(headRows.get("src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS")?.value_ms, 30_000);
+  assert.equal(headRows.get("src/cli.ts:setTimeout")?.value_ms, 100);
+  assert.equal(headMapping["src/cli.ts:setTimeout"].operation.name, "listener-stop-poll");
+  assert.equal(headRows.get("src/cli.ts:setTimeout#2")?.value_ms, 250);
+  assert.equal(headMapping["src/cli.ts:setTimeout#2"].operation.name, "hook-stdin");
   assert.equal(
     headRows.get("src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS")?.value_ms,
     AGENT_CHECK_TIMEOUT_MS,
@@ -156,16 +195,16 @@ test("setup whole-operation timeout citation names the constant and deadline blo
   assert.match(lines[Number(match[3]) - 1] ?? "", /}, options.fetcher\);/);
 });
 
-test("Fold 15 storage lock citations resolve to the constant and default", { timeout: 10000 }, async () => {
+test("merged storage lock citations resolve to the constant and default", { timeout: 10000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const rows = mappingForRef(mapping, "HEAD").rows;
   const lines = (await readFile(join(repo, "src/cloud/storage.ts"), "utf8")).split("\n");
   for (const [id, expected] of [
     ["src/cloud/storage.ts:LOCK_TIMEOUT_MS", /^const LOCK_TIMEOUT_MS = 30_000;$/],
-    ["src/cloud/storage.ts:timeoutMs", /^  const timeoutMs = options\.timeoutMs \?\? LOCK_TIMEOUT_MS;$/],
+    ["src/cloud/storage.ts:timeoutMs#2", /^  const timeoutMs = options\.timeoutMs \?\? LOCK_TIMEOUT_MS;$/],
   ] as const) {
     const citation = rows[id]?.citation;
-    const match = /^src\/cloud\/storage\.ts:(\d+)$/.exec(citation ?? "");
+    const match = /^src\/cloud\/storage\.ts:(\d+)(?:,\d+-\d+)?$/.exec(citation ?? "");
     assert.ok(match, `unexpected citation for ${id}: ${citation}`);
     assert.match(lines[Number(match[1]) - 1] ?? "", expected);
   }
@@ -187,6 +226,15 @@ test("MCP hidden-input timeout citation points to the stty deadline", { timeout:
   assert.ok(match, `unexpected citation: ${citation}`);
   const source = await readFile(join(repo, "src/cloud/mcp-connect.ts"), "utf8");
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /spawnSync\("stty"[\s\S]*timeout: 2_000/);
+});
+
+test("machine-id timeout citation points to the bounded ioreg call", { timeout: 1000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/arrival-watch.ts:timeout"]?.citation;
+  const match = /^src\/cloud\/arrival-watch\.ts:(\d+)$/.exec(citation ?? "");
+  assert.ok(match, `unexpected citation: ${citation}`);
+  const source = await readFile(join(repo, "src/cloud/arrival-watch.ts"), "utf8");
+  assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /runFile\("\/usr\/sbin\/ioreg".*timeout: 2000/);
 });
 
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {

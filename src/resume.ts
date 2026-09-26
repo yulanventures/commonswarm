@@ -1,6 +1,11 @@
 import { execFile, spawn } from "node:child_process";
+import { dirname } from "node:path";
 import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
-import { notifyRestartCommand } from "./cloud/arrival-watch.js";
+import { arrivalHostIdFileState, arrivalMachineHash, arrivalWatchLockIdentity, arrivalWatchLockPath } from "./cloud/arrival-watch.js";
+import { WAKE_LEASE_STALE_LABEL, printedCommand, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
+import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
+import type { ServerSessionStatus } from "./cloud/session-client.js";
+import type { AgentWakeLease } from "./cloud/wake-lease.js";
 export { lsofStdoutConsumer } from "./stdout-consumer.js";
 export type { StdoutConsumerAdapter, StdoutConsumerState } from "./stdout-consumer.js";
 import type { BrainTopicSnapshot } from "./cloud/brain.js";
@@ -17,6 +22,7 @@ import {
 export interface ResumeIdentity {
   displayName: string;
   principalId: string;
+  sessionStatus?: ServerSessionStatus;
 }
 
 export interface ProcessRow {
@@ -91,10 +97,14 @@ export interface ResumeInspection {
     highWaterFile: string;
   };
   inbox: ResumeInboxCount;
+  sessionContexts?: { paths: string[]; verificationUnavailable: boolean; managed: boolean | null;
+    verificationRefused?: boolean; verificationServiceError?: boolean };
+  wakeLease?: { lease: AgentWakeLease | null; localWatcherId: string | null; unavailable?: boolean; machineIdUnavailable?: boolean; hostIdFileState?: "present" | "missing" | "unreadable"; hostIdDirectory?: string };
   target: CloudTarget;
   workspaceId: string;
   credentialFile: string;
   installedVersion: string;
+  stateDirectory?: string;
 }
 
 export interface ResumeInspectionAdapters {
@@ -104,6 +114,7 @@ export interface ResumeInspectionAdapters {
     principalId: string,
     instanceDirectory: string,
   ): Promise<ResumeInboxCount>;
+  readWakeLease?: () => Promise<AgentWakeLease | null>;
   processTable?: ProcessTableAdapter;
   stdoutConsumer?: StdoutConsumerAdapter;
   parentProcess?: ParentProcessAdapter;
@@ -121,6 +132,8 @@ export interface ResumeInspectionOptions {
   credentialPathAliases?: readonly string[];
   installedVersion: string;
   stateDirectory?: string;
+  sessionCredential?: string;
+  sessionTokenFile?: string;
 }
 
 function execFileText(
@@ -388,16 +401,39 @@ export async function inspectResume(
   const digestStore = new FileBrainDigestStore(paths.instanceDirectory, principalId);
   const digest = await digestStore.preview(topics);
   const inbox = await adapters.readInboxCount(principalId, paths.instanceDirectory);
+  const sessionContexts = options.sessionCredential === undefined ? undefined :
+    await verifiedLiveSessionContexts({ target: options.target, workspaceId: options.workspaceId,
+      principalId, credential: options.sessionCredential,
+      ...(identity.sessionStatus === undefined ? {} : { serverStatus: identity.sessionStatus }),
+      checkManagementWithoutFiles: true,
+      ...(options.sessionTokenFile === undefined ? {} : { tokenFile: options.sessionTokenFile }) });
+  let leaseUnavailable = false;
+  const lease = adapters.readWakeLease
+    ? await adapters.readWakeLease().catch(() => { leaseUnavailable = true; return null; })
+    : null;
+  const wakeLease = adapters.readWakeLease
+    ? { lease,
+        unavailable: leaseUnavailable,
+        machineIdUnavailable: await arrivalMachineHash() === null,
+        hostIdDirectory: dirname(arrivalWatchLockPath(options.target, options.workspaceId, principalId)),
+        hostIdFileState: await arrivalHostIdFileState(arrivalWatchLockPath(
+          options.target, options.workspaceId, principalId)),
+        localWatcherId: await arrivalWatchLockIdentity(arrivalWatchLockPath(
+          options.target, options.workspaceId, principalId)) }
+    : undefined;
   return {
     identity: { ...identity, principalId },
     listener,
     watchers,
     brain: { digest, highWaterFile: digestStore.location },
     inbox,
+    ...(sessionContexts ? { sessionContexts } : {}),
+    ...(wakeLease ? { wakeLease } : {}),
     target: options.target,
     workspaceId: options.workspaceId,
     credentialFile: options.credentialFile,
     installedVersion: options.installedVersion,
+    ...(options.stateDirectory ? { stateDirectory: options.stateDirectory } : {}),
   };
 }
 
@@ -426,25 +462,27 @@ function commonCommandArgs(report: ResumeInspection): string {
   ].join(" ");
 }
 
-function watcherRestartCommand(report: ResumeInspection): string {
-  return notifyRestartCommand({
-    agentTokenFile: report.credentialFile,
-    workspaceId: report.workspaceId,
-    url: report.target.url,
-    anonKey: report.target.anonKey,
-  });
+function watcherNextStep(report: ResumeInspection): string {
+  if (report.sessionContexts?.managed === false) {
+    return printedCommand("start one watcher under a live Monitor.",
+      `cswarm inbox --notify ${commonCommandArgs(report)}`);
+  }
+  return report.sessionContexts?.paths.length
+    ? "start one watcher under the live host session with its verified context path listed above."
+    : "start one watcher from this seat's live host session after its context is verified.";
 }
 
 function restartCommand(report: ResumeInspection, status: ListenerStatus): string {
   const common = commonCommandArgs(report);
+  const stateDir = report.stateDirectory ? ` --state-dir ${shellArg(report.stateDirectory)}` : "";
   const start = [
     "cswarm listen start",
     common,
-    `--provider ${status.provider}`,
-    `--permissions ${status.permissionMode ?? "allow"}`,
+    `--provider ${shellArg(status.provider)}`,
+    `--permissions ${shellArg(status.permissionMode ?? "allow")}`,
     "--route main",
   ].join(" ");
-  return `cswarm listen stop ${common} && ${start}`;
+  return `cswarm listen stop ${common}${stateDir} --wait && ${start}${stateDir}`;
 }
 
 function watcherState(watcher: NotifyWatcher): StdoutConsumerState {
@@ -480,14 +518,25 @@ export function renderResume(report: ResumeInspection): string {
     `You are ${safeText(report.identity.displayName)} (${report.identity.principalId}).`,
     "Next: use this principal for every listener, watcher, brain, and inbox check below.",
     "",
-    "Listener",
   ];
+  if (report.sessionContexts) {
+    lines.push(...(report.sessionContexts.verificationRefused
+      ? ["Live session context on this host: the service refused this credential (expired or revoked). Renew the agent credential, then resume."]
+      : report.sessionContexts.verificationServiceError
+      ? ["Live session context on this host: the read service returned an error; try again after it recovers."]
+      : report.sessionContexts.verificationUnavailable
+      ? ["Live session context on this host: could not verify with the read service; check again when it is reachable."]
+      : report.sessionContexts.paths.length === 0
+      ? ["Live session context on this host: no live session on this host was verified for this seat."]
+      : report.sessionContexts.paths.map(path => `Live session context on this host: ${safeText(path)}`)), "");
+  }
+  lines.push("Listener");
   const listener = report.listener;
   const status = listener.status;
   if (status === null) {
     lines.push(
       `No listener found under ${safeText(listener.checkedDirectory)} for profile ${report.target.profileId}.`,
-      `Next: start one with the original provider: cswarm listen start ${commonCommandArgs(report)} --provider <provider>`,
+      "Next: start one with the original provider used for this seat.",
     );
   } else {
     if (listener.source === "live_process") {
@@ -503,16 +552,16 @@ export function renderResume(report: ResumeInspection): string {
     if (listener.source !== "live_process") {
       lines.push(
         `Running listener cswarm version: cannot determine because the process did not answer; status file recorded ${runningVersion ?? "no version"}; installed CLI: ${report.installedVersion}.`,
-        `Next: restart the listener because its process did not answer: ${restartCommand(report, status)}`,
+        printedCommand("Next: restart the listener because its process did not answer.", restartCommand(report, status)),
       );
     } else if (runningVersion === null) {
       lines.push(
         `Listener cswarm version: cannot determine from this listener; installed CLI: ${report.installedVersion}.`,
-        `Next: restart it to make the running version reportable: ${restartCommand(report, status)}`,
+        printedCommand("Next: restart it to make the running version reportable.", restartCommand(report, status)),
       );
     } else if (runningVersion !== report.installedVersion) {
       lines.push(
-        `VERSION MISMATCH: listener runs ${runningVersion}; installed ${report.installedVersion} — restart it: ${restartCommand(report, status)}`,
+        printedCommand(`VERSION MISMATCH: listener runs ${runningVersion}; installed ${report.installedVersion}. Restart it.`, restartCommand(report, status)),
       );
     } else {
       lines.push(
@@ -530,7 +579,7 @@ export function renderResume(report: ResumeInspection): string {
   if (report.watchers.length === 0) {
     lines.push(
       "Found: 0.",
-      `Next: start one watcher under a live Monitor: ${watcherRestartCommand(report)}`,
+      `Next: ${watcherNextStep(report)}`,
     );
   } else {
     lines.push(`Found: ${report.watchers.length}.`);
@@ -538,7 +587,9 @@ export function renderResume(report: ResumeInspection): string {
     const orphans = report.watchers.filter((watcher) => watcherState(watcher) === "orphaned");
     if (orphans.length > 0) {
       lines.push(
-        `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}; then restart ${watcherRestartCommand(report)} under the session's Monitor.`,
+        printedCommand(`Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything.`,
+          `kill ${orphans.map((watcher) => watcher.pid).join(" ")}`),
+        `Then ${watcherNextStep(report)}`,
       );
     } else if (report.watchers.some((watcher) => watcherState(watcher) === "cannot_determine")) {
       const unknown = report.watchers.filter((watcher) => watcherState(watcher) === "cannot_determine");
@@ -554,6 +605,24 @@ export function renderResume(report: ResumeInspection): string {
     }
   }
 
+  if (report.wakeLease) {
+    if (report.wakeLease.machineIdUnavailable) {
+      lines.push(report.wakeLease.hostIdFileState === "present"
+        ? "This command could not read the machine id; a host-id file exists but cannot be verified against this machine."
+        : report.wakeLease.hostIdFileState === "missing"
+        ? "This command could not read the machine id; no host-id file exists yet."
+        : "This command could not read the machine id or verify the host-id file.");
+      if (report.wakeLease.hostIdDirectory) lines.push(
+        `Keep the host-id state in ${safeText(report.wakeLease.hostIdDirectory)} separate on each machine; sharing that directory across machines is unsupported.`);
+    }
+    const lease = report.wakeLease.lease;
+    lines.push(report.wakeLease.unavailable
+      ? "Server wake lease: unavailable; check again when the read service is reachable."
+      : lease === null
+      ? "Server wake lease: none."
+      : `Server wake lease: ${sanitizeWakeHostLabel(lease.host_label)}, generation ${lease.generation}, renewed ${Math.floor(lease.renewed_age_ms / 1000)}s ago; this host holds it: ${report.wakeLease.localWatcherId === lease.watcher_id ? "yes" : "no"}. A renewal does not prove this session reads its mail; observed ACK does. The lease goes stale after ${WAKE_LEASE_STALE_LABEL}.`);
+  }
+
   lines.push(
     "",
     "Brain digest",
@@ -565,7 +634,8 @@ export function renderResume(report: ResumeInspection): string {
       "Next: no brain read is needed now.",
     );
   } else {
-    lines.push(report.brain.digest, "Next: read any needed topic with the command above.");
+    lines.push(report.brain.digest.replace(/ Read: cswarm brain get <topic>$/, ""),
+      "Next: read any needed topic by name.");
   }
 
   const inboxCount = report.inbox.exact
@@ -577,7 +647,7 @@ export function renderResume(report: ResumeInspection): string {
     `Unread directed asks and notes from the same read used by the hook: ${inboxCount}.`,
     report.inbox.count === 0
       ? "Next: no inbox action is needed now."
-      : `Next: read them without acknowledging them first: cswarm inbox ${commonCommandArgs(report)}`,
+      : printedCommand("Next: read them without acknowledging them first.", `cswarm inbox ${commonCommandArgs(report)}`),
     "",
     "Read-only check complete. No cursor, brain high-water, listener status, receipt, acknowledgement, or process was changed.",
   );
@@ -591,6 +661,8 @@ export function resumeJson(report: ResumeInspection): Record<string, unknown> {
       display_name: report.identity.displayName,
       principal_id: report.identity.principalId,
     },
+    ...(report.sessionContexts ? { live_session_context_paths: report.sessionContexts.paths,
+      live_session_context_verification_unavailable: report.sessionContexts.verificationUnavailable } : {}),
     listener: {
       found: report.listener.status !== null,
       checked_directory: report.listener.checkedDirectory,
@@ -613,6 +685,16 @@ export function resumeJson(report: ResumeInspection): Record<string, unknown> {
       parent: watcher.parent,
       state: watcherState(watcher),
     })),
+    ...(report.wakeLease ? { ...(report.wakeLease.unavailable ? { wake_lease_error: "unavailable" } : {}),
+      ...(report.wakeLease.machineIdUnavailable ? { host_machine_id_unavailable: true } : {}),
+      host_id_file_state: report.wakeLease.hostIdFileState ?? null,
+      wake_lease: report.wakeLease.lease === null ? null : {
+      host_label: sanitizeWakeHostLabel(report.wakeLease.lease.host_label),
+      generation: report.wakeLease.lease.generation,
+      renewed_age_ms: report.wakeLease.lease.renewed_age_ms,
+      held_by_this_host: report.wakeLease.localWatcherId === report.wakeLease.lease.watcher_id,
+      renewal_is_mail_observation: false,
+    } } : {}),
     brain: {
       high_water_file: report.brain.highWaterFile,
       high_water_advanced: false,

@@ -359,6 +359,7 @@ export async function runListenerSupervisor(
     ...(options.projectDirectory ? { projectDirectory: options.projectDirectory } : {}),
     ...(options.targetUrl ? { targetUrl: options.targetUrl } : {}),
     pid: process.pid,
+    processStartedAt: Date.now() - process.uptime() * 1_000,
     state: "starting",
     startedAt,
     readyAt: null,
@@ -1219,31 +1220,17 @@ export async function runListenerSupervisor(
  */
 export async function effectiveListenerStatus(
   paths: ListenerPaths,
+  timeoutMs?: number,
 ): Promise<ListenerStatus | null> {
   try {
-    return await queryListenerControl(paths, "status");
+    return await queryListenerControl(paths, "status", timeoutMs);
   } catch {
     const stored = await readListenerStatus(paths);
     if (
       stored &&
       LISTENER_RUNNING_STATES.includes(stored.state)
     ) {
-      const failed: ListenerStatus = {
-        ...stored,
-        state: "failed",
-        updatedAt: new Date().toISOString(),
-        stoppedAt: new Date().toISOString(),
-        lastErrorCode: "unclean_exit",
-        /* The process is gone: it holds nothing and observes nothing, so every
-           field whose sentence is rendered in the present tense against read
-           time is cleared. pendingDeliveryCount stays, because its line already
-           says it is what the service reported. */
-        currentDeliverySignalId: null,
-        currentDeliverySince: null,
-        heldBackDeliveries: [],
-        credentialStopAt: null,
-        nextAttemptAt: null,
-      };
+      const failed = uncleanListenerStatus(stored);
       await writeListenerStatus(paths, failed);
       return failed;
     }
@@ -1251,13 +1238,23 @@ export async function effectiveListenerStatus(
   }
 }
 
+/** Derive a truthful dead-process view without changing the saved record. */
+export function uncleanListenerStatus(stored: ListenerStatus): ListenerStatus {
+  const stoppedAt = new Date().toISOString();
+  return { ...stored, state: "failed", updatedAt: stoppedAt, stoppedAt,
+    lastErrorCode: "unclean_exit", currentDeliverySignalId: null,
+    currentDeliverySince: null, heldBackDeliveries: [], credentialStopAt: null,
+    nextAttemptAt: null };
+}
+
 export async function stopListener(
   paths: ListenerPaths,
+  timeoutMs?: number,
 ): Promise<ListenerStatus | null> {
   try {
-    return await queryListenerControl(paths, "stop");
+    return await queryListenerControl(paths, "stop", timeoutMs);
   } catch {
-    return await effectiveListenerStatus(paths);
+    return await effectiveListenerStatus(paths, timeoutMs);
   }
 }
 

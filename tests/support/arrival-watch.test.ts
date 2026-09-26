@@ -4,14 +4,21 @@
  * ★ Named by `npm test`; it needs no network or database.
  */
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readlink, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import {
   acquireArrivalWatchLock,
+  acquireArrivalWatchSeatLocks,
+  arrivalHostId,
+  arrivalHostIdFileState,
+  arrivalMachineHash,
+  arrivalWatchLockPath,
   arrivalWatchLockHeld,
+  legacyArrivalWatchLockPath,
   arrivalNotification,
   arrivalFullTextCommand,
   arrivalReplyCommand,
@@ -22,14 +29,17 @@ import {
   ARRIVAL_SNIPPET_MAX,
   ARRIVAL_WATCH_POLL_MS,
   NotifyStdoutClosedError,
+  notifySignalStopSentence,
   createArrivalRetryNoticePolicy,
   formatArrivalNotification,
   formatArrivalRetryNotice,
   releaseArrivalWatchLock,
+  releaseArrivalWatchSeatLocks,
   runArrivalWatch,
   type ArrivalCursorStore,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+import { cleanupDeadOwnerTemps } from "../../src/cloud/storage.js";
 import { nextIdlePollMs } from "../../src/cloud/idle-poll.js";
 import {
   SignalHttpError,
@@ -59,6 +69,111 @@ const EXISTING_CURSOR = {
   created_at: "2026-08-28T10:04:00.000Z",
   id: "55555555-5555-4555-8555-555555555555",
 };
+
+test("arrival host id is stable and private in the state directory", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-id-"));
+  try {
+    const lockPath = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    const first = await arrivalHostId(lockPath);
+    const second = await arrivalHostId(lockPath);
+    assert.equal(first, second);
+    assert.deepEqual(new Set(await Promise.all(Array.from({ length: 8 }, () => arrivalHostId(lockPath)))), new Set([first]));
+    const info = await stat(join(root, "host-id"));
+    assert.equal(info.mode & 0o777, 0o600);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("one seat lock spans profile ids in the same state root", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-seat-lock-"));
+  const other = { ...CLOUD, profileId: "other-profile" };
+  const first = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  const second = arrivalWatchLockPath(other, WORKSPACE, AGENT, root);
+  try {
+    assert.equal(first, second);
+    await acquireArrivalWatchLock(first);
+    await assert.rejects(acquireArrivalWatchLock(second), ArrivalWatchAlreadyRunningError);
+  } finally {
+    await releaseArrivalWatchLock(first);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("new watcher also holds the previous release's profile lock", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-upgrade-lock-"));
+  const oldPath = legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  try {
+    assert.equal(oldPath, join(root, `${CLOUD.profileId}-${WORKSPACE}-${AGENT}.lock`));
+    await acquireArrivalWatchLock(oldPath);
+    await assert.rejects(
+      acquireArrivalWatchSeatLocks(CLOUD, WORKSPACE, AGENT, process.pid, undefined, root),
+      ArrivalWatchAlreadyRunningError,
+    );
+    await releaseArrivalWatchLock(oldPath);
+    const locks = await acquireArrivalWatchSeatLocks(CLOUD, WORKSPACE, AGENT, process.pid, undefined, root);
+    try {
+      await assert.rejects(acquireArrivalWatchLock(oldPath), ArrivalWatchAlreadyRunningError);
+    } finally { await releaseArrivalWatchSeatLocks(locks); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("copied host id rotates on machine mismatch and survives unreadable machine id", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-copy-"));
+  try {
+    const path = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    const first = await arrivalHostId(path, "a".repeat(64));
+    assert.equal(await arrivalHostId(path, null), first);
+    const second = await arrivalHostId(path, "b".repeat(64));
+    assert.notEqual(second, first);
+    assert.equal(await arrivalHostId(path, "b".repeat(64)), second);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("host id gains a newly readable machine hash without changing identity", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-adopt-"));
+  try {
+    const lock = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+    assert.equal(await arrivalHostIdFileState(lock), "missing");
+    const first = await arrivalHostId(lock, null);
+    assert.equal(await arrivalHostIdFileState(lock), "present");
+    assert.equal(await arrivalHostId(lock, "a".repeat(64)), first);
+    assert.deepEqual(JSON.parse(await readFile(join(root, "host-id"), "utf8")), {
+      host_id: first, machine_hash: "a".repeat(64),
+    });
+    assert.notEqual(await arrivalHostId(lock, "b".repeat(64)), first);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("machine hash lookup names the system tool by absolute path", { timeout: 2000 }, async () => {
+  const source = await readFile(new URL("../../src/cloud/arrival-watch.ts", import.meta.url), "utf8");
+  assert.match(source, /runFile\("\/usr\/sbin\/ioreg"/);
+  assert.match(source, /readFile\("\/etc\/machine-id"/);
+  const hash = await arrivalMachineHash();
+  assert.equal(hash === null || /^[0-9a-f]{64}$/.test(hash), true);
+});
+
+test("bad host id content or mode is replaced with one path-specific notice", { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-host-repair-"));
+  const path = join(root, "host-id");
+  const lock = arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root);
+  const originalWrite = process.stderr.write;
+  let notices = "";
+  process.stderr.write = ((chunk: string) => { notices += chunk; return true; }) as typeof process.stderr.write;
+  try {
+    await writeFile(path, "garbage", { mode: 0o600 });
+    const repaired = await arrivalHostId(lock, "a".repeat(64));
+    assert.match(repaired, /^[0-9a-f-]{36}$/);
+    assert.equal(notices.match(/replacing invalid or copied host id/g)?.length, 1);
+    assert.match(notices, /host-id/);
+    notices = "";
+    await chmod(path, 0o644);
+    assert.notEqual(await arrivalHostId(lock, "a".repeat(64)), repaired);
+    assert.equal(notices.match(/replacing invalid or copied host id/g)?.length, 1);
+    assert.match(notices, /host-id/);
+  } finally {
+    process.stderr.write = originalWrite;
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function row(id: string, body: string, createdAt: string): SignalRecord {
   return {
@@ -674,7 +789,7 @@ test("a second arrival watcher for the same agent names the other pid", async ()
   const root = await mkdtemp(join(tmpdir(), "cswarm-notify-lock-"));
   const lockPath = join(root, "watch.lock");
   const ownerPid = process.pid;
-  await acquireArrivalWatchLock(lockPath, ownerPid);
+  assert.equal(await acquireArrivalWatchLock(lockPath, ownerPid), false);
   await assert.rejects(
     () => acquireArrivalWatchLock(lockPath, ownerPid + 1),
     (error: unknown) => {
@@ -696,11 +811,194 @@ test("a stale arrival watch lock is stolen when the other pid is gone", async ()
   await writeFile(lockPath, `${JSON.stringify({ version: 1, pid: 999999 })}\n`, {
     mode: 0o600,
   });
-  await acquireArrivalWatchLock(lockPath, process.pid);
+  assert.equal(await acquireArrivalWatchLock(lockPath, process.pid), true);
   const raw = await readFile(lockPath, "utf8");
   assert.match(raw, new RegExp(`"pid":${process.pid}`));
   await releaseArrivalWatchLock(lockPath, process.pid);
   await rm(root, { recursive: true, force: true });
+});
+
+test("two stale seat or legacy takeovers leave one watcher", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-takeover-"));
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      await writeFile(path, `${JSON.stringify({ version: 1, pid: 999_999_999 })}\n`, { mode: 0o600 });
+      let entered!: () => void;
+      let release!: () => void;
+      const atMove = new Promise<void>(resolve => { entered = resolve; });
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const first = acquireArrivalWatchLock(path, process.pid, undefined,
+        { onBeforeStaleMove: async () => { entered(); await blocked; } });
+      try {
+        await atMove;
+        let secondEntered = false;
+        const second = acquireArrivalWatchLock(path, process.pid, undefined,
+          { onBeforeStaleMove: async () => { secondEntered = true; } });
+        await new Promise(resolve => setTimeout(resolve, 60));
+        assert.equal(secondEntered, false, "the second takeover must wait for the first publication");
+        release();
+        assert.equal(await first, true);
+        await assert.rejects(second, ArrivalWatchAlreadyRunningError);
+        assert.equal(JSON.parse(await readFile(path, "utf8")).pid, process.pid);
+      } finally {
+        release();
+        await first.catch(() => undefined);
+        await releaseArrivalWatchLock(path);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a changed owner survives the stale watcher's moved-record check", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-moved-"));
+  const path = join(root, "watch.lock");
+  const replacement = `${JSON.stringify({ version: 1, pid: process.pid })}\n`;
+  try {
+    await writeFile(path, `${JSON.stringify({ version: 1, pid: 999_999_999 })}\n`);
+    await assert.rejects(acquireArrivalWatchLock(path, process.pid, undefined, {
+      onBeforeStaleMove: async () => {
+        await writeFile(`${path}.new`, replacement);
+        await rename(`${path}.new`, path);
+      },
+    }), ArrivalWatchAlreadyRunningError);
+    assert.equal(await readFile(path, "utf8"), replacement);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a future-dated incomplete watcher lock obeys one deadline", { timeout: 7_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-future-"));
+  const path = join(root, "watch.lock");
+  try {
+    await writeFile(path, "{partial");
+    const future = new Date(Date.now() + 60_000);
+    await utimes(path, future, future);
+    const start = Date.now();
+    await assert.rejects(acquireArrivalWatchLock(path), /timed out waiting for the watch lock.*rm --/);
+    assert.ok(Date.now() - start < 6_000);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("seat and legacy live owners survive an aged record", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-aged-live-"));
+  const clock = Date.now;
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      await acquireArrivalWatchLock(path);
+      const before = await readFile(path, "utf8");
+      Date.now = () => clock() + 61_000;
+      await assert.rejects(acquireArrivalWatchLock(path), ArrivalWatchAlreadyRunningError);
+      Date.now = clock;
+      assert.equal(await readFile(path, "utf8"), before);
+      await releaseArrivalWatchLock(path);
+    }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("dead symlink owner is taken over without deleting its target before the move", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-symlink-"));
+  const path = join(root, "watch.lock");
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+      `import { acquireArrivalWatchLock } from './src/cloud/arrival-watch.ts';
+       await acquireArrivalWatchLock(process.argv[1], process.pid, undefined, {
+         publishLink: async () => { throw Object.assign(new Error('unsupported'), { code: 'EPERM' }); },
+       });
+       process.stdout.write('ready\\n'); await new Promise(() => {});`, path],
+      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    await new Promise<void>((resolve, reject) => {
+      child!.stdout!.once("data", () => resolve());
+      child!.once("error", reject);
+      child!.once("close", code => reject(new Error(`publisher exited: ${code}`)));
+    });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 1);
+    const target = await readlink(path);
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    await cleanupDeadOwnerTemps(root, "watch.lock");
+    assert.match(await readFile(target, "utf8"), /"owner_id"/);
+    assert.equal(await acquireArrivalWatchLock(path), true);
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 0);
+    await releaseArrivalWatchLock(path);
+  } finally {
+    if (child?.exitCode === null && child?.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a killed watcher publisher's private temp is removed on the next start", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-temp-"));
+  const path = join(root, "watch.lock");
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+    `import { acquireArrivalWatchLock } from './src/cloud/arrival-watch.ts';
+     await acquireArrivalWatchLock(process.argv[1], process.pid, undefined,
+       { onBeforePublish: async () => { process.stdout.write('ready\\n'); await new Promise(() => {}); } });`,
+    path], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.once("data", () => resolve());
+      child.once("error", reject);
+      child.once("close", code => reject(new Error(`publisher exited early: ${code}`)));
+    });
+    assert.equal((await readdir(root)).filter(name => /^watch\.lock\.\d+\.[0-9a-f]+\.tmp$/.test(name)).length, 1);
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await acquireArrivalWatchLock(path);
+    assert.equal((await readdir(root)).filter(name => /^watch\.lock\.\d+\.[0-9a-f]+\.tmp$/.test(name)).length, 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise<void>(resolve => child.once("close", () => resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("signal stop names the current inbox surface", { timeout: 2_000 }, () => {
+  const options = { url: "http://127.0.0.1:1" };
+  assert.match(notifySignalStopSentence("SIGTERM", options, "released"), /nothing is watching this inbox now/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "last-known"), /another surface may have taken over since/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "claim-unknown"), /claim result is unknown/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "h0_poll"), /H0 poll holds this inbox now/);
+  assert.doesNotMatch(notifySignalStopSentence("SIGTERM", options, "watcher"), /nothing is watching/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "watcher"), /another watcher holds/);
+});
+
+test("seat and legacy watcher locks publish a complete owner before either contender can acquire", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-atomic-"));
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      let entered!: () => void;
+      let release!: () => void;
+      const publishing = new Promise<void>(resolve => { entered = resolve; });
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const first = acquireArrivalWatchLock(path, process.pid, undefined, { onBeforePublish: async () => {
+        entered();
+        await blocked;
+      } });
+      try {
+        await publishing;
+        await assert.rejects(stat(path), { code: "ENOENT" }, "a slow writer must not expose an empty lock");
+        const second = acquireArrivalWatchLock(path);
+        release();
+        const outcomes = await Promise.allSettled([first, second]);
+        assert.equal(outcomes.filter(result => result.status === "fulfilled").length, 1);
+        assert.equal(outcomes.filter(result => result.status === "rejected" &&
+          result.reason instanceof ArrivalWatchAlreadyRunningError).length, 1);
+        assert.equal(JSON.parse(await readFile(path, "utf8")).pid, process.pid);
+      } finally {
+        release();
+        await first.catch(() => undefined);
+        await releaseArrivalWatchLock(path);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("arrivalWatchLockHeld is true only while the lock names a live pid", async () => {

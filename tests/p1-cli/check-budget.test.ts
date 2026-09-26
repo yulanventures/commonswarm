@@ -268,7 +268,16 @@ test("lock contention from another process becomes check_timeout without moving 
       profilePath,
       fetcher: fetcher([first, signal(2)], 0),
       present: async () => {},
-    }), { code: "check_timeout" });
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.equal((error as Error & { code?: string }).code, "check_timeout");
+      assert.match(error.message, /check\.lock/);
+      assert.match(error.message, new RegExp(`owner pid ${holder.pid}`));
+      assert.ok(error.message.includes(`host ${hostname()}`));
+      assert.ok(error.message.includes(`rm -- '${lockPath}'`));
+      assert.doesNotMatch(error.message, /Try cswarm check again/);
+      return true;
+    });
     const elapsed = Date.now() - started;
     assert.ok(elapsed < AGENT_CHECK_TIMEOUT_MS + 250, `lock timeout took ${elapsed}ms`);
     const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));

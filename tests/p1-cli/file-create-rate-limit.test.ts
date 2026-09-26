@@ -1074,7 +1074,7 @@ test("the generated content-type regex accepts and refuses exactly what the lite
  * `scope` and `resets_at` are strings the SERVER chooses, and this lane added a branch that
  * wrote them raw beside a sanitised message — the one unsanitised path in the pair. A Codex arm
  * caught it. Assert the CLI routes them through the same terminal sanitiser. */
-test("the CLI sanitises the refusal's wire fields before they reach the terminal", () => {
+test("the CLI sanitises the refusal's wire fields before they reach the terminal", { timeout: 1000 }, () => {
   const cli = read("src/cli.ts");
 
   assert.match(
@@ -1084,7 +1084,7 @@ test("the CLI sanitises the refusal's wire fields before they reach the terminal
   );
   assert.match(
     cli,
-    /const message = error instanceof Error \? error\.message : "unknown error";\s*\n\s*return sanitizeForTerminal\(message\)/,
+    /const message = error instanceof Error \? error\.message : "unknown error";[\s\S]*?const safe = error instanceof WakeLeaseLostError[\s\S]*?message\.split\("\\n"\)\.map\(sanitizeForTerminal\)\.join\("\\n"\)[\s\S]*?: sanitizeForTerminal\(message\);[\s\S]*?return error instanceof WakeLeaseLostError \? safe : safe\.slice\(0, 1000\)/,
     "safeError no longer routes through sanitizeForTerminal",
   );
   assert.match(

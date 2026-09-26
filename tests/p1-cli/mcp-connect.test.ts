@@ -6,7 +6,7 @@ import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { PassThrough } from "node:stream";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -30,6 +30,78 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+
+test("connect accepts its symlink lock when hard-link publication is unavailable", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "symlink-lock", "profile.json");
+    let observedLockTarget: string | null = null;
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      publishLink: async () => { throw Object.assign(new Error("hard links unavailable"), { code: "EPERM" }); },
+      fetcher: async (input, init) => {
+        const lockPath = join(dirname(path), CONNECT_PROFILE_FILES.connectLock);
+        assert.equal((await lstat(lockPath)).isSymbolicLink(), true);
+        observedLockTarget = await readlink(lockPath);
+        assert.equal((await lstat(observedLockTarget)).isFile(), true);
+        return f.fetcher(input, init);
+      } });
+    assert.equal(result.profile, path);
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+    assert.equal(f.calls(), 1);
+    assert.notEqual(observedLockTarget, null);
+    assert.equal((await readdir(dirname(path))).filter(name => name.endsWith(".lock")).length, 0);
+  } finally { await f.close(); }
+});
+
+test("connect refuses symlink locks that are not its private published owner file", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const variant of ["other-directory", "wrong-mode", "wrong-name"] as const) {
+      const directory = join(f.root, variant);
+      await mkdir(directory, { mode: 0o700 });
+      const path = join(directory, "profile.json");
+      const lockPath = join(directory, CONNECT_PROFILE_FILES.connectLock);
+      const target = variant === "other-directory"
+        ? join(f.root, `${CONNECT_PROFILE_FILES.connectLock}.${process.pid}.${"a".repeat(16)}.tmp`)
+        : variant === "wrong-name"
+          ? `${lockPath}.${process.pid}.${"a".repeat(15)}.tmp`
+          : `${lockPath}.${process.pid}.${"a".repeat(16)}.tmp`;
+      await writeFile(target, "owner", { mode: variant === "wrong-mode" ? 0o644 : 0o600 });
+      await chmod(target, variant === "wrong-mode" ? 0o644 : 0o600);
+      await symlink(target, lockPath);
+      let posts = 0;
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), { code: "connect_reserved_unreadable" });
+      assert.equal(posts, 0, variant);
+    }
+
+    const directory = join(f.root, "non-lock");
+    await mkdir(directory, { mode: 0o700 });
+    const pendingPath = join(directory, CONNECT_PROFILE_FILES.pending);
+    const pendingTarget = `${pendingPath}.${process.pid}.${"b".repeat(16)}.tmp`;
+    await writeFile(pendingTarget, "pending", { mode: 0o600 });
+    await symlink(pendingTarget, pendingPath);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: join(directory, "profile.json"),
+      readCode: async () => JOIN, fetcher: async () => { throw new Error("unexpected POST"); } }),
+    { code: "connect_pending_unreadable" });
+  } finally { await f.close(); }
+});
+
+test("both reserved lock names accept their private published owner file", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const lockName of [CONNECT_PROFILE_FILES.connectLock, CONNECT_PROFILE_FILES.setupLock]) {
+      const lockPath = join(f.root, lockName);
+      const target = `${lockPath}.${process.pid}.${"c".repeat(16)}.tmp`;
+      await writeFile(target, "owner", { mode: 0o600 });
+      await chmod(target, 0o600);
+      await symlink(target, lockPath);
+      assert.equal((await classifyConnectReservedPath(lockPath)).outcome, "ok", lockName);
+      await unlink(lockPath);
+      await unlink(target);
+    }
+  } finally { await f.close(); }
+});
 
 test("Fold 18 a vanished reserved file is absent after the read race", { timeout: 10000 }, async () => {
   const f = await fixture();

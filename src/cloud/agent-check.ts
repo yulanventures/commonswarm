@@ -351,7 +351,11 @@ export async function checkAgentMessages(options: {
     }
     return checked.result;
   } catch (error) {
-    if (error instanceof FileLockTimeoutError || error instanceof SignalReadTimeoutError) {
+    if (error instanceof FileLockTimeoutError) {
+      throw new AgentSetupError("check_timeout",
+        `The message check timed out on a local lock: ${error.message}`);
+    }
+    if (error instanceof SignalReadTimeoutError) {
       throw checkTimeoutError();
     }
     throw error;

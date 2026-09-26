@@ -576,10 +576,10 @@ export async function readSessionContextIfPresent(
  * caller that needs the live proof treats "none" and "more than one" alike,
  * never picking a first match.
  */
-export async function listSessionContexts(
+export async function listSessionContextFiles(
   workspaceId: string,
   principalId: string,
-): Promise<SessionContextDocument[]> {
+): Promise<Array<{ path: string; context: SessionContextDocument }>> {
   const directory = join(
     defaultSessionRootDirectory(),
     workspaceId.toLowerCase(),
@@ -591,17 +591,28 @@ export async function listSessionContexts(
   } catch {
     return [];
   }
-  const contexts: SessionContextDocument[] = [];
+  const contexts: Array<{ path: string; context: SessionContextDocument }> = [];
   for (const name of names.sort()) {
     if (!name.endsWith(".json")) continue;
     try {
-      const context = await readSessionContextIfPresent(join(directory, name));
-      if (context !== null) contexts.push(context);
+      const path = join(directory, name);
+      const context = await readSessionContextIfPresent(path);
+      if (context !== null && context.workspace_id.toLowerCase() === workspaceId.toLowerCase() &&
+          context.principal_id.toLowerCase() === principalId.toLowerCase()) {
+        contexts.push({ path, context });
+      }
     } catch {
       continue;
     }
   }
   return contexts;
+}
+
+export async function listSessionContexts(
+  workspaceId: string,
+  principalId: string,
+): Promise<SessionContextDocument[]> {
+  return (await listSessionContextFiles(workspaceId, principalId)).map(({ context }) => context);
 }
 
 export async function deleteSessionContext(path: string): Promise<void> {

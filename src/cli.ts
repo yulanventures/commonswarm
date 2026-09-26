@@ -9,6 +9,7 @@ export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
 import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
 import { AgentSetupError, privatePath, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
+import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
@@ -29,8 +30,8 @@ import {
 } from "./onboarding-cli.js";
 import { spawnSync } from "node:child_process";
 import { createReadStream, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { open, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
+import { open, realpath, unlink } from "node:fs/promises";
+import { homedir, hostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import type { Command } from "./protocol/index.js";
@@ -151,6 +152,7 @@ import {
   agentSignalPendingStore,
   credentialStore, defaultCredentialStateDirectory,
   readSecureJsonFile,
+  pidStartMs,
   type CredentialStore,
 } from "./cloud/storage.js";
 import {
@@ -255,10 +257,13 @@ import {
   type SignalAttachmentRef,
 } from "./cloud/attachments.js";
 import {
-  acquireArrivalWatchLock,
+  acquireArrivalWatchSeatLocks,
+  arrivalHostId,
   arrivalNotification,
   arrivalWatchLockHeld,
   arrivalWatchLockPath,
+  legacyArrivalWatchLockPath,
+  arrivalWatchLockIdentity,
   createArrivalRetryNoticePolicy,
   fileArrivalCursorStore,
   formatArrivalNotification,
@@ -267,14 +272,19 @@ import {
   EXIT_NOTIFY_ORPHANED,
   NOTIFY_FLAG,
   NOTIFY_SIGNAL_EXIT_CODES,
+  notifyRefusalRestartCommand,
+  notifyRestartCommand,
   notifySignalStopSentence,
   type NotifyRestartOptions,
   NotifyStdoutClosedError,
-  releaseArrivalWatchLock,
+  releaseArrivalWatchSeatLocks,
   runArrivalWatch,
   writeArrivalMonitorLine,
 } from "./cloud/arrival-watch.js";
 import { lsofStdoutConsumer } from "./stdout-consumer.js";
+import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseTransientError } from "./cloud/wake-lease.js";
+import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
+const LISTENER_STOP_WAIT_TIMEOUT_MS = 30_000;
 import {
   IDLE_POLL_DEFAULT_MS,
   idlePollHelpSentence,
@@ -312,6 +322,7 @@ import {
   ListenerStartupError,
   ListenerActivityController,
   effectiveListenerStatus,
+  uncleanListenerStatus,
   listenerPaths,
   defaultListenerStateDirectory,
   discoverListenerHookPrincipalIds,
@@ -321,6 +332,8 @@ import {
   runListenerSupervisor,
   spawnDetachedListener,
   stopListener,
+  queryListenerControl,
+  readListenerStatusIfPresent,
   waitForListenerReady,
   LISTENER_PROMPT_TIMEOUT_MS,
   ListenerRenewalUnavailableError,
@@ -364,6 +377,7 @@ import {
   type ListenerDeliveryJournal,
   type ListenerSenderProvenanceContext,
   type ListenerStatus,
+  type ListenerPaths,
   type ListenerRouteMode,
   type ListenerAttendanceSurface,
 } from "./listener/index.js";
@@ -375,10 +389,9 @@ import {
 } from "./resume.js";
 import {
   SessionContextError,
-  defaultSessionContextPath,
   defaultSessionRootDirectory,
   holdSessionReceiverLock,
-  listSessionContexts,
+  listSessionContextFiles,
   readSessionContext,
   releaseSessionReceiverLock,
   releaseSessionReceiverLockIfHeld,
@@ -599,7 +612,7 @@ export const KNOWN_FLAGS = new Set([
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel",
   "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
-  "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "opencode-executable", "out",
+  "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
@@ -628,6 +641,7 @@ export const BOOLEAN_FLAGS = new Set([
   "local",
   "ndjson",
   "notify",
+  "take-over",
   "no-browser",
   "reveal-anon-key",
   "repo",
@@ -695,7 +709,8 @@ export class Arguments {
       if (!name || name.includes("=")) {
         throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
-      if (BOOLEAN_FLAGS.has(name)) {
+      if (BOOLEAN_FLAGS.has(name) || (name === "wait" &&
+          this.positionals[0] === "listen" && this.positionals[1] === "stop")) {
         this.push(name, "true");
         this.originalOptions.push({ name });
         continue;
@@ -832,7 +847,7 @@ function requireProfileWithHostSessionId(args: Arguments): void {
 const SESSION_CONTEXT_FLAGS = ["session-context"] as const;
 const NOTIFY_PATH_FLAGS = new Set(["agent-token-file", "profile", "session-context"]);
 export const NOTIFY_ACCEPTED_FLAGS = [
-  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, NOTIFY_FLAG, "json", ...SESSION_CONTEXT_FLAGS,
+  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, NOTIFY_FLAG, "take-over", "json", ...SESSION_CONTEXT_FLAGS,
 ] as const;
 
 export function notifyRestartOptions(args: Arguments): NotifyRestartOptions {
@@ -892,7 +907,7 @@ Usage:
   cswarm receipt <signal-id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
   cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]
   cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]
-  cswarm inbox --notify ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
+  cswarm inbox --notify ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--session-context <path>] [--take-over] [--json]
   cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]
   cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters
   cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
@@ -910,7 +925,7 @@ Usage:
   cswarm listen start ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]
   cswarm listen canary ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]
   cswarm listen status ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm listen stop ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
+  cswarm listen stop ${agentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--state-dir <path>] [--wait] [--json]
   cswarm session start --mode ${SESSION_MODES.join("|")} --provider grok|opencode|claude|codex --host-session-id <id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--session-context <absolute-path>] [--host-label <text>] [--foreground] [--json]
   cswarm session status --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
   cswarm session stop --session-context <absolute-path> ${agentCredential} [--url <url> --anon-key <key>] [--json]
@@ -3154,10 +3169,7 @@ async function agentSession(
       target: cloud,
       lineageKey: credentialLineageKey(agent.token),
     });
-    // Proved usable before it is trusted, the way agentSignalPendingStore proves its own:
-    // the directory checks (owned by this user, 0700, not a symlink) only run on first
-    // touch, and a path that fails them must degrade to "no renewal" rather than abort a
-    // command that would otherwise have worked.
+    // An unusable store degrades to no renewal while the presented credential still works.
     await candidate.withLock(async () => {
       await candidate.read().catch(() => null);
     });
@@ -4487,11 +4499,14 @@ async function runResume(args: Arguments): Promise<void> {
     workspaceId,
     credentialFile,
     credentialPathAliases: [...new Set([suppliedCredentialPath, credentialFile])],
+    sessionCredential: agent.token,
+    sessionTokenFile: credentialFile,
     installedVersion: CLI_BUILD_VERSION,
     ...(listenerStateDirectory(args)
       ? { stateDirectory: listenerStateDirectory(args) }
       : {}),
   }, {
+    readWakeLease: async () => await readAgentWakeLease(cloud, workspaceId, agent.token),
     readIdentity: async () => {
       const directory = await readAgentSignalDirectory(
         cloud,
@@ -4524,6 +4539,7 @@ async function runResume(args: Arguments): Promise<void> {
       return {
         displayName: sanitizeDisplayLabel(principal.name, "Unnamed agent"),
         principalId: identity.principal_id,
+        ...(directory.sessionStatus === undefined ? {} : { sessionStatus: directory.sessionStatus }),
       };
     },
     readBrainTopics: async () => brainTopicSnapshots(await listBrainRowsAsAgent(
@@ -4775,28 +4791,154 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   }
 
   const restartOptions = notifyRestartOptions(args);
-
+  const suppliedContextPath = args.optional("session-context");
+  const optionTokens = args.originalOptionTokens(NOTIFY_FLAG);
+  const profileStarted = optionTokens.includes("--profile");
+  const explicitContext = optionTokens.includes("--session-context") || optionTokens.some(token => token.startsWith("--session-context="));
+  const hostIndex = optionTokens.indexOf("--host-session-id");
   const controller = new AbortController();
-  const httpClient = new ListenerHttpClient();
   let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
+  let generation: number | null = null;
+  let watchFailure: unknown = null;
+  let leaseStopState: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" | "session-refused" = "unclaimed";
+  let sessionRefusal: string | undefined;
+  const recordLeaseRefusal = (error: WakeLeaseLostError) => {
+    if (error.code === "notify_held_elsewhere" || error.code === "wake_lease_superseded") {
+      leaseStopState = error.surface === "h0_poll" ? "h0_poll" : "watcher";
+    } else {
+      leaseStopState = "session-refused";
+      sessionRefusal = error.message;
+    }
+  };
+  let stopSentencePrinted = false;
   const stopInt = () => { stopSignal = "SIGINT"; controller.abort(); };
   const stopTerm = () => { stopSignal = "SIGTERM"; controller.abort(); };
+  const finishSignalStop = () => {
+    if (stopSignal === null || stopSentencePrinted) return;
+    // Once claimed, the release in finally supplies the last known lease state.
+    if (generation !== null && !leaseReleaseAttempted) return;
+    stopSentencePrinted = true;
+    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, leaseStopState, sessionRefusal)}\n`);
+    process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
+  };
+  let leaseReleaseAttempted = false;
   process.on("SIGINT", stopInt);
   process.on("SIGTERM", stopTerm);
+  try {
+  const verified = await verifiedLiveSessionContexts({ target: cloud, workspaceId: selected.selectedWorkspace,
+    principalId, credential: selected.bearer,
+    ...(args.optional("agent-token-file") === undefined ? {} : { tokenFile: args.optional("agent-token-file")! }),
+    ...(profileStarted && hostIndex >= 0 ? { hostSessionId: optionTokens[hostIndex + 1] } : {}) });
+  if (stopSignal !== null) { finishSignalStop(); return; }
+  const liveContextPath = verified.paths.length === 1 ? verified.paths[0]! : null;
+  const sameContext = liveContextPath !== null && suppliedContextPath !== undefined &&
+    await Promise.all([realpath(liveContextPath), realpath(suppliedContextPath)]).then(
+      ([live, supplied]) => live === supplied, () => false);
+  const withoutContext: string[] = [];
+  for (let i = 0; i < optionTokens.length; i++) {
+    if (optionTokens[i] === "--session-context") { i++; continue; }
+    if (optionTokens[i]?.startsWith("--session-context=")) continue;
+    withoutContext.push(optionTokens[i]!);
+  }
+  const remedyCommand = liveContextPath !== null && !sameContext &&
+    !optionTokens.includes("--agent-token-stdin")
+    ? notifyRefusalRestartCommand({ arguments: [...withoutContext, "--session-context", liveContextPath] }) ?? undefined
+    : undefined;
+  const refusedContextSource = suppliedContextPath === undefined ? undefined : explicitContext
+    ? "operator" : profileStarted ? "profile" : undefined;
+  const fallback = verified.verificationUnavailable
+    ? "the live session context could not be verified; inspect this seat's resume output when the read service is reachable"
+    : verified.paths.length > 1
+    ? "more than one live session context file for this seat was verified on this host; inspect this seat's resume output and choose the file for the live host session"
+    : liveContextPath === null
+    ? "no live session context for this seat was verified on this host; inspect this seat's resume output and start the watcher from its live host session"
+    : sameContext
+    ? "this context was refused; inspect this seat's resume output and the host session proof before retrying"
+    : `a live session context for this seat was verified at ${liveContextPath}; retry from that host session using this path`;
+  const remedyFallback = fallback;
+
+  const httpClient = new ListenerHttpClient();
   const testCheckMs = process.env.NODE_ENV === "test" &&
       new URL(cloud.url).hostname === "127.0.0.1"
     ? Number(process.env.CSWARM_TEST_NOTIFY_CHECK_MS)
     : NaN;
   const stdoutCheckIntervalMs = Number.isInteger(testCheckMs) && testCheckMs >= 100 && testCheckMs <= 60_000
     ? testCheckMs : 60_000;
-  const lockPath = arrivalWatchLockPath(
+  const watcherId = randomUUID();
+  const locks = await acquireArrivalWatchSeatLocks(
     cloud,
     selected.selectedWorkspace,
     principalId,
+    process.pid,
+    watcherId,
   );
-  await acquireArrivalWatchLock(lockPath);
+  const { lockPath } = locks;
   const wake = createWakeSubscriber({ target: cloud });
+  let stopRenewal: (() => void) | null = null;
+  let cleanStop = false;
+  let leaseBearer = selected.bearer;
   try {
+    const hostId = await arrivalHostId(lockPath);
+    const hostLabel = selected.sessionContext?.host_label || hostname();
+    const restartCommand = notifyRefusalRestartCommand(restartOptions);
+    const leaseRequest = async (command: Record<string, unknown>) => {
+      leaseBearer = selected.session ? await selected.session.bearer() : selected.bearer;
+      return await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
+        token: leaseBearer,
+        command, restartCommand, sessionContextPath: suppliedContextPath, remedyCommand,
+        contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher,
+        signal: controller.signal });
+    };
+    let claimed: Record<string, unknown>;
+    let claimFailures = 0;
+    for (;;) {
+      try {
+        leaseStopState = "claim-unknown";
+        claimed = await leaseRequest({ kind: "claim_wake_lease", watcher_id: watcherId,
+          host_label: hostLabel, host_id: hostId, take_over: args.has("take-over") });
+        break;
+      } catch (error) {
+        if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
+        if (controller.signal.aborted && stopSignal !== null) {
+          finishSignalStop();
+          return;
+        }
+        if (!(error instanceof WakeLeaseTransientError)) throw error;
+        leaseStopState = "claim-unknown";
+        if (claimFailures === 0) process.stderr.write("cswarm: wake lease claim is unavailable; retrying.\n");
+        claimFailures += 1;
+        await new Promise<void>((resolve) => {
+          const done = () => { clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); };
+          const timer = setTimeout(done, Math.min(60_000, 1000 * 2 ** Math.min(claimFailures, 6)));
+          controller.signal.addEventListener("abort", done, { once: true });
+        });
+        if (controller.signal.aborted && stopSignal !== null) {
+          finishSignalStop();
+          return;
+        }
+      }
+    }
+    generation = Number(claimed.generation);
+    leaseStopState = "last-known";
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new Error("wake lease claim returned no generation");
+    }
+    if (stopSignal !== null) {
+      finishSignalStop();
+      return;
+    }
+    stopRenewal = startWakeLeaseRenewal({
+      intervalMs: process.env.NODE_ENV === "test" &&
+        new URL(cloud.url).hostname === "127.0.0.1" &&
+        Number.isInteger(Number(process.env.CSWARM_TEST_WAKE_RENEW_MS)) &&
+        Number(process.env.CSWARM_TEST_WAKE_RENEW_MS) >= 100
+        ? Math.min(60_000, Number(process.env.CSWARM_TEST_WAKE_RENEW_MS))
+        : undefined,
+      renew: async () => { await leaseRequest({ kind: "renew_wake_lease",
+        watcher_id: watcherId, generation }); },
+      lost: (error) => { watchFailure = error; if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error); controller.abort(); },
+      failed: (error) => { watchFailure = error; controller.abort(); },
+    });
     const retryNotices = createArrivalRetryNoticePolicy();
     let renderedBearer = selected.bearer;
     const cursorStore = fileArrivalCursorStore({
@@ -4869,20 +5011,41 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         }
       },
     });
+    if (watchFailure !== null && stopSignal === null) throw watchFailure;
     if (result.reason === "error") {
       throw result.error ?? new Error("arrival watch stopped");
     }
+    cleanStop = true;
     // Programmatic aborts keep exit 0; only an OS signal sets a failure status.
-    if (stopSignal !== null) {
-      process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions)}\n`);
-      process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
+    finishSignalStop();
+  } catch (error) {
+    if (error instanceof NotifyStdoutClosedError) cleanStop = true;
+    throw error;
+  } finally {
+    stopRenewal?.();
+    httpClient.close();
+    await wake.close();
+    if (generation !== null && (cleanStop || stopSignal !== null)) {
+      try {
+        const released = await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
+          token: leaseBearer,
+          command: { kind: "release_wake_lease", watcher_id: watcherId, generation },
+          restartCommand: notifyRefusalRestartCommand(restartOptions),
+          sessionContextPath: suppliedContextPath, remedyCommand, timeoutMs: 2_000,
+          contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
+        if (released.released === true) leaseStopState = "released";
+      } catch (error) {
+        if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
+        // A transient failure leaves the last observed holder as our best evidence.
+      }
     }
+    leaseReleaseAttempted = true;
+    finishSignalStop();
+    await releaseArrivalWatchSeatLocks(locks);
+  }
   } finally {
     process.off("SIGINT", stopInt);
     process.off("SIGTERM", stopTerm);
-    httpClient.close();
-    await wake.close();
-    await releaseArrivalWatchLock(lockPath);
   }
 }
 
@@ -6558,22 +6721,16 @@ async function runConfiguredListener(options: {
      is the one `cswarm session start` saved for this workspace/principal.
      None: legacy path, the server fences a managed principal. More than one
      live: refuse rather than pick a first match. */
-  const managedContexts = (await listSessionContexts(options.workspaceId, options.principalId))
-    .filter((context) => sessionProofOf(context) !== null);
+  const managedContexts = (await listSessionContextFiles(options.workspaceId, options.principalId))
+    .filter(({ context }) => sessionProofOf(context) !== null);
   if (managedContexts.length > 1) {
     httpClient.close();
     throw new Error(
       `listen start found ${managedContexts.length} live session contexts for this agent; stop the stale ones with cswarm session stop --session-context <path> first`,
     );
   }
-  const managedContext = managedContexts[0] ?? null;
-  const managedContextPath = managedContext === null
-    ? null
-    : defaultSessionContextPath(
-      options.workspaceId,
-      options.principalId,
-      managedContext.session_id,
-    );
+  const managedContext = managedContexts[0]?.context ?? null;
+  const managedContextPath = managedContexts[0]?.path ?? null;
   if (managedContextPath !== null) {
     try {
       await holdSessionReceiverLock(managedContextPath, "listen");
@@ -6596,11 +6753,7 @@ async function runConfiguredListener(options: {
         return await credentialBearer();
       },
       workspaceId: options.workspaceId,
-      contextPath: defaultSessionContextPath(
-        options.workspaceId,
-        options.principalId,
-        managedContext.session_id,
-      ),
+      contextPath: managedContextPath!,
       context: managedContext,
       onDispatchStop: () => {
         if (!leaseAbort.signal.aborted) leaseAbort.abort();
@@ -6950,14 +7103,10 @@ async function liveManagedContextPath(
   workspaceId: string,
   principalId: string,
 ): Promise<string | null> {
-  const live = (await listSessionContexts(workspaceId, principalId))
-    .filter((context) => sessionProofOf(context) !== null);
+  const live = (await listSessionContextFiles(workspaceId, principalId))
+    .filter(({ context }) => sessionProofOf(context) !== null);
   if (live.length !== 1) return null;
-  return defaultSessionContextPath(
-    workspaceId,
-    principalId,
-    live[0]!.session_id,
-  );
+  return live[0]!.path;
 }
 
 async function runListenStart(args: Arguments): Promise<void> {
@@ -7320,6 +7469,53 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
   }
 }
 
+/** A control timeout is unknown. Only a refused connect proves socket closure. */
+export async function waitForListenerStop(
+  paths: ListenerPaths,
+  initial: ListenerStatus | null,
+  waitBudgetMs: number,
+  deadline = Date.now() + waitBudgetMs,
+  processStart: (pid: number, remainingMs: number) => number | null =
+    (pid, remainingMs) => pidStartMs(pid, undefined, remainingMs),
+): Promise<ListenerStatus | null> {
+  if (initial?.state === "stopped") {
+    try { await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now()))); }
+    catch (error) {
+      if (["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return initial;
+    }
+  }
+  let status = initial;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error(`listener stop timed out after ${waitBudgetMs / 1000} seconds; state ${status?.state ?? "absent"}, pid ${status?.pid ?? "absent"} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
+    }
+    let socketClosed = false;
+    try {
+      status = await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now())));
+    } catch (error) {
+      socketClosed = ["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "");
+      status = await readListenerStatusIfPresent(paths);
+    }
+    let pidGone = status === null || status.pid <= 0;
+    if (!pidGone && status !== null) {
+      try {
+        process.kill(status.pid, 0);
+      } catch (error) {
+        pidGone = (error as NodeJS.ErrnoException).code === "ESRCH";
+      }
+      if (!pidGone && Date.now() < deadline) {
+        const start = processStart(status.pid, deadline - Date.now());
+        pidGone = start !== null && status.processStartedAt !== undefined &&
+          Math.abs(start - status.processStartedAt) > 2_000;
+      }
+    }
+    if (socketClosed && pidGone) return status && LISTENER_RUNNING_STATES.includes(status.state)
+      ? uncleanListenerStatus(status) : status;
+    if (deadline - Date.now() >= 100) await new Promise(resolve => setTimeout(resolve, 100));
+    else await new Promise(resolve => setTimeout(resolve, Math.max(1, deadline - Date.now())));
+  }
+}
+
 async function runListenStatusOrStop(
   args: Arguments,
   command: "status" | "stop",
@@ -7332,14 +7528,18 @@ async function runListenStatusOrStop(
     "principal-id",
     "state-dir",
     "json",
+    "wait",
     ...SESSION_CONTEXT_FLAGS,
   ], 2);
+  if (command === "status" && args.has("wait")) throw new Error("--wait is only valid for listen stop");
   requireProfileWithHostSessionId(args);
   const cloud = await target(args);
   const workspaceId = listenerUuid(args.optional("workspace-id"), "workspace-id");
   let principalId: string;
+  let statusAgentToken: string | null = null;
   if (hasAgentCredential(args)) {
     const agent = await agentCredential(args);
+    statusAgentToken = agent.token;
     if (agent.principalId === null) {
       throw new Error(
         "listen status/stop needs the complete JSON agent credential so it can select the same listener profile as listen start",
@@ -7359,6 +7559,27 @@ async function runListenStatusOrStop(
     principalId = listenerUuid(args.optional("principal-id"), "principal-id");
   }
   const stateDirectory = listenerStateDirectory(args);
+  let leaseReadFailed = false;
+  const wakeLease = command === "status" && statusAgentToken !== null
+    ? await readAgentWakeLease(cloud, workspaceId, statusAgentToken).catch(() => {
+      leaseReadFailed = true;
+      return null;
+    })
+    : null;
+  const localWatcherId = command === "status" && wakeLease !== null
+    ? await arrivalWatchLockIdentity(arrivalWatchLockPath(cloud, workspaceId, principalId))
+    : null;
+  const leaseStatus = wakeLease === null ? null : {
+    host_label: sanitizeWakeHostLabel(wakeLease.host_label),
+    generation: wakeLease.generation,
+    renewed_age_ms: wakeLease.renewed_age_ms,
+    held_by_this_host: localWatcherId === wakeLease.watcher_id,
+    renewal_is_mail_observation: false,
+  };
+  const leaseLine = leaseReadFailed
+    ? "Server wake lease: unavailable; check again when the read service is reachable."
+    : wakeLease === null ? "Server wake lease: none."
+    : `Server wake lease: ${sanitizeWakeHostLabel(wakeLease.host_label)}, generation ${wakeLease.generation}, renewed ${Math.floor(wakeLease.renewed_age_ms / 1000)}s ago; this host holds it: ${localWatcherId === wakeLease.watcher_id ? "yes" : "no"}. Renewal does not prove this session reads its mail; observed ACK does. Stale after ${WAKE_LEASE_STALE_LABEL}.`;
   const paths = listenerPaths({
     profileId: cloud.profileId,
     workspaceId,
@@ -7371,9 +7592,16 @@ async function runListenStatusOrStop(
       await releaseSessionReceiverLock(stopContextPath);
     }
   }
+  const stopWait = command === "stop" && args.has("wait");
+  const stopWaitMs = LISTENER_STOP_WAIT_TIMEOUT_MS;
+  const stopDeadline = stopWait ? Date.now() + stopWaitMs : 0;
   let status = command === "stop"
-    ? await stopListener(paths)
+    ? stopWait
+      ? await queryListenerControl(paths, "stop", Math.min(1_000, Math.max(1, stopDeadline - Date.now())))
+        .catch(() => readListenerStatusIfPresent(paths))
+      : await stopListener(paths)
     : await effectiveListenerStatus(paths);
+  if (stopWait) status = await waitForListenerStop(paths, status, stopWaitMs, stopDeadline);
   if (status === null) {
     if (args.has("json")) {
       printJson({
@@ -7382,11 +7610,14 @@ async function runListenStatusOrStop(
         principal_id: principalId,
         profile_id: cloud.profileId,
         checked_directory: paths.instanceDirectory,
+        ...(command === "status" && statusAgentToken !== null ? {
+          wake_lease: leaseStatus, ...(leaseReadFailed ? { wake_lease_error: "unavailable" } : {}),
+        } : {}),
       });
     } else {
       process.stdout.write(
         command === "status"
-          ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", paths.instanceDirectory)} Checked profile ${cloud.profileId}.\n`
+          ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", paths.instanceDirectory)} Checked profile ${cloud.profileId}.\n${statusAgentToken !== null ? `${leaseLine}\n` : ""}`
           : `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.\n`,
       );
     }
@@ -7418,17 +7649,19 @@ async function runListenStatusOrStop(
     : null;
   if (args.has("json")) {
     printJson(
-      listenerStatusJson(
+      { ...listenerStatusJson(
         status,
         undefined,
         attendanceEvidence,
         Date.now(),
         installed,
-      ),
+      ), ...(command === "status" && statusAgentToken !== null ? {
+        wake_lease: leaseStatus, ...(leaseReadFailed ? { wake_lease_error: "unavailable" } : {}),
+      } : {}) },
     );
   } else {
     process.stdout.write(
-      `${renderListenerStatus(status, attendanceEvidence, Date.now(), installed)}\n`,
+      `${renderListenerStatus(status, attendanceEvidence, Date.now(), installed)}\n${command === "status" && statusAgentToken !== null ? `${leaseLine}\n` : ""}`,
     );
   }
 }
@@ -7774,9 +8007,8 @@ async function listenerWatcherSurfacePresent(
   workspaceId: string,
   principalId: string,
 ): Promise<boolean> {
-  return await arrivalWatchLockHeld(
-    arrivalWatchLockPath(cloud, workspaceId, principalId),
-  );
+  return await arrivalWatchLockHeld(arrivalWatchLockPath(cloud, workspaceId, principalId)) ||
+    await arrivalWatchLockHeld(legacyArrivalWatchLockPath(cloud, workspaceId, principalId));
 }
 
 async function listenerHasAttendanceSurface(options: {
@@ -9592,7 +9824,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   listen: group({
     start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start"] }),
     status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status"] }),
-    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
     canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary"] }),
   }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
@@ -9850,7 +10082,12 @@ function sanitizeForTerminal(value: string): string {
 
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : "unknown error";
-  return sanitizeForTerminal(message).slice(0, 1000);
+  const safe = error instanceof WakeLeaseLostError
+    ? message.split("\n").map(sanitizeForTerminal).join("\n")
+    : sanitizeForTerminal(message);
+  // This sentence is assembled from bounded CLI inputs and can contain a runnable
+  // restart command. Cutting it can turn that command into a different command.
+  return error instanceof WakeLeaseLostError ? safe : safe.slice(0, 1000);
 }
 
 /**
@@ -9883,6 +10120,7 @@ function markRestartable(error: Error): Error {
 
 function exitCodeFor(error: unknown): number {
   if (error instanceof NotifyStdoutClosedError) return EXIT_NOTIFY_ORPHANED;
+  if (error instanceof WakeLeaseLostError) return error.exitCode;
   return error instanceof Error ? restartableExit.get(error) ?? 1 : 1;
 }
 

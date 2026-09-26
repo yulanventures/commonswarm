@@ -1,10 +1,12 @@
 import { open, unlink } from "node:fs/promises";
+import { hostname } from "node:os";
 
 const lockPath = process.argv[2];
 if (!lockPath) throw new Error("lock path is required");
 
 const handle = await open(lockPath, "wx", 0o600);
-await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: Date.now() }), "utf8");
+await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
+  createdAt: Date.now(), startTime: Date.now() - process.uptime() * 1_000 }), "utf8");
 process.stdout.write("ready\n");
 process.stdin.resume();
 

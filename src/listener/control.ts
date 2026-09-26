@@ -99,6 +99,8 @@ export interface ListenerStatus {
   pid: number;
   state: ListenerStatusState;
   startedAt: string;
+  /** Start of this PID, recorded independently of supervisor initialization. */
+  processStartedAt?: number;
   readyAt: string | null;
   updatedAt: string;
   stoppedAt: string | null;
@@ -289,6 +291,7 @@ const STATUS_ALLOWED_KEYS = new Set([
   "pid",
   "state",
   "startedAt",
+  "processStartedAt",
   "readyAt",
   "updatedAt",
   "stoppedAt",
@@ -542,6 +545,8 @@ function parseStatus(raw: string, rejectUnknownKeys = false): ListenerStatus {
     !LISTENER_STATUS_STATES.includes(row.state) ||
     typeof row.startedAt !== "string" ||
     !Number.isFinite(Date.parse(row.startedAt)) ||
+    !(row.processStartedAt === undefined ||
+      (typeof row.processStartedAt === "number" && Number.isFinite(row.processStartedAt) && row.processStartedAt > 0)) ||
     !(row.readyAt === null ||
       (typeof row.readyAt === "string" && Number.isFinite(Date.parse(row.readyAt)))) ||
     typeof row.updatedAt !== "string" ||

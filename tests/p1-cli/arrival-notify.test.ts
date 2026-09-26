@@ -46,6 +46,16 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
       const body = raw.length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>;
       requests.push({ path: req.url ?? "", body });
       const command = body.command as Record<string, unknown> | undefined;
+      if (req.url === "/functions/v1/command" && command?.kind === "claim_wake_lease") {
+        res.writeHead(200, { "content-type": "application/json" }).end(
+          JSON.stringify({ ok: true, status: "accepted", generation: 1 }),
+        );
+        return;
+      }
+      if (req.url === "/functions/v1/command" && command?.kind === "release_wake_lease") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, released: true }));
+        return;
+      }
       if (req.url === "/functions/v1/command" && command?.kind === "signals_seen") {
         res.writeHead(503, { "content-type": "application/json" }).end(
           JSON.stringify({ error: "temporarily_unavailable" }),
@@ -184,7 +194,7 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
       agentTokenStdin: true,
       arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE],
-    })}`);
+    }, "released")}`);
     const lines = stdout.trimEnd().split("\n");
     assert.equal(lines.length, 2, stdout);
     assert.match(lines[0]!, new RegExp(SENDER));
@@ -204,15 +214,17 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     assert.doesNotMatch(lines[0]!, new RegExp(TOKEN));
     assert.deepEqual(
       requests.map(({ path }) => path),
-      ["/functions/v1/read", "/functions/v1/command"],
+      ["/functions/v1/command", "/functions/v1/read", "/functions/v1/command", "/functions/v1/command"],
     );
-    assert.equal(requests[0]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
-    assert.equal(requests[0]?.body.after_id, OLD_SIGNAL);
+    assert.equal((requests[0]?.body.command as Record<string, unknown>).kind, "claim_wake_lease");
+    assert.equal(requests[1]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
+    assert.equal(requests[1]?.body.after_id, OLD_SIGNAL);
     assert.deepEqual(
-      (requests[1]?.body.command as Record<string, unknown>).signal_ids,
+      (requests[2]?.body.command as Record<string, unknown>).signal_ids,
       [BROADCAST_SIGNAL],
       "a directed line is rendered but only the rendered broadcast is attested",
     );
+    assert.equal((requests[3]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
     assert.deepEqual(receipt, receiptBefore);
 
     const stored = JSON.parse(await readFile(cursorStore.location, "utf8")) as {
@@ -240,6 +252,18 @@ test("inbox --notify --json carries the whole body; the readable line names a ru
     });
     req.on("end", () => {
       const body = raw.length === 0 ? {} : JSON.parse(raw) as Record<string, unknown>;
+      if (req.url === "/functions/v1/command" &&
+          (body.command as Record<string, unknown> | undefined)?.kind === "claim_wake_lease") {
+        res.writeHead(200, { "content-type": "application/json" }).end(
+          JSON.stringify({ ok: true, status: "accepted", generation: 1 }),
+        );
+        return;
+      }
+      if (req.url === "/functions/v1/command" &&
+          (body.command as Record<string, unknown> | undefined)?.kind === "release_wake_lease") {
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, released: false }));
+        return;
+      }
       if (req.url !== "/functions/v1/read" || body.resource !== "signals") {
         res.writeHead(503, { "content-type": "application/json" }).end(
           JSON.stringify({ error: "temporarily_unavailable" }),
@@ -343,7 +367,7 @@ test("inbox --notify --json carries the whole body; the readable line names a ru
     assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence("SIGTERM", {
       agentTokenStdin: true,
       arguments: ["--agent-token-stdin", "--url", url, "--anon-key", "anon-key-for-arrival-test", "--workspace-id", WORKSPACE, ...extra],
-    })}`);
+    }, "last-known")}`);
     return stdout.trimEnd().split("\n")[0]!;
   };
   try {

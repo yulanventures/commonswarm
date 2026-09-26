@@ -2,14 +2,14 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { channel } from "node:diagnostics_channel";
 import { constants, lstatSync, rmdirSync, type Stats } from "node:fs";
-import { access, lstat, mkdir, readFile, readdir, rmdir, unlink } from "node:fs/promises";
+import { access, link, lstat, mkdir, readFile, readlink, readdir, rmdir, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { AGENT_CREDENTIAL_MESSAGE_D088, AgentCredentialInputError } from "./agent-credential-input.js";
 import { parseAgentCredentialInput } from "./agent-credential-input.js";
 import { AgentSetupError, ONBOARDING_MAX_FILE_BYTES, assertPrivateLocation, privatePath, readAgentProfile, readProfileCredential, saveAgentProfile, type AgentProfile } from "./agent-profile.js";
-import { deleteSecureJsonFile, ensureSecureStateDirectory, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "./storage.js";
+import { deleteSecureJsonFile, ensureSecureStateDirectory, isPublishedOwnerFileTarget, readSecureJsonFileIfPresent, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "./storage.js";
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
 import { type CloudTarget } from "./config.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
@@ -215,6 +215,16 @@ export async function classifyConnectReservedPath(path: string, probe: ReservedP
   let info: Stats;
   try { info = await (probe.inspect ?? lstat)(path); }
   catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? { outcome: "absent", path } : unreadable(); }
+  const name = basename(path);
+  if (info.isSymbolicLink() && (name === CONNECT_PROFILE_FILES.connectLock || name === CONNECT_PROFILE_FILES.setupLock)) {
+    const target = await readlink(path).catch(() => null);
+    const targetInfo = target !== null && isPublishedOwnerFileTarget(path, target, path, 16)
+      ? await (probe.inspect ?? lstat)(target).catch(() => null) : null;
+    if (targetInfo?.isFile() && !targetInfo.isSymbolicLink() &&
+        typeof process.getuid === "function" && targetInfo.uid === process.getuid() &&
+        (targetInfo.mode & 0o777) === 0o600) return { outcome: "ok", path };
+    return unreadable();
+  }
   if (!info.isFile() || info.isSymbolicLink() ||
       (typeof process.getuid === "function" && info.uid !== process.getuid())) return unreadable();
   if ((info.mode & 0o777) !== 0o600) return { outcome: "wrong mode", path,
@@ -389,6 +399,7 @@ export interface McpConnectOptions {
   inspectReserved?: (path: string) => Promise<Stats>;
   readReserved?: (path: string) => Promise<string | null>;
   checkProfileAccess?: typeof access;
+  publishLink?: typeof link;
   terminal?: HiddenTerminal;
   removeEmptyDirectory?: typeof rmdir;
 }
@@ -673,7 +684,8 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     }
     const reservedProbe = { inspect: options.inspectReserved, read: options.readReserved };
     await preflightConnectReservedPaths(path, reservedProbe);
-    await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => { await cleanConnectTemps(path); });
+    await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => { await cleanConnectTemps(path); },
+      { publishLink: options.publishLink });
     try { await (options.checkProfileAccess ?? access)(dirname(path), constants.W_OK); }
     catch (error) { await classifyDirectoryFailure(dirname(path), error); }
     const pending = await readPending(path);
@@ -743,7 +755,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
           return connectedResult(path, restored);
-        });
+        }, { publishLink: options.publishLink });
       }
       if ((!current && await pathExists(path)) || (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))) {
         throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
@@ -782,7 +794,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       const attemptId = current?.attemptId ?? randomUUID();
       if (!current) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
         await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: new Date().toISOString() } satisfies PendingConnect));
-      });
+      }, { publishLink: options.publishLink });
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
       let redirected = false;
@@ -865,7 +877,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;
         throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
       }
-    });
+    }, { publishLink: options.publishLink });
   } finally {
     if (createdInfo) {
       try {

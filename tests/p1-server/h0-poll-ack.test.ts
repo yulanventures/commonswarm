@@ -373,6 +373,47 @@ before(async () => {
   owner = { workspace, ownerId: user.id, ownerJwt: user.jwt };
 });
 
+test("H0 poll refuses a seat with a fresh watcher lease and succeeds after it goes stale", { timeout: 20_000 }, async () => {
+  const seat = await makeSeat();
+  await sql`INSERT INTO swarm.agent_wake_leases
+    (workspace_id, principal_id, watcher_id, host_label, host_id, host_session_ref,
+     generation, claimed_at, renewed_at)
+    VALUES (${owner.workspace}::uuid, ${seat.principalId}::uuid,
+      ${randomUUID()}::uuid, 'other-host', ${randomUUID()}::uuid, NULL, 1,
+      clock_timestamp(), clock_timestamp())`;
+  try {
+    const refused = await h0("poll", seat.token, { wait: 0 });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error, "notify_held_elsewhere");
+    assert.equal(refused.body.surface, "watcher");
+    assert.equal(refused.body.host_label, "other-host");
+    await sql`UPDATE swarm.agent_wake_leases SET renewed_at = clock_timestamp() - interval '4 minutes'
+      WHERE workspace_id = ${owner.workspace}::uuid AND principal_id = ${seat.principalId}::uuid`;
+    const allowed = await h0("poll", seat.token, { wait: 0 });
+    assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+  } finally {
+    await sql`DELETE FROM swarm.agent_wake_leases
+      WHERE workspace_id = ${owner.workspace}::uuid AND principal_id = ${seat.principalId}::uuid`;
+  }
+});
+
+test("a watcher claim for a real H0 seat names its fresh poll lock", { timeout: 20_000 }, async () => {
+  const seat = await makeSeat();
+  await sql`INSERT INTO swarm.h0_poll_locks
+    (workspace_id, principal_id, holder, listener_instance_id, acquired_at, expires_at)
+    VALUES (${owner.workspace}::uuid, ${seat.principalId}::uuid,
+      ${randomUUID()}::uuid, ${randomUUID()}::uuid, clock_timestamp(),
+      clock_timestamp() + interval '1 minute')`;
+  const claim = await command(seat.token, { kind: "claim_wake_lease",
+    watcher_id: randomUUID(), host_label: "h0-seat-host", host_id: randomUUID(),
+    take_over: true });
+  assert.equal(claim.status, 409);
+  assert.equal(claim.body.error, "notify_held_elsewhere");
+  assert.equal(claim.body.surface, "h0_poll");
+  await sql`UPDATE swarm.h0_poll_locks SET expires_at = clock_timestamp()
+    WHERE workspace_id = ${owner.workspace}::uuid AND principal_id = ${seat.principalId}::uuid`;
+});
+
 after(async () => {
   if (functionProcess && functionProcess.exitCode === null) {
     const exited = new Promise<boolean>((resolve) => {
