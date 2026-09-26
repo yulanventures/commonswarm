@@ -513,3 +513,32 @@ Tests: the required acceptance script exited 0. It built the CLI and typechecked
 The required `g2b-test.sh` command was also run. Its initial `gates` phase passed build, test type-check, edge check, generated-command-core comparison, release build, and diff check, but returned 1 before the focused-file loop. The service-free run had the same two sandbox `spawn EPERM` controls already recorded by lane 2b (`/bin/ps` and the real resume CLI), and the site build could not unlink the shared symlink target's `site/node_modules/.vite/deps/_metadata.json` from this managed sandbox. The concrete log is `/tmp/alloy-g2b-gates.log`; this is not evidence of a source or site regression, and it is not a passing claim for the aggregate script. The six required focused files were therefore run separately through the same wrapper as listed above.
 
 No deployment, production host, real workspace, database, migration, browser, or live service was contacted. Live behavior and an unrestricted aggregate gate remain unverified here.
+
+## Renew gate for the box window
+
+Run this on the Mac mini immediately after Anvil reports the new edge live. The first argument is the clean checkout of the exact release SHA after `npm run build`. The seed directory must be mode `0700` and contain mode-`0600` `credential.json` (the complete minted agent credential), `principal.json` (the matching `principal create` JSON), and `anon-key.txt`. The credential must have at least 90 minutes remaining. The gate validates all of this before its first network call.
+
+```sh
+deploy/release-proofs/item-g2b/g2b-renew-gate.sh \
+  <release-checkout> <seed-dir> https://api.commonswarm.com <workspace-id>
+```
+
+The gate claims one lease as host `g2b-renew-gate`, then runs 50 ordered renew/check pairs. It calls the built `dist/cloud/wake-lease.js` and `dist/cloud/agent-check.js` modules without timeout overrides. Before every lease call it reopens the built profile credential session and asks for its current bearer; if a check rotates and retires the minted token, the next renew adopts the stored successor. `G2B_RENEW_GATE_ROUNDS=3` is the local-test shortening seam; leave it unset in the box window.
+
+The gate writes mode-`0600` `renew-gate.json` and `renew-gate.md` in the seed directory. The JSON retains every call, including the cold first renew and check; both reports show n, first-call time, p50, p95, and max. The timeout table records the shipped 15,000 ms renew timeout at `src/cloud/wake-lease.ts:64` and the non-gating 3,900 ms check budget at `src/cloud/agent-check-budget.ts:22`. It also writes mode-`0600` `renew-gate-state.json` so the exact held lease can be released. Standard output contains only IDs, statuses, timings, and exit codes; it prints `G2B_PRINCIPAL_ID=<id>` for the functional SQL proof and never prints the credential.
+
+Exit codes are:
+
+- `0`: `GATE PASS`; every renew succeeded and renew p95 is below 15,000 ms. With `--release`, the recorded lease was released.
+- `2`: local input refusal before network access, including wrong modes, malformed/mismatched JSON, a missing built client, or less than 90 minutes remaining.
+- `7`: `GATE FAIL <reason>` because a renew failed or renew p95 was not below 15,000 ms. Reports and the held-lease state remain available.
+- `8`: `GATE CANNOT RUN <edge-code>` because the claim was refused, transport failed, or the helper could not establish the gate run.
+
+After Anvil's functional proof, release the exact held lease:
+
+```sh
+deploy/release-proofs/item-g2b/g2b-renew-gate.sh \
+  <release-checkout> <seed-dir> https://api.commonswarm.com <workspace-id> --release
+```
+
+`tests/p1-server/g2b-renew-gate.test.ts` seeds an isolated agent seat directly in the local stack, runs three renew/check pairs through the wrapper and built clients, asserts `GATE PASS`, verifies every renew and check sample is present, verifies neither stdout nor stderr contains the token, proves the lease remains held for the functional proof, runs `--release`, and proves the row is gone. The server suite already uses the `tests/p1-server/**/*.test.ts` glob, so no literal package list change is needed. `tests/p1-cli/g2b-renew-gate.test.ts` pins the statistics behavior and an input refusal that makes no transport attempt.
