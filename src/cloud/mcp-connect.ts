@@ -701,7 +701,19 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         try {
           const profile = await completedProfileAt(path);
           if (!profile) throw new Error("profile is incomplete");
-          const marker = await readSecureJsonFileIfPresent(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker), 4096).catch(() => null);
+          const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
+          let marker: string | null;
+          try { marker = await readSecureJsonFileIfPresent(markerPath, 4096); }
+          catch {
+            const wrongDirectory = await wrongModeAncestor(profileDir).catch(() => null);
+            if (wrongDirectory) throw directoryModeError(wrongDirectory);
+            const info = await lstat(markerPath).catch(() => null);
+            if (info?.isFile() && !info.isSymbolicLink() &&
+                (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
+              throw new McpConnectError("connect_marker_mode", `The connect attempt marker at ${markerPath} needs mode 0600. Run chmod 600 ${quoteAgentArgument(markerPath)}, then rerun the same command.`);
+            }
+            throw new McpConnectError("connect_marker_unreadable", `The connect attempt marker at ${markerPath} cannot be read safely. Inspect that file before retrying the same command.`);
+          }
           let markedAttempt: string | undefined;
           try { markedAttempt = record(JSON.parse(marker ?? "null"))?.attemptId as string | undefined; } catch { /* Refuse an invalid marker. */ }
           if (markedAttempt !== current.attemptId) {

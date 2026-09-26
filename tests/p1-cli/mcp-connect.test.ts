@@ -257,6 +257,65 @@ test("Fold 12 pending resume keeps a host-bound working profile from this attemp
   } finally { await f.close(); }
 });
 
+test("Fold 15 wrong-mode attempt marker gives an exact repair and same-command resume", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "marker-mode", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const dir = dirname(path);
+    const marker = join(dir, CONNECT_PROFILE_FILES.attemptMarker);
+    const complete = JSON.parse(await readFile(join(dir, CONNECT_PROFILE_FILES.complete), "utf8"));
+    const pending = join(dir, CONNECT_PROFILE_FILES.pending);
+    await writeSecureJsonFile(pending, JSON.stringify({ attemptId: complete.attemptId, url: complete.url,
+      name: "MCP agent", codeHash: complete.codeHash, createdAt: new Date().toISOString() }));
+    const profileBytes = await readFile(path);
+    let posts = 0;
+    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    await chmod(marker, 0o644);
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_mode");
+      assert.ok(String(error).includes(`chmod 600 '${marker}'`));
+      assert.match(String(error), /rerun the same command/);
+      assert.doesNotMatch(String(error), /not written by the pending connect|new --profile/);
+      return true;
+    });
+    assert.equal(posts, 0);
+    assert.deepEqual(await readFile(path), profileBytes);
+    assert.equal(existsSync(pending), true);
+    await chmod(marker, 0o600);
+    const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost });
+    assert.equal(result.profile, path);
+    assert.equal(posts, 0);
+    assert.equal(existsSync(pending), false);
+  } finally { await f.close(); }
+});
+
+test("Fold 15 unsafe attempt marker gets a typed file-specific refusal before POST", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "marker-unsafe", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const dir = dirname(path);
+    const marker = join(dir, CONNECT_PROFILE_FILES.attemptMarker);
+    const complete = JSON.parse(await readFile(join(dir, CONNECT_PROFILE_FILES.complete), "utf8"));
+    const pending = join(dir, CONNECT_PROFILE_FILES.pending);
+    await writeSecureJsonFile(pending, JSON.stringify({ attemptId: complete.attemptId, url: complete.url,
+      name: "MCP agent", codeHash: complete.codeHash, createdAt: new Date().toISOString() }));
+    await unlink(marker);
+    await symlink(join(f.root, "elsewhere"), marker);
+    let posts = 0;
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_unreadable");
+      assert.ok(String(error).includes(marker));
+      assert.doesNotMatch(String(error), /not written by the pending connect|new --profile/);
+      return true;
+    });
+    assert.equal(posts, 0);
+    assert.equal(existsSync(pending), true);
+  } finally { await f.close(); }
+});
+
 test("Fold 13 pending profile must belong to this connect attempt", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
