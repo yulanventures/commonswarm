@@ -19,6 +19,18 @@ const HIGH_PORT_MIN = 49_152;
 const HIGH_PORT_MAX_EXCLUSIVE = 65_536;
 const CALLBACK_ATTEMPTS = 32;
 
+export const LOGIN_PROVIDERS = ["google", "github"] as const;
+export type LoginProvider = typeof LOGIN_PROVIDERS[number];
+
+const LOGIN_PROVIDER_LABELS: { readonly [Provider in LoginProvider]: string } = {
+  google: "Google",
+  github: "GitHub",
+};
+
+export function loginProviderLabel(provider: LoginProvider): string {
+  return LOGIN_PROVIDER_LABELS[provider];
+}
+
 export interface AsyncStorage {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
@@ -44,6 +56,7 @@ export class MemoryStorage implements AsyncStorage {
 export interface LoginOptions {
   target: CloudTarget;
   store: CredentialStore;
+  provider?: LoginProvider;
   openBrowser?: (url: string) => Promise<boolean>;
   input?: Readable;
   output?: Writable;
@@ -222,9 +235,10 @@ function oauthUrl(
   target: CloudTarget,
   redirectUrl: string,
   challenge: string,
+  provider: LoginProvider,
 ): string {
   const url = new URL("/auth/v1/authorize", target.url);
-  url.searchParams.set("provider", "github");
+  url.searchParams.set("provider", provider);
   url.searchParams.set("redirect_to", redirectUrl);
   url.searchParams.set("code_challenge", challenge);
   url.searchParams.set("code_challenge_method", "s256");
@@ -432,6 +446,10 @@ async function discoverSoleWorkspace(
 
 export async function login(options: LoginOptions): Promise<LoginResult> {
   const output = options.output ?? process.stderr;
+  // Invite acceptance predates provider selection and still narrates a GitHub
+  // sign-in. The login command passes its Google default explicitly; embedded
+  // callers that omit the option retain their existing GitHub behavior.
+  const provider = options.provider ?? "github";
   const state = base64Url(randomBytes(32));
   const verifier = pkceVerifier();
   const memory = new MemoryStorage();
@@ -449,13 +467,16 @@ export async function login(options: LoginOptions): Promise<LoginResult> {
     options.target,
     receiver.redirectUrl,
     pkceChallenge(verifier),
+    provider,
   );
   const opener = options.openBrowser ?? openExternalBrowser;
 
   try {
     const opened = await opener(authorizationUrl);
     if (!opened) {
-      output.write("Open this URL in a browser to sign in with GitHub:\n");
+      output.write(
+        `Open this URL in a browser to sign in with ${loginProviderLabel(provider)}:\n`,
+      );
       output.write(`${authorizationUrl}\n`);
     }
     const code = await waitForCode(

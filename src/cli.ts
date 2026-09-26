@@ -49,10 +49,13 @@ import type { Command } from "./protocol/index.js";
 import { FILE_VERSION_PRECONDITION_FAILED } from "./protocol/index.js";
 import {
   login,
+  loginProviderLabel,
+  LOGIN_PROVIDERS,
   logout,
   logoutMessage,
   HumanSessionError,
   refreshedCredential,
+  type LoginProvider,
   type RefreshedCredential,
 } from "./cloud/auth.js";
 import {
@@ -901,6 +904,9 @@ const TASK_FLAGS = [
  * included) to spaces and would flatten it to one truncated line.
  */
 class UsageError extends Error {}
+
+/** A local login option refusal, distinguished so shells receive usage exit 2. */
+class LoginProviderError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
 const shellArgument = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -2250,7 +2256,7 @@ async function runInvite(args: Arguments): Promise<void> {
   const inviteLink = encodeInviteLink(payload);
   printJson({
     message:
-      "Invitation created. Share the one-time link below with its intended recipient. It can be accepted once before it expires; use a GitHub account with a distinct verified email for a second person.",
+      "Invitation created. Share the one-time link below with its intended recipient. It can be accepted once before it expires; use a distinct verified email for a second person.",
     status: response.status,
     invitation_id: uuid(response.invitation_id, "invitation_id"),
     invite_link: inviteLink,
@@ -9434,10 +9440,24 @@ async function runSeed(args: Arguments): Promise<void> {
   }
 }
 
-export const RUN_LOGIN_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser"] as const;
+export const RUN_LOGIN_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser", "provider"] as const;
+
+const LOGIN_PROVIDER_USAGE = LOGIN_PROVIDERS.join("|");
+const DEFAULT_LOGIN_PROVIDER_LABEL = loginProviderLabel(LOGIN_PROVIDERS[0]);
+
+function loginProvider(args: Arguments): LoginProvider {
+  const provider = args.optional("provider") ?? LOGIN_PROVIDERS[0];
+  if (!(LOGIN_PROVIDERS as readonly string[]).includes(provider)) {
+    throw new LoginProviderError(
+      `--provider must be one of: ${LOGIN_PROVIDERS.join(", ")}`,
+    );
+  }
+  return provider as LoginProvider;
+}
 
 async function runLogin(args: Arguments): Promise<void> {
   args.assertShape(RUN_LOGIN_1_ACCEPTED_FLAGS, 1);
+  const provider = loginProvider(args);
   const cloud = await target(args);
   const credentials = await store(args, cloud);
   process.stderr.write(
@@ -9446,6 +9466,7 @@ async function runLogin(args: Arguments): Promise<void> {
   const result = await login({
     target: cloud,
     store: credentials,
+    provider,
     openBrowser: args.has("no-browser") ? async () => false : undefined,
   });
   await writeCurrentTarget(cloud);
@@ -10021,7 +10042,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     profileListOrder: 14,
     refusalTrace: "runSession",
   }),
-  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login [--url <project-url> --anon-key <key>] [--no-browser]"] }),
+  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: `Sign a person in. ${DEFAULT_LOGIN_PROVIDER_LABEL} is the default provider.`, mutates: true, flags: RUN_LOGIN_1_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: [`cswarm login [--url <project-url> --anon-key <key>] [--provider ${LOGIN_PROVIDER_USAGE}] [--no-browser]`] }),
   logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout [--url <project-url> --anon-key <key>] [--all-devices] [--local]"] }),
   /*
    * These selectors deliberately preserve the old handlers' order. Invite sent
@@ -10401,6 +10422,7 @@ function markRestartable(error: Error): Error {
 }
 
 function exitCodeFor(error: unknown): number {
+  if (error instanceof LoginProviderError) return 2;
   if (error instanceof NotifyStdoutClosedError) return EXIT_NOTIFY_ORPHANED;
   if (error instanceof WakeLeaseLostError) return error.exitCode;
   return error instanceof Error ? restartableExit.get(error) ?? 1 : 1;

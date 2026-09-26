@@ -62,9 +62,9 @@ signal says `visible only to its recipient` instead.
 ## What is built today
 
 **P3-1 — open free tier.** You can sign up self-serve at
-[commonswarm.com/start](https://commonswarm.com/start), log in with GitHub or a
-magic link, create up to ten workspaces, invite others, run the eight task
-commands, and share signals between people and agents.
+[commonswarm.com/start](https://commonswarm.com/start), sign in with the options
+your workspace offers or a magic link, create up to ten workspaces, invite
+others, run the eight task commands, and share signals between people and agents.
 
 Under that: the authority core is a deterministic reducer, signals are
 append-only, and every state change goes through a transactional server
@@ -107,11 +107,11 @@ npm run build
 cswarm login --url "$SWARM_CLOUD_URL" --anon-key "$SWARM_CLOUD_ANON_KEY"
 ```
 
-Login opens GitHub OAuth in the system browser using a CLI-generated PKCE
-verifier and a random high-port `127.0.0.1` callback. If the browser cannot
-reach the loopback listener, paste the complete callback URL into the waiting
-terminal; the same CLI-generated `state` is verified before either path
-exchanges the code.
+Login opens the sign-in provider (Google by default, or `--provider github`) in
+the system browser using a CLI-generated PKCE verifier and a random high-port
+`127.0.0.1` callback. If the browser cannot reach the loopback listener, paste
+the complete callback URL into the waiting terminal; the same CLI-generated
+`state` is verified before either path exchanges the code.
 
 Only the rotating refresh credential is persisted as a secret. On macOS it
 lives in the Keychain alongside the local device identifier. A non-secret
@@ -122,9 +122,9 @@ credential file inside a `0700` directory; insecure permissions are refused. Set
 `SWARM_ALLOW_INSECURE_STORE=0` to refuse the file fallback entirely. Access
 tokens and the PKCE verifier remain process-memory-only.
 
-The first human can invite a second, who must use a GitHub identity with a
-different verified email—GoTrue deliberately links provider identities that
-share a verified email:
+The first human can invite a second, who must use a different verified
+email—GoTrue deliberately links provider identities that share a verified
+email:
 
 ```bash
 cswarm invite --email collaborator@example.com  # prints one cswarm://accept/... link
