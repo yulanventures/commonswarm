@@ -58,6 +58,7 @@ export interface ClaimAgentInboxCommand {
   kind: "claim_agent_inbox";
   listener_instance_id: string;
   limit: number;
+  route?: "channel" | "listener";
 }
 
 export interface AckAgentDeliveryCommand {
@@ -755,6 +756,7 @@ export async function ackAgentDelivery(
         SET
           acked_at = statement_timestamp(),
           ack_outcome = 'observed',
+          ack_via = COALESCE(ack_via, 'unclaimed'),
           delivered_at = COALESCE(delivered_at, statement_timestamp()),
           surfaced_at = COALESCE(surfaced_at, statement_timestamp()),
           updated_at = statement_timestamp()
@@ -788,10 +790,12 @@ export async function ackAgentDelivery(
   }
   if (queuedObservation) {
     if (row.acked_at === null) return { status: "unavailable" };
-    if (row.ack_outcome === "observed") return {
-      status: "idempotent",
-      response: { ok: true, event_ids: [], signal_id: args.signalId, outcome: "observed" },
-    };
+    if (row.ack_outcome === "observed") {
+      return {
+        status: "idempotent",
+        response: { ok: true, event_ids: [], signal_id: args.signalId, outcome: "observed" },
+      };
+    }
     if (managed && (
       args.proof == null || row.session_id !== args.proof.session_id ||
       Number(row.session_generation) !== args.proof.generation
@@ -800,6 +804,12 @@ export async function ackAgentDelivery(
     await tx`
       UPDATE swarm.signal_deliveries SET acked_at = statement_timestamp(),
         ack_outcome = 'observed',
+        ack_via = COALESCE(
+          ack_via,
+          -- Pre-G3d queued ACKs have no ack_via, but their retained lease id
+          -- still records whether this delivery reached a listener lease.
+          CASE WHEN last_lease_id IS NULL THEN 'unclaimed' ELSE 'leased' END
+        ),
         surfaced_at = CASE WHEN ${managed} THEN COALESCE(surfaced_at, statement_timestamp()) ELSE surfaced_at END,
         updated_at = statement_timestamp()
       WHERE workspace_id = ${args.workspaceId}::uuid
@@ -880,6 +890,7 @@ export async function ackAgentDelivery(
     SET
       acked_at = statement_timestamp(),
       ack_outcome = ${args.outcome},
+      ack_via = COALESCE(ack_via, 'leased'),
       last_error_code = ${args.lastErrorCode},
       last_lease_id = lease_id,
       last_leased_by = leased_by,
