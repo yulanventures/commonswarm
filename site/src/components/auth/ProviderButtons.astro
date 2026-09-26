@@ -27,19 +27,23 @@
  * or an "or" above these buttons. Leaving that behind when there are no buttons is a page that
  * promises a choice it does not offer, and it is reachable in production: an operator who
  * turns every OAuth provider off in GoTrue gets it on the next build. So the host
- * passes that furniture in the `before` slot and the wrapper class in `listClass`, and this
- * component renders BOTH or NEITHER.
+ * passes that furniture in the `before` or `after` slot and the wrapper class in `listClass`,
+ * and this component renders BOTH or NEITHER.
  */
 import { enabledProvidersForBuild, type AuthProvider } from "../../lib/auth-providers";
 
 interface Props {
   /** Class for each button, so a host page keeps its own visual language. */
   buttonClass?: string;
+  /** When present, class for the first rendered provider button. */
+  primaryClass?: string;
+  /** Class for later buttons when primaryClass is present; falls back to buttonClass. */
+  secondaryClass?: string;
   /** Class for the element that wraps the buttons. Omitted, the wrapper carries no class. */
   listClass?: string;
 }
 
-const { buttonClass = "", listClass = "" } = Astro.props;
+const { buttonClass = "", primaryClass, secondaryClass, listClass = "" } = Astro.props;
 
 const providers: readonly AuthProvider[] = await enabledProvidersForBuild({
   url: import.meta.env.PUBLIC_SUPABASE_URL,
@@ -51,11 +55,20 @@ const providers: readonly AuthProvider[] = await enabledProvidersForBuild({
   <Fragment>
     <slot name="before" />
     <div class={listClass || undefined}>
-      {providers.map((provider) => (
-        <button class={buttonClass} type="button" data-signin-provider={provider.id}>
+      {providers.map((provider, index) => (
+        <button
+          class={primaryClass
+            ? index === 0
+              ? primaryClass
+              : secondaryClass ?? buttonClass
+            : buttonClass}
+          type="button"
+          data-signin-provider={provider.id}
+        >
           {provider.label}
         </button>
       ))}
     </div>
+    <slot name="after" />
   </Fragment>
 )}

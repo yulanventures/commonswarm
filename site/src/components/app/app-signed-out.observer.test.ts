@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { providerFixtures } from "../../../scripts/provider-fixtures.js";
 import { AUTH_PROVIDERS, authProvider } from "../../lib/auth-providers.js";
 
-test("signed-out /app onramp is cold-stranger, email-first, free, draft-legal", async () => {
+test("signed-out /app onramp is cold-stranger, provider-first, free, draft-legal", async () => {
   const source = await readFile(
     new URL("./LiveDashboard.astro", import.meta.url),
     "utf8",
@@ -36,8 +36,8 @@ test("signed-out /app onramp is cold-stranger, email-first, free, draft-legal", 
   const email = panel.indexOf('id="dashboard-email"');
   const providerButtons = panel.indexOf("<ProviderButtons");
   assert.ok(
-    email >= 0 && providerButtons > email,
-    "email must precede the generated provider buttons in the shared auth view",
+    providerButtons >= 0 && email > providerButtons,
+    "the generated provider buttons must precede email in the shared auth view",
   );
   /*
    * Astro's braced JSX-style template comments are compiled away, so they are not markup. They
@@ -104,9 +104,10 @@ test("the built signed-out panel offers generated provider buttons", async () =>
   const ids = [...new Set(
     [...panel.matchAll(/data-signin-provider="([^"]+)"/g)].map((match) => match[1] as string),
   )];
-  assert.ok(
-    ids.length > 0,
-    "the all-providers fixture must render a provider button",
+  assert.deepEqual(
+    ids,
+    AUTH_PROVIDERS.map((provider) => provider.id),
+    "the signed-out buttons must preserve the deliberate provider order",
   );
   for (const id of ids) {
     const provider = authProvider(id);
@@ -123,4 +124,33 @@ test("the built signed-out panel offers generated provider buttons", async () =>
     ids.every((id) => AUTH_PROVIDERS.some((provider) => provider.id === id)),
     "every rendered button must be a provider AUTH_PROVIDERS names",
   );
+  const providerAt = panel.indexOf("data-signin-provider");
+  const dividerAt = panel.indexOf("dashboard__auth-divider");
+  const emailAt = panel.indexOf('id="dashboard-email"');
+  assert.ok(
+    providerAt >= 0 && dividerAt > providerAt && emailAt > dividerAt,
+    "the built choices view must put providers first, then the divider, then email",
+  );
+  assert.match(
+    panel,
+    /<button class="dashboard__button dashboard__button--secondary" type="submit">\s*Email me a sign-in link/,
+    "the email submit must remain available without competing with the first provider button",
+  );
+});
+
+test("the signed-out divider disappears when no provider is enabled", async () => {
+  const fixture = (await providerFixtures()).find(({ enabled }) => enabled.length === 0);
+  assert.ok(fixture, "the provider fixtures must include the no-providers state");
+  const html = await readFile(new URL("app/index.html", fixture.dir), "utf8");
+  const start = html.indexOf("data-signed-out-onramp");
+  const end = html.indexOf('data-panel="create"', start);
+  assert.ok(start >= 0 && end > start);
+  const panel = html.slice(start, end);
+  assert.doesNotMatch(panel, /data-signin-provider/);
+  assert.doesNotMatch(
+    panel,
+    /dashboard__auth-divider/,
+    "the provider/email divider must not promise a choice when no OAuth provider rendered",
+  );
+  assert.match(panel, /id="dashboard-email"/, "email remains available without OAuth providers");
 });

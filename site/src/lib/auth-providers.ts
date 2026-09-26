@@ -35,16 +35,16 @@
  */
 const PROVIDERS = [
   {
-    id: "github",
-    label: "Sign in with GitHub",
-    name: "GitHub",
-    legalEntity: "GitHub, Inc.",
-  },
-  {
     id: "google",
     label: "Sign in with Google",
     name: "Google",
     legalEntity: "Google LLC",
+  },
+  {
+    id: "github",
+    label: "Sign in with GitHub",
+    name: "GitHub",
+    legalEntity: "GitHub, Inc.",
   },
 ] as const;
 
@@ -260,7 +260,7 @@ function describe(caught: unknown): string {
   return "the request failed";
 }
 
-/** "GitHub", "GitHub or Google", "GitHub, Google, or X" — an Oxford comma list. */
+/** "Google", "Google or GitHub", "Google, GitHub, or X" — an Oxford comma list. */
 export function listSentence(items: readonly string[]): string {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0] as string;

@@ -53,38 +53,41 @@ import "../../styles/tokens.css";
         </p>
       </div>
 
-      <form class="dashboard__auth dashboard__email" data-auth-view="choices">
-        <label for="dashboard-email">Email address</label>
-        <div class="dashboard__email-row">
-          <input
-            id="dashboard-email"
-            name="email"
-            type="email"
-            autocomplete="email"
-            inputmode="email"
-            required
-            placeholder="you@example.com"
-          />
-          <button class="dashboard__button dashboard__button--primary" type="submit">
-            Email me a sign-in link
-          </button>
-        </div>
-        <p class="dashboard__auth-note">No password. The link returns you to this page.</p>
+      <div class="dashboard__auth dashboard__signin-choices" data-auth-view="choices">
         {/* The OAuth control here is GENERATED, not written, for the same reason the
             re-authentication control below it is (2026-09-05): this used to be a hand-typed
             "Sign in with GitHub" button carrying `data-signin-github`, which made /app free to
             offer a different set of doors from /invite. Now the label and the set both come
             from auth-providers.ts and the deployment's own /auth/v1/settings, so enabling
             Google in GoTrue on the server gives this panel a Google button with no change
-            here. The "or" divider goes in the `before` slot so a build with no OAuth provider
+            here. The "or" divider goes in the `after` slot so a build with no OAuth provider
             renders neither the divider nor the buttons, instead of an "or" above nothing. */}
         <ProviderButtons
-          buttonClass="dashboard__button dashboard__button--secondary"
+          primaryClass="dashboard__button dashboard__button--primary"
+          secondaryClass="dashboard__button dashboard__button--secondary"
           listClass="dashboard__providers"
         >
-          <div slot="before" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
+          <div slot="after" class="dashboard__auth-divider" aria-hidden="true"><span>or</span></div>
         </ProviderButtons>
-      </form>
+        <form class="dashboard__email">
+          <label for="dashboard-email">Email address</label>
+          <div class="dashboard__email-row">
+            <input
+              id="dashboard-email"
+              name="email"
+              type="email"
+              autocomplete="email"
+              inputmode="email"
+              required
+              placeholder="you@example.com"
+            />
+            <button class="dashboard__button dashboard__button--secondary" type="submit">
+              Email me a sign-in link
+            </button>
+          </div>
+          <p class="dashboard__auth-note">No password. The link returns you to this page.</p>
+        </form>
+      </div>
 
       <div class="dashboard__auth dashboard__email-sent" data-auth-view="email-sent" hidden>
         <p class="dashboard__email-sent-title">Check your inbox.</p>
@@ -9661,6 +9664,7 @@ import "../../styles/tokens.css";
     color: var(--text);
   }
 
+  .dashboard__signin-choices,
   .dashboard__email {
     display: grid;
     gap: var(--s-3);
@@ -9688,9 +9692,9 @@ import "../../styles/tokens.css";
   }
 
   /* ProviderButtons renders its buttons inside ONE wrapper, so the wrapper is a single grid
-     item of .dashboard__email and has to carry the row gap itself. Without this rule a second
-     provider stacks flush against the first, which is invisible on the GitHub-only build the
-     site is deployed from today and wrong on the day Google is enabled. */
+     item of .dashboard__signin-choices and has to carry the row gap itself. Without this rule
+     a second provider stacks flush against the first, which is invisible on a one-provider
+     build and wrong when multiple providers are enabled. */
   .dashboard__providers {
     display: grid;
     gap: var(--s-3);
