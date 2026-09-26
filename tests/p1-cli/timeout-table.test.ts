@@ -56,10 +56,10 @@ test("HEAD timeout citations resolve to their exact operations", { timeout: 2_00
     assert.ok(lines[Number(match[2]) - 1]?.includes(token), citation);
   }
   const lockCitation = rows["src/cloud/storage.ts:LOCK_TIMEOUT_MS"].citation;
-  assert.equal(lockCitation, "src/cloud/storage.ts:33,590-591");
+  assert.equal(lockCitation, "src/cloud/storage.ts:33,599-600");
   const storage = (await readFile(join(repo, "src/cloud/storage.ts"), "utf8")).split("\n");
   assert.match(storage[32]!, /const LOCK_TIMEOUT_MS = 30_000/);
-  assert.match(storage.slice(589, 591).join("\n"), /options.timeoutMs \?\? LOCK_TIMEOUT_MS[\s\S]*timeoutMs > LOCK_TIMEOUT_MS/);
+  assert.match(storage.slice(598, 600).join("\n"), /options.timeoutMs \?\? LOCK_TIMEOUT_MS[\s\S]*timeoutMs > LOCK_TIMEOUT_MS/);
 });
 
 async function listen(delayMs: () => number) {
