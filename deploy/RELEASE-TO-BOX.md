@@ -376,6 +376,14 @@ ending in `.log`. Create the list with a protected editor as root and mode
 `0600` (a protected editor or a root-owned script is fine); do not generate it
 from `find`.
 
+Write this list at preflight (section 1), from the copy-back paths named in the
+item's box plan, so it exists on the box before the window closes. If the list
+is missing at copy-back time, stop and ask HezLead; do not reconstruct it from
+the directory. Before copying, remove any EMPTY `*.err` file in `$PROOF_DIR`
+(for example an empty `functional.err`); a non-empty `.err` file is evidence:
+list it and copy it back. The window is closed by HezLead; Anvil runs the close
+steps and reports each one.
+
 ```sh
 (
   set -euo pipefail
@@ -1275,22 +1283,16 @@ both loopback and staging probes finish, capture the log window that began at
 The log is box-only and must not appear in `copy-back.list`.
 
 For migration `20260925000001`, run its functional proof only after this edge
-release is verified. HezLead supplies a dedicated active test seat with its
-owner still in the workspace. On the box, use the owner credential against
-`http://127.0.0.1:9000/functions/v1/command` to post a directed note to that
-seat. Then use the seat's credential and, if managed, its current session-proof
-headers against that same loopback command endpoint to send
-`ack_agent_delivery` for the first note with `lease_id: null`,
-`listener_instance_id: null`, `outcome: "observed"`, `last_error_code: null`,
-`surfaced: true`, and `unclaimed: true`. Require HTTP 200 and verify the
-delivery row's unclaimed `observed` ACK. Finally post a second directed note
-to the same seat, leave it unchecked, and record that note's exact signal UUID
-as `SEED_SIGNAL_ID`. Keep credentials in root-owned files, as with the other
-section 6 probes; do not put them in arguments or logs.
+release is verified. Anvil does NOT seed on the box. After HezLead reports "edge
+switched and healthy", CSwarmDevLead runs
+`deploy/release-proofs/item-g/g-seed.sh <bundle> <seed-dir> https://api.commonswarm.com <workspace-id>`
+from the Mac mini with the two seats minted for the window (see the item's box plan,
+`docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md` rows 3-6) and sends
+HezLead `SEED_NOTE_ID=<uuid>` or the STOP line. HezLead passes the id to Anvil.
 Anvil runs `release_psql_ro -v item_g_seed_signal_id="$SEED_SIGNAL_ID" --file
-"/proof/20260925000001-functional.sql"` and saves its nonzero-sensitive output
-as section 5 does. A missing seed is a failed proof. Do not run this proof in
-section 5's pre-edge Verify step.
+"/proof/20260925000001-functional.sql"` and saves its output as section 5 does.
+A missing seed is a failed proof. Do not run this proof in section 5's pre-edge
+Verify step.
 
 For migration `20260927000002`, use a dedicated live agent seat to make one
 successful routed command through the new edge (`claim_wake_lease`,

@@ -31,7 +31,7 @@ receipt.
 | 4 | lead | `g-seed.sh` steps 0-3 from the mini (below). Sends HezLead `SEED_NOTE_ID=<uuid>` natively, or the STOP line and exit code. |
 | 5 | HezLead -> Anvil | the note id. |
 | 6 | Anvil | Step 4: `release_psql_ro -v item_g_seed_signal_id=<uuid> --file /proof/20260925000001-functional.sql` (exit 0 = pass; missing or ineligible seed exits 3). |
-| 7 | HezLead | close the window. Then the lead releases cswarm 0.1.78 and the site. |
+| 7 | HezLead | close the window (Anvil runs the close steps). cswarm 0.1.78 and the site do NOT follow this window: they follow the item G lane 2b window (`docs/evidence/2026-09-25-item-g-lane2b/BOX-WINDOW.md`), built from the pinned client SHA. |
 
 ## Tom's mint block (2026-09-25 between 20:00Z and 21:30Z)
 
@@ -179,3 +179,12 @@ stack. The lead repeats this read on production after step 4 (it needs no box ac
 - Steps 1-3 and the stale receipt against production (they run in the window).
 - `token mint` with a human session was not rehearsed locally (no local human login); the rehearsal minted local
   tokens in the same credential shape.
+
+## Released 2026-09-26 (window 21:45Z)
+
+Phase A: migration `20260925000001` applied (ledger 1, catalog `t`). Phase B: edge `9627cb37` switched and healthy
+(probes a-h and j1-j3, metrics line, no `CONNECT_TIMEOUT`). The seeds were minted about 20:25Z by the owner account
+(GitHub Ridgeio). `g-seed.sh` from the mini at 21:55:11Z exited 0: step 1 receipt observed (the new edge accepted the
+unclaimed observed ACK); step 3 authenticated read 200 with note 2; `SEED_NOTE_ID=c2cb52be-424b-414d-a525-dec949b860aa`.
+Phase C: the functional proof exited 0. Window closed PASS, no rollback. Evidence:
+`docs/evidence/2026-09-26-release-9627cb37e697/` (with `g-seed-lead-run.txt`).
