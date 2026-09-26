@@ -90,12 +90,16 @@ export function notifyRefusalRestartCommand(options: NotifyRestartOptions): stri
 }
 
 export function notifySignalStopSentence(signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES,
-  options: NotifyRestartOptions, holder: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" = "unclaimed"): string {
+  options: NotifyRestartOptions, holder: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" | "session-refused" = "unclaimed",
+  sessionRefusal?: string): string {
+  if (holder === "session-refused") {
+    return `inbox --notify stopped because of ${signal} after a session refusal: ${sessionRefusal ?? "inspect this seat's resume output for a verified live context on this host"}`;
+  }
   const state = { released: "this watcher's lease was released; nothing is watching this inbox now",
     "last-known": "this watcher held the lease at its last renewal; another surface may have taken over since",
     watcher: "another watcher holds this inbox now", h0_poll: "H0 poll holds this inbox now",
     unclaimed: "this watcher had not claimed the inbox lease",
-    "claim-unknown": "this watcher's claim result is unknown; any lease it took expires within 3 minutes" }[holder];
+    "claim-unknown": "this watcher's claim result is unknown; check this seat's wake lease before starting another watcher; any lease it took expires within 3 minutes" }[holder];
   const prose = `inbox --notify stopped because of ${signal} and ${state}; restart it under the session's Monitor`;
   return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
     ? `${prose} the same way it was started, with the agent token on stdin.`

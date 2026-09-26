@@ -17,7 +17,7 @@ const workspace = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const principal = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
 type FixtureMode = "refuse" | "takeover" | "supersede" | "status" | "status_controls" | "lifecycle" | "claim_retry" | "claim_inflight" |
-  "release_superseded_watcher" | "release_superseded_h0" | "release_transient" |
+  "claim_timeout" | "release_false" | "release_session_conflict" | "release_session_expired" | "release_transient" |
   "unmanaged" | "h0_holder" | "session_conflict" | "session_expired" | "session_retired" |
   "session_proof_invalid" | "session_proof_missing" | "profile_unauthorized" | "profile_forbidden" | "profile_unreachable" | "profile_transport" | "profile_renewed";
 async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
@@ -47,6 +47,10 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
         }
         if (command.kind === "claim_wake_lease" && mode === "claim_inflight") {
           setTimeout(() => response.writeHead(503).end("unavailable"), 1500);
+          return;
+        }
+        if (command.kind === "claim_wake_lease" && mode === "claim_timeout") {
+          setTimeout(() => { if (!response.destroyed) response.writeHead(503).end("unavailable"); }, 20_000).unref();
           return;
         }
         if (command.kind === "claim_wake_lease" && mode === "session_proof_missing" &&
@@ -106,11 +110,13 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
           }));
           return;
         }
-        if (command.kind === "release_wake_lease" && mode.startsWith("release_superseded_")) {
-          response.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({
-            error: "wake_lease_superseded", surface: mode.endsWith("h0") ? "h0_poll" : "watcher",
-            host_label: "new-host",
-          }));
+        if (command.kind === "release_wake_lease" && mode === "release_false") {
+          response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, released: false }));
+          return;
+        }
+        if (command.kind === "release_wake_lease" && mode.startsWith("release_session_")) {
+          response.writeHead(mode === "release_session_conflict" ? 409 : 401,
+            { "content-type": "application/json" }).end(JSON.stringify({ error: mode.slice("release_".length) }));
           return;
         }
         if (command.kind === "release_wake_lease" && mode === "release_transient") {
@@ -186,7 +192,7 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
     child.stderr?.on("data", (chunk: Buffer) => stderr += chunk.toString());
     const running = child;
     const exit = new Promise<{ code: number | null; stderr: string }>((done, reject) => {
-      const timer = setTimeout(() => { running.kill("SIGKILL"); reject(new Error("watcher timeout")); }, 10_000);
+      const timer = setTimeout(() => { running.kill("SIGKILL"); reject(new Error("watcher timeout")); }, 21_000);
       running.once("exit", (code) => { clearTimeout(timer); done({ code, stderr }); });
       running.once("error", reject);
     });
@@ -449,7 +455,7 @@ test("transient start claim retries with one notice before watching", { timeout:
   } finally { await f.cleanup(); }
 });
 
-test("SIGTERM during claim backoff keeps exit 143 and one stop sentence", { timeout: 8000 }, async () => {
+test("SIGTERM during a 503 claim backoff reports an unknown claim result", { timeout: 8000 }, async () => {
   const f = await fixture("claim_retry");
   try {
     const watch = f.start();
@@ -460,7 +466,7 @@ test("SIGTERM during claim backoff keeps exit 143 and one stop sentence", { time
     watch.stop();
     const result = await watch.exit;
     assert.equal(result.code, 143, result.stderr);
-    assert.equal(result.stderr.match(/this watcher had not claimed the inbox lease/g)?.length, 1);
+    assert.equal(result.stderr.match(/this watcher's claim result is unknown/g)?.length, 1);
   } finally { await f.cleanup(); }
 });
 
@@ -478,10 +484,27 @@ test("SIGINT during an in-flight claim keeps exit 130 and one stop sentence", { 
   } finally { await f.cleanup(); }
 });
 
-test("signal stop reports the last known state after release", { timeout: 12_000 }, async () => {
-  for (const [mode, expected] of [["release_superseded_watcher", /another watcher holds/],
-    ["release_superseded_h0", /H0 poll holds/],
-    ["release_transient", /another surface may have taken over since/]] as const) {
+test("a timed-out claim followed by SIGTERM reports an unknown result", { timeout: 22_000 }, async () => {
+  const f = await fixture("claim_timeout");
+  try {
+    const watch = f.start();
+    const deadline = Date.now() + 18_000;
+    while (f.seen.length < 1 && Date.now() < deadline) await new Promise(done => setTimeout(done, 20));
+    assert.equal(f.seen[0]?.kind, "claim_wake_lease");
+    await new Promise(done => setTimeout(done, 15_250));
+    watch.stop();
+    const result = await watch.exit;
+    assert.equal(result.code, 143, result.stderr);
+    assert.match(result.stderr, /claim result is unknown; check this seat's wake lease/);
+    assert.doesNotMatch(result.stderr, /had not claimed/);
+  } finally { await f.cleanup(); }
+});
+
+test("signal stop reports the edge's release result or session refusal", { timeout: 18_000 }, async () => {
+  for (const [mode, expected] of [["release_false", /another surface may have taken over since/],
+    ["release_transient", /another surface may have taken over since/],
+    ["release_session_conflict", /session refusal:.*session_conflict.*another live session owns this seat/is],
+    ["release_session_expired", /session refusal:.*session_expired.*host session ended/is]] as const) {
     const f = await fixture(mode);
     try {
       const watch = f.start();
@@ -494,6 +517,7 @@ test("signal stop reports the last known state after release", { timeout: 12_000
       const result = await watch.exit;
       assert.equal(result.code, 143, result.stderr);
       assert.match(result.stderr, expected);
+      if (mode.startsWith("release_session_")) assert.doesNotMatch(result.stderr, /another watcher holds this inbox/);
       assert.ok(f.seen.some(command => command.kind === "release_wake_lease"));
     } finally { await f.cleanup(); }
   }

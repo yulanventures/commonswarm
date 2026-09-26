@@ -4800,7 +4800,16 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
   let generation: number | null = null;
   let watchFailure: unknown = null;
-  let leaseStopState: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" = "unclaimed";
+  let leaseStopState: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" | "session-refused" = "unclaimed";
+  let sessionRefusal: string | undefined;
+  const recordLeaseRefusal = (error: WakeLeaseLostError) => {
+    if (error.code === "notify_held_elsewhere" || error.code === "wake_lease_superseded") {
+      leaseStopState = error.surface === "h0_poll" ? "h0_poll" : "watcher";
+    } else {
+      leaseStopState = "session-refused";
+      sessionRefusal = error.message;
+    }
+  };
   let stopSentencePrinted = false;
   const stopInt = () => { stopSignal = "SIGINT"; controller.abort(); };
   const stopTerm = () => { stopSignal = "SIGTERM"; controller.abort(); };
@@ -4809,7 +4818,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     // Once claimed, the release in finally supplies the last known lease state.
     if (generation !== null && !leaseReleaseAttempted) return;
     stopSentencePrinted = true;
-    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, leaseStopState)}\n`);
+    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, leaseStopState, sessionRefusal)}\n`);
     process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
   };
   let leaseReleaseAttempted = false;
@@ -4889,12 +4898,13 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
           host_label: hostLabel, host_id: hostId, take_over: args.has("take-over") });
         break;
       } catch (error) {
+        if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
         if (controller.signal.aborted && stopSignal !== null) {
           finishSignalStop();
           return;
         }
         if (!(error instanceof WakeLeaseTransientError)) throw error;
-        leaseStopState = "unclaimed";
+        leaseStopState = "claim-unknown";
         if (claimFailures === 0) process.stderr.write("cswarm: wake lease claim is unavailable; retrying.\n");
         claimFailures += 1;
         await new Promise<void>((resolve) => {
@@ -4926,7 +4936,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         : undefined,
       renew: async () => { await leaseRequest({ kind: "renew_wake_lease",
         watcher_id: watcherId, generation }); },
-      lost: (error) => { watchFailure = error; if (error instanceof WakeLeaseLostError) leaseStopState = error.surface; controller.abort(); },
+      lost: (error) => { watchFailure = error; if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error); controller.abort(); },
       failed: (error) => { watchFailure = error; controller.abort(); },
     });
     const retryNotices = createArrivalRetryNoticePolicy();
@@ -5025,7 +5035,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
           contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
         if (released.released === true) leaseStopState = "released";
       } catch (error) {
-        if (error instanceof WakeLeaseLostError) leaseStopState = error.surface;
+        if (error instanceof WakeLeaseLostError) recordLeaseRefusal(error);
         // A transient failure leaves the last observed holder as our best evidence.
       }
     }

@@ -18,7 +18,7 @@ export class WakeLeaseLostError extends Error {
   readonly exitCode: number;
   constructor(
     readonly code: NotifyLeaseCode,
-    readonly surface: "watcher" | "h0_poll",
+    readonly surface: "watcher" | "h0_poll" | "session",
     readonly host: string | null,
     restartCommand: string | null,
     phase: WakeLeasePhase = "renew",
@@ -27,7 +27,8 @@ export class WakeLeaseLostError extends Error {
     contextSource?: "operator" | "profile",
     fallback?: string,
   ) {
-    super(wakeLeaseExitSentence(code, surface, host, restartCommand, phase, sessionContextPath, remedyCommand, contextSource, fallback));
+    super(wakeLeaseExitSentence(code, surface === "session" ? "watcher" : surface,
+      host, restartCommand, phase, sessionContextPath, remedyCommand, contextSource, fallback));
     this.name = "WakeLeaseLostError";
     this.exitCode = wakeLeaseRule(code, phase).exit;
   }
@@ -103,7 +104,7 @@ export async function sendWakeLeaseCommand(options: {
     if (body && typeof body.error === "string" &&
         isAgentSessionErrorCode(body.error) && body.error in NOTIFY_LEASE_EXITS) {
       throw new WakeLeaseLostError(body.error as NotifyLeaseCode,
-        "watcher", null, options.restartCommand,
+        "session", null, options.restartCommand,
         options.command.kind === "claim_wake_lease" ? "start" : "renew", options.sessionContextPath, options.remedyCommand,
         options.contextSource, options.fallback);
     }
