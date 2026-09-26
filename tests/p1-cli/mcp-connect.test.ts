@@ -15,6 +15,7 @@ import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile } from "../../src/cloud/agent-profile.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
+import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const PRINCIPAL = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -174,8 +175,8 @@ test("hidden prompt rejects EOF and empty input, trims input, and restores echo 
   }
 });
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-connect-"));
+async function fixture(guardedRoot?: string) {
+  const root = guardedRoot ?? await mkdtemp(join(tmpdir(), "cswarm-mcp-connect-"));
   let calls = 0;
   let consumed = false;
   let refusal: string | null = null;
@@ -194,7 +195,7 @@ async function fixture() {
       run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" });
   };
   return { root, fetcher, calls: () => calls, refuse: (value: string) => { refusal = value; },
-    reset: () => { consumed = false; }, close: () => rm(root, { recursive: true, force: true }) };
+    reset: () => { consumed = false; }, close: () => guardedRoot ? removeLaneTempHome(root) : rm(root, { recursive: true, force: true }) };
 }
 
 test("connect saves an unbound private profile and never returns either secret", { timeout: 10000 }, async () => {
@@ -239,7 +240,7 @@ test("mcp connect succeeds after registration when the optional inventory is una
   const oldHome = process.env.HOME;
   try {
     for (const cause of ["mode", "damaged"] as const) {
-      const f = await fixture();
+      const f = await fixture(createLaneTempHome(`mcp-inventory-${cause}-`));
       try {
         process.env.HOME = f.root;
         const inventoryRoot = join(f.root, ".cswarm");
@@ -256,7 +257,7 @@ test("mcp connect succeeds after registration when the optional inventory is una
         assert.equal(result.profile, path);
         assert.equal((await stat(path)).mode & 0o777, 0o600);
         assert.equal(warnings.length, 1);
-        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /damaged inventory moved to ~\/\.cswarm\/profile-paths\.json\.damaged-/);
       } finally { await f.close(); }
     }
   } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; }

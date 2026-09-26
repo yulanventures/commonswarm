@@ -113,7 +113,7 @@ test("setup reports success after a profile save when the optional inventory is 
         assert.equal(result.connected, true);
         assert.equal((await lstat(profilePath)).mode & 0o777, 0o600);
         assert.equal(warnings.length, 1);
-        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /damaged inventory moved to ~\/\.cswarm\/profile-paths\.json\.damaged-/);
       } finally { removeLaneTempHome(home); }
     }
   } finally {

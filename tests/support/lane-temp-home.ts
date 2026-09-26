@@ -5,11 +5,29 @@ import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 const temporaryRoot = realpathSync("/tmp");
 const realHome = realpathSync(userInfo().homedir);
 const createdHomes = new Set<string>();
+const unownedHomes = new Set<string>();
 
 export function createLaneTempHome(prefix: string): string {
   const path = mkdtempSync(resolve(temporaryRoot, `lane-home-${prefix}`));
   createdHomes.add(realpathSync(path));
   return path;
+}
+
+/** A guarded negative control: owned by this test helper, but not by removeLaneTempHome. */
+export function createLaneUnownedTempHome(prefix: string): string {
+  const path = mkdtempSync(resolve(temporaryRoot, `lane-home-${prefix}`));
+  unownedHomes.add(realpathSync(path));
+  return path;
+}
+
+export function removeLaneUnownedTempHome(path: string): void {
+  const actual = realpathSync(path);
+  const inside = relative(temporaryRoot, actual);
+  if (!inside || inside === ".." || inside.startsWith(`..${sep}`) || !unownedHomes.has(actual)) {
+    throw new Error("refusing to remove an unowned temporary home");
+  }
+  unownedHomes.delete(actual);
+  rmSync(actual, { recursive: true, force: true });
 }
 
 export function removeLaneTempHome(path: string): void {

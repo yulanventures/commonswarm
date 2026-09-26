@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, realpath, readdir } from "node:fs/promises";
+import { lstat, realpath, readdir, rename } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { cloudTarget, type CloudTarget } from "./config.js";
@@ -65,7 +65,8 @@ export function privatePath(path: string): string {
 }
 
 export function profilePathRemedy(): string {
-  return "Use an absolute private file path outside a repository, for example ~/.cswarm/agents/<deployment>/<workspace-id>/<principal-id>/profile.json. Run cswarm profile ls to find saved profiles.";
+  const example = agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>", "~/.cswarm");
+  return `Use an absolute private file path outside a repository, for example ${example}. Run cswarm profile ls to find saved profiles.`;
 }
 
 /** Check each existing ancestor, including repos reached through an ancestor symlink. */
@@ -153,8 +154,8 @@ export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "
   return agentProfilePath(target.profileId, connection.workspace_id, connection.principal_id);
 }
 
-function agentProfilePath(deployment: string, workspace: string, principal: string): string {
-  return join(agentProfileRoot(), "agents", deployment, workspace, principal, "profile.json");
+export function agentProfilePath(deployment: string, workspace: string, principal: string, root = agentProfileRoot()): string {
+  return join(root, "agents", deployment, workspace, principal, "profile.json");
 }
 
 /** Shared root for automatic setup and MCP connect profiles. Explicit paths under this root are included too. */
@@ -271,7 +272,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, registryWrite = writeSecureJsonFile): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -299,17 +300,32 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
   const root = agentProfileRoot();
+  let movedRegistry: string | undefined;
   try {
     await withFileLock(root, "profile-registry", async () => {
-      const paths = await registeredProfilePaths(root);
-      if (!paths.includes(path)) await writeSecureJsonFile(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
+      let paths: string[];
+      try { paths = await registeredProfilePaths(root); }
+      catch (error) {
+        if (!(error instanceof AgentSetupError) || error.code !== "profile_registry_invalid") throw error;
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        movedRegistry = join(root, `${PROFILE_REGISTRY}.damaged-${stamp}`);
+        await rename(join(root, PROFILE_REGISTRY), movedRegistry);
+        paths = [];
+      }
+      if (!paths.includes(path)) await registryWrite(join(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
     });
+    if (movedRegistry) process.stderr.write(`cswarm: Profile saved; damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)} and rebuilt.\n`);
   } catch {
     let modeCause = false;
-    try { modeCause = ((await lstat(root)).mode & 0o777) !== 0o700; } catch { /* The inventory is optional. */ }
+    let symlinkCause = false;
+    try {
+      const stat = await lstat(root);
+      modeCause = (stat.mode & 0o777) !== 0o700;
+      symlinkCause = stat.isSymbolicLink();
+    } catch { /* The inventory is optional. */ }
     process.stderr.write(modeCause
-      ? "cswarm: Profile saved; inventory unavailable. Run chmod 700 ~/.cswarm to enable it.\n"
-      : "cswarm: Profile saved; inventory unavailable. Run cswarm profile ls to inspect saved profiles.\n");
+      ? symlinkCause ? "cswarm: Profile saved; inventory unavailable. ~/.cswarm must be a real private directory.\n" : "cswarm: Profile saved; inventory unavailable. Run chmod 700 ~/.cswarm to enable it.\n"
+      : `cswarm: Profile saved; inventory unavailable.${movedRegistry ? ` Damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)}.` : ""} Run cswarm profile ls to inspect saved profiles.\n`);
   }
   return profile;
 }

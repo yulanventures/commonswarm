@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { userInfo } from "node:os";
 import test from "node:test";
-import { agentProfileRoot, listAgentProfiles, privatePath, saveAgentProfile } from "../../src/cloud/agent-profile.js";
+import { agentProfilePath, agentProfileRoot, listAgentProfiles, privatePath, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { mapMcpError } from "../../src/mcp/errors.js";
 import { parseProfileListUrl } from "../../src/cli.js";
-import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
+import { createLaneTempHome, createLaneUnownedTempHome, removeLaneTempHome, removeLaneUnownedTempHome } from "../support/lane-temp-home.js";
 
 const LOOPBACK = "http://127.0.0.1:9";
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
@@ -88,8 +88,13 @@ test("temporary home cleanup refuses outside paths", { timeout: 10_000 }, () => 
   const helper = readFileSync(resolve("tests/support/lane-temp-home.ts"), "utf8");
   assert.match(helper, /actual === "\/" \|\| actual === realHome/);
   assert.match(helper, /inside\.startsWith/);
+  assert.match(readFileSync(resolve("tests/p1-cli/mcp-connect.test.ts"), "utf8"), /fixture\(createLaneTempHome\(`mcp-inventory-/);
+  const controlSource = readFileSync(resolve("tests/p1-cli/profile-ls.test.ts"), "utf8");
+  const setupStart = controlSource.indexOf('\n  const home = createLaneTempHome("cleanup-control-");');
+  const controlSetup = controlSource.slice(setupStart, controlSource.indexOf("  try {", setupStart));
+  assert.match(controlSetup, /const unowned = createLaneUnownedTempHome\("unowned-control-"\)/);
   const home = createLaneTempHome("cleanup-control-");
-  const unowned = mkdtempSync("/tmp/lane-home-unowned-");
+  const unowned = createLaneUnownedTempHome("unowned-control-");
   try {
     assert.throws(() => removeLaneTempHome("/"));
     assert.throws(() => removeLaneTempHome(userInfo().homedir));
@@ -97,7 +102,7 @@ test("temporary home cleanup refuses outside paths", { timeout: 10_000 }, () => 
     assert.throws(() => removeLaneTempHome(unowned), /refusing to remove/);
     assert.throws(() => removeLaneTempHome(""), /absolute path/);
   } finally {
-    rmSync(unowned, { recursive: true, force: true });
+    removeLaneUnownedTempHome(unowned);
     removeLaneTempHome(home);
   }
 });
@@ -117,26 +122,36 @@ test("profile inventory failure cannot turn a saved profile into setup failure",
         profile(walked);
         if (cause === "mode") chmodSync(root, 0o755);
         if (cause === "damaged") writeFileSync(join(root, "profile-paths.json"), "{", { mode: 0o600 });
-        if (cause === "unwritable") chmodSync(root, 0o500);
+        const registryWrite = cause === "unwritable" ? async () => {
+          const error = new Error("registry write refused") as NodeJS.ErrnoException;
+          error.code = "EACCES";
+          throw error;
+        } : undefined;
         const saved = join(home, "explicit", "profile.json");
         const warnings: string[] = [];
         const write = process.stderr.write;
         process.stderr.write = ((chunk: string) => { warnings.push(String(chunk)); return true; }) as typeof write;
-        try { await saveAgentProfile(saved, connection); }
+        try { await saveAgentProfile(saved, connection, undefined, undefined, false, registryWrite); }
         finally { process.stderr.write = write; }
         assert.equal(statSync(saved).mode & 0o777, 0o600, cause);
         assert.equal(warnings.length, 1, cause);
-        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : /inventory unavailable/);
+        assert.match(warnings[0]!, cause === "mode" ? /chmod 700 ~\/\.cswarm/ : cause === "damaged" ? /damaged inventory moved to ~\/\.cswarm\/profile-paths\.json\.damaged-.* and rebuilt/ : /inventory unavailable/);
+        if (cause === "damaged") {
+          const backups = readdirSync(root).filter(name => name.startsWith("profile-paths.json.damaged-"));
+          assert.equal(backups.length, 1);
+          assert.equal(readFileSync(join(root, backups[0]!), "utf8"), "{");
+          assert.ok(warnings[0]!.includes(backups[0]!));
+          const second = join(home, "second", "profile.json");
+          await saveAgentProfile(second, connection);
+          assert.equal(warnings.length, 1, "repaired inventory does not warn again");
+          assert.equal(readdirSync(root).filter(name => name.startsWith("profile-paths.json.damaged-")).length, 1);
+        }
         if (cause !== "unwritable") {
           const listed = await listAgentProfiles();
           assert.ok(listed.profiles.some(row => row.path === walked), cause);
-          if (cause === "damaged") {
-            assert.equal(listed.profiles.find(row => row.path === join(root, "profile-paths.json"))?.error, "profile_registry_invalid");
-          }
+          if (cause === "damaged") assert.ok(listed.profiles.some(row => row.path === saved));
         }
-        if (cause === "unwritable") chmodSync(root, 0o700);
       } finally {
-        if (cause === "unwritable") chmodSync(join(home, ".cswarm"), 0o700);
         removeLaneTempHome(home);
       }
     }
@@ -159,6 +174,8 @@ test("MCP profile remedy is generated for each call with a private example", { t
     const b = mapMcpError(invalid);
     assert.equal(a.message, b.message);
     assert.match(a.message, /~\/\.cswarm\/agents/);
+    assert.ok(a.message.includes(agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>", "~/.cswarm")));
+    assert.match(readFileSync(resolve("src/cloud/agent-profile.ts"), "utf8"), /profilePathRemedy\(\): string \{[\s\S]*?agentProfilePath\("<deployment>", "<workspace-id>", "<principal-id>", "~\/\.cswarm"\)/);
     assert.doesNotMatch(a.message, new RegExp(one));
     assert.equal(mapMcpError(invalid).code, "profile_path_invalid");
     assert.equal(mapMcpError({ code: "profile_registry_invalid" }).code, "mcp_call_failed");
