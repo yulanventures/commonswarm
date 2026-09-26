@@ -409,6 +409,47 @@ test("hook merge keeps unrelated handlers and repeated install does not duplicat
   assert.equal(JSON.stringify(first).includes("Stop"), false);
 });
 
+test("Claude wake settings add only the receipt permission and turn removes only it", async () => {
+  const created = mergeReceiveHooks({ permissions: { deny: ["Bash"] } }, "check", null, true);
+  assert.deepEqual(created.permissions, { deny: ["Bash"], allow: ["mcp__cswarm__cswarm_received"] });
+  const { profilePath } = await setup();
+  const cwd = await mkdtemp(join(root, "claude-permissions-"));
+  const settingsPath = join(cwd, ".claude", "settings.local.json");
+  await mkdir(dirname(settingsPath), { recursive: true });
+  const unrelatedHook = { hooks: [{ type: "command", command: "other-agent" }] };
+  await writeFile(settingsPath, JSON.stringify({
+    theme: "kept", permissions: { allow: ["Read", "mcp__other__tool"] },
+    hooks: { UserPromptSubmit: [unrelatedHook] },
+  }));
+  const common = { profilePath, provider: "claude", hostSessionId: "permission-session", cwd,
+    execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
+  await configureAgentReceive({ ...common, mode: "wake", previewChannel: true });
+  await configureAgentReceive({ ...common, mode: "wake", previewChannel: true });
+  const wake = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(wake.theme, "kept");
+  assert.deepEqual(wake.permissions.allow, ["Read", "mcp__other__tool", "mcp__cswarm__cswarm_received"]);
+  assert.equal(JSON.stringify(wake.hooks).includes("other-agent"), true);
+  await configureAgentReceive({ ...common, mode: "turn" });
+  const turn = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.deepEqual(turn.permissions.allow, ["Read", "mcp__other__tool"]);
+  assert.equal(turn.theme, "kept");
+  assert.equal(JSON.stringify(turn.hooks).includes("other-agent"), true);
+});
+
+test("Claude receive refuses malformed permissions without changing settings", async () => {
+  const { profilePath } = await setup();
+  const cwd = await mkdtemp(join(root, "claude-invalid-permissions-"));
+  const settingsPath = join(cwd, ".claude", "settings.local.json");
+  await mkdir(dirname(settingsPath), { recursive: true });
+  const before = `${JSON.stringify({ permissions: { allow: "Read" }, untouched: true }, null, 2)}\n`;
+  await writeFile(settingsPath, before);
+  await assert.rejects(configureAgentReceive({
+    profilePath, mode: "wake", provider: "claude", hostSessionId: "invalid-permission-session", cwd,
+    previewChannel: true, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] },
+  }), { code: "receive_settings_invalid" });
+  assert.equal(await readFile(settingsPath, "utf8"), before);
+});
+
 test("Claude hook verifies only the configured session; Stop records idle without reading messages", async () => {
   const { profilePath } = await setup();
   const cwd = await mkdtemp(join(root, "project-"));
