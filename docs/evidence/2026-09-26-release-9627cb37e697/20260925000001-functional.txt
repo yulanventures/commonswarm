@@ -1,4 +1,4 @@
-              set_config              
+              set_config
 --------------------------------------
  c2cb52be-424b-414d-a525-dec949b860aa
 (1 row)
