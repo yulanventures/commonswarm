@@ -1001,7 +1001,8 @@ SQL
   test "$CATALOG_AFTER" = t
   # Item G's functional proofs need observations from the NEW edge. These
   # versions run after section 6 and their seeded command, never at this step.
-  if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260927000002 ]; then
+  if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260927000001 ] \
+    && [ "$VERSION" != 20260927000002 ]; then
     release_psql_ro --file "/proof/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
