@@ -237,8 +237,8 @@ test("p1-cli mode refuses to start while OrbStack runs", { skip: p1CliSkip, time
 test("the OrbStack probe always checks the real helper and accepts only a control-prefixed extra name", () => {
   const source = readFileSync(script, "utf8");
   assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) extra_orb=\$RUN_GATES_ORB_PATTERN ;; \*\) extra_orb= ;; esac/);
-  // The real probe is unconditional: an override can add a name, never switch the OrbStack check off.
-  assert.match(source, /orb_running\(\) \{\n  if pgrep -f "OrbStack Helper" >\/dev\/null 2>&1 \|\| \{/);
+  // The real probe is unconditional and anchored to an executable path inside OrbStack.app.
+  assert.match(source, /orb_running\(\) \{\n  if pgrep -f '\^\/\[\^ \]\*\/OrbStack\\\.app\/' >\/dev\/null 2>&1 \|\| \{/);
   assert.match(source, /kern\.memorystatus_vm_pressure_level/);
 });
 
@@ -302,6 +302,51 @@ test("a separate wrapper run still blocks p1-cli mode", { skip: p1CliSkip, timeo
     assert.doesNotMatch(body, /EXIT|SHOULD-NOT-RUN/);
   } finally {
     spawnSync("pkill", ["-f", name], { stdio: "ignore" });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+// The OrbStack probe matches an executable inside an OrbStack.app bundle, not text in a command line.
+test("a command line that only mentions OrbStack does not stop a p1-cli run", { skip: p1CliSkip, timeout: 60_000 }, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  try {
+    // The fake suite's own command line contains the helper's name, as another probe's `pgrep -f` would.
+    const worktree = fakeP1CliWorktree(scratch, "bash -c 'sleep 4; : OrbStack Helper decoy'");
+    const log = join(scratch, "gate.log");
+    const result = spawnSync("bash", [script, worktree, log, "HEAD", "p1-cli"], { encoding: "utf8", timeout: 50_000, env: wrapperEnv });
+    const body = readFileSync(log, "utf8");
+    if (result.status === 3 && /^refuse: memory pressure level/m.test(body)) {
+      t.skip("memory pressure rose above level 1 after this file loaded; the wrapper refused to start");
+      return;
+    }
+    assert.equal(result.status, 0, body + result.stderr);
+    assert.doesNotMatch(body, /^STOPPED/m);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("an executable inside an OrbStack.app bundle stops a p1-cli run", { skip: p1CliSkip, timeout: 60_000 }, async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  let dummy: ReturnType<typeof spawn> | undefined;
+  try {
+    const worktree = fakeP1CliWorktree(scratch, "sleep 40");
+    const log = join(scratch, "gate.log");
+    const fakeApp = join(scratch, "OrbStack.app", "Contents", "MacOS", "run-gates-control-dummy");
+    const wrapper = spawn("bash", [script, worktree, log, "HEAD", "p1-cli"], { env: wrapperEnv, stdio: "ignore" });
+    const exited = new Promise<number | null>(done => wrapper.on("close", code => done(code)));
+    await new Promise(done => setTimeout(done, 2_000));
+    dummy = spawn("bash", ["-c", `exec -a "${fakeApp}" sleep 30`], { stdio: "ignore" });
+    const code = await exited;
+    const body = readFileSync(log, "utf8");
+    if (code === 3 && /^refuse: memory pressure level/m.test(body)) {
+      t.skip("memory pressure rose above level 1 after this file loaded; the wrapper refused to start");
+      return;
+    }
+    assert.equal(code, 1, body);
+    assert.match(body, /^STOPPED: OrbStack appeared during the gate; the gate was killed$/m);
+  } finally {
+    dummy?.kill("SIGKILL");
     rmSync(scratch, { recursive: true, force: true });
   }
 });
