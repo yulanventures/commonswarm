@@ -123,8 +123,9 @@ test("the members command itself uses the nonthrowing pending read", { timeout: 
   const source = await readFile(new URL("../../src/cli.ts", import.meta.url), "utf8");
   const calls = membersPendingCalls(source);
   assert.deepEqual(calls, ["readPendingAccessOptional"]);
-  const reverted = source.replace("const pending = await readPendingAccessOptional(",
-    "const pending = await readPendingAccess(");
+  // members reads pending access and presence together (G3e); the mutation targets that call.
+  const reverted = source.replace("    readPendingAccessOptional(\n      cloud, selected.bearer,",
+    "    readPendingAccess(\n      cloud, selected.bearer,");
   assert.notEqual(reverted, source, "the mutation reaches members");
   assert.deepEqual(membersPendingCalls(reverted), ["readPendingAccess"]);
 });
