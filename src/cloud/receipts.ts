@@ -5,6 +5,7 @@ import {
   type DeliveryReceipt,
   type DeliveryReceiptRow,
   type HumanDeliveryReceipt,
+  type ReplyReceipt,
 } from "./delivery-receipts.js";
 import { relativeAge, relativeExpiry } from "./workspaces.js";
 import { WAKE_STALE_LABEL, WAKE_STALE_MS } from "./idle-poll.js";
@@ -95,6 +96,13 @@ export function renderSignalReceiptReport(
   report: SignalReceiptReport,
   nowMs: number = Date.now(),
 ): string {
+  const latestReplies = new Map<string, ReplyReceipt>();
+  for (const reply of report.replies ?? []) {
+    latestReplies.set(reply.responder_principal_id, reply);
+  }
+  const replySections = [...latestReplies.values()].map((reply) =>
+    `Replied${reply.reply_status === null ? "" : ` (${reply.reply_status})`} by ${reply.responder_display_name} ${relativeAge(reply.created_at, nowMs)}.`
+  );
   const humanReceipts = report.receipts.filter(humanReceipt);
   const agentReceipts = report.receipts.filter(agentDeliveryReceipt);
   const humanSections = humanReceipts.map((receipt) =>
@@ -161,6 +169,7 @@ export function renderSignalReceiptReport(
         : null,
     ].filter((section): section is string => section !== null);
     return [
+      ...replySections,
       "This was a broadcast; no agent was addressed and none was woken.",
       ...rosterSections,
       `To wake an agent, send a new ask with: cswarm ask "<text>" --to <agent> --workspace-id ${report.workspaceId}`,
@@ -259,7 +268,7 @@ export function renderSignalReceiptReport(
       `Ask the agent's operator to check its listener with: ${listenerStatusCommand(report, receipt)}`,
     ].join("\n");
   });
-  return [...humanSections, ...sections].join("\n\n");
+  return [...replySections, ...humanSections, ...sections].join("\n\n");
 }
 
 /** Keep the CLI's machine state explicit while retaining every ledger field. */
@@ -271,6 +280,7 @@ export function signalReceiptJsonPayload(
     workspace_id: report.workspaceId,
     signal_id: report.signalId,
     broadcast: !report.addressed,
+    replies: report.replies ?? [],
     ...(report.broadcast_roster === undefined
       ? {}
       : { broadcast_roster: report.broadcast_roster }),

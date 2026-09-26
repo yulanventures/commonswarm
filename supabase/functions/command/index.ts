@@ -52,6 +52,11 @@ import {
 import { optionalWake } from "../_shared/wake.ts";
 import { WAKE_LEASE_STALE_MS } from "../../../src/cloud/wake-lease-constants.ts";
 import {
+  isReplyStatus,
+  REPLY_STATUSES,
+  type ReplyStatus,
+} from "../../../src/cloud/reply-status.ts";
+import {
   commandAllowedOrigins,
   commandPreflight,
   withCommandCors,
@@ -249,6 +254,7 @@ interface SignalCommand {
   to_user_id: string | null;
   to_agent_principal_id?: string | null;
   in_reply_to?: string | null;
+  reply_status?: ReplyStatus;
   about: string | null;
   attachments?: SignalAttachmentRef[];
   until_ms?: number;
@@ -294,6 +300,7 @@ interface SignalRecord {
   to: string | null;
   to_agent: string | null;
   in_reply_to: string | null;
+  reply_status: ReplyStatus | null;
   about: string | null;
   kind: SignalKind;
   body: string;
@@ -1637,7 +1644,7 @@ function nullableUuid(value: unknown): value is string | null {
 
 function validateCommand(
   value: unknown,
-): { ok: true; command: ValidatedCommand } | { ok: false; status: number; reason: string } {
+): { ok: true; command: ValidatedCommand } | { ok: false; status: number; reason: string; error?: string } {
   const cmd = record(value);
   if (!cmd || typeof cmd.kind !== "string") {
     return { ok: false, status: 400, reason: "invalid command shape" };
@@ -1921,6 +1928,31 @@ function validateCommand(
       ? cmd.to_agent_principal_id
       : null;
     const inReplyTo = modernShape ? cmd.in_reply_to : null;
+    const hasReplyStatus = Object.hasOwn(cmd, "reply_status");
+    const replyStatus = hasReplyStatus ? cmd.reply_status : undefined;
+    if (hasReplyStatus && threadRoot !== null) {
+      return {
+        ok: false,
+        status: 400,
+        error: "reply_status_thread",
+        reason: "reply_status applies only to a private reply, not a thread reply",
+      };
+    }
+    if (hasReplyStatus && inReplyTo === null) {
+      return {
+        ok: false,
+        status: 400,
+        error: "reply_status_not_reply",
+        reason: "reply_status requires in_reply_to",
+      };
+    }
+    if (hasReplyStatus && !isReplyStatus(replyStatus)) {
+      return {
+        ok: false,
+        status: 400,
+        reason: `reply_status must be ${REPLY_STATUSES.join("|")}`,
+      };
+    }
     /* Every rule the chat fields add lives in one pure function so the edge
      * cannot enforce half of them and so they are testable without Deno. Its
      * SENTENCE is what the caller gets back: routing it into the generic
@@ -1948,6 +1980,7 @@ function validateCommand(
       ...attachmentKeys,
       ...optionalKeys,
       ...chatKeys,
+      ...(hasReplyStatus ? ["reply_status"] : []),
     ]);
     const baseValid = keysOk &&
       typeof cmd.signal_kind === "string" &&
@@ -2035,6 +2068,7 @@ function validateCommand(
               in_reply_to: inReplyTo as string | null,
             }
             : {}),
+          ...(hasReplyStatus ? { reply_status: replyStatus as ReplyStatus } : {}),
           about: sanitizedAbout,
           ...(attachments === undefined ? {} : { attachments: attachments! }),
           ...(cmd.until_ms === undefined
@@ -8696,6 +8730,7 @@ async function postSignal(
     to_user_id: string | null;
     to_agent_principal_id: string | null;
     in_reply_to: string | null;
+    reply_status: ReplyStatus | null;
     about: string | null;
     kind: SignalKind;
     body: string;
@@ -8743,7 +8778,7 @@ async function postSignal(
     )
     INSERT INTO swarm.signals (
       id, workspace_id, from_principal, from_kind,
-      to_user_id, to_agent_principal_id, in_reply_to,
+      to_user_id, to_agent_principal_id, in_reply_to, reply_status,
       about, kind, body, until, created_at,
       channel_id, thread_root_id, broadcast_to_channel
     )
@@ -8761,6 +8796,7 @@ async function postSignal(
       ${target.toUserId}::uuid,
       ${target.toAgentPrincipalId}::uuid,
       ${target.inReplyTo}::uuid,
+      ${command.reply_status ?? null},
       ${command.about},
       ${command.signal_kind},
       ${command.body},
@@ -8775,7 +8811,7 @@ async function postSignal(
       OR candidate.until_value <= ${placement.untilCeiling}::timestamptz
     RETURNING
       id, workspace_id, from_principal, from_kind,
-      to_user_id, to_agent_principal_id, in_reply_to,
+      to_user_id, to_agent_principal_id, in_reply_to, reply_status,
       about, kind, body, until, created_at,
       channel_id, thread_root_id, broadcast_to_channel
   `;
@@ -8848,6 +8884,7 @@ async function postSignal(
     to: signal.to_user_id,
     to_agent: signal.to_agent_principal_id,
     in_reply_to: signal.in_reply_to,
+    reply_status: signal.reply_status,
     about: signal.about,
     kind: signal.kind,
     body: signal.body,
@@ -9175,9 +9212,9 @@ async function handleTransaction(
       return {
         status: validation.status,
         body: {
-          error: validation.status === 413
+          error: validation.error ?? (validation.status === 413
             ? "payload_too_large"
-            : "invalid_request",
+            : "invalid_request"),
           message: validation.reason,
         },
       };

@@ -29,6 +29,7 @@ import {
 } from "./attachments.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 import { parseServerSessionStatus, type ServerSessionStatus } from "./session-client.js";
+import { isReplyStatus } from "./reply-status.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -524,6 +525,13 @@ export function parseSignalRecord(
     in_reply_to: row.in_reply_to === undefined
       ? null
       : checkedNullableUuid(row.in_reply_to, "in_reply_to"),
+    reply_status: row.reply_status === undefined || row.reply_status === null
+      ? null
+      : isReplyStatus(row.reply_status)
+      ? row.reply_status
+      : (() => {
+        throw new SignalMalformedError("signal read returned a malformed reply_status");
+      })(),
     about: row.about as string | null,
     kind: row.kind as SignalKind,
     body: row.body,
@@ -1090,7 +1098,7 @@ async function humanSignals(
   url.searchParams.set(
     "select",
     [
-      "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,about,kind,body,attachments,until,created_at",
+      "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,reply_status,about,kind,body,attachments,until,created_at",
       ...(query.channelId === undefined
         ? []
         : ["channel_id", "thread_root_id", "broadcast_to_channel"]),
@@ -2002,6 +2010,9 @@ export function renderSignals(
     const replyTo = (signal.in_reply_to ?? null) === null
       ? ""
       : ` — in reply to ${signal.in_reply_to}`;
+    const replyStatus = signal.reply_status == null
+      ? ""
+      : ` (${signal.reply_status})`;
     /* The signal's OWN id, because `cswarm reply <signal-id>` requires it and no human-readable
      * surface printed it — not feed, not inbox, not status, not the confirmation after a post.
      * The core loop was unusable from the CLI: you could read an ask and had no way to answer it.
@@ -2016,7 +2027,7 @@ export function renderSignals(
       ? signal.body.slice(0, SIGNAL_BODY_DISPLAY_MAX)
       : signal.body;
     lines.push(
-      `- [${signal.kind}] ${author} — ${
+      `- [${signal.kind}]${replyStatus} ${author} — ${
         relativeAge(signal.created_at, now)
       } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}: ${
         JSON.stringify(displayedBody)

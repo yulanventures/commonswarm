@@ -23,11 +23,13 @@ import { managedAckInput } from "./session-ack.js";
 import { parseSignalRecord, readAgentSignalDirectory, signalAddressesAgent } from "./signals.js";
 import { assertProfileIdentity } from "./agent-check.js";
 import { boundProfileCommands } from "./agent-onboarding-contract.js";
+import { isReplyStatus, REPLY_STATUSES } from "./reply-status.js";
 
 export const CHANNEL_RECEIPT_TOOL = "cswarm_received";
 export const CHANNEL_RECEIPT_FIELDS = ["signal_id", "receipt", "host_session_id"] as const;
 export const CHANNEL_REPLY_TOOL = "cswarm_reply";
 export const CHANNEL_REPLY_FIELDS = ["signal_id", "body"] as const;
+const CHANNEL_REPLY_OPTIONAL_FIELDS = ["status"] as const;
 const CHANNEL_HEARTBEAT_MS = 5_000;
 const CHANNEL_POLL_MS = 30_000;
 
@@ -244,6 +246,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
       description: "Answer a CommonSwarm message privately to its original author.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         signal_id: { type: "string" }, body: { type: "string" },
+        status: { type: "string", enum: [...REPLY_STATUSES] },
       }, required: [...CHANNEL_REPLY_FIELDS] },
     },
   ] }));
@@ -268,8 +271,9 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
   };
   const sendReply = async (request: { params: { arguments?: Record<string, unknown> } }) => {
     const args = request.params.arguments ?? {};
-    if (Object.keys(args).length !== CHANNEL_REPLY_FIELDS.length || CHANNEL_REPLY_FIELDS.some(key => typeof args[key] !== "string")) {
-      return { isError: true, content: [{ type: "text" as const, text: `Reply needs exactly: ${CHANNEL_REPLY_FIELDS.join(", ")}.` }] };
+    const allowed = new Set<string>([...CHANNEL_REPLY_FIELDS, ...CHANNEL_REPLY_OPTIONAL_FIELDS]);
+    if (CHANNEL_REPLY_FIELDS.some(key => typeof args[key] !== "string") || Object.keys(args).some(key => !allowed.has(key)) || (args.status !== undefined && !isReplyStatus(args.status))) {
+      return { isError: true, content: [{ type: "text" as const, text: `Reply needs ${CHANNEL_REPLY_FIELDS.join(", ")}; optional status is ${REPLY_STATUSES.join("|")}.` }] };
     }
     const signalId = args.signal_id as string;
     const body = args.body as string;
@@ -291,6 +295,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
       kind: "post_signal", signal_kind: "note", body,
       to_user_id: null, to_agent_principal_id: null,
       in_reply_to: normalizedSignalId, about: null,
+      ...(args.status === undefined ? {} : { reply_status: args.status }),
     };
     try {
       const result = await sendSignalWithPending(replySender, {

@@ -3,6 +3,7 @@ import {
   SIGNAL_READ_TIMEOUT_MS,
   SignalReadTimeoutError,
 } from "./signals.js";
+import { isReplyStatus, type ReplyStatus } from "./reply-status.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -91,8 +92,18 @@ export interface DeliveryReceiptResult {
   /** Null means this credential did not author a matching signal. */
   addressed: boolean | null;
   receipts: DeliveryReceiptRow[];
+  /** Ordered oldest-first by (created_at, reply_signal_id). Absent on old servers. */
+  replies?: ReplyReceipt[];
   /** Present only for broadcasts; each section is independently capped by the server. */
   broadcast_roster?: BroadcastRecipientRoster;
+}
+
+export interface ReplyReceipt {
+  responder_principal_id: string;
+  responder_display_name: string;
+  reply_signal_id: string;
+  reply_status: ReplyStatus | null;
+  created_at: string;
 }
 
 /** Roster members a cut list did not show, per section, from the server's uncapped totals. */
@@ -176,6 +187,39 @@ function displayName(value: unknown, field: string): string {
     );
   }
   return value;
+}
+
+function parseReplyReceipt(value: unknown): ReplyReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DeliveryReceiptReadError(
+      "protocol",
+      "delivery receipt returned a malformed reply row",
+    );
+  }
+  const row = value as Record<string, unknown>;
+  const status = row.reply_status === null
+    ? null
+    : isReplyStatus(row.reply_status)
+    ? row.reply_status
+    : (() => {
+      throw new DeliveryReceiptReadError(
+        "protocol",
+        "delivery receipt returned a malformed reply_status",
+      );
+    })();
+  return {
+    responder_principal_id: uuid(
+      row.responder_principal_id,
+      "responder_principal_id",
+    ),
+    responder_display_name: displayName(
+      row.responder_display_name,
+      "responder_display_name",
+    ),
+    reply_signal_id: uuid(row.reply_signal_id, "reply_signal_id"),
+    reply_status: status,
+    created_at: timestamp(row.created_at, "reply created_at"),
+  };
 }
 
 /** Parse the narrow agent-or-human receipt wire without inventing either kind. */
@@ -427,6 +471,16 @@ export function parseDeliveryReceiptResult(value: unknown): DeliveryReceiptResul
     );
   }
   const receipts = body.receipts.map(parseDeliveryReceipt);
+  const replies = Object.hasOwn(body, "replies")
+    ? Array.isArray(body.replies)
+      ? body.replies.map(parseReplyReceipt)
+      : (() => {
+        throw new DeliveryReceiptReadError(
+          "protocol",
+          "delivery receipt read returned malformed replies",
+        );
+      })()
+    : [];
   const broadcastRoster = Object.hasOwn(body, "broadcast_roster")
     ? parseBroadcastRoster(body.broadcast_roster)
     : undefined;
@@ -483,6 +537,7 @@ export function parseDeliveryReceiptResult(value: unknown): DeliveryReceiptResul
   return {
     addressed: body.addressed,
     receipts,
+    replies,
     ...(broadcastRoster === undefined ? {} : { broadcast_roster: broadcastRoster }),
   };
 }
@@ -597,6 +652,7 @@ export async function readAgentDeliveryReceipts(
     return {
       addressed: result.addressed,
       receipts: result.receipts,
+      replies: result.replies,
       ...(result.broadcast_roster === undefined
         ? {}
         : { broadcast_roster: result.broadcast_roster }),

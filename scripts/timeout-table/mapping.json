@@ -1717,7 +1717,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:304",
+          "citation": "src/cli.ts:309",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7580",
+          "citation": "src/cli.ts:7602",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8331",
+          "citation": "src/cli.ts:8353",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5087-5089; src/cloud/wake-lease.ts:61,64",
+          "citation": "src/cli.ts:5109-5111; src/cloud/wake-lease.ts:61,64",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1773,7 +1773,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3414",
+          "citation": "src/cli.ts:3422",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1789,7 +1789,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-channel.ts:142",
+          "citation": "src/cloud/agent-channel.ts:209",
           "detail": "DeliveryCommandClient deadline on the receive-channel loop.",
           "operation": {
             "name": "channel-delivery-deadline",
@@ -1805,7 +1805,7 @@
           "class": "local",
           "scope": "per-request",
           "endpoints": [],
-          "citation": "src/cloud/agent-channel.ts:216",
+          "citation": "src/cloud/agent-channel.ts:343",
           "detail": "Local receive-channel heartbeat interval.",
           "operation": {
             "name": "channel-heartbeat",
@@ -1821,7 +1821,7 @@
           "endpoints": [
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-channel.ts:143",
+          "citation": "src/cloud/agent-channel.ts:210",
           "detail": "ThinCommandClient signal request timeout on the receive-channel loop.",
           "operation": {
             "name": "channel-signal-timeout",
@@ -1859,7 +1859,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8382; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8404; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2473,7 +2473,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:39,882-930",
+          "citation": "src/cloud/signals.ts:40,890-938",
           "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
@@ -2491,7 +2491,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:930",
+          "citation": "src/cloud/signals.ts:938",
           "detail": "fetchSignalRead default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -2509,7 +2509,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:1043",
+          "citation": "src/cloud/signals.ts:1051",
           "detail": "fetchSignalReadRetrying default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6932",
+          "citation": "src/cli.ts:6954",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7133",
+          "citation": "src/cli.ts:7155",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
