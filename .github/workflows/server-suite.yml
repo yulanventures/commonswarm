@@ -1,15 +1,19 @@
-# Runs the local-stack server suite (`npm run test:p1-server`) for one ref, on demand only.
+# Runs one suite that cannot run on the Mac mini, for one ref, on demand only:
+# - suite server: the local-stack server suite (`npm run test:p1-server`);
+# - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers;
+# - suite site: the site build, then `npm --prefix site test`, whose observer tests start a headless Chrome.
 #
-# Why it exists (HezLead ruling, 2026-09-26): the Mac mini can no longer host a local Supabase stack (OrbStack was
-# stopped for memory), and no lane ships with an unrun server suite, so lane server suites run here.
+# Why it exists (HezLead rulings, 2026-09-26): the Mac mini runs no docker at all (any docker CLI call starts
+# OrbStack, which was stopped for memory) and no browser tests (each headless Chrome raises a Keychain dialog on the
+# operator's screen), and no lane ships with an unrun suite, so lanes run these here.
 #
 # Limits, all deliberate:
 # - workflow_dispatch ONLY. Never on push, pull_request or schedule: each run costs paid minutes.
 # - GitHub-hosted ubuntu-latest ONLY. It does not read the CI_RUNS_ON* repository variables the other workflows use,
 #   because those route to the self-hosted fleet on machines that cannot spare a Supabase stack's memory.
 # - No secrets. The local stack generates its own development keys.
-# - timeout-minutes 30; one run per landing SHA; at most 20 dispatches a week (about $2.50).
-# The ref input is used only as a checkout ref, never inside a run script.
+# - timeout-minutes 30; one run per landing SHA and suite; at most 20 dispatches a week in total (about $2.50).
+# The ref input is used only as a checkout ref, never inside a run script; the suite input is a fixed choice.
 name: server suite (manual)
 
 on:
@@ -19,16 +23,25 @@ on:
         description: "Commit SHA or branch to test"
         required: true
         type: string
+      suite:
+        description: "Which suite to run"
+        required: true
+        type: choice
+        options:
+          - server
+          - p1-cli
+          - site
+        default: server
 
 concurrency:
-  group: server-suite-${{ inputs.ref }}
+  group: server-suite-${{ inputs.suite }}-${{ inputs.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  p1-server:
+  suite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -42,21 +55,37 @@ jobs:
           cache: npm
       - run: npm ci
       - uses: supabase/setup-cli@v1
+        if: inputs.suite == 'server'
         with:
           version: 2.118.0
       - name: Start the local stack
+        if: inputs.suite == 'server'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
         run: |
           supabase start --ignore-health-check
           npm run db:reset
       - name: Server suite
+        if: inputs.suite == 'server'
         run: |
           set -o pipefail
-          npm run test:p1-server 2>&1 | tee p1-server.log
+          npm run test:p1-server 2>&1 | tee server.log
+      - name: p1-cli suite
+        if: inputs.suite == 'p1-cli'
+        run: |
+          set -o pipefail
+          npm run test:p1-cli 2>&1 | tee p1-cli.log
+      - name: Site build and site suite
+        if: inputs.suite == 'site'
+        # The observer tests read the built pages, so the build runs first; they find /usr/bin/google-chrome.
+        run: |
+          set -o pipefail
+          npm ci --prefix site
+          npm --prefix site run build
+          npm --prefix site test 2>&1 | tee site.log
       - name: Upload the log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: p1-server-log
-          path: p1-server.log
+          name: ${{ inputs.suite }}-log
+          path: ${{ inputs.suite }}.log
           retention-days: 14
