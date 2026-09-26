@@ -8,7 +8,7 @@ import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
 import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
-import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
+import { AgentSetupError, privatePath, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
@@ -9499,7 +9499,7 @@ async function runMcpConnect(args: Arguments): Promise<void> {
       ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.\n`
       : cleared.emptyClaimPresent
         ? cleared.profilePresent
-          ? `${removed} This directory holds an empty claim file at credential.json and a profile at ${profilePath} that could not be validated; both files were kept. Ask the operator to inspect them before another connect.\n`
+          ? `${removed} This directory holds an empty claim file at credential.json and a profile at ${privatePath(profilePath)} that could not be validated; both files were kept. Ask the operator to inspect them before another connect.\n`
           : `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
       : cleared.credentialPresent
         ? cleared.profilePresent

@@ -6,7 +6,7 @@ import { readAgentSignalDirectory, readAgentSignalPage } from "./signals.js";
 import { readSecureJsonFileIfPresent } from "./storage.js";
 import {
   AgentSetupError, ONBOARDING_MAX_FILE_BYTES, assertPrivateLocation,
-  defaultAgentProfilePath, parseAgentConnection, profileTarget, readAgentProfile, saveAgentProfile,
+  defaultAgentProfilePath, parseAgentConnection, profileTarget, readAgentProfile, refusePendingConnectProfile, saveAgentProfile,
   type AgentProfile,
 } from "./agent-profile.js";
 import { assertProfileIdentity, shellQuote, withAgentDeadline } from "./agent-check.js";
@@ -31,6 +31,7 @@ export async function setupAgent(options: {
   if (raw === null) throw new AgentSetupError("connection_missing", "Save the connection file outside repositories in a private 0700 directory, with file mode 0600, then run setup again.");
   const connection = parseAgentConnection(raw);
   const profilePath = await assertPrivateLocation(options.profilePath ?? defaultAgentProfilePath(connection));
+  await refusePendingConnectProfile(profilePath);
   // A rebind must be refused before setup authenticates the connection on the network.
   if (await readSecureJsonFileIfPresent(profilePath, ONBOARDING_MAX_FILE_BYTES) !== null) {
     await readAgentProfile(profilePath, options.hostSessionId);

@@ -524,10 +524,11 @@ async function defaultPendingProfile(target: CloudTarget, code: string): Promise
 
 export interface McpConnectResult { profile: string; principal_id: string; install: string }
 
-function connectedResult(path: string, principalId: string): McpConnectResult {
-  const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm mcp --profile ${quoteAgentArgument(path)}`;
-  const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ["mcp", "--profile", ${JSON.stringify(path)}]`;
-  return { profile: path, principal_id: principalId, install: `${claude}\n${codex}` };
+function connectedResult(path: string, profile: AgentProfile): McpConnectResult {
+  const arguments_ = ["mcp", "--profile", path, ...(profile.host_session_id ? ["--host-session-id", profile.host_session_id] : [])];
+  const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm ${arguments_.map(quoteAgentArgument).join(" ")}`;
+  const codex = `[mcp_servers.cswarm]\ncommand = "cswarm"\nargs = ${JSON.stringify(arguments_)}`;
+  return { profile: path, principal_id: profile.principal_id, install: `${claude}\n${codex}` };
 }
 
 async function completedProfileAt(path: string): Promise<AgentProfile | null> {
@@ -683,10 +684,10 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           }
           const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
-            credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
+            credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential), connect_attempt_id: complete.attemptId };
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
-          return connectedResult(path, orphan.principalId);
+          return connectedResult(path, restored);
         });
       }
       if ((!current && await pathExists(path)) || (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))) {
@@ -699,6 +700,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
         try {
           const profile = await completedProfileAt(path);
           if (!profile) throw new Error("profile is incomplete");
+          if (profile.connect_attempt_id !== current.attemptId) {
+            throw new McpConnectError("connect_profile_other_attempt", `The profile at ${path} was not written by the pending connect at ${pendingPath(path)}. Keep both files and use a new --profile path for a new agent.`);
+          }
           if (profile.url !== options.target.url) throw new Error("wrong profile target");
           const credential = await readProfileCredential(profile);
           try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId: current.attemptId, url: current.url, codeHash: current.codeHash,
@@ -706,7 +710,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
             ...(credential.runId ? { run_id: credential.runId } : {}) } satisfies CompleteConnect)); }
           catch { throw new McpConnectError("connect_complete_write_failed", `The working profile at ${path} was kept, but the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`); }
           await deleteSecureJsonFile(pendingPath(path));
-          return connectedResult(path, profile.principal_id);
+          return connectedResult(path, profile);
         } catch (error) {
           if (error instanceof McpConnectError) throw error;
           throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
@@ -787,12 +791,12 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           throw new McpConnectError("profile_conflict", "The saved credential belongs to another agent. Inspect the connection before retrying.");
         }
         // saveAgentProfile owns the 0700 directory and 0600 file writes. The profile is intentionally unbound.
-        await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId);
+        const profile = await (options.saveProfile ?? saveAgentProfile)(path, connection, undefined, undefined, true, current !== null, orphanPrincipalId, undefined, attemptId);
         try { await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({ attemptId, url: options.target.url, codeHash: codeHash(code, attemptId),
           workspace_id: connection.workspace_id, anon_key: connection.anon_key, principal_id: connection.principal_id, run_id: body.run_id } satisfies CompleteConnect)); }
         catch { throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and usable, but the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`); }
         await deleteSecureJsonFile(pendingPath(path));
-        return connectedResult(path, body.principal_id);
+        return connectedResult(path, profile);
       } catch (error) {
         clearTimeout(timer);
         if (error instanceof McpConnectError && error.code !== "register_outcome_unknown") throw error;

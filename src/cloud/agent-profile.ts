@@ -44,6 +44,7 @@ export interface AgentProfile {
    */
   workspace_name?: string;
   host_session_id?: string;
+  connect_attempt_id?: string;
 }
 
 /** Refuse a bound profile before any credential, cache, or network access. */
@@ -150,21 +151,28 @@ export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "
   return join(homedir(), ".cswarm", "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
 }
 
+export async function refusePendingConnectProfile(path: string): Promise<void> {
+  const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+  const present = await lstat(pending).then(() => true, error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  });
+  if (present) throw new AgentSetupError("setup_connect_pending", `This directory holds ${pending}. Keep it and use a new --profile path for setup.`);
+}
+
 export async function readAgentProfile(path: string, hostSessionId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
   let p: AgentProfile;
   try { p = JSON.parse(raw); } catch { throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again."); }
-  /* Exactly the required keys, optionally plus workspace_name and host_session_id. Written as accepted sets
-   * rather than a subset test, so an unknown key is still a damaged profile. */
+  /* Exactly the required keys, optionally plus the known metadata. */
   const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
-  const keys = Object.keys(p ?? {}).sort().join();
-  const keysAccepted = keys === [...required].sort().join() ||
-    keys === [...required, "workspace_name"].sort().join() ||
-    keys === [...required, "host_session_id"].sort().join() ||
-    keys === [...required, "workspace_name", "host_session_id"].sort().join();
+  const keys = Object.keys(p ?? {});
+  const keysAccepted = required.every(key => keys.includes(key)) &&
+    keys.every(key => required.includes(key) || ["workspace_name", "host_session_id", "connect_attempt_id"].includes(key));
   if (!p || p.version !== 1 || !keysAccepted ||
+      (p.connect_attempt_id !== undefined && (typeof p.connect_attempt_id !== "string" || !ONBOARDING_UUID.test(p.connect_attempt_id))) ||
       (p.host_session_id !== undefined &&
         (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200)) ||
       (p.workspace_name !== undefined &&
@@ -195,7 +203,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -206,8 +214,10 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
      * released client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
     ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
+    ...(connectAttemptId === undefined ? {} : { connect_attempt_id: connectAttemptId }),
   };
   await withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+    if (connectAttemptId === undefined) await refusePendingConnectProfile(path);
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
