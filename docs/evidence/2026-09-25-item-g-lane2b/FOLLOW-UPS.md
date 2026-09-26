@@ -54,3 +54,32 @@ The lead verified Codex R17 item 2 as the lane-introduced production blocker; Fo
 | Opus R17 F3 | `tests/p1-cli/host-id-rotation.test.ts` | The real `/bin/ps` path for a non-self PID remains unmeasured in this sandbox. | This is a measurement gap, not a verified production failure. |
 | Opus R17 F4 | `src/cloud/storage.ts` | Host-id and reclaim-gate records still use a two-sided process-start comparison. | Outside the general-lock finding selected for Fold 19. |
 | Opus R17 F5 | `site/src/components/download/WhatHappens.astro` | Two agent-state citations point to unrelated storage code. | The citation error predates this lane. |
+
+## Round 18 (Fold 19 review; Codex PASS, Opus PASS)
+
+- Codex: `storage.ts` treats every `stat` failure with a present `lstat` as a dangling symlink, so a lock whose
+  `stat` fails with EACCES can be reclaimed before `LOCK_STALE_MS`; the normal writer's target is in the accessible
+  state directory, so no production case was shown. No test swaps one unreadable entry for another unreadable entry.
+- Opus R1: `sameUnreadableOwner` compares dev, ino and symlink target only; on ext4 (inode reuse) a root-owned record
+  published inside a few-syscall window could be removed. Main had a check-then-unlink race for every lock.
+- Opus R2: the restore uses link()/symlink() and passes only EEXIST; with `fs.protected_hardlinks=1` a user cannot
+  link root's 0600 file (EPERM), so the record stays at `.stale` and the lock path is empty.
+- Opus R3: `rm(moved, {recursive: true})` throws EACCES on a non-empty root-owned directory; later acquisitions then
+  fail on the `.stale` leftover (cswarm never makes a directory at a lock path).
+- Opus R4: no control swaps unreadable entries with different inodes, so the identity comparison has no failing test.
+- Opus R5 (lane-new locks): `staleHostIdOwnerRecord` returns null on any read failure, so an unreadable host-id or
+  watch-takeover lock is never reclaimed (the timeout prints the rm step); a root-owned `.reclaim` directory makes
+  `rm(movedGate, {recursive, force})` throw EACCES.
+
+## Merge with main after item M (Opus check of the resolution, 2026-09-26)
+
+- The blocker it found (connect refused the lock module's own symlink lock on file systems without hard links) is
+  FIXED in Alloy task 511af083 before landing.
+- Reclaim gate under umask 0277: `mkdir(temporaryGate, {mode: 0o700})` becomes 0500, so `open(owner.json, "wx")`
+  fails with EACCES and a stale lock cannot be reclaimed under that umask.
+- If `open(lockPath, "r")` fails after publication, this process's record stays until it exits.
+- Four `cli.ts` citations in `scripts/timeout-table/mapping.json` (3294, 6517, 6714, 7872) were already stale at
+  9627cb37 and at both parents.
+- Alloy task `ed2ca787` is retained (its review packet was over 96 KB because of the regenerated dispatch fixture, so
+  no Alloy review ran and `alloy cleanup` refuses); HezLead decides its disposal. Keep regenerated fixtures out of an
+  execute's diff where possible.
