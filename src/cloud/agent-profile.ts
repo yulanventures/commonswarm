@@ -208,8 +208,8 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     workspace_id: connection.workspace_id, principal_id: connection.principal_id,
     credential_file: join(dirname(path), CONNECT_PROFILE_FILES.credential),
     /* Only when the server actually gave one. The key is omitted rather than written null, so
-     * a profile from a deployment that does not send the name keeps exactly the six keys every
-     * released client already accepts. */
+     * an unbound profile without a workspace name keeps exactly the six keys every released
+     * client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
     ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
   };
