@@ -30,6 +30,7 @@ import {
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
 import { parseServerSessionStatus, type ServerSessionStatus } from "./session-client.js";
 import { isReplyStatus } from "./reply-status.js";
+import { CHAIN_MAX_HOPS } from "./ask-chain-constants.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -512,6 +513,10 @@ export function parseSignalRecord(
     }
     senderOwnerRelation = row.sender_owner_relation as SenderOwnerRelation;
   }
+  const chainHop = row.chain_hop === undefined || row.chain_hop === null ? 0 : row.chain_hop;
+  if (typeof chainHop !== "number" || !Number.isSafeInteger(chainHop) || chainHop < 0 || chainHop > CHAIN_MAX_HOPS) {
+    throw new SignalMalformedError("signal read returned a malformed chain_hop");
+  }
   return {
     id: checkedUuid(row.id, "id"),
     workspace_id: checkedUuid(row.workspace_id, "workspace_id"),
@@ -540,6 +545,7 @@ export function parseSignalRecord(
     }),
     until: checkedTimestamp(row.until, "until"),
     created_at: checkedTimestamp(row.created_at, "created_at"),
+    ...(chainHop === 0 ? {} : { chain_hop: chainHop }),
     sender_owner_relation: senderOwnerRelation,
     /* ABSENT AND NULL ARE DIFFERENT HERE, and the difference is a claim.
      *
@@ -1098,7 +1104,7 @@ async function humanSignals(
   url.searchParams.set(
     "select",
     [
-      "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,reply_status,about,kind,body,attachments,until,created_at",
+      "id,workspace_id,from,from_kind,to,to_agent,in_reply_to,reply_status,about,kind,body,attachments,until,created_at,chain_hop",
       ...(query.channelId === undefined
         ? []
         : ["channel_id", "thread_root_id", "broadcast_to_channel"]),
@@ -2013,6 +2019,9 @@ export function renderSignals(
     const replyStatus = signal.reply_status == null
       ? ""
       : ` (${signal.reply_status})`;
+    const chainHop = (signal.chain_hop ?? 0) > 0
+      ? ` — hop ${signal.chain_hop} of ${CHAIN_MAX_HOPS}`
+      : "";
     /* The signal's OWN id, because `cswarm reply <signal-id>` requires it and no human-readable
      * surface printed it — not feed, not inbox, not status, not the confirmation after a post.
      * The core loop was unusable from the CLI: you could read an ask and had no way to answer it.
@@ -2029,7 +2038,7 @@ export function renderSignals(
     lines.push(
       `- [${signal.kind}]${replyStatus} ${author} — ${
         relativeAge(signal.created_at, now)
-      } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}: ${
+      } — ${relativeExpiry(signal.until, now)}${expired}${about}${replyTo}${chainHop}: ${
         JSON.stringify(displayedBody)
       }${idHint}`,
     );

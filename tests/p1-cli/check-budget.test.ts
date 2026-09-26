@@ -16,6 +16,13 @@ import {
 } from "../../src/cloud/agent-check-budget.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { checkAgentMessages } from "../../src/cloud/agent-check.js";
+import {
+  appendHandledAsk,
+  handledAskIds,
+  mergeHandledAsks,
+  replaceHandledAsks,
+  startHandledAskTurn,
+} from "../../src/cloud/ask-chain-context.js";
 import { withFileLock } from "../../src/cloud/storage.js";
 import { profileScopeKey } from "../../src/cloud/agent-profile.js";
 import { mergeReceiveHooks, receiveBindingPath } from "../../src/cloud/agent-receive.js";
@@ -147,6 +154,56 @@ test("an absolute deadline shortens the check budget and leaves the cursor uncha
   assert.equal(presented, false);
   const state = JSON.parse(await readFile(join(dirname(profilePath), "check.json"), "utf8"));
   assert.equal(state.cursor.id, first.id);
+});
+
+test("a slow empty check merges a channel ask shown in the same turn", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const host = "slow-check-channel-session";
+  const channelAsk = signal(2).id;
+  await replaceHandledAsks(profilePath, host, [signal(1).id]);
+  const checking = checkAgentMessages({
+    profilePath,
+    hostSessionId: host,
+    fetcher: fetcher([], 250),
+    present: async () => {},
+  });
+  await delay(50);
+  await appendHandledAsk(profilePath, host, channelAsk);
+  await checking;
+  assert.deepEqual(await handledAskIds(profilePath, host), [channelAsk]);
+});
+
+test("a failed turn check clears the preceding turn's ask", { timeout: 10_000 }, async () => {
+  const profilePath = await profile();
+  const host = "failed-check-session";
+  const first = signal(1);
+  await checkAgentMessages({ profilePath, hostSessionId: host, fetcher: fetcher([first], 0), present: async () => {} });
+  assert.deepEqual(await handledAskIds(profilePath, host), [first.id]);
+  await assert.rejects(checkAgentMessages({
+    profilePath,
+    hostSessionId: host,
+    fetcher: fetcher([first], 1_000),
+    timeoutMs: 100,
+    present: async () => {},
+  }), { code: "check_timeout" });
+  assert.deepEqual(await handledAskIds(profilePath, host), []);
+});
+
+test("handled-ask writers merge under one lock and stale generations cannot overwrite", async () => {
+  const profilePath = await profile();
+  const host = "concurrent-context-session";
+  const generation = await startHandledAskTurn(profilePath, host);
+  const ids = Array.from({ length: 20 }, (_, index) => signal(index + 1).id);
+  await Promise.all(ids.map(id => mergeHandledAsks(profilePath, host, generation, [id])));
+  assert.deepEqual(new Set(await handledAskIds(profilePath, host)), new Set(ids));
+
+  const staleGeneration = generation;
+  const currentGeneration = await startHandledAskTurn(profilePath, host);
+  await Promise.all([
+    mergeHandledAsks(profilePath, host, staleGeneration, [signal(30).id]),
+    mergeHandledAsks(profilePath, host, currentGeneration, [signal(31).id]),
+  ]);
+  assert.deepEqual(await handledAskIds(profilePath, host), [signal(31).id]);
 });
 
 test("a lock left by a dead process is taken at once, not after the stale window", { timeout: 10_000 }, async () => {

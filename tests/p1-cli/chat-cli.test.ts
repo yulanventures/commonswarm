@@ -260,6 +260,14 @@ test("a post with no chat option is byte-identical to the installed body", async
   );
 });
 
+test("a declared ask parent reaches the wire and a root ask adds no field", async () => {
+  const root = await postedCommand({ ...baseCommand, signal_kind: "ask" });
+  assert.equal(Object.hasOwn(root, "parent_signal_id"), false);
+  const parent = "55555555-5555-4555-8555-555555555555";
+  const child = await postedCommand({ ...baseCommand, signal_kind: "ask", parent_signal_id: parent });
+  assert.equal(child.parent_signal_id, parent);
+});
+
 test("each chat option adds its own key and drags in no sibling", async () => {
   const samples: Array<[string, Partial<PostSignalCommand>, unknown]> = [
     ["channel", { channel: "mobile" }, "mobile"],

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
-import { signalReadJsonPayload } from "../../src/cloud/signals.js";
+import { parseSignalRecord, renderSignals, signalReadJsonPayload } from "../../src/cloud/signals.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "22222222-2222-4222-8222-222222222222";
@@ -65,4 +65,17 @@ test("inbox JSON keeps the existing empty message", () => {
     signals: [],
     message: "Nothing is waiting for you.",
   });
+});
+
+test("chain hop is omitted for absent, null, and zero, and shown for hop two", () => {
+  for (const chain_hop of [undefined, null, 0]) {
+    const parsed = parseSignalRecord({ ...row, ...(chain_hop === undefined ? {} : { chain_hop }) });
+    assert.equal(Object.hasOwn(parsed, "chain_hop"), false);
+    assert.doesNotMatch(JSON.stringify(signalReadJsonPayload(WORKSPACE, true, [parsed])), /chain_hop/);
+    assert.doesNotMatch(renderSignals([parsed], { inbox: true, includeStale: true, now: Date.parse("2026-07-24T00:00:01.000Z") }), /hop /);
+  }
+  const chained = parseSignalRecord({ ...row, kind: "ask", chain_hop: 2 });
+  assert.equal(chained.chain_hop, 2);
+  assert.equal((signalReadJsonPayload(WORKSPACE, true, [chained]).signals as SignalRecord[])[0]!.chain_hop, 2);
+  assert.match(renderSignals([chained], { inbox: true, includeStale: true, now: Date.parse("2026-07-24T00:00:01.000Z") }), /hop 2 of 4/);
 });

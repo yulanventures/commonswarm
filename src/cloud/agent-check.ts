@@ -20,6 +20,7 @@ import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
 import { DeliveryCommandClient, DeliveryHttpError } from "./delivery.js";
+import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -48,6 +49,7 @@ export interface AgentCheckMessage {
   truncated: boolean;
   attachment_count: number;
   created_at: string;
+  chain_hop?: number;
   full_text_command?: string;
 }
 
@@ -208,6 +210,7 @@ export async function checkAgentMessages(options: {
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
+  const askTurnGeneration = await startHandledAskTurn(profilePath, options.hostSessionId);
   const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const path = checkStatePath(profilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
@@ -276,6 +279,7 @@ export async function checkAgentMessages(options: {
             sender_owner_relation: row.sender_owner_relation ?? "unknown", kind: row.kind,
             body, truncated: body.length < row.body.length,
             attachment_count: row.attachments?.length ?? 0, created_at: row.created_at,
+            ...((row.chain_hop ?? 0) > 0 ? { chain_hop: row.chain_hop } : {}),
             ...(body.length < row.body.length ? {
               full_text_command: `cswarm check --profile ${shellQuote(profilePath)}${options.hostSessionId ? ` --host-session-id ${shellQuote(options.hostSessionId)}` : ""} --message-id ${row.id}`,
             } : {}),
@@ -304,6 +308,13 @@ export async function checkAgentMessages(options: {
         if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached));
         signal.throwIfAborted();
         await options.present(result);
+        const replaceTurnContext = async (lastVisibleId?: string) => {
+          const visible = lastVisibleId === undefined
+            ? presented
+            : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1);
+          await mergeHandledAsks(profilePath, options.hostSessionId, askTurnGeneration,
+            visible.filter(row => row.kind === "ask").map(row => row.id));
+        };
         const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);
         const pendingIds = [...new Set([...(state.pending_observed_ids ?? []), ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
         const ackPending = async () => {
@@ -379,18 +390,30 @@ export async function checkAgentMessages(options: {
                   pending_observed_ids: pendingVisibleIds,
                   pending_observed_retries: queuedRetries(current, pendingVisibleIds) }));
               }
-            }).then(async () => { try { await ackPending(); } catch { /* Never change MCP output. */ } }));
+            }).then(async () => {
+              await replaceTurnContext(lastVisibleId);
+              try { await ackPending(); } catch { /* Never change MCP output. */ }
+            }));
           } else {
             await writeSecureJsonFile(path, JSON.stringify({ ...cached, cursor, pending_observed_ids: pendingIds,
               pending_observed_retries: queuedRetries(cached, pendingIds) }));
+            await replaceTurnContext();
             ackAfterCommit = ackPending;
           }
         } else if (pendingIds.length > 0) {
           if (options.deferCursorCommit) {
-            options.deferCursorCommit(async () => { try { await ackPending(); } catch { /* Output is already written. */ } });
+            options.deferCursorCommit(async () => {
+              await replaceTurnContext();
+              try { await ackPending(); } catch { /* Output is already written. */ }
+            });
           } else {
+            await replaceTurnContext();
             ackAfterCommit = ackPending;
           }
+        } else if (options.deferCursorCommit) {
+          options.deferCursorCommit(async () => replaceTurnContext());
+        } else {
+          await replaceTurnContext();
         }
         return result;
       }, options.fetcher).finally(() => {
