@@ -15,6 +15,7 @@ import { ChannelReceiptGate } from "../../src/cloud/agent-channel.js";
 import type { SignalRecord } from "../../src/cloud/command-client.js";
 import type { DeliveryRow } from "../../src/cloud/delivery.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
+import { appendHandledAsk, handledAskIds } from "../../src/cloud/ask-chain-context.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -222,6 +223,23 @@ test("output failure does not advance the cursor; a fresh check is not a cooldow
   const next = fixture([row(1), row(2)]);
   await checkAgentMessages({ profilePath, fetcher: next.fetcher, present: async r => { shown += r.messages.length; } });
   assert.equal(shown, 2);
+});
+
+test("turn checks replace the host-scoped handled asks after presentation", async () => {
+  const ask = row(1);
+  const note = row(2);
+  const { profilePath, fake } = await setup([ask, note]);
+  await checkAgentMessages({ profilePath, hostSessionId: "turn-a", fetcher: fake.fetcher, present: async () => {} });
+  assert.deepEqual(await handledAskIds(profilePath, "turn-a"), [ask.id]);
+  assert.deepEqual(await handledAskIds(profilePath, "turn-b"), []);
+
+  const channelAsk = row(3);
+  await appendHandledAsk(profilePath, "turn-a", channelAsk.id);
+  assert.deepEqual(await handledAskIds(profilePath, "turn-a"), [ask.id, channelAsk.id],
+    "a channel ask remains in the turn context after its separate receipt path");
+
+  await checkAgentMessages({ profilePath, hostSessionId: "turn-a", fetcher: fixture([ask, note]).fetcher, present: async () => {} });
+  assert.deepEqual(await handledAskIds(profilePath, "turn-a"), [], "the next successful turn replaces channel context");
 });
 
 test("failed observation leaves check successful and retries after a later empty check", async () => {

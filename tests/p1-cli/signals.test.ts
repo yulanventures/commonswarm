@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -41,6 +43,7 @@ import {
   agentSignalPendingStore,
   credentialStore,
 } from "../../src/cloud/storage.js";
+import { replaceHandledAsks } from "../../src/cloud/ask-chain-context.js";
 
 const WORKSPACE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const USER = "11111111-1111-4111-8111-111111111111";
@@ -927,6 +930,88 @@ test("human-readable signal post states permanence and tenancy while its row own
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
+  }
+});
+
+test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", { timeout: 20_000 }, async () => {
+  const home = await mkdtemp(join(tmpdir(), "cswarm-ask-parent-"));
+  const profileDir = join(home, "profile");
+  const profile = join(profileDir, "profile.json");
+  const credential = join(profileDir, "credential.json");
+  await mkdir(profileDir, { mode: 0o700 });
+  const commands: Array<Record<string, unknown>> = [];
+  let refusal: { code: string; message: string } | null = null;
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.setEncoding("utf8");
+    request.on("data", chunk => raw += chunk);
+    request.on("end", () => {
+      const envelope = JSON.parse(raw) as Record<string, any>;
+      response.setHeader("content-type", "application/json");
+      if (envelope.resource === "members") {
+        response.end(JSON.stringify({
+          members: [{ user_id: USER, display_name: "Owner" }],
+          agents: [{ principal_id: AGENT, name: "Agent", owner_user_id: USER }],
+          identity: { credential_valid: true, principal_id: AGENT, workspace_id: WORKSPACE, owner_user_id: USER },
+        }));
+        return;
+      }
+      commands.push(envelope.command);
+      if (refusal) {
+        response.statusCode = 409;
+        response.end(JSON.stringify({ error: refusal.code, message: refusal.message }));
+        return;
+      }
+      response.end(JSON.stringify({ status: "accepted", ok: true, event_ids: [], signal: signal({
+        kind: "ask", body: envelope.command.body, from: AGENT, from_kind: "agent", to: USER,
+        until: "2099-01-01T00:00:00.000Z",
+      }) }));
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}`;
+    await writeFile(credential, JSON.stringify({ ...JSON.parse(agentArtifact()), expires_at: "2099-01-01T00:00:00.000Z" }), { mode: 0o600 });
+    await writeFile(profile, JSON.stringify({ version: 1, url, anon_key: "anon", workspace_id: WORKSPACE,
+      principal_id: AGENT, credential_file: credential }), { mode: 0o600 });
+    const env = { HOME: home, SWARM_AGENT_STATE_DIR: join(home, "renewal"), XDG_CONFIG_HOME: join(home, "config") };
+    const explicitParent = "77777777-7777-4777-8777-777777777777";
+    const explicit = await runCli(["ask", "explicit", "--profile", profile, "--to", "Owner", "--parent", explicitParent, "--json"], "", env);
+    assert.equal(explicit.code, 0, explicit.stderr);
+    assert.equal(commands.at(-1)!.parent_signal_id, explicitParent);
+    assert.doesNotMatch(explicit.stderr, /--parent/);
+
+    await replaceHandledAsks(profile, undefined, [SIGNAL]);
+    const automatic = await runCli(["ask", "automatic", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    assert.equal(automatic.code, 0, automatic.stderr);
+    assert.equal(commands.at(-1)!.parent_signal_id, SIGNAL);
+
+    await replaceHandledAsks(profile, undefined, []);
+    const root = await runCli(["ask", "root", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    assert.equal(root.code, 0, root.stderr);
+    assert.doesNotThrow(() => JSON.parse(root.stdout), "--json stdout remains one JSON document");
+    assert.match(root.stderr, /--parent/);
+    assert.equal(Object.hasOwn(commands.at(-1)!, "parent_signal_id"), false);
+
+    await replaceHandledAsks(profile, undefined, [SIGNAL, explicitParent]);
+    const ambiguous = await runCli(["ask", "ambiguous", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    assert.equal(ambiguous.code, 0, ambiguous.stderr);
+    assert.match(ambiguous.stderr, /--parent/);
+    assert.equal(Object.hasOwn(commands.at(-1)!, "parent_signal_id"), false);
+
+    for (const code of ["chain_parent_invalid", "chain_loop", "chain_too_long", "chain_too_wide"]) {
+      const message = `server sentence for ${code}`;
+      refusal = { code, message };
+      const refused = await runCli(["ask", code, "--profile", profile, "--to", "Owner", "--parent", SIGNAL], "", env);
+      assert.equal(refused.code, 1);
+      assert.equal(refused.stderr, `cswarm: ${message}\n`);
+    }
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
   }
 });
 

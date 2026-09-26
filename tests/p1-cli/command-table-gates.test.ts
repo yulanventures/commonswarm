@@ -1118,6 +1118,7 @@ test("parsed-argument functions between lookup and handler are allowlisted", { t
       const profile = await readAgentProfile(path, this.optional("host-session-id"));
       await readProfileCredential(profile);
       this.expandedProfilePath = path;
+      this.expandedProfileHostSessionId = this.optional("host-session-id");
       if (this.has("host-session-id") && hostSessionId === "drop") {
         const selected = await profileSessionContext(profile, this.required("host-session-id"));
         if (selected) {

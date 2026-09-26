@@ -23,6 +23,7 @@ import { FileCommandRefused, FileTransportError } from "../../src/cloud/files.js
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
 import { MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, MCP_TOOLS, capMcpResult, capFreshCheck, validateMcpArguments } from "../../src/mcp/tools.js";
 import { Arguments } from "../../src/cli.js";
+import { replaceHandledAsks } from "../../src/cloud/ask-chain-context.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -315,6 +316,35 @@ test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeou
     // Mutation control: one printable table-handler line must break stdout purity.
     assert.throws(() => [...rawLines, "Signal shared."].forEach(line => JSON.parse(line)), SyntaxError);
   } finally { await f.close(); }
+});
+
+test("MCP ask chooses one turn parent, explains ambiguity, and explicit input wins", { timeout: 15_000 }, async () => {
+  const f = await fixture();
+  const explicit = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  try {
+    await f.call("check");
+    const automatic = await f.call("ask", { body: "automatic", to: "Owner", request_id: "parent001" });
+    assert.equal(automatic.value.parent_context, undefined);
+    assert.equal(f.posts.at(-1)!.command.parent_signal_id, ID);
+
+    await replaceHandledAsks(f.profile, undefined, [ID, explicit]);
+    const ambiguous = await f.call("ask", { body: "ambiguous", to: "Owner", request_id: "parent002" });
+    assert.match(ambiguous.value.parent_context, /parent_signal_id/);
+    assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "parent_signal_id"), false);
+
+    const chosen = await f.call("ask", { body: "explicit", to: "Owner", request_id: "parent003", parent_signal_id: explicit });
+    assert.equal(chosen.value.parent_context, undefined);
+    assert.equal(f.posts.at(-1)!.command.parent_signal_id, explicit);
+  } finally { await f.close(); }
+});
+
+test("MCP ask returns each chain refusal's server sentence unchanged", () => {
+  for (const code of ["chain_parent_invalid", "chain_loop", "chain_too_long", "chain_too_wide"]) {
+    const sentence = `server sentence for ${code}`;
+    assert.deepEqual(mapMcpError(new CommandHttpError(409, sentence, code)), {
+      code, message: sentence, next_step: "check the arguments; if the problem stays, ask a person", status: 409,
+    });
+  }
 });
 
 test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeout: 30_000 }, async () => {

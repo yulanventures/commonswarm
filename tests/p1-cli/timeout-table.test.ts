@@ -32,10 +32,10 @@ const repo = resolve(import.meta.dirname, "../..");
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5082-5084; src/cloud/wake-lease.ts:62,65");
+  assert.equal(row.citation, "src/cli.ts:5101-5103; src/cloud/wake-lease.ts:62,65");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5081, 5084).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(cli.slice(5100, 5103).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
   assert.match(lease[61]!, /timeoutMs\?: number/);
   assert.match(lease[64]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });
@@ -300,12 +300,12 @@ test("HEAD signal read citations resolve for each mapped row", { timeout: 10_000
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const lines = (await readFile(join(repo, "src/cloud/signals.ts"), "utf8")).split("\n");
   const expected: Record<string, { citation: string; sites: Array<[number, RegExp]> }> = {
-    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:40,890-938",
-      sites: [[40, /export const SIGNAL_READ_TIMEOUT_MS/], [938, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
-    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:938",
-      sites: [[938, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
-    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1051",
-      sites: [[1051, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:41,896-944",
+      sites: [[41, /export const SIGNAL_READ_TIMEOUT_MS/], [944, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:944",
+      sites: [[944, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1057",
+      sites: [[1057, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
   };
   const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
   for (const [id, target] of Object.entries(expected)) {

@@ -322,6 +322,8 @@ import {
   DeliveryReceiptReadError,
   readAgentDeliveryReceipts,
 } from "./cloud/delivery-receipts.js";
+import { ASK_PARENT_CLI_SENTENCE, defaultAskParent } from "./cloud/ask-chain-context.js";
+import { isAskChainRefusalCode } from "./cloud/ask-chain-constants.js";
 import {
   DELIVERY_HANDLED_OUTCOMES,
   H0_SEAT_CLAIM_REFUSED_CODE,
@@ -640,7 +642,7 @@ export const KNOWN_FLAGS = new Set([
   "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
   "link-stdin", "local", "model", "name", "ndjson", "no-browser", "notify", "take-over", "opencode-executable", "out",
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
-  "thread",
+  "parent", "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status",
 ]);
@@ -687,6 +689,7 @@ export class Arguments {
   private readonly originalOptions: Array<{ name: string; value?: string }> = [];
   readonly hadProfileOption: boolean;
   expandedProfilePath?: string;
+  expandedProfileHostSessionId?: string;
   constructor(values: string[]) {
     let positionalOnly = false;
     let sawOption = false;
@@ -802,6 +805,7 @@ export class Arguments {
     const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
     this.expandedProfilePath = path;
+    this.expandedProfileHostSessionId = this.optional("host-session-id");
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
       if (selected) {
@@ -3758,6 +3762,19 @@ async function runPostSignal(
   const waitSeconds = allowWait && args.optional("wait") !== undefined
     ? parseWaitSeconds(args.required("wait"))
     : undefined;
+  let parentSignalId: string | undefined;
+  if (kind === "ask") {
+    const explicitParent = args.optional("parent");
+    if (explicitParent !== undefined) {
+      if (!UUID_RE.test(explicitParent)) throw new Error("--parent requires the full signal UUID of the ask being handled");
+      parentSignalId = explicitParent.toLowerCase();
+    } else {
+      parentSignalId = args.expandedProfilePath === undefined
+        ? undefined
+        : await defaultAskParent(args.expandedProfilePath, args.expandedProfileHostSessionId);
+      if (parentSignalId === undefined) process.stderr.write(ASK_PARENT_CLI_SENTENCE);
+    }
+  }
   const cloud = await target(args);
   const credential = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true,
@@ -3799,6 +3816,7 @@ async function runPostSignal(
     signal_kind: kind,
     body,
     ...postSignalTargets(recipient),
+    ...(parentSignalId === undefined ? {} : { parent_signal_id: parentSignalId }),
     about: args.optional("about") === undefined
       ? null
       : signalText(args.required("about"), "about"),
@@ -3813,6 +3831,7 @@ async function runPostSignal(
     result = await postSignalCommand(cloud, credential, command);
   } catch (error) {
     if (kind === "ask") {
+      if (error instanceof CommandHttpError && isAskChainRefusalCode(error.code)) throw error;
       throw new Error(
         askCreateFailureMessage(credential.selectedWorkspace, error),
       );
@@ -3966,7 +3985,7 @@ export const POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS = [
   "about", "channel", "until", "json", ...SESSION_CONTEXT_FLAGS,
 ] as const;
 export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "attach"] as const;
-export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "wait"] as const;
+export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "parent", "wait"] as const;
 
 export function postSignalAllowedFlags(kind: SignalKind = "note"): readonly string[] {
   return kind === "working-on" ? POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS
@@ -10103,7 +10122,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "parent", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--parent <signal-id>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
   reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "status", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--status <${REPLY_STATUSES.join("|")}>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),

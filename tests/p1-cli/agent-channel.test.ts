@@ -10,8 +10,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { saveAgentProfile, parseAgentConnection } from "../../src/cloud/agent-profile.js";
 import { configureAgentReceive, readReceiveBinding, receiveHookEvent, receiveStatus, requestReceiveCanary, type ReceiveBinding } from "../../src/cloud/agent-receive.js";
-import { CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
+import { CHANNEL_ASK_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_RECEIPT_TOOL, channelNotice, channelNoticePrefix, isOwnCanary } from "../../src/cloud/agent-channel.js";
 import { SIGNAL_BODY_MAX } from "../../src/cloud/signal-limits.js";
+import { handledAskIds } from "../../src/cloud/ask-chain-context.js";
 
 const WS = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const AGENT = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -89,12 +90,14 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
   const posts: unknown[] = [], acks: unknown[] = [];
   const queuedSignals: Array<Record<string, unknown>> = [];
   const replyRequests: Array<Record<string, unknown>> = [];
+  const askRequests: Array<Record<string, unknown>> = [];
   const replyRequestIds: string[] = [];
   let acked = false;
   let refuseReplies = false;
   let ambiguousReplies = false;
   let unreadableReplies = false;
   let stallReplies = false;
+  let askRefusal: { code: string; message: string } | null = null;
   let stalledReplyStarted = false;
   const server = createServer((req, res) => {
     let raw = "";
@@ -108,6 +111,18 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
         agents: [{ principal_id: AGENT, name: "Channel", owner_user_id: OWNER }],
         identity: { credential_valid: true, principal_id: AGENT, workspace_id: WS, owner_user_id: OWNER },
       };
+      else if (body.command.kind === "post_signal" && body.command.signal_kind === "ask") {
+        askRequests.push(body.command);
+        if (askRefusal) {
+          res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: askRefusal.code, message: askRefusal.message }));
+          return;
+        }
+        result = { ok: true, status: "accepted", event_ids: [], events: [], signal: {
+          id: REPLY, workspace_id: WS, from: AGENT, from_kind: "agent", to: OWNER, to_agent: null,
+          in_reply_to: null, about: null, kind: "ask", body: body.command.body,
+          created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
+        } };
+      }
       else if (body.command.kind === "post_signal" && body.command.in_reply_to !== null) {
         replyRequests.push(body.command);
         replyRequestIds.push(body.command_id);
@@ -180,7 +195,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await client.connect(transport);
     assert.ok(client.getServerCapabilities()?.experimental?.["claude/channel"]);
     const tools = (await client.listTools()).tools;
-    assert.deepEqual(tools.map(tool => tool.name), [CHANNEL_RECEIPT_TOOL, CHANNEL_REPLY_TOOL]);
+    assert.deepEqual(tools.map(tool => tool.name), [CHANNEL_RECEIPT_TOOL, CHANNEL_REPLY_TOOL, CHANNEL_ASK_TOOL]);
     assert.deepEqual(tools[1]!.inputSchema, {
       type: "object", additionalProperties: false,
       properties: {
@@ -189,6 +204,12 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       },
       required: ["signal_id", "body"],
     });
+    const rootAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "root ask" } });
+    assert.match(JSON.stringify(rootAsk.content), /parent_signal_id/);
+    assert.equal(Object.hasOwn(askRequests.at(-1)!, "parent_signal_id"), false);
+    const explicitAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "explicit ask", parent_signal_id: SIGNAL } });
+    assert.equal(explicitAsk.isError, undefined);
+    assert.equal(askRequests.at(-1)!.parent_signal_id, SIGNAL);
     await requestReceiveCanary(profile, "host-session");
     await delay(300);
     assert.equal(posts.length, 0, "a busy session is not an idle wake control");
@@ -238,6 +259,18 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const teammateMeta = teammateNotification.params!.meta as Record<string, string>;
     const content = teammateNotification.params!.content as string;
     const prefix = channelNoticePrefix(OWNER, INCOMING, teammateMeta.receipt, "host-session");
+    await eventually(async () => (await handledAskIds(profile, "host-session")).includes(INCOMING));
+    const automaticAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: "automatic ask" } });
+    assert.equal(automaticAsk.isError, undefined);
+    assert.equal(askRequests.at(-1)!.parent_signal_id, INCOMING);
+    for (const code of ["chain_parent_invalid", "chain_loop", "chain_too_long", "chain_too_wide"]) {
+      const message = `server sentence for ${code}`;
+      askRefusal = { code, message };
+      const refusedAsk = await client.callTool({ name: CHANNEL_ASK_TOOL, arguments: { to: "Owner", body: code, parent_signal_id: INCOMING } });
+      assert.equal(refusedAsk.isError, true);
+      assert.equal((refusedAsk.content as Array<{ text: string }>)[0]!.text, message);
+    }
+    askRefusal = null;
     assert.ok(content.startsWith(`${prefix}\nCommonSwarm established that this sender has the same operator as you.\n\n<teammate-message>\n`));
     assert.equal(content.match(/<\/teammate-message>/g)?.length, 1, "the teammate body cannot close the untrusted block");
     assert.ok(content.includes("&lt;/teammate-message>"));
@@ -307,6 +340,8 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       reply_status: "declined",
     });
     await eventually(() => acks.length === 3);
+    assert.deepEqual(await handledAskIds(profile, "host-session"), [INCOMING],
+      "the channel's handled ask survives its receipt");
     await eventually(() => notifications.filter(n => n.method === "notifications/claude/channel").length === 4);
     const staleWakeNotification = notifications.filter(n => n.method === "notifications/claude/channel")[3]!;
     const staleWakeMeta = staleWakeNotification.params!.meta as Record<string, string>;
@@ -328,9 +363,10 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       in_reply_to: null, about: null, kind: "note", body: "Deploy finished: sha <123> & green",
       created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString(),
     });
-    await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
+    const queuedReceived = await client.callTool({ name: CHANNEL_RECEIPT_TOOL, arguments: {
       signal_id: queuedAskMeta.signal_id, receipt: queuedAskMeta.receipt, host_session_id: "host-session",
     } });
+    assert.equal(queuedReceived.isError, undefined, JSON.stringify(queuedReceived.content));
     await eventually(() => notifications.filter(n => n.method === "notifications/claude/channel").length === 6);
     const selfNotification = notifications.filter(n => n.method === "notifications/claude/channel")[5]!;
     const selfMeta = selfNotification.params!.meta as Record<string, string>;

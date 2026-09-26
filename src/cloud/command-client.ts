@@ -296,6 +296,8 @@ export interface PostSignalCommand {
   to_agent_principal_id: string | null;
   /** Correlates a reply to the signal it answers. Always sent (null when absent). */
   in_reply_to: string | null;
+  /** Declares the delivered ask this ask follows. Ask-only and omitted for a root ask. */
+  parent_signal_id?: string;
   /** Outcome attached only to a private reply. Absent remains valid for old clients. */
   reply_status?: import("./reply-status.js").ReplyStatus;
   about: string | null;
@@ -340,6 +342,8 @@ export interface SignalRecord {
   attachments?: import("./attachments.js").SignalAttachment[];
   until: string;
   created_at: string;
+  /** Positive hop count for a follow-up ask. Absent means a root or an older row/server. */
+  chain_hop?: number;
   /**
    * Present on agent-authenticated reads from a capable edge. Absent from older
    * edges and human REST rows; clients normalize absence to "unknown".
@@ -1281,6 +1285,9 @@ export class ThinCommandClient {
       to_user_id: request.command.to_user_id,
       to_agent_principal_id: request.command.to_agent_principal_id,
       in_reply_to: request.command.in_reply_to,
+      ...(request.command.parent_signal_id === undefined
+        ? {}
+        : { parent_signal_id: request.command.parent_signal_id }),
       ...(request.command.reply_status === undefined
         ? {}
         : { reply_status: request.command.reply_status }),

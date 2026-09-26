@@ -9,3 +9,15 @@ export const ASK_SENDER_PER_MINUTE = 20;
 
 /** Fixed-ten-minute ask budget for one agent-sender/agent-recipient pair. */
 export const ASK_PAIR_PER_10_MINUTES = 6;
+
+/** Refusals whose service-authored sentence is the complete user remedy. */
+export const ASK_CHAIN_REFUSAL_CODES = [
+  "chain_parent_invalid",
+  "chain_loop",
+  "chain_too_long",
+  "chain_too_wide",
+] as const;
+
+export function isAskChainRefusalCode(value: unknown): value is typeof ASK_CHAIN_REFUSAL_CODES[number] {
+  return typeof value === "string" && (ASK_CHAIN_REFUSAL_CODES as readonly string[]).includes(value);
+}
