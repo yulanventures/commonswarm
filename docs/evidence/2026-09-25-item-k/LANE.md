@@ -183,3 +183,18 @@ Every mutation above ran a positive control and its negative probe in one invoca
 Final permitted gates: `npm run build` exit 0; `npm run check:tests` exit 0; five focused CLI files passed 51/51, two selected dispatcher tests passed 2/2, and three selected timeout mapping tests passed 3/3, each under temporary HOME. `citation-drift.test.ts` was included in the 51/51 run after the final `src/cli.ts` edit. `git diff --check` exit 0. `pgrep` could not enumerate processes because `sysmond` is unavailable (exit 3); every lane command returned and its temporary HOME was removed.
 
 The complete local-edge server comparison and the whole-file K CLI sweep are not established in this lane. The server comparison needs the lead's exclusive local stack. Several existing dispatcher and CLI tests intentionally invoke local refusals without a loopback `--url`; the hard rule against running such commands prevents using them for a whole-file HOME sweep here. The focused HOME control runs the two in-process save/check paths that exposed the incident. The lead also owns the full suites, edge check, release bundle, and site build. No production host, real workspace, or real home path was contacted.
+
+## Fold 10 — Round 9 rulings
+
+Round 9 Codex passed with one follow-up; Opus found one verified production blocker. `FOLLOW-UPS.md` accounts for the non-blocking round 8 and 9 findings.
+
+| Ruling | Change | Behavioral test | Reversion measurement |
+|---|---|---|---|
+| AN1 | `agent-connection-token` and every `item-i-profile-binding` fixture now set HOME to their own temporary directory before profile writes and restore it afterward. The item I snapshot compares files after the inventory directory appears. A structural control scans every test file, reconciles the ten files importing profile writers or spawning setup/connect commands, and checks fixture HOME at the calls. | The connection-token setup test reads the registered paths under its fixture HOME; the item I receive test checks a saved profile's inventory there; the item I file passes 20/20. | With both test files restored from `895a0782`, the structural control exits 1 and names the connection-token call plus eight item I test paths. The positive control exits 0 in the same temporary HOME. |
+| AN2 | The cap notice builds one printed `cswarm inbox --follow --ndjson` step from the original `--since` and explicit target flags. The same builder serves text and JSON notices. | `inbox-since` extracts the printed command and passes its words to `Arguments`, checking follow, ndjson, since, and loopback target flags. | Removing `--ndjson` from the builder gives control exit 0, mutation exit 1 in the same temporary HOME. |
+
+The Fold 10 CLI addition shifted three `citation-drift` lines and five HEAD timeout-map CLI citations by nine lines. Their pointers were refreshed; the shipped `v0.1.71` timeout section remains byte-identical to `main`.
+
+Permitted gates: `npm run build` exit 0; `npm run check:tests` exit 0; named connection-token setup 1/1; item I profile binding 20/20; inbox since 8/8; item K HOME control 2/2; citation drift 3/3; named timeout-map checks 2/2. Each lane test command used `T=$(mktemp -d /tmp/lane-home.XXXXXX)` and `env HOME="$T"`, then removed only that directory. An initial item I run found and fixed the snapshot's directory-read error; an initial citation run found and fixed the nine-line drift. `git diff --check` exited 0.
+
+Not established here: full `npm test`, full P1 CLI, edge check, release bundle, site build, server tests, and the complete dispatcher baseline. Host rules reserve those gates for the lead and forbid Docker, Supabase, and browser tests on this machine. No production host or real workspace was contacted.
