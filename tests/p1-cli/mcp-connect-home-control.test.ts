@@ -6,12 +6,19 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 
 test("Fold 18 whole MCP lane leaves an empty isolated HOME and builds default paths only from fixtures", { timeout: 240000 }, async () => {
+  const help = spawnSync(process.execPath, ["--help"], { encoding: "utf8", timeout: 5000 });
+  assert.equal(help.status, 0, `could not probe test-isolation flags from ${process.execPath}: ${help.error ?? help.stderr}`);
+  const accepts = (flag: string) => new RegExp(`(?:^|[\\s,])--${flag}(?:[=\\s,]|$)`, "m").test(help.stdout);
+  const isolationFlag = accepts("test-isolation") ? "--test-isolation=none"
+    : accepts("experimental-test-isolation") ? "--experimental-test-isolation=none" : null;
+  assert.ok(isolationFlag, `${process.execPath} supports neither --test-isolation=none nor --experimental-test-isolation=none`);
+  console.log(`MCP lane isolation flag: ${isolationFlag}`);
   const home = await mkdtemp("/tmp/lane-home.");
   const logs = await mkdtemp("/tmp/lane-home-spy.");
   const log = join(logs, "homedir.log");
   try {
     const run = spawnSync(process.execPath, ["--require", resolve("tests/p1-cli/mcp-connect-home-spy.cjs"), "--import", "tsx",
-      "--test-isolation=none", "--test", "tests/p1-cli/mcp-connect.test.ts"], {
+      isolationFlag, "--test", "tests/p1-cli/mcp-connect.test.ts"], {
       cwd: process.cwd(), env: { ...process.env, HOME: home, CSWARM_HOME_SPY_LOG: log },
       encoding: "utf8", timeout: 180000, maxBuffer: 8 * 1024 * 1024,
     });
