@@ -36,21 +36,35 @@ for b in docker docker-compose orb orbctl supabase; do
     [ ! -e "$d/node_modules/.bin/$b" ] || { echo "refuse: $d/node_modules/.bin/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
     up=$(dirname "$d"); [ "$up" != "$d" ] || break; d=$up; done
 done
-# The real OrbStack helper always counts. The controls may ADD a dummy process name (control prefix only); an
-# override can never replace or switch off the real probe.
+# Any process whose executable is inside an OrbStack.app bundle always counts. The probe reads each process's
+# argv[0] alone (`ps -o comm`: one line per process, spaces kept, no arguments), so an install path with spaces
+# matches and a command that only mentions OrbStack does not (a substring match on whole command lines also matched
+# another `pgrep -f "OrbStack Helper"` process and stopped a clean run on 2026-09-26). The controls may ADD a dummy process
+# name (control prefix only); an override can never replace or switch off the real probe.
 case "${RUN_GATES_ORB_PATTERN:-}" in run-gates-control-orb-*) extra_orb=$RUN_GATES_ORB_PATTERN ;; *) extra_orb= ;; esac
-orb_running() {
-  if pgrep -f "OrbStack Helper" >/dev/null 2>&1 || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
-  then echo yes; else echo no; fi; }
+orb_running() { # no pipe: under pipefail, `ps | grep -q` fails on SIGPIPE exactly when grep matches early
+  local comms; comms=$(ps -Ao comm= 2>/dev/null)
+  case "$comms" in *"/OrbStack.app/"*) echo yes; return ;; esac
+  if [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 # Live runs of this wrapper other than this run. An ancestor wrapper is not "another run": this run was started
-# inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run.
+# inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run, and
+# so is every process that descends from it (for example its OrbStack watchdog, a subshell with the same command line).
+wrapper_pattern='^(/bin/)?bash [^ ]*run-gates[^ /]*\.sh '
 other_runs() {
-  local anc=" $$ " a=$$ p q
-  while [ "${a:-1}" -gt 1 ]; do a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' '); anc="$anc${a:-1} "; done
-  for p in $(pgrep -f '^(/bin/)?bash [^ ]*run-gates[^ /]*\.sh ' 2>/dev/null); do  # a wrapper process, not a mention
+  local anc=" $$ " wrap_anc=" " a=$$ p q skip
+  while [ "${a:-1}" -gt 1 ]; do
+    a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' '); anc="$anc${a:-1} "
+    ! ps -o command= -p "${a:-1}" 2>/dev/null | grep -qE "$wrapper_pattern" || wrap_anc="$wrap_anc$a "
+  done
+  for p in $(pgrep -f "$wrapper_pattern" 2>/dev/null); do  # a wrapper process, not a mention
     case "$anc" in *" $p "*) continue ;; esac
-    q=$p; while [ "${q:-1}" -gt 1 ] && [ "$q" != "$$" ]; do q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); done
-    [ "$q" = "$$" ] && continue          # a subshell of this run has the same command line
+    q=$p; skip=
+    while [ "${q:-1}" -gt 1 ]; do
+      [ "$q" != "$$" ] || { skip=1; break; }                     # a subshell of this run
+      case "$wrap_anc" in *" $q "*) skip=1; break ;; esac        # part of an ancestor wrapper's run
+      q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')
+    done
+    [ -n "$skip" ] && continue
     kill -0 "$p" 2>/dev/null && printf '%s ' "$p"; done; }
 orb_before=$(orb_running)
 snapshot() { # every write class: the two cswarm trees in full, plus the top-level names under the home, .config and .claude
