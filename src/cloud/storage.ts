@@ -469,8 +469,8 @@ export async function writeSecureJsonFile(
   const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await write(handle, serialized);
     await handle.chmod(0o600);
+    await write(handle, serialized);
     await handle.sync();
     await handle.close();
     await secureCredentialFile(temporary);
@@ -493,8 +493,8 @@ export async function writeSecureJsonFileExclusive(
   const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await write(handle, serialized);
     await handle.chmod(0o600);
+    await write(handle, serialized);
     await handle.sync();
     await handle.close();
     // Hard-link publication is atomic and fails with EEXIST even across different locks.
@@ -510,8 +510,8 @@ export async function writeSecureJsonFileExclusive(
         const fallback = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
         const fallbackHandle = await open(fallback, "wx", 0o600);
         try {
-          await write(fallbackHandle, serialized);
           await fallbackHandle.chmod(0o600);
+          await write(fallbackHandle, serialized);
           await fallbackHandle.sync();
           await fallbackHandle.close();
           const claim = await claimIdentity(final);

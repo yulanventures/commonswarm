@@ -40,17 +40,8 @@ function parseComplete(raw: string): CompleteConnect | null {
   return value as unknown as CompleteConnect;
 }
 
-async function readComplete(path: string, strict = false, inspect: (path: string) => Promise<Stats> = lstat): Promise<CompleteConnect | null> {
+async function readComplete(path: string, strict = false): Promise<CompleteConnect | null> {
   const file = completePath(path);
-  if (strict) {
-    const info = await inspect(file).catch(error => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    });
-    if (info && (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()))) {
-      throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} is unsafe. Inspect that file before retrying.`);
-    }
-  }
   let raw: string | null;
   try { raw = await readSecureJsonFileIfPresent(file, 4096); }
   catch {
@@ -58,10 +49,7 @@ async function readComplete(path: string, strict = false, inspect: (path: string
     if (info?.isFile() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
       throw new McpConnectError("connect_complete_mode", `The completed connect record at ${file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(file)}, then rerun the same command.`);
     }
-    if (strict && info && (!info.isFile() || info.isSymbolicLink() || (typeof process.getuid === "function" && info.uid !== process.getuid()))) {
-      throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} is unsafe. Inspect that file before retrying.`);
-    }
-    if (strict) throw new McpConnectError("connect_complete_unsafe", `The completed connect record at ${file} cannot be written safely. Inspect that file before retrying.`);
+    if (strict) throw new McpConnectError("connect_complete_unreadable", `The completed connect record at ${file} cannot be read safely. Inspect that file, then rerun the same command.`);
     process.stderr.write(`Warning: completed connect record at ${file} cannot be read safely; continuing.\n`);
     return null;
   }
@@ -200,21 +188,23 @@ function directoryModeError(dir: string): McpConnectError {
 
 type ReservedOutcome = "absent" | "ok" | "wrong mode" | "unreadable";
 type ReservedInspection = { outcome: ReservedOutcome; path: string; error?: McpConnectError };
-type ReservedProbe = { inspect?: (path: string) => Promise<Stats>; read?: (path: string) => Promise<string | null> };
+type ReservedProbe = { inspect?: (path: string) => Promise<Stats>; read?: (path: string) => Promise<string | null>; profileName?: string };
 
 /** One rule for every connect-owned name, including locks and temporary files. */
 export async function classifyConnectReservedPath(path: string, probe: ReservedProbe = {}): Promise<ReservedInspection> {
   const dir = dirname(path);
-  const label = basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect attempt marker" :
+  const label = basename(path) === probe.profileName || basename(path) === "profile.json" ? "profile" :
+    basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect attempt marker" :
     basename(path) === CONNECT_PROFILE_FILES.pending ? "connect record" :
     basename(path) === CONNECT_PROFILE_FILES.complete ? "completed connect record" :
     basename(path) === CONNECT_PROFILE_FILES.credential ? "credential" :
     basename(path).endsWith(".lock") ? "connect lock" : "connect file";
-  const code = basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect_marker" :
+  const code = basename(path) === probe.profileName || basename(path) === "profile.json" ? "connect_profile" :
+    basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect_marker" :
     basename(path) === CONNECT_PROFILE_FILES.pending ? "connect_pending" :
     basename(path) === CONNECT_PROFILE_FILES.complete ? "connect_complete" :
     basename(path) === CONNECT_PROFILE_FILES.credential ? "connect_credential" :
-    basename(path) === "profile.json" ? "connect_profile" : "connect_reserved";
+    "connect_reserved";
   const unreadable = () => ({ outcome: "unreadable" as const, path,
     error: new McpConnectError(`${code}_unreadable`, `The ${label} at ${path} cannot be read safely. Inspect that file, then rerun the same command.`) });
   let directory: Stats;
@@ -229,9 +219,14 @@ export async function classifyConnectReservedPath(path: string, probe: ReservedP
       (typeof process.getuid === "function" && info.uid !== process.getuid())) return unreadable();
   if ((info.mode & 0o777) !== 0o600) return { outcome: "wrong mode", path,
     error: new McpConnectError(`${code}_mode`, `The ${label} at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`) };
+  const afterMissingRead = async (): Promise<ReservedInspection> => {
+    try { await (probe.inspect ?? lstat)(path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { outcome: "absent", path }; }
+    return unreadable();
+  };
   try {
-    if (await (probe.read ?? (file => readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES)))(path) === null) return unreadable();
-  } catch { return unreadable(); }
+    if (await (probe.read ?? (file => readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES)))(path) === null) return await afterMissingRead();
+  } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? await afterMissingRead() : unreadable(); }
   return { outcome: "ok", path };
 }
 
@@ -244,7 +239,7 @@ async function preflightConnectReservedPaths(path: string, probe: ReservedProbe 
   const dir = dirname(path);
   const entries = await readdir(dir);
   for (const name of connectProfileReservedPaths(basename(path), entries)) {
-    await requireConnectReservedPath(join(dir, name), probe);
+    await requireConnectReservedPath(join(dir, name), { ...probe, profileName: basename(path) });
   }
 }
 
@@ -391,7 +386,6 @@ export interface McpConnectOptions {
   fetcher?: typeof fetch;
   saveProfile?: typeof saveAgentProfile;
   writeCompletion?: typeof writeSecureJsonFile;
-  inspectCompletion?: (path: string) => Promise<Stats>;
   inspectReserved?: (path: string) => Promise<Stats>;
   readReserved?: (path: string) => Promise<string | null>;
   checkProfileAccess?: typeof access;
@@ -412,7 +406,9 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
     }
     throw new McpConnectError("connect_clear_unsafe", `The connect directory at ${dir} cannot be read safely.`);
   }
+  await preflightConnectReservedPaths(path);
   return await withFileLock(dir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+    await preflightConnectReservedPaths(path);
     const hadPending = await pathExists(pendingPath(path));
     const hadComplete = await pathExists(completePath(path));
     if (!hadPending && !hadComplete) return { completedProfile: null, credentialPresent: await pathExists(join(dir, CONNECT_PROFILE_FILES.credential)), emptyClaimPresent: await emptyClaimAt(join(dir, CONNECT_PROFILE_FILES.credential)), profilePresent: await pathExists(path), removed: "nothing" as const };
@@ -450,10 +446,9 @@ export async function clearMcpConnect(profilePath: string, removeFile: typeof un
     let removedComplete = false;
     for (const file of [pendingPath(path), completePath(path)]) {
       try {
-        const info = await lstat(file);
-        if ((typeof process.getuid === "function" && info.uid !== process.getuid()) || (!info.isFile() && !info.isSymbolicLink())) {
-          throw new McpConnectError("connect_clear_unsafe", `Cannot clear unsafe file at ${file}.`);
-        }
+        const classified = await classifyConnectReservedPath(file, { profileName: basename(path) });
+        if (classified.error) throw classified.error;
+        if (classified.outcome === "absent") continue;
         await removeFile(file);
         if (file === pendingPath(path)) removedPending = true;
         else removedComplete = true;
@@ -713,7 +708,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       await preflightConnectReservedPaths(path, reservedProbe);
       await cleanConnectTemps(path);
       const current = await readPending(path);
-      const complete = await readComplete(path, current !== null, options.inspectCompletion);
+      const complete = await readComplete(path, current !== null);
       if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) &&
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
         return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {

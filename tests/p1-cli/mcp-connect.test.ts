@@ -31,8 +31,102 @@ const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
 
+test("Fold 18 a vanished reserved file is absent after the read race", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const file = join(f.root, CONNECT_PROFILE_FILES.pending);
+    await writeFile(file, "readable");
+    await chmod(file, 0o600);
+    const vanished = await classifyConnectReservedPath(file, { read: async path => { await unlink(path); return null; } });
+    assert.equal(vanished.outcome, "absent");
+    await writeFile(file, "readable");
+    await chmod(file, 0o600);
+    const stillPresent = await classifyConnectReservedPath(file, { read: async () => null });
+    assert.equal(stillPresent.outcome, "unreadable");
+    const thrownEnoent = await classifyConnectReservedPath(file, { read: async path => {
+      await unlink(path);
+      throw Object.assign(new Error("vanished"), { code: "ENOENT" });
+    } });
+    assert.equal(thrownEnoent.outcome, "absent");
+  } finally { await f.close(); }
+});
+
+test("Fold 18 clear classifies pending and completion before removal", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const profile = join(f.root, "profile.json");
+    const pending = join(f.root, CONNECT_PROFILE_FILES.pending);
+    const complete = join(f.root, CONNECT_PROFILE_FILES.complete);
+    const removed: string[] = [];
+    const removeFile: typeof unlink = async file => { removed.push(String(file)); await unlink(file); };
+    await writeFile(pending, "pending");
+    await chmod(pending, 0o644);
+    await assert.rejects(clearMcpConnect(profile, removeFile), { code: "connect_pending_mode" });
+    assert.deepEqual(removed, []);
+    await chmod(pending, 0o600);
+    await writeFile(complete, "x".repeat(20_000));
+    await chmod(complete, 0o600);
+    await assert.rejects(clearMcpConnect(profile, removeFile), { code: "connect_complete_unreadable" });
+    assert.deepEqual(removed, []);
+    await unlink(complete);
+    await symlink(pending, complete);
+    await assert.rejects(clearMcpConnect(profile, removeFile), { code: "connect_complete_unreadable" });
+    assert.deepEqual(removed, []);
+    await unlink(complete);
+    const result = await clearMcpConnect(profile, removeFile);
+    assert.equal(result.removed, "pending record");
+    assert.deepEqual(removed, [pending]);
+    await writeSecureJsonFile(pending, "pending");
+    await writeSecureJsonFile(complete, "complete");
+    const raceRemove: typeof unlink = async file => {
+      if (String(file) === pending) await chmod(complete, 0o644);
+      await unlink(file);
+    };
+    await assert.rejects(clearMcpConnect(profile, raceRemove), { code: "connect_complete_mode" });
+    assert.equal((await stat(complete)).mode & 0o777, 0o644);
+    await chmod(complete, 0o600);
+    assert.equal((await clearMcpConnect(profile)).removed, "completion record");
+  } finally { await f.close(); }
+});
+
+test("Fold 18 temp writers set 0600 before writing under umask 0277", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  const oldUmask = process.umask(0o277);
+  try {
+    const seen: number[] = [];
+    const checkBeforeWrite = async (handle: import("node:fs/promises").FileHandle, contents: string) => {
+      seen.push((await handle.stat()).mode & 0o777);
+      await handle.writeFile(contents, "utf8");
+    };
+    await writeSecureJsonFile(join(f.root, "replace.json"), "{}", checkBeforeWrite);
+    await writeSecureJsonFileExclusive(join(f.root, "exclusive.json"), "{}", checkBeforeWrite);
+    await writeSecureJsonFileExclusive(join(f.root, "fallback.json"), "{}", checkBeforeWrite,
+      async () => { throw Object.assign(new Error("unsupported link"), { code: "EPERM" }); });
+    assert.deepEqual(seen, [0o600, 0o600, 0o600, 0o600]);
+  } finally { process.umask(oldUmask); await f.close(); }
+});
+
+test("Fold 18 custom profile basename gets profile refusal codes", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const profile = join(f.root, "agent.json");
+    let posts = 0;
+    const attempt = () => connectMcp({ target: TARGET, profilePath: profile, readCode: async () => JOIN,
+      fetcher: async () => { posts++; throw new Error("unexpected POST"); } });
+    await writeFile(profile, "private body");
+    await chmod(profile, 0o644);
+    await assert.rejects(attempt(), { code: "connect_profile_mode" });
+    await unlink(profile);
+    await symlink(join(f.root, "missing"), profile);
+    await assert.rejects(attempt(), { code: "connect_profile_unreadable" });
+    assert.equal(posts, 0);
+  } finally { await f.close(); }
+});
+
 test("Fold 17 every reserved path refuses unsafe state before POST on explicit and default connect", { timeout: 60000 }, async () => {
   const f = await fixture();
+  const previousHome = process.env.HOME;
+  process.env.HOME = f.root;
   const defaultBase = join(homedir(), ".cswarm", "agents");
   const ownedDefault: string[] = [];
   const tempNames = [...CONNECT_PROFILE_FILES.temporaryBases, "profile.json"]
@@ -102,6 +196,8 @@ test("Fold 17 every reserved path refuses unsafe state before POST on explicit a
     }
   } finally {
     for (const dir of ownedDefault) await rm(dir, { recursive: true, force: true });
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await f.close();
   }
 });
@@ -774,15 +870,14 @@ test("Fold 9 completion write failure reports a saved usable profile and resumes
   } finally { await f.close(); }
 });
 
-test("Fold 12 completion chmod failure leaves no record before reporting it unwritten", { timeout: 10000 }, async () => {
+test("Fold 12 completion prepublish failure leaves no record before reporting it unwritten", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
     const path = join(f.root, "completion-chmod", "profile.json");
     const complete = join(dirname(path), "connect-complete.json");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
       writeCompletion: (file, serialized) => writeSecureJsonFile(file, serialized, async (handle, contents) => {
-        await handle.writeFile(contents, "utf8");
-        Object.defineProperty(handle, "chmod", { value: async () => { throw Object.assign(new Error("chmod failed"), { code: "EACCES" }); } });
+        throw Object.assign(new Error(`write failed before ${contents.length} bytes`), { code: "EACCES" });
       }) }), error => {
       assert.equal((error as { code: string }).code, "connect_complete_write_failed");
       assert.match(String(error), /completion record .*was not written/);
@@ -1452,13 +1547,6 @@ test("Fold 8 pending resume classifies completion and keeps a working profile on
     await unlink(complete);
     await writeSecureJsonFile(complete, JSON.stringify(record));
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
-      inspectCompletion: async file => Object.assign(await stat(file), { uid: 0 }) }), error => {
-      assert.equal((error as { code: string }).code, "connect_complete_unsafe");
-      assert.match(String(error), /connect-complete\.json/);
-      assert.doesNotMatch(String(error), /mv .*profile\.json/);
-      return true;
-    });
-    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher,
       writeCompletion: async () => { throw Object.assign(new Error("write refused"), { code: "EIO" }); } }), error => {
       assert.equal((error as { code: string }).code, "connect_complete_write_failed");
       assert.doesNotMatch(String(error), /damaged|mv /);
@@ -1612,6 +1700,9 @@ test("Fold 7 damaged completion warns; unreadable completion refuses before regi
       } else {
         await assert.rejects(attempt(), { code: "connect_complete_unreadable" });
         assert.equal(captured.length, 0);
+        await assert.rejects(clearMcpConnect(connected.profile), { code: "connect_complete_unreadable" });
+        await unlink(complete);
+        await writeSecureJsonFile(complete, "{");
       }
       await clearMcpConnect(connected.profile);
       await assert.rejects(stat(complete), { code: "ENOENT" });
@@ -2317,6 +2408,10 @@ test("foreign, malformed, and wrong-mode pending records refuse before POST with
         return true;
       });
       assert.equal(prompts, 0);
+      if (kind === "wrong-mode") {
+        await assert.rejects(clearMcpConnect(path), { code: "connect_pending_mode" });
+        await chmod(pending, 0o600);
+      }
       await clearMcpConnect(path);
       await assert.rejects(stat(pending), { code: "ENOENT" });
     }
