@@ -421,3 +421,21 @@ The lead verified round-15 Opus F1–F3 at `4f940979` and ruled them blocking. T
 Verification used temporary HOME for each lane test invocation. Seven complete lane files passed on the final sources: wake-lease CLI 36/36, host-id rotation 29 passed with two real-`ps` skips, check-budget 12/12, timeout-table 21/21, citation-drift 5/5, arrival-watch 44/44, and arrival-notify 2/2. Three focused resume sentence tests passed. An earlier combined parallel run produced timing failures under load; a first complete wake-lease run had one 12-second timeout, and its isolated case plus the complete rerun passed. `npm run build`, `npm run check:tests`, and `git diff --check` passed. No full suite ran in this lane.
 
 The lead still owns the full service-free, CLI, server, edge, site and release gates at the Fold 17 SHA. Real `/bin/ps` controls and host-wide process absence are not established in this sandbox. The non-blocking round-14 and round-15 findings are inventoried in `FOLLOW-UPS.md`.
+
+## Fold 18
+
+Round 16 Codex and Opus found the same production regression in general-lock reclamation. The lead ruled AO1 blocking and placed Opus R2–R7 and Codex's non-blocking text in `FOLLOW-UPS.md`. This fold changes the general-lock owner decision, its tests, and citations moved by that change. No production host, real workspace, database, migration, or release surface was contacted.
+
+| Ruling | Change | Behavioral test and measured reversion |
+|---|---|---|
+| AO1: reused main-format PID | A same-host PID whose process start is more than two seconds after `createdAt` is stale at once, even without `startTime`. | A main-format record with a live reused PID was reclaimed. Restoring Fold 17's `startTime` decision made the focused test time out (pass 1/1 to fail 1/1). |
+| AO1: live owner | A process that started no later than `createdAt + 2_000` retains its general lock regardless of publication age or the optional `startTime`. | An aged current-process record with an unrelated earlier `startTime` remained; the Fold 17 decision removed it (pass 1/1 to fail 1/1). |
+| AO1: EPERM | `EPERM` still probes PID start and applies the same creation-time rule. | Injected `EPERM` for PID 1 and a deterministic start lookup: the reused record was reclaimed and the live record retained. Restoring Fold 17's EPERM branch failed this test (pass 1/1 to fail 1/1). |
+| AO1: unreadable or missing time | An unreadable PID start or nonnumeric `createdAt` falls back to the general lock's 60-second publication bound. | A pure decision control kept the record at 59,999 ms and reclaimed it at 60,000 ms; replacing the fallback with indefinite retention failed it (pass 1/1 to fail 1/1). |
+| AO1: incomplete record | A parsed `null` general-lock record also follows publication age. | A fresh `null` record was kept and an aged one reclaimed; removing the guard failed with a TypeError (pass 1/1 to fail 1/1). |
+
+General-lock removal still uses the shared reclaim gate and rename-then-verify path. The optional `startTime` is still published but no longer decides general-lock staleness. HEAD timeout-table citations for `pidStartMs` and the two lock-timeout rows were moved with `storage.ts`.
+
+The complete `host-id-rotation.test.ts` lane file passed 34/36 with two real-`/bin/ps` cases skipped by this sandbox. `npm run build` and `npm run check:tests` passed. Citation-drift and timeout-table lane files were rerun after the moved-line edits. Every test invocation used a temporary HOME and a test-level timeout. No full suite ran in this lane.
+
+The lead still owns full service-free, CLI, server, edge, site, and release gates for this SHA. Real `/bin/ps` behavior for another PID, host-wide process absence, and production behavior are not established here.

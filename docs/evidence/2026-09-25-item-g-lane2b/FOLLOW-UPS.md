@@ -1,6 +1,6 @@
 # Item G lane 2b review follow-ups
 
-The lead's 2026-09-26 landing bar blocks only verified, lane-introduced production findings. This inventory retains the non-blocking findings from rounds 14 and 15, including findings closed by Folds 16 and 17. Line numbers in the review files refer to their reviewed SHAs.
+The lead's 2026-09-26 landing bar blocks only verified, lane-introduced production findings. This inventory retains the non-blocking findings from rounds 14–16, including findings closed by later folds. Line numbers in the review files refer to their reviewed SHAs.
 
 | Finding | File | Finding | Why it does not block |
 |---|---|---|---|
@@ -27,3 +27,17 @@ The lead's 2026-09-26 landing bar blocks only verified, lane-introduced producti
 | Opus R15 F8 | `src/cloud/arrival-watch.ts` | “Last renewal” may describe a claim before the first renewal. | This is copy accuracy; Codex R15 F1 names the same issue. |
 
 Opus R15 F1–F4 are addressed by Fold 17 rulings AM1–AM4; F7 is the Fold 16 evidence correction in AM5.
+
+| Finding | File | Finding | Why it does not block |
+|---|---|---|---|
+| Opus R16 R2 | `src/cloud/arrival-watch.ts`, `src/cloud/wake-lease-constants.ts`, `src/cli.ts` | A session refusal stop line says “exit 76” although signal exits can be 130 or 143, and release calls a refusal “during renewal.” | The lead classified this copy mismatch as non-blocking under the production-only landing bar. |
+| Opus R16 R3 | `src/resume.ts`, `src/cli.ts` | “Check this seat's wake lease” omits a command and retypes the three-minute label. | This is recovery-copy precision, without a verified lane-introduced production failure. |
+| Opus R16 R4 | `src/cloud/storage.ts` | A waiting general lock runs blocking `/bin/ps` probes every 25–100 ms for a live same-host owner. | Latency impact was not measured as a production regression at the reviewed SHA. |
+| Opus R16 R5 | `src/cloud/storage.ts` | A reclaim-gate timeout omits owner host and prints “host unknown.” | This is diagnostic copy; the timeout still names the gate and recovery step. |
+| Opus R16 R6 | `src/cloud/wake-lease.ts` | A failed response-body read after a 200 header can surface raw instead of as an unknown outcome. | The report did not verify a lane-introduced production failure for this earlier behavior. |
+| Opus R16 R7 | `scripts/timeout-table/mapping.json` | Four historical-ref CLI citations point at unrelated lines. | The drift is old reference metadata and outside the production-only landing bar. |
+| Codex R16 non-blocking | `tests/p1-cli/host-id-rotation.test.ts` | The Fold 17 reused-PID control wrote only a new-format record, leaving upgrade behavior untested. | Fold 18 adds a main-format control that fails under the prior decision. |
+| Codex R16 controls | `tests/p1-cli/wake-lease-cli.test.ts`, `tests/p1-cli/timeout-table.test.ts`, `tests/p1-cli/citation-drift.test.ts` | AM1, AM2, AM4, and AM5 matched their rulings and their controls caught the reviewed reversions. | These are positive review results, without an outstanding production finding. |
+| Codex R16 non-blocking | `tests/p1-cli/host-id-rotation.test.ts` | The review ran no tests and reported no real-home access by the lane delta. | Test execution is measured in Fold 18; the isolated temporary-HOME controls do not access the real home. |
+
+Opus R16 R1 is addressed by Fold 18 AO1's one-sided creation-time decision. Codex and Opus R16 P1 are the same production finding addressed there.
