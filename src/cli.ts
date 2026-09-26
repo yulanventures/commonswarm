@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { NO_LISTENER_STATUS, NO_LISTENER_STATUS_SENTENCE } from "./listener/main-routing.js";
 import { signalDuration } from "./cloud/signal-duration.js";
+import { CLI_BUILD_VERSION } from "./cloud/client-build.js";
 import { pendingAccessAge, readPendingAccessOptional, type PendingAgentAccess } from "./cloud/pending-access.js";
 import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
@@ -679,34 +680,6 @@ export const BOOLEAN_FLAGS = new Set([
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-// Injected by scripts/build-release.sh via esbuild --define. Absent in dev/test builds,
-// where the package.json read below is correct. A bundled release has no package.json
-// beside it, so without this a release binary reports "unknown" and support cannot ask
-// "what version are you on?".
-declare const __COSWARM_VERSION__: string;
-
-function packageVersion(): string {
-  if (typeof __COSWARM_VERSION__ === "string" && __COSWARM_VERSION__.length > 0) {
-    return __COSWARM_VERSION__;
-  }
-  try {
-    const value = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-    ) as Record<string, unknown>;
-    // usage() is written to the terminal without going through safeError(), so
-    // everything interpolated into it must be safe at its source. A version is
-    // a short printable token; anything else is reported as unknown rather
-    // than passed through.
-    const version = value.version;
-    if (typeof version !== "string") return "unknown";
-    return /^[\x20-\x7e]{1,64}$/.test(version) ? version : "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-const CLI_BUILD_VERSION = packageVersion();
-
 export class Arguments {
   readonly positionals: string[] = [];
   private readonly leadingPositionals: string[] = [];

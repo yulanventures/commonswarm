@@ -11,6 +11,7 @@ import {
   type CloudTarget,
 } from "./config.js";
 import type { CredentialRecord, CredentialStore } from "./storage.js";
+import { withClientBuild } from "./client-build.js";
 
 const CALLBACK_PATH = "/callback";
 const CALLBACK_TIMEOUT_MS = 5 * 60_000;
@@ -379,7 +380,7 @@ async function registerLoginDevice(
       apikey: target.anonKey,
       "content-type": "application/json",
     },
-    body: JSON.stringify({
+    body: JSON.stringify(withClientBuild({
       command_id: `login_${randomBytes(12).toString("base64url")}`,
       client_version: CLIENT_PROTOCOL_VERSION,
       command: {
@@ -387,7 +388,7 @@ async function registerLoginDevice(
         device_id: deviceId,
         label: "cswarm-cli",
       },
-    }),
+    })),
   });
   let body: unknown;
   try {

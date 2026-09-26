@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { commandEndpoint, readEndpoint, type CloudTarget } from "./config.js";
 import { CLIENT_PROTOCOL_VERSION } from "./config.js";
+import { withClientBuild } from "./client-build.js";
 import { isAgentSessionErrorCode } from "./session-contract.js";
 import {
   NOTIFY_LEASE_EXITS, WAKE_LEASE_RENEW_MS, wakeLeaseExitSentence, wakeLeaseRule,
@@ -74,11 +75,11 @@ export async function sendWakeLeaseCommand(options: {
           apikey: options.target.anonKey,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(withClientBuild({
           command_id: randomUUID(), client_version: CLIENT_PROTOCOL_VERSION,
           workspace_id: options.workspaceId, stream: { kind: "workspace" },
           command: options.command,
-        }),
+        })),
         signal: controller.signal,
       });
     } catch (error) {

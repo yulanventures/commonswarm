@@ -140,12 +140,15 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
           in_reply_to: null, about: null, kind: "note", body: body.command.body,
           created_at: new Date().toISOString(), until: new Date(Date.now() + 300_000).toISOString() };
         result = { ok: true, status: "accepted", event_ids: [], events: [], signal };
-      } else if (body.command.kind === "claim_agent_inbox") result = {
+      } else if (body.command.kind === "claim_agent_inbox") {
+        assert.equal(body.command.route, "channel");
+        result = {
         ok: true, status: "accepted", event_ids: [], events: [],
         capabilities: { delivery_claim: 1, delivery_ack: 1, sender_owner_relation: 1 },
         deliveries: signal && !acked ? [{ signal, lease_id: LEASE, leased_until: new Date(Date.now() + 60_000).toISOString(), sender_owner_relation: "same_owner" }] : [],
         pending_delivery_count: signal && !acked ? 1 : 0, terminal_delivery_failure_count: 0,
-      };
+        };
+      }
       else if (body.command.kind === "ack_agent_delivery") {
         assert.equal(body.command.outcome, "observed");
         acks.push(body.command);

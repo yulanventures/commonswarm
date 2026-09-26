@@ -15,6 +15,7 @@ import {
   type ManagedAckInput,
 } from "./session-ack.js";
 import { ACK_AGENT_DELIVERY_SURFACED_FIELD } from "./session-wire.js";
+import { withClientBuild } from "./client-build.js";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -208,6 +209,8 @@ export interface DeliveryClaimRequest {
   listenerInstanceId: string;
   /** The client's own agent principal; every claimed signal must be addressed to it. */
   expectedPrincipalId: string;
+  /** Only long-lived receive surfaces identify their server-derived presence route. */
+  route?: "channel" | "listener";
 }
 
 export interface DeliveryAckRequest {
@@ -239,6 +242,12 @@ export interface DeliveryObservationRequest {
   managedAck?: ManagedAckInput;
   /** See DeliveryAckRequest.surfaced. */
   surfaced?: boolean;
+}
+
+export interface PresenceTouchRequest {
+  workspaceId: string;
+  credential: string;
+  commandId: string;
 }
 
 /** A profile check's observation, distinct from a leased ACK or hook queue promotion. */
@@ -784,6 +793,21 @@ function successBody(response: Response, text: string, verb: string): unknown {
   return body;
 }
 
+function parsePresenceSuccess(response: Response, text: string): void {
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new DeliveryResponseError(
+      `presence touch response was not JSON (HTTP ${response.status})`,
+    );
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body) ||
+      (body as Record<string, unknown>).ok !== true) {
+    throw new DeliveryResponseError("presence touch response did not report ok");
+  }
+}
+
 /**
  * Strict transport and parsing layer for the server's durable
  * `claim_agent_inbox` / `ack_agent_delivery` contract. Sends exactly the
@@ -850,13 +874,13 @@ export class DeliveryCommandClient {
               apikey: this.target.anonKey,
               "content-type": "application/json",
             },
-            body: JSON.stringify({
+            body: JSON.stringify(withClientBuild({
               command_id: request.commandId,
               client_version: CLIENT_PROTOCOL_VERSION,
               workspace_id: request.workspaceId.toLowerCase(),
               stream: { kind: "workspace" },
               command,
-            }),
+            })),
             signal,
           });
         } catch (error) {
@@ -906,6 +930,7 @@ export class DeliveryCommandClient {
       kind: "claim_agent_inbox",
       listener_instance_id: request.listenerInstanceId.toLowerCase(),
       limit: 1,
+      ...(request.route === undefined ? {} : { route: request.route }),
     }, "delivery claim");
     if (!response.ok) throw refusal(response, text);
     const parsed = parseClaimSuccess(
@@ -924,6 +949,19 @@ export class DeliveryCommandClient {
       terminalDeliveryFailureCount: parsed.terminalDeliveryFailureCount,
       ...(parsed.wake === undefined ? {} : { wake: parsed.wake }),
     };
+  }
+
+  /** Best-effort turn presence. Callers decide retry/throttle policy. */
+  async touchPresence(request: PresenceTouchRequest): Promise<{ httpStatus: number }> {
+    checkedCommandId(request.commandId);
+    assertAgentToken(request.credential);
+    checkedUuidRequest(request.workspaceId, "workspaceId");
+    const { response, text } = await this.post(request, {
+      kind: "touch_presence",
+    }, "presence touch");
+    if (!response.ok) throw refusal(response, text);
+    parsePresenceSuccess(response, text);
+    return { httpStatus: response.status };
   }
 
   /** Acknowledge one leased delivery with an exact terminal outcome. */

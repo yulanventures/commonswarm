@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { commandEndpoint, readEndpoint, type CloudTarget } from "./config.js";
 import { newCommandId } from "./command-client.js";
+import { withClientBuild } from "./client-build.js";
 
 /* MUST match supabase/functions/command/file-artifacts.ts:52 (FILE_MAX_VERSION_BYTES).
  * Duplicated so `file put` can refuse a 26 MB file before uploading 26 MB; the server
@@ -222,13 +223,13 @@ async function sendFileCommand<T>(
         apikey: options.target.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: options.commandId ?? newCommandId(),
         client_version: "0.1.0",
         workspace_id: options.workspaceId,
         stream: { kind: "workspace" },
         command,
-      }),
+      })),
       signal: controller.signal,
     });
   } catch (error) {

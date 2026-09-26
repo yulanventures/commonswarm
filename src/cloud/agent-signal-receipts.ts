@@ -4,6 +4,7 @@ import {
   commandEndpoint,
   type CloudTarget,
 } from "./config.js";
+import { withClientBuild } from "./client-build.js";
 
 export const AGENT_SEEN_BATCH_MAX = 50;
 const AGENT_SEEN_TIMEOUT_MS = 5_000;
@@ -64,13 +65,13 @@ async function postAgentSeenBatch(
         apikey: target.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: newCommandId(),
         client_version: CLIENT_PROTOCOL_VERSION,
         workspace_id: workspaceId,
         stream: { kind: "workspace" },
         command: { kind: "signals_seen", signal_ids: signalIds },
-      }),
+      })),
       signal: controller.signal,
     });
   } catch {

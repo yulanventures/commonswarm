@@ -16,6 +16,7 @@ import {
   CHANNEL_UNSUPPORTED_MESSAGE,
   type ChannelRow,
 } from "./channels.js";
+import { withClientBuild } from "./client-build.js";
 
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
 export const INVITATION_TOKEN_RE = /^swm_inv_[A-Za-z0-9_-]{43}$/;
@@ -886,13 +887,13 @@ export async function declareAgentModel(
         apikey: target.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: request.commandId ?? newCommandId(),
         client_version: CLIENT_PROTOCOL_VERSION,
         workspace_id: request.workspaceId,
         stream: { kind: "workspace" },
         command: { kind: "declare_agent_model", model: request.model },
-      }),
+      })),
       signal: controller.signal,
     });
   } catch (error) {
@@ -933,13 +934,13 @@ export class ThinCommandClient {
           apikey: this.target.anonKey,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(withClientBuild({
           command_id: commandId,
           client_version: CLIENT_PROTOCOL_VERSION,
           workspace_id: request.workspaceId,
           stream: request.stream,
           command: request.command,
-        }),
+        })),
         signal: controller.signal,
       });
     } catch (error) {
@@ -1036,7 +1037,7 @@ export class ThinCommandClient {
           apikey: this.target.anonKey,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(withClientBuild({
           command_id: commandId,
           client_version: CLIENT_PROTOCOL_VERSION,
           ...(untenanted
@@ -1046,7 +1047,7 @@ export class ThinCommandClient {
               stream: { kind: "workspace" },
             }),
           command,
-        }),
+        })),
         signal: controller.signal,
       });
     } catch (error) {
@@ -1141,12 +1142,12 @@ export class ThinCommandClient {
           apikey: this.target.anonKey,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(withClientBuild({
           command_id: commandId,
           client_version: CLIENT_PROTOCOL_VERSION,
           workspace_id: request.workspaceId,
           command,
-        }),
+        })),
         signal: controller.signal,
       });
     } catch (error) {
@@ -1215,13 +1216,13 @@ export class ThinCommandClient {
           apikey: this.target.anonKey,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
+        body: JSON.stringify(withClientBuild({
           command_id: commandId,
           client_version: CLIENT_PROTOCOL_VERSION,
           workspace_id: request.workspaceId,
           stream: { kind: "workspace" },
           command: request.command,
-        }),
+        })),
         signal: controller.signal,
       });
     } catch (error) {
@@ -1369,14 +1370,14 @@ export class ThinCommandClient {
                   apikey: this.target.anonKey,
                   "content-type": "application/json",
                 },
-                body: JSON.stringify({
+                body: JSON.stringify(withClientBuild({
                   // One id is minted outside the loop. Every retry is a replay.
                   command_id: commandId,
                   client_version: CLIENT_PROTOCOL_VERSION,
                   workspace_id: request.workspaceId,
                   stream: { kind: "workspace" },
                   command,
-                }),
+                })),
                 signal: controller.signal,
               }),
             );

@@ -445,6 +445,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
             const claimed = await delivery.claimAgentInbox({
               workspaceId: profile.workspace_id, credential: token, commandId: newCommandId(),
               listenerInstanceId: journal.listener_instance_id, expectedPrincipalId: profile.principal_id,
+              route: "channel",
             });
             lastPoll = Date.now();
             wake.noteClaim();

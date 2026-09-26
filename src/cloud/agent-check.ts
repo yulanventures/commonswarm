@@ -36,6 +36,7 @@ export const AGENT_CHECK_ACK_MIN_REMAINING_MS = 50;
 export const AGENT_CHECK_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 export const AGENT_CHECK_ACK_RETRY_BASE_MS = 250;
 export const AGENT_CHECK_ACK_RETRY_MAX_MS = 60_000;
+export const AGENT_PRESENCE_TOUCH_INTERVAL_MS = 60_000;
 
 export interface AgentCheckMessage {
   id: string;
@@ -138,6 +139,33 @@ function checkStatePath(profilePath: string, hostSessionId?: string): string {
   return join(dirname(profilePath), "check.json");
 }
 
+export function agentPresenceTouchStatePath(
+  profilePath: string,
+  principalId: string,
+): string {
+  return join(dirname(profilePath), `presence-touch-${principalId.toLowerCase()}.json`);
+}
+
+async function reservePresenceTouch(
+  profilePath: string,
+  principalId: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const path = agentPresenceTouchStatePath(profilePath, principalId);
+  const raw = await readSecureJsonFileIfPresent(path, 4_096);
+  if (raw !== null) {
+    try {
+      const state = JSON.parse(raw) as Record<string, unknown>;
+      if (state.version === 1 && Number.isFinite(state.last_attempt_at) &&
+          now - Number(state.last_attempt_at) < AGENT_PRESENCE_TOUCH_INTERVAL_MS) {
+        return false;
+      }
+    } catch { /* A damaged throttle is replaced before another request is sent. */ }
+  }
+  await writeSecureJsonFile(path, JSON.stringify({ version: 1, last_attempt_at: now }));
+  return true;
+}
+
 async function readCheckState(path: string): Promise<CheckState> {
   const raw = await readSecureJsonFileIfPresent(path, 16 * 1024 * 1024);
   if (raw === null) return { version: 1, cursor: null, messages: [] };
@@ -188,12 +216,34 @@ export async function checkAgentMessages(options: {
     const checked = await withFileLock(dirname(path), "check", async () => {
       const state = await readCheckState(path);
       let ackAfterCommit: (() => Promise<void>) | undefined;
+      let presenceAbort: AbortController | undefined;
       const result = await withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
         const managed = await profileSessionContext(profile, options.hostSessionId);
         const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
         const credential = await openProfileCredential(profile, fetcher);
         const token = await credential.bearer();
         const target = profileTarget(profile);
+        try {
+          if (await reservePresenceTouch(profilePath, profile.principal_id)) {
+            presenceAbort = new AbortController();
+            const touchSignal = presenceAbort.signal;
+            const touchFetcher = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+              fetcher(input, {
+                ...init,
+                signal: init?.signal
+                  ? AbortSignal.any([touchSignal, init.signal])
+                  : touchSignal,
+              })) as typeof fetch;
+            const touch = new DeliveryCommandClient(target, touchFetcher, {
+              deadlineMs: Math.max(1, deadlineMs - Date.now()),
+            });
+            void touch.touchPresence({
+              workspaceId: profile.workspace_id,
+              credential: token,
+              commandId: randomUUID(),
+            }).catch(() => undefined);
+          }
+        } catch { /* Presence is advisory and must not change a check. */ }
         const [directory, page] = await Promise.all([
           readAgentSignalDirectory(target, token, profile.workspace_id, { fetcher, signal, deadlineMs }),
           readAgentSignalPage(target, { kind: "agent", token }, {
@@ -343,7 +393,10 @@ export async function checkAgentMessages(options: {
           }
         }
         return result;
-      }, options.fetcher);
+      }, options.fetcher).finally(() => {
+        // A slow or refusing presence request never extends the turn check.
+        presenceAbort?.abort();
+      });
       return { result, ackAfterCommit };
     }, { timeoutMs: Math.min(Math.max(0, Math.floor(deadlineMs - Date.now())), 30_000) });
     if (checked.ackAfterCommit) {

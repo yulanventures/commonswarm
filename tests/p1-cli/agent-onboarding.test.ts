@@ -553,7 +553,8 @@ test("managed profile checks use only the named host's proof", async () => {
       return fake.fetcher(url, init);
     }) as typeof fetch;
     await checkAgentMessages({ profilePath, hostSessionId: "this-session", fetcher: boundFetch, present: async () => {} });
-    assert.equal(count, 3, "directory, inbox, and observation all carry the current session proof");
+    assert.equal(count, 4, "presence, directory, inbox, and observation all carry the current session proof");
+    assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "touch_presence").length, 1);
     assert.equal(fake.requests.filter(r => (r.command as { kind?: string } | undefined)?.kind === "ack_agent_delivery").length, 1);
   } finally { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; }
 });

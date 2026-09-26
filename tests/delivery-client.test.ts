@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { CLI_BUILD_VERSION } from "../src/cloud/client-build.js";
 import type { SignalRecord } from "../src/cloud/command-client.js";
 import {
   CLIENT_PROTOCOL_VERSION,
@@ -221,6 +222,7 @@ test("claim_agent_inbox sends the exact command envelope, limit:1, and caller co
   assert.deepEqual(sent.body, {
     command_id: COMMAND_ID,
     client_version: CLIENT_PROTOCOL_VERSION,
+    client_build: CLI_BUILD_VERSION,
     workspace_id: WORKSPACE,
     stream: { kind: "workspace" },
     command: {
@@ -920,6 +922,7 @@ test("ack sends the exact shape with explicit null and parses the echo", async (
   assert.deepEqual(captures[0]!.body, {
     command_id: "cmd_ack_test_000001",
     client_version: CLIENT_PROTOCOL_VERSION,
+    client_build: CLI_BUILD_VERSION,
     workspace_id: WORKSPACE,
     stream: { kind: "workspace" },
     command: {
@@ -950,6 +953,7 @@ test("hook observation uses a distinct idempotent command and no expired lease c
   assert.deepEqual(captures[0]!.body, {
     command_id: `observe_${SIGNAL.replaceAll("-", "")}`,
     client_version: CLIENT_PROTOCOL_VERSION,
+    client_build: CLI_BUILD_VERSION,
     workspace_id: WORKSPACE,
     stream: { kind: "workspace" },
     command: {

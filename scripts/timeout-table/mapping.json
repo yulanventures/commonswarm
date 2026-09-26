@@ -1717,7 +1717,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:309",
+          "citation": "src/cli.ts:310",
           "detail": "One 30-second deadline for waiting on listener stop.",
           "operation": {
             "name": "listener-stop-wait",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7602",
+          "citation": "src/cli.ts:7575",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8353",
+          "citation": "src/cli.ts:8326",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5109-5111; src/cloud/wake-lease.ts:61,64",
+          "citation": "src/cli.ts:5082-5084; src/cloud/wake-lease.ts:62,65",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1773,7 +1773,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3422",
+          "citation": "src/cli.ts:3395",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1840,26 +1840,26 @@
             "/functions/v1/read",
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-check-budget.ts:22; src/cloud/agent-check.ts:153-205",
-          "detail": "Whole check: local profile and cursor reads, credential renewal if due, directory read, and inbox page read.",
+          "citation": "src/cloud/agent-check-budget.ts:22; src/cloud/agent-check.ts:196-254",
+          "detail": "Whole check: local profile and cursor reads, credential renewal if due, best-effort turn presence, directory read, and inbox page read.",
           "operation": {
             "name": "check",
-            "class": "safe-read",
+            "class": "not-run",
             "writes": [
-              "private-copy check.json cursor/cache only"
+              "agent turn presence on the command edge",
+              "private-copy presence throttle and check.json cursor/cache"
             ],
             "removes": [
               "entire private profile copy"
             ],
-            "reason": "Uncapped source check measures directory and inbox reads only. The copy omits optional expires_at, so credential renewal is not exercised. Gate is NOT MEASURED until acknowledged.",
-            "measures_guarded_path": false
+            "reason": "A check now sends touch_presence concurrently with its reads, so the timeout probe cannot remain a read-only production measurement."
           }
         },
         "src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8404; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8377; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6954",
+          "citation": "src/cli.ts:6927",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7155",
+          "citation": "src/cli.ts:7128",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",

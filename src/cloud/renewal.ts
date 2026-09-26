@@ -48,6 +48,7 @@ import {
   commandEndpoint,
   type CloudTarget,
 } from "./config.js";
+import { withClientBuild } from "./client-build.js";
 /* One list of standing-grant rules for the whole CLI. renewal-grants.ts imports
    only ./config.js, so this direction introduces no cycle. */
 import {
@@ -396,13 +397,13 @@ export async function requestSuccessor(options: {
         apikey: options.target.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: options.commandId,
         client_version: CLIENT_PROTOCOL_VERSION,
         workspace_id: options.workspaceId,
         stream: { kind: "workspace" },
         command: renewalCommand(),
-      }),
+      })),
       signal: controller.signal,
     });
   } catch (error) {

@@ -380,7 +380,7 @@ test("a channel command carries the envelope and the exact fields the edge names
     );
     assert.deepEqual(
       Object.keys(envelope).sort(),
-      ["client_version", "command", "command_id", "stream", "workspace_id"],
+      ["client_build", "client_version", "command", "command_id", "stream", "workspace_id"],
     );
     assert.equal(envelope.client_version, CLIENT_PROTOCOL_VERSION);
     assert.deepEqual(envelope.stream, { kind: "workspace" });

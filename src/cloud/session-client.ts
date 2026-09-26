@@ -5,6 +5,7 @@ import {
   type CloudTarget,
 } from "./config.js";
 import { CommandTransportError, newCommandId } from "./command-client.js";
+import { withClientBuild } from "./client-build.js";
 import {
   ACQUIRE_AGENT_SESSION_KIND,
   AGENT_SESSION_ID_HEADER,
@@ -98,13 +99,13 @@ async function postSessionCommand(
     response = await fetcher(commandEndpoint(options.target), {
       method: "POST",
       headers,
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: input.commandId,
         client_version: CLIENT_PROTOCOL_VERSION,
         workspace_id: input.workspaceId,
         stream: { kind: "workspace" },
         command: input.command,
-      }),
+      })),
       signal: controller.signal,
     });
   } catch (error) {

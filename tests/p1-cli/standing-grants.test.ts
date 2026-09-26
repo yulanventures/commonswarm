@@ -517,7 +517,7 @@ test("cswarm grant resume reaches the wire and says what is still to be done", a
        fakes accept anything. This asserts the two lists against each other. */
     assert.deepEqual(
       Object.keys(captured.at(-1)!).sort(),
-      ["client_version", "command", "command_id", "stream", "workspace_id"],
+      ["client_build", "client_version", "command", "command_id", "stream", "workspace_id"],
     );
     assert.deepEqual(captured.at(-1)!.stream, { kind: "workspace" });
     const edge = await readFile(
@@ -532,6 +532,8 @@ test("cswarm grant resume reaches the wire and says what is still to be done", a
       ["client_version", "command", "command_id", "stream", "workspace_id"],
       "the CLI envelope and the edge's accepted key set have drifted apart",
     );
+    assert.match(handler[1], /\.\.\.clientBuildKey/,
+      "the edge must also admit the optional client_build envelope key");
 
     assert.match(resumed.stdout, /Grant resumed at 2026-09-04T10:00:00\.000Z\./);
     /* HONESTY IS NOT SUFFICIENT. Exit 0 here does not mean the agent is working

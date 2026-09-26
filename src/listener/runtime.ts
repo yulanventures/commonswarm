@@ -1872,6 +1872,7 @@ export async function runListenerRuntime(
               commandId: active.claimCommandId,
               listenerInstanceId: options.listenerInstanceId!,
               expectedPrincipalId: options.principalId,
+              route: "listener",
             });
             validateClaimResult(result);
           } catch (error) {

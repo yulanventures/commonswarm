@@ -1,5 +1,6 @@
 import { commandEndpoint, type CloudTarget } from "./config.js";
 import { newCommandId } from "./command-client.js";
+import { withClientBuild } from "./client-build.js";
 
 /** Transport never returned a response; retrying is safe (nothing landed). */
 export class FeedbackTransportError extends Error {
@@ -53,7 +54,7 @@ export async function submitFeedback(
         apikey: options.target.anonKey,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(withClientBuild({
         command_id: newCommandId(),
         client_version: "0.1.0",
         workspace_id: options.workspaceId,
@@ -65,7 +66,7 @@ export async function submitFeedback(
           body: request.body,
           context: request.context ?? null,
         },
-      }),
+      })),
       signal: controller.signal,
     });
   } catch (error) {

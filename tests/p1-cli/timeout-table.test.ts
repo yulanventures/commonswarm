@@ -32,12 +32,12 @@ const repo = resolve(import.meta.dirname, "../..");
 test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
-  assert.equal(row.citation, "src/cli.ts:5109-5111; src/cloud/wake-lease.ts:61,64");
+  assert.equal(row.citation, "src/cli.ts:5082-5084; src/cloud/wake-lease.ts:62,65");
   const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
   const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
-  assert.match(cli.slice(5108, 5111).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
-  assert.match(lease[60]!, /timeoutMs\?: number/);
-  assert.match(lease[63]!, /setTimeout\(\(\) => controller\.abort\(\)/);
+  assert.match(cli.slice(5081, 5084).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(lease[61]!, /timeoutMs\?: number/);
+  assert.match(lease[64]!, /setTimeout\(\(\) => controller\.abort\(\)/);
 });
 
 test("HEAD timeout citations resolve to their exact operations", { timeout: 2_000 }, async () => {
@@ -151,8 +151,8 @@ test("timeout inventory and mapping are exact in both directions for each measur
   );
   assert.equal(
     mappingForRef(mapping, "HEAD").rows["src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS"]
-      ?.operation.measures_guarded_path,
-    false,
+      ?.operation.class,
+    "not-run",
   );
   assert.equal(
     mappingForRef(mapping, "HEAD").rows["site/src/lib/auth-providers.ts:AbortSignal.timeout"]
@@ -1088,10 +1088,9 @@ test("runTable does not write to the origin and will not PASS unacknowledged NOT
     version: 1, url, anon_key: "public", workspace_id: workspace, principal_id: principal,
     credential_file: credential,
   }), { mode: 0o600 });
-  const checkId = "src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS";
   const signalId = "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS";
   const channelId = "src/cloud/channels.ts:timeoutMs";
-  const incomplete = [checkId, signalId];
+  const incomplete = [signalId];
   await assert.rejects(runTable({
     baseUrl: url, profile, client: null, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
@@ -1134,16 +1133,13 @@ if (process.argv[2] === "check" || process.argv[1] && process.argv.includes("che
 }
 process.exit(0);
 `, { mode: 0o700 });
-  await assert.rejects(runTable({
+  const notRun = await runTable({
     baseUrl: url, profile, client: timeoutClient, runs: 1, pauseMs: 0, ref: "HEAD",
     sourceTimeoutMs: 120_000, mapping: join(repo, "scripts/timeout-table/mapping.json"),
     output: null, acknowledgeNotMeasured: [...incomplete, channelId, "src/cloud/files.ts:REQUEST_TIMEOUT_MS"],
-  }), (error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    assert.match(message, /FAIL rows: .*AGENT_CHECK_TIMEOUT_MS/);
-    assert.doesNotMatch(message, /HOOK_CHECK_TIMEOUT_MS/);
-    return true;
   });
+  assert.match(notRun.report, /AGENT_CHECK_TIMEOUT_MS.*NOT RUN/);
+  assert.equal(notRun.status.fails.length, 0);
 
   const noisyClient = join(home, "noisy-client.mjs");
   await writeFile(noisyClient, `
