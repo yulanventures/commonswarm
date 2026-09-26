@@ -10,6 +10,7 @@ export const REGISTER_REFUSALS: Readonly<Record<string, number>> = {
   "principal_limit_reached": 403,
   "registration_seat_revoked": 409,
   "registration_token_already_used": 409,
+  "route_not_allowed": 400,
   "upgrade_required": 426
 };
 export const REGISTER_NO_SEAT_THIS_ATTEMPT: Readonly<Record<string, number>> = {
@@ -19,6 +20,7 @@ export const REGISTER_NO_SEAT_THIS_ATTEMPT: Readonly<Record<string, number>> = {
   "not_found": 404,
   "payload_too_large": 413,
   "principal_limit_reached": 403,
+  "route_not_allowed": 400,
   "upgrade_required": 426
 };
 export const REGISTER_EXISTING_SEAT_REFUSALS: Readonly<Record<string, number>> = {

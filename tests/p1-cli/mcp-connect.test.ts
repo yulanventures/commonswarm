@@ -1061,7 +1061,7 @@ test("register refusal table and seat-state sets are generated from the server h
   const core = await readFile("supabase/functions/h0/core.ts", "utf8");
   for (const code of ["method_not_allowed", "payload_too_large"]) assert.match(forward, new RegExp(`error: "${code}"`));
   assert.match(core, /error: "not_found"/);
-  assert.deepEqual(Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT).sort(), ["upgrade_required", "principal_limit_reached", "forbidden", "invalid_request", "payload_too_large", "not_found", "method_not_allowed"].sort());
+  assert.deepEqual(Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT).sort(), ["upgrade_required", "principal_limit_reached", "forbidden", "invalid_request", "payload_too_large", "not_found", "method_not_allowed", "route_not_allowed"].sort());
   assert.deepEqual(Object.keys(REGISTER_EXISTING_SEAT_REFUSALS).sort(), ["join_credential_seat_cap_reached", "registration_token_already_used", "registration_seat_revoked"].sort());
   assert.equal(REGISTER_NO_SEAT_THIS_ATTEMPT.command_id_conflict, undefined);
   assert.equal(REGISTER_EXISTING_SEAT_REFUSALS.command_id_conflict, undefined);
@@ -2702,6 +2702,7 @@ test("generated register refusal inventory and typed remedies", { timeout: 10000
       payload_too_large: "The request was refused; this attempt created no seat. Ask the operator for a new code.",
       not_found: "Check --url; this attempt created no seat.",
       method_not_allowed: "Check --url; this attempt created no seat.",
+      route_not_allowed: "The request was refused; this attempt created no seat. Ask the operator for a new code.",
     };
     assert.deepEqual(Object.keys(noSeatRemedies).sort(), Object.keys(REGISTER_NO_SEAT_THIS_ATTEMPT).sort());
     const messages: string[] = [];
@@ -2719,13 +2720,13 @@ test("generated register refusal inventory and typed remedies", { timeout: 10000
       });
       await assert.rejects(stat(path), { code: "ENOENT" });
     }
-    assert.equal(f.calls(), 10);
-    assert.equal(messages.length, 10);
+    assert.equal(f.calls(), 11);
+    assert.equal(messages.length, 11);
     f.refuse(JOIN);
     const path = join(f.root, "hostile-error", "profile.json");
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }),
       { code: "register_outcome_unknown", message: "The register outcome is unknown. Run the same cswarm mcp connect command again with the same code. If recovery fails, ask the operator to inspect this attempt before starting another connect." });
-    assert.equal(f.calls(), 11);
+    assert.equal(f.calls(), 12);
   } finally { await f.close(); }
 });
 
