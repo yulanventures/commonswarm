@@ -999,9 +999,9 @@ SQL
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
   test "$CATALOG_AFTER" = t
-  # Item G's functional proof needs an observation from the NEW edge. Its
-  # version runs after section 6 and the seeded note, never at this step.
-  if [ "$VERSION" != 20260925000001 ]; then
+  # Item G's functional proofs need observations from the NEW edge. These
+  # versions run after section 6 and their seeded command, never at this step.
+  if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260927000002 ]; then
     release_psql_ro --file "/proof/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
@@ -1291,6 +1291,25 @@ Anvil runs `release_psql_ro -v item_g_seed_signal_id="$SEED_SIGNAL_ID" --file
 as section 5 does. A missing seed is a failed proof. Do not run this proof in
 section 5's pre-edge Verify step.
 
+For migration `20260927000002`, use a dedicated live agent seat to make one
+successful routed command through the new edge (`claim_wake_lease`,
+`renew_wake_lease`, routed `claim_agent_inbox`, or `touch_presence`). Keep its
+credential in a root-owned file and do not put it in arguments or logs. Then run
+the functional proof exactly as follows; it uses session-level settings and no
+outer transaction:
+
+```sh
+release_psql_ro -v item_g3d_principal_id="$ITEM_G3D_PRINCIPAL_ID" \
+  -v item_g3d_workspace_id="$ITEM_G3D_WORKSPACE_ID" \
+  --file "/proof/20260927000002-functional.sql" \
+  >"$PROOF_DIR/20260927000002-functional.txt"
+test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
+```
+
+This proof never runs from section 5's automatic functional-proof step. A
+missing variable, a wrong seat/workspace pair, or no route timestamp from the
+last three minutes fails the proof.
+
 If the recycle timer was stopped, restart and verify it before closing a
 successful release:
 
@@ -1344,6 +1363,41 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
   fi
 )
 ```
+
+### Record a published npm client build — Anvil; HezLead approves
+
+Only after the npm package for this exact release SHA has been published and
+that publication is recorded in the release evidence, generate the database
+statement from the Git object on the Mac mini. No operator types a version:
+
+```sh
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = <sha>
+  scripts/current-client-build-sql.sh "$SHA" \
+    >"$EVIDENCE_DIR/current-client-build.sql"
+  chmod 0600 "$EVIDENCE_DIR/current-client-build.sql"
+)
+```
+
+Repeat section 1's proof-list review and transfer for that reviewed SQL file;
+do not copy it around the review. On the box, confirm the target identity as in
+section 5 and apply the statement only through the write helper:
+
+```sh
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
+    "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
+  release_psql --file /proof/current-client-build.sql
+)
+```
+
+Do not run this step for an unpublished package. A server or site release alone
+does not change `current_client_build`.
 
 ## 7. Stack or edge image pin bump
 
@@ -1691,7 +1745,9 @@ For a release containing several parts, use this order:
    change, whether section 7, section 8, or both need it. A migration-only
    release uses `NEW_STACK` without changing `stack/current`.
 7. Recreate changed stack images, one service at a time.
-8. Run public and authenticated end-to-end verification; archive evidence.
+8. After an npm package is published, record its exact-SHA client build with
+   section 6's generated-SQL step. Skip this for releases with no npm publish.
+9. Run public and authenticated end-to-end verification; archive evidence.
 
 Migration precedes code that needs it. Backfill precedes later migrations. A
 new edge must remain compatible with the verified database state at the moment

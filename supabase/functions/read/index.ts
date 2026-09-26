@@ -701,6 +701,15 @@ async function handle(
           p.model,
           p.owner_user_id,
           p.managed_at,
+          presence.last_command_at,
+          presence.client_build,
+          presence.watcher_at,
+          presence.channel_at,
+          presence.listener_at,
+          presence.turn_at,
+          presence.last_ack_via,
+          presence.last_ack_at,
+          presence.current_client_build,
           s.lifecycle_state,
           s.provider,
           s.host_label,
@@ -712,6 +721,9 @@ async function handle(
           s.expired_at,
           (s.expired_at IS NOT NULL AND s.expired_at > statement_timestamp()) AS is_live
         FROM swarm_read.agent_principals AS p
+        LEFT JOIN swarm_read.agent_presence AS presence
+          ON presence.workspace_id = p.workspace_id
+         AND presence.principal_id = p.principal_id
         LEFT JOIN swarm_read.agent_execution_sessions s ON s.principal_id = p.principal_id
         JOIN swarm_read.member_profiles AS owner
           ON owner.workspace_id = p.workspace_id

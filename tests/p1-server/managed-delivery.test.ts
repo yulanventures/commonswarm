@@ -223,6 +223,7 @@ async function deliveryRow(signalId: string, principalId: string) {
     session_generation: number | null;
     attempt_count: number;
     ack_outcome: string | null;
+    ack_via: string | null;
     acked_at: Date | null;
     surfaced_at: Date | null;
     lease_id: string | null;
@@ -232,6 +233,7 @@ async function deliveryRow(signalId: string, principalId: string) {
       session_generation,
       attempt_count,
       ack_outcome,
+      ack_via,
       acked_at,
       surfaced_at,
       lease_id::text
@@ -1396,6 +1398,7 @@ test("recovery reclaims a queued unsurfaced row; new holder claims it; attempt u
   assert.equal(queued.status, 200, JSON.stringify(queued.body));
   const before = await deliveryRow(signalId, agent.principalId);
   assert.equal(before.ack_outcome, "queued");
+  assert.equal(before.ack_via, "leased");
   assert.equal(before.surfaced_at, null);
   const attempts = before.attempt_count;
   const recovered = await runCmd(shared.ownerJwt, {
@@ -1408,6 +1411,7 @@ test("recovery reclaims a queued unsurfaced row; new holder claims it; attempt u
   assert.equal(mid.session_generation, null);
   assert.equal(mid.lease_id, null);
   assert.equal(mid.acked_at, null);
+  assert.equal(mid.ack_via, null);
   assert.equal(mid.attempt_count, attempts);
   const nextSession = randomUUID();
   const nextKey = synthKey();

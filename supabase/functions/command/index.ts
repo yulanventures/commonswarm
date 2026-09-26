@@ -321,6 +321,10 @@ interface SignalRecord {
 
 type DeliveryCommand = ClaimAgentInboxCommand | AckAgentDeliveryCommand;
 
+interface TouchPresenceCommand {
+  kind: "touch_presence";
+}
+
 type ValidatedCommand =
   | Command
   | ConnectCommand
@@ -329,6 +333,7 @@ type ValidatedCommand =
   | ChannelCommand
   | SignalsSeenCommand
   | DeliveryCommand
+  | TouchPresenceCommand
   | FileCommand;
 
 type WorkspaceRole = "owner" | "admin" | "member";
@@ -959,6 +964,7 @@ const CHANNEL_COMMAND_KINDS = [
   "channel_rename",
   "channel_archive",
 ] as const;
+const TOUCH_PRESENCE_KIND = "touch_presence";
 
 const COMMAND_KINDS = [
   "create",
@@ -993,6 +999,7 @@ const COMMAND_KINDS = [
   "claim_wake_lease",
   "renew_wake_lease",
   "release_wake_lease",
+  TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
 ] as const;
 const TASK_COMMAND_KINDS = [
@@ -1043,6 +1050,7 @@ const WORKSPACE_COMMAND_KINDS = [
   "claim_wake_lease",
   "renew_wake_lease",
   "release_wake_lease",
+  TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
 ] as const;
 const P0_AGENT_SCOPES = [
@@ -1207,6 +1215,7 @@ type Role = "owner" | "admin" | "member";
 interface RequestBody {
   command_id?: unknown;
   client_version?: unknown;
+  client_build?: unknown;
   workspace_id?: unknown;
   stream?: unknown;
   command?: unknown;
@@ -1653,12 +1662,23 @@ function validateCommand(
     return { ok: false, status: 400, reason: "unknown command kind" };
   }
 
+  if (cmd.kind === TOUCH_PRESENCE_KIND) {
+    return exactKeys(cmd, ["kind"])
+      ? { ok: true, command: { kind: TOUCH_PRESENCE_KIND } }
+      : {
+        ok: false,
+        status: 400,
+        reason: "touch_presence accepts no command fields",
+      };
+  }
+
   if ((FILE_COMMAND_KINDS as readonly string[]).includes(cmd.kind)) {
     return validateFileCommand(cmd);
   }
 
   if (cmd.kind === CLAIM_AGENT_INBOX_KIND) {
     const optionalKeys = Object.hasOwn(cmd, "limit") ? ["limit"] : [];
+    const routeKeys = Object.hasOwn(cmd, "route") ? ["route"] : [];
     const limit = Object.hasOwn(cmd, "limit")
       ? cmd.limit
       : DELIVERY_CLAIM_DEFAULT_LIMIT;
@@ -1666,6 +1686,7 @@ function validateCommand(
       "kind",
       "listener_instance_id",
       ...optionalKeys,
+      ...routeKeys,
     ]) &&
       typeof cmd.listener_instance_id === "string" &&
       UUID_RE.test(cmd.listener_instance_id) &&
@@ -1679,6 +1700,9 @@ function validateCommand(
           listener_instance_id: (cmd.listener_instance_id as string)
             .toLowerCase(),
           limit: limit as number,
+          ...(Object.hasOwn(cmd, "route")
+            ? { route: cmd.route as "channel" | "listener" }
+            : {}),
         },
       }
       : {
@@ -2660,6 +2684,78 @@ function compareSemver(left: string, right: string): number | null {
     if (difference !== 0) return difference;
   }
   return 0;
+}
+
+type PresenceRoute = "watcher" | "channel" | "listener" | "turn";
+
+function presenceRoute(
+  command: Record<string, unknown> | null,
+): { ok: true; route: PresenceRoute | null } | { ok: false } {
+  if (command === null || typeof command.kind !== "string") {
+    return { ok: true, route: null };
+  }
+  if (Object.hasOwn(command, "route")) {
+    if (
+      command.kind !== CLAIM_AGENT_INBOX_KIND ||
+      (command.route !== "channel" && command.route !== "listener")
+    ) return { ok: false };
+    return { ok: true, route: command.route };
+  }
+  if (command.kind === "claim_wake_lease" || command.kind === "renew_wake_lease") {
+    return { ok: true, route: "watcher" };
+  }
+  if (command.kind === TOUCH_PRESENCE_KIND) {
+    return { ok: true, route: "turn" };
+  }
+  return { ok: true, route: null };
+}
+
+function validClientBuild(value: unknown): string | null {
+  return typeof value === "string" && value.length <= 64 &&
+      compareSemver(value, "0.0.0") !== null
+    ? value
+    : null;
+}
+
+/** The single presence mutation used by every successful agent response. */
+async function recordAgentPresence(
+  tx: Sql,
+  agent: AgentAuthRow,
+  clientBuild: unknown,
+  route: PresenceRoute | null,
+): Promise<void> {
+  const build = validClientBuild(clientBuild);
+  await tx`
+    INSERT INTO swarm.agent_presence AS presence (
+      workspace_id, principal_id, last_command_at, client_build,
+      watcher_at, channel_at, listener_at, turn_at
+    ) VALUES (
+      ${agent.principal_workspace_id}::uuid,
+      ${agent.principal_id}::uuid,
+      statement_timestamp(),
+      ${build},
+      CASE WHEN ${route} = 'watcher' THEN statement_timestamp() ELSE NULL END,
+      CASE WHEN ${route} = 'channel' THEN statement_timestamp() ELSE NULL END,
+      CASE WHEN ${route} = 'listener' THEN statement_timestamp() ELSE NULL END,
+      CASE WHEN ${route} = 'turn' THEN statement_timestamp() ELSE NULL END
+    )
+    ON CONFLICT (workspace_id, principal_id) DO UPDATE SET
+      last_command_at = CASE
+        WHEN ${route}::text IS NOT NULL
+          OR presence.last_command_at <= statement_timestamp() - interval '60 seconds'
+        THEN statement_timestamp()
+        ELSE presence.last_command_at
+      END,
+      client_build = EXCLUDED.client_build,
+      watcher_at = CASE WHEN ${route} = 'watcher'
+        THEN statement_timestamp() ELSE presence.watcher_at END,
+      channel_at = CASE WHEN ${route} = 'channel'
+        THEN statement_timestamp() ELSE presence.channel_at END,
+      listener_at = CASE WHEN ${route} = 'listener'
+        THEN statement_timestamp() ELSE presence.listener_at END,
+      turn_at = CASE WHEN ${route} = 'turn'
+        THEN statement_timestamp() ELSE presence.turn_at END
+  `;
 }
 
 function stateFromRow(row: Record<string, unknown> | undefined): TaskState | null {
@@ -6041,6 +6137,18 @@ async function registerAgentSeat(
     return { status: 403, body: { error: "forbidden" } };
   }
   const ignoredIdentity = forgedActorDetail(body);
+  if (!presenceRoute(record(body.command)).ok) {
+    await insertAudit(tx, {
+      auth,
+      commandKind: REGISTER_AGENT_SEAT_KIND,
+      workspaceId: credential.workspace_id,
+      streamId: credential.stream_id,
+      outcome: "validation",
+      reason: "route_not_allowed",
+      detail: ignoredIdentity,
+    });
+    return { status: 400, body: { error: "route_not_allowed" } };
+  }
   if (Object.hasOwn(body, "from")) {
     await insertAudit(tx, {
       auth,
@@ -6993,9 +7101,13 @@ async function capabilityPreamble(
   }
 
   const command = record(body.command);
+  const clientBuildKey = Object.hasOwn(body, "client_build")
+    ? ["client_build"]
+    : [];
   const shapeOk = exactKeys(body, [
     "command_id",
     "client_version",
+    ...clientBuildKey,
     "workspace_id",
     "command",
   ]) &&
@@ -7629,9 +7741,13 @@ async function resumeRenewalGrant(
   }
 
   const command = record(body.command);
+  const clientBuildKey = Object.hasOwn(body, "client_build")
+    ? ["client_build"]
+    : [];
   const shapeOk = exactKeys(body, [
     "command_id",
     "client_version",
+    ...clientBuildKey,
     "workspace_id",
     "stream",
     "command",
@@ -8944,6 +9060,9 @@ async function handleTransaction(
   const kind = commandKind(body);
   const commandId = String(body.command_id);
   return await db.begin("isolation level read committed", async (tx) => {
+    let authenticatedAgent: AgentAuthRow | null = null;
+    let acceptedPresenceRoute: PresenceRoute | null = null;
+    const result = await (async (): Promise<HttpResult> => {
     await beforeStep(2);
     await setTransaction(tx);
     await afterStep(2);
@@ -8970,6 +9089,7 @@ async function handleTransaction(
       );
       return { status: 401, body: { error: "unauthenticated" } };
     }
+    authenticatedAgent = auth.agent;
 
     if (
       auth.credentialKind === "agent" &&
@@ -9005,6 +9125,19 @@ async function handleTransaction(
     await beforeStep(4);
     const ignoredIdentity = forgedActorDetail(body);
     await afterStep(4);
+
+    const routeClassification = presenceRoute(record(body.command));
+    if (!routeClassification.ok) {
+      await insertAudit(tx, {
+        auth,
+        commandKind: kind,
+        outcome: "validation",
+        reason: "route_not_allowed",
+        detail: ignoredIdentity,
+      });
+      return { status: 400, body: { error: "route_not_allowed" } };
+    }
+    acceptedPresenceRoute = routeClassification.route;
 
     const isDeliveryCommand =
       kind === CLAIM_AGENT_INBOX_KIND || kind === ACK_AGENT_DELIVERY_KIND;
@@ -9294,6 +9427,10 @@ async function handleTransaction(
       (CHANNEL_COMMAND_KINDS as readonly string[]).includes(
         validation.command.kind,
       );
+    const isTouchPresence = validation.command.kind === TOUCH_PRESENCE_KIND;
+    if (isTouchPresence && auth.agent === null) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
     if (isModelDeclare && auth.agent === null) {
       await insertAudit(tx, {
         auth,
@@ -9349,6 +9486,7 @@ async function handleTransaction(
       !isDeliveryCommand &&
       !isSeenCommand &&
       !isFileCommand &&
+      !isTouchPresence &&
       (
         (CONNECT_COMMAND_KINDS as readonly string[]).includes(
           validation.command.kind,
@@ -9490,6 +9628,11 @@ async function handleTransaction(
       const matches = existing.request_hash === hash &&
         existing.workspace_id === route.workspaceId &&
         existing.stream_id === route.streamId;
+      if (isTouchPresence) {
+        return matches
+          ? { status: 200, body: { ok: true } }
+          : { status: 409, body: { error: "command_id_conflict" } };
+      }
       /* ★ THE ONE REPLAY THAT MUST NOT REPLAY. A renewal stores ids and expiry and
          NEVER the successor's secret (renewalReplayFields), because a live credential
          at rest in a table read on every replay is a worse trade than any outage. So
@@ -9582,6 +9725,35 @@ async function handleTransaction(
         detail: ignoredIdentity,
         hash,
       });
+    }
+    if (isTouchPresence) {
+      const inserted = await tx<{ command_id: string }[]>`
+        INSERT INTO swarm.idempotency_keys (
+          principal_kind, principal_id, command_id,
+          workspace_id, stream_id, request_hash, response
+        ) VALUES (
+          ${auth.credentialKind},
+          ${canonicalPrincipal(auth.actor)},
+          ${commandId},
+          ${route.workspaceId}::uuid,
+          ${route.streamId}::uuid,
+          ${hash},
+          ${tx.json({ ok: true })}::jsonb
+        )
+        ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+        RETURNING command_id
+      `;
+      if (inserted.length === 0) {
+        throw new LedgerRace(
+          auth,
+          commandId,
+          kind,
+          route.workspaceId,
+          route.streamId,
+          hash,
+        );
+      }
+      return { status: 200, body: { ok: true } };
     }
     await afterStep(7);
 
@@ -11167,12 +11339,28 @@ async function handleTransaction(
       };
     await afterStep(15);
     return result;
+    })();
+    if (
+      result.status >= 200 && result.status < 300 && authenticatedAgent !== null
+    ) {
+      await recordAgentPresence(
+        tx,
+        authenticatedAgent,
+        body.client_build,
+        acceptedPresenceRoute,
+      );
+    }
+    return result;
   });
 }
 
-async function resolveLedgerRace(error: LedgerRace): Promise<HttpResult> {
+async function resolveLedgerRace(
+  error: LedgerRace,
+  body: RequestBody,
+): Promise<HttpResult> {
   return await db.begin("isolation level read committed", async (tx) => {
     await setTransaction(tx);
+    const result = await (async (): Promise<HttpResult> => {
 
     if (
       (error.commandKind === CLAIM_AGENT_INBOX_KIND ||
@@ -11217,6 +11405,11 @@ async function resolveLedgerRace(error: LedgerRace): Promise<HttpResult> {
     const matches = winner.request_hash === error.hash &&
       winner.workspace_id === error.workspaceId &&
       winner.stream_id === error.streamId;
+    if (error.commandKind === TOUCH_PRESENCE_KIND) {
+      return matches
+        ? { status: 200, body: { ok: true } }
+        : { status: 409, body: { error: "command_id_conflict" } };
+    }
     await insertAudit(tx, {
       auth: error.auth,
       commandKind: error.commandKind,
@@ -11295,6 +11488,19 @@ async function resolveLedgerRace(error: LedgerRace): Promise<HttpResult> {
       };
     }
     return replayResult(storedResponse(winner.response), error.commandKind);
+    })();
+    if (
+      result.status >= 200 && result.status < 300 && error.auth.agent !== null
+    ) {
+      const routeClassification = presenceRoute(record(body.command));
+      await recordAgentPresence(
+        tx,
+        error.auth.agent,
+        body.client_build,
+        routeClassification.ok ? routeClassification.route : null,
+      );
+    }
+    return result;
   });
 }
 
@@ -11474,7 +11680,7 @@ async function handlePostRequest(request: Request): Promise<Response> {
   } catch (error) {
     if (error instanceof LedgerRace) {
       try {
-        const result = await resolveLedgerRace(error);
+        const result = await resolveLedgerRace(error, body);
         return json(result.status, result.body, result.headers);
       } catch (raceError) {
         console.error("command race resolution failed", safeError(raceError));
@@ -11609,6 +11815,10 @@ async function reclaimUnsurfacedLeases(
       acked_at = CASE
         WHEN ack_outcome = 'queued' THEN NULL
         ELSE acked_at
+      END,
+      ack_via = CASE
+        WHEN ack_outcome = 'queued' THEN NULL
+        ELSE ack_via
       END,
       ack_outcome = CASE
         WHEN ack_outcome = 'queued' THEN NULL
