@@ -2,6 +2,7 @@ import { homedir, platform } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { dirname, join } from "node:path";
 import { link, lstat, open, readFile, rename, unlink } from "node:fs/promises";
 import type { SignalRecord } from "./command-client.js";
@@ -18,7 +19,10 @@ import {
 } from "./signals.js";
 import {
   ensureSecureStateDirectory,
+  HOST_ID_LOCK_INCOMPLETE_GRACE_MS,
+  publishCompleteOwnerFile,
   readSecureJsonFile,
+  removePublishedOwnerFile,
   withFileLock,
   writeSecureJsonFile,
 } from "./storage.js";
@@ -380,28 +384,27 @@ export async function acquireArrivalWatchLock(
   path: string,
   pid: number = process.pid,
   watcherId?: string,
+  options: { onBeforePublish?: () => Promise<void> } = {},
 ): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new Error("arrival watch lock pid must be a positive integer");
   }
   await ensureSecureStateDirectory(dirname(path));
-  const payload = `${JSON.stringify({ version: 1, pid, ...(watcherId ? { watcher_id: watcherId } : {}) })}\n`;
+  const payload = `${JSON.stringify({ version: 1, pid, owner_id: randomUUID(),
+    ...(watcherId ? { watcher_id: watcherId } : {}) })}\n`;
   let replacedDeadPredecessor = false;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(path, "wx", 0o600);
-      try {
-        await handle.writeFile(payload, "utf8");
-      } finally {
-        await handle.close();
-      }
+      await publishCompleteOwnerFile(path, payload, options);
       return replacedDeadPredecessor;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     }
     let existing: { pid: number; watcherId: string | null } | null = null;
+    let observedRaw: string | null = null;
     try {
       const raw = await readFile(path, "utf8");
+      observedRaw = raw;
       if (Buffer.byteLength(raw, "utf8") <= WATCH_LOCK_MAX_BYTES) {
         existing = parseWatchLock(raw);
       }
@@ -412,8 +415,19 @@ export async function acquireArrivalWatchLock(
     if (existing !== null && pidIsAlive(existing.pid)) {
       throw new ArrivalWatchAlreadyRunningError(existing.pid);
     }
+    if (existing === null) {
+      const info = await lstat(path).catch(() => null);
+      if (info === null) continue;
+      if (Date.now() - info.mtimeMs < HOST_ID_LOCK_INCOMPLETE_GRACE_MS) {
+        await delay(25);
+        attempt -= 1;
+        continue;
+      }
+    }
     if (existing !== null) replacedDeadPredecessor = true;
-    await unlink(path).catch(() => undefined);
+    if (await readFile(path, "utf8").catch(() => null) === observedRaw) {
+      await removePublishedOwnerFile(path).catch(() => undefined);
+    }
   }
   throw new Error("arrival watch lock could not be acquired");
 }
@@ -467,7 +481,7 @@ export async function releaseArrivalWatchLock(
     const raw = await readFile(path, "utf8");
     const existing = parseWatchLock(raw);
     if (existing === null || existing.pid !== pid) return;
-    await unlink(path);
+    await removePublishedOwnerFile(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;

@@ -8,10 +8,12 @@ import {
   mkdir,
   open,
   readFile,
+  readlink,
   readdir,
   rename,
   rm,
   stat,
+  symlink,
   unlink,
 } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
@@ -28,6 +30,8 @@ const KEYCHAIN_SERVICE = "com.commonswarm.cli";
 const LOCK_STALE_MS = 60_000;
 /** Longer than a local owner-record write, including a paused process. */
 export const HOST_ID_LOCK_INCOMPLETE_GRACE_MS = 2_000;
+/** A host-id rotation is local file I/O; an uninspectable owner cannot hold it indefinitely. */
+export const HOST_ID_LOCK_MAX_HOLD_MS = 60_000;
 const LOCK_TIMEOUT_MS = 30_000;
 const MAX_KEYCHAIN_RECORD_BYTES = 126;
 const MAX_PROFILE_BYTES = 64 * 1024;
@@ -316,20 +320,59 @@ function parseProfile(raw: string): CredentialProfile {
   return value as CredentialProfile;
 }
 
-/**
- * One writer per (state directory, name) across processes. Extracted from the credential
- * store because the agent successor record (§2.3 renewal) has to take the same lock: two
- * CLI invocations renewing the same lineage concurrently is exactly the read-rotate-write
- * race that once produced two live credentials.
- */
+function hostIdRemovalStep(path: string, directory: boolean): string {
+  return `rm ${directory ? "-r " : ""}-- '${path.replaceAll("'", "'\"'\"'")}'`;
+}
+
 export class FileLockTimeoutError extends Error {
   readonly name = "FileLockTimeoutError";
   readonly code = "file_lock_timeout";
 
-  constructor(readonly lockName: string, readonly lockPath?: string, readonly ownerPid?: number) {
+  constructor(readonly lockName: string, readonly lockPath?: string, readonly ownerPid?: number,
+    readonly gate = false) {
     super(lockName === "host-id-rotation"
-      ? `timed out waiting for the host-id rotation lock at ${lockPath} (owner pid ${ownerPid ?? "unknown"}). Wait for its owner to exit, then retry. If its owner is gone, remove ${lockPath} and retry.`
+      ? `timed out waiting for the host-id ${gate ? "reclaim gate directory" : "rotation lock"} at ${lockPath} (owner pid ${ownerPid ?? "unknown"}). Wait for its owner to exit, then retry. If its owner is gone, remove ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(lockPath ?? "", gate)} and retry.`
       : `timed out waiting for the credential refresh lock`);
+  }
+}
+
+/** Publish complete bytes at an absent path. A symlink is the atomic fallback when hard links are unavailable. */
+export async function publishCompleteOwnerFile(path: string, record: string,
+  options: { publishLink?: typeof link; onBeforePublish?: () => Promise<void> } = {},
+): Promise<string | null> {
+  const tempPath = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  const temp = await open(tempPath, "wx", 0o600);
+  let retained = false;
+  try {
+    await temp.writeFile(record, "utf8");
+    await temp.sync();
+    await options.onBeforePublish?.();
+    try {
+      await (options.publishLink ?? link)(tempPath, path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const published = code === "EEXIST" ? await lstat(path).catch(() => null) : null;
+      const source = published ? await lstat(tempPath).catch(() => null) : null;
+      if (published && source && published.dev === source.dev && published.ino === source.ino) {
+        // The link operation succeeded before its caller observed EEXIST.
+      } else if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(code ?? "")) {
+        await symlink(tempPath, path);
+        retained = true;
+      } else throw error;
+    }
+    return retained ? tempPath : null;
+  } finally {
+    await temp.close();
+    if (!retained) await unlink(tempPath).catch(() => undefined);
+  }
+}
+
+export async function removePublishedOwnerFile(path: string): Promise<void> {
+  const target = await readlink(path).catch(() => null);
+  await unlink(path);
+  if (target !== null && dirname(target) === dirname(path) &&
+      target.startsWith(`${path}.`) && /\.\d+\.[0-9a-f]+\.tmp$/.test(target)) {
+    await unlink(target).catch(() => undefined);
   }
 }
 
@@ -357,7 +400,7 @@ function releaseHeldFileLocksSync(): void {
 /**
  * The lock's raw content when it names a pid that no longer exists on THIS host, else null. Unknown owners are not dead:
  * a record still being written, one without a host (written before this rule), or one from another host or container
- * (a pid there means nothing here) falls back to the mtime rule. A reused pid or EPERM reads as alive.
+ * (a pid there means nothing here) falls back to the mtime rule.
  */
 async function deadLockOwnerRecord(lockPath: string): Promise<string | null> {
   let raw: string;
@@ -397,7 +440,7 @@ export function pidStartMs(pid: number, runPs: typeof execFileSync = execFileSyn
 async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<string | null> {
   const raw = await readFile(lockPath, "utf8").catch(() => null);
   if (raw === null) return null;
-  let owner: { pid?: unknown; host?: unknown; createdAt?: unknown };
+  let owner: { pid?: unknown; host?: unknown; createdAt?: unknown; startTime?: unknown };
   try { owner = JSON.parse(raw) as typeof owner; }
   catch { return ageMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null; }
   if (owner?.host !== undefined && owner.host !== hostname()) return raw;
@@ -407,28 +450,67 @@ async function staleHostIdOwnerRecord(lockPath: string, ageMs: number): Promise<
       typeof (owner as { startTime?: unknown }).startTime !== "number") {
     return ageMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null;
   }
-  try {
-    process.kill(owner.pid, 0);
-    const start = pidStartMs(owner.pid);
-    return start !== null && Math.abs(start - (owner as { startTime: number }).startTime) > 2_000 ? raw : null;
+  try { process.kill(owner.pid, 0); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return raw;
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
   }
-  catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null; }
+  const start = pidStartMs(owner.pid);
+  if (start !== null) return Math.abs(start - (owner.startTime as number)) > 2_000 ? raw : null;
+  return Date.now() - owner.createdAt >= HOST_ID_LOCK_MAX_HOLD_MS ? raw : null;
 }
 
 async function cleanupDeadHostIdTemps(stateDirectory: string, lockName: string): Promise<void> {
   const prefix = `${lockName}.lock.`;
   for (const name of await readdir(stateDirectory)) {
-    const match = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\d+)\\.[0-9a-f]+\\.tmp$`).exec(name);
+    const match = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:reclaim\\.)?(\\d+)\\.[0-9a-f]+\\.(?:tmp|stale|done)$`).exec(name);
     if (!match) continue;
     const pid = Number(match[1]);
     if (pid === process.pid) continue;
     try { process.kill(pid, 0); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") await unlink(join(stateDirectory, name)).catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") await rm(join(stateDirectory, name), { recursive: true, force: true });
     }
   }
 }
 
+function gateOwnerChanged(reclaimPath: string, phase: string): Error {
+  return new Error(`host-id reclaim gate owner changed at ${reclaimPath} ${phase}. Retry the command; if its owner is gone, remove that directory with ${hostIdRemovalStep(reclaimPath, true)} and retry.`);
+}
+
+async function releaseReclaimGate(reclaimPath: string, ownerId: string): Promise<void> {
+  const ownerPath = join(reclaimPath, "owner.json");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const current = await readFile(ownerPath, "utf8").catch(() => null);
+    let ours = false;
+    try { ours = current !== null && (JSON.parse(current) as { ownerId?: string }).ownerId === ownerId; }
+    catch { /* A changed or incomplete gate is never ours to remove. */ }
+    if (ours) {
+      const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.done`;
+      const moved = await rename(reclaimPath, movedGate).then(() => true).catch(error => {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        return false;
+      });
+      if (moved) {
+        const raw = await readFile(join(movedGate, "owner.json"), "utf8").catch(() => null);
+        if (raw === current) {
+          await rm(movedGate, { recursive: true, force: true });
+          return;
+        }
+        if (!await stat(reclaimPath).then(() => true).catch(() => false)) {
+          await rename(movedGate, reclaimPath).catch(() => undefined);
+        }
+      }
+    }
+    if (attempt === 0) await delay(25);
+  }
+  throw gateOwnerChanged(reclaimPath, "before release");
+}
+
+/**
+ * One writer per (state directory, name) across processes. The successor record also
+ * uses this lock, so concurrent CLI renewals cannot rotate one lineage twice.
+ */
 export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
@@ -449,42 +531,15 @@ export async function withFileLock<T>(
 
   let createdAt = 0;
   const ownerId = randomBytes(8).toString("hex");
+  let gateOwnerChangeRetries = 0;
   while (handle === null) {
     try {
       createdAt = Date.now();
       if (options.stalePolicy === "host-id") {
-        const tempPath = `${lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-        const temp = await open(tempPath, "wx", 0o600);
-        try {
-          const record = JSON.stringify({ pid: process.pid, host: hostname(),
-            createdAt, startTime: THIS_PROCESS_START_MS, ownerId });
-          await temp.writeFile(record, "utf8");
-          await temp.sync();
-          try {
-            await (options.publishLink ?? link)(tempPath, lockPath);
-            handle = temp;
-          } catch (error) {
-            const code = (error as NodeJS.ErrnoException).code;
-            if (code === "EEXIST" && await readFile(lockPath, "utf8").catch(() => null) === record) {
-              handle = temp; // A retransmitted LINK published our complete record.
-            } else if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(code ?? "")) {
-              const final = await open(lockPath, "wx", 0o600);
-              try {
-                await final.writeFile(record, "utf8");
-                await final.sync();
-                handle = final;
-              } catch (writeError) {
-                await final.close();
-                await unlink(lockPath).catch(() => undefined);
-                throw writeError;
-              }
-            } else throw error;
-          }
-        } catch (error) {
-          await temp.close();
-          throw error;
-        } finally { await unlink(tempPath).catch(() => undefined); }
-        if (handle !== temp) await temp.close();
+        const record = JSON.stringify({ pid: process.pid, host: hostname(),
+          createdAt, startTime: THIS_PROCESS_START_MS, ownerId });
+        await publishCompleteOwnerFile(lockPath, record, { publishLink: options.publishLink });
+        handle = await open(lockPath, "r");
       } else {
         handle = await open(lockPath, "wx", 0o600);
         await handle.writeFile(JSON.stringify({ pid: process.pid, host: hostname(), createdAt, ownerId }), "utf8");
@@ -531,16 +586,22 @@ export async function withFileLock<T>(
           let completeLocalOwner = false;
           if (gateOwner !== null) {
             try {
-              const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number };
+              const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number; createdAt?: number };
               if (Number.isSafeInteger(owner?.pid) && owner.pid > 0) recordedPid = owner.pid;
               completeLocalOwner = owner.host === hostname() && recordedPid !== undefined &&
                 Number.isFinite(owner.startTime) && owner.startTime > 0;
               if (completeLocalOwner) {
-                try {
-                  process.kill(owner.pid, 0);
-                  const start = pidStartMs(owner.pid);
-                  abandoned = start !== null && Math.abs(start - owner.startTime) > 2_000;
-                } catch (error) { abandoned = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+                let gone = false;
+                try { process.kill(owner.pid, 0); }
+                catch (error) {
+                  if ((error as NodeJS.ErrnoException).code === "ESRCH") gone = true;
+                  else if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+                }
+                const start = gone ? null : pidStartMs(owner.pid);
+                abandoned = gone || (start !== null
+                  ? Math.abs(start - owner.startTime) > 2_000
+                  : Date.now() - (typeof owner.createdAt === "number" && Number.isFinite(owner.createdAt)
+                    ? owner.createdAt : gateInfo?.mtimeMs ?? Date.now()) >= HOST_ID_LOCK_MAX_HOLD_MS);
               }
             } catch { /* Incomplete records become reclaimable after the stated grace. */ }
           }
@@ -560,12 +621,13 @@ export async function withFileLock<T>(
                 if (!await stat(reclaimPath).then(() => true).catch(() => false)) {
                   await rename(movedGate, reclaimPath).catch(() => undefined);
                 }
-                throw new Error("host-id reclaim gate owner changed during stale takeover");
+                if (gateOwnerChangeRetries++ === 0) continue;
+                throw gateOwnerChanged(reclaimPath, "during stale takeover");
               }
               await rm(movedGate, { recursive: true, force: true });
             }
           }
-          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath, recordedPid);
+          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath, recordedPid, true);
           await delay(25);
           continue;
         }
@@ -589,32 +651,7 @@ export async function withFileLock<T>(
               throw new Error("host-id lock owner changed during stale takeover");
             }
           }
-        } finally {
-          const currentOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
-          let ownedAtPath = false;
-          try { ownedAtPath = currentOwner !== null &&
-            (JSON.parse(currentOwner) as { ownerId?: string }).ownerId === ownerId; }
-          catch { /* A changed or incomplete gate is not ours. */ }
-          if (!ownedAtPath) throw new Error("host-id reclaim gate owner changed before release");
-          const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.done`;
-          const moved = await rename(reclaimPath, movedGate).then(() => true).catch(error => {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            return false;
-          });
-          if (moved) {
-            const raw = await readFile(join(movedGate, "owner.json"), "utf8").catch(() => null);
-            let ours = false;
-            try { ours = raw !== null && (JSON.parse(raw) as { ownerId?: string }).ownerId === ownerId; }
-            catch { /* A changed or incomplete gate is never ours to remove. */ }
-            if (ours) await rm(movedGate, { recursive: true, force: true });
-            else {
-              if (!await stat(reclaimPath).then(() => true).catch(() => false)) {
-                await rename(movedGate, reclaimPath).catch(() => undefined);
-              }
-              throw new Error("host-id reclaim gate owner changed before release");
-            }
-          }
-        }
+        } finally { await releaseReclaimGate(reclaimPath, ownerId); }
         continue;
       }
       if (Date.now() >= deadline) {
@@ -646,7 +683,7 @@ export async function withFileLock<T>(
         return false;
       }
     })();
-    if (ours) await unlink(lockPath).catch(() => undefined);
+    if (ours) await removePublishedOwnerFile(lockPath).catch(() => undefined);
   }
 }
 
