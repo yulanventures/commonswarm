@@ -1713,25 +1713,25 @@
             "reason": "Use of BROWSER_REQUEST_TIMEOUT_MS. A CLI profile cannot exercise that client code."
           }
         },
+        "src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:287",
+          "detail": "One 30-second deadline for waiting on listener stop.",
+          "operation": {
+            "name": "listener-stop-wait",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local listener control wait."
+          }
+        },
         "src/cli.ts:setTimeout": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7818-7843",
-          "detail": "Wait for Claude hook JSON on stdin.",
-          "operation": {
-            "name": "hook-stdin",
-            "class": "not-run",
-            "writes": [],
-            "removes": [],
-            "reason": "Local stdin wait."
-          }
-        },
-        "src/cli.ts:setTimeout#2": {
-          "class": "local",
-          "scope": "whole-operation",
-          "endpoints": [],
-          "citation": "src/cli.ts:7548",
+          "citation": "src/cli.ts:7486",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1739,6 +1739,20 @@
             "writes": [],
             "removes": [],
             "reason": "Local listener control wait."
+          }
+        },
+        "src/cli.ts:setTimeout#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/cli.ts:8276",
+          "detail": "Wait for Claude hook JSON on stdin.",
+          "operation": {
+            "name": "hook-stdin",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "Local stdin wait."
           }
         },
         "src/cli.ts:timeoutMs": {

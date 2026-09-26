@@ -152,6 +152,7 @@ import {
   agentSignalPendingStore,
   credentialStore,
   readSecureJsonFile,
+  pidStartMs,
   type CredentialStore,
 } from "./cloud/storage.js";
 import {
@@ -283,7 +284,7 @@ import {
 import { lsofStdoutConsumer } from "./stdout-consumer.js";
 import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseTransientError } from "./cloud/wake-lease.js";
 import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
-const LISTENER_STOP_WAIT_MS = 30_000;
+const LISTENER_STOP_WAIT_TIMEOUT_MS = 30_000;
 import {
   IDLE_POLL_DEFAULT_MS,
   idlePollHelpSentence,
@@ -375,6 +376,7 @@ import {
   type ListenerDeliveryJournal,
   type ListenerSenderProvenanceContext,
   type ListenerStatus,
+  type ListenerPaths,
   type ListenerRouteMode,
   type ListenerAttendanceSurface,
 } from "./listener/index.js";
@@ -3161,18 +3163,17 @@ async function agentSession(
   listenerMode = false,
 ): Promise<AgentCredentialSession> {
   let store: Awaited<ReturnType<typeof agentCredentialStore>> | null = null;
+  const candidate = await agentCredentialStore({
+    target: cloud,
+    lineageKey: credentialLineageKey(agent.token),
+  });
+  // Read failures must surface before a predecessor can be presented. In particular,
+  // this repairs an owned directory before withLock verifies its mode.
+  await candidate.read();
   try {
-    const candidate = await agentCredentialStore({
-      target: cloud,
-      lineageKey: credentialLineageKey(agent.token),
-    });
-    // Proved usable before it is trusted, the way agentSignalPendingStore proves its own:
-    // the directory checks (owned by this user, 0700, not a symlink) only run on first
-    // touch, and a path that fails them must degrade to "no renewal" rather than abort a
-    // command that would otherwise have worked.
-    await candidate.withLock(async () => {
-      await candidate.read().catch(() => null);
-    });
+    // Prove the lock is usable before trusting it for a successor write. A lock failure
+    // keeps the existing explicit no-renewal warning; a failed read above is fatal.
+    await candidate.withLock(async () => undefined);
     store = candidate;
   } catch {
     process.stderr.write(
@@ -7445,6 +7446,48 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
   }
 }
 
+/** A control timeout is unknown. Only a refused connect proves socket closure. */
+export async function waitForListenerStop(
+  paths: ListenerPaths,
+  initial: ListenerStatus | null,
+  waitBudgetMs: number,
+  deadline = Date.now() + waitBudgetMs,
+  processStart: (pid: number) => number | null = pidStartMs,
+): Promise<ListenerStatus | null> {
+  if (initial?.state === "stopped") {
+    try { await queryListenerControl(paths, "status", 250); }
+    catch (error) {
+      if (["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return initial;
+    }
+  }
+  let status = initial;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throw new Error(`listener stop timed out after ${waitBudgetMs / 1000} seconds; state ${status?.state ?? "absent"}, pid ${status?.pid ?? "absent"} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
+    }
+    let socketClosed = false;
+    try {
+      status = await queryListenerControl(paths, "status", 250);
+    } catch (error) {
+      socketClosed = ["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "");
+      status = await readListenerStatusIfPresent(paths);
+    }
+    let pidGone = status === null || status.pid <= 0;
+    if (!pidGone && status !== null) {
+      try {
+        process.kill(status.pid, 0);
+        const start = processStart(status.pid);
+        pidGone = start !== null && Math.abs(start - Date.parse(status.startedAt)) > 2_000;
+      } catch (error) {
+        pidGone = (error as NodeJS.ErrnoException).code === "ESRCH";
+      }
+    }
+    if (socketClosed && pidGone) return status;
+    if (deadline - Date.now() >= 100) await new Promise(resolve => setTimeout(resolve, 100));
+    else await new Promise(resolve => setTimeout(resolve, Math.max(1, deadline - Date.now())));
+  }
+}
+
 async function runListenStatusOrStop(
   args: Arguments,
   command: "status" | "stop",
@@ -7522,33 +7565,15 @@ async function runListenStatusOrStop(
     }
   }
   const stopWait = command === "stop" && args.has("wait");
-  const stopWaitMs = LISTENER_STOP_WAIT_MS;
+  const stopWaitMs = LISTENER_STOP_WAIT_TIMEOUT_MS;
   const stopDeadline = stopWait ? Date.now() + stopWaitMs : 0;
-  const remainingStopMs = () => Math.max(1, stopDeadline - Date.now());
   let status = command === "stop"
-    ? await stopListener(paths, stopWait ? Math.min(1_000, remainingStopMs()) : undefined)
+    ? stopWait
+      ? await queryListenerControl(paths, "stop", Math.min(1_000, Math.max(1, stopDeadline - Date.now())))
+        .catch(() => readListenerStatusIfPresent(paths))
+      : await stopListener(paths)
     : await effectiveListenerStatus(paths);
-  if (stopWait && status !== null) {
-    for (;;) {
-      // A failed record from effectiveListenerStatus means the socket is already gone.
-      // A stopped record can precede socket close and process exit.
-      const socketStatus = await queryListenerControl(paths, "status", Math.min(250, remainingStopMs())).catch(() => null);
-      if (socketStatus !== null) status = socketStatus;
-      else status = await effectiveListenerStatus(paths, Math.min(250, remainingStopMs()));
-      if (socketStatus === null && (status === null || status.state === "failed")) break;
-      let pidAlive = false;
-      if (status !== null && status.pid > 0) {
-        try { process.kill(status.pid, 0); pidAlive = true; }
-        catch (error) { pidAlive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
-      }
-      if (socketStatus === null && !pidAlive) break;
-      if (Date.now() >= stopDeadline) {
-        throw new Error(`listener stop timed out after ${stopWaitMs / 1000} seconds; state ${status?.state ?? "absent"}, pid ${status?.pid ?? "absent"} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
-      }
-      if (remainingStopMs() >= 100) await new Promise(resolve => setTimeout(resolve, 100));
-      else await new Promise(resolve => setTimeout(resolve, remainingStopMs()));
-    }
-  }
+  if (stopWait) status = await waitForListenerStop(paths, status, stopWaitMs, stopDeadline);
   if (status === null) {
     if (args.has("json")) {
       printJson({

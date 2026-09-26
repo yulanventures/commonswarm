@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { spawn, type execFileSync } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
 import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, pidStartMs, withFileLock } from "../../src/cloud/storage.js";
 
@@ -131,8 +131,6 @@ test("host-id lock distinguishes pid reuse, incomplete records, and EPERM", { ti
 });
 
 test("two stale-lock contenders rotate once", { timeout: 8_000 }, async () => {
-  const source = await readFile(new URL("../../src/cloud/storage.ts", import.meta.url), "utf8");
-  assert.match(source, /await rename\(lockPath, moved\)/, "stale reclaim must move its old inode before discarding it");
   const root = await mkdtemp(join(tmpdir(), "cswarm-stale-race-"));
   const machineHash = "a".repeat(64);
   try {
@@ -145,6 +143,55 @@ test("two stale-lock contenders rotate once", { timeout: 8_000 }, async () => {
     const persisted = JSON.parse(await readFile(join(root, "host-id"), "utf8")) as { host_id: string };
     assert.deepEqual(results, [persisted.host_id, persisted.host_id]);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("stale reclaim preserves a second contender published after the stale decision", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stale-publish-"));
+  const lockPath = join(root, "host-id-rotation.lock");
+  const fresh = JSON.stringify({ pid: process.pid, host: hostname(), createdAt: Date.now(),
+    startTime: pidStartMs(process.pid), ownerId: "new-contender" });
+  try {
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "dead" }), { mode: 0o600 });
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong", {
+      stalePolicy: "host-id", timeoutMs: 500, onBeforeStaleMove: async () => {
+        const temp = `${lockPath}.fresh`;
+        await writeFile(temp, fresh, { mode: 0o600 });
+        await rename(temp, lockPath);
+      },
+    }), /owner changed during stale takeover/);
+    assert.equal(await readFile(lockPath, "utf8"), fresh);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("dead reclaim gate is recovered and a live gate obeys its deadline", { timeout: 6_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stale-gate-"));
+  const lockPath = join(root, "host-id-rotation.lock");
+  const gate = `${lockPath}.reclaim`;
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  try {
+    assert.ok(child.pid);
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "dead" }), { mode: 0o600 });
+    await mkdir(gate);
+    const owner = { pid: child.pid, host: hostname(), startTime: Date.now(), ownerId: "gate" };
+    await writeFile(join(gate, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong",
+      { stalePolicy: "host-id", timeoutMs: 150 }), error => {
+      assert.ok(error instanceof FileLockTimeoutError);
+      assert.match(error.message, /\.reclaim/);
+      return true;
+    });
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.once("close", () => resolve()));
+    assert.equal(await withFileLock(root, "host-id-rotation", async () => "recovered",
+      { stalePolicy: "host-id", timeoutMs: 1_000 }), "recovered");
+    await assert.rejects(stat(gate), { code: "ENOENT" });
+  } finally {
+    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("host-id publication falls back on unsupported links and accepts retransmitted LINK", { timeout: 8_000 }, async () => {
@@ -170,26 +217,21 @@ test("host-id publication falls back on unsupported links and accepts retransmit
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "cswarm-lock-ps-"));
+test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, async (t) => {
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   try {
     assert.ok(child.pid);
-    await writeFile(join(root, "host-id-rotation.lock"), JSON.stringify({ pid: child.pid,
-      host: hostname(), createdAt: Date.now(), startTime: 0 }), { mode: 0o600 });
-    let called = false;
-    const parsed = pidStartMs(child.pid, ((executable: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
-      called = true;
-      assert.equal(executable, "/bin/ps");
-      assert.deepEqual(args, ["-o", "lstart=", "-p", String(child.pid)]);
-      assert.equal(options.env?.LC_ALL, "C");
-      return "Wed Sep 25 12:00:00 2024\n";
-    }) as typeof execFileSync);
-    assert.equal(called, true);
-    assert.ok(parsed);
+    let raw: string;
+    try {
+      raw = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(child.pid)],
+        { encoding: "utf8", timeout: 1_000, env: { ...process.env, LC_ALL: "C" } });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("sandbox denies /bin/ps"); return; }
+      throw error;
+    }
+    assert.equal(pidStartMs(child.pid), Date.parse(raw.trim()));
   } finally {
     child.kill("SIGKILL");
     await new Promise<void>(resolve => child.once("close", () => resolve()));
-    await rm(root, { recursive: true, force: true });
   }
 });

@@ -86,6 +86,12 @@ test("timeout inventory and mapping are exact in both directions for each measur
     true,
   );
   const headRows = new Map(enumerateRepository({ repo }).map(row => [row.id, row]));
+  const headMapping = mappingForRef(mapping, "HEAD").rows;
+  assert.equal(headRows.get("src/cli.ts:LISTENER_STOP_WAIT_TIMEOUT_MS")?.value_ms, 30_000);
+  assert.equal(headRows.get("src/cli.ts:setTimeout")?.value_ms, 100);
+  assert.equal(headMapping["src/cli.ts:setTimeout"].operation.name, "listener-stop-poll");
+  assert.equal(headRows.get("src/cli.ts:setTimeout#2")?.value_ms, 250);
+  assert.equal(headMapping["src/cli.ts:setTimeout#2"].operation.name, "hook-stdin");
   assert.equal(
     headRows.get("src/cloud/agent-check-budget.ts:AGENT_CHECK_TIMEOUT_MS")?.value_ms,
     AGENT_CHECK_TIMEOUT_MS,

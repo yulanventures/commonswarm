@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { dirname } from "node:path";
 import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
 import { arrivalHostIdFileState, arrivalMachineHash, arrivalWatchLockIdentity, arrivalWatchLockPath } from "./cloud/arrival-watch.js";
-import { WAKE_LEASE_STALE_LABEL, printedCommand } from "./cloud/wake-lease-constants.js";
+import { WAKE_LEASE_STALE_LABEL, printedCommand, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
 import type { ServerSessionStatus } from "./cloud/session-client.js";
 import type { AgentWakeLease } from "./cloud/wake-lease.js";
@@ -620,7 +620,7 @@ export function renderResume(report: ResumeInspection): string {
       ? "Server wake lease: unavailable; check again when the read service is reachable."
       : lease === null
       ? "Server wake lease: none."
-      : `Server wake lease: ${safeText(lease.host_label)}, generation ${lease.generation}, renewed ${Math.floor(lease.renewed_age_ms / 1000)}s ago; this host holds it: ${report.wakeLease.localWatcherId === lease.watcher_id ? "yes" : "no"}. A renewal does not prove this session reads its mail; observed ACK does. The lease goes stale after ${WAKE_LEASE_STALE_LABEL}.`);
+      : `Server wake lease: ${sanitizeWakeHostLabel(lease.host_label)}, generation ${lease.generation}, renewed ${Math.floor(lease.renewed_age_ms / 1000)}s ago; this host holds it: ${report.wakeLease.localWatcherId === lease.watcher_id ? "yes" : "no"}. A renewal does not prove this session reads its mail; observed ACK does. The lease goes stale after ${WAKE_LEASE_STALE_LABEL}.`);
   }
 
   lines.push(
@@ -689,7 +689,7 @@ export function resumeJson(report: ResumeInspection): Record<string, unknown> {
       ...(report.wakeLease.machineIdUnavailable ? { host_machine_id_unavailable: true } : {}),
       host_id_file_state: report.wakeLease.hostIdFileState ?? null,
       wake_lease: report.wakeLease.lease === null ? null : {
-      host_label: report.wakeLease.lease.host_label,
+      host_label: sanitizeWakeHostLabel(report.wakeLease.lease.host_label),
       generation: report.wakeLease.lease.generation,
       renewed_age_ms: report.wakeLease.lease.renewed_age_ms,
       held_by_this_host: report.wakeLease.localWatcherId === report.wakeLease.lease.watcher_id,

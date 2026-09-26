@@ -7,6 +7,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer as createSocketServer } from "node:net";
 import {
   access,
   mkdir,
@@ -53,7 +54,7 @@ import {
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
 import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
-import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions } from "../../src/cli.js";
+import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions, waitForListenerStop } from "../../src/cli.js";
 import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { generateSessionKey } from "../../src/cloud/session-proof.js";
 
@@ -84,6 +85,7 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
   let control: Awaited<ReturnType<typeof startListenerControlServer>> | null = null;
   let shell: ChildProcess | null = null;
   let nextPid: number | null = null;
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   try {
     const url = await listen(server);
     const target = cloudTarget(url, "public-test-key");
@@ -93,21 +95,31 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
     status.profileId = target.profileId;
     status.workspaceId = WORKSPACE;
     status.principalId = PRINCIPAL;
-    status.pid = 999_999_999;
+    assert.ok(owner.pid);
+    status.pid = owner.pid;
+    status.startedAt = new Date().toISOString();
     status.provider = "claude";
     await writeListenerStatus(paths, status);
     if (mode !== "dead") control = await startListenerControlServer({ paths, status: () => status, stop: () => {
       status.state = "stopping";
       setTimeout(() => {
         if (mode === "dies_during_stop") {
+          owner.kill("SIGKILL");
           void control?.close();
           return;
         }
         status.state = "stopped";
         status.stoppedAt = new Date().toISOString();
-        void writeListenerStatus(paths, status).then(() => setTimeout(() => void control?.close(), 300));
+        void writeListenerStatus(paths, status).then(() => setTimeout(() => {
+          owner.kill("SIGKILL");
+          void control?.close();
+        }, 300));
       }, 1_200);
     } });
+    if (mode === "dead") {
+      owner.kill("SIGKILL");
+      await new Promise<void>(resolve => owner.once("close", () => resolve()));
+    }
     await writeFile(credentialFile, credentialArtifact(), { mode: 0o600 });
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
@@ -143,6 +155,8 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
       await writeFile(process.env.CSWARM_FOLD10_LISTENER_EVIDENCE, `${JSON.stringify(restarted, null, 2)}\n`);
     }
   } finally {
+    owner.kill("SIGKILL");
+    if (owner.exitCode === null && owner.signalCode === null) await new Promise<void>(resolve => owner.once("close", () => resolve()));
     if (shell?.exitCode === null) shell.kill("SIGKILL");
     if (nextPid !== null) {
       try { process.kill(nextPid, "SIGTERM"); } catch { /* already gone */ }
@@ -154,6 +168,92 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
     }
     await control?.close().catch(() => undefined);
     await close(server);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stop wait treats a slow control reply as unknown until socket and child exit", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-slow-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
+    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
+  const status = listenerStatus(paths.logPath);
+  let server: ReturnType<typeof createSocketServer> | null = null;
+  try {
+    assert.ok(child.pid);
+    status.pid = child.pid;
+    status.startedAt = new Date().toISOString();
+    status.state = "stopping";
+    await writeListenerStatus(paths, status);
+    server = createSocketServer(socket => socket.on("data", () => {
+      setTimeout(() => { if (!socket.destroyed) socket.end(`${JSON.stringify({ ok: true, status })}\n`); }, 300);
+    }));
+    await new Promise<void>(resolve => server!.listen(paths.socketPath, resolve));
+    let settled = false;
+    const waiting = waitForListenerStop(paths, status, 2_000).then(value => { settled = true; return value; });
+    await new Promise(resolve => setTimeout(resolve, 450));
+    assert.equal(settled, false);
+    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
+    await new Promise<void>(resolve => server!.close(() => resolve()));
+    server = null;
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child.once("close", () => resolve()));
+    assert.equal((await waiting)?.state, "stopping");
+  } finally {
+    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
+    if (server) await new Promise<void>(resolve => server!.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stop wait times out on a live stopping child without rewriting status", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-stuck-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
+    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
+  const status = listenerStatus(paths.logPath);
+  try {
+    assert.ok(child.pid);
+    status.pid = child.pid;
+    status.startedAt = new Date().toISOString();
+    status.state = "stopping";
+    await writeListenerStatus(paths, status);
+    await assert.rejects(waitForListenerStop(paths, status, 600), error => {
+      assert.match((error as Error).message, /listener stop timed out after 0.6 seconds; state stopping, pid /);
+      assert.match((error as Error).message, new RegExp(String(child.pid)));
+      return true;
+    });
+    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
+    process.kill(child.pid, 0);
+  } finally {
+    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stop wait treats a reused pid as gone and a recorded stopped state as complete", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-reused-"));
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
+    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
+  const status = listenerStatus(paths.logPath);
+  try {
+    assert.ok(child.pid);
+    status.pid = child.pid;
+    status.startedAt = "2020-01-01T00:00:00.000Z";
+    status.state = "stopping";
+    await writeListenerStatus(paths, status);
+    assert.equal((await waitForListenerStop(paths, status, 900, Date.now() + 900, () => Date.now()))?.pid, child.pid);
+    process.kill(child.pid, 0);
+    status.state = "stopped";
+    const start = Date.now();
+    assert.equal(await waitForListenerStop(paths, status, 500), status);
+    assert.ok(Date.now() - start < 200, "a recorded stopped listener needs no PID wait");
+  } finally {
+    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -463,6 +563,12 @@ test("resume prints lease age, generation and this-host ownership without callin
   const json = resumeJson(report) as { wake_lease: Record<string, unknown> };
   assert.equal(json.wake_lease.held_by_this_host, true);
   assert.equal(json.wake_lease.renewal_is_mail_observation, false);
+  const hostile = { ...report, wakeLease: { ...report.wakeLease,
+    lease: { ...report.wakeLease.lease, host_label: `safe\u001b[31m\u0085\u202e${"x".repeat(300)}` } } };
+  const clean = (resumeJson(hostile) as { wake_lease: { host_label: string } }).wake_lease.host_label;
+  assert.equal(clean.length, 120);
+  assert.doesNotMatch(clean, /[\u001b\u0085\u202e]/);
+  assert.match(renderResume(hostile), new RegExp(clean));
   const unreadable = { ...report, wakeLease: { ...report.wakeLease, machineIdUnavailable: true,
     hostIdFileState: "missing" as const } };
   assert.match(renderResume(unreadable), /no host-id file exists yet/);

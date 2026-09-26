@@ -10,6 +10,7 @@ import {
   readFile,
   readdir,
   rename,
+  rm,
   rmdir,
   stat,
   unlink,
@@ -433,7 +434,8 @@ export async function withFileLock<T>(
   stateDirectory: string,
   lockName: string,
   work: () => Promise<T>,
-  options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link } = {},
+  options: { timeoutMs?: number; stalePolicy?: "host-id"; publishLink?: typeof link;
+    onBeforeStaleMove?: () => Promise<void> } = {},
 ): Promise<T> {
   await secureDirectory(stateDirectory);
   const lockPath = join(stateDirectory, `${lockName}.lock`);
@@ -500,9 +502,51 @@ export async function withFileLock<T>(
         // Serialize stale contenders, then move the stale inode out of the publication path.
         // Never unlink the publication path after deciding from an earlier read.
         const reclaimPath = `${lockPath}.reclaim`;
-        try { await mkdir(reclaimPath, { mode: 0o700 }); }
+        const gateOwnerPath = join(reclaimPath, "owner.json");
+        let gateCreated = false;
+        try {
+          await mkdir(reclaimPath, { mode: 0o700 });
+          gateCreated = true;
+          const ownerFile = await open(gateOwnerPath, "wx", 0o600);
+          try {
+            await ownerFile.writeFile(JSON.stringify({ pid: process.pid, host: hostname(),
+              createdAt: Date.now(), startTime: THIS_PROCESS_START_MS, ownerId }));
+            await ownerFile.sync();
+          } finally { await ownerFile.close(); }
+        }
         catch (gateError) {
-          if ((gateError as NodeJS.ErrnoException).code !== "EEXIST") throw gateError;
+          if ((gateError as NodeJS.ErrnoException).code !== "EEXIST") {
+            if (gateCreated) {
+              await unlink(gateOwnerPath).catch(() => undefined);
+              await rmdir(reclaimPath).catch(() => undefined);
+            }
+            throw gateError;
+          }
+          const gateInfo = await stat(reclaimPath).catch(() => null);
+          const gateOwner = await readFile(gateOwnerPath, "utf8").catch(() => null);
+          let abandoned = false;
+          if (gateOwner !== null) {
+            try {
+              const owner = JSON.parse(gateOwner) as { pid: number; host: string; startTime: number };
+              if (owner.host === hostname() && Number.isSafeInteger(owner.pid) && owner.pid > 0) {
+                try {
+                  process.kill(owner.pid, 0);
+                  const start = pidStartMs(owner.pid);
+                  abandoned = start !== null && Math.abs(start - owner.startTime) > 2_000;
+                } catch (error) { abandoned = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+              }
+            } catch { /* Incomplete record gets a grace period. */ }
+          } else if (gateInfo && Date.now() - gateInfo.mtimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS) {
+            abandoned = true;
+          }
+          if (abandoned) {
+            const movedGate = `${reclaimPath}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
+            await rename(reclaimPath, movedGate).catch(error => {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            });
+            await rm(movedGate, { recursive: true, force: true });
+          }
+          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath);
           await delay(25);
           continue;
         }
@@ -512,6 +556,7 @@ export async function withFileLock<T>(
             ? await staleHostIdOwnerRecord(lockPath, Date.now() - freshInfo.mtimeMs)
             : await deadLockOwnerRecord(lockPath));
           if (stillStale === deadRecord) {
+            await options.onBeforeStaleMove?.();
             const moved = `${lockPath}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
             const movedOwner = await rename(lockPath, moved).then(() => true).catch(error => {
               if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -525,7 +570,10 @@ export async function withFileLock<T>(
               throw new Error("host-id lock owner changed during stale takeover");
             }
           }
-        } finally { await rmdir(reclaimPath).catch(() => undefined); }
+        } finally {
+          await unlink(gateOwnerPath).catch(() => undefined);
+          await rmdir(reclaimPath).catch(() => undefined);
+        }
         continue;
       }
       if (Date.now() >= deadline) {
@@ -596,7 +644,18 @@ export async function readSecureJsonFile(
   path: string,
   maxBytes: number,
 ): Promise<string | null> {
-  await secureDirectory(dirname(path));
+  const directory = dirname(path);
+  const info = await lstat(directory).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (info === null) await secureDirectory(directory);
+  else {
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`credential directory is not a real directory: ${directory}`);
+    assertOwnedByCurrentUser(info.uid);
+    if (mode(info.mode) !== 0o700) await chmod(directory, 0o700);
+    await secureDirectory(directory);
+  }
   try {
     await secureCredentialFile(path);
     const raw = await readFile(path, "utf8");
