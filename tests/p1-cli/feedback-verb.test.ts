@@ -32,6 +32,7 @@ async function cli(
     "tsx",
     "src/cli.ts",
     ...args,
+    ...(args.includes("--url") ? [] : ["--url", "http://127.0.0.1:9"]),
   ], {
     cwd: process.cwd(),
     env: {
@@ -125,7 +126,7 @@ test("feedback without --kind is a usage error", async () => {
   assert.match(result.stderr, /--kind/);
 });
 
-test("feedback refuses a kind outside bug|idea|friction", async () => {
+test("feedback refuses a kind outside bug|idea|friction", { timeout: 10_000 }, async () => {
   const result = await cli([
     "feedback",
     "the flags fought me",

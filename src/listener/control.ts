@@ -77,7 +77,11 @@ const LISTENER_STATUS_STATES: readonly string[] = [
   ...LISTENER_RUNNING_STATES, "stopped", "failed",
 ];
 
-export type ListenerProviderId = "grok" | "opencode" | "claude" | "codex";
+export const LISTENER_PROVIDERS = ["grok", "opencode", "claude", "codex"] as const;
+export type ListenerProviderId = (typeof LISTENER_PROVIDERS)[number];
+export function isListenerProvider(value: string): value is ListenerProviderId {
+  return LISTENER_PROVIDERS.some(provider => provider === value);
+}
 
 /** Consecutive terminal ack failures that make a listener hard-down. */
 export const LISTENER_DELIVERY_FAILING_THRESHOLD = 3;

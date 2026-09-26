@@ -10,6 +10,22 @@
     "handlers": []
   },
   {
+    "id": "refusal.unknown-option.device",
+    "argv": [
+      "target",
+      "show",
+      "--url",
+      "<ORIGIN>",
+      "--anon-key",
+      "fixture-anon-key",
+      "--device"
+    ],
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "cswarm: unknown option --device; run cswarm --help to see the options this version accepts\n",
+    "handlers": []
+  },
+  {
     "id": "refusal.unknown-verb.profile-valid",
     "argv": [
       "nonexistent_verb",

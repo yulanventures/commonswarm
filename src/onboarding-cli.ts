@@ -136,10 +136,12 @@ export function withSetupOperatorStep(message: string): string {
   return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;
 }
 
+export const RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS = ["connection-file", "profile", "host-session-id", "json"] as const;
+
 export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-import");
   // Argument errors are the caller's to fix; only a setup that ran and failed ends with the operator step.
-  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+  args.assertShape(RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, 1);
   const connectionFile = args.required("connection-file");
   const hostSessionId = args.optional("host-session-id");
   if (hostSessionId !== undefined) checkedHostSessionId(hostSessionId);
@@ -161,19 +163,23 @@ export async function runSetupImport(args: OnboardingArguments): Promise<void> {
   }
 }
 
+export const RUN_SETUP_VERSION_1_ACCEPTED_FLAGS = ["check-version"] as const;
+
 export async function runSetupVersion(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-version");
-  args.assertShape(["check-version"], 1);
+  args.assertShape(RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, 1);
   await output({ setup_version: AGENT_CONNECTION_VERSION });
 }
 
+export const RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS = [] as const;
+
 export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:setup-guide");
-  args.assertShape([], 2);
+  args.assertShape(RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS, 2);
   await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}\n`);
 }
 
-const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
+export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
 
 export async function runCheckHook(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-hook");
@@ -200,11 +206,13 @@ export async function runCheckMessages(args: OnboardingArguments): Promise<void>
   });
 }
 
-const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
+export const RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"] as const;
+
+export const RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"] as const;
 
 export async function runReceiveConfigure(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-configure");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS, 2);
   await output(await configureAgentReceive({
     profilePath: args.required("profile"), mode: args.required("mode"), provider: args.optional("provider"),
     hostSessionId: args.optional("host-session-id"), cwd: args.optional("cwd"), previewChannel: args.has("preview-channel"),
@@ -227,9 +235,11 @@ export async function runReceiveTest(args: OnboardingArguments): Promise<void> {
   await output(await requestReceiveCanary(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
 
+export const RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"] as const;
+
 export async function runReceiveConfirm(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-confirm");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS, 2);
   const { confirmAgentChannel } = await import("./cloud/agent-channel.js");
   await output(await confirmAgentChannel({ profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")), signalId: args.required("signal-id"), receipt: args.required("receipt") }));
 }
@@ -241,9 +251,11 @@ export async function runReceiveIdle(args: OnboardingArguments): Promise<void> {
   await output(await markGrokBotIdle(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
 
+export const RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
+
 export async function runReceiveServe(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:receive-serve");
-  args.assertShape(["profile", "host-session-id"], 2);
+  args.assertShape(RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS, 2);
   const { serveAgentChannel } = await import("./cloud/agent-channel.js");
   const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
   const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
@@ -253,9 +265,11 @@ export async function runReceiveServe(args: OnboardingArguments): Promise<void> 
   } else await serveAgentChannel(options);
 }
 
+export const RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "json"] as const;
+
 export async function runResumeSnapshot(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:resume-profile");
-  args.assertShape(["profile", "host-session-id", "json"], 1);
+  args.assertShape(RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS, 1);
   const path = privatePath(args.required("profile"));
   const profile = await readAgentProfile(path, args.optional("host-session-id"));
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));

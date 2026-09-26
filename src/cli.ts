@@ -12,6 +12,15 @@ import { AgentSetupError, listAgentProfiles, readAgentProfile, readProfileCreden
 import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
+  CHECK_FLAGS,
+  RECEIVE_COMMON_FLAGS,
+  RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
+  RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
+  RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
+  RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS,
+  RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
+  RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
+  RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   onboardingUsage,
   runCheckHook,
   runCheckMessage,
@@ -364,6 +373,7 @@ import {
   type ListenerCanaryAttemptCallback,
   type ListenerPermissionMode,
   type ListenerProviderId,
+  isListenerProvider,
   type ListenerDeliveryJournal,
   type ListenerSenderProvenanceContext,
   type ListenerStatus,
@@ -591,8 +601,9 @@ export function formatBodySourceMissing(
 
 /**
  * Every flag this build accepts, for ERROR WORDING ONLY — never for acceptance. See the throw in
- * the parser for why that distinction is load-bearing. Kept honest by a gate that reads the
- * usage text and requires every flag printed there to appear here.
+ * the parser for why that distinction is load-bearing. A bare flag absent from this
+ * historical set keeps its original "unknown option" wording even if another command
+ * accepts that flag with a value.
  */
 export const KNOWN_FLAGS = new Set([
   ...ONBOARDING_BOOLEAN_FLAGS, ...ONBOARDING_VALUE_FLAGS,
@@ -607,7 +618,6 @@ export const KNOWN_FLAGS = new Set([
   "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
   "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt",
-  "device", "to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -1570,9 +1580,13 @@ export async function resolveSignalBody(
   return signalText(raw, "body");
 }
 
+export const INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS] as const;
+
+export const INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "invitation-token-stdin"] as const;
+
 async function invitationCredential(args: Arguments): Promise<string> {
   if (args.has("invitation-token-stdin")) {
-    args.assertShape([...TARGET_FLAGS, "invitation-token-stdin"], 1);
+    args.assertShape(INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS, 1);
     if (process.stdin.isTTY) {
       throw new Error(
         "--invitation-token-stdin requires the capability to be piped on stdin",
@@ -1589,7 +1603,7 @@ async function invitationCredential(args: Arguments): Promise<string> {
     assertInvitationToken(capability);
     return capability;
   }
-  args.assertShape([...TARGET_FLAGS], 2);
+  args.assertShape(INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS, 2);
   process.stderr.write(
     "Warning: positional invitation capabilities may be recorded in shell history and process listings; prefer --invitation-token-stdin.\n",
   );
@@ -1732,8 +1746,10 @@ async function profileIdentity(
     : { email: null, workspaceId: null };
 }
 
+export const RUN_WORKSPACES_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json"] as const;
+
 async function runWorkspaces(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "json"], 1);
+  args.assertShape(RUN_WORKSPACES_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -1761,8 +1777,10 @@ async function runWorkspaces(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_USE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json"] as const;
+
 async function runUse(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "json"], 2);
+  args.assertShape(RUN_USE_1_ACCEPTED_FLAGS, 2);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -1785,6 +1803,8 @@ async function runUse(args: Arguments): Promise<void> {
   process.stdout.write(`${message}\n`);
 }
 
+export const RUN_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "name", "json"] as const;
+
 async function runNew(args: Arguments): Promise<void> {
   const named = args.has("name");
   if (named && args.positionals.length > 1) {
@@ -1792,7 +1812,7 @@ async function runNew(args: Arguments): Promise<void> {
       "give the workspace name once: as a positional or as --name, not both",
     );
   }
-  args.assertShape([...TARGET_FLAGS, "name", "json"], named ? 1 : 2);
+  args.assertShape(RUN_NEW_1_ACCEPTED_FLAGS, named ? 1 : 2);
   // Validated before any credential or network work, so a typo costs one line.
   const name = (named ? args.required("name") : args.positionals[1]!).trim();
   assertWorkspaceName(name);
@@ -1845,6 +1865,12 @@ async function runNew(args: Arguments): Promise<void> {
   process.stdout.write(`${message}\n${next}\n`);
 }
 
+export const RUN_TARGET_3_ACCEPTED_FLAGS = ["json"] as const;
+
+export const RUN_TARGET_2_ACCEPTED_FLAGS = ["url", "anon-key", "json"] as const;
+
+export const RUN_TARGET_1_ACCEPTED_FLAGS = ["json", "reveal-anon-key"] as const;
+
 async function runTarget(args: Arguments): Promise<void> {
   const action = args.positionals[1] ?? "show";
   if (action === "show") {
@@ -1855,7 +1881,7 @@ async function runTarget(args: Arguments): Promise<void> {
      * meta tag on every page of commonswarm.com), so there is no secret to withhold; the default
      * stays fingerprinted only so a 208-character JWT does not land in logs by accident. */
     args.assertShape(
-      ["json", "reveal-anon-key"],
+      RUN_TARGET_1_ACCEPTED_FLAGS,
       args.positionals[1] === undefined ? 1 : 2,
     );
     const reveal = args.has("reveal-anon-key");
@@ -1882,7 +1908,7 @@ async function runTarget(args: Arguments): Promise<void> {
     return;
   }
   if (action === "set") {
-    args.assertShape(["url", "anon-key", "json"], 2);
+    args.assertShape(RUN_TARGET_2_ACCEPTED_FLAGS, 2);
     const selected = cloudTarget(
       args.required("url"),
       args.required("anon-key"),
@@ -1902,7 +1928,7 @@ async function runTarget(args: Arguments): Promise<void> {
     return;
   }
   if (action === "clear") {
-    args.assertShape(["json"], 2);
+    args.assertShape(RUN_TARGET_3_ACCEPTED_FLAGS, 2);
     const removed = await clearCurrentTarget();
     if (args.has("json")) {
       printJson({
@@ -1921,8 +1947,10 @@ async function runTarget(args: Arguments): Promise<void> {
   throw new Error(`unknown target command: ${action}`);
 }
 
+export const RUN_STATUS_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "json"] as const;
+
 async function runStatus(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "workspace-id", "json"], 1);
+  args.assertShape(RUN_STATUS_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -2070,6 +2098,10 @@ async function runStatus(args: Arguments): Promise<void> {
   })}\n\n${renderedSignalStatus}\n`);
 }
 
+export const RUN_INVITE_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "email", "json"] as const;
+
+export const RUN_INVITE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "invitation-id", "json"] as const;
+
 async function runInvite(args: Arguments): Promise<void> {
   /* `--json` is accepted and has no effect: this verb's receipt is already JSON on stdout,
    * with narration on stderr. It is allowed because refusing it was a trap — `--json` works
@@ -2088,7 +2120,7 @@ async function runInvite(args: Arguments): Promise<void> {
    * Client-only: no edge deploy, nothing near the D-047 freeze. */
   if (args.positionals[1] === "revoke") {
     args.assertShape(
-      [...TARGET_FLAGS, "workspace-id", "invitation-id", "json"],
+      RUN_INVITE_1_ACCEPTED_FLAGS,
       2,
     );
     const cloud = await target(args);
@@ -2127,7 +2159,7 @@ async function runInvite(args: Arguments): Promise<void> {
     else process.stdout.write(`${output.message}\n`);
     return;
   }
-  args.assertShape([...TARGET_FLAGS, "workspace-id", "email", "json"], 1);
+  args.assertShape(RUN_INVITE_2_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
@@ -2177,9 +2209,11 @@ async function runInvite(args: Arguments): Promise<void> {
   });
 }
 
+export const RUN_MEMBER_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "confirm", "json"] as const;
+
 async function runMember(args: Arguments): Promise<void> {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "confirm", "json"],
+    RUN_MEMBER_1_ACCEPTED_FLAGS,
     3,
   );
   if (args.positionals[1] !== "remove") {
@@ -2234,8 +2268,10 @@ async function runMember(args: Arguments): Promise<void> {
   }
 }
 
+export const RUN_WORKSPACE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "confirm", "json"] as const;
+
 async function runWorkspace(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "confirm", "json"], 3);
+  args.assertShape(RUN_WORKSPACE_1_ACCEPTED_FLAGS, 3);
   if (args.positionals[1] !== "close") {
     throw new UsageError(
       `unknown workspace command: ${args.positionals[1] ?? "(missing)"}`,
@@ -2407,10 +2443,14 @@ async function runLinkAccept(
   }
 }
 
+export const RUN_ACCEPT_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name"] as const;
+
+export const RUN_ACCEPT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name"] as const;
+
 async function runAccept(args: Arguments): Promise<void> {
   if (args.has("link-stdin")) {
     args.assertShape(
-      [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name"],
+      RUN_ACCEPT_1_ACCEPTED_FLAGS,
       1,
     );
     const payload = decodeInviteLink(await stdinInviteLink());
@@ -2432,7 +2472,7 @@ async function runAccept(args: Arguments): Promise<void> {
     return;
   }
   args.assertShape(
-    [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name"],
+    RUN_ACCEPT_2_ACCEPTED_FLAGS,
     2,
   );
   process.stderr.write(
@@ -2441,17 +2481,21 @@ async function runAccept(args: Arguments): Promise<void> {
   await runLinkAccept(args, parsed.payload);
 }
 
-async function runPrincipal(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  if (action === "create") {
-    /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
-    args.assertShape([
+export const RUN_PRINCIPAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"] as const;
+
+export const RUN_PRINCIPAL_1_ACCEPTED_FLAGS = [
       ...TARGET_FLAGS,
       "workspace-id",
       "name",
       "json",
       "allow-duplicate-name",
-    ], 2);
+    ] as const;
+
+async function runPrincipal(args: Arguments): Promise<void> {
+  const action = args.positionals[1];
+  if (action === "create") {
+    /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
+    args.assertShape(RUN_PRINCIPAL_1_ACCEPTED_FLAGS, 2);
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
@@ -2482,7 +2526,7 @@ async function runPrincipal(args: Arguments): Promise<void> {
     return;
   }
   if (action === "revoke") {
-    args.assertShape([...TARGET_FLAGS, "workspace-id", "principal-id", "json"], 2);
+    args.assertShape(RUN_PRINCIPAL_2_ACCEPTED_FLAGS, 2);
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
@@ -2545,14 +2589,7 @@ async function runPrincipal(args: Arguments): Promise<void> {
  * There is nothing to put in its place. "Mint one, get one, atomically" is the whole design.
  */
 
-async function runToken(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  if (action === "revoke") {
-    await runTokenRevoke(args);
-    return;
-  }
-  args.assertShape(
-    [
+export const RUN_TOKEN_1_ACCEPTED_FLAGS = [
       ...TARGET_FLAGS,
       "workspace-id",
       "principal-id",
@@ -2565,7 +2602,16 @@ async function runToken(args: Arguments): Promise<void> {
       "confirm-standing",
       /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
       "json",
-    ],
+    ] as const;
+
+async function runToken(args: Arguments): Promise<void> {
+  const action = args.positionals[1];
+  if (action === "revoke") {
+    await runTokenRevoke(args);
+    return;
+  }
+  args.assertShape(
+    RUN_TOKEN_1_ACCEPTED_FLAGS,
     2,
   );
   if (action !== "mint") {
@@ -2678,16 +2724,18 @@ async function runToken(args: Arguments): Promise<void> {
  * IT IS NOT `--force`, EITHER. A revoked grant is refused by the server and no
  * flag on this side changes that.
  */
-async function runGrant(args: Arguments): Promise<void> {
-  const action = args.positionals[1];
-  args.assertShape(
-    [
+export const RUN_GRANT_1_ACCEPTED_FLAGS = [
       ...TARGET_FLAGS,
       "workspace-id",
       "renewal-grant-id",
       /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
       "json",
-    ],
+    ] as const;
+
+async function runGrant(args: Arguments): Promise<void> {
+  const action = args.positionals[1];
+  args.assertShape(
+    RUN_GRANT_1_ACCEPTED_FLAGS,
     2,
   );
   if (action !== "resume") {
@@ -2727,11 +2775,15 @@ async function runGrant(args: Arguments): Promise<void> {
  * --agent-token-stdin, derives (or validates) token_id from that artifact, and never
  * accepts the secret as argv or prints it back.
  */
+export const RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "token-id", "json"] as const;
+
+export const RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "token-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS] as const;
+
 async function runTokenRevoke(args: Arguments): Promise<void> {
   // Agent self-surrender accepts both --agent-token-file and the existing --agent-token-stdin.
   if (hasAgentCredential(args)) {
     args.assertShape(
-      [...TARGET_FLAGS, "workspace-id", "token-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS],
+      RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS,
       2,
     );
     const cloud = await target(args);
@@ -2786,7 +2838,7 @@ async function runTokenRevoke(args: Arguments): Promise<void> {
   }
 
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "token-id", "json"],
+    RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS,
     2,
   );
   const cloud = await target(args);
@@ -2858,9 +2910,11 @@ const CAPABILITY_DISCLOSED_FIELDS = [
   "expires_at",
 ] as const;
 
+export const RUN_LINK_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "task-id", "ttl-ms", "site", "json"] as const;
+
 async function runLinkNew(args: Arguments): Promise<void> {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "task-id", "ttl-ms", "site", "json"],
+    RUN_LINK_NEW_1_ACCEPTED_FLAGS,
     2,
   );
   const taskId = args.required("task-id");
@@ -2938,9 +2992,11 @@ async function runLinkNew(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_LINK_REVOKE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "capability-id", "json"] as const;
+
 async function runLinkRevoke(args: Arguments): Promise<void> {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "capability-id", "json"],
+    RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
     2,
   );
   const capabilityId = args.required("capability-id");
@@ -3866,23 +3922,16 @@ async function runPostSignal(
   );
 }
 
+export const POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, ...BODY_FLAGS,
+  "about", "channel", "until", "json", ...SESSION_CONTEXT_FLAGS,
+] as const;
+export const POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "attach"] as const;
+export const POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "wait"] as const;
+
 export function postSignalAllowedFlags(kind: SignalKind = "note"): readonly string[] {
-  const allowTo = kind !== "working-on";
-  const allowWait = kind === "ask";
-  return [
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    ...BODY_FLAGS,
-    ...(allowTo ? ["to"] : []),
-    "about",
-    "channel",
-    "until",
-    ...(allowWait ? ["wait"] : []),
-    ...(allowTo ? ["attach"] : []),
-    "json",
-    ...SESSION_CONTEXT_FLAGS,
-  ];
+  return kind === "working-on" ? POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS
+    : kind === "ask" ? POST_SIGNAL_ASK_ACCEPTED_FLAGS : POST_SIGNAL_NOTE_ACCEPTED_FLAGS;
 }
 
 /**
@@ -4052,8 +4101,7 @@ async function runReply(args: Arguments): Promise<void> {
   );
 }
 
-export function replyAllowedFlags(): readonly string[] {
-  return [
+export const REPLY_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     "workspace-id",
     ...CREDENTIAL_FLAGS,
@@ -4064,7 +4112,10 @@ export function replyAllowedFlags(): readonly string[] {
     "until",
     "json",
     ...SESSION_CONTEXT_FLAGS,
-  ];
+  ] as const;
+
+export function replyAllowedFlags(): readonly string[] {
+  return REPLY_ACCEPTED_FLAGS;
 }
 
 /**
@@ -4237,14 +4288,16 @@ export function renderRoster(
   return `${lines.join("\n")}\n`;
 }
 
-async function runMembers(args: Arguments): Promise<void> {
-  args.assertShape([
+export const RUN_MEMBERS_1_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     "workspace-id",
     ...CREDENTIAL_FLAGS,
     "json",
     ...SESSION_CONTEXT_FLAGS,
-  ], 1);
+  ] as const;
+
+async function runMembers(args: Arguments): Promise<void> {
+  args.assertShape(RUN_MEMBERS_1_ACCEPTED_FLAGS, 1);
 
   const cloud = await target(args);
   const selected = await commandWorkspaceAndCredential(args, cloud, {
@@ -4307,14 +4360,16 @@ async function runMembers(args: Arguments): Promise<void> {
 }
 
 /** Show the identity authenticated by this request, never a saved human profile. */
-async function runWhoami(args: Arguments): Promise<void> {
-  args.assertShape([
+export const RUN_WHOAMI_1_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     "workspace-id",
     ...CREDENTIAL_FLAGS,
     "json",
     ...SESSION_CONTEXT_FLAGS,
-  ], 1);
+  ] as const;
+
+async function runWhoami(args: Arguments): Promise<void> {
+  args.assertShape(RUN_WHOAMI_1_ACCEPTED_FLAGS, 1);
   if (!hasAgentCredential(args)) {
     throw new UsageError(
       "cswarm whoami needs --agent-token-file <path> or --agent-token-stdin",
@@ -4402,14 +4457,16 @@ async function runWhoami(args: Arguments): Promise<void> {
 }
 
 /** Read the complete reconnect state without renewing, acknowledging, or advancing it. */
-async function runResume(args: Arguments): Promise<void> {
-  args.assertShape([
+export const RUN_RESUME_1_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     "workspace-id",
     "agent-token-file",
     "state-dir",
     "json",
-  ], 1);
+  ] as const;
+
+async function runResume(args: Arguments): Promise<void> {
+  args.assertShape(RUN_RESUME_1_ACCEPTED_FLAGS, 1);
   const suppliedCredentialPath = args.optional("agent-token-file");
   if (suppliedCredentialPath === undefined) {
     throw new UsageError("cswarm resume needs --agent-token-file <path>");
@@ -4509,27 +4566,15 @@ async function runResume(args: Arguments): Promise<void> {
   else process.stdout.write(`${renderResume(report)}\n`);
 }
 
+export const SIGNAL_READ_FEED_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
+export const SIGNAL_READ_INBOX_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "wait", "follow", "ndjson", "notify", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
+
 async function runSignalRead(
   args: Arguments,
   inbox: boolean,
 ): Promise<void> {
   const notify = inbox && args.has(NOTIFY_FLAG);
-  args.assertShape(notify
-    ? NOTIFY_ACCEPTED_FLAGS
-    : [
-      ...TARGET_FLAGS,
-      "workspace-id",
-      ...CREDENTIAL_FLAGS,
-      "about",
-      "channel",
-      "kind",
-      ...(inbox ? ["wait", "follow", "ndjson", "notify"] : []),
-      "since",
-      "limit",
-      "include-stale",
-      "json",
-      ...SESSION_CONTEXT_FLAGS,
-    ], 1);
+  args.assertShape(notify ? NOTIFY_ACCEPTED_FLAGS : inbox ? SIGNAL_READ_INBOX_ACCEPTED_FLAGS : SIGNAL_READ_FEED_ACCEPTED_FLAGS, 1);
 
   if (notify) {
     await runInboxNotifyCommand(args);
@@ -4846,14 +4891,16 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   }
 }
 
-async function runReceipt(args: Arguments): Promise<void> {
-  args.assertShape([
+export const RUN_RECEIPT_1_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     "workspace-id",
     ...CREDENTIAL_FLAGS,
     "json",
     ...SESSION_CONTEXT_FLAGS,
-  ], 2);
+  ] as const;
+
+async function runReceipt(args: Arguments): Promise<void> {
+  args.assertShape(RUN_RECEIPT_1_ACCEPTED_FLAGS, 2);
   const signalId = args.positionals[1]!;
   if (!UUID_RE.test(signalId)) {
     throw new Error("signal-id must be a UUID");
@@ -5123,12 +5170,12 @@ function listenerProvider(args: Arguments): ListenerProviderId {
   if (provider === undefined) {
     throw new Error(`--provider is required; ${hints}`);
   }
-  if (!(SESSION_PROVIDERS as readonly string[]).includes(provider)) {
+  if (!isListenerProvider(provider)) {
     throw new Error(
       `unsupported --provider; ${hints}`,
     );
   }
-  return provider as ListenerProviderId;
+  return provider;
 }
 
 function validateListenerProviderFlags(
@@ -7207,8 +7254,7 @@ async function runListenStart(args: Arguments): Promise<void> {
   );
 }
 
-async function runListenSupervisor(args: Arguments): Promise<void> {
-  args.assertShape([
+export const RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS = [
     ...TARGET_FLAGS,
     ...CREDENTIAL_FLAGS,
     "workspace-id",
@@ -7228,7 +7274,10 @@ async function runListenSupervisor(args: Arguments): Promise<void> {
     "route",
     "defer-over",
     ...SESSION_CONTEXT_FLAGS,
-  ], 1);
+  ] as const;
+
+async function runListenSupervisor(args: Arguments): Promise<void> {
+  args.assertShape(RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS, 1);
   const provider = listenerProvider(args);
   validateListenerProviderFlags(args, provider);
   // Validated before the credential is read, like the public listen start
@@ -8019,10 +8068,14 @@ async function hookHostSessionIdFromStdin(): Promise<string | null> {
   }
 }
 
+export const RUN_HOOK_1_ACCEPTED_FLAGS = ["cooldown", "principal-id"] as const;
+export const HOOK_INSTALL_ACCEPTED_FLAGS = ["write", "user", "repo", "principal-id"] as const;
+export const HOOK_UNINSTALL_ACCEPTED_FLAGS = ["write", "user", "repo"] as const;
+
 async function runHook(args: Arguments): Promise<void> {
   const command = args.positionals[1];
   if (command === "check") {
-    args.assertShape(["cooldown", "principal-id"], 2);
+    args.assertShape(RUN_HOOK_1_ACCEPTED_FLAGS, 2);
     const rawPrincipalIds = args.all("principal-id");
     if (rawPrincipalIds.some((principalId) => !UUID_RE.test(principalId))) return;
     const principalIds = rawPrincipalIds.map((principalId) => principalId.toLowerCase());
@@ -8067,12 +8120,7 @@ async function runHook(args: Arguments): Promise<void> {
   if (command !== "install" && command !== "uninstall") {
     throw new UsageError("hook requires check, install, or uninstall");
   }
-  args.assertShape(
-    command === "install"
-      ? ["write", "user", "repo", "principal-id"]
-      : ["write", "user", "repo"],
-    3,
-  );
+  args.assertShape(command === "install" ? HOOK_INSTALL_ACCEPTED_FLAGS : HOOK_UNINSTALL_ACCEPTED_FLAGS, 3);
   if (args.positionals[2] !== "claude") {
     throw new Error("hook install/uninstall currently supports claude");
   }
@@ -8138,13 +8186,21 @@ type FileCliContext = {
   selected: Awaited<ReturnType<typeof commandWorkspaceAndCredential>>;
 };
 
+export const FILE_CONTEXT_BASE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS] as const;
+export const FILE_PUT_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "name", "request-id"] as const;
+export const FILE_LS_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "include-tombstoned"] as const;
+export const FILE_GET_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "version", "out", "force"] as const;
+export const BRAIN_GET_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "version"] as const;
+export const BRAIN_PUT_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "if-version", "request-id"] as const;
+export const FEEDBACK_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "kind", "about"] as const;
+
 async function fileContext(
   args: Arguments,
-  extraFlags: readonly string[],
+  acceptedFlags: readonly string[],
   positionalCount: number,
 ): Promise<FileCliContext> {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS, ...extraFlags],
+    acceptedFlags,
     positionalCount,
   );
   const cloud = await target(args);
@@ -8286,7 +8342,7 @@ async function uploadNamedFile(
 async function runFilePut(args: Arguments): Promise<void> {
   const localPath = args.positionals[2];
   if (!localPath) throw new UsageError("cswarm file put needs a local path");
-  const context = await fileContext(args, ["name", "request-id"], 3);
+  const context = await fileContext(args, FILE_PUT_ACCEPTED_FLAGS, 3);
   let bytes: Uint8Array;
   try {
     bytes = readFileSync(localPath);
@@ -8315,7 +8371,7 @@ async function runFilePut(args: Arguments): Promise<void> {
 }
 
 async function runFileLs(args: Arguments): Promise<void> {
-  const context = await fileContext(args, ["include-tombstoned"], 2);
+  const context = await fileContext(args, FILE_LS_ACCEPTED_FLAGS, 2);
   const rows = await fileRows(context);
   const visible = args.has("include-tombstoned")
     ? rows
@@ -8364,7 +8420,7 @@ async function runFileLs(args: Arguments): Promise<void> {
 async function runFileGet(args: Arguments): Promise<void> {
   const selector = args.positionals[2];
   if (!selector) throw new UsageError("cswarm file get needs a file name or id");
-  const context = await fileContext(args, ["version", "out", "force"], 3);
+  const context = await fileContext(args, FILE_GET_ACCEPTED_FLAGS, 3);
   const versionN = args.has("version")
     ? integer(args, "version", { minimum: 1 })
     : null;
@@ -8409,7 +8465,7 @@ async function runFileRm(args: Arguments): Promise<void> {
   /* ★R7: no --confirm here on purpose — the tombstone is reversible for 30
    * days and says so; the ceremony belongs to the irreversible purge, which
    * nobody invokes by hand. */
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 3);
   const fileId = await resolveFileSelector(context, selector);
   const result = await fileTombstone({
     target: context.cloud,
@@ -8432,7 +8488,7 @@ async function runFileRestore(args: Arguments): Promise<void> {
   if (!selector) {
     throw new UsageError("cswarm file restore needs a file name or id");
   }
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 3);
   const fileId = await resolveFileSelector(context, selector);
   const result = await fileRestore({
     target: context.cloud,
@@ -8494,7 +8550,7 @@ function decodeBrainMarkdown(bytes: Uint8Array): string {
 }
 
 async function runBrainLs(args: Arguments): Promise<void> {
-  const context = await fileContext(args, [], 2);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 2);
   const topics = await brainRows(context);
   if (args.has("json")) {
     process.stdout.write(
@@ -8528,7 +8584,7 @@ async function runBrainGet(args: Arguments): Promise<void> {
   if (!requestedTopic) throw new UsageError("cswarm brain get needs a topic");
   const selector = parseBrainTopicSelector(requestedTopic);
   const topic = selector.topic;
-  const context = await fileContext(args, ["version"], 3);
+  const context = await fileContext(args, BRAIN_GET_ACCEPTED_FLAGS, 3);
   const row = (await brainRows(context)).find((candidate) => candidate.topic === topic);
   if (!row) {
     throw new Error(
@@ -8595,7 +8651,7 @@ async function runBrainPut(args: Arguments): Promise<void> {
   const ifVersion = args.optional("if-version") === undefined
     ? undefined
     : integer(args, "if-version", { minimum: 0 });
-  const context = await fileContext(args, ["if-version", "request-id"], args.positionals.length);
+  const context = await fileContext(args, BRAIN_PUT_ACCEPTED_FLAGS, args.positionals.length);
   let bytes: Uint8Array;
   if (localPath) {
     try {
@@ -8659,10 +8715,10 @@ async function runFeedback(args: Arguments): Promise<void> {
   }
   const kind = args.required("kind");
   if (!(FEEDBACK_KINDS as readonly string[]).includes(kind)) {
-    throw new UsageError(`--kind must be ${FEEDBACK_KINDS.join(", ")}`);
+    throw new UsageError(`--kind must be ${formatOrList(FEEDBACK_KINDS)}`);
   }
   const about = args.optional("about");
-  const context = await fileContext(args, ["kind", "about"], 2);
+  const context = await fileContext(args, FEEDBACK_ACCEPTED_FLAGS, 2);
   /* Context is descriptive only: the CLI version and platform help the
    * operator reproduce, and nothing here reads env vars or paths. */
   const submitted = await submitFeedback({
@@ -8806,12 +8862,14 @@ const CHANNEL_FLAGS = [
   ...SESSION_CONTEXT_FLAGS,
 ] as const;
 
+export const RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "purpose"] as const;
+
 async function runChannelCreate(args: Arguments): Promise<void> {
   const name = args.positionals[2];
   if (name === undefined) {
     throw new UsageError("cswarm channel create needs a channel name");
   }
-  args.assertShape([...CHANNEL_FLAGS, "purpose"], 3);
+  args.assertShape(RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS, 3);
   const problem = channelSlugProblem(name);
   if (problem !== null) throw new Error(problem);
   const purposeInput = args.optional("purpose");
@@ -8824,7 +8882,7 @@ async function runChannelCreate(args: Arguments): Promise<void> {
       `A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`,
     );
   }
-  const context = await fileContext(args, ["purpose"], 3);
+  const context = await fileContext(args, RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS, 3);
   const channel = await sendChannelCommand(context, {
     kind: "channel_create",
     slug: normalizeChannelSlug(name),
@@ -8842,9 +8900,11 @@ async function runChannelCreate(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_CHANNEL_LS_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "include-archived"] as const;
+
 async function runChannelLs(args: Arguments): Promise<void> {
-  args.assertShape([...CHANNEL_FLAGS, "include-archived"], 2);
-  const context = await fileContext(args, ["include-archived"], 2);
+  args.assertShape(RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
+  const context = await fileContext(args, RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
   const rows = await channelRows(context);
   const includeArchived = args.has("include-archived");
   if (args.has("json")) {
@@ -8859,6 +8919,8 @@ async function runChannelLs(args: Arguments): Promise<void> {
   process.stdout.write(renderChannelList(rows, { includeArchived }));
 }
 
+export const RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
 async function runChannelRename(args: Arguments): Promise<void> {
   const selector = args.positionals[2];
   const nextName = args.positionals[3];
@@ -8867,11 +8929,11 @@ async function runChannelRename(args: Arguments): Promise<void> {
       "cswarm channel rename needs the channel and its new name",
     );
   }
-  args.assertShape([...CHANNEL_FLAGS], 4);
+  args.assertShape(RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS, 4);
   const selectorKind = channelSelectorKind(selector);
   const problem = channelSlugProblem(nextName);
   if (problem !== null) throw new Error(problem);
-  const context = await fileContext(args, [], 4);
+  const context = await fileContext(args, RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS, 4);
   const channelId = await resolveChannelSelector(context, selector, selectorKind);
   const channel = await sendChannelCommand(context, {
     kind: "channel_rename",
@@ -8889,14 +8951,16 @@ async function runChannelRename(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS] as const;
+
 async function runChannelArchive(args: Arguments): Promise<void> {
   const selector = args.positionals[2];
   if (selector === undefined) {
     throw new UsageError("cswarm channel archive needs the channel");
   }
-  args.assertShape([...CHANNEL_FLAGS], 3);
+  args.assertShape(RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS, 3);
   const selectorKind = channelSelectorKind(selector);
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS, 3);
   const channelId = await resolveChannelSelector(context, selector, selectorKind);
   const channel = await sendChannelCommand(context, {
     kind: "channel_archive",
@@ -8913,9 +8977,11 @@ async function runChannelArchive(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_TASK_COMMAND_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS] as const;
+
 async function runTaskCommand(args: Arguments): Promise<void> {
   args.assertShape(
-    [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS],
+    RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
     2,
   );
   const kind = args.positionals[1];
@@ -8933,9 +8999,7 @@ async function runTaskCommand(args: Arguments): Promise<void> {
   printResult(kind, result);
 }
 
-async function runDogfood(args: Arguments): Promise<void> {
-  args.assertShape(
-    [
+export const RUN_DOGFOOD_1_ACCEPTED_FLAGS = [
       ...TARGET_FLAGS,
       ...ROUTE_FLAGS,
       ...CREDENTIAL_FLAGS,
@@ -8945,7 +9009,11 @@ async function runDogfood(args: Arguments): Promise<void> {
       "branch",
       "head-sha",
       "evidence",
-    ],
+    ] as const;
+
+async function runDogfood(args: Arguments): Promise<void> {
+  args.assertShape(
+    RUN_DOGFOOD_1_ACCEPTED_FLAGS,
     1,
   );
   const cloud = await target(args);
@@ -9000,16 +9068,18 @@ async function runDogfood(args: Arguments): Promise<void> {
   }));
 }
 
-async function runSeed(args: Arguments): Promise<void> {
-  args.assertShape(
-    [
+export const RUN_SEED_1_ACCEPTED_FLAGS = [
       "uid",
       "device-id",
       "workspace-id",
       "display-name",
       "workspace-name",
       "agent-name",
-    ],
+    ] as const;
+
+async function runSeed(args: Arguments): Promise<void> {
+  args.assertShape(
+    RUN_SEED_1_ACCEPTED_FLAGS,
     1,
   );
   const databaseUrl = process.env.DATABASE_URL;
@@ -9082,8 +9152,10 @@ async function runSeed(args: Arguments): Promise<void> {
   }
 }
 
+export const RUN_LOGIN_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser"] as const;
+
 async function runLogin(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "no-browser"], 1);
+  args.assertShape(RUN_LOGIN_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const credentials = await store(args, cloud);
   process.stderr.write(
@@ -9104,8 +9176,10 @@ async function runLogin(args: Arguments): Promise<void> {
   );
 }
 
+export const RUN_LOGOUT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "device", "all-devices", "local"] as const;
+
 async function runLogout(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "device", "all-devices", "local"], 1);
+  args.assertShape(RUN_LOGOUT_1_ACCEPTED_FLAGS, 1);
   if (args.optional("device") !== undefined) {
     throw new Error(
       "--device is deferred until the server-side device authority endpoint ships",
@@ -9320,17 +9394,20 @@ export function commandHelpLines(verb?: string, action?: string): string {
     for (const [subaction, entry] of commands) {
       if (action !== undefined && subaction !== action) continue;
       if (!entry.visible) continue;
-      for (const variant of Object.values(entry.variants)) {
+      const key = `${name}${subaction ? `.${subaction}` : ""}`;
+      for (const [variantName, variant] of Object.entries(entry.variants)) {
         const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
         for (const hint of hints) {
           lines.push(`  ${hint}`);
           lines.push(`    ${entry.description}`);
         }
+        const handlerFlags = VARIANT_HELP_FLAGS[`${key}.${variantName}`] ?? HANDLER_HELP_FLAGS[key];
+        if (!handlerFlags) throw new Error(`missing handler help flags for ${key}.${variantName}`);
+        const accepted = entry.profile === "expand" ? [...handlerFlags, "profile", "host-session-id"] : handlerFlags;
+        const shown = new Set(hints.flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
+        const extra = [...new Set(accepted)].filter(flag => !shown.has(flag));
+        if (extra.length > 0) lines.push(`    Additional options: ${extra.map(flag => helpFlag(key, flag)).join(", ")}`);
       }
-      const shown = new Set(Object.values(entry.variants).flatMap(variant => variant.help)
-        .flatMap(hint => [...hint.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1])));
-      const extra = [...entry.flags, ...(entry.cliOnlyFlags ?? [])].filter(flag => !shown.has(flag));
-      if (extra.length > 0) lines.push(`    Additional options: ${extra.map(flag => helpFlag(`${name}${subaction ? `.${subaction}` : ""}`, flag)).join(", ")}`);
     }
   }
   return lines.join("\n");
@@ -9448,8 +9525,10 @@ const inboxVariants = {
   follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]"]),
 };
 
+export const RUN_MCP_CODE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id"] as const;
+
 async function runMcpCode(args: Arguments): Promise<void> {
-  args.assertShape([...TARGET_FLAGS, "workspace-id"], 2);
+  args.assertShape(RUN_MCP_CODE_1_ACCEPTED_FLAGS, 2);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
@@ -9458,8 +9537,10 @@ async function runMcpCode(args: Arguments): Promise<void> {
   process.stdout.write(renderMcpCode(result, cloud));
 }
 
+export const RUN_MCP_CONNECT_1_ACCEPTED_FLAGS = ["url", "anon-key", "profile", "name"] as const;
+
 async function runMcpConnect(args: Arguments): Promise<void> {
-  args.assertShape(["url", "anon-key", "profile", "name"], 2);
+  args.assertShape(RUN_MCP_CONNECT_1_ACCEPTED_FLAGS, 2);
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
   const explicitUrl = args.required("url");
   const explicitAnonKey = args.optional("anon-key");
@@ -9487,8 +9568,10 @@ export function parseProfileListUrl(url: string | undefined): void {
   }
 }
 
+export const RUN_PROFILE_LS_1_ACCEPTED_FLAGS = ["json", "url"] as const;
+
 async function runProfileLs(args: Arguments): Promise<void> {
-  args.assertShape(["json", "url"], 2);
+  args.assertShape(RUN_PROFILE_LS_1_ACCEPTED_FLAGS, 2);
   parseProfileListUrl(args.optional("url"));
   const all = await listAgentProfiles();
   const result = all;
@@ -9513,6 +9596,7 @@ async function runProfileLs(args: Arguments): Promise<void> {
  * The command table is the only verb dispatcher. Closed sub-actions are nested,
  * while flag-selected modes stay behind one key and are chosen by select().
  */
+export const MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"] as const;
 export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   profile: group({
     ls: commandEntry({ ...noTool("local profile inventory; no network or credential read"), handler: runProfileLs,
@@ -9524,7 +9608,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   }),
   mcp: group({
     serve: commandEntry({ ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
-      handler: async args => { args.assertShape(["profile", "host-session-id"], 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
+      handler: async args => { args.assertShape(MCP_SERVE_ACCEPTED_FLAGS, 1); const { serveMcp } = await import("./mcp/server.js"); await serveMcp({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") }); },
       description: "Serve CommonSwarm MCP tools over stdio.", mutates: false,
       flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE,
       visible: true, help: ["cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio"], bootstrap: true }),
@@ -9599,7 +9683,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       ? `cswarm session start --mode ${SESSION_MODES.join("|")} --provider ${SESSION_PROVIDERS.join("|")} --host-session-id <id> --workspace-id <uuid> --agent-token-file <absolute-path> [--host-label <label>] [--session-context <path>] [--foreground] [--json]`
       : action === "status" || action === "stop"
       ? `cswarm session ${action} --session-context <path> (--agent-token-file <path> | --agent-token-stdin) [--profile <absolute-path> [--workspace-id <uuid>]] [--json]`
-      : `cswarm session ${action} --principal-id <uuid> --workspace-id <uuid>`;
+      : `cswarm session ${action} --principal-id <uuid> [--workspace-id <uuid>]`;
     const flags = humanOnly ? SESSION_HUMAN_ACCEPTED_FLAGS : action === "start" ? SESSION_START_ACCEPTED_FLAGS : SESSION_PROFILE_STATUS_ACCEPTED_FLAGS;
     return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags, transports: STDIO_ONLY, ...(humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST), visible: true, help: [synopsis] })];
   })), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
@@ -9645,7 +9729,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
     rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
     archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 15,
     refusalTrace: "runChannel",
@@ -9656,7 +9740,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get <name|file-id> [--version <n>] [--out <local-path>] [--force] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
     rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
     restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 10,
     refusalTrace: "runFile",
@@ -9665,7 +9749,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
     ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
     get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get <topic>[@<version>] [--version <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
     put: commandEntry({ tool: "brain_put", mcp: true, handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put <topic> [<markdown-path>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--if-version <n>] [--request-id <id>] [--json]  # without a path, reads Markdown from stdin; --if-version refuses the write unless the live version is still <n>"], workspaceErrorJson: true }),
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 9,
     refusalTrace: "runBrain",
@@ -9708,6 +9792,100 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [command fields]"] }),
   dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] --slug <slug> --branch <branch> --head-sha <sha> --evidence <ref>"] }),
   "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]"] }),
+};
+
+/** Help uses handler shapes. The dispatch table's flags remain the recorded parser baseline. */
+export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
+  "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
+  "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
+  "mcp.connect": RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
+  setup: [...RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, ...RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, ...RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS],
+  check: CHECK_FLAGS,
+  "receive.configure": RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS,
+  "receive.status": RECEIVE_COMMON_FLAGS,
+  "receive.test": RECEIVE_COMMON_FLAGS,
+  "receive.confirm": RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
+  "receive.idle": RECEIVE_COMMON_FLAGS,
+  "receive.serve": RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
+  "__listen-supervisor": RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
+  "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
+  "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
+  "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
+  "listen.start": LISTEN_START_ACCEPTED_FLAGS,
+  "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
+  "listen.stop": LISTEN_STATUS_ACCEPTED_FLAGS,
+  "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
+  "session.start": SESSION_START_ACCEPTED_FLAGS.filter(flag => flag !== "agent-token-stdin"),
+  "session.status": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  "session.stop": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  "session.enable": SESSION_HUMAN_ACCEPTED_FLAGS,
+  "session.disable": SESSION_HUMAN_ACCEPTED_FLAGS,
+  "session.recover": SESSION_HUMAN_ACCEPTED_FLAGS,
+  login: RUN_LOGIN_1_ACCEPTED_FLAGS,
+  logout: RUN_LOGOUT_1_ACCEPTED_FLAGS,
+  "invite.create": RUN_INVITE_2_ACCEPTED_FLAGS,
+  "invite.revoke": RUN_INVITE_1_ACCEPTED_FLAGS,
+  "member.remove": RUN_MEMBER_1_ACCEPTED_FLAGS,
+  "workspace.close": RUN_WORKSPACE_1_ACCEPTED_FLAGS,
+  "target.show": RUN_TARGET_1_ACCEPTED_FLAGS,
+  "target.set": RUN_TARGET_2_ACCEPTED_FLAGS,
+  "target.clear": RUN_TARGET_3_ACCEPTED_FLAGS,
+  status: RUN_STATUS_1_ACCEPTED_FLAGS,
+  whoami: RUN_WHOAMI_1_ACCEPTED_FLAGS,
+  resume: [...RUN_RESUME_1_ACCEPTED_FLAGS, ...RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS],
+  feedback: FEEDBACK_ACCEPTED_FLAGS,
+  "channel.create": RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
+  "channel.ls": RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
+  "channel.rename": RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
+  "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
+  "file.put": FILE_PUT_ACCEPTED_FLAGS,
+  "file.ls": FILE_LS_ACCEPTED_FLAGS,
+  "file.get": FILE_GET_ACCEPTED_FLAGS,
+  "file.rm": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "file.restore": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "brain.ls": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "brain.get": BRAIN_GET_ACCEPTED_FLAGS,
+  "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
+  members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
+  note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
+  ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  reply: REPLY_ACCEPTED_FLAGS,
+  receipt: RUN_RECEIPT_1_ACCEPTED_FLAGS,
+  feed: SIGNAL_READ_FEED_ACCEPTED_FLAGS,
+  inbox: [...SIGNAL_READ_INBOX_ACCEPTED_FLAGS, ...NOTIFY_ACCEPTED_FLAGS],
+  workspaces: RUN_WORKSPACES_1_ACCEPTED_FLAGS,
+  use: RUN_USE_1_ACCEPTED_FLAGS,
+  new: RUN_NEW_1_ACCEPTED_FLAGS,
+  accept: [...RUN_ACCEPT_1_ACCEPTED_FLAGS, ...RUN_ACCEPT_2_ACCEPTED_FLAGS, ...INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS],
+  "principal.create": RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
+  "principal.revoke": RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
+  "token.mint": RUN_TOKEN_1_ACCEPTED_FLAGS,
+  "token.revoke": [...RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS, ...RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS],
+  "grant.resume": RUN_GRANT_1_ACCEPTED_FLAGS,
+  "link.new": RUN_LINK_NEW_1_ACCEPTED_FLAGS,
+  "link.revoke": RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
+  command: RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
+  dogfood: RUN_DOGFOOD_1_ACCEPTED_FLAGS,
+  "seed-fixture": RUN_SEED_1_ACCEPTED_FLAGS,
+};
+
+export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
+  "setup.import": RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
+  "setup.version": RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
+  "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
+  "check.messages": CHECK_FLAGS.filter(flag => flag !== "message-id" && flag !== "hook"),
+  "check.message": CHECK_FLAGS.filter(flag => flag !== "force" && flag !== "full" && flag !== "hook"),
+  "check.hook": CHECK_FLAGS.filter(flag => flag !== "full" && flag !== "message-id" && flag !== "json"),
+  "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
+  "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
+  "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "follow" && flag !== "ndjson" && flag !== "notify"),
+  "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
+  "inbox.follow": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "wait" && flag !== "notify"),
+  "accept.linkStdin": RUN_ACCEPT_1_ACCEPTED_FLAGS,
+  "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
+  "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS,
 };
 
 function isCommandGroup(root: AgentCommandRoot): root is AgentCommandGroup {
@@ -9790,6 +9968,8 @@ let selectedCommandContext: {
   args: Arguments;
 } | null = null;
 
+export const MAIN_1_ACCEPTED_FLAGS = [] as const;
+
 async function main(): Promise<void> {
   selectedCommandContext = null;
   /*
@@ -9816,7 +9996,7 @@ async function main(): Promise<void> {
   const args = new Arguments(process.argv.slice(2));
   const verb = args.positionals[0];
   if (!verb || verb === "help" || args.has("help")) {
-    if (verb === "help") args.assertShape([], 1);
+    if (verb === "help") args.assertShape(MAIN_1_ACCEPTED_FLAGS, 1);
     process.stdout.write(`${helpFor(verb, args.positionals[1])}\n`);
     return;
   }

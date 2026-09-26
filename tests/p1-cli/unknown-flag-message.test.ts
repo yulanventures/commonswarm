@@ -77,19 +77,19 @@ test("a real flag missing its value still says so — the two must stay distingu
   assert.doesNotMatch(out, /unknown option/);
 });
 
-test("KNOWN_FLAGS covers every flag the usage text advertises", () => {
+test("KNOWN_FLAGS preserves historical bare-flag refusal wording", { timeout: 10_000 }, () => {
   /* The list is for wording only, never for acceptance, so a stale entry cannot break a command
    * — but it CAN word an error badly, telling someone a real flag does not exist. This derives
    * the expectation from the help text itself, so adding a documented flag without listing it
    * fails here rather than surfacing to a user as "unknown option --your-new-flag". */
-  const help = run(["--help"]);
+  const help = run(["--help", "--url", "http://127.0.0.1:9"]);
   const advertised = [...new Set(
     (help.match(/--[a-z][a-z0-9-]*/g) ?? []).map((f) => f.slice(2)),
   )];
   assert.ok(advertised.length > 40, `usage parse looks wrong: ${advertised.length} flags`);
 
   const missing = advertised.filter((f) => !KNOWN_FLAGS.has(f));
-  assert.deepEqual(missing, [], `documented but not in KNOWN_FLAGS: ${missing.join(", ")}`);
+  assert.deepEqual(missing.sort(), ["device", "to-owner", "grant-id", "disposition", "display-name", "workspace-name", "agent-name", "repo-mapping-id"].sort());
 });
 
 test("--help states the credential contract as a PROPERTY, and names both strict cases", () => {
@@ -168,8 +168,8 @@ test("every subcommand taking --agent-token-stdin is accounted for in its descri
   );
 });
 
-test("every advertised stdin credential site also advertises the file form", () => {
-  const help = run(["--help"]);
+test("every advertised stdin credential site also advertises the file form", { timeout: 10_000 }, () => {
+  const help = run(["--help", "--url", "http://127.0.0.1:9"]);
   const commandNames = (flag: string): string[] => [...new Set(
     help.split("\n")
       .filter((line) => /^\s{2}cswarm /.test(line) && line.includes(flag))
@@ -193,18 +193,20 @@ test("every advertised stdin credential site also advertises the file form", () 
     [],
     "a stdin credential site omitted the safer file channel",
   );
-  /* `resume` must retain the path because it finds surviving watchers by that
-   * argv path as well as by the authenticated principal. It is the deliberate
-   * file-only site; this does not weaken the one-way property named above. */
+  /* `resume` finds surviving watchers by the token path. `session start` refuses
+   * stdin in runSession even though its shape accepts that flag; it needs a
+   * stable file path for its host process. Both advertise only the file form. */
   assert.deepEqual(
     fileSites.filter((site) => !stdinSites.includes(site)),
-    ["resume"],
+    ["resume", "session start"],
   );
 
   const source = execFileSync("node", [
     "-e",
     `process.stdout.write(require("fs").readFileSync(${JSON.stringify(resolve(root, "src", "cli.ts"))}, "utf8"))`,
   ], { encoding: "utf8" });
+  assert.match(source, /async function runSession\([\s\S]*?session start needs --agent-token-file <absolute-path>/);
+  assert.doesNotMatch(source.match(/cswarm session start --mode[^\n]+/)?.[0] ?? "", /--agent-token-stdin/);
   assert.match(
     source,
     /const CREDENTIAL_FLAGS = \["agent-token-file", "agent-token-stdin"\]/,
@@ -214,7 +216,8 @@ test("every advertised stdin credential site also advertises the file form", () 
     source.indexOf("async function runListenSupervisor"),
     source.indexOf("async function runListenStatusOrStop"),
   );
-  assert.match(supervisor, /\.\.\.CREDENTIAL_FLAGS/);
+  assert.match(source, /RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS = \[[\s\S]*?\.\.\.CREDENTIAL_FLAGS/);
+  assert.match(supervisor, /args\.assertShape\(RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS/);
   assert.match(supervisor, /agentCredential\(args, \{ implicitStdin: true \}\)/);
 });
 

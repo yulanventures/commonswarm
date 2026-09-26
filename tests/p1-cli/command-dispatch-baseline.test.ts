@@ -292,6 +292,7 @@ function coreFixtures(): Fixture[] {
   const agent = [...profile];
   return [
     { id: "refusal.unknown-verb", argv: ["invalidverb"] },
+    { id: "refusal.unknown-option.device", argv: ["target", "show", ...target, "--device"] },
     { id: "refusal.unknown-verb.profile-valid", argv: ["nonexistent_verb", ...profile] },
     { id: "refusal.unknown-verb.profile-missing", argv: ["nonexistent_verb", "--profile", "<MISSING_PROFILE>"] },
     ...prototypeVerbFixtures(),
@@ -718,6 +719,19 @@ test("dispatcher baseline keeps refusal text while help has its own gate", { tim
   assert.equal(withoutGeneratedHelp("cswarm: unknown command\ncswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n  cswarm new\n"),
     "cswarm: unknown command\n<GENERATED_HELP>\n");
   assert.equal(withoutGeneratedHelp("cswarm: unknown command\n"), "cswarm: unknown command\n");
+});
+
+test("recorded bare device refusal keeps its prior unknown-option wording", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("device-refusal-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "refusal.unknown-option.device");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: unknown option --device; run cswarm --help to see the options this version accepts\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
 });
 
 test("profile dispatcher baseline covers listing and refusal routes", { timeout: 60_000 }, async () => {

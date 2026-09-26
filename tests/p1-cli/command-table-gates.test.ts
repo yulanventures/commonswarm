@@ -9,9 +9,8 @@ import {
   AGENT_PROFILE_COMMANDS,
   agentToolsForTransport,
   commandHelpLines,
-  BOOLEAN_FLAGS,
-  KNOWN_FLAGS,
-  parseCommandOptions,
+  HANDLER_HELP_FLAGS,
+  VARIANT_HELP_FLAGS,
   SESSION_HUMAN_ACCEPTED_FLAGS,
   SESSION_START_ACCEPTED_FLAGS,
   SESSION_STATUS_ACCEPTED_FLAGS,
@@ -32,10 +31,13 @@ import { CHANNEL_PURPOSE_MAX } from "../../src/cloud/channels.js";
 import { listenerRouteUsage } from "../../src/listener/index.js";
 import { parseSessionMode, parseSessionProvider } from "../../src/cloud/session-cli.js";
 import { SESSION_PROVIDERS } from "../../src/cloud/session-contract.js";
+import { LISTENER_PROVIDERS, isListenerProvider, type ListenerProviderId } from "../../src/listener/control.js";
 import { parseReceiveMode, parseReceiveProvider } from "../../src/cloud/agent-receive.js";
 import { SINCE_OFFSET_GUIDANCE } from "../../src/cloud/signals.js";
 
 type EntryRow = { key: string; entry: AgentCommandEntry };
+const sessionProvidersMustBeListenerProviders: readonly ListenerProviderId[] = SESSION_PROVIDERS;
+void sessionProvidersMustBeListenerProviders;
 
 function isGroup(value: AgentCommandEntry | AgentCommandGroup): value is AgentCommandGroup {
   return "subcommands" in value;
@@ -94,15 +96,15 @@ test("generated help covers every visible command, variant, and accepted flag", 
     const namedFlags = new Set([...section.matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
     assert.ok(section.startsWith("  cswarm "), `${key} has no synopsis`);
     assert.ok(section.includes(entry.description), `${key} has no description`);
-    for (const flag of entry.flags) {
-      assert.ok(namedFlags.has(flag), `${key} help omits --${flag}`);
-    }
+    const accepted = new Set(HANDLER_HELP_FLAGS[key]);
+    if (entry.profile === "expand") { accepted.add("profile"); accepted.add("host-session-id"); }
+    assert.deepEqual([...namedFlags].sort(), [...accepted].sort(), `${key} help differs from handler acceptance`);
     for (const variant of Object.values(entry.variants)) {
       assert.ok(variant.help.length > 0, `${key}.${variant.id} has no variant synopsis`);
       for (const hint of variant.help) {
         assert.ok(section.includes(hint.split("  #")[0]!), `${key}.${variant.id} hint is absent`);
         for (const match of hint.matchAll(/--([a-z][a-z-]*)/g)) {
-          assert.ok([...entry.flags, ...(entry.cliOnlyFlags ?? [])].includes(match[1]!), `${key}.${variant.id} help names unaccepted --${match[1]}`);
+          assert.ok(accepted.has(match[1]!), `${key}.${variant.id} help names unaccepted --${match[1]}`);
         }
       }
     }
@@ -111,23 +113,100 @@ test("generated help covers every visible command, variant, and accepted flag", 
   assert.equal(all, expected.join("\n"), "help has a command outside the table or omits one");
 });
 
-test("rendered flags exactly match in-process command parser acceptance", { timeout: 10_000 }, () => {
-  const candidates = new Set([...KNOWN_FLAGS, "unrendered-control"]);
-  for (const { entry } of entries(true)) {
-    for (const flag of [...entry.flags, ...(entry.cliOnlyFlags ?? [])]) candidates.add(flag);
-  }
-  for (const { key, entry } of entries()) {
-    if (!entry.visible) continue;
-    const path = key.split(".");
-    const section = commandHelpLines(path[0], path[1]);
-    const rendered = new Set([...section.matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
-    for (const flag of new Set([...candidates, ...rendered])) {
-      const tokens = [...path, `--${flag}`, ...(BOOLEAN_FLAGS.has(flag) ? [] : ["test-value"])];
-      let accepted = true;
-      try { parseCommandOptions(tokens); } catch { accepted = false; }
-      assert.equal(accepted, rendered.has(flag), `${key} --${flag} drift`);
+test("multi-variant help prints each variant's own accepted flags", { timeout: 10_000 }, () => {
+  const variants = entries().filter(row => Object.keys(row.entry.variants).length > 1);
+  const expectedKeys = variants.flatMap(row => Object.keys(row.entry.variants).map(id => `${row.key}.${id}`));
+  assert.deepEqual(Object.keys(VARIANT_HELP_FLAGS).sort(), expectedKeys.sort());
+  for (const { key, entry } of variants) {
+    const [verb, action] = key.split(".");
+    const section = commandHelpLines(verb, action);
+    const declared = Object.entries(entry.variants);
+    for (let index = 0; index < declared.length; index++) {
+      const [variantName, variant] = declared[index]!;
+      const start = section.indexOf(`  ${variant.help[0]}`);
+      assert.ok(start >= 0, `${key}.${variant.id} missing`);
+      const next = declared[index + 1]?.[1];
+      const end = next ? section.indexOf(`  ${next.help[0]}`, start + 1) : section.length;
+      const rendered = new Set([...section.slice(start, end).matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!));
+      const accepted = new Set(VARIANT_HELP_FLAGS[`${key}.${variantName}`]);
+      if (entry.profile === "expand") { accepted.add("profile"); accepted.add("host-session-id"); }
+      assert.deepEqual([...rendered].sort(), [...accepted].sort(), `${key}.${variant.id}`);
     }
   }
+});
+
+test("every handler shape reads an exported accepted-flag constant", { timeout: 10_000 }, async () => {
+  let count = 0;
+  for (const file of ["src/cli.ts", "src/onboarding-cli.ts"]) {
+    const source = ts.createSourceFile(file, await readFile(resolve(file), "utf8"), ts.ScriptTarget.Latest, true);
+    const exports = new Set(source.statements.filter(ts.isVariableStatement)
+      .filter(node => node.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.ExportKeyword))
+      .flatMap(node => node.declarationList.declarations.map(declaration => declaration.name.getText(source))));
+    const imported = new Set(source.statements.filter(ts.isImportDeclaration)
+      .flatMap(node => node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)
+        ? node.importClause.namedBindings.elements.map(element => element.name.text) : []));
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && node.expression.getText(source) === "args.assertShape") {
+        count++;
+        const shape = node.arguments[0]!;
+        if (shape.getText(source) === "allowedFlags" && file === "src/cli.ts") {
+          const body = source.getFullText();
+          assert.match(body, /resolveSignalBody\(args, 1, allowedFlags\)/);
+          assert.match(body, /resolveSignalBody\(args, 2, allowedFlags\)/);
+          assert.match(body, /const allowedFlags = postSignalAllowedFlags\(kind\)/);
+          assert.match(body, /const allowedFlags = replyAllowedFlags\(\)/);
+          assert.match(body, /return kind === "working-on" \? POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS/);
+          assert.match(body, /return REPLY_ACCEPTED_FLAGS/);
+          ts.forEachChild(node, visit);
+          return;
+        }
+        if (shape.getText(source) === "acceptedFlags" && file === "src/cli.ts") {
+          const body = source.getFullText();
+          assert.match(body, /fileContext\(args, FILE_PUT_ACCEPTED_FLAGS/);
+          assert.match(body, /fileContext\(args, FILE_LS_ACCEPTED_FLAGS/);
+          assert.match(body, /fileContext\(args, BRAIN_PUT_ACCEPTED_FLAGS/);
+          assert.match(body, /fileContext\(args, FEEDBACK_ACCEPTED_FLAGS/);
+          ts.forEachChild(node, visit);
+          return;
+        }
+        const identifiers = [...shape.getText(source).matchAll(/\b[A-Z][A-Z0-9_]*_FLAGS\b/g)].map(match => match[0]);
+        assert.ok(identifiers.length > 0, `${file}:${source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1} has no accepted-flag constant`);
+        for (const identifier of identifiers) assert.ok(exports.has(identifier) || imported.has(identifier), `${file} uses non-exported ${identifier}`);
+        assert.ok(!/\[[^\]]*"[^"]+"/.test(shape.getText(source)), `${file} has copied literal shape ${shape.getText(source)}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  assert.ok(count >= 60, `enumeration found only ${count} assertShape sites`);
+});
+
+test("every help entry references a handler flag constant instead of a copied list", { timeout: 10_000 }, async () => {
+  const source = ts.createSourceFile("src/cli.ts", await readFile(resolve("src/cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const declaration = source.statements.filter(ts.isVariableStatement)
+    .flatMap(statement => [...statement.declarationList.declarations])
+    .find(item => item.name.getText(source) === "HANDLER_HELP_FLAGS");
+  assert.ok(declaration?.initializer && ts.isObjectLiteralExpression(declaration.initializer));
+  const rows = new Map(declaration.initializer.properties.filter(ts.isPropertyAssignment).map(item => [
+    item.name.getText(source).replace(/^"|"$/g, ""), item.initializer.getText(source),
+  ]));
+  assert.deepEqual([...rows.keys()].sort(), entries().map(row => row.key).sort());
+  for (const [key, value] of rows) {
+    assert.match(value, /(?:ACCEPTED_FLAGS|CHECK_FLAGS|RECEIVE_COMMON_FLAGS)/, key);
+    if (key !== "session.start") assert.doesNotMatch(value, /"[a-z][a-z-]*"/, `${key} copied flag values`);
+  }
+});
+
+test("handler help omits refused resume, dogfood and command flags", { timeout: 10_000 }, () => {
+  const resume = commandHelpLines("resume");
+  assert.doesNotMatch(resume, /--agent-token-stdin|--session-context/);
+  assert.match(resume, /--state-dir/);
+  const dogfood = commandHelpLines("dogfood");
+  assert.doesNotMatch(dogfood, /--json|--session-context|--epoch|--to-owner|--grant-id|--disposition/);
+  const command = commandHelpLines("command");
+  assert.doesNotMatch(command, /--json/);
+  assert.match(command, /--repo-mapping-id/);
+  assert.doesNotMatch(commandHelpLines("session", "start"), /--agent-token-stdin/);
 });
 
 test("each enumerated help flag uses its command's enforcement parser", { timeout: 10_000 }, () => {
@@ -171,7 +250,7 @@ test("session handler and help read the same accepted-flag constants", { timeout
     "SESSION_START_ACCEPTED_FLAGS",
   ]);
   const expected: Record<string, readonly string[]> = {
-    start: [...SESSION_START_ACCEPTED_FLAGS, "profile"],
+    start: [...SESSION_START_ACCEPTED_FLAGS.filter(flag => flag !== "agent-token-stdin"), "profile"],
     status: [...SESSION_PROFILE_STATUS_ACCEPTED_FLAGS, "profile"],
     stop: [...SESSION_PROFILE_STATUS_ACCEPTED_FLAGS, "profile"],
     enable: SESSION_HUMAN_ACCEPTED_FLAGS,
@@ -186,6 +265,9 @@ test("session handler and help read the same accepted-flag constants", { timeout
   const start = commandHelpLines("session", "start");
   assert.match(start, /cswarm session start[^\n]*--foreground/);
   assert.match(start, /cswarm session start[^\n]*--agent-token-file/);
+  for (const action of ["enable", "disable", "recover"]) {
+    assert.match(commandHelpLines("session", action), new RegExp(`cswarm session ${action}[^\\n]*\\[--workspace-id <uuid>\\]`));
+  }
   for (const action of ["status", "stop"]) {
     assert.match(commandHelpLines("session", action), /\[--profile [^\n]*\[--workspace-id/);
   }
@@ -240,10 +322,13 @@ test("provider, permissions and feedback kind help render enforcement values", {
   for (const value of LISTENER_PERMISSION_MODES) assert.equal(listenerPermissionMode(value), value);
   assert.throws(() => listenerPermissionMode("not-rendered-control"));
   for (const value of SESSION_PROVIDERS) assert.equal(parseSessionProvider(value), value);
+  assert.deepEqual(LISTENER_PROVIDERS, SESSION_PROVIDERS);
+  for (const value of LISTENER_PROVIDERS) assert.equal(isListenerProvider(value), true);
+  assert.equal(isListenerProvider("session-only-control"), false);
   assert.throws(() => parseSessionProvider("not-rendered-control"));
   const source = await readFile(resolve("src/cli.ts"), "utf8");
   assert.match(source, /FEEDBACK_KINDS as readonly string\[\]\)\.includes\(kind\)/);
-  assert.match(source, /function listenerProvider\(args: Arguments\): ListenerProviderId \{[\s\S]*?SESSION_PROVIDERS as readonly string\[\]\)\.includes\(provider\)/);
+  assert.match(source, /function listenerProvider\(args: Arguments\): ListenerProviderId \{[\s\S]*?isListenerProvider\(provider\)/);
   assert.match(source, /help: \[`cswarm listen start[^`]+--provider \$\{SESSION_PROVIDERS\.join\("\|"\)\}/);
   assert.match(source, /help: \[`cswarm listen start[^`]+--permissions \$\{LISTENER_PERMISSION_MODES\.join\("\|"\)\}/);
   assert.match(source, /help: \[`cswarm feedback[^`]+--kind \$\{FEEDBACK_KINDS\.join\("\|"\)\}/);
@@ -469,7 +554,7 @@ test("main has one direct lookup and only allowlisted meta and selected-entry st
     const args = new Arguments(process.argv.slice(2));
     const verb = args.positionals[0];
     if (!verb || verb === "help" || args.has("help")) {
-      if (verb === "help") args.assertShape([], 1);
+      if (verb === "help") args.assertShape(MAIN_1_ACCEPTED_FLAGS, 1);
       process.stdout.write(\`\${helpFor(verb, args.positionals[1])}\\n\`);
       return;
     }
