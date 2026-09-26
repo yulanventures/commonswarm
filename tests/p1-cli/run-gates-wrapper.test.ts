@@ -14,7 +14,7 @@ test("the gate wrapper never reads the caller's HOME and only injects its own", 
   const source = readFileSync(script, "utf8");
   assert.equal((source.match(/\$HOME\b/g) ?? []).length, 0, "the wrapper must not read $HOME");
   assert.equal((source.match(/\bexport HOME=|^HOME=/gm) ?? []).length, 0, "HOME is never assigned");
-  assert.match(source, /env -u FORCE_COLOR HOME="\$T" bash -c/, "each gate runs under env HOME=$T");
+  assert.match(source, /env -u FORCE_COLOR HOME="\$T" perl -e 'setpgrp\(0,0\); exec @ARGV' bash -c/, "each gate runs under env HOME=$T in its own process group");
   assert.match(source, /mktemp -d \/tmp\/lane-home\.XXXXXX/, "the temp home comes from mktemp under /tmp");
   assert.match(source, /rm -rf -- "\$T"/, "only $T is deleted");
 });
