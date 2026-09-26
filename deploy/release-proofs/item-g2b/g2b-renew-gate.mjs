@@ -119,12 +119,24 @@ export async function validateSeedInputs({ releaseCheckout, seedDir, url, worksp
   }
   const anonKey = (await readFile(paths.anon, "utf8")).trim();
   if (!anonKey || /\s/.test(anonKey)) throw new Error("anon-key.txt must contain one non-empty key");
+  let releaseState = null;
+  if (release) {
+    if (!await exactMode(paths.state, 0o600).catch(() => false)) {
+      throw new Error("renew-gate-state.json must exist with mode 0600");
+    }
+    releaseState = await jsonFile(paths.state, "renew-gate-state.json");
+    if (releaseState.principal_id !== principal.principal_id.toLowerCase() ||
+        releaseState.workspace_id !== workspaceId.toLowerCase() ||
+        !UUID_RE.test(releaseState.watcher_id) ||
+        !Number.isSafeInteger(releaseState.generation)) {
+      throw new Error("renew-gate-state.json does not match this seat and workspace");
+    }
+  }
   return {
     releaseRoot, seedRoot, paths, credential, principal,
     principalId: principal.principal_id.toLowerCase(),
     workspaceId: workspaceId.toLowerCase(),
-    url: target.origin,
-    anonKey,
+    url: target.origin, anonKey, releaseState,
   };
 }
 
@@ -228,13 +240,8 @@ async function runtime(input) {
 }
 
 async function releaseLease(input) {
-  const state = await jsonFile(input.paths.state, "renew-gate-state.json").catch(() => {
-    throw new Error("renew-gate-state.json is missing or invalid");
-  });
-  if (state.principal_id !== input.principalId || state.workspace_id !== input.workspaceId ||
-      !UUID_RE.test(state.watcher_id) || !Number.isSafeInteger(state.generation)) {
-    throw new Error("renew-gate-state.json does not match this seat and workspace");
-  }
+  const state = input.releaseState;
+  if (!state) throw new Error("validated release state is missing");
   const { lease } = await runtime(input);
   const result = await lease({
     kind: "release_wake_lease",

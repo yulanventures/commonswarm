@@ -199,11 +199,11 @@ test("box renew gate keeps every sample and leaves then releases its lease", { t
   assert.equal(statSync(join(seedDir, "renew-gate.json")).mode & 0o777, 0o600);
   assert.equal(statSync(join(seedDir, "renew-gate.md")).mode & 0o777, 0o600);
 
-  const held = await sql<{ watcher_id: string; generation: number }[]>`
+  const held = await sql<{ watcher_id: string; generation: string }[]>`
     SELECT watcher_id::text, generation FROM swarm.agent_wake_leases
     WHERE workspace_id = ${workspaceId}::uuid AND principal_id = ${principalId}::uuid`;
   assert.equal(held.length, 1);
-  assert.equal(held[0]?.generation, 1);
+  assert.equal(Number(held[0]?.generation), 1);
 
   const released = spawnSync("bash", [wrapper, process.cwd(), seedDir, local.API_URL, workspaceId, "--release"], {
     encoding: "utf8",

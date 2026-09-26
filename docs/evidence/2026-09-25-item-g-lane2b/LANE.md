@@ -516,7 +516,7 @@ No deployment, production host, real workspace, database, migration, browser, or
 
 ## Renew gate for the box window
 
-Run this on the Mac mini immediately after Anvil reports the new edge live. The first argument is the clean checkout of the exact release SHA after `npm run build`. The seed directory must be mode `0700` and contain mode-`0600` `credential.json` (the complete minted agent credential), `principal.json` (the matching `principal create` JSON), and `anon-key.txt`. The credential must have at least 90 minutes remaining. The gate validates all of this before its first network call.
+Run this on the Mac mini immediately after Anvil reports the new edge live. The first argument is the clean checkout of the exact release SHA after `npm run build`. The seed directory may be passed as an absolute or relative path; the wrapper resolves it before configuring credential state. It must be mode `0700` and contain mode-`0600` `credential.json` (the complete minted agent credential), `principal.json` (the matching `principal create` JSON), and `anon-key.txt`. The credential must have at least 90 minutes remaining. The gate validates all of this before its first network call.
 
 ```sh
 deploy/release-proofs/item-g2b/g2b-renew-gate.sh \
@@ -534,7 +534,7 @@ Exit codes are:
 - `7`: `GATE FAIL <reason>` because a renew failed or renew p95 was not below 15,000 ms. Reports and the held-lease state remain available.
 - `8`: `GATE CANNOT RUN <edge-code>` because the claim was refused, transport failed, or the helper could not establish the gate run.
 
-After Anvil's functional proof, release the exact held lease:
+After Anvil's functional proof, release the exact held lease. Release mode treats a missing, malformed, insecurely permissioned, or seat/workspace-mismatched `renew-gate-state.json` as an exit-2 input refusal before opening a credential session or making a network call:
 
 ```sh
 deploy/release-proofs/item-g2b/g2b-renew-gate.sh \

@@ -31,6 +31,10 @@ file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
   echo "input: seed directory must exist with mode 0700"
   exit 2
 }
+SEED_DIR=$(CDPATH= cd -- "$SEED_DIR" && pwd) || {
+  echo "input: seed directory cannot be resolved"
+  exit 2
+}
 for name in credential.json principal.json anon-key.txt; do
   path="$SEED_DIR/$name"
   [ -f "$path" ] && [ "$(file_mode "$path")" = 600 ] || {
