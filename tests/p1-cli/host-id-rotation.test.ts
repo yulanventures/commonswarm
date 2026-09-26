@@ -541,6 +541,39 @@ test("host, credential, and takeover locks serialize two dead-owner contenders a
   } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
+test("general locks reclaim aged foreign hosts and reused pids, but keep a matching live owner", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-general-recovery-"));
+  const path = join(root, "check.lock");
+  const clock = Date.now;
+  const startTime = pidStartMs(process.pid);
+  assert.ok(startTime !== null);
+  try {
+    const foreign = JSON.stringify({ pid: process.pid, host: "previous-hostname",
+      createdAt: clock(), startTime, ownerId: "foreign" });
+    await writeFile(path, foreign);
+    await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 40 }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), foreign);
+    Date.now = () => clock() + AGED_LOCK_MS;
+    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
+    Date.now = clock;
+
+    await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
+      createdAt: clock(), startTime: startTime - 10_000, ownerId: "reused" }));
+    assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
+
+    await withFileLock(root, "check", async () => {
+      const owner = JSON.parse(await readFile(path, "utf8")) as { startTime?: number };
+      assert.equal(owner.startTime, startTime);
+    });
+    const live = JSON.stringify({ pid: process.pid, host: hostname(),
+      createdAt: clock(), startTime, ownerId: "live" });
+    await writeFile(path, live);
+    Date.now = () => clock() + AGED_LOCK_MS;
+    await assert.rejects(withFileLock(root, "check", async () => "wrong", { timeoutMs: 50 }), FileLockTimeoutError);
+    assert.equal(await readFile(path, "utf8"), live);
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
 test("host and takeover reclaim gates serialize dead owners and retain aged live owners", { timeout: 6_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-all-reclaim-gates-"));
   const clock = Date.now;

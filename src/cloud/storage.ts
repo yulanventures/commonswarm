@@ -327,24 +327,24 @@ export class FileLockTimeoutError extends Error {
   readonly code = "file_lock_timeout";
 
   constructor(readonly lockName: string, readonly lockPath?: string, readonly ownerPid?: number,
-    readonly gate = false) {
-    super(fileLockTimeoutSentence(lockName, lockPath ?? "", ownerPid, gate));
+    readonly gate = false, readonly ownerHost?: string) {
+    super(fileLockTimeoutSentence(lockName, lockPath ?? "", ownerPid, gate, ownerHost));
   }
 }
 
 export function fileLockTimeoutSentence(lockName: string, path: string, ownerPid?: number,
-  gate = false): string {
+  gate = false, ownerHost?: string): string {
   const label = gate ? `${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate directory`
     : lockName === "host-id-rotation" ? "host-id rotation lock"
     : /^[0-9a-f]{24}$/.test(lockName) ? "credential refresh lock" : `${lockName} lock`;
   let liveOwner = false;
-  if (ownerPid !== undefined) {
+  if (ownerPid !== undefined && (ownerHost === undefined || ownerHost === hostname())) {
     try { process.kill(ownerPid, 0); liveOwner = true; }
     catch (error) { liveOwner = (error as NodeJS.ErrnoException).code === "EPERM"; }
   }
   const next = liveOwner ? "Wait for its owner to exit, then retry. If its owner is gone, remove"
     : "No live owner was identified; remove";
-  return `timed out waiting for the ${label} at ${path} (owner pid ${ownerPid ?? "unknown"}). ${next} ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(path, gate)} and retry.`;
+  return `timed out waiting for the ${label} at ${path} (owner pid ${ownerPid ?? "unknown"}, host ${ownerHost ?? "unknown"}). ${next} ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(path, gate)} and retry.`;
 }
 
 /** Publish complete bytes at an absent path. A symlink is the atomic fallback when hard links are unavailable. */
@@ -456,26 +456,27 @@ function readlinkSyncSafe(path: string): string | null {
 }
 
 /**
- * A complete owner on another host or a live local PID is never aged out. A confirmed
- * dead local PID is reclaimable; incomplete records use the published path's age.
+ * A live local PID with the recorded start stays live. Foreign-host and incomplete
+ * records use publication age; a dead or reused local PID is reclaimable immediately.
  */
 async function deadLockOwnerRecord(lockPath: string, publishedAgeMs: number): Promise<string | null> {
   let raw: string | null = null;
-  let owner: { pid?: unknown; host?: unknown };
+  let owner: { pid?: unknown; host?: unknown; startTime?: unknown };
   try {
     raw = await readFile(lockPath, "utf8");
-    owner = JSON.parse(raw) as { pid?: unknown; host?: unknown };
+    owner = JSON.parse(raw) as typeof owner;
   } catch {
     return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   }
-  if (owner.host !== hostname()) return null;
-  if (owner.pid === process.pid) return null;
+  if (owner.host !== hostname()) return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
     return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   }
   try {
     process.kill(owner.pid, 0);
-    return null;
+    const start = pidStartMs(owner.pid);
+    return start !== null && typeof owner.startTime === "number" &&
+      Math.abs(start - owner.startTime) > 2_000 ? raw : null;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ESRCH" ? raw : null;
   }
@@ -607,7 +608,8 @@ export async function withFileLock<T>(
         handle = await open(lockPath, "r");
       } else {
         await publishCompleteOwnerFile(lockPath,
-          JSON.stringify({ pid: process.pid, host: hostname(), createdAt, ownerId }),
+          JSON.stringify({ pid: process.pid, host: hostname(), createdAt,
+            startTime: THIS_PROCESS_START_MS, ownerId }),
           { publishLink: options.publishLink, onBeforePublish: options.onBeforePublish });
         handle = await open(lockPath, "r");
       }
@@ -727,8 +729,8 @@ export async function withFileLock<T>(
         continue;
       }
       if (Date.now() >= deadline) {
-        const owner = await readFile(lockPath, "utf8").then(raw => JSON.parse(raw) as { pid?: number }).catch(() => null);
-        throw new FileLockTimeoutError(lockName, lockPath, owner?.pid);
+        const owner = await readFile(lockPath, "utf8").then(raw => JSON.parse(raw) as { pid?: number; host?: string }).catch(() => null);
+        throw new FileLockTimeoutError(lockName, lockPath, owner?.pid, false, owner?.host);
       }
       await delay(25 + randomBytes(1)[0]! % 75);
     }
