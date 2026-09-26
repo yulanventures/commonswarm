@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { spawn, execFileSync } from "node:child_process";
 import { arrivalHostId } from "../../src/cloud/arrival-watch.js";
-import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, HOST_ID_LOCK_MAX_HOLD_MS, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
+import { FileLockTimeoutError, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, fileLockTimeoutSentence, pidStartMs, readSecureJsonFile, withFileLock } from "../../src/cloud/storage.js";
 import { listenerPaths, runListenerSupervisor } from "../../src/listener/index.js";
+
+const AGED_LOCK_MS = 61_000;
 
 test("secure JSON read rejects a 0755 parent without changing it", { timeout: 2_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-read-mode-"));
@@ -141,35 +143,45 @@ test("host-id lock distinguishes pid reuse, incomplete records, and EPERM", { ti
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("uninspectable reused pid is reclaimed after the recorded maximum hold for lock and gate", { timeout: 5_000 }, async () => {
+test("an uninspectable live pid stays protected past 60 seconds; a dead pid is reclaimed", { timeout: 5_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-unknown-pid-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
   const fakePid = 999_999_997;
+  let denied = true;
   const originalKill = process.kill;
   process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
-    if (pid === fakePid && signal === 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+    if (pid === fakePid && signal === 0 && denied) throw Object.assign(new Error("denied"), { code: "EPERM" });
     return originalKill(pid, signal);
   }) as typeof process.kill;
+  const clock = Date.now;
   try {
     const record = (createdAt: number) => JSON.stringify({ pid: fakePid, host: hostname(),
       createdAt, startTime: createdAt, ownerId: "old" });
     await writeFile(lock, record(Date.now()), { mode: 0o600 });
     await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
       { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
-    await writeFile(lock, record(Date.now() - HOST_ID_LOCK_MAX_HOLD_MS - 1_000));
+    Date.now = () => clock() + AGED_LOCK_MS;
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
+      { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
+    denied = false;
     await withFileLock(root, "host-id-rotation", async () => undefined,
       { stalePolicy: "host-id", timeoutMs: 700 });
-    await writeFile(lock, record(Date.now() - HOST_ID_LOCK_MAX_HOLD_MS - 1_000));
+    Date.now = clock;
+    denied = true;
+    await writeFile(lock, record(Date.now()));
     await mkdir(gate, { mode: 0o700 });
     await writeFile(join(gate, "owner.json"), record(Date.now()));
     await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
       { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
-    await writeFile(join(gate, "owner.json"), record(Date.now() - HOST_ID_LOCK_MAX_HOLD_MS - 1_000));
+    Date.now = () => clock() + AGED_LOCK_MS;
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
+      { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
+    denied = false;
     await withFileLock(root, "host-id-rotation", async () => undefined,
       { stalePolicy: "host-id", timeoutMs: 700 });
     await assert.rejects(stat(gate), { code: "ENOENT" });
-  } finally { process.kill = originalKill; await rm(root, { recursive: true, force: true }); }
+  } finally { Date.now = clock; process.kill = originalKill; await rm(root, { recursive: true, force: true }); }
 });
 
 test("reclaim gate timeout names its directory and the directory removal step", { timeout: 2_000 }, async () => {
@@ -191,6 +203,26 @@ test("reclaim gate timeout names its directory and the directory removal step", 
       return true;
     });
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("one timeout builder names each lock or gate, its path, and an ownerless removal step", { timeout: 1_000 }, () => {
+  const cases = [
+    ["host-id-rotation", false, /host-id rotation lock/],
+    ["a".repeat(24), false, /credential refresh lock/],
+    [`watch-takeover-${"b".repeat(24)}`, false, /watch-takeover-.* lock/],
+    ["host-id-rotation", true, /host-id reclaim gate directory/],
+    ["check", true, /check reclaim gate directory/],
+    ["seat", false, /seat lock/],
+  ] as const;
+  for (const [name, gate, label] of cases) {
+    const path = `/tmp/${name}${gate ? ".reclaim" : ".lock"}`;
+    const sentence = fileLockTimeoutSentence(name, path, undefined, gate);
+    assert.match(sentence, label);
+    assert.ok(sentence.includes(path));
+    assert.match(sentence, /No live owner was identified/);
+    assert.ok(sentence.includes(`rm ${gate ? "-r " : ""}-- '${path}'`));
+    if (!/^[0-9a-f]{24}$/.test(name)) assert.doesNotMatch(sentence, /credential refresh lock/);
+  }
 });
 
 test("two stale-lock contenders rotate once", { timeout: 8_000 }, async () => {
@@ -296,6 +328,7 @@ test("empty, partial, and foreign reclaim gates recover after two-second grace",
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-grace-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
+  const clock = Date.now;
   try {
     for (const owner of [null, "{partial", JSON.stringify({ pid: process.pid, host: "foreign-host", startTime: Date.now(), ownerId: "foreign" })]) {
       await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
@@ -303,12 +336,12 @@ test("empty, partial, and foreign reclaim gates recover after two-second grace",
       if (owner !== null) await writeFile(join(gate, "owner.json"), owner, { mode: 0o600 });
       await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined,
         { stalePolicy: "host-id", timeoutMs: 80 }), FileLockTimeoutError);
-      const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 100);
-      await utimes(gate, old, old);
+      Date.now = () => clock() + HOST_ID_LOCK_INCOMPLETE_GRACE_MS + 100;
       await withFileLock(root, "host-id-rotation", async () => undefined, { stalePolicy: "host-id", timeoutMs: 600 });
+      Date.now = clock;
       await assert.rejects(stat(gate), { code: "ENOENT" });
     }
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
 test("three contenders inspect a live gate in place without moving it", { timeout: 3_000 }, async () => {
@@ -341,12 +374,12 @@ test("released and replaced gate is not mistaken for the first inode", { timeout
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-replace-stat-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
+  const clock = Date.now;
   try {
     await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
       createdAt: Date.now(), startTime: Date.now() }));
     await mkdir(gate);
-    const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 500);
-    await utimes(gate, old, old);
+    Date.now = () => clock() + HOST_ID_LOCK_INCOMPLETE_GRACE_MS + 500;
     let replaced = false;
     await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong", {
       stalePolicy: "host-id", timeoutMs: 150, onAfterGateStat: async () => {
@@ -354,10 +387,68 @@ test("released and replaced gate is not mistaken for the first inode", { timeout
         replaced = true;
         await rm(gate, { recursive: true, force: true });
         await mkdir(gate);
+        await new Promise(resolve => setTimeout(resolve, 180));
       },
     }), FileLockTimeoutError);
     assert.equal(replaced, true);
     assert.ok((await stat(gate)).isDirectory(), "the replacement gate stays at its path");
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("a complete replacement gate is judged by its own id and publication time", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-complete-gate-replace-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "dead" }));
+    await mkdir(gate);
+    await writeFile(join(gate, "owner.json"), JSON.stringify({ pid: 999_999_998, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "first" }));
+    const replacement = JSON.stringify({ pid: 999_999_997, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "second" });
+    let replaced = false;
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong", {
+      stalePolicy: "host-id", timeoutMs: 150, onAfterGateStat: async () => {
+        if (replaced) return;
+        replaced = true;
+        await rm(gate, { recursive: true, force: true });
+        await mkdir(gate);
+        await writeFile(join(gate, "owner.json"), replacement);
+        await new Promise(resolve => setTimeout(resolve, 180));
+      },
+    }), FileLockTimeoutError);
+    assert.equal(replaced, true);
+    assert.equal(await readFile(join(gate, "owner.json"), "utf8"), replacement);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("gate owner id changes are detected even when the directory inode is unchanged", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-gate-id-replace-"));
+  const lock = join(root, "host-id-rotation.lock");
+  const gate = `${lock}.reclaim`;
+  try {
+    await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "dead-lock" }));
+    await mkdir(gate);
+    const ownerPath = join(gate, "owner.json");
+    await writeFile(ownerPath, JSON.stringify({ pid: 999_999_998, host: hostname(),
+      startTime: Date.now(), ownerId: "first" }));
+    const ino = (await stat(gate)).ino;
+    const replacement = JSON.stringify({ pid: 999_999_997, host: hostname(),
+      startTime: Date.now(), ownerId: "second" });
+    let replaced = false;
+    await assert.rejects(withFileLock(root, "host-id-rotation", async () => "wrong", {
+      stalePolicy: "host-id", timeoutMs: 150, onAfterGateStat: async () => {
+        if (replaced) return;
+        replaced = true;
+        await writeFile(ownerPath, replacement);
+        await new Promise(resolve => setTimeout(resolve, 180));
+      },
+    }), FileLockTimeoutError);
+    assert.equal(replaced, true);
+    assert.equal((await stat(gate)).ino, ino);
+    assert.equal(await readFile(ownerPath, "utf8"), replacement);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -386,7 +477,7 @@ test("a gate's maximum hold starts at rename publication", { timeout: 3_000 }, a
         const ownerPath = join(root, temp, "owner.json");
         const owner = JSON.parse(await readFile(ownerPath, "utf8"));
         await writeFile(ownerPath, JSON.stringify({ ...owner, pid: fakePid,
-          createdAt: Date.now() - HOST_ID_LOCK_MAX_HOLD_MS - 1_000 }));
+          createdAt: Date.now() - AGED_LOCK_MS }));
       },
       onBeforeStaleMove: async () => { atPublishedGate(); await blocked; },
     });
@@ -417,17 +508,115 @@ test("credential lock path stays absent while its complete owner is being writte
   } finally { release(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("host, credential, and takeover locks serialize two dead-owner contenders and retain an aged live owner", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-all-file-locks-"));
+  const clock = Date.now;
+  try {
+    for (const name of ["host-id-rotation", "a".repeat(24), `watch-takeover-${"b".repeat(24)}`]) {
+      const path = join(root, `${name}.lock`);
+      const policy = name === "host-id-rotation" || name.startsWith("watch-takeover-")
+        ? { stalePolicy: "host-id" as const } : {};
+      await writeFile(path, JSON.stringify({ pid: 999_999_999, host: hostname(),
+        createdAt: clock(), startTime: clock(), ownerId: "dead" }));
+      let active = 0;
+      let peak = 0;
+      await Promise.all(Array.from({ length: 2 }, () => withFileLock(root, name, async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 30));
+        active--;
+      }, { ...policy, timeoutMs: 1_500 })));
+      assert.equal(peak, 1, name);
+      await writeFile(path, JSON.stringify({ pid: process.pid, host: hostname(),
+        createdAt: clock() - AGED_LOCK_MS,
+        startTime: pidStartMs(process.pid), ownerId: "live" }));
+      const original = await readFile(path, "utf8");
+      Date.now = () => clock() + AGED_LOCK_MS;
+      await assert.rejects(withFileLock(root, name, async () => "wrong",
+        { ...policy, timeoutMs: 70 }), FileLockTimeoutError);
+      Date.now = clock;
+      assert.equal(await readFile(path, "utf8"), original, name);
+      await rm(path);
+    }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("host and takeover reclaim gates serialize dead owners and retain aged live owners", { timeout: 6_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-all-reclaim-gates-"));
+  const clock = Date.now;
+  try {
+    for (const name of ["host-id-rotation", `watch-takeover-${"b".repeat(24)}`]) {
+      const path = join(root, `${name}.lock`);
+      const gate = `${path}.reclaim`;
+      const dead = JSON.stringify({ pid: 999_999_999, host: hostname(),
+        createdAt: clock(), startTime: clock(), ownerId: "dead" });
+      await writeFile(path, dead);
+      await mkdir(gate);
+      await writeFile(join(gate, "owner.json"), dead);
+      let active = 0;
+      let peak = 0;
+      await Promise.all(Array.from({ length: 2 }, () => withFileLock(root, name, async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise(resolve => setTimeout(resolve, 25));
+        active--;
+      }, { stalePolicy: "host-id", timeoutMs: 1_500 })));
+      assert.equal(peak, 1, name);
+      await writeFile(path, dead);
+      await mkdir(gate);
+      const live = JSON.stringify({ pid: process.pid, host: hostname(),
+        createdAt: clock() - AGED_LOCK_MS, startTime: pidStartMs(process.pid), ownerId: "live" });
+      await writeFile(join(gate, "owner.json"), live);
+      Date.now = () => clock() + AGED_LOCK_MS;
+      await assert.rejects(withFileLock(root, name, async () => "wrong",
+        { stalePolicy: "host-id", timeoutMs: 70 }), FileLockTimeoutError);
+      Date.now = clock;
+      assert.equal(await readFile(join(gate, "owner.json"), "utf8"), live);
+      await rm(gate, { recursive: true, force: true });
+      await rm(path);
+    }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("a killed general-lock publisher's temp is removed on the next acquire", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-general-temp-"));
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+      `import { withFileLock } from './src/cloud/storage.ts';
+       await withFileLock(process.argv[1], 'check', async () => {}, {
+         onBeforePublish: async () => { process.stdout.write('ready\\n'); await new Promise(() => {}); },
+       });`, root], { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    await new Promise<void>((resolve, reject) => {
+      child!.stdout!.once("data", () => resolve());
+      child!.once("error", reject);
+      child!.once("close", code => reject(new Error(`publisher exited: ${code}`)));
+    });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 1);
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    await withFileLock(root, "check", async () => undefined, { timeoutMs: 500 });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 0);
+  } finally {
+    if (child?.exitCode === null && child?.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("reclaim checks the moved owner and preserves a replacement gate", { timeout: 3_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-gate-race-"));
   const lock = join(root, "host-id-rotation.lock");
   const gate = `${lock}.reclaim`;
+  const clock = Date.now;
   const fresh = JSON.stringify({ pid: process.pid, host: hostname(), startTime: pidStartMs(process.pid), ownerId: "fresh" });
   try {
     await writeFile(lock, JSON.stringify({ pid: 999_999_999, host: hostname(), createdAt: Date.now(), startTime: Date.now() }), { mode: 0o600 });
     await mkdir(gate, { mode: 0o700 });
     await writeFile(join(gate, "owner.json"), "{old", { mode: 0o600 });
-    const old = new Date(Date.now() - HOST_ID_LOCK_INCOMPLETE_GRACE_MS - 100);
-    await utimes(gate, old, old);
+    Date.now = () => clock() + HOST_ID_LOCK_INCOMPLETE_GRACE_MS + 100;
     await assert.rejects(withFileLock(root, "host-id-rotation", async () => undefined, {
       stalePolicy: "host-id", timeoutMs: 500, onBeforeGateStaleMove: async () => {
         await rename(gate, `${gate}.prior`);
@@ -441,7 +630,7 @@ test("reclaim checks the moved owner and preserves a replacement gate", { timeou
       return true;
     });
     assert.equal(await readFile(join(gate, "owner.json"), "utf8"), fresh);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
 });
 
 test("gate release leaves a replacement owner untouched", { timeout: 3_000 }, async () => {
