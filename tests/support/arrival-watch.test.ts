@@ -815,6 +815,38 @@ test("a stale arrival watch lock is stolen when the other pid is gone", async ()
   await rm(root, { recursive: true, force: true });
 });
 
+test("seat and legacy watcher locks publish a complete owner before either contender can acquire", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-atomic-"));
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      let entered!: () => void;
+      let release!: () => void;
+      const publishing = new Promise<void>(resolve => { entered = resolve; });
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const first = acquireArrivalWatchLock(path, process.pid, undefined, { onBeforePublish: async () => {
+        entered();
+        await blocked;
+      } });
+      try {
+        await publishing;
+        await assert.rejects(stat(path), { code: "ENOENT" }, "a slow writer must not expose an empty lock");
+        const second = acquireArrivalWatchLock(path);
+        release();
+        const outcomes = await Promise.allSettled([first, second]);
+        assert.equal(outcomes.filter(result => result.status === "fulfilled").length, 1);
+        assert.equal(outcomes.filter(result => result.status === "rejected" &&
+          result.reason instanceof ArrivalWatchAlreadyRunningError).length, 1);
+        assert.equal(JSON.parse(await readFile(path, "utf8")).pid, process.pid);
+      } finally {
+        release();
+        await first.catch(() => undefined);
+        await releaseArrivalWatchLock(path);
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("arrivalWatchLockHeld is true only while the lock names a live pid", async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-notify-held-"));
   const lockPath = join(root, "watch.lock");
