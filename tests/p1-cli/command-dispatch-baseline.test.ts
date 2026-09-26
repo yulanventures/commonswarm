@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { encodeInviteLink, type InviteLinkPayload } from "../../src/cloud/invite-link.js";
 import { credentialStore } from "../../src/cloud/storage.js";
+import { usage } from "../../src/cli.js";
 import { createLaneTempHome, removeLaneTempHome } from "../support/lane-temp-home.js";
 
 type Fixture = {
@@ -719,6 +720,13 @@ test("dispatcher baseline keeps refusal text while help has its own gate", { tim
   assert.equal(withoutGeneratedHelp("cswarm: unknown command\ncswarm <VERSION> (protocol 0.1.0)\n\nUsage:\n  cswarm new\n"),
     "cswarm: unknown command\n<GENERATED_HELP>\n");
   assert.equal(withoutGeneratedHelp("cswarm: unknown command\n"), "cswarm: unknown command\n");
+});
+
+test("profile refusal baseline records current help text", { timeout: 10_000 }, async () => {
+  const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+  const row = recorded.find(value => value.id === "profile.refusal");
+  assert.ok(row);
+  assert.equal(row.stderr, `cswarm: profile requires ls\n${usage().replace(/^cswarm [^ ]+/, "cswarm <VERSION>")}\n`);
 });
 
 test("recorded bare device refusal keeps its prior unknown-option wording", { timeout: 10_000 }, async () => {
