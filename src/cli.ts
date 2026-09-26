@@ -241,7 +241,7 @@ import {
   postSignalTargets,
   readAgentSignalPage,
   readDirectedInboxSince,
-  checkedSince,
+  type SignalCursor,
   SINCE_OFFSET_GUIDANCE,
   readAgentSignalDirectory,
   readSignals,
@@ -884,7 +884,9 @@ const TASK_FLAGS = [
 class UsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
-export const inboxMoreNotice = (last: string): string => `More inbox messages may remain; rerun with --since ${last}.`;
+export const inboxMoreNotice = (last: SignalCursor, since: string): string =>
+  `More inbox messages may remain. Stopped after ${last.created_at} (id ${last.id}). ` +
+  `Rerunning with the same --since re-reads from ${since}, including this timestamp; use inbox --follow to read in order.`;
 
 /** Non-command guidance appended after the command table's generated synopses. */
 const USAGE_GUIDANCE = `Inbox paging:
@@ -4628,16 +4630,11 @@ async function runSignalRead(
   const waitSeconds = inbox && args.optional("wait") !== undefined
     ? parseWaitSeconds(args.required("wait"))
     : undefined;
-  const since = checkedSince(args.optional("since"));
   const cloud = await target(args);
   const selected = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true,
   });
   const credential = signalCredentialOf(selected);
-  if (inbox && credential.kind === "agent" && since !== undefined) {
-    const directory = await readAgentSignalDirectory(cloud, credential.token, selected.selectedWorkspace);
-    assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
-  }
   /* Two paths, two shapes. The `read` edge resolves a slug itself, so an agent
    * sends the slug. PostgREST has no slug lookup on swarm_read.signals, so a
    * signed-in person resolves it against swarm_read.channels first and filters
@@ -4667,9 +4664,9 @@ async function runSignalRead(
     ...(args.optional("kind") === undefined
       ? {}
       : { kind: signalKind(args.required("kind")) }),
-    ...(since === undefined
+    ...(args.optional("since") === undefined
       ? {}
-      : { since }),
+      : { since: args.required("since") }),
     ...(args.optional("limit") === undefined
       ? {}
       : { limit: integer(args, "limit", { minimum: 1, maximum: 100 }) }),
@@ -4677,13 +4674,13 @@ async function runSignalRead(
   };
 
   let rows;
-  let moreSince: string | undefined;
+  let moreSince: SignalCursor | undefined;
   let timedOut = false;
   let waited = false;
   try {
     if (waitSeconds === undefined) {
       rows = inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
-        ? await readDirectedInboxSince(cloud, credential, queryBase, { onTruncated: last => { moreSince = last.created_at; } })
+        ? await readDirectedInboxSince(cloud, credential, queryBase, { onTruncated: last => { moreSince = last; } })
         : await readSignals(cloud, credential, queryBase);
     } else {
       waited = true;
@@ -4692,7 +4689,7 @@ async function runSignalRead(
         deadlineMs,
         read: () =>
           inbox && credential.kind === "agent" && queryBase.since !== undefined && queryBase.limit === undefined
-            ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs, onTruncated: last => { moreSince = last.created_at; } })
+            ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs, onTruncated: last => { moreSince = last; } })
             : readSignals(cloud, credential, queryBase, { deadlineMs }),
       });
       rows = waitResult.signals;
@@ -4706,12 +4703,17 @@ async function runSignalRead(
     throw error;
   }
 
+  if (inbox && credential.kind === "agent" && queryBase.since !== undefined) {
+    const directory = await readAgentSignalDirectory(cloud, credential.token, selected.selectedWorkspace);
+    assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
+  }
+
   if (args.has("json")) {
     printJson(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
-      }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince) }
+      }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince, queryBase.since!) }
         : inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
         ? { notice: INBOX_LIMIT_NOTICE } : {}) },
     );
@@ -4760,7 +4762,7 @@ async function runSignalRead(
   if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
     process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
   }
-  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince)}\n`);
+  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since!)}\n`);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
@@ -9405,15 +9407,26 @@ function helpFlag(key: string, flag: string): string {
 
 /** Every synopsis starts with a variant declared in AGENT_COMMANDS and includes its accepted flags. */
 export function visibleUsageHint(hint: string, accepted: readonly string[]): string {
-  let result = hint;
-  let previous: string;
-  do {
-    previous = result;
-    result = result.replace(/\[[^\[\]]+\]/g, segment => {
-      const flags = [...segment.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1]!);
-      return flags.some(flag => !accepted.includes(flag)) ? "" : segment;
-    });
-  } while (result !== previous);
+  const filter = (source: string): string => {
+    let result = "";
+    for (let index = 0; index < source.length;) {
+      if (source[index] !== "[") { result += source[index++]; continue; }
+      let depth = 1;
+      let end = index + 1;
+      while (end < source.length && depth > 0) {
+        if (source[end] === "[") depth++;
+        if (source[end] === "]") depth--;
+        end++;
+      }
+      if (depth !== 0) { result += source.slice(index); break; }
+      const inner = filter(source.slice(index + 1, end - 1));
+      const flags = [...inner.matchAll(/--([a-z][a-z-]*)/g)].map(match => match[1]!);
+      if (flags.every(flag => accepted.includes(flag))) result += `[${inner}]`;
+      index = end;
+    }
+    return result;
+  };
+  const result = filter(hint);
   return result === hint ? hint : result.replace(/  +/g, " ");
 }
 

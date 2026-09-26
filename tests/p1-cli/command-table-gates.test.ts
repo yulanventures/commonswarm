@@ -314,6 +314,8 @@ test("usage synopsis removes any refused bracket group regardless of group or fl
     "cswarm example [--third]");
   assert.equal(visibleUsageHint("cswarm example [--outer [--inner]] [--third]", ["third"]),
     "cswarm example [--third]");
+  assert.equal(visibleUsageHint("cswarm reply [--thread [--broadcast-to-channel]] [--json]", ["broadcast-to-channel", "json"]),
+    "cswarm reply [--json]");
   assert.equal(visibleUsageHint("cswarm example [--first <x> | --second <y>] [--third]", ["first", "second", "third"]),
     "cswarm example [--first <x> | --second <y>] [--third]");
 });

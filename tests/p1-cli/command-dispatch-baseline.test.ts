@@ -294,6 +294,8 @@ function coreFixtures(): Fixture[] {
   return [
     { id: "refusal.unknown-verb", argv: ["invalidverb"] },
     { id: "refusal.unknown-option.device", argv: ["target", "show", ...target, "--device"] },
+    { id: "feed.since.target-before-date", argv: ["feed", "--since", "yesterday", "--url", "<ORIGIN>"], env: { SWARM_CLOUD_ANON_KEY: "" } },
+    { id: "inbox.since.kind-before-date", argv: ["inbox", "--since", "yesterday", "--kind", "bogus", ...agent] },
     { id: "refusal.unknown-verb.profile-valid", argv: ["nonexistent_verb", ...profile] },
     { id: "refusal.unknown-verb.profile-missing", argv: ["nonexistent_verb", "--profile", "<MISSING_PROFILE>"] },
     ...prototypeVerbFixtures(),
@@ -767,6 +769,24 @@ test("repeated follow wait keeps main's exact refusal", { timeout: 10_000 }, asy
     assert.equal(row.stderr, "cswarm: --wait may only be provided once\n");
     const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("since validation preserves target and kind refusal order", { timeout: 20_000 }, async () => {
+  const root = createLaneTempHome("since-refusal-order-");
+  try {
+    const all = await fixtures();
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    for (const [id, sentence] of [
+      ["feed.since.target-before-date", "cswarm: no Cloud anon key is selected: pass --anon-key, set SWARM_CLOUD_ANON_KEY, or run cswarm target set with the complete target\n"],
+      ["inbox.since.kind-before-date", "cswarm: --kind must be working-on, note, or ask\n"],
+    ]) {
+      const fixture = all.find(row => row.id === id);
+      assert.ok(fixture);
+      const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+      assert.equal(row.stderr, sentence, id);
+      assert.deepEqual(recorded.find(value => value.id === id), row);
+    }
   } finally { removeLaneTempHome(root); }
 });
 

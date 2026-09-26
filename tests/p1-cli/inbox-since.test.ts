@@ -71,16 +71,18 @@ test("wrong agent workspace is a typed refusal, not an empty inbox", { timeout: 
     error instanceof Error && "code" in error && error.code === "inbox_workspace_mismatch");
 });
 
-test("inbox drain stops at the page cap and names a resumable since value", { timeout: 10_000 }, async () => {
+test("inbox drain stops at the exact cursor and explains equal-timestamp rereads", { timeout: 10_000 }, async () => {
   assert.equal(INBOX_SINCE_PAGE_CAP, 10);
   const many = Array.from({ length: (INBOX_SINCE_PAGE_CAP + 1) * 100 }, (_, index) => ({
     ...rows[index % rows.length]!, id: `${String(index + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
-    created_at: new Date(Date.UTC(2026, 8, 25, 1, 0, index)).toISOString(),
+    created_at: "2026-09-25T01:00:00.000Z",
   }));
   let calls = 0;
   let notice = "";
+  const requests: Array<{ after_created_at?: string; after_id?: string }> = [];
   const fetcher = (async (_url: unknown, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body)) as { after_id?: string; limit: number };
+    const request = JSON.parse(String(init?.body)) as { after_created_at?: string; after_id?: string; limit: number };
+    requests.push(request);
     calls += 1;
     const start = request.after_id ? many.findIndex(row => row.id === request.after_id) + 1 : 0;
     return new Response(JSON.stringify({ signals: many.slice(start, start + request.limit),
@@ -88,10 +90,17 @@ test("inbox drain stops at the page cap and names a resumable since value", { ti
   }) as typeof fetch;
   const result = await readDirectedInboxSince(target, { kind: "agent", token: TOKEN }, {
     workspaceId: WORKSPACE, inbox: true, since: many[0]!.created_at,
-  }, { fetcher, onTruncated: last => { notice = inboxMoreNotice(last.created_at); } });
+  }, { fetcher, onTruncated: last => { notice = inboxMoreNotice(last, many[0]!.created_at); } });
   assert.equal(calls, INBOX_SINCE_PAGE_CAP);
   assert.equal(result.length, INBOX_SINCE_PAGE_CAP * 100);
-  assert.match(notice, /rerun with --since 2026-/);
+  assert.equal(requests[1]?.after_created_at, many[99]!.created_at);
+  assert.equal(requests[1]?.after_id, many[99]!.id);
+  assert.match(notice, new RegExp(`Stopped after ${many[999]!.created_at} \\(id ${many[999]!.id}\\)`));
+  assert.match(notice, /same --since re-reads from 2026-09-25T01:00:00.000Z, including this timestamp/);
+  assert.match(notice, /inbox --follow to read in order/);
+  assert.doesNotMatch(notice, /rerun with --since 2026-/i);
+  assert.match(inboxMoreNotice({ created_at: many[999]!.created_at, id: many[999]!.id }, "2026-09-24T00:00:00.000Z"),
+    /same --since re-reads from 2026-09-24T00:00:00.000Z, including this timestamp/);
 });
 
 test("inbox drain paging failures are typed", { timeout: 10_000 }, async () => {

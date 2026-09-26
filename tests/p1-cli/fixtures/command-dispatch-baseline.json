@@ -26,6 +26,40 @@
     "handlers": []
   },
   {
+    "id": "feed.since.target-before-date",
+    "argv": [
+      "feed",
+      "--since",
+      "yesterday",
+      "--url",
+      "<ORIGIN>"
+    ],
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "cswarm: no Cloud anon key is selected: pass --anon-key, set SWARM_CLOUD_ANON_KEY, or run cswarm target set with the complete target\n",
+    "handlers": [
+      "runSignalRead:feed"
+    ]
+  },
+  {
+    "id": "inbox.since.kind-before-date",
+    "argv": [
+      "inbox",
+      "--since",
+      "yesterday",
+      "--kind",
+      "bogus",
+      "--profile",
+      "<PROFILE>"
+    ],
+    "exitCode": 1,
+    "stdout": "",
+    "stderr": "cswarm: --kind must be working-on, note, or ask\n",
+    "handlers": [
+      "runSignalRead:inbox"
+    ]
+  },
+  {
     "id": "refusal.unknown-verb.profile-valid",
     "argv": [
       "nonexistent_verb",
