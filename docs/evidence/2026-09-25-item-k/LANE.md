@@ -198,3 +198,17 @@ The Fold 10 CLI addition shifted three `citation-drift` lines and five HEAD time
 Permitted gates: `npm run build` exit 0; `npm run check:tests` exit 0; named connection-token setup 1/1; item I profile binding 20/20; inbox since 8/8; item K HOME control 2/2; citation drift 3/3; named timeout-map checks 2/2. Each lane test command used `T=$(mktemp -d /tmp/lane-home.XXXXXX)` and `env HOME="$T"`, then removed only that directory. An initial item I run found and fixed the snapshot's directory-read error; an initial citation run found and fixed the nine-line drift. `git diff --check` exited 0.
 
 Not established here: full `npm test`, full P1 CLI, edge check, release bundle, site build, server tests, and the complete dispatcher baseline. Host rules reserve those gates for the lead and forbid Docker, Supabase, and browser tests on this machine. No production host or real workspace was contacted.
+
+## Fold 11 — Round 10 AQ1
+
+Codex and Opus round 10 identified the same production defect in the cap notice: the printed follow step lost the stdin credential, session binding, and filters, and profile expansion exposed the derived raw target flags. The lead ruled AQ1 blocking. Only that behavior, its tests, moved citations, and the two named follow-ups changed.
+
+| Ruling | Change | Behavioral test | Reversion measurement |
+|---|---|---|---|
+| AQ1 | The notice walks the options captured by `Arguments` before profile expansion. It carries the original credential source, profile, host session ID, session context, and follow-compatible filters. It derives support from the inbox read accepted flags, command table flags, and follow refusal flags. One stated drop rule removes the one-shot limit and output shape; `--since` keeps its value. A refused read-changing option such as `--channel` or `--wait` produces a cannot-carry notice. Stdin guidance says to pipe the same token again. | `inbox-follow-step.test.ts` enumerates the accepted read flags, runs capped reads and their printed follow steps through the real CLI dispatcher with a temporary loopback server, checks the stdin bearer and each supported filter, checks profile and host binding without expanded credentials, and verifies session-context and channel behavior. | Rebuilt `src/cli.ts` from `d4d7a613`, ran the four focused tests under temporary HOME, and observed 0/4 pass. The control on Fold 11 passed 4/4. Source and build were restored after the baseline probe. |
+
+`citation-drift.test.ts` passed 3/3 after three moved CLI pointers were updated. Five HEAD timeout mapping CLI pointers moved with the same source edit; its selected citation check passed 1/1. The shipped `v0.1.71` timeout section was untouched.
+
+Permitted gates: `npm run build` exit 0; `npm run check:tests` exit 0; `inbox-follow-step`, `inbox-since`, and `citation-drift` together 15/15; selected HEAD timeout citation check 1/1. Each lane test invocation used a fresh `env HOME="$T"` with `T` under `/tmp/lane-home.XXXXXX` and removed only that directory. The follow children terminated and the test loopback servers closed. No production host or real workspace was contacted.
+
+Not established here: full `npm test`, full P1 CLI, edge check, release bundle, site build, server tests, and the complete dispatcher baseline. The lead owns those gates.
