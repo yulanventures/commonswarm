@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DeliveryCommandClient, DeliveryHttpError, DeliveryProtocolError, type DeliveryRow } from "./delivery.js";
 import { RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended } from "./renewal.js";
-import { CommandHttpError, CommandTransportError, ThinCommandClient, newCommandId, type PostSignalCommand, type PostSignalRequest, type PostSignalResult } from "./command-client.js";
+import { CommandHttpError, CommandTransportError, ThinCommandClient, newCommandId, type PostSignalCommand, type PostSignalRequest, type PostSignalResult, type SenderOwnerRelation } from "./command-client.js";
 import type { CloudTarget } from "./config.js";
 import { AgentSetupError, ONBOARDING_UUID, openProfileCredential, privatePath, profileScopeKey, profileSessionContext, profileTarget, readAgentProfile } from "./agent-profile.js";
 import { readReceiveBinding, receiveStatus, updateReceiveBinding, type ReceiveBinding } from "./agent-receive.js";
@@ -24,6 +24,7 @@ import { parseSignalRecord, readAgentSignalDirectory, signalAddressesAgent } fro
 import { assertProfileIdentity } from "./agent-check.js";
 import { boundProfileCommands } from "./agent-onboarding-contract.js";
 import { isReplyStatus, REPLY_STATUSES } from "./reply-status.js";
+import { ownerRelationLines } from "./owner-relation.js";
 
 export const CHANNEL_RECEIPT_TOOL = "cswarm_received";
 export const CHANNEL_RECEIPT_FIELDS = ["signal_id", "receipt", "host_session_id"] as const;
@@ -43,8 +44,8 @@ function channelMessageBlock(body: string): string {
   return `<teammate-message>\n${untrustedBody}\n</teammate-message>`;
 }
 
-function channelNotice(sender: string, signalId: string, receipt: string, hostSessionId: string, body: string): string {
-  return `${channelNoticePrefix(sender, signalId, receipt, hostSessionId)}\n\n${channelMessageBlock(body)}`;
+export function channelNotice(sender: string, signalId: string, receipt: string, hostSessionId: string, body: string, relation: SenderOwnerRelation): string {
+  return `${channelNoticePrefix(sender, signalId, receipt, hostSessionId)}\n${ownerRelationLines(relation).join("\n")}\n\n${channelMessageBlock(body)}`;
 }
 
 function channelCanaryNotice(sender: string, signalId: string, receipt: string, hostSessionId: string): string {
@@ -412,7 +413,7 @@ export async function serveAgentChannel(options: { profilePath: string; hostSess
                 ? channelCanaryNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host)
                 : selfAddressed
                 ? channelSelfNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host, pending.row.signal.body)
-                : channelNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host, pending.row.signal.body),
+                : channelNotice(pending.row.signal.from, pending.row.signal.id, pending.receipt, host, pending.row.signal.body, pending.row.senderOwnerRelation),
               meta: { signal_id: pending.row.signal.id, receipt: pending.receipt,
                 sender_id: pending.row.signal.from, sender_kind: pending.row.signal.from_kind,
                 sender_owner_relation: pending.row.senderOwnerRelation, kind: pending.row.signal.kind,
