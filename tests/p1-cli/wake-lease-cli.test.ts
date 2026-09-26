@@ -966,7 +966,7 @@ test("profile resume falls back when the renewal record is insecure", { timeout:
   } finally { await f.cleanup(); }
 });
 
-test("resume read stays read-only while renewal read repairs directory mode", { timeout: 3_000 }, async () => {
+test("resume and renewal reads leave an insecure directory untouched", { timeout: 3_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-renewal-read-mode-"));
   const options = { target: cloudTarget("http://127.0.0.1:54321", "anon"),
     lineageKey: "a".repeat(32), stateDirectory: join(root, "successors") };
@@ -982,18 +982,20 @@ test("resume read stays read-only while renewal read repairs directory mode", { 
     const resume = await agentCredentialStore({ ...options, readOnly: true });
     await assert.rejects(resume.read(), /directory must be mode 0700/);
     assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o755);
-    assert.deepEqual(await renewal.read(), record);
-    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o700);
-    await chmod(options.stateDirectory, 0o755);
+    await assert.rejects(renewal.read(), /directory must be mode 0700/);
+    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o755);
     const sessionOptions = { target: options.target, workspaceId: workspace,
       presented: { token: `swm_agt_${"A".repeat(43)}`, tokenId: record.rootTokenId,
         principalId: principal, runId: record.runId, expiresAt: record.expiresAt + 1_000_000 },
       store: renewal, now: () => 0 };
+    await assert.rejects(AgentCredentialSession.open(sessionOptions), /directory must be mode 0700/);
+    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o755);
+    await chmod(options.stateDirectory, 0o700);
     const session = await AgentCredentialSession.open(sessionOptions);
     assert.equal(await session.bearer(), record.token);
-    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o700);
     await writeFile(renewal.location, "{broken", { mode: 0o600 });
-    await assert.rejects(AgentCredentialSession.open(sessionOptions));
+    const degraded = await AgentCredentialSession.open(sessionOptions);
+    assert.equal(await degraded.bearer(), sessionOptions.presented.token);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

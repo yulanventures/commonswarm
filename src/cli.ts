@@ -3163,17 +3163,15 @@ async function agentSession(
   listenerMode = false,
 ): Promise<AgentCredentialSession> {
   let store: Awaited<ReturnType<typeof agentCredentialStore>> | null = null;
-  const candidate = await agentCredentialStore({
-    target: cloud,
-    lineageKey: credentialLineageKey(agent.token),
-  });
-  // Read failures must surface before a predecessor can be presented. In particular,
-  // this repairs an owned directory before withLock verifies its mode.
-  await candidate.read();
   try {
-    // Prove the lock is usable before trusting it for a successor write. A lock failure
-    // keeps the existing explicit no-renewal warning; a failed read above is fatal.
-    await candidate.withLock(async () => undefined);
+    const candidate = await agentCredentialStore({
+      target: cloud,
+      lineageKey: credentialLineageKey(agent.token),
+    });
+    // An unusable store degrades to no renewal while the presented credential still works.
+    await candidate.withLock(async () => {
+      await candidate.read().catch(() => null);
+    });
     store = candidate;
   } catch {
     process.stderr.write(

@@ -644,18 +644,7 @@ export async function readSecureJsonFile(
   path: string,
   maxBytes: number,
 ): Promise<string | null> {
-  const directory = dirname(path);
-  const info = await lstat(directory).catch(error => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  });
-  if (info === null) await secureDirectory(directory);
-  else {
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`credential directory is not a real directory: ${directory}`);
-    assertOwnedByCurrentUser(info.uid);
-    if (mode(info.mode) !== 0o700) await chmod(directory, 0o700);
-    await secureDirectory(directory);
-  }
+  await secureDirectory(dirname(path));
   try {
     await secureCredentialFile(path);
     const raw = await readFile(path, "utf8");
