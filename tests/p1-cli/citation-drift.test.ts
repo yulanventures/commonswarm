@@ -40,6 +40,17 @@ test("lane record marks the retired parent rule and reconciles Fold 1 probe coun
   assert.equal(Number(counts[2]), listed - 1, "F3 and F4 share the EPERM probe");
 });
 
+test("Fold 16 evidence describes the edge release and file age actually exercised", { timeout: 1_000 }, () => {
+  const record = readFileSync(new URL("docs/evidence/2026-09-25-item-g-lane2b/LANE.md", root), "utf8");
+  const fold16 = record.split("## Fold 16\n")[1]?.split("## Fold 17\n")[0];
+  assert.ok(fold16);
+  assert.match(fold16, /superseded release with `released: false`/);
+  assert.match(fold16, /managed-seat session fence can refuse release/);
+  assert.match(fold16, /incomplete host-id lock grace uses the published path's mtime/);
+  assert.match(fold16, /aged self-PID records/);
+  assert.doesNotMatch(fold16, /Release 409 selects watcher or H0 poll|retain aged live records/);
+});
+
 interface Citation {
   /** Where the citing comment lives, for the failure message. */
   citedBy: string;
@@ -79,19 +90,19 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6581, 6581],
+    lines: [6591, 6591],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6607, 6607],
+    lines: [6617, 6617],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7229, 7229],
+    lines: [7239, 7239],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note

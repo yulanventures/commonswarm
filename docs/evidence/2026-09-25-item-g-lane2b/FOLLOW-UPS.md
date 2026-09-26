@@ -1,0 +1,29 @@
+# Item G lane 2b review follow-ups
+
+The lead's 2026-09-26 landing bar blocks only verified, lane-introduced production findings. This inventory retains the non-blocking findings from rounds 14 and 15, including findings closed by Folds 16 and 17. Line numbers in the review files refer to their reviewed SHAs.
+
+| Finding | File | Finding | Why it does not block |
+|---|---|---|---|
+| Codex R14 F1 | `src/cloud/arrival-watch.ts` | A check-then-unlink watcher takeover could remove a newly published owner. | Fold 16 serialized takeover and verifies the moved owner before deletion. |
+| Codex R14 F2 | `src/cloud/storage.ts` | A replaced reclaim gate could be moved while another contender inspects it. | Fold 16 compares directory identity and owner bytes before removal. |
+| Codex R14 F3 | `scripts/timeout-table/mapping.json` | The lane's release timeout citation pointed at unrelated code. | Folds 15–17 repinned it and added a source-token check. |
+| Codex R14 F4 | `tests/p1-cli/host-id-rotation.test.ts` | Real `/bin/ps` controls and full gates had not run at the reviewed SHA. | This was a measurement gap; the lead's Fold 16 service-free and CLI gates were green, while real `ps` remains separately unestablished in this sandbox. |
+| Opus R14 F1 | `tests/p1-cli/citation-drift.test.ts` | Fold 15 moved source lines pinned by a citation test. | Fold 16 corrected the citations and the lead's gates passed. |
+| Opus R14 F2 | `tests/p1-cli/resume.test.ts` | Idle watcher signal tests expected an unclaimed lease after a successful claim. | Fold 16 corrected the expectation and measured the focused tests. |
+| Opus R14 F3 | `src/cli.ts` | A signal stop could claim release while another watcher might hold the lease. | Fold 16 kept a last-known state until release confirms deletion; Fold 17 handles session refusals separately. |
+| Opus R14 F4 | `src/cloud/arrival-watch.ts` | A killed publisher's symlink target could be removed before watcher takeover. | Fold 16 retained the active target and tested a killed publisher. |
+| Opus R14 F5 | `src/cloud/storage.ts` | A watcher takeover gate timeout used the credential lock name. | Fold 16 gave each lock and gate its actual name, path, and recovery step. |
+| Opus R14 F6 | `src/cloud/storage.ts` | A complete replacement gate could be judged using an earlier gate's timestamp. | Fold 16 checks record and directory identity across the stale decision. |
+| Opus R14 F7 | `src/cloud/storage.ts` | Publication timing for incomplete lock and gate records was not established on APFS. | Fold 16 uses publication metadata; APFS timing remains a platform measurement, not a verified lane-introduced production fault. |
+| Opus R14 F8 | `src/cloud/storage.ts` | General lock takeover and release removed a path after checking an earlier owner. | The pattern predated the lane, and Fold 16 replaced removals with moved-owner verification. |
+| Opus R14 F9 | `src/cloud/arrival-watch.ts` | An ownerless watcher timeout said to wait for an owner. | Fold 16 names the lock and prints its exact removal step. |
+| Opus R14 F10 | `src/cli.ts` | An aborted claim might have committed despite an unclaimed stop sentence. | Fold 16 covered an in-flight abort; Fold 17 covers a completed transient failure. |
+| Opus R14 F11 | `docs/evidence/2026-09-25-item-g-lane2b/LANE.md` | Fold 15 overstated its lease-state control coverage. | Fold 16 records the missed idle watcher tests and supersedes that claim. |
+| Opus R14 F12 | `src/cloud/storage.ts` | Complete publication affected every general lock caller, with latency not measured. | Fold 16 inventories those callers; the remaining latency question is not a verified production failure. |
+| Codex R15 F1 | `src/cloud/arrival-watch.ts` | “Last renewal” is printed after a claim before any renewal occurs. | This is copy accuracy; the lease state and recovery path remain correct. |
+| Codex R15 F2 | `tests/p1-server/h0-poll-ack.test.ts` | A pre-existing server child can inherit `DENO_DIR` on a direct run. | It predates the lane's H0 cases, and the lead's temporary-HOME gate isolates HOME; cache isolation is a follow-up. |
+| Opus R15 F5 | `tests/p1-cli/host-id-rotation.test.ts` | Two aged-live controls use the test process's PID and miss a non-self liveness probe. | They still catch age-based removal; a child-PID control would improve coverage without showing a production fault. |
+| Opus R15 F6 | `src/cloud/arrival-watch.ts` | A watcher timeout can assert no live owner without probing after its shared deadline. | The window is narrow and was not verified as a lane-introduced production failure. |
+| Opus R15 F8 | `src/cloud/arrival-watch.ts` | “Last renewal” may describe a claim before the first renewal. | This is copy accuracy; Codex R15 F1 names the same issue. |
+
+Opus R15 F1–F4 are addressed by Fold 17 rulings AM1–AM4; F7 is the Fold 16 evidence correction in AM5.
