@@ -24,3 +24,15 @@ export function reservedConnectProfileNames(): string {
     ...CONNECT_PROFILE_FILES.temporaryBases.map(base => `${base}.<pid>.<12 hex>.tmp`),
     "<profile-name>.<pid>.<12 hex>.tmp"].join(", ");
 }
+
+/** Enumerate existing reserved paths from the same names and patterns used by writers. */
+export function connectProfileReservedPaths(profileName: string, entries: readonly string[]): string[] {
+  const fixed = new Set<string>([CONNECT_PROFILE_FILES.pending, CONNECT_PROFILE_FILES.complete,
+    CONNECT_PROFILE_FILES.attemptMarker, CONNECT_PROFILE_FILES.credential, CONNECT_PROFILE_FILES.setupLock,
+    CONNECT_PROFILE_FILES.connectLock, profileName]);
+  for (const entry of entries) {
+    if (reservedConnectProfileName(entry) || entry === profileName ||
+        (CONNECT_PROFILE_FILES.temporaryPattern.test(entry) && entry.startsWith(`${profileName}.`))) fixed.add(entry);
+  }
+  return [...fixed];
+}

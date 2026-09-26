@@ -16,7 +16,7 @@ import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
 import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
-import { CONNECT_PROFILE_FILES, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
+import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
 
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
@@ -198,25 +198,58 @@ function directoryModeError(dir: string): McpConnectError {
   return new McpConnectError("connect_directory_mode", `The connect directory at ${dir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(dir)}, then rerun the same command.`);
 }
 
-async function checkAttemptMarkerMode(markerPath: string): Promise<void> {
-  const dir = dirname(markerPath);
-  const directory = await lstat(dir).catch(() => null);
-  if (directory?.isDirectory() && !directory.isSymbolicLink() &&
-      (typeof process.getuid !== "function" || directory.uid === process.getuid()) && (directory.mode & 0o777) !== 0o700) {
-    throw directoryModeError(dir);
-  }
-  const info = await lstat(markerPath).catch(error => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  });
-  if (info?.isFile() && !info.isSymbolicLink() &&
-      (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
-    throw new McpConnectError("connect_marker_mode", `The connect attempt marker at ${markerPath} needs mode 0600. Run chmod 600 ${quoteAgentArgument(markerPath)}, then rerun the same command.`);
+type ReservedOutcome = "absent" | "ok" | "wrong mode" | "unreadable";
+type ReservedInspection = { outcome: ReservedOutcome; path: string; error?: McpConnectError };
+type ReservedProbe = { inspect?: (path: string) => Promise<Stats>; read?: (path: string) => Promise<string | null> };
+
+/** One rule for every connect-owned name, including locks and temporary files. */
+export async function classifyConnectReservedPath(path: string, probe: ReservedProbe = {}): Promise<ReservedInspection> {
+  const dir = dirname(path);
+  const label = basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect attempt marker" :
+    basename(path) === CONNECT_PROFILE_FILES.pending ? "connect record" :
+    basename(path) === CONNECT_PROFILE_FILES.complete ? "completed connect record" :
+    basename(path) === CONNECT_PROFILE_FILES.credential ? "credential" :
+    basename(path).endsWith(".lock") ? "connect lock" : "connect file";
+  const code = basename(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect_marker" :
+    basename(path) === CONNECT_PROFILE_FILES.pending ? "connect_pending" :
+    basename(path) === CONNECT_PROFILE_FILES.complete ? "connect_complete" :
+    basename(path) === CONNECT_PROFILE_FILES.credential ? "connect_credential" :
+    basename(path) === "profile.json" ? "connect_profile" : "connect_reserved";
+  const unreadable = () => ({ outcome: "unreadable" as const, path,
+    error: new McpConnectError(`${code}_unreadable`, `The ${label} at ${path} cannot be read safely. Inspect that file, then rerun the same command.`) });
+  let directory: Stats;
+  try { directory = await (probe.inspect ?? lstat)(dir); } catch { return unreadable(); }
+  if (!directory.isDirectory() || directory.isSymbolicLink() ||
+      (typeof process.getuid === "function" && directory.uid !== process.getuid())) return unreadable();
+  if ((directory.mode & 0o777) !== 0o700) return { outcome: "wrong mode", path, error: directoryModeError(dir) };
+  let info: Stats;
+  try { info = await (probe.inspect ?? lstat)(path); }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT" ? { outcome: "absent", path } : unreadable(); }
+  if (!info.isFile() || info.isSymbolicLink() ||
+      (typeof process.getuid === "function" && info.uid !== process.getuid())) return unreadable();
+  if ((info.mode & 0o777) !== 0o600) return { outcome: "wrong mode", path,
+    error: new McpConnectError(`${code}_mode`, `The ${label} at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`) };
+  try {
+    if (await (probe.read ?? (file => readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES)))(path) === null) return unreadable();
+  } catch { return unreadable(); }
+  return { outcome: "ok", path };
+}
+
+async function requireConnectReservedPath(path: string, probe: ReservedProbe = {}): Promise<void> {
+  const result = await classifyConnectReservedPath(path, probe);
+  if (result.error) throw result.error;
+}
+
+async function preflightConnectReservedPaths(path: string, probe: ReservedProbe = {}): Promise<void> {
+  const dir = dirname(path);
+  const entries = await readdir(dir);
+  for (const name of connectProfileReservedPaths(basename(path), entries)) {
+    await requireConnectReservedPath(join(dir, name), probe);
   }
 }
 
 export async function classifyAttemptMarkerReadFailure(markerPath: string): Promise<never> {
-  await checkAttemptMarkerMode(markerPath);
+  await requireConnectReservedPath(markerPath);
   throw new McpConnectError("connect_marker_unreadable", `The connect attempt marker at ${markerPath} cannot be read safely. Inspect that file before retrying the same command.`);
 }
 
@@ -359,6 +392,8 @@ export interface McpConnectOptions {
   saveProfile?: typeof saveAgentProfile;
   writeCompletion?: typeof writeSecureJsonFile;
   inspectCompletion?: (path: string) => Promise<Stats>;
+  inspectReserved?: (path: string) => Promise<Stats>;
+  readReserved?: (path: string) => Promise<string | null>;
   checkProfileAccess?: typeof access;
   terminal?: HiddenTerminal;
   removeEmptyDirectory?: typeof rmdir;
@@ -437,7 +472,7 @@ async function emptyClaimAt(path: string): Promise<boolean> {
   return info !== null && info.isFile() && !info.isSymbolicLink() && info.size === 0;
 }
 
-async function defaultPendingProfile(target: CloudTarget, code: string): Promise<string | null> {
+async function defaultPendingProfile(target: CloudTarget, code: string, probe: ReservedProbe = {}): Promise<string | null> {
   const base = join(homedir(), ".cswarm", "agents");
   let entries: string[];
   try { entries = await readdir(base); }
@@ -459,8 +494,12 @@ async function defaultPendingProfile(target: CloudTarget, code: string): Promise
   for (const entry of entries) {
     if (!/^mcp-[0-9a-f-]{36}$/.test(entry)) continue;
     const path = join(base, entry, "profile.json");
+    let checkingReserved = false;
     try {
       await ensureSecureStateDirectory(dirname(path));
+      checkingReserved = true;
+      await preflightConnectReservedPaths(path, probe);
+      checkingReserved = false;
       const complete = await readComplete(path);
       if (complete?.url === target.url && complete.codeHash === codeHash(code, complete.attemptId)) {
         if (await pathExists(path) && !await completedProfileAt(path) &&
@@ -483,7 +522,7 @@ async function defaultPendingProfile(target: CloudTarget, code: string): Promise
         }
       }
     } catch (error) {
-      if (error instanceof McpConnectError && (error.code === "connect_profile_mode" || error.code === "connect_credential_mode" || error.code === "connect_profile_damaged" || error.code === "connect_complete_mode")) throw error;
+      if (checkingReserved || (error instanceof McpConnectError && (error.code === "connect_profile_mode" || error.code === "connect_credential_mode" || error.code === "connect_profile_damaged" || error.code === "connect_complete_mode"))) throw error;
       // A mode error does not hide owned, readable content. Inspect it without trusting
       // that mode for a retry; the user must repair the mode before the same attempt runs.
       let raw: string | null = null;
@@ -600,7 +639,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     const code = (await (options.readCode ?? (() => readHiddenJoinCode(options.terminal)))()).trim();
     if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
     if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
-    const match = await defaultPendingProfile(options.target, code);
+    const match = await defaultPendingProfile(options.target, code, { inspect: options.inspectReserved, read: options.readReserved });
     return await connectMcp({ ...options, profilePath: match ?? join(homedir(), ".cswarm", "agents", `mcp-${randomUUID()}`, "profile.json"), readCode: async () => code });
   }
   const path = await privateConnectLocation(options.profilePath);
@@ -637,18 +676,12 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       }
       throw new McpConnectError("connect_state_unavailable", `The connect directory at ${profileDir} cannot be used safely. Inspect the path and rerun the same command.`);
     }
+    const reservedProbe = { inspect: options.inspectReserved, read: options.readReserved };
+    await preflightConnectReservedPaths(path, reservedProbe);
     await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => { await cleanConnectTemps(path); });
     try { await (options.checkProfileAccess ?? access)(dirname(path), constants.W_OK); }
     catch (error) { await classifyDirectoryFailure(dirname(path), error); }
     const pending = await readPending(path);
-    if (pending) {
-      const credential = join(profileDir, CONNECT_PROFILE_FILES.credential);
-      const info = await lstat(credential).catch(() => null);
-      if (info?.isFile() && !info.isSymbolicLink() && (info.mode & 0o777) !== 0o600) {
-        throw new McpConnectError("connect_credential_mode", `The credential at ${credential} needs mode 0600. Run chmod 600 ${quoteAgentArgument(credential)}, then rerun the same command.`);
-      }
-      await checkAttemptMarkerMode(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker));
-    }
     // A pending record is the sole exception for an orphan credential.
     if (!pending && await pathExists(path)) {
       if (await completedProfileAt(path) || !await repairableProfileAt(path) || !await readComplete(path)) {
@@ -677,6 +710,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       throw new McpConnectError("connect_code_mismatch", `The record at ${pendingPath(path)} belongs to another code. Rerun with the original code; ask the operator to inspect the attempt before clearing it with ${clearCommand(path)}.`);
     }
     return await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+      await preflightConnectReservedPaths(path, reservedProbe);
       await cleanConnectTemps(path);
       const current = await readPending(path);
       const complete = await readComplete(path, current !== null, options.inspectCompletion);
@@ -709,7 +743,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
             credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
           const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
-          await checkAttemptMarkerMode(markerPath);
+          await requireConnectReservedPath(markerPath, reservedProbe);
           await writeSecureJsonFile(markerPath, JSON.stringify({ attemptId: complete.attemptId }));
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));

@@ -393,13 +393,20 @@ export async function withFileLock<T>(
   while (handle === null) {
     try {
       handle = await open(lockPath, "wx", 0o600);
+      await handle.chmod(0o600);
       createdAt = Date.now();
       await handle.writeFile(
         JSON.stringify({ pid: process.pid, host: hostname(), createdAt }),
         "utf8",
       );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        if (handle) {
+          await handle.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+        }
+        throw error;
+      }
       const lockInfo = await stat(lockPath).catch(() => null);
       if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
         await unlink(lockPath).catch(() => undefined);

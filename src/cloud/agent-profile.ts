@@ -201,7 +201,7 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string, writeCredential: typeof writeSecureJsonFile = writeSecureJsonFile): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
@@ -247,7 +247,7 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
     } else if (existingCredential === null && refuseExisting) {
       await exclusiveWrite(profile.credential_file, JSON.stringify(connection.credential));
     } else if (existingCredential === null) {
-      await writeCredential(profile.credential_file, JSON.stringify(connection.credential));
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
     }
     if (connectAttemptId !== undefined) await writeSecureJsonFile(join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: connectAttemptId }));
     await writeSecureJsonFile(path, JSON.stringify(profile));
