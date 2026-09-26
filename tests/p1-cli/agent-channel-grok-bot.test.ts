@@ -30,6 +30,8 @@ async function eventually(check: () => boolean | Promise<boolean>, timeout = 10_
 
 test("Grok Bot gateway canary requires explicit idle and matching CLI receipt before service ACK", { timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-channel-control-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
   const cwd = join(root, "project");
   await mkdir(cwd);
   const profile = join(root, "agent", "profile.json");
@@ -79,7 +81,7 @@ test("Grok Bot gateway canary requires explicit idle and matching CLI receipt be
   });
   try {
     await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
-  } catch (error) { await rm(root, { recursive: true, force: true }); throw error; }
+  } catch (error) { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await rm(root, { recursive: true, force: true }); throw error; }
   let serving: Promise<void> | undefined;
   const previousState = process.env.SWARM_AGENT_STATE_DIR;
   process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
@@ -145,12 +147,14 @@ test("Grok Bot gateway canary requires explicit idle and matching CLI receipt be
     }
     if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
     else process.env.SWARM_AGENT_STATE_DIR = previousState;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await new Promise<void>(done => server.close(() => done()));
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("gateway descriptor precedence, loopback address, failure redaction, and redirect refusal", async () => {
+test("gateway descriptor precedence, loopback address, failure redaction, and redirect refusal", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "grok-gateway-"));
   try {
     const first = join(root, "first.json"), second = join(root, "second.json");

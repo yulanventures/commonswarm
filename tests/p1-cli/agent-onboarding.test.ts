@@ -23,12 +23,17 @@ const OTHER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const TOKEN = `swm_agt_${"A".repeat(43)}`;
 let root: string;
 let previousState: string | undefined;
+let previousHome: string | undefined;
 before(async () => {
   root = await mkdtemp(join(tmpdir(), "cswarm-onboarding-"));
+  previousHome = process.env.HOME;
+  process.env.HOME = root;
   previousState = process.env.SWARM_AGENT_STATE_DIR;
   process.env.SWARM_AGENT_STATE_DIR = join(root, "renewal");
 });
 after(async () => {
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
   if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
   else process.env.SWARM_AGENT_STATE_DIR = previousState;
   await rm(root, { recursive: true, force: true });

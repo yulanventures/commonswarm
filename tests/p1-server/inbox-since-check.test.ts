@@ -30,6 +30,8 @@ let runId: string;
 let profilePath: string;
 let credentialFile: string;
 let functionReady = false;
+let previousHome: string | undefined;
+let previousState: string | undefined;
 
 function localEnvironment(): Local {
   const parsed = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
@@ -91,6 +93,10 @@ function inbox(since: string, extra: string[] = []): { id: string }[] {
 before(async () => {
   local = localEnvironment();
   root = createLaneTempHome("item-k-server-");
+  previousHome = process.env.HOME;
+  previousState = process.env.SWARM_AGENT_STATE_DIR;
+  process.env.HOME = root;
+  process.env.SWARM_AGENT_STATE_DIR = join(root, "state");
   const envFile = join(root, "edge.env");
   writeFileSync(envFile, "SWARM_ENV=test\n", { mode: 0o600 });
   sql = postgres(local.DB_URL, { prepare: false, max: 3 });
@@ -161,11 +167,17 @@ after(async () => {
     }
   }
   await sql?.end({ timeout: 5 });
+  if (previousHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousHome;
+  if (previousState === undefined) delete process.env.SWARM_AGENT_STATE_DIR;
+  else process.env.SWARM_AGENT_STATE_DIR = previousState;
   if (root) removeLaneTempHome(root);
 }, { timeout: 10_000 });
 
 test("check and inbox --since return the same directed ask across timestamps, filters, and default paging", { timeout: 240_000 }, async () => {
   assert.equal(functionReady, true);
+  assert.equal(process.env.HOME, root, "in-process check uses the fixture home");
+  assert.equal(process.env.SWARM_AGENT_STATE_DIR, join(root, "state"), "in-process check uses fixture credential state");
   const ask = await postAsk("item-k directed ask");
   const [created] = await sql<{ created_at: string }[]>`SELECT created_at::text FROM swarm.signals WHERE id = ${ask}::uuid`;
   assert.ok(created);

@@ -8,7 +8,7 @@ import { PassThrough } from "node:stream";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
@@ -24,6 +24,18 @@ const TOKEN_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const JOIN = `swm_join_${"J".repeat(43)}`;
 const TOKEN = `swm_agt_${"T".repeat(43)}`;
 const TARGET = cloudTarget("http://127.0.0.1:39876", "public-test-key");
+let fileHome: string;
+let previousFileHome: string | undefined;
+before(() => {
+  fileHome = createLaneTempHome("mcp-connect-file-");
+  previousFileHome = process.env.HOME;
+  process.env.HOME = fileHome;
+});
+after(() => {
+  if (previousFileHome === undefined) delete process.env.HOME;
+  else process.env.HOME = previousFileHome;
+  removeLaneTempHome(fileHome);
+});
 
 test("mcp code uses the human bearer and one-seat, one-hour mint", { timeout: 10000 }, async () => {
   let calls = 0;
@@ -200,6 +212,8 @@ async function fixture(guardedRoot?: string) {
 
 test("connect saves an unbound private profile and never returns either secret", { timeout: 10000 }, async () => {
   const f = await fixture();
+  const oldHome = process.env.HOME;
+  process.env.HOME = f.root;
   try {
     const path = join(f.root, "seat", "profile.json");
     const result = await connectMcp({ target: TARGET, profilePath: path, readCode: async () => `  ${JOIN}  `, fetcher: f.fetcher });
@@ -233,7 +247,7 @@ test("connect saves an unbound private profile and never returns either secret",
     await assert.rejects(connectMcp({ target: TARGET, profilePath: second, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "join_credential_seat_cap_reached", message: "This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code." });
     assert.equal(f.calls(), 2, "register must not retry");
     await assert.rejects(stat(second), { code: "ENOENT" });
-  } finally { await f.close(); }
+  } finally { if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome; await f.close(); }
 });
 
 test("mcp connect succeeds after registration when the optional inventory is unavailable", { timeout: 10_000 }, async () => {

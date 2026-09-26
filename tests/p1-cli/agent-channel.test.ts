@@ -25,6 +25,8 @@ async function eventually(check: () => boolean | Promise<boolean>, timeout = 10_
 
 test("stdio channel emits an idle canary, requires this session's receipt, and stops on turn mode", { timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-channel-control-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
   const cwd = join(root, "project");
   await mkdir(cwd);
   const profile = join(root, "agent", "profile.json");
@@ -77,7 +79,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     const options = { profilePath: profile, mode: "wake", provider: "claude", hostSessionId: "host-session", cwd, previewChannel: true, execution: { command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js"))] } };
     await configureAgentReceive(options);
     transport = new StdioClientTransport({ command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js")), "receive", "serve", "--profile", profile, "--host-session-id", "host-session"],
-      env: { PATH: process.env.PATH ?? "", SWARM_AGENT_STATE_DIR: join(root, "renewal"), XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
+      env: { PATH: process.env.PATH ?? "", HOME: root, SWARM_AGENT_STATE_DIR: join(root, "renewal"), XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
     transport.stderr?.on("data", chunk => stderr += chunk);
     await client.connect(transport);
     assert.ok(client.getServerCapabilities()?.experimental?.["claude/channel"]);
@@ -105,7 +107,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     await eventually(async () => !receiveStatus(await readReceiveBinding(profile, "host-session")).channel_running);
     client = new Client({ name: "restarted-host-no-model", version: "1" });
     transport = new StdioClientTransport({ command: process.execPath, args: [(process.env.CSWARM_TEST_CLI ?? resolve("dist/cli.js")), "receive", "serve", "--profile", profile, "--host-session-id", "host-session"],
-      env: { PATH: process.env.PATH ?? "", SWARM_AGENT_STATE_DIR: join(root, "renewal"), XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
+      env: { PATH: process.env.PATH ?? "", HOME: root, SWARM_AGENT_STATE_DIR: join(root, "renewal"), XDG_CONFIG_HOME: join(root, "config") }, stderr: "pipe" });
     transport.stderr?.on("data", chunk => stderr += chunk);
     await client.connect(transport);
     await receiveHookEvent(profile, "host-session", { session_id: "host-session", cwd, hook_event_name: "SessionStart" });
@@ -118,5 +120,5 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     assert.equal(receiveStatus(await readReceiveBinding(profile, "host-session")).wake_verified, false);
     assert.equal(stderr.includes(TOKEN), false);
   } catch (error) { throw new Error(`${error instanceof Error ? error.message : error}\nChannel stderr: ${stderr}`, { cause: error }); }
-  finally { await client.close(); await transport?.close(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); await rm(root, { recursive: true, force: true }); }
+  finally { if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome; await client.close(); await transport?.close(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); await rm(root, { recursive: true, force: true }); }
 });

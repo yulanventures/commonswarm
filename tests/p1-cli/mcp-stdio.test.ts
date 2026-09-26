@@ -44,6 +44,8 @@ function signal(body: string, kind: string, id = ID) {
 
 async function fixture(incomingBody = "A teammate's full message", expiresAt = "2099-01-01T00:00:00.000Z") {
   const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = root;
   const posts: Array<Record<string, any>> = [];
   const observations: Array<Record<string, any>> = [];
   const fileCommands: Array<Record<string, any>> = [];
@@ -194,6 +196,8 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
     closed = true;
     await client.close().catch(() => undefined); await transport.close().catch(() => undefined);
     await new Promise<void>(done => edge.close(() => done()));
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await rm(root, { recursive: true, force: true });
   };
   const call = async (name: string, args: Record<string, unknown> = {}) => {
