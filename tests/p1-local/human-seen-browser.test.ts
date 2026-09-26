@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createClient } from "@supabase/supabase-js";
 import { build } from "esbuild";
 import postgres from "postgres";
-import { findChrome } from "../../site/src/components/app/participant-rail.fixture.js";
+import { findChrome } from "../../site/tests/chrome.js";
 import { seedDogfood } from "../../src/cloud/seed.js";
 import { awaitFunctionRunning } from "../support/edge-readiness.js";
 
