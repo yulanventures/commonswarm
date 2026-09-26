@@ -29,6 +29,17 @@ import { LISTENER_PROMPT_TIMEOUT_MS } from "../../src/listener/types.js";
 
 const repo = resolve(import.meta.dirname, "../..");
 
+test("wake lease release citation points to the call and abort timer", { timeout: 2_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/cli.ts:timeoutMs"];
+  assert.equal(row.citation, "src/cli.ts:5011-5017; src/cloud/wake-lease.ts:60,63");
+  const cli = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
+  const lease = (await readFile(join(repo, "src/cloud/wake-lease.ts"), "utf8")).split("\n");
+  assert.match(cli.slice(5010, 5017).join("\n"), /release_wake_lease[\s\S]*timeoutMs: 2_000/);
+  assert.match(lease[59]!, /timeoutMs\?: number/);
+  assert.match(lease[62]!, /setTimeout\(\(\) => controller\.abort\(\)/);
+});
+
 async function listen(delayMs: () => number) {
   let requests = 0;
   let receivedSecret = false;

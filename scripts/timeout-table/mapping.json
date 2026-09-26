@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:4951-4956; src/cloud/wake-lease.ts:50-53",
+          "citation": "src/cli.ts:5011-5017; src/cloud/wake-lease.ts:60,63",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
