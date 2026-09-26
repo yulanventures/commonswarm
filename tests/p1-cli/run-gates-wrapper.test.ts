@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
 // scripts/run-gates.sh is the one wrapper every local gate run goes through (2026-09-26 ruling after the home
 // deletion). These controls pin what protects the real home: the script never reads $HOME, it runs each gate
-// under a temporary HOME it created under /tmp, it refuses an unknown mode, and no gate can reach docker (any
-// docker CLI call starts OrbStack on this host; HezLead ruling, 2026-09-26).
+// under a temporary HOME it created under /tmp, it refuses an unknown mode, and no gate finds docker through PATH
+// (any docker CLI call starts OrbStack on this host; HezLead ruling, 2026-09-26). A test that runs a docker binary by
+// absolute path is not covered; none does today.
 const script = resolve("scripts/run-gates.sh");
 // This file itself runs under node:test, and a nested `node --test` that inherits NODE_TEST_CONTEXT skips its
 // files and exits 0. The probes below must really run, so the wrapper is spawned without it.
@@ -115,9 +116,11 @@ test("cli-file refuses a site test and an observer test, before running anything
     const worktree = join(scratch, "wt");
     mkdirSync(join(worktree, "site", "src"), { recursive: true });
     const harmless = 'import test from "node:test"; test("harmless", () => {});\n';
-    writeFileSync(join(worktree, "site", "src", "x.observer.test.mjs"), harmless);
+    writeFileSync(join(worktree, "site", "src", "plain.test.mjs"), harmless);
     writeFileSync(join(worktree, "y.observer.test.mjs"), harmless);
-    for (const file of ["site/src/x.observer.test.mjs", "y.observer.test.mjs"]) {
+    mkdirSync(join(worktree, "tests"));
+    symlinkSync(join(worktree, "site", "src", "plain.test.mjs"), join(worktree, "tests", "alias.test.mjs"));
+    for (const file of ["site/src/plain.test.mjs", "y.observer.test.mjs", "tests/alias.test.mjs"]) {
       const log = join(scratch, "gate.log");
       const result = spawnSync("bash", [script, worktree, log, "HEAD", "cli-file", file], { encoding: "utf8", timeout: 30_000, env: wrapperEnv });
       assert.equal(result.status, 3, file + "\n" + result.stdout + result.stderr);

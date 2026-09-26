@@ -23,7 +23,7 @@ case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "refuse: temp home $T is not unde
 [ "$T" != "$real_home" ] || { echo "refuse: temp home equals the passwd home" >&2; exit 3; }
 [ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; rm -rf -- "$T"; exit 3; }
 wt=$(cd "$wt" && pwd -P) || { rm -rf -- "$T"; exit 3; }   # absolute, so the ancestor walk below ends at /
-shims="$T/.gate-bin"; mkdir "$shims" || exit 1
+shims="$T/.gate-bin"; mkdir "$shims" || { rm -rf -- "$T"; exit 1; }
 for b in docker docker-compose orb orbctl supabase; do
   printf '#!/bin/sh\nprintf "%%s %%s\\n" "${0##*/}" "$(printf "%%s" "$*" | tr "\\n" " ")" >> "%s/calls"\necho "run-gates.sh: ${0##*/} is blocked on this host (no docker)" >&2\nexit 1\n' "$shims" > "$shims/$b"
   chmod 755 "$shims/$b"
@@ -66,7 +66,7 @@ case "$mode" in
   server) echo "refuse: no docker on this host; dispatch .github/workflows/server-suite.yml with the exact SHA" | tee -a "$log"; status=3 ;;
   cli-file)
     case "$extra" in /*) f="$extra" ;; *) f="$wt/$extra" ;; esac
-    [ ! -f "$f" ] || f="$(cd "$(dirname "$f")" && pwd -P)/$(basename "$f")"   # physical, like $wt
+    [ ! -f "$f" ] || f=$(realpath "$f")   # every symlink resolved, like $wt, so an alias cannot hide a site file
     if [ ! -f "$f" ]; then echo "refuse: no test file at $f" | tee -a "$log"; status=3
     # No browser on this host: every browser test today is a site file or an *.observer.* file; they run in the
     # workflow (suite site).
