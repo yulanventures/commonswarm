@@ -76,7 +76,7 @@ snapshot() { # every write class: the two cswarm trees in full, plus the top-lev
 before=$(snapshot | sort)
 run() { # run one gate command under the temp home, in its own process group; kill what it leaves behind
   echo "== $1" >> "$log"
-  ( cd "$wt" && exec env -u FORCE_COLOR HOME="$T" PATH="$shims:$PATH" perl -e 'setpgrp(0,0); exec @ARGV' bash -c "$1" ) >> "$log" 2>&1 &
+  ( cd "$wt" && exec env -u FORCE_COLOR HOME="$T" PATH="$shims:$PATH" RUN_GATES_MODE="$mode" perl -e 'setpgrp(0,0); exec @ARGV' bash -c "$1" ) >> "$log" 2>&1 &
   local pgid=$! watcher=
   if [ "${watch_orb:-0}" = 1 ]; then # HezLead's term: if OrbStack appears at any point, the run stops
     ( while kill -0 "$pgid" 2>/dev/null; do

@@ -20,7 +20,7 @@ test("the gate wrapper never reads the caller's HOME and only injects its own", 
   const source = readFileSync(script, "utf8");
   assert.equal((source.match(/\$HOME\b/g) ?? []).length, 0, "the wrapper must not read $HOME");
   assert.equal((source.match(/\bexport HOME=|^HOME=/gm) ?? []).length, 0, "HOME is never assigned");
-  assert.match(source, /env -u FORCE_COLOR HOME="\$T" PATH="\$shims:\$PATH" perl -e 'setpgrp\(0,0\); exec @ARGV' bash -c/, "each gate runs under env HOME=$T in its own process group");
+  assert.match(source, /env -u FORCE_COLOR HOME="\$T" PATH="\$shims:\$PATH" RUN_GATES_MODE="\$mode" perl -e 'setpgrp\(0,0\); exec @ARGV' bash -c/, "each gate runs under env HOME=$T in its own process group, told the wrapper mode");
   assert.match(source, /mktemp -d \/tmp\/lane-home\.XXXXXX/, "the temp home comes from mktemp under /tmp");
   assert.match(source, /rm -rf -- "\$T"/, "only $T is deleted");
   assert.doesNotMatch(source, /"npm --prefix site (run )?test"/, "no site test on this host: it starts a browser per case");
@@ -331,7 +331,12 @@ test("a command line that only mentions OrbStack does not stop a p1-cli run", { 
   }
 });
 
-test("an executable inside an OrbStack.app bundle stops a p1-cli run", { skip: p1CliSkip, timeout: 60_000 }, async (t) => {
+// Its decoy has an argv[0] inside an OrbStack.app bundle, which the REAL probe matches; inside a p1-cli run the
+// enclosing wrapper's watchdog would see it and stop the whole suite (as it did at 09:20Z on 2026-09-26). It runs in
+// cli-file mode, where no watchdog encloses it.
+const insideP1Cli = process.env.RUN_GATES_MODE === "p1-cli"
+  ? "inside a p1-cli run: a real-probe decoy would stop the enclosing suite" : false;
+test("an executable inside an OrbStack.app bundle stops a p1-cli run", { skip: p1CliSkip || insideP1Cli, timeout: 60_000 }, async (t) => {
   const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
   let dummy: ReturnType<typeof spawn> | undefined;
   try {
