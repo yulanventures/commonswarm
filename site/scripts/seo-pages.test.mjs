@@ -15,6 +15,14 @@ const PAGES = [
     schema: "Article",
   },
   {
+    route: "/guides/grok-bot",
+    title: "Connect Grok Bot to CommonSwarm",
+    description:
+      "Connect Grok Bot to a CommonSwarm workspace with an optional wake preview for idle chats.",
+    schema: "Article",
+    date: "2026-09-26",
+  },
+  {
     route: "/orchestration",
     title: "AI Agent Orchestration: A Practical Guide",
     description:
@@ -70,8 +78,8 @@ test("SEO pages emit exact metadata, canonicals, OpenGraph, and structured data"
       assert.equal(json.numberOfItems, 6);
       assert.equal(json.itemListElement.length, 6);
     } else {
-      assert.equal(json.datePublished, "2026-09-02");
-      assert.equal(json.dateModified, "2026-09-02");
+      assert.equal(json.datePublished, page.date ?? "2026-09-02");
+      assert.equal(json.dateModified, page.date ?? "2026-09-02");
     }
 
     assert.doesNotMatch(html, /<!--/, `${page.route} ships an HTML comment`);
@@ -135,6 +143,42 @@ test("the Claude guide derives its release pin and shows the credential-file pat
   assert.doesNotMatch(article, /--agent-token-stdin/);
   assert.match(source, /import \{ INSTALL_CMD_PINNED \} from "\.\.\/\.\.\/lib\/release\.ts"/);
   assert.doesNotMatch(source, /\b0\.\d+\.\d+\b/);
+});
+
+test("the Grok Bot guide names wake's preview and delivery limits", () => {
+  const html = builtHtml("/guides/grok-bot");
+  const article = attribute(html, /(<article class="seo-page">[\s\S]+<\/article>)/);
+
+  assert.match(article, /Wake is a preview\./);
+  assert.match(article, /A gateway reply is not delivery\s+confirmation\./);
+  assert.match(article, /The receipt in CommonSwarm is what counts\./);
+  assert.match(article, /wake_verified: true/);
+  assert.match(article, /End the Bot turn and wait until the chat is idle\./);
+  assert.match(article, /Let it do\s+that, then check the status:/);
+  assert.match(
+    article,
+    /cswarm receive configure --mode wake --provider grok-bot\s+\\\s+--profile\s+&lt;absolute-path-to-saved-profile&gt;\s+\\\s+--host-session-id\s+&lt;Bot-agent-UUID&gt;\s+\\\s+--grok-bot-agent-id\s+&lt;Bot-agent-UUID&gt;/,
+  );
+  for (const command of ["test", "idle", "status"]) {
+    assert.match(
+      article,
+      new RegExp(
+        `cswarm receive ${command} --profile\\s+&lt;absolute-path-to-saved-profile&gt;\\s+\\\\\\s+--host-session-id\\s+&lt;Bot-agent-UUID&gt;`,
+      ),
+    );
+  }
+  assert.match(article, /The gateway prompt tells the woken Bot to run\s+<code>cswarm receive confirm<\/code>/);
+  assert.match(
+    article,
+    /the optional\s+wake receiver,\s+<code>cswarm receive serve<\/code>, runs on the Bot(?:&#39;|')s computer/,
+  );
+  assert.doesNotMatch(article, /runs your agent on your machine/);
+  const testAt = article.indexOf("cswarm receive test");
+  const idleAt = article.indexOf("cswarm receive idle");
+  const confirmAt = article.indexOf("cswarm receive confirm");
+  const statusAt = article.indexOf("cswarm receive status");
+  assert.ok(testAt < idleAt && idleAt < confirmAt && confirmAt < statusAt);
+  assert.match(html, /href="\/guides\/grok-bot"[^>]*>\s*Grok Bot\s*<\/a>/);
 });
 
 test("the generated sitemap includes every SEO route", () => {
