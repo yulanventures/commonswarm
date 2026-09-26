@@ -305,6 +305,17 @@ test("host-id publication falls back on unsupported links and accepts retransmit
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+function assertPidStartMatchesSpawn(parsedStartMs: number | null, spawnTimeMs: number): void {
+  assert.ok(parsedStartMs !== null && Math.abs(parsedStartMs - spawnTimeMs) < 2_000,
+    "parsed PID start must be within two seconds of the child's real spawn");
+}
+
+test("PID start-time control rejects a self-consistent but wrong ps value", { timeout: 1_000 }, () => {
+  const spawnTimeMs = Date.now();
+  assert.doesNotThrow(() => assertPidStartMatchesSpawn(spawnTimeMs - 500, spawnTimeMs));
+  assert.throws(() => assertPidStartMatchesSpawn(spawnTimeMs - 10_000, spawnTimeMs), /real spawn/);
+});
+
 test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, async (t) => {
   const spawnTimeMs = Date.now();
   const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
@@ -318,7 +329,7 @@ test("pid-reuse probe reaches ps for another live process", { timeout: 8_000 }, 
       if ((error as NodeJS.ErrnoException).code === "EPERM") { t.skip("sandbox denies /bin/ps"); return; }
       throw error;
     }
-    assert.ok(Math.abs(pidStartMs(child.pid)! - spawnTimeMs) < 2_000);
+    assertPidStartMatchesSpawn(pidStartMs(child.pid), spawnTimeMs);
   } finally {
     child.kill("SIGKILL");
     await new Promise<void>(resolve => child.once("close", () => resolve()));
