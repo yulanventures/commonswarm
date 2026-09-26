@@ -198,6 +198,28 @@ function directoryModeError(dir: string): McpConnectError {
   return new McpConnectError("connect_directory_mode", `The connect directory at ${dir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(dir)}, then rerun the same command.`);
 }
 
+async function checkAttemptMarkerMode(markerPath: string): Promise<void> {
+  const dir = dirname(markerPath);
+  const directory = await lstat(dir).catch(() => null);
+  if (directory?.isDirectory() && !directory.isSymbolicLink() &&
+      (typeof process.getuid !== "function" || directory.uid === process.getuid()) && (directory.mode & 0o777) !== 0o700) {
+    throw directoryModeError(dir);
+  }
+  const info = await lstat(markerPath).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (info?.isFile() && !info.isSymbolicLink() &&
+      (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
+    throw new McpConnectError("connect_marker_mode", `The connect attempt marker at ${markerPath} needs mode 0600. Run chmod 600 ${quoteAgentArgument(markerPath)}, then rerun the same command.`);
+  }
+}
+
+export async function classifyAttemptMarkerReadFailure(markerPath: string): Promise<never> {
+  await checkAttemptMarkerMode(markerPath);
+  throw new McpConnectError("connect_marker_unreadable", `The connect attempt marker at ${markerPath} cannot be read safely. Inspect that file before retrying the same command.`);
+}
+
 async function privateConnectLocation(path: string): Promise<string> {
   try { return await assertPrivateLocation(path); }
   catch (error) {
@@ -625,6 +647,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
       if (info?.isFile() && !info.isSymbolicLink() && (info.mode & 0o777) !== 0o600) {
         throw new McpConnectError("connect_credential_mode", `The credential at ${credential} needs mode 0600. Run chmod 600 ${quoteAgentArgument(credential)}, then rerun the same command.`);
       }
+      await checkAttemptMarkerMode(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker));
     }
     // A pending record is the sole exception for an orphan credential.
     if (!pending && await pathExists(path)) {
@@ -685,7 +708,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           const restored: AgentProfile = { version: 1, url: complete.url, anon_key: complete.anon_key,
             workspace_id: complete.workspace_id, principal_id: orphan.principalId,
             credential_file: join(profileDir, CONNECT_PROFILE_FILES.credential) };
-          await writeSecureJsonFile(join(profileDir, CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: complete.attemptId }));
+          const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
+          await checkAttemptMarkerMode(markerPath);
+          await writeSecureJsonFile(markerPath, JSON.stringify({ attemptId: complete.attemptId }));
           if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
           else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
           return connectedResult(path, restored);
@@ -702,18 +727,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           const profile = await completedProfileAt(path);
           if (!profile) throw new Error("profile is incomplete");
           const markerPath = join(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
-          let marker: string | null;
+          let marker: string | null = null;
           try { marker = await readSecureJsonFileIfPresent(markerPath, 4096); }
-          catch {
-            const wrongDirectory = await wrongModeAncestor(profileDir).catch(() => null);
-            if (wrongDirectory) throw directoryModeError(wrongDirectory);
-            const info = await lstat(markerPath).catch(() => null);
-            if (info?.isFile() && !info.isSymbolicLink() &&
-                (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 0o777) !== 0o600) {
-              throw new McpConnectError("connect_marker_mode", `The connect attempt marker at ${markerPath} needs mode 0600. Run chmod 600 ${quoteAgentArgument(markerPath)}, then rerun the same command.`);
-            }
-            throw new McpConnectError("connect_marker_unreadable", `The connect attempt marker at ${markerPath} cannot be read safely. Inspect that file before retrying the same command.`);
-          }
+          catch { await classifyAttemptMarkerReadFailure(markerPath); }
           let markedAttempt: string | undefined;
           try { markedAttempt = record(JSON.parse(marker ?? "null"))?.attemptId as string | undefined; } catch { /* Refuse an invalid marker. */ }
           if (markedAttempt !== current.attemptId) {

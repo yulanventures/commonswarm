@@ -12,7 +12,7 @@ import { test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
-import { classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
+import { classifyAttemptMarkerReadFailure, classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { Arguments } from "../../src/cli.js";
@@ -290,6 +290,81 @@ test("Fold 15 wrong-mode attempt marker gives an exact repair and same-command r
   } finally { await f.close(); }
 });
 
+test("Fold 16 pending without profile classifies marker mode before register", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "pending-marker-mode", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    const marker = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
+    const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+    const pendingBytes = await readFile(pending);
+    await writeFile(marker, JSON.stringify({ attemptId: JSON.parse(pendingBytes.toString()).attemptId }), { mode: 0o644 });
+    let posts = 0;
+    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_mode");
+      assert.ok(String(error).includes(`chmod 600 '${marker}'`));
+      assert.match(String(error), /rerun the same command/);
+      assert.doesNotMatch(String(error), /register outcome is unknown|credential file must be mode/);
+      return true;
+    });
+    assert.equal(posts, 0);
+    assert.equal(existsSync(path), false);
+    assert.deepEqual(await readFile(pending), pendingBytes);
+    await chmod(marker, 0o600);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+  } finally { await f.close(); }
+});
+
+test("Fold 16 completion rebuild classifies marker mode before rewriting it", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "rebuild-marker-mode", "profile.json");
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+    const marker = join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker);
+    await unlink(path);
+    await chmod(marker, 0o644);
+    const markerBytes = await readFile(marker);
+    let posts = 0;
+    const noPost: typeof fetch = async () => { posts++; throw new Error("unexpected POST"); };
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost }), error => {
+      assert.equal((error as { code: string }).code, "connect_marker_mode");
+      assert.ok(String(error).includes(`chmod 600 '${marker}'`));
+      assert.match(String(error), /rerun the same command/);
+      assert.doesNotMatch(String(error), /credential file must be mode/);
+      return true;
+    });
+    assert.equal(posts, 0);
+    assert.equal(existsSync(path), false);
+    assert.deepEqual(await readFile(marker), markerBytes);
+    await chmod(marker, 0o600);
+    await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: noPost });
+    assert.equal(posts, 0);
+    assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
+  } finally { await f.close(); }
+});
+
+test("Fold 16 marker read failure names a wrong-mode directory before an unsafe marker", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const dir = join(f.root, "marker-directory-mode");
+    const marker = join(dir, CONNECT_PROFILE_FILES.attemptMarker);
+    await mkdir(dir, { mode: 0o700 });
+    await symlink(join(f.root, "elsewhere"), marker);
+    await chmod(dir, 0o755);
+    await assert.rejects(classifyAttemptMarkerReadFailure(marker), error => {
+      assert.equal((error as { code: string }).code, "connect_directory_mode");
+      assert.ok(String(error).includes(`chmod 700 '${dir}'`));
+      assert.match(String(error), /rerun the same command/);
+      return true;
+    });
+    await chmod(dir, 0o700);
+    await assert.rejects(classifyAttemptMarkerReadFailure(marker), { code: "connect_marker_unreadable" });
+  } finally { await f.close(); }
+});
+
 test("Fold 15 unsafe attempt marker gets a typed file-specific refusal before POST", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
@@ -394,15 +469,15 @@ test("Fold 14 setup and connect serialize the pending check with the profile wri
         agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" } };
     let connectWrite: Promise<void> | undefined;
     let pendingDuringWrite = false;
-    await saveAgentProfile(path, connection, undefined, "setup-session", true, false, undefined,
-      async (credential, serialized) => {
+    await saveAgentProfile(path, connection, undefined, "setup-session", false, false, undefined,
+      undefined, undefined, async (credential, serialized) => {
         connectWrite = withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
           await writeSecureJsonFile(pending, JSON.stringify({ attemptId: "11111111-1111-4111-8111-111111111111",
             url: TARGET.url, name: "MCP agent", codeHash: "a".repeat(64), createdAt: new Date().toISOString() }));
         });
         await new Promise(resolve => setTimeout(resolve, 100));
         pendingDuringWrite = existsSync(pending);
-        await writeSecureJsonFileExclusive(credential, serialized);
+        await writeSecureJsonFile(credential, serialized);
       });
     await connectWrite;
     assert.equal(pendingDuringWrite, false, "connect cannot write pending during setup's locked write");
