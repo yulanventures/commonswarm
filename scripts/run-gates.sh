@@ -43,14 +43,24 @@ orb_running() {
   if pgrep -f "OrbStack Helper" >/dev/null 2>&1 || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
   then echo yes; else echo no; fi; }
 # Live runs of this wrapper other than this run. An ancestor wrapper is not "another run": this run was started
-# inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run.
+# inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run, and
+# so is every process that descends from it (for example its OrbStack watchdog, a subshell with the same command line).
+wrapper_pattern='^(/bin/)?bash [^ ]*run-gates[^ /]*\.sh '
 other_runs() {
-  local anc=" $$ " a=$$ p q
-  while [ "${a:-1}" -gt 1 ]; do a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' '); anc="$anc${a:-1} "; done
-  for p in $(pgrep -f '^(/bin/)?bash [^ ]*run-gates[^ /]*\.sh ' 2>/dev/null); do  # a wrapper process, not a mention
+  local anc=" $$ " wrap_anc=" " a=$$ p q skip
+  while [ "${a:-1}" -gt 1 ]; do
+    a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' '); anc="$anc${a:-1} "
+    ! ps -o command= -p "${a:-1}" 2>/dev/null | grep -qE "$wrapper_pattern" || wrap_anc="$wrap_anc$a "
+  done
+  for p in $(pgrep -f "$wrapper_pattern" 2>/dev/null); do  # a wrapper process, not a mention
     case "$anc" in *" $p "*) continue ;; esac
-    q=$p; while [ "${q:-1}" -gt 1 ] && [ "$q" != "$$" ]; do q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' '); done
-    [ "$q" = "$$" ] && continue          # a subshell of this run has the same command line
+    q=$p; skip=
+    while [ "${q:-1}" -gt 1 ]; do
+      [ "$q" != "$$" ] || { skip=1; break; }                     # a subshell of this run
+      case "$wrap_anc" in *" $q "*) skip=1; break ;; esac        # part of an ancestor wrapper's run
+      q=$(ps -o ppid= -p "$q" 2>/dev/null | tr -d ' ')
+    done
+    [ -n "$skip" ] && continue
     kill -0 "$p" 2>/dev/null && printf '%s ' "$p"; done; }
 orb_before=$(orb_running)
 snapshot() { # every write class: the two cswarm trees in full, plus the top-level names under the home, .config and .claude
