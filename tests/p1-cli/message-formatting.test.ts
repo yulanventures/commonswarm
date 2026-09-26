@@ -786,11 +786,11 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
   );
 
   // Command acceptance verification through CLI: unallowed body flags are rejected with unknown option error
-  const unallowedNoteRes = await runCli(["note", "positional text", "--body-shadow", "val"]);
+  const unallowedNoteRes = await runCli(["note", "positional text", "--body-shadow", "val", "--url", "http://127.0.0.1:9"]);
   assert.equal(unallowedNoteRes.code, 1);
   assert.match(unallowedNoteRes.stderr, /unknown option: --body-shadow/);
 
-  const unallowedReplyRes = await runCli(["reply", SIGNAL_ID, "positional text", "--body-shadow", "val"]);
+  const unallowedReplyRes = await runCli(["reply", SIGNAL_ID, "positional text", "--body-shadow", "val", "--url", "http://127.0.0.1:9"]);
   assert.equal(unallowedReplyRes.code, 1);
   assert.match(unallowedReplyRes.stderr, /unknown option: --body-shadow/);
 
