@@ -4,7 +4,7 @@
  * ★ Named by `npm test`; it needs no network or database.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, readlink, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,6 +39,7 @@ import {
   type ArrivalCursorStore,
 } from "../../src/cloud/arrival-watch.js";
 import { cloudTarget } from "../../src/cloud/config.js";
+import { cleanupDeadOwnerTemps } from "../../src/cloud/storage.js";
 import { nextIdlePollMs } from "../../src/cloud/idle-poll.js";
 import {
   SignalHttpError,
@@ -873,9 +874,61 @@ test("a future-dated incomplete watcher lock obeys one deadline", { timeout: 7_0
     const future = new Date(Date.now() + 60_000);
     await utimes(path, future, future);
     const start = Date.now();
-    await assert.rejects(acquireArrivalWatchLock(path), /could not be acquired/);
+    await assert.rejects(acquireArrivalWatchLock(path), /timed out waiting for the watch lock.*rm --/);
     assert.ok(Date.now() - start < 6_000);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("seat and legacy live owners survive an aged record", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-aged-live-"));
+  const clock = Date.now;
+  try {
+    for (const path of [arrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root),
+      legacyArrivalWatchLockPath(CLOUD, WORKSPACE, AGENT, root)]) {
+      await acquireArrivalWatchLock(path);
+      const before = await readFile(path, "utf8");
+      Date.now = () => clock() + 61_000;
+      await assert.rejects(acquireArrivalWatchLock(path), ArrivalWatchAlreadyRunningError);
+      Date.now = clock;
+      assert.equal(await readFile(path, "utf8"), before);
+      await releaseArrivalWatchLock(path);
+    }
+  } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("dead symlink owner is taken over without deleting its target before the move", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-watch-symlink-"));
+  const path = join(root, "watch.lock");
+  let child: ReturnType<typeof spawn> | null = null;
+  try {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
+      `import { acquireArrivalWatchLock } from './src/cloud/arrival-watch.ts';
+       await acquireArrivalWatchLock(process.argv[1], process.pid, undefined, {
+         publishLink: async () => { throw Object.assign(new Error('unsupported'), { code: 'EPERM' }); },
+       });
+       process.stdout.write('ready\\n'); await new Promise(() => {});`, path],
+      { cwd: process.cwd(), stdio: ["ignore", "pipe", "pipe"] });
+    await new Promise<void>((resolve, reject) => {
+      child!.stdout!.once("data", () => resolve());
+      child!.once("error", reject);
+      child!.once("close", code => reject(new Error(`publisher exited: ${code}`)));
+    });
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 1);
+    const target = await readlink(path);
+    child.kill("SIGKILL");
+    await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    await cleanupDeadOwnerTemps(root, "watch.lock");
+    assert.match(await readFile(target, "utf8"), /"owner_id"/);
+    assert.equal(await acquireArrivalWatchLock(path), true);
+    assert.equal((await readdir(root)).filter(name => name.endsWith(".tmp")).length, 0);
+    await releaseArrivalWatchLock(path);
+  } finally {
+    if (child?.exitCode === null && child?.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise<void>(resolve => child!.once("close", () => resolve()));
+    }
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a killed watcher publisher's private temp is removed on the next start", { timeout: 8_000 }, async () => {
@@ -908,7 +961,9 @@ test("a killed watcher publisher's private temp is removed on the next start", {
 
 test("signal stop names the current inbox surface", { timeout: 2_000 }, () => {
   const options = { url: "http://127.0.0.1:1" };
-  assert.match(notifySignalStopSentence("SIGTERM", options, "this watcher"), /nothing is watching this inbox now/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "released"), /nothing is watching this inbox now/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "last-known"), /another surface may have taken over since/);
+  assert.match(notifySignalStopSentence("SIGTERM", options, "claim-unknown"), /claim result is unknown/);
   assert.match(notifySignalStopSentence("SIGTERM", options, "h0_poll"), /H0 poll holds this inbox now/);
   assert.doesNotMatch(notifySignalStopSentence("SIGTERM", options, "watcher"), /nothing is watching/);
   assert.match(notifySignalStopSentence("SIGTERM", options, "watcher"), /another watcher holds/);

@@ -4800,15 +4800,19 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   let stopSignal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES | null = null;
   let generation: number | null = null;
   let watchFailure: unknown = null;
+  let leaseStopState: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" = "unclaimed";
+  let stopSentencePrinted = false;
   const stopInt = () => { stopSignal = "SIGINT"; controller.abort(); };
   const stopTerm = () => { stopSignal = "SIGTERM"; controller.abort(); };
   const finishSignalStop = () => {
-    if (stopSignal === null) return;
-    const holder = watchFailure instanceof WakeLeaseLostError ? watchFailure.surface
-      : generation !== null ? "this watcher" : "unclaimed";
-    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, holder)}\n`);
+    if (stopSignal === null || stopSentencePrinted) return;
+    // Once claimed, the release in finally supplies the last known lease state.
+    if (generation !== null && !leaseReleaseAttempted) return;
+    stopSentencePrinted = true;
+    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, leaseStopState)}\n`);
     process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
   };
+  let leaseReleaseAttempted = false;
   process.on("SIGINT", stopInt);
   process.on("SIGTERM", stopTerm);
   try {
@@ -4880,6 +4884,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     let claimFailures = 0;
     for (;;) {
       try {
+        leaseStopState = "claim-unknown";
         claimed = await leaseRequest({ kind: "claim_wake_lease", watcher_id: watcherId,
           host_label: hostLabel, host_id: hostId, take_over: args.has("take-over") });
         break;
@@ -4889,6 +4894,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
           return;
         }
         if (!(error instanceof WakeLeaseTransientError)) throw error;
+        leaseStopState = "unclaimed";
         if (claimFailures === 0) process.stderr.write("cswarm: wake lease claim is unavailable; retrying.\n");
         claimFailures += 1;
         await new Promise<void>((resolve) => {
@@ -4903,6 +4909,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       }
     }
     generation = Number(claimed.generation);
+    leaseStopState = "last-known";
     if (!Number.isSafeInteger(generation) || generation < 1) {
       throw new Error("wake lease claim returned no generation");
     }
@@ -4919,7 +4926,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         : undefined,
       renew: async () => { await leaseRequest({ kind: "renew_wake_lease",
         watcher_id: watcherId, generation }); },
-      lost: (error) => { watchFailure = error; controller.abort(); },
+      lost: (error) => { watchFailure = error; if (error instanceof WakeLeaseLostError) leaseStopState = error.surface; controller.abort(); },
       failed: (error) => { watchFailure = error; controller.abort(); },
     });
     const retryNotices = createArrivalRetryNoticePolicy();
@@ -4994,7 +5001,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
         }
       },
     });
-    if (watchFailure !== null) throw watchFailure;
+    if (watchFailure !== null && stopSignal === null) throw watchFailure;
     if (result.reason === "error") {
       throw result.error ?? new Error("arrival watch stopped");
     }
@@ -5010,14 +5017,20 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     await wake.close();
     if (generation !== null && (cleanStop || stopSignal !== null)) {
       try {
-        await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
+        const released = await sendWakeLeaseCommand({ target: cloud, workspaceId: selected.selectedWorkspace,
           token: leaseBearer,
           command: { kind: "release_wake_lease", watcher_id: watcherId, generation },
           restartCommand: notifyRefusalRestartCommand(restartOptions),
           sessionContextPath: suppliedContextPath, remedyCommand, timeoutMs: 2_000,
           contextSource: refusedContextSource, fallback: remedyFallback, fetcher: selected.fetcher });
-      } catch { /* Best effort: the lease expires if release cannot reach the edge. */ }
+        if (released.released === true) leaseStopState = "released";
+      } catch (error) {
+        if (error instanceof WakeLeaseLostError) leaseStopState = error.surface;
+        // A transient failure leaves the last observed holder as our best evidence.
+      }
     }
+    leaseReleaseAttempted = true;
+    finishSignalStop();
     await releaseArrivalWatchSeatLocks(locks);
   }
   } finally {

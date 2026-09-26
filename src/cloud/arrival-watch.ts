@@ -20,10 +20,11 @@ import {
 import {
   ensureSecureStateDirectory,
   cleanupDeadOwnerTemps,
+  fileLockTimeoutSentence,
   HOST_ID_LOCK_INCOMPLETE_GRACE_MS,
   publishCompleteOwnerFile,
   readSecureJsonFile,
-  removePublishedOwnerFile,
+  removeObservedOwnerFile,
   withFileLock,
   writeSecureJsonFile,
 } from "./storage.js";
@@ -89,8 +90,12 @@ export function notifyRefusalRestartCommand(options: NotifyRestartOptions): stri
 }
 
 export function notifySignalStopSentence(signal: keyof typeof NOTIFY_SIGNAL_EXIT_CODES,
-  options: NotifyRestartOptions, holder: "this watcher" | "watcher" | "h0_poll" | "unclaimed" = "unclaimed"): string {
-  const state = { "this watcher": "nothing is watching this inbox now", watcher: "another watcher holds this inbox now", h0_poll: "H0 poll holds this inbox now", unclaimed: "this watcher had not claimed the inbox lease" }[holder];
+  options: NotifyRestartOptions, holder: "released" | "last-known" | "watcher" | "h0_poll" | "unclaimed" | "claim-unknown" = "unclaimed"): string {
+  const state = { released: "this watcher's lease was released; nothing is watching this inbox now",
+    "last-known": "this watcher held the lease at its last renewal; another surface may have taken over since",
+    watcher: "another watcher holds this inbox now", h0_poll: "H0 poll holds this inbox now",
+    unclaimed: "this watcher had not claimed the inbox lease",
+    "claim-unknown": "this watcher's claim result is unknown; any lease it took expires within 3 minutes" }[holder];
   const prose = `inbox --notify stopped because of ${signal} and ${state}; restart it under the session's Monitor`;
   return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin")
     ? `${prose} the same way it was started, with the agent token on stdin.`
@@ -384,7 +389,8 @@ export async function acquireArrivalWatchLock(
   path: string,
   pid: number = process.pid,
   watcherId?: string,
-  options: { onBeforePublish?: () => Promise<void>; onBeforeStaleMove?: () => Promise<void> } = {},
+  options: { publishLink?: typeof link; onBeforePublish?: () => Promise<void>;
+    onBeforeStaleMove?: () => Promise<void> } = {},
 ): Promise<boolean> {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new Error("arrival watch lock pid must be a positive integer");
@@ -414,7 +420,10 @@ export async function acquireArrivalWatchLock(
         }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        continue;
+        if (!await lstat(path).catch(() => null)) {
+          await delay(25);
+          continue;
+        }
       }
       if (existing !== null && pidIsAlive(existing.pid)) {
         throw new ArrivalWatchAlreadyRunningError(existing.pid);
@@ -428,25 +437,11 @@ export async function acquireArrivalWatchLock(
         }
       }
       await options.onBeforeStaleMove?.();
-      const moved = `${path}.${process.pid}.${randomUUID().replaceAll("-", "")}.stale`;
-      try { await rename(path, moved); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      const movedRaw = await readFile(moved, "utf8").catch(() => null);
-      if (movedRaw !== observedRaw) {
-        await link(moved, path).catch(error => {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        });
-        await unlink(moved).catch(() => undefined);
-        continue;
-      }
-      await unlink(moved);
+      if (!await removeObservedOwnerFile(path, observedRaw)) continue;
       await cleanupDeadOwnerTemps(dirname(path), basename(path));
       if (existing !== null) replacedDeadPredecessor = true;
     }
-    throw new Error(`arrival watch lock could not be acquired at ${path}; retry when its owner exits`);
+    throw new Error(fileLockTimeoutSentence(basename(path, ".lock"), path));
   }, { stalePolicy: "host-id", timeoutMs: Math.max(0, deadline - Date.now()) });
 }
 
@@ -499,7 +494,7 @@ export async function releaseArrivalWatchLock(
     const raw = await readFile(path, "utf8");
     const existing = parseWatchLock(raw);
     if (existing === null || existing.pid !== pid) return;
-    await removePublishedOwnerFile(path);
+    await removeObservedOwnerFile(path, raw);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;

@@ -1424,7 +1424,7 @@ for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES
       assert.equal(await exit, expectedCode, stderr);
       assert.equal(stderr.trim(), `cswarm: ${notifySignalStopSentence(signalName, {
         arguments: ["--agent-token-file", credential, "--url", url, "--anon-key", "anon-signal", "--workspace-id", WORKSPACE],
-      })}`);
+      }, "last-known")}`);
       assert.ok(stderr.includes(NOTIFY_RESTART_COMMAND));
       assert.doesNotMatch(stderr, /now\. Restart/, "the signal message is one sentence");
     } finally {
