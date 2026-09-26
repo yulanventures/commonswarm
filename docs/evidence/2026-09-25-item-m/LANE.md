@@ -565,4 +565,4 @@ Each new test has a timeout. The table also checks absent and ok as positive con
 
 - The lead owns the full pure and CLI suites, edge check, release bundle, site build, and server gates at this fold's tip. No migration was applied.
 - Owner and body faults in the table are injected; an external filesystem and real workspace were not tested. No production host was contacted.
-- The focused command exited. Process-list inspection is reported separately after the final check.
+- The focused command exited. `pgrep` could not inspect this sandbox's process list (`sysmond service not found`); no task child was intentionally left running.
