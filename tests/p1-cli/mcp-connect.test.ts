@@ -14,6 +14,8 @@ import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
 import { classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
+import { setupAgent } from "../../src/cloud/agent-setup.js";
+import { Arguments } from "../../src/cli.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
 import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
@@ -62,9 +64,9 @@ test("Fold 9 unsupported hard links use exclusive final creation and recover a w
       saveProfile: async () => { throw new Error("interrupted save"); } }), { code: "register_outcome_unknown" });
     const refusedLink = async () => { throw Object.assign(new Error("hard links unavailable"), { code: "EPERM" }); };
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher,
-      saveProfile: (file, connection, workspace, session, exclusive, orphan, principal) =>
+      saveProfile: (file, connection, workspace, session, exclusive, orphan, principal, _write, attemptId) =>
         saveAgentProfile(file, connection, workspace, session, exclusive, orphan, principal,
-          (credential, serialized) => writeSecureJsonFileExclusive(credential, serialized, undefined, refusedLink)),
+          (credential, serialized) => writeSecureJsonFileExclusive(credential, serialized, undefined, refusedLink), attemptId),
     });
     assert.equal(posts, 2);
     assert.equal(attempts.size, 1, "retry reuses one seat attempt");
@@ -216,15 +218,15 @@ test("Fold 11 setup-bound profile survives a same-code connect", { timeout: 1000
   } finally { await f.close(); }
 });
 
-test("Fold 12 pending resume keeps a setup-bound working profile", { timeout: 10000 }, async () => {
+test("Fold 12 pending resume keeps a host-bound working profile from this attempt", { timeout: 10000 }, async () => {
   const f = await fixture();
   try {
     const path = join(f.root, "pending-bound", "profile.json");
     await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
     const original = await readAgentProfile(path);
-    await saveAgentProfile(path, { version: 1, url: original.url, anon_key: original.anon_key,
-      workspace_id: original.workspace_id, principal_id: original.principal_id,
-      credential: JSON.parse(await readFile(original.credential_file, "utf8")) }, undefined, "setup-session");
+    const connectRecord = JSON.parse(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.complete), "utf8"));
+    assert.equal(original.connect_attempt_id, connectRecord.attemptId);
+    await writeSecureJsonFile(path, JSON.stringify({ ...original, host_session_id: "setup-session" }));
     const boundBytes = await readFile(path);
     const complete = join(dirname(path), "connect-complete.json");
     const pending = join(dirname(path), "connect-pending.json");
@@ -239,6 +241,80 @@ test("Fold 12 pending resume keeps a setup-bound working profile", { timeout: 10
     assert.equal(existsSync(pending), false);
     assert.deepEqual(await readFile(path), boundBytes);
     assert.doesNotMatch(renderMcpConnect(result), /damaged|mv /);
+    const claude = result.install.split("\n")[0]!;
+    const printed = claude.match(/-- cswarm 'mcp' '--profile' '([^']+)' '--host-session-id' '([^']+)'$/);
+    assert.ok(printed, "host-bound Claude install line includes the session option");
+    const args = new Arguments(["mcp", "--profile", printed[1]!, "--host-session-id", printed[2]!]);
+    args.assertShape(["profile", "host-session-id"], 1);
+    assert.equal((await readAgentProfile(args.required("profile"), args.optional("host-session-id"))).principal_id, PRINCIPAL);
+    const codexArgs = JSON.parse(result.install.match(/args = (\[[^\n]+\])/)![1]!) as string[];
+    const codex = new Arguments(codexArgs);
+    codex.assertShape(["profile", "host-session-id"], 1);
+    assert.equal((await readAgentProfile(codex.required("profile"), codex.optional("host-session-id"))).principal_id, PRINCIPAL);
+  } finally { await f.close(); }
+});
+
+test("Fold 13 pending profile must belong to this connect attempt", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    for (const kind of ["another-agent", "another-attempt"] as const) {
+      const path = join(f.root, kind, "profile.json");
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+      const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+      const pendingBytes = await readFile(pending);
+      const attemptId = JSON.parse(pendingBytes.toString()).attemptId;
+      const principal = kind === "another-agent" ? "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" : PRINCIPAL;
+      const credential = join(dirname(path), CONNECT_PROFILE_FILES.credential);
+      await writeSecureJsonFile(credential, JSON.stringify({ message: AGENT_CREDENTIAL_MESSAGE_D088, status: "accepted",
+        principal_id: principal, run_id: RUN, token_id: TOKEN_ID, agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" }));
+      await writeSecureJsonFile(path, JSON.stringify({ version: 1, url: TARGET.url, anon_key: TARGET.anonKey,
+        workspace_id: WS, principal_id: principal, credential_file: credential,
+        ...(kind === "another-attempt" ? { connect_attempt_id: "11111111-1111-4111-8111-111111111111" } : {}) }));
+      assert.notEqual(JSON.parse(await readFile(path, "utf8")).connect_attempt_id, attemptId);
+      const profileBytes = await readFile(path);
+      const credentialBytes = await readFile(credential);
+      let posts = 0;
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+        fetcher: async () => { posts++; throw new Error("unexpected POST"); } }), error => {
+        assert.equal((error as { code: string }).code, "connect_profile_other_attempt");
+        assert.ok(String(error).includes(path));
+        assert.ok(String(error).includes(pending));
+        assert.match(String(error), /new --profile path/);
+        return true;
+      });
+      assert.equal(posts, 0);
+      assert.deepEqual(await readFile(path), profileBytes);
+      assert.deepEqual(await readFile(credential), credentialBytes);
+      assert.deepEqual(await readFile(pending), pendingBytes);
+      assert.equal(existsSync(join(dirname(path), CONNECT_PROFILE_FILES.complete)), false);
+    }
+  } finally { await f.close(); }
+});
+
+test("Fold 13 setup refuses a directory with a connect pending record before network", { timeout: 10000 }, async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.root, "setup-pending", "profile.json");
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
+      fetcher: async () => { throw new Error("lost response"); } }), { code: "register_outcome_unknown" });
+    const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+    const connectionFile = join(f.root, "connection.json");
+    await writeFile(connectionFile, JSON.stringify({ version: 1, url: TARGET.url, anon_key: TARGET.anonKey,
+      workspace_id: WS, principal_id: PRINCIPAL, credential: { message: AGENT_CREDENTIAL_MESSAGE_D088,
+        status: "accepted", principal_id: PRINCIPAL, run_id: RUN, token_id: TOKEN_ID,
+        agent_token: TOKEN, expires_at: "2099-01-01T00:00:00Z" } }), { mode: 0o600 });
+    const pendingBytes = await readFile(pending);
+    let requests = 0;
+    await assert.rejects(setupAgent({ connectionFile, profilePath: path, hostSessionId: "setup-session",
+      fetcher: async () => { requests++; throw new Error("unexpected request"); } }), error => {
+      assert.equal((error as { code: string }).code, "setup_connect_pending");
+      assert.ok(String(error).includes(pending));
+      return true;
+    });
+    assert.equal(requests, 0);
+    assert.deepEqual(await readFile(pending), pendingBytes);
+    assert.equal(existsSync(path), false);
   } finally { await f.close(); }
 });
 
@@ -290,10 +366,12 @@ test("Fold 12 clear names a kept unvalidated profile beside an empty credential 
     await writeFile(credential, "", { mode: 0o600 });
     await writeFile(path, "{", { mode: 0o600 });
     const profileBytes = await readFile(path);
-    const cleared = await cli(["mcp", "connect", "--clear-pending", "--profile", path, "--url", TARGET.url], { HOME: f.root });
+    const cleared = await cli(["mcp", "connect", "--clear-pending", "--profile", "~/empty-claim-and-profile/agent.json", "--url", TARGET.url], { HOME: f.root });
     assert.equal(cleared.code, 0, cleared.stderr);
     assert.match(cleared.stdout, /empty claim file at credential\.json/);
     assert.match(cleared.stdout, /profile at .*agent\.json that could not be validated/);
+    assert.ok(cleared.stdout.includes(`profile at ${path} that could not be validated`));
+    assert.doesNotMatch(cleared.stdout, /profile at ~\//);
     assert.match(cleared.stdout, /both files were kept/);
     assert.equal((await readFile(credential)).length, 0);
     assert.deepEqual(await readFile(path), profileBytes);
