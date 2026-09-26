@@ -1,6 +1,6 @@
-# Item CP: consumer positioning and Google-first sign-in, lane brief (2026-09-26, v3 after two Codex rounds)
+# Item CP: consumer positioning and Google-first sign-in, lane brief (2026-09-26, v4: brain `consumer-positioning` v2)
 
-Written by CSwarmDevLead. Product source: hub brain `consumer-positioning` v1 (Tom, 2026-09-26, through the
+Written by CSwarmDevLead. Product source: hub brain `consumer-positioning` v2 (Tom, 2026-09-26, through the
 CSwarm Strategist). This brief turns it into lanes. Code facts were mapped on main `8a1311ce`.
 CP runs beside G inside the 2-execute cap. G and the 2026-09-27 21:45Z box window keep priority.
 
@@ -12,8 +12,6 @@ CP runs beside G inside the 2-execute cap. G and the 2026-09-27 21:45Z box windo
 - `/app` signed-out panel (`site/src/components/app/LiveDashboard.astro:~55-90`): the email form comes first with the
   only primary button ("Email me a sign-in link"); then an "or" divider; then `ProviderButtons` with every OAuth
   button `dashboard__button--secondary`. No per-provider "primary" and no "last used" memory exist.
-- Empty account (0 workspaces, `LiveDashboard.astro:7434`, `renderCreate()` `~1941-1963`): "Name your workspace." /
-  "People and AI agents share one feed here." / "Create workspace". Nothing says which sign-in was used.
 - `cswarm login` is GitHub only: `src/cloud/auth.ts:227`. Flags: `RUN_LOGIN_1_ACCEPTED_FLAGS` (`src/cli.ts:9437`).
 - Copy sources: title and meta `site/src/pages/index.astro:12-13`; hero `site/src/components/landing/ConsumerHero.astro:14-23`
   with agents Wren/Claude, Otto/Codex, Ivy/Gemini inline (`:41-116`); og text `site/scripts/og-card.mjs` and alt text
@@ -27,15 +25,12 @@ CP runs beside G inside the 2-execute cap. G and the 2026-09-27 21:45Z box windo
   the whole site suite in Actions, so a pin missing from this list still fails there.
 - `ProviderButtons` serves three hosts: /app sign-in (`LiveDashboard.astro:81`), /app re-authentication
   (`LiveDashboard.astro:1082`) and /invite (`InviteOnramp.astro:40-44`).
-- `app_metadata.provider` is the FIRST sign-up provider, not the provider of the current login
-  (`@supabase/auth-js` types, `lib/types.d.ts:335-343`). OAuth leaves the page and the email path only sends a link
-  (`site/src/lib/commonswarm.ts:274`, `:348`).
-- A zero-workspace boot returns before any invite read, and pending invites are an owner/admin read that needs a
-  workspace id (`LiveDashboard.astro:7435`, `site/src/lib/commonswarm.ts:721`).
 - `site/scripts/provider-fixtures.ts` already runs the real `astro build` against a local GoTrue-shaped server for
   three provider states. No production contact is needed to test rendered buttons.
 - `cswarm login` refuses `--profile` (`REFUSE_PROFILE`, `src/cli.ts:10024`); human target state lives in
-  `src/cloud/current-target.ts:22-25` (version-1 files exist). Login has no JSON error mode (`src/cli.ts:10561`).
+  `src/cloud/current-target.ts:22-25`. Login has no JSON error mode (`src/cli.ts:10561`).
+- Accounts match by email (Tom, brain v2): a Google sign-in with the same verified email is the same account, and
+  GoTrue v2.197.0 links it; a different email is a different account, and that is correct.
 - The Grok Bot wake prompt (`src/cloud/agent-channel-grok-bot.ts:12-16`) and the Claude channel notice both omit the
   server-derived `sender_owner_relation` and the cross-owner steer that `docs/design/SWARM-CLOUD.md:299-304` (D-044)
   requires; the listener path states it (`src/listener/engine.ts:161`, `:255-257`).
@@ -77,10 +72,10 @@ nearest existing test-helper folder), every observer test that launches Chrome (
 Acceptance: an Actions `suite=site` run at the lane SHA is green, or every remaining failure is listed with its cause
 and is also red on main.
 
-### CP1: Google-first sign-in on /app, "last used", and the way back
+### CP1: Google-first sign-in on /app
 
 Files: `site/src/lib/auth-providers.ts`, `site/src/components/auth/ProviderButtons.astro`,
-`site/src/components/app/LiveDashboard.astro`, `site/src/lib/commonswarm.ts`, the pins above, new observer tests.
+`site/src/components/app/LiveDashboard.astro`, the pins above, new observer tests.
 
 1. `PROVIDERS` order becomes `google`, `github` (this also orders /invite and re-authentication).
 2. `ProviderButtons` takes host-supplied `primaryClass` and `secondaryClass`. Only the /app sign-in host passes a
@@ -88,42 +83,35 @@ Files: `site/src/lib/auth-providers.ts`, `site/src/components/auth/ProviderButto
    Prominence comes from list position; no second constant.
 3. On /app sign-in the provider buttons come first and the email form follows the "or" divider; the email button
    becomes secondary. (The pin "email precedes ProviderButtons" is reversed on purpose.)
-4. "Last used" (OAuth and email): clicking a provider or sending a link stores a PENDING attempt
-   (`commonswarm:sign-in-attempt:v1`: method and time). Only a matching authenticated return (the OAuth callback
-   session, or the magic-link return, in the same browser) promotes it to `commonswarm:last-sign-in:v1`. A cancelled
-   or failed attempt never changes "last used". All storage access is in try/catch. The next signed-out view marks
-   that method "Last used"; an unknown or disabled method is ignored.
-5. Way back from an empty account: when the signed-in user has 0 workspaces, the create panel adds one line built
-   from the PROMOTED attempt (never `app_metadata.provider`): "You signed in with Google as <email>. If your
-   workspaces are under GitHub, sign out and sign in with GitHub." It is omitted when the current method is unknown,
-   when no other provider is enabled, or when the user's identities already include the other provider (switching
-   would return the same user). Provider names come from `PROVIDERS`.
+4. No "last used" hint and no empty-account message (brain v2). No copy says CommonSwarm uses the GitHub account;
+   GitHub is only a way to sign in. (A grep of `site/src` and `README.md` on 2026-09-26 found no such copy; CP3's
+   pins forbid it.)
 
-Acceptance: observer tests for the order, the primary class on /app only (and /invite and re-authentication
-unchanged), "last used" (promote on return; unchanged on cancel and on send failure; disabled method ignored), and
-the way-back line (shown; omitted for unknown, single provider, linked identities). Actions site suite green.
-Live control BEFORE the site release: Tom signs in on the web once with Google and once with GitHub (the first real
-Google web round trip); after the release, /app shows Google first and primary and the email link still arrives.
+Acceptance: observer tests for the order and the primary class on /app only (/invite and re-authentication
+unchanged). Actions site suite green. Live control BEFORE the site release: Tom signs in on the web once with Google
+(the first real Google web round trip). After the release, /app shows Google first and primary, GitHub one click
+away, and the email link still arrives.
+
+Same-email linking proof (done-test, brain v2): a read-only count on the box, through HezLead, of accounts that have
+both a `github` and a `google` identity (counts only, no emails), or one sign-in by Tom. Agents make no Google or
+GitHub accounts for this.
 
 ### CP2: `cswarm login --provider google|github`
 
 Files: `src/cloud/auth.ts`, `src/cli.ts` (`RUN_LOGIN_1_ACCEPTED_FLAGS` `:9437`, help `:10024`),
-`src/cloud/current-target.ts`, `README.md` (`:65`, `:110`), new `tests/p1-cli/login-provider.test.ts`.
+`README.md` (`:65`, `:110`), new `tests/p1-cli/login-provider.test.ts`.
 
 - One exported constant `LOGIN_PROVIDERS = ["google", "github"]`; the flag check, help and refusal read it.
-- Default: the provider of this CLI's last successful human login, stored in the human target state
-  (`current-target.ts`), never in an agent profile. Old version-1 target files read as "no last provider". Else
-  `google`. Every existing writer of the target file keeps the stored provider (a target switch or rewrite never drops
-  it).
+- Default: `google`. `--provider github` stays for accounts made with GitHub. Nothing is stored; the CLI has no email
+  sign-in.
 - An unknown value exits 2 before any network call, with one stderr line naming the accepted set. (Login has no
   JSON mode; this lane does not add one.)
 - README lines 65 and 110 say sign-in works with the providers the workspace offers, without a hand-typed list.
 
 Acceptance, exact commands: `bash scripts/run-gates.sh <worktree> <log> origin/main cli-file
 tests/p1-cli/login-provider.test.ts` (the test spawns the built `dist/cli.js` and asserts the authorize URL's
-`provider` for: fresh state → google; `--provider github`; last login GitHub → github; a version-1 target file →
-google; a target rewrite by another command keeps the stored provider; unknown value → exit 2, the accepted set on
-stderr, no network call); and `bash scripts/build-release.sh`,
+`provider` for: no flag → google; `--provider github` → github; `--provider google` → google; unknown value →
+exit 2, the accepted set on stderr, no network call); and `bash scripts/build-release.sh`,
 exit code read directly. Live control: Tom logs in once with each provider (a human login; the lead never signs in).
 
 ### CP3a: owner relation in the session wake prompts (prerequisite of the Grok Bot page)
@@ -152,6 +140,8 @@ Files: `site/src/pages/index.astro`, `site/src/components/landing/ConsumerHero.a
 - Every claim holds today for a new user on the hosted workspace. Each agent still connects through the `cswarm` tool
   on a computer; the copy does not claim a setup without it.
 - README and `package.json` state 10 workspaces where they give a number, matching the site.
+- No copy says CommonSwarm uses a GitHub account; GitHub and Google are only ways to sign in.
+  `consumer-copy.observer.mjs` forbids "GitHub account" on the public pages.
 - The Grok Bot page (after CP3a lands): checked against `cswarm receive --provider grok-bot`. It says the Bot's
   computer needs the local gateway; it says the gateway's answer is not delivery confirmation and that the receipt in
   CommonSwarm is the truth; it does not claim an idle wake works until a live proof exists. The product name is "Grok
@@ -168,15 +158,15 @@ subhead, sign-in page text) for Tom's yes/no.**
 ## Release
 
 - CP0 lands on its own (CI only; nothing to release).
-- CP1 and CP3 go out in one site release after Tom's yes and after the live Google and GitHub web sign-ins. The site
+- CP1 and CP3 go out in one site release after Tom's yes and after Tom's live Google web sign-in. The site
   SHA carries all of main; the handoff lists what it carries and its server needs.
 - CP2 and CP3a ride the next npm release after 0.1.78, unless they land and pass review before the 2026-09-27 window.
 - **The Grok Bot page ships only after the CLI with CP3a is live on npm and `/download`.** If the CP1/CP3 site release
   comes first, it ships without the Grok Bot page (the page and its footer link stay behind a build flag or on a
   later commit), and the page follows in the site release after that npm publish.
 
-## Decisions taken from the review
+## Decisions
 
-1. CI uses the local fixture server, never production, for provider tests.
-2. "Last used" covers email too, recorded only after an authenticated return.
-3. The way-back line uses the current attempt, never `app_metadata.provider`, and is omitted for linked identities.
+1. CI uses the local fixture server, never production, for provider tests (Codex review).
+2. No "last used" hint and no empty-account message: accounts match by email (brain v2, Tom).
+3. `cswarm login` defaults to Google and stores nothing (brain v2).
