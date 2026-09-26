@@ -237,8 +237,13 @@ test("p1-cli mode refuses to start while OrbStack runs", { skip: p1CliSkip, time
 test("the OrbStack probe always checks the real helper and accepts only a control-prefixed extra name", () => {
   const source = readFileSync(script, "utf8");
   assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) extra_orb=\$RUN_GATES_ORB_PATTERN ;; \*\) extra_orb= ;; esac/);
-  // The real probe is unconditional and reads each process's executable path (argv[0]) alone.
-  assert.match(source, /orb_running\(\) \{\n  if ps -Ao comm= 2>\/dev\/null \| grep -q '\/OrbStack\\\.app\/' \|\| \{/);
+  // The real probe is unconditional, reads each process's executable path (argv[0]) alone, and uses no pipe
+  // (under pipefail an early `grep -q` match makes `ps` fail on SIGPIPE, which would read as "no OrbStack").
+  const probe = source.slice(source.indexOf("orb_running() {"), source.indexOf("\n", source.indexOf('*"/OrbStack.app/"*)')));
+  assert.match(probe, /comms=\$\(ps -Ao comm= 2>\/dev\/null\)/);
+  assert.match(probe, /case "\$comms" in \*"\/OrbStack\.app\/"\*\) echo yes; return ;; esac/);
+  const probeCode = probe.split("\n").map(line => line.replace(/#.*$/, "")).join("\n");
+  assert.doesNotMatch(probeCode, /ps [^\n]*\|/, "no pipe from ps in the probe");
   assert.match(source, /kern\.memorystatus_vm_pressure_level/);
 });
 

@@ -42,9 +42,10 @@ done
 # another `pgrep -f "OrbStack Helper"` process and stopped a clean run on 2026-09-26). The controls may ADD a dummy process
 # name (control prefix only); an override can never replace or switch off the real probe.
 case "${RUN_GATES_ORB_PATTERN:-}" in run-gates-control-orb-*) extra_orb=$RUN_GATES_ORB_PATTERN ;; *) extra_orb= ;; esac
-orb_running() {
-  if ps -Ao comm= 2>/dev/null | grep -q '/OrbStack\.app/' || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
-  then echo yes; else echo no; fi; }
+orb_running() { # no pipe: under pipefail, `ps | grep -q` fails on SIGPIPE exactly when grep matches early
+  local comms; comms=$(ps -Ao comm= 2>/dev/null)
+  case "$comms" in *"/OrbStack.app/"*) echo yes; return ;; esac
+  if [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 # Live runs of this wrapper other than this run. An ancestor wrapper is not "another run": this run was started
 # inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run, and
 # so is every process that descends from it (for example its OrbStack watchdog, a subshell with the same command line).
