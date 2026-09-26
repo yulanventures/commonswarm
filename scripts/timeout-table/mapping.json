@@ -2424,7 +2424,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:25,193-248",
+          "citation": "src/cloud/storage.ts:27",
           "detail": "Local credential and state file-lock acquisition.",
           "operation": {
             "name": "storage-lock",
@@ -2438,7 +2438,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:383",
+          "citation": "src/cloud/storage.ts:385",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",

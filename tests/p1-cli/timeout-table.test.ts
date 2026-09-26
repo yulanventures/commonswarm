@@ -156,6 +156,21 @@ test("setup whole-operation timeout citation names the constant and deadline blo
   assert.match(lines[Number(match[3]) - 1] ?? "", /}, options.fetcher\);/);
 });
 
+test("Fold 15 storage lock citations resolve to the constant and default", { timeout: 10000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const rows = mappingForRef(mapping, "HEAD").rows;
+  const lines = (await readFile(join(repo, "src/cloud/storage.ts"), "utf8")).split("\n");
+  for (const [id, expected] of [
+    ["src/cloud/storage.ts:LOCK_TIMEOUT_MS", /^const LOCK_TIMEOUT_MS = 30_000;$/],
+    ["src/cloud/storage.ts:timeoutMs", /^  const timeoutMs = options\.timeoutMs \?\? LOCK_TIMEOUT_MS;$/],
+  ] as const) {
+    const citation = rows[id]?.citation;
+    const match = /^src\/cloud\/storage\.ts:(\d+)$/.exec(citation ?? "");
+    assert.ok(match, `unexpected citation for ${id}: ${citation}`);
+    assert.match(lines[Number(match[1]) - 1] ?? "", expected);
+  }
+});
+
 test("Fold 10 MCP register budget citation points to its constant", { timeout: 10000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const citation = mappingForRef(mapping, "HEAD").rows["src/cloud/mcp-connect.ts:MCP_REGISTER_TIMEOUT_MS"]?.citation;
