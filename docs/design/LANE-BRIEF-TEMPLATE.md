@@ -30,6 +30,12 @@ Each decision has a test that fails when its fix is reverted; record the measure
 - Every arm and Maker prompt carries these two sentences verbatim: "HOME is never assigned in a shell
   script; pass it only inside `env HOME="$T" cmd`, where `T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1`,
   and delete only $T." and "Run no test suite; the lead runs the gates."
+- Every gate run goes through `scripts/run-gates.sh` (it creates the temporary HOME, runs each gate in its own
+  process group, and fails if anything appears under the real home). Nobody types `npm test` or
+  `npm run test:p1-cli` bare.
+- Any command whose exit gates a decision runs with `set -o pipefail` or reads `${PIPESTATUS[0]}`; a pipe into
+  `tail`, `head` or `grep` never decides a landing (measured 2026-09-26: a wrapper commit landed while its own
+  control was red because the status went into `| tail`).
 - Any script in the lane that removes a directory named from a variable resolves the path first and
   refuses `/`, the home directory, an empty value, and any path outside its own temporary root, with a
   control test.
