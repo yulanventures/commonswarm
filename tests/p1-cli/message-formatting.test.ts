@@ -585,7 +585,6 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
       : ["REPLY_ACCEPTED_FLAGS"];
     for (const name of names) assert.match(returned, new RegExp(`\\b${name}\\b`));
     for (const name of names) {
-      if (!names.includes(name)) continue;
       const declaration = cliSourceFile.statements.filter(ts.isVariableStatement)
         .flatMap(statement => [...statement.declarationList.declarations])
         .find(item => item.name.getText(cliSourceFile) === name);
@@ -615,6 +614,12 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
       `${fn} must not contain hardcoded body flags: ${bodyStringLiterals.join(", ")}`,
     );
   }
+  const ownAst = ts.createSourceFile("message-formatting.test.ts", await readFile(fileURLToPath(import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+  const visitOwn = (node: ts.Node): void => {
+    if (ts.isIfStatement(node)) assert.notEqual(node.expression.getText(ownAst), "!names.includes(name)", "body-source walk must visit every listed shape");
+    ts.forEachChild(node, visitOwn);
+  };
+  visitOwn(ownAst);
 
   // AST check: runPostSignal and runReply dispatch to their respective allowedFlags functions
   // and pass the helper's RESULT to resolveSignalBody (proving data flow statically)

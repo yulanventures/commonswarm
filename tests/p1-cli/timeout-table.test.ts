@@ -161,10 +161,9 @@ test("shipped timeout mapping stays byte-identical to main", { timeout: 10_000 }
   const main = execFileSync("git", ["show", `${shippedMainRef()}:scripts/timeout-table/mapping.json`], { cwd: repo, encoding: "utf8", timeout: 5_000 });
   const shipped = (source: string) => source.slice(source.indexOf('"v0.1.71"'), source.indexOf('"HEAD"', source.indexOf('"v0.1.71"')));
   assert.equal(shipped(current), shipped(main));
+  assert.equal(shippedMainRef(ref => ref === "refs/heads/main" || ref === "refs/remotes/origin/main"), "main");
   const fallback = shippedMainRef(ref => ref === "refs/remotes/origin/main");
   assert.equal(fallback, "origin/main");
-  const originMain = execFileSync("git", ["show", `${fallback}:scripts/timeout-table/mapping.json`], { cwd: repo, encoding: "utf8", timeout: 5_000 });
-  assert.equal(shipped(current), shipped(originMain));
 });
 
 test("HEAD timeout mapping citations point to their measured source lines", { timeout: 10_000 }, async () => {

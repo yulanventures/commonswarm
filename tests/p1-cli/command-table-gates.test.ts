@@ -11,6 +11,8 @@ import {
   AGENT_PROFILE_COMMANDS,
   agentToolsForTransport,
   commandHelpLines,
+  helpDescription,
+  visibleUsageHint,
   HANDLER_HELP_FLAGS,
   VARIANT_HELP_FLAGS,
   SESSION_HUMAN_ACCEPTED_FLAGS,
@@ -207,7 +209,7 @@ test("single command help omits flags the handler always refuses", { timeout: 10
   assert.deepEqual(renderedLogout, [...cliAccepted.RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LOGOUT_REFUSED_FLAGS as readonly string[]).includes(flag))].sort());
   const renderedListen = [...new Set([...commandHelpLines("listen", "start").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
   assert.deepEqual(renderedListen, [...new Set([...LISTEN_START_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LISTEN_START_REFUSED_FLAGS as readonly string[]).includes(flag)), "profile"])].sort());
-  assert.match(source, /LISTEN_START_REFUSED_FLAGS as readonly string\[\]\)\.find\(flag => supplied\[flag\] !== undefined\)/);
+  assert.match(source, /LISTEN_START_REFUSED_FLAGS as readonly string\[\]\)\.find\(flag => supplied\[flag\] !== undefined \|\| args\?\.has\(flag\)\)/);
 });
 
 test("removing a handler refusal makes its flag reappear in help", { timeout: 10_000 }, async () => {
@@ -260,6 +262,13 @@ test("added refusal flags reach the listen and inbox handlers and disappear from
     assert.ok(!HANDLER_HELP_FLAGS["listen.start"]!.includes("route"));
     assert.doesNotMatch(commandHelpLines("listen", "start"), /--route\b/);
   } finally { listen.pop(); }
+  listen.push("poll-interval");
+  try {
+    const args = new cliAccepted.Arguments(["listen", "start", "--poll-interval", "15s"]);
+    assert.throws(() => cliAccepted.listenerRouteConfiguration("main", undefined, args), /--poll-interval/);
+    assert.ok(!HANDLER_HELP_FLAGS["listen.start"]!.includes("poll-interval"));
+    assert.doesNotMatch(commandHelpLines("listen", "start"), /--poll-interval\b/);
+  } finally { listen.pop(); }
 
   const follow = cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS as unknown as string[];
   for (const [options, expected] of [
@@ -270,6 +279,8 @@ test("added refusal flags reach the listen and inbox handlers and disappear from
   ] as const) {
     assert.equal(cliAccepted.inboxFollowRefusal(new cliAccepted.Arguments(["inbox", "--follow", "--ndjson", ...options])), expected);
   }
+  assert.throws(() => cliAccepted.inboxFollowRefusal(new cliAccepted.Arguments(["inbox", "--follow", "--ndjson", "--wait", "1", "--wait", "2"])),
+    { message: "--wait may only be provided once" });
   const args = new cliAccepted.Arguments(["inbox", "--follow", "--ndjson", "--about", "fixture"]);
   assert.equal(cliAccepted.inboxFollowRefusal(args), null);
   follow.push("about");
@@ -279,6 +290,61 @@ test("added refusal flags reach the listen and inbox handlers and disappear from
     const section = commandHelpLines("inbox").split("cswarm inbox --follow")[1] ?? "";
     assert.doesNotMatch(section, /--about\b/);
   } finally { follow.pop(); }
+});
+
+test("all help descriptions agree with attachment flags and synopses", { timeout: 10_000 }, () => {
+  for (const { key, entry } of entries()) {
+    if (!entry.visible) continue;
+    const rendered = commandHelpLines(...(key.includes(".") ? key.split(".") as [string, string] : [key]));
+    const hasAttach = [...entry.flags, ...(entry.cliOnlyFlags ?? [])].includes("attach");
+    for (const variant of Object.values(entry.variants)) {
+      const synopsisHasAttach = variant.help.some(hint => hint.includes("--attach"));
+      assert.equal(synopsisHasAttach, hasAttach, key);
+    }
+    assert.equal(helpDescription(entry).includes("Use --attach to add files."), hasAttach, key);
+    if (hasAttach) {
+      assert.match(rendered, /--attach/);
+      assert.doesNotMatch(rendered, /without attachments/i);
+    }
+  }
+});
+
+test("usage synopsis removes any refused bracket group regardless of group or flag count", { timeout: 10_000 }, () => {
+  assert.equal(visibleUsageHint("cswarm example [--first <x> | --second <y>] [--third]", ["first", "third"]),
+    "cswarm example [--third]");
+  assert.equal(visibleUsageHint("cswarm example [--outer [--inner]] [--third]", ["third"]),
+    "cswarm example [--third]");
+  assert.equal(visibleUsageHint("cswarm example [--first <x> | --second <y>] [--third]", ["first", "second", "third"]),
+    "cswarm example [--first <x> | --second <y>] [--third]");
+});
+
+test("variant selectors are shared by dispatch and help, while force is not a selector", { timeout: 10_000 }, async () => {
+  const source = await readFile(resolve("src/cli.ts"), "utf8");
+  assert.match(source, /selectedVariants\(checkVariants, \(args\) => args\.has\(CHECK_MESSAGES_SELECTOR_FLAGS\[1\]\).*args\.has\(CHECK_MESSAGES_SELECTOR_FLAGS\[0\]\)/);
+  assert.match(source, /selectedVariants\(inboxVariants, \(args\) => args\.has\(INBOX_READ_SELECTOR_FLAGS\[2\]\).*args\.has\(INBOX_READ_SELECTOR_FLAGS\[0\]\)/);
+  assert.match(source, /args\.has\(INBOX_READ_SELECTOR_FLAGS\[1\]\)/);
+  assert.match(source, /const CHECK_MESSAGE_HIDDEN_FLAGS = \["force"\]/);
+  assert.doesNotMatch(source, /CHECK_MESSAGE_SELECTOR_FLAGS = [^\n]*force/);
+  const check = AGENT_COMMANDS.check as AgentCommandEntry;
+  const inbox = AGENT_COMMANDS.inbox as AgentCommandEntry;
+  assert.equal(check.select(new cliAccepted.Arguments(["check", "--force"])), "messages");
+  assert.equal(check.select(new cliAccepted.Arguments(["check", "--hook"])), "hook");
+  assert.equal(inbox.select(new cliAccepted.Arguments(["inbox", "--follow"])), "follow");
+  const checkSelectors = cliAccepted.CHECK_MESSAGES_SELECTOR_FLAGS as unknown as string[];
+  const inboxSelectors = cliAccepted.INBOX_READ_SELECTOR_FLAGS as unknown as string[];
+  const oldCheck = checkSelectors[1]!;
+  const oldInbox = inboxSelectors[0]!;
+  checkSelectors[1] = "full";
+  inboxSelectors[0] = "include-stale";
+  try {
+    assert.equal(check.select(new cliAccepted.Arguments(["check", "--full"])), "hook");
+    assert.equal(inbox.select(new cliAccepted.Arguments(["inbox", "--include-stale"])), "follow");
+    assert.ok(!VARIANT_HELP_FLAGS["check.messages"]!.includes("full"));
+    assert.ok(!VARIANT_HELP_FLAGS["inbox.read"]!.includes("include-stale"));
+  } finally {
+    checkSelectors[1] = oldCheck;
+    inboxSelectors[0] = oldInbox;
+  }
 });
 
 test("no unused parser option gate remains beside the help renderer", { timeout: 10_000 }, async () => {

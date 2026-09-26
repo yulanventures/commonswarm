@@ -397,6 +397,7 @@ function coreFixtures(): Fixture[] {
     { id: "inbox.default", argv: ["inbox", ...agent, "--limit", "1", "--wait", "1", "--json"] },
     { id: "inbox.notify", argv: ["inbox", ...agent, "--notify", "--json"] },
     { id: "inbox.notify-over-follow", argv: ["inbox", "--follow", "--notify", "--url", "<ORIGIN>"] },
+    { id: "inbox.follow.repeated-wait", argv: ["inbox", "--follow", "--ndjson", "--wait", "1", "--wait", "2", "--url", "<ORIGIN>"] },
     { id: "inbox.follow", argv: ["inbox", ...agent, "--follow", "--ndjson"] },
 
     { id: "workspaces", argv: ["workspaces", ...target, "--json"] },
@@ -751,6 +752,19 @@ test("notify mode keeps the main refusal when follow is also present", { timeout
     const row = await runFixture(root, "http://127.0.0.1:9", fixture);
     assert.equal(row.exitCode, 1);
     assert.equal(row.stderr, "cswarm: unknown option: --follow\n");
+    const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    assert.deepEqual(recorded.find(value => value.id === row.id), row);
+  } finally { removeLaneTempHome(root); }
+});
+
+test("repeated follow wait keeps main's exact refusal", { timeout: 10_000 }, async () => {
+  const root = createLaneTempHome("follow-repeated-wait-");
+  try {
+    const fixture = (await fixtures()).find(row => row.id === "inbox.follow.repeated-wait");
+    assert.ok(fixture);
+    const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+    assert.equal(row.exitCode, 1);
+    assert.equal(row.stderr, "cswarm: --wait may only be provided once\n");
     const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     assert.deepEqual(recorded.find(value => value.id === row.id), row);
   } finally { removeLaneTempHome(root); }

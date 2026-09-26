@@ -206,8 +206,12 @@ test("check and inbox --since return the same directed ask across timestamps, fi
     "--since", "2026-09-25T12:00:00", "--json"], {
     cwd: resolve("."), encoding: "utf8", timeout: 20_000, env: { ...process.env, HOME: root },
   });
-  assert.notEqual(naive.status, 0);
-  assert.match(naive.stderr, /2026-09-25T12:00:00\+00:00/);
+  assert.equal(naive.status, 0, naive.stderr);
+  const naiveRows = (JSON.parse(naive.stdout) as { signals: { id: string }[] }).signals;
+  const offsetRows = inbox("2026-09-25T12:00:00+00:00");
+  process.stdout.write(`${JSON.stringify({ case: "naive_since_compared_with_offset", naiveCount: naiveRows.length,
+    offsetCount: offsetRows.length, naiveContainsAsk: naiveRows.some(row => row.id === ask),
+    offsetContainsAsk: offsetRows.some(row => row.id === ask) })}\n`);
   const wrong = spawnSync(process.execPath, ["dist/cli.js", "inbox", "--url", local.API_URL,
     "--anon-key", local.ANON_KEY, "--workspace-id", randomUUID(), "--agent-token-file", credentialFile,
     "--since", milli, "--json"], {

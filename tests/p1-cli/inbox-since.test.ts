@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
-import { checkedSince, INBOX_SINCE_EXAMPLE, INBOX_SINCE_PAGE_CAP, readDirectedInboxSince, SignalSinceError, InboxSinceError } from "../../src/cloud/signals.js";
+import { checkedSince, INBOX_SINCE_PAGE_CAP, readDirectedInboxSince, readSignals, InboxSinceError } from "../../src/cloud/signals.js";
 import { assertInboxWorkspace, inboxMoreNotice } from "../../src/cli.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
@@ -41,14 +41,28 @@ test("inbox --since drains beyond the default 50 and across a full cursor page",
   assert.equal(requests[0]?.since, rows[0]!.created_at);
 });
 
-test("inbox --since refuses a naive timestamp and names an offset example", { timeout: 10_000 }, () => {
-  assert.throws(() => checkedSince("2026-09-25T12:00:00"), (error: unknown) =>
-    error instanceof SignalSinceError && error.message.includes(INBOX_SINCE_EXAMPLE));
-  assert.equal(checkedSince("2026-09-25T14:00:00+02:00"), "2026-09-25T12:00:00.000Z");
-  assert.equal(checkedSince("2026-09-25T14:00+02:00"), "2026-09-25T12:00:00.000Z");
-  const dateOnly = "2026-09-25Z";
-  assert.equal(checkedSince(dateOnly), new Date(dateOnly).toISOString());
-  assert.throws(() => checkedSince("2026-09-25"), SignalSinceError);
+test("--since keeps every Date.parse-finite form main accepted", { timeout: 10_000 }, () => {
+  for (const value of ["2026-09-25T12:00:00", "2026-09-25T14:00:00+02:00", "2026-09-25T14:00+02:00", "2026-09-25Z", "2026-09-25", "Fri, 25 Sep 2026 12:00:00 GMT"]) {
+    assert.ok(Number.isFinite(Date.parse(value)), value);
+    assert.equal(checkedSince(value), value);
+  }
+  assert.equal(checkedSince(undefined), undefined);
+  assert.throws(() => checkedSince("not-a-date"), { message: "--since must be an ISO-8601 timestamp" });
+});
+
+test("read and feed pass main-accepted since values through unchanged", { timeout: 10_000 }, async () => {
+  for (const since of ["2026-09-25T12:00:00", "2026-09-25", "2026-09-25T14:00:00+02:00"]) {
+    for (const inbox of [true, false]) {
+      let request: Record<string, unknown> | undefined;
+      const fetcher = (async (_url: unknown, init?: RequestInit) => {
+        request = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ signals: [], capabilities: { sender_owner_relation: 1, cursor_after: 1 } }), { status: 200 });
+      }) as typeof fetch;
+      assert.deepEqual(await readSignals(target, { kind: "agent", token: TOKEN }, { workspaceId: WORKSPACE, inbox, since }, fetcher), []);
+      assert.equal(request?.since, since);
+      assert.equal(request?.inbox, inbox);
+    }
+  }
 });
 
 test("wrong agent workspace is a typed refusal, not an empty inbox", { timeout: 10_000 }, () => {
