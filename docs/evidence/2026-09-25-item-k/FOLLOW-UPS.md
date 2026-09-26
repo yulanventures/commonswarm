@@ -15,3 +15,26 @@ The lead's Fold 10 landing bar blocks only verified, lane-introduced production 
 | Opus 9, item 6 | `scripts/timeout-table/mapping.json` | One signal-read citation range starts inside `checkedSince`. | The range still includes the cited read default; the two single-line citations are exact. |
 | Codex 10, follow-up | `tests/p1-cli/item-k-home-control.test.ts` | The AN1 inventory recognizes named imports and literal setup/connect spawn expressions; namespace imports or argv variables could evade it. No real-HOME access was demonstrated in the reviewed call sites. | Test-control coverage only; no verified lane-introduced production finding. |
 | Opus 10, F4 | `tests/p1-cli/item-k-home-control.test.ts`; `src/onboarding-cli.ts` | The AN1 control misses `runSetupImport` through `setupAgent`, does not check helpers outside test callbacks, and its whole-file `HOME:` pattern can satisfy a fixture check unrelated to the call site. No current test imports `runSetupImport`. | Test-control coverage only; no verified lane-introduced production finding. |
+
+## Round 11 (fold 11 review; Codex PASS, Opus PASS)
+
+- Opus F1: `INBOX_FOLLOW_REFUSED_FLAGS = ["channel", "wait", "json"]` makes a capped `--since --wait` read say there
+  is no equivalent follow step; dropping `--wait` would give a valid step (it changes timing, not what is read).
+- Opus F2: the cap notice prints the server's `created_at` raw on the human text path; main already does the same in
+  `renewal-grants.ts`, so no new class of risk.
+- Opus F3: `tests/p1-cli/inbox-follow-step.test.ts` types its own boolean-flag set instead of `BOOLEAN_FLAGS`.
+- Opus F4: the printed follow command is followed by the sentence's period; copying it gives a since value ending in
+  `.`, which is refused (never a wrong read).
+
+## Merge with main after items M and G lane 2b (Opus check of the resolution, 2026-09-26)
+
+- The blocker (main's `listen status --wait` refusal lost) and the two help deviations are FIXED before landing
+  (Alloy task 05f1422a). The two p1-cli failures the landing run found are FIXED (Alloy task 334a7228).
+- `inbox --notify`'s synopsis lacks main's `[--session-context <path>] [--take-over]`; both are still listed under
+  Additional options.
+- `saveAgentProfile`'s sixth argument now takes a boolean or a function to keep both call shapes; an options object
+  would be clearer.
+- `mcp-connect-home-control.test.ts` types the `lane-home-mcp-` prefixes; derive them from `lane-temp-home.ts`.
+- Pre-existing stale citations (not from the merge): `control.ts:1196`, `agent-receive.ts:148` and `:249-257`.
+- Alloy task `c429ac7f` (the merge resolution) is retained: its review packet was over 96 KB because of the
+  re-recorded dispatch fixture, so no Alloy review ran and `alloy cleanup` refuses. HezLead decides its disposal.
