@@ -237,6 +237,14 @@ function renderedProviderIds(html: string): string[] {
     .sort();
 }
 
+function providerButtonTags(html: string): string[] {
+  return html.match(/<button\b[^>]*\bdata-signin-provider="[^"]+"[^>]*>/g) ?? [];
+}
+
+function buttonClass(tag: string): string | undefined {
+  return /\bclass="([^"]*)"/.exec(tag)?.[1];
+}
+
 /**
  * The tail of a `data-*` attribute NAME in which a provider id is one whole hyphen segment:
  * `data-github`, `data-signin-github`, `data-member-reauth-github`, `data-github-login`.
@@ -305,7 +313,7 @@ const SIGNIN_MARKER: readonly { pattern: string; claim: string; probe: string }[
   {
     pattern: PROVIDER_IN_ATTRIBUTE_NAME,
     claim:
-      `a provider id (${AUTH_PROVIDERS.map((provider) => provider.id).join(" or ")}) as a ` +
+      `a provider id (${AUTH_PROVIDERS.map((provider) => provider.id).sort().join(" or ")}) as a ` +
       `hyphen segment of any data-* attribute NAME, in any case`,
     probe: `<button data-member-reauth-${AUTH_PROVIDERS[0]?.id}>`,
   },
@@ -410,7 +418,7 @@ const SWEEP_CATCHES: readonly string[] = [
   `any string literal handed to ${GENERAL_PROVIDER_CALL}`,
   ...NAMED_PROVIDER_WRAPPERS.map((wrapper) => `any ${wrapper} anywhere`),
   `a rendered button whose label is not exactly one of: ` +
-    AUTH_PROVIDERS.map((provider) => JSON.stringify(provider.label)).join(", "),
+    AUTH_PROVIDERS.map((provider) => JSON.stringify(provider.label)).sort().join(", "),
 ];
 
 /**
@@ -1506,6 +1514,72 @@ test("CONTROL: /app's all-providers fixture hand-writes NO provider control", as
   }
 });
 
+test("the signed-out host alone promotes its first provider button", async () => {
+  const fixture = await allProvidersFixture();
+  const app = await readFile(new URL("app/index.html", fixture.dir), "utf8");
+  const invite = await readFile(new URL("invite/index.html", fixture.dir), "utf8");
+
+  const signedOutStart = app.indexOf("data-signed-out-onramp");
+  const signedOutEnd = app.indexOf('data-panel="create"', signedOutStart);
+  assert.ok(signedOutStart >= 0 && signedOutEnd > signedOutStart);
+  const signedOut = app.slice(signedOutStart, signedOutEnd);
+
+  const reauthStart = app.indexOf("data-member-reauth");
+  const reauthEnd = app.indexOf("data-member-reauth-email", reauthStart);
+  assert.ok(reauthStart >= 0 && reauthEnd > reauthStart);
+  const reauth = app.slice(reauthStart, reauthEnd);
+
+  const signedOutButtons = providerButtonTags(signedOut);
+  const inviteButtons = providerButtonTags(invite);
+  const reauthButtons = providerButtonTags(reauth);
+  for (const [host, buttons] of [
+    ["/app sign-in", signedOutButtons],
+    ["/invite", inviteButtons],
+    ["/app re-authentication", reauthButtons],
+  ] as const) {
+    assert.equal(
+      buttons.length,
+      AUTH_PROVIDERS.length,
+      `${host} must render every provider in the all-providers fixture`,
+    );
+  }
+
+  assert.equal(
+    buttonClass(signedOutButtons[0] as string),
+    "dashboard__button dashboard__button--primary",
+    "the first signed-out provider is the only promoted sign-in choice",
+  );
+  for (const tag of signedOutButtons.slice(1)) {
+    assert.equal(
+      buttonClass(tag),
+      "dashboard__button dashboard__button--secondary",
+      "later signed-out providers must use the host's secondary class",
+    );
+  }
+  assert.match(
+    signedOut,
+    /<button class="dashboard__button dashboard__button--secondary" type="submit">\s*Email me a sign-in link/,
+    "the email submit must be secondary",
+  );
+
+  for (const tag of inviteButtons) {
+    assert.equal(
+      buttonClass(tag),
+      "invite-onramp__button invite-onramp__button--quiet",
+      "/invite must keep one class for every provider button",
+    );
+    assert.doesNotMatch(tag, /--primary/);
+  }
+  for (const tag of reauthButtons) {
+    assert.equal(
+      buttonClass(tag),
+      "dashboard__rail-add",
+      "re-authentication must keep one class for every provider button",
+    );
+    assert.doesNotMatch(tag, /--primary/);
+  }
+});
+
 test("providersFromSettings reads GoTrue's own answer and nothing else", () => {
   assert.deepEqual(
     providersFromSettings(LIVE_SETTINGS).map((provider) => provider.id),
@@ -1515,12 +1589,12 @@ test("providersFromSettings reads GoTrue's own answer and nothing else", () => {
   const withGoogle = { external: { ...LIVE_SETTINGS.external, google: true } };
   assert.deepEqual(
     providersFromSettings(withGoogle).map((provider) => provider.id),
-    ["github", "google"],
+    ["google", "github"],
   );
   // Order follows AUTH_PROVIDERS, never the key order GoTrue happens to send.
   assert.deepEqual(
     providersFromSettings({ external: { google: true, github: true } }).map((p) => p.id),
-    ["github", "google"],
+    ["google", "github"],
   );
   assert.deepEqual(
     providersFromSettings({ external: { github: false, google: false } }).map((p) => p.id),
@@ -1765,7 +1839,7 @@ test("providerChoices reads as a sentence for one, two, and three providers", ()
   assert.equal(listSentence(["one"]), "one");
   assert.equal(listSentence(["one", "two"]), "one or two");
   assert.equal(listSentence(["one", "two", "three"]), "one, two, or three");
-  assert.equal(providerChoices(providersFromSettings({ external: { github: true, google: true } })), "GitHub or Google");
+  assert.equal(providerChoices(providersFromSettings({ external: { github: true, google: true } })), "Google or GitHub");
   assert.equal(providerChoices(providersFromSettings(LIVE_SETTINGS)), "GitHub");
 });
 
@@ -1785,7 +1859,7 @@ test("AUTH_PROVIDERS ids are unique, well formed, and a deliberate set", () => {
   }
   assert.deepEqual(
     ids,
-    ["github", "google"],
+    ["google", "github"],
     "Adding a provider is deliberate: update this line, and read the rules above it first.",
   );
 });

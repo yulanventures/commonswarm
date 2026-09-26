@@ -53,7 +53,7 @@ const BUILD_LOCK_TIMEOUT_MS = 120_000;
 const FIXTURE_ANON_KEY = "fixture-anon-key-not-a-real-credential";
 
 export interface ProviderFixture {
-  /** The state's name, built from the ids it enables, e.g. "none", "github", "github+google". */
+  /** The state's name, built from the ids it enables, e.g. "none", "google", "google+github". */
   readonly state: string;
   /** The provider ids this state's GoTrue reports as enabled. */
   readonly enabled: readonly string[];
@@ -68,7 +68,7 @@ export const FIXTURE_STATES: readonly (readonly string[])[] = [
   AUTH_PROVIDERS.map((provider) => provider.id),
 ];
 
-/** "none", "github", "github+google" — the state's own contents, never a typed label. */
+/** "none", "google", "google+github" — the state's own contents, never a typed label. */
 export function fixtureStateName(enabled: readonly string[]): string {
   return enabled.length === 0 ? "none" : enabled.join("+");
 }
