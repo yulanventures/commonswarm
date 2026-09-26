@@ -22,13 +22,13 @@ before this release.
 | # | Who | What |
 |---|---|---|
 | 0 | HezLead / Anvil | Preflight as in `RELEASE-TO-BOX.md` section 1, plus the same `search_path` check as item G: the section-5 role's `SHOW search_path` must not contain `swarm`. Stage the proofs from `deploy/release-proofs/item-g2b/` in `/proof`. The files are `20260926000001-catalog.sql`, `20260926000001-functional.sql`, `20260926000001-rollback.sql` and `20260926000001-rollback-catalog.sql`. |
-| 1 | Anvil | Section 5: apply `20260926000001` with its catalog proof. The proof must return `t`. |
+| 1 | Anvil | Section 5: apply `20260926000001` with its catalog proof. The proof must return `t`. **Override of `RELEASE-TO-BOX.md` section 5:** do NOT run `20260926000001-functional.sql` in section 5. It needs the test seat's lease, which exists only after step 4, so section 5 would stop there. It runs in step 5 of this plan. |
 | 2 | Anvil | Section 6: apply the edge (`command`, `read`, `h0` from the SHA). Then run the health check, the standard probes a-h, the metrics line and the log check. |
 | 3 | HezLead -> lead | "edge switched and healthy" (native message). |
 | 4 | lead | **Renew gate** (below). The lead sends HezLead the gate line (`GATE PASS`, `GATE FAIL <reason>` or `GATE CANNOT RUN <code>`), `G2B_PRINCIPAL_ID=<id>` and the time of the last renew. |
 | 5 | HezLead -> Anvil | **Within 3 minutes of the gate's last renew:** `release_psql_ro -v item_g2b_principal_id=<id> --file /proof/20260926000001-functional.sql`. It must exit 0. The proof requires a lease renewed within the last 3 minutes, and the gate stops renewing when it ends. HezLead has this command ready before step 4. |
 | 6 | lead | `g2b-renew-gate.sh … --release` frees the gate's lease. |
-| 7 | HezLead | Close the window. After a `GATE PASS` and a passing step 5 only: the lead publishes cswarm 0.1.78 from main, and Anvil releases the site. The site release must follow `RELEASE-TO-BOX.md`. |
+| 7 | HezLead | Close the window. After a 50-pair `GATE PASS` and a passing step 5 only: the lead publishes cswarm 0.1.78 built from the pinned client SHA `N` (below), the SAME SHA whose build the gate used, and Anvil releases the site. The site release must follow `RELEASE-TO-BOX.md`. |
 
 ## Tom's mint block (2026-09-27 between 20:00Z and 21:30Z)
 
@@ -49,6 +49,7 @@ change the `-0927` suffix, because a principal name that already exists is refus
   D="$HOME/.config/cswarm/g2b-seed-20260927"
   WS=c2ea0541-f56d-4c73-bf71-56c5405c4934
   mkdir -p -m 0700 "$D"
+  chmod 0700 "$D"
   lower() { tr 'A-Z' 'a-z'; }
   cswarm principal create --workspace-id "$WS" --name g2b-gate-0927 >"$D/principal.json" 2>>"$D/mint.log"
   PID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["principal_id"])' "$D/principal.json")"
@@ -71,9 +72,11 @@ cswarm principal revoke --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --pr
 
 ## The renew gate (step 4)
 
-The gate runs on the mini. The first argument is a clean checkout of the release SHA, outside the repository's
-working tree, with `npm run build` done. The gate imports that build's own client modules, so the timeouts it uses
-are the shipped ones.
+The gate runs on the mini. The first argument is a clean checkout of the **pinned client SHA `N`**, outside the
+repository's working tree, with `npm run build` done. `N` is the exact SHA that cswarm 0.1.78 will be built from.
+The lead pins it in a message to HezLead before the window. `N` must contain the edge SHA `d4677b0d`, and the lead
+confirms that `git merge-base --is-ancestor d4677b0d N` succeeds. The gate imports `N`'s own client modules, so it
+measures the client that ships, with its real timeouts. If `N` must change after the gate, the gate runs again.
 
 ```sh
 deploy/release-proofs/item-g2b/g2b-renew-gate.sh <release-checkout> "$HOME/.config/cswarm/g2b-seed-20260927" \
@@ -104,14 +107,16 @@ directory. A later run of the gate would overwrite them.
 
 | Exit | Line | Decision |
 |---|---|---|
-| 0 | `GATE PASS` | Every renew succeeded and renew p95 < 15,000 ms. Go to step 5. |
+| 0 | `GATE PASS` | Exactly 50 pairs ran, every renew succeeded, and renew p95 < 15,000 ms. Go to step 5. Only this line authorizes npm and the site. |
 | 7 | `GATE FAIL <reason>` | A renew failed, or renew p95 ≥ 15,000 ms. **Roll back the EDGE only.** The migration stays. Ship no npm and no site in this window. Run `--release` if the edge is still up. |
 | 8 | `GATE CANNOT RUN <code>` | The claim was refused, or transport failed. Ship no npm and no site in this window. The edge stays only if the standard release checks (step 2) passed. |
+| 10 | `GATE NOT A RELEASE GATE n=<k> …` | A shortened run (`G2B_RENEW_GATE_ROUNDS` < 50), for example the refresh rerun below. It never authorizes anything. |
 | 2 | `input: …` | A local input problem, raised before any network call: a mode, the JSON, a missing build, or less than 90 minutes left. This is not an edge problem. Fix the input, or have Tom mint again with a new suffix, then rerun. |
 
 **If step 5 cannot start within 3 minutes of the last renew,** the lease is too old for the proof. Wait until the
 lease is more than 3 minutes old; a new claim may then take it over. Then run the gate once more with
-`G2B_RENEW_GATE_ROUNDS=1`, and run step 5 at once. Before that rerun, the 50-pair evidence must already be saved.
+`G2B_RENEW_GATE_ROUNDS=1`, and run step 5 at once. The rerun ends with `GATE NOT A RELEASE GATE` (exit 10); it only
+refreshes the lease. Before that rerun, the 50-pair evidence must already be saved.
 
 ## Rollback
 
@@ -141,7 +146,8 @@ exits nonzero.
 
 This host runs no docker. The rehearsal is the server test `tests/p1-server/g2b-renew-gate.test.ts`, run in
 GitHub Actions against the local stack. It seeds a seat and runs three pairs through the wrapper and the built
-clients. It asserts `GATE PASS` and that every call was kept. It checks that the lease is held after the run and
+clients. Its 3-pair run asserts the shortened-run result, `GATE NOT A RELEASE GATE` with exit 10, and that every call was
+kept. It checks that the lease is held after the run and
 gone after `--release`. It checks that no token appears in the output. Runs: 36232492152 at `cdf23ee8` FAILED on ubuntu: the gate refused its own 0700 seed directory, because
 `stat -f %Lp` on Linux reports file-system status. The mode check was fixed in `21274b5d` (GNU `stat -c %a` first).
 Run 36232991157 at `21274b5d`: 273 of 275, and the renew-gate test passes; the two failures are main's baseline ones
