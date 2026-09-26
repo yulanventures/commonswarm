@@ -439,3 +439,16 @@ General-lock removal still uses the shared reclaim gate and rename-then-verify p
 The complete `host-id-rotation.test.ts` lane file passed 34/36 with two real-`/bin/ps` cases skipped by this sandbox. `npm run build` and `npm run check:tests` passed. Citation-drift and timeout-table lane files were rerun after the moved-line edits. Every test invocation used a temporary HOME and a test-level timeout. No full suite ran in this lane.
 
 The lead still owns full service-free, CLI, server, edge, site, and release gates for this SHA. Real `/bin/ps` behavior for another PID, host-wide process absence, and production behavior are not established here.
+
+## Fold 19
+
+Round 17 Codex found an unreadable general-lock record that remained stuck after its 60-second publication bound. The lead verified this lane-introduced production regression as AR2 and limited this fold to that ruling, its tests, moved citations, and the non-blocking review inventory in `FOLLOW-UPS.md`. No production host, real workspace, database, migration, or release surface was contacted.
+
+| Ruling | Change | Behavioral test and measured reversion |
+|---|---|---|
+| AR2: unreadable lock record | A failed record read now reaches the age decision. At the bound, the existing reclaim gate moves the entry and verifies its `lstat` device and inode, plus its target if it is a symlink. An unreadable directory at the lock path can be removed after the move. | A directory with an orphaned child, a symlink to a directory, and a mode-000 file where the runner cannot read it remain below 60 seconds and yield at the bound. On `a353ee53`, the focused test timed out at the bound (0/1); on Fold 19 it passed (1/1). |
+| AR2: changed owner during takeover | A moved unreadable entry that has become readable is restored and never removed, even when it retains its inode. | The pre-rename hook changes an unreadable directory, and a mode-000 file where supported, into a readable live record. On `a353ee53`, the hook was never reached (0/1); on Fold 19 it ran and the live record survived (1/1). |
+
+`npm run build`, `npm run check:tests`, and `git diff --check` passed. The complete `host-id-rotation.test.ts` lane file passed 36/38 with two real-`/bin/ps` cases skipped by this sandbox. `citation-drift.test.ts` passed 5/5. HEAD storage timeout citations moved with the source and `timeout-table.test.ts` passed 21/21 after repinning. Every lane test used a temporary HOME and each test has a timeout. No full suite ran in this lane.
+
+The lead still owns the full service-free, CLI, server, edge, site, and release gates for the Fold 19 SHA. Real `/bin/ps` behavior for another PID, host-wide process absence, and production behavior are not established here.

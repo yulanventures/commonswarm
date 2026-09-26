@@ -41,3 +41,16 @@ Opus R15 F1–F4 are addressed by Fold 17 rulings AM1–AM4; F7 is the Fold 16 e
 | Codex R16 non-blocking | `tests/p1-cli/host-id-rotation.test.ts` | The review ran no tests and reported no real-home access by the lane delta. | Test execution is measured in Fold 18; the isolated temporary-HOME controls do not access the real home. |
 
 Opus R16 R1 is addressed by Fold 18 AO1's one-sided creation-time decision. Codex and Opus R16 P1 are the same production finding addressed there.
+
+## Round 17 (Fold 18 review)
+
+The lead verified Codex R17 item 2 as the lane-introduced production blocker; Fold 19 addresses it. These findings remain outside this bounded fold under the 2026-09-26 landing bar.
+
+| Finding | File | Finding | Why it does not block Fold 19 |
+|---|---|---|---|
+| Codex R17 item 1 | `src/cloud/storage.ts` | A wall-clock step can make a live same-host owner appear to have a reused PID. | Main also evicted a lock after a forward step exceeding the stale bound; platform clock behavior changes the exposed direction. The lead ruled it outside this fold. |
+| Opus R17 F1 | `src/cloud/storage.ts` | A safe-integer PID outside the process API's accepted range raises a TypeError during a liveness probe. | No writer produces that PID; the lead ruled it non-blocking. |
+| Opus R17 F2 | `src/cloud/storage.ts` | The creation-time comparison can misjudge a live owner after a platform-dependent wall-clock step. | Same underlying issue as Codex item 1; the lead ruled it outside this fold. |
+| Opus R17 F3 | `tests/p1-cli/host-id-rotation.test.ts` | The real `/bin/ps` path for a non-self PID remains unmeasured in this sandbox. | This is a measurement gap, not a verified production failure. |
+| Opus R17 F4 | `src/cloud/storage.ts` | Host-id and reclaim-gate records still use a two-sided process-start comparison. | Outside the general-lock finding selected for Fold 19. |
+| Opus R17 F5 | `site/src/components/download/WhatHappens.astro` | Two agent-state citations point to unrelated storage code. | The citation error predates this lane. |

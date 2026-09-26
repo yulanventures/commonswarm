@@ -1,4 +1,5 @@
 import { constants as fsConstants, linkSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
+import type { Stats } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   access,
@@ -387,8 +388,21 @@ export async function removePublishedOwnerFile(path: string, publishedPath = pat
   }
 }
 
+type UnreadableOwnerIdentity = { dev: number; ino: number; target: string | null };
+
+async function unreadableOwnerIdentity(path: string, info: Stats | null): Promise<UnreadableOwnerIdentity | null> {
+  if (!info) return null;
+  const target = info.isSymbolicLink() ? await readlink(path).catch(() => null) : null;
+  if (info.isSymbolicLink() && target === null) return null;
+  return { dev: info.dev, ino: info.ino, target };
+}
+
+function sameUnreadableOwner(a: UnreadableOwnerIdentity, b: UnreadableOwnerIdentity | null): boolean {
+  return b !== null && a.dev === b.dev && a.ino === b.ino && a.target === b.target;
+}
+
 /** Move first, then check the moved record. The source path is never unlinked after a read. */
-export async function removeObservedOwnerFile(path: string, expectedRaw: string | null): Promise<boolean> {
+export async function removeObservedOwnerFile(path: string, expected: string | null | UnreadableOwnerIdentity): Promise<boolean> {
   const moved = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.stale`;
   try { await rename(path, moved); }
   catch (error) {
@@ -396,18 +410,25 @@ export async function removeObservedOwnerFile(path: string, expectedRaw: string 
     throw error;
   }
   const movedRaw = await readFile(moved, "utf8").catch(() => null);
-  if (movedRaw !== expectedRaw) {
+  const movedInfo = await lstat(moved).catch(() => null);
+  const movedIdentity = typeof expected === "object" && expected !== null
+    ? await unreadableOwnerIdentity(moved, movedInfo) : null;
+  if (typeof expected === "object" && expected !== null
+    ? movedRaw !== null || !sameUnreadableOwner(expected, movedIdentity)
+    : movedRaw !== expected) {
     // A different publisher won the race. Restore it only when the source is still vacant.
     const target = await readlink(moved).catch(() => null);
-    const restored = await (target === null ? link(moved, path) : symlink(target, path))
+    const restored = await (movedInfo?.isDirectory() ? rename(moved, path)
+      : target === null ? link(moved, path) : symlink(target, path))
       .then(() => true).catch(error => {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
         throw error;
       });
-    if (restored) await unlink(moved);
+    if (restored && !movedInfo?.isDirectory()) await unlink(moved);
     return false;
   }
-  await removePublishedOwnerFile(moved, path);
+  if (movedInfo?.isDirectory()) await rm(moved, { recursive: true });
+  else await removePublishedOwnerFile(moved, path);
   return true;
 }
 
@@ -459,16 +480,18 @@ function readlinkSyncSafe(path: string): string | null {
  * A local PID that started before publication stays live. Foreign-host, incomplete,
  * and uninspectable records use publication age; dead or reused PIDs are stale at once.
  */
+const UNREADABLE_OWNER_RECORD = Symbol("unreadable owner record");
+
 async function deadLockOwnerRecord(
   lockPath: string, publishedAgeMs: number, startLookup: typeof pidStartMs = pidStartMs,
-): Promise<string | null> {
+): Promise<string | typeof UNREADABLE_OWNER_RECORD | null> {
   let raw: string | null = null;
   let owner: { pid?: unknown; host?: unknown; createdAt?: unknown };
   try {
     raw = await readFile(lockPath, "utf8");
     owner = JSON.parse(raw) as typeof owner;
   } catch {
-    return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+    return publishedAgeMs >= LOCK_STALE_MS ? raw ?? UNREADABLE_OWNER_RECORD : null;
   }
   if (!owner || typeof owner !== "object") return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
   if (owner.host !== hostname()) return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
@@ -627,9 +650,11 @@ export async function withFileLock<T>(
       const pathInfo = await lstat(lockPath).catch(() => null);
       const lockInfo = await stat(lockPath).catch(() => null);
       const dangling = lockInfo === null && pathInfo !== null;
-      let deadRecord = dangling ? "" : lockInfo ? options.stalePolicy === "host-id"
+      const deadCandidate = dangling ? "" : lockInfo ? options.stalePolicy === "host-id"
         ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs))
         : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), options.pidStartLookup) : null;
+      const deadRecord = deadCandidate === UNREADABLE_OWNER_RECORD
+        ? await unreadableOwnerIdentity(lockPath, pathInfo) : deadCandidate;
       if (deadRecord !== null) {
         // Serialize stale contenders, then move the stale inode out of the publication path.
         // Never unlink the publication path after deciding from an earlier read.
@@ -725,10 +750,15 @@ export async function withFileLock<T>(
           const freshPathInfo = await lstat(lockPath).catch(() => null);
           const freshInfo = await stat(lockPath).catch(() => null);
           const freshDangling = freshInfo === null && freshPathInfo !== null;
-          const stillStale = freshDangling ? "" : freshInfo && (options.stalePolicy === "host-id"
+          const freshCandidate = freshDangling ? "" : freshInfo && (options.stalePolicy === "host-id"
             ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs))
             : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), options.pidStartLookup));
-          if (stillStale === deadRecord) {
+          const stillStale = freshCandidate === UNREADABLE_OWNER_RECORD
+            ? await unreadableOwnerIdentity(lockPath, freshPathInfo) : freshCandidate;
+          const sameRecord = typeof deadRecord === "object"
+            ? typeof stillStale === "object" && stillStale !== null && sameUnreadableOwner(deadRecord, stillStale)
+            : stillStale === deadRecord;
+          if (sameRecord) {
             await options.onBeforeStaleMove?.();
             if (!await removeObservedOwnerFile(lockPath, deadRecord === "" && freshDangling ? null : deadRecord)) {
               throw new Error(`${lockName} lock owner changed during stale takeover`);

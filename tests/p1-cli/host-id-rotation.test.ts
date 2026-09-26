@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { link, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -645,6 +645,89 @@ test("a parsed but incomplete general-lock record uses publication age", { timeo
     Date.now = () => clock() + AGED_LOCK_MS;
     assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed");
   } finally { Date.now = clock; await rm(root, { recursive: true, force: true }); }
+});
+
+test("unreadable general-lock entries wait until publication age, then yield", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-unreadable-lock-"));
+  const path = join(root, "check.lock");
+  const clock = Date.now;
+  try {
+    for (const kind of ["directory", "symlink-directory", "mode-000"] as const) {
+      if (kind === "directory") {
+        await mkdir(path);
+        await writeFile(join(path, "interrupted.tmp"), "orphaned");
+      } else if (kind === "symlink-directory") {
+        const target = join(root, "orphaned-target");
+        await mkdir(target);
+        await symlink(target, path);
+      } else {
+        await writeFile(path, "unreadable", { mode: 0o000 });
+        // A privileged test runner can still read mode-000 files; the directory covers that runner.
+        if (await readFile(path).then(() => true).catch(() => false)) {
+          assert.equal(process.getuid?.(), 0, "mode-000 must be unreadable to a non-root runner");
+          await rm(path);
+          continue;
+        }
+      }
+      const publishedAt = (await lstat(path)).ctimeMs;
+      const beforeBoundOffset = Math.floor(publishedAt + 59_000 - clock());
+      Date.now = () => clock() + beforeBoundOffset;
+      await assert.rejects(withFileLock(root, "check", async () => "too-early", { timeoutMs: 80 }), FileLockTimeoutError);
+      assert.equal((await lstat(path)).isSymbolicLink(), kind === "symlink-directory", kind);
+      assert.equal((await stat(path)).isDirectory(), kind !== "mode-000", kind);
+      const atBoundOffset = Math.ceil(publishedAt + 60_000 - clock());
+      Date.now = () => clock() + atBoundOffset;
+      assert.equal(await withFileLock(root, "check", async () => "reclaimed", { timeoutMs: 500 }), "reclaimed", kind);
+      Date.now = clock;
+    }
+  } finally {
+    Date.now = clock;
+    if ((await lstat(path).catch(() => null))?.isFile()) await chmod(path, 0o600);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unreadable lock that becomes a readable live record before rename survives", { timeout: 4_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-unreadable-live-lock-"));
+  const path = join(root, "check.lock");
+  const clock = Date.now;
+  try {
+    for (const kind of ["directory", "mode-000"] as const) {
+      if (kind === "directory") await mkdir(path);
+      else {
+        await writeFile(path, "unreadable", { mode: 0o000 });
+        if (await readFile(path).then(() => true).catch(() => false)) {
+          assert.equal(process.getuid?.(), 0, "mode-000 must be unreadable to a non-root runner");
+          await rm(path);
+          continue;
+        }
+      }
+      const publishedAt = (await stat(path)).ctimeMs;
+      const atBoundOffset = Math.ceil(publishedAt + 60_000 - clock());
+      Date.now = () => clock() + atBoundOffset;
+      const live = JSON.stringify({ pid: process.pid, host: hostname(), createdAt: Date.now() });
+      let moved = false;
+      await assert.rejects(withFileLock(root, "check", async () => "wrong", {
+        timeoutMs: 120,
+        onBeforeStaleMove: async () => {
+          if (moved) return;
+          moved = true;
+          if (kind === "directory") await rm(path, { recursive: true });
+          else await chmod(path, 0o600);
+          await writeFile(path, live);
+        },
+      }), error => error instanceof FileLockTimeoutError ||
+        error instanceof Error && /lock owner changed during stale takeover/.test(error.message));
+      assert.equal(moved, true);
+      assert.equal(await readFile(path, "utf8"), live);
+      Date.now = clock;
+      await rm(path);
+    }
+  } finally {
+    Date.now = clock;
+    if ((await lstat(path).catch(() => null))?.isFile()) await chmod(path, 0o600);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("host and takeover reclaim gates serialize dead owners and retain aged live owners", { timeout: 6_000 }, async () => {

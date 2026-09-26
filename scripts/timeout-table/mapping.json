@@ -2524,7 +2524,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:33,599-600",
+          "citation": "src/cloud/storage.ts:34,622-623",
           "detail": "Local credential and state file-lock acquisition.",
           "operation": {
             "name": "storage-lock",
@@ -2538,7 +2538,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:496",
+          "citation": "src/cloud/storage.ts:519",
           "detail": "Bounded local ps process-start probe for host-id lock ownership.",
           "operation": {
             "name": "host-id-pid-probe",
@@ -2552,7 +2552,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:599",
+          "citation": "src/cloud/storage.ts:622",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",
