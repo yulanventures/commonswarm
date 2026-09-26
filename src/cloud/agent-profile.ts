@@ -7,7 +7,8 @@ import { parseAgentCredentialInput, type AgentCredentialInput } from "./agent-cr
 import { agentCredentialStore, credentialLineageKey } from "./agent-credential.js";
 import { AgentCredentialSession } from "./renewal.js";
 import { assertLocalSessionBinding, defaultSessionContextPath, listSessionContexts, sessionProofOf } from "./session-context.js";
-import { readSecureJsonFileIfPresent, writeSecureJsonFile, withFileLock } from "./storage.js";
+import { readSecureJsonFileIfPresent, writeSecureJsonFile, writeSecureJsonFileExclusive, withFileLock } from "./storage.js";
+import { CONNECT_PROFILE_FILES } from "./connect-profile-files.js";
 import {
   AGENT_CONNECTION_FIELDS, AGENT_CONNECTION_VERSION,
   type AgentConnectionEnvelope,
@@ -149,20 +150,26 @@ export function defaultAgentProfilePath(connection: Pick<AgentProfile, "url" | "
   return join(homedir(), ".cswarm", "agents", target.profileId, connection.workspace_id, connection.principal_id, "profile.json");
 }
 
+export async function refusePendingConnectProfile(path: string): Promise<void> {
+  const pending = join(dirname(path), CONNECT_PROFILE_FILES.pending);
+  const present = await lstat(pending).then(() => true, error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  });
+  if (present) throw new AgentSetupError("setup_connect_pending", `This directory holds ${pending}. Keep it and use a new --profile path for setup.`);
+}
+
 export async function readAgentProfile(path: string, hostSessionId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
   let p: AgentProfile;
   try { p = JSON.parse(raw); } catch { throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again."); }
-  /* Exactly the required keys, optionally plus workspace_name and host_session_id. Written as accepted sets
-   * rather than a subset test, so an unknown key is still a damaged profile. */
+  /* Exactly the six required keys, optionally plus the older known metadata. */
   const required = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
-  const keys = Object.keys(p ?? {}).sort().join();
-  const keysAccepted = keys === [...required].sort().join() ||
-    keys === [...required, "workspace_name"].sort().join() ||
-    keys === [...required, "host_session_id"].sort().join() ||
-    keys === [...required, "workspace_name", "host_session_id"].sort().join();
+  const keys = Object.keys(p ?? {});
+  const keysAccepted = required.every(key => keys.includes(key)) &&
+    keys.every(key => required.includes(key) || ["workspace_name", "host_session_id"].includes(key));
   if (!p || p.version !== 1 || !keysAccepted ||
       (p.host_session_id !== undefined &&
         (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200)) ||
@@ -171,7 +178,7 @@ export async function readAgentProfile(path: string, hostSessionId?: string): Pr
       typeof p.url !== "string" || typeof p.anon_key !== "string" ||
       typeof p.workspace_id !== "string" || !ONBOARDING_UUID.test(p.workspace_id) ||
       typeof p.principal_id !== "string" || !ONBOARDING_UUID.test(p.principal_id) ||
-      p.credential_file !== join(dirname(path), "credential.json")) {
+      p.credential_file !== join(dirname(path), CONNECT_PROFILE_FILES.credential)) {
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget(p.url, p.anon_key);
@@ -194,19 +201,20 @@ export async function openProfileCredential(profile: AgentProfile, fetcher: type
   return AgentCredentialSession.open({ target, workspaceId: profile.workspace_id, presented: agent, store, fetcher });
 }
 
-export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false): Promise<AgentProfile> {
+export async function saveAgentProfile(path: string, connection: AgentConnectionEnvelope, workspaceName?: string, hostSessionId?: string, refuseExisting = false, allowOrphanCredential = false, revokedOrphanPrincipalId?: string, exclusiveWrite: typeof writeSecureJsonFileExclusive = writeSecureJsonFileExclusive, connectAttemptId?: string): Promise<AgentProfile> {
   path = await assertPrivateLocation(path);
   const profile: AgentProfile = {
     version: 1, url: connection.url, anon_key: connection.anon_key,
     workspace_id: connection.workspace_id, principal_id: connection.principal_id,
-    credential_file: join(dirname(path), "credential.json"),
+    credential_file: join(dirname(path), CONNECT_PROFILE_FILES.credential),
     /* Only when the server actually gave one. The key is omitted rather than written null, so
-     * a profile from a deployment that does not send the name keeps exactly the six keys every
-     * released client already accepts. */
+     * an unbound profile without a workspace name keeps exactly the six keys every released
+     * client already accepts. */
     ...(workspaceName === undefined ? {} : { workspace_name: workspaceName }),
     ...(hostSessionId === undefined || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }),
   };
-  await withFileLock(dirname(path), "setup", async () => {
+  const save = async () => withFileLock(dirname(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+    if (connectAttemptId === undefined) await refusePendingConnectProfile(path);
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
@@ -215,12 +223,40 @@ export async function saveAgentProfile(path: string, connection: AgentConnection
         throw new AgentSetupError("profile_conflict", "This profile belongs to another workspace or agent. Use a different profile path.");
       }
     }
-    if (refuseExisting && await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) !== null) {
+    const existingCredential = refuseExisting ? await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) : null;
+    if (refuseExisting && existingCredential !== null && !allowOrphanCredential) {
       throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
     }
-    await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    const unfinishedClaim = refuseExisting && allowOrphanCredential && existingCredential === "";
+    if (existingCredential !== null && existingCredential !== JSON.stringify(connection.credential) && !unfinishedClaim) {
+      if (!refuseExisting || !allowOrphanCredential || revokedOrphanPrincipalId !== connection.principal_id) {
+        throw new AgentSetupError("profile_conflict", "The existing credential differs from the resumed attempt. Inspect the connection before retrying.");
+      }
+      const old = parseAgentCredentialInput(existingCredential, { kind: "file", path: profile.credential_file });
+      if (!old.durable || old.principalId !== revokedOrphanPrincipalId) {
+        throw new AgentSetupError("profile_conflict", "The existing credential belongs to another agent. Inspect the connection before retrying.");
+      }
+      // The same-attempt register retry has revoked this unused token and returned
+      // a fresh token for this principal. Replace only that orphan, atomically.
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    }
+    if (unfinishedClaim) {
+      // Only mcp connect passes allowOrphanCredential after validating its pending
+      // same-code attempt. Replace the empty claim atomically after register succeeds.
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    } else if (existingCredential === null && refuseExisting) {
+      await exclusiveWrite(profile.credential_file, JSON.stringify(connection.credential));
+    } else if (existingCredential === null) {
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection.credential));
+    }
+    if (connectAttemptId !== undefined) await writeSecureJsonFile(join(dirname(path), CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: connectAttemptId }));
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
+  if (connectAttemptId === undefined) {
+    await withFileLock(dirname(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), save);
+  } else {
+    await save(); // connect already holds the connect lock, then takes the setup lock
+  }
   return profile;
 }
 

@@ -3,6 +3,7 @@ import {
   access,
   chmod,
   lstat,
+  link,
   mkdir,
   open,
   readFile,
@@ -16,6 +17,7 @@ import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CloudTarget } from "./config.js";
+import { CONNECT_PROFILE_FILES } from "./connect-profile-files.js";
 
 // Renamed from "io.ridge.coswarm" with the CommonSwarm rename. An install that predates
 // the rename keeps its old keychain record; nothing reads it, so that install reports
@@ -391,13 +393,20 @@ export async function withFileLock<T>(
   while (handle === null) {
     try {
       handle = await open(lockPath, "wx", 0o600);
+      await handle.chmod(0o600);
       createdAt = Date.now();
       await handle.writeFile(
         JSON.stringify({ pid: process.pid, host: hostname(), createdAt }),
         "utf8",
       );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        if (handle) {
+          await handle.close().catch(() => undefined);
+          await unlink(lockPath).catch(() => undefined);
+        }
+        throw error;
+      }
       const lockInfo = await stat(lockPath).catch(() => null);
       if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
         await unlink(lockPath).catch(() => undefined);
@@ -449,6 +458,7 @@ export async function withFileLock<T>(
 export async function writeSecureJsonFile(
   path: string,
   serialized: string,
+  write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
 ): Promise<void> {
   await secureDirectory(dirname(path));
   try {
@@ -456,20 +466,77 @@ export async function writeSecureJsonFile(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
   const handle = await open(temporary, "wx", 0o600);
   try {
-    await handle.writeFile(serialized, "utf8");
+    await handle.chmod(0o600);
+    await write(handle, serialized);
     await handle.sync();
     await handle.close();
+    await secureCredentialFile(temporary);
     await rename(temporary, path);
   } catch (error) {
     await handle.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
-  await chmod(path, 0o600);
-  await secureCredentialFile(path);
+}
+
+/** Publish a new private file only after its contents are durable. Never replace an existing path. */
+export async function writeSecureJsonFileExclusive(
+  path: string, serialized: string,
+  write: (handle: import("node:fs/promises").FileHandle, contents: string) => Promise<void> = async (handle, contents) => { await handle.writeFile(contents, "utf8"); },
+  publishLink: typeof link = link,
+  claimIdentity: (handle: import("node:fs/promises").FileHandle) => ReturnType<import("node:fs/promises").FileHandle["stat"]> = handle => handle.stat(),
+): Promise<void> {
+  await secureDirectory(dirname(path));
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
+  const handle = await open(temporary, "wx", 0o600);
+  try {
+    await handle.chmod(0o600);
+    await write(handle, serialized);
+    await handle.sync();
+    await handle.close();
+    // Hard-link publication is atomic and fails with EEXIST even across different locks.
+    try { await publishLink(temporary, path); }
+    catch (error) {
+      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      // Reserve the name exclusively. A killed process leaves an empty claim, never
+      // a partial credential. The caller can identify that claim beside its pending record.
+      const final = await open(path, "wx", 0o600);
+      try {
+        // The first temp was prepared for link(). Write a second temp after the
+        // claim so even a kill during this fallback leaves only the empty claim.
+        const fallback = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, randomBytes(6).toString("hex"));
+        const fallbackHandle = await open(fallback, "wx", 0o600);
+        try {
+          await fallbackHandle.chmod(0o600);
+          await write(fallbackHandle, serialized);
+          await fallbackHandle.sync();
+          await fallbackHandle.close();
+          const claim = await claimIdentity(final);
+          const current = await lstat(path).catch(() => null);
+          if (!current || current.dev !== claim.dev || current.ino !== claim.ino) {
+            throw Object.assign(new Error("exclusive claim changed before publication"), { code: "EEXIST" });
+          }
+          await rename(fallback, path);
+        } catch (writeError) {
+          await fallbackHandle.close().catch(() => undefined);
+          throw writeError;
+        } finally { await unlink(fallback).catch(() => undefined); }
+      } catch (writeError) {
+        const current = await lstat(path).catch(() => null);
+        const claim = await claimIdentity(final);
+        if (current && claim.dev === current.dev && claim.ino === current.ino) await unlink(path).catch(() => undefined);
+        throw writeError;
+      } finally { await final.close().catch(() => undefined); }
+    }
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  } finally {
+    await unlink(temporary).catch(() => undefined);
+  }
 }
 
 /** Reads a 0600-verified JSON file, or null when it has never been written. */

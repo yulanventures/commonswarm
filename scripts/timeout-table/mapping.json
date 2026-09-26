@@ -1911,7 +1911,7 @@
             "/functions/v1/read",
             "/functions/v1/command"
           ],
-          "citation": "src/cloud/agent-setup.ts:17,37-66",
+          "citation": "src/cloud/agent-setup.ts:17,45-68",
           "detail": "Setup identity proof: credential renewal if due plus directory and inbox reads.",
           "operation": {
             "name": "agent-setup",
@@ -2424,7 +2424,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:25,193-248",
+          "citation": "src/cloud/storage.ts:27",
           "detail": "Local credential and state file-lock acquisition.",
           "operation": {
             "name": "storage-lock",
@@ -2438,7 +2438,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/storage.ts:383",
+          "citation": "src/cloud/storage.ts:385",
           "detail": "File lock default options.timeoutMs ?? LOCK_TIMEOUT_MS.",
           "operation": {
             "name": "storage-lock-site",
@@ -3146,7 +3146,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:21",
+          "citation": "src/cloud/mcp-connect.ts:23",
           "detail": "Register request budget for the H0 seat write.",
           "operation": {
             "name": "mcp-register",
@@ -3164,7 +3164,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:167",
+          "citation": "src/cloud/mcp-connect.ts:787",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3180,7 +3180,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:48",
+          "citation": "src/cloud/mcp-connect.ts:317",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",

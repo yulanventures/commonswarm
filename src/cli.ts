@@ -8,7 +8,7 @@ import { SIGNAL_BODY_MAX, SIGNAL_ABOUT_MAX } from "./cloud/signal-limits.js";
 export { SIGNAL_BODY_MAX } from "./cloud/signal-limits.js";
 import { recordDispatch } from "./dispatch-trace.js";
 import { isBlobBody } from "./cloud/agent-onboarding-contract.js";
-import { AgentSetupError, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
+import { AgentSetupError, privatePath, readAgentProfile, readProfileCredential, profileSessionContext } from "./cloud/agent-profile.js";
 import {
   ONBOARDING_BOOLEAN_FLAGS,
   ONBOARDING_VALUE_FLAGS,
@@ -595,7 +595,7 @@ export const KNOWN_FLAGS = new Set([
   ...ONBOARDING_BOOLEAN_FLAGS, ...ONBOARDING_VALUE_FLAGS,
   ...BODY_FLAGS,
   "about", "agent-token-file", "agent-token-stdin", "all-devices", "allow-unattended", "anon-key", "attach", "branch", "capability-id",
-  "claude-executable", "codex-executable", "confirm", "confirm-standing", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
+  "claude-executable", "codex-executable", "confirm", "confirm-standing", "clear-pending", "cooldown", "cwd", "defer-over", "device-id", "effort", "email",
   "epoch", "evidence", "follow", "force", "force-file-store", "foreground", "grok-executable", "head-sha",
   "broadcast-to-channel", "channel",
   "help", "if-version", "include-archived", "include-stale", "include-tombstoned", "invitation-id", "invitation-token-stdin", "json", "kind", "limit",
@@ -613,7 +613,7 @@ export const BOOLEAN_FLAGS = new Set([
   "all-devices",
   "allow-unattended",
   "broadcast-to-channel",
-  "confirm-standing",
+  "confirm-standing", "clear-pending",
   "force-file-store",
   "follow",
   "force",
@@ -882,7 +882,7 @@ Usage:
   cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
   cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
   cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]
-  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]
+  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]  # --clear-pending --profile <path> clears an interrupted connect
   cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
   cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--json]
   cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
@@ -9486,7 +9486,28 @@ async function runMcpCode(args: Arguments): Promise<void> {
 }
 
 async function runMcpConnect(args: Arguments): Promise<void> {
-  args.assertShape(["url", "anon-key", "profile", "name"], 2);
+  args.assertShape(["url", "anon-key", "profile", "name", "clear-pending"], 2);
+  if (args.has("clear-pending")) {
+    if (!args.has("profile") || args.has("anon-key") || args.has("name")) {
+      throw new AgentSetupError("connect_clear_options", "Pass --clear-pending and --profile <path> to clear an interrupted connect.");
+    }
+    const { clearMcpConnect } = await import("./cloud/mcp-connect.js");
+    const profilePath = args.required("profile");
+    const cleared = await clearMcpConnect(profilePath);
+    const removed = cleared.removed === "nothing" ? "Nothing was removed." : `Removed ${cleared.removed}.`;
+    process.stdout.write(cleared.removed === "nothing" ? `${removed}\n` : cleared.completedProfile
+      ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.\n`
+      : cleared.emptyClaimPresent
+        ? cleared.profilePresent
+          ? `${removed} This directory holds an empty claim file at credential.json and a profile at ${privatePath(profilePath)} that could not be validated; both files were kept. Ask the operator to inspect them before another connect.\n`
+          : `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
+      : cleared.credentialPresent
+        ? cleared.profilePresent
+          ? `${removed} This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.\n`
+          : `${removed} This directory holds a credential without a profile; the credential was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.\n`
+        : `${removed} No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n`);
+    return;
+  }
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
   const explicitUrl = args.required("url");
   const explicitAnonKey = args.optional("anon-key");
@@ -9519,7 +9540,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
       visible: true, help: ["cswarm mcp code"], bootstrap: true }),
     connect: commandEntry({ ...noTool("operator enters a code in a hidden terminal prompt"), handler: runMcpConnect,
       description: "Redeem a connect code on the agent host.", mutates: true,
-      flags: ["url", "anon-key", "profile", "name"], transports: STDIO_ONLY,
+      flags: ["url", "anon-key", "profile", "name", "clear-pending"], transports: STDIO_ONLY,
       profile: "native", hostSessionId: "drop", visible: true, help: ["cswarm mcp connect"], bootstrap: true }),
   }, args => args.positionals[1] ?? "serve", () => new UsageError("mcp requires code or connect, or --profile to serve tools"), {
     refusalPolicy: { flags: ["profile", "host-session-id", "url", "anon-key", "name"], ...NATIVE_PROFILE },
@@ -9895,15 +9916,24 @@ export function isCliMain(): boolean {
 
 export function mcpFailureCode(error: unknown, subcommand: string | undefined): string {
   if (error instanceof AgentSetupError) return error.code;
+  if (subcommand === "connect" && ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "")) return "connect_state_unavailable";
   return subcommand === "code" ? "mcp_code_failed"
     : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
+}
+
+export function mcpFailureMessage(error: unknown, subcommand: string | undefined): string {
+  if (subcommand === "connect" && !(error instanceof AgentSetupError) &&
+      ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "")) {
+    return "The connect state cannot be used safely. Inspect its access and rerun the same command.";
+  }
+  return safeError(error);
 }
 
 if (isCliMain()) {
   main().catch((error) => {
     const selected = selectedCommandContext;
     if (selected?.args.positionals[0] === "mcp") {
-      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${safeError(error)}\n`);
+      process.stderr.write(`cswarm: [${mcpFailureCode(error, selected.args.positionals[1])}] ${mcpFailureMessage(error, selected.args.positionals[1])}\n`);
       process.exitCode = 1;
       return;
     }
