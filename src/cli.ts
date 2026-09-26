@@ -322,6 +322,7 @@ import {
   ListenerStartupError,
   ListenerActivityController,
   effectiveListenerStatus,
+  uncleanListenerStatus,
   listenerPaths,
   defaultListenerStateDirectory,
   discoverListenerHookPrincipalIds,
@@ -7450,10 +7451,11 @@ export async function waitForListenerStop(
   initial: ListenerStatus | null,
   waitBudgetMs: number,
   deadline = Date.now() + waitBudgetMs,
-  processStart: (pid: number) => number | null = pidStartMs,
+  processStart: (pid: number, remainingMs: number) => number | null =
+    (pid, remainingMs) => pidStartMs(pid, undefined, remainingMs),
 ): Promise<ListenerStatus | null> {
   if (initial?.state === "stopped") {
-    try { await queryListenerControl(paths, "status", 250); }
+    try { await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now()))); }
     catch (error) {
       if (["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) return initial;
     }
@@ -7465,7 +7467,7 @@ export async function waitForListenerStop(
     }
     let socketClosed = false;
     try {
-      status = await queryListenerControl(paths, "status", 250);
+      status = await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now())));
     } catch (error) {
       socketClosed = ["ECONNREFUSED", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "");
       status = await readListenerStatusIfPresent(paths);
@@ -7474,13 +7476,17 @@ export async function waitForListenerStop(
     if (!pidGone && status !== null) {
       try {
         process.kill(status.pid, 0);
-        const start = processStart(status.pid);
-        pidGone = start !== null && Math.abs(start - Date.parse(status.startedAt)) > 2_000;
       } catch (error) {
         pidGone = (error as NodeJS.ErrnoException).code === "ESRCH";
       }
+      if (!pidGone && Date.now() < deadline) {
+        const start = processStart(status.pid, deadline - Date.now());
+        pidGone = start !== null && status.processStartedAt !== undefined &&
+          Math.abs(start - status.processStartedAt) > 2_000;
+      }
     }
-    if (socketClosed && pidGone) return status;
+    if (socketClosed && pidGone) return status && LISTENER_RUNNING_STATES.includes(status.state)
+      ? uncleanListenerStatus(status) : status;
     if (deadline - Date.now() >= 100) await new Promise(resolve => setTimeout(resolve, 100));
     else await new Promise(resolve => setTimeout(resolve, Math.max(1, deadline - Date.now())));
   }

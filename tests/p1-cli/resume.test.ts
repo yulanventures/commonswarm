@@ -85,6 +85,7 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
   let control: Awaited<ReturnType<typeof startListenerControlServer>> | null = null;
   let shell: ChildProcess | null = null;
   let nextPid: number | null = null;
+  const ownerSpawnAt = Date.now();
   const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   try {
     const url = await listen(server);
@@ -97,6 +98,7 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
     status.principalId = PRINCIPAL;
     assert.ok(owner.pid);
     status.pid = owner.pid;
+    status.processStartedAt = ownerSpawnAt;
     status.startedAt = new Date().toISOString();
     status.provider = "claude";
     await writeListenerStatus(paths, status);
@@ -139,13 +141,21 @@ for (const mode of ["slow", "dead", "dies_during_stop"] as const) test(`printed 
       XDG_STATE_HOME: join(root, "state"), PATH: `${bin}:${process.env.PATH ?? ""}` },
       stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
+    let stdout = "";
     shell.stderr?.on("data", chunk => stderr += String(chunk));
+    shell.stdout?.on("data", chunk => stdout += String(chunk));
     const code = await new Promise<number | null>((done, reject) => {
       const timer = setTimeout(() => { shell?.kill("SIGKILL"); reject(new Error("restart shell timeout")); }, 15_000);
       shell!.once("exit", value => { clearTimeout(timer); done(value); });
       shell!.once("error", reject);
     });
     assert.equal(code, 0, `${stderr}\n${JSON.stringify((await readListenerStatusIfPresent(paths))?.lastErrorCode)}\n${await readFile(paths.logPath, "utf8").catch(() => "no log")}`);
+    if (mode !== "slow") {
+      const stopOutput = stdout.split("Listener ready for agent")[0]!;
+      assert.match(stopOutput, /^Listener failed/);
+      assert.match(stopOutput, /CONNECTED: no\. Transport state is failed/);
+      assert.doesNotMatch(stopOutput, /Listener running|CONNECTED: yes/);
+    }
     const restarted = await readListenerStatusIfPresent(paths);
     assert.ok(restarted);
     assert.ok(LISTENER_RUNNING_STATES.includes(restarted.state));
@@ -198,7 +208,8 @@ test("stop wait treats a slow control reply as unknown until socket and child ex
     server = null;
     child.kill("SIGKILL");
     await new Promise<void>(resolve => child.once("close", () => resolve()));
-    assert.equal((await waiting)?.state, "stopping");
+    assert.equal((await waiting)?.state, "failed");
+    assert.equal((await readListenerStatusIfPresent(paths))?.state, "stopping");
   } finally {
     child.kill("SIGKILL");
     if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
@@ -243,9 +254,10 @@ test("stop wait treats a reused pid as gone and a recorded stopped state as comp
     assert.ok(child.pid);
     status.pid = child.pid;
     status.startedAt = "2020-01-01T00:00:00.000Z";
+    status.processStartedAt = Date.parse(status.startedAt);
     status.state = "stopping";
     await writeListenerStatus(paths, status);
-    assert.equal((await waitForListenerStop(paths, status, 900, Date.now() + 900, () => Date.now()))?.pid, child.pid);
+    assert.equal((await waitForListenerStop(paths, status, 900, Date.now() + 900, () => Date.now()))?.state, "failed");
     process.kill(child.pid, 0);
     status.state = "stopped";
     const start = Date.now();
@@ -254,6 +266,57 @@ test("stop wait treats a reused pid as gone and a recorded stopped state as comp
   } finally {
     child.kill("SIGKILL");
     if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stop wait keeps a live PID whose supervisor started over two seconds later", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-old-process-"));
+  const spawnedAt = Date.now();
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
+    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
+  try {
+    assert.ok(child.pid);
+    await new Promise(resolve => setTimeout(resolve, 2_100));
+    const status = listenerStatus(paths.logPath);
+    status.pid = child.pid;
+    status.processStartedAt = spawnedAt;
+    status.startedAt = new Date().toISOString();
+    status.state = "stopping";
+    await writeListenerStatus(paths, status);
+    await assert.rejects(waitForListenerStop(paths, status, 350, Date.now() + 350,
+      () => spawnedAt), /timed out after 0.35 seconds; state stopping, pid/);
+    process.kill(child.pid, 0);
+  } finally {
+    child.kill("SIGKILL");
+    if (child.exitCode === null && child.signalCode === null) await new Promise<void>(resolve => child.once("close", () => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("EPERM means alive and still reaches the one stop deadline", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-stop-eperm-"));
+  const paths = listenerPaths({ profileId: cloudTarget("http://127.0.0.1:54321", "anon").profileId,
+    workspaceId: WORKSPACE, principalId: PRINCIPAL, stateDirectory: root });
+  const status = listenerStatus(paths.logPath);
+  status.pid = 999_999_998;
+  status.processStartedAt = Date.now();
+  status.startedAt = new Date().toISOString();
+  status.state = "stopping";
+  const originalKill = process.kill;
+  try {
+    await writeListenerStatus(paths, status);
+    process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === status.pid && signal === 0) throw Object.assign(new Error("denied"), { code: "EPERM" });
+      return originalKill(pid, signal);
+    }) as typeof process.kill;
+    const start = Date.now();
+    await assert.rejects(waitForListenerStop(paths, status, 300, start + 300,
+      () => status.processStartedAt!), /timed out after 0.3 seconds; state stopping, pid 999999998/);
+    assert.ok(Date.now() - start < 650);
+  } finally {
+    process.kill = originalKill;
     await rm(root, { recursive: true, force: true });
   }
 });
