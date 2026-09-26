@@ -16,7 +16,7 @@ URL=$3
 WORKSPACE_ID=$4
 MODE=${5:-}
 
-file_mode() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1"; }
+file_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }  # GNU first: on Linux `stat -f` is file-system status and succeeds
 
 [ -d "$RELEASE_CHECKOUT" ] || { echo "input: release checkout is not a directory"; exit 2; }
 [ -f "$RELEASE_CHECKOUT/dist/cloud/wake-lease.js" ] || {
