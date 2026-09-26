@@ -181,6 +181,7 @@ export async function runSetupGuide(args: OnboardingArguments): Promise<void> {
 
 export const CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"] as const;
 export const CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"] as const;
+export const CHECK_MESSAGE_REFUSED_FLAGS = ["full"] as const;
 
 export async function runCheckHook(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-hook");
@@ -192,7 +193,7 @@ export async function runCheckHook(args: OnboardingArguments): Promise<void> {
 export async function runCheckMessage(args: OnboardingArguments): Promise<void> {
   recordDispatch("runOnboardingCommand:check-message");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full")) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
+  if (CHECK_MESSAGE_REFUSED_FLAGS.some(flag => args.has(flag))) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
   const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
   await output({ source: "local_preview_cache", message });
 }

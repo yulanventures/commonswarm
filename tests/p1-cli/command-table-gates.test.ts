@@ -28,7 +28,7 @@ import {
   type AgentCommandGroup,
 } from "../../src/cli.js";
 import { AGENT_QUICK_GUIDE } from "../../src/cloud/agent-onboarding-contract.js";
-import { CHECK_HOOK_REFUSED_FLAGS, onboardingUsage } from "../../src/onboarding-cli.js";
+import { CHECK_HOOK_REFUSED_FLAGS, CHECK_MESSAGE_REFUSED_FLAGS, onboardingUsage } from "../../src/onboarding-cli.js";
 import { CHANNEL_PURPOSE_MAX } from "../../src/cloud/channels.js";
 import { listenerRouteUsage } from "../../src/listener/index.js";
 import { parseSessionMode, parseSessionProvider } from "../../src/cloud/session-cli.js";
@@ -147,14 +147,14 @@ test("variant help renders the flags bound to its handler shape", { timeout: 10_
     { key: "setup.version", handler: "runSetupVersion", shape: "RUN_SETUP_VERSION_1_ACCEPTED_FLAGS", onboarding: true },
     { key: "setup.guide", handler: "runSetupGuide", shape: "RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS", onboarding: true },
     { key: "check.messages", handler: "runCheckMessages", shape: "CHECK_FLAGS", excluded: ["message-id", "hook"], onboarding: true },
-    { key: "check.message", handler: "runCheckMessage", shape: "CHECK_FLAGS", excluded: ["force", "full", "hook"], onboarding: true },
+    { key: "check.message", handler: "runCheckMessage", shape: "CHECK_FLAGS", excluded: ["force", ...CHECK_MESSAGE_REFUSED_FLAGS, "hook"], onboarding: true },
     { key: "check.hook", handler: "runCheckHook", shape: "CHECK_FLAGS", excluded: CHECK_HOOK_REFUSED_FLAGS, onboarding: true },
     { key: "resume.inspect", handler: "runResume", shape: "RUN_RESUME_1_ACCEPTED_FLAGS" },
     { key: "resume.profile", handler: "runResumeSnapshot", shape: "RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS", onboarding: true },
     { key: "inbox.read", handler: "runSignalRead", route: "runInboxReadMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: ["follow", "ndjson", "notify"] },
     { key: "inbox.notify", handler: "runSignalRead", route: "runInboxNotifyMode", shape: "NOTIFY_ACCEPTED_FLAGS" },
-    { key: "inbox.follow", handler: "runSignalRead", route: "runInboxFollowMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: ["wait", "notify", "channel", "json"] },
-    { key: "accept.linkStdin", handler: "runAccept", route: "runAcceptLinkStdinMode", shape: "RUN_ACCEPT_1_ACCEPTED_FLAGS", excluded: ["url", "anon-key"] },
+    { key: "inbox.follow", handler: "runSignalRead", route: "runInboxFollowMode", shape: "SIGNAL_READ_INBOX_ACCEPTED_FLAGS", excluded: cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS },
+    { key: "accept.linkStdin", handler: "runAccept", route: "runAcceptLinkStdinMode", shape: "RUN_ACCEPT_1_ACCEPTED_FLAGS", excluded: cliAccepted.ACCEPT_LINK_REFUSED_FLAGS },
     { key: "accept.legacyStdin", handler: "invitationCredential", route: "runAcceptLegacyStdinMode", shape: "INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS" },
     { key: "accept.positional", handler: "runAccept", route: "runAcceptPositionalMode", shape: "RUN_ACCEPT_2_ACCEPTED_FLAGS" },
   ];
@@ -192,7 +192,7 @@ test("variant help renders the flags bound to its handler shape", { timeout: 10_
     assert.deepEqual(rendered, expected, row.key);
   }
   assert.match(onboardingSource, /CHECK_HOOK_REFUSED_FLAGS\.some\(flag => args\.has\(flag\)\)/);
-  assert.match(cliSource, /"check\.hook": CHECK_FLAGS\.filter\(flag => !\(CHECK_HOOK_REFUSED_FLAGS/);
+  assert.match(cliSource, /get "check\.hook"\(\) \{ return CHECK_FLAGS\.filter\(flag => !\(CHECK_HOOK_REFUSED_FLAGS/);
 });
 
 test("single command help omits flags the handler always refuses", { timeout: 10_000 }, async () => {
@@ -201,12 +201,53 @@ test("single command help omits flags the handler always refuses", { timeout: 10
   const logout = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "runLogout");
   assert.ok(logout && ts.isFunctionDeclaration(logout));
   assert.match(logout.getText(ast), /args\.assertShape\(RUN_LOGOUT_1_ACCEPTED_FLAGS/);
-  assert.match(logout.getText(ast), /args\.optional\("device"\)[\s\S]*?throw new Error/);
+  assert.match(logout.getText(ast), /LOGOUT_REFUSED_FLAGS\.some\(flag => args\.optional\(flag\) !== undefined\)[\s\S]*?throw new Error/);
   const renderedLogout = [...new Set([...commandHelpLines("logout").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
-  assert.deepEqual(renderedLogout, [...cliAccepted.RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => flag !== "device")].sort());
+  assert.deepEqual(renderedLogout, [...cliAccepted.RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LOGOUT_REFUSED_FLAGS as readonly string[]).includes(flag))].sort());
   const renderedListen = [...new Set([...commandHelpLines("listen", "start").matchAll(/--([a-z][a-z-]*)\b/g)].map(match => match[1]!))].sort();
-  assert.deepEqual(renderedListen, [...new Set([...LISTEN_START_ACCEPTED_FLAGS.filter(flag => flag !== "defer-over"), "profile"])].sort());
-  assert.match(source, /if \(deferOverValue !== undefined\) \{\s*throw new Error\(listenerDeferOverRefusedSentence\(\)\)/);
+  assert.deepEqual(renderedListen, [...new Set([...LISTEN_START_ACCEPTED_FLAGS.filter(flag => !(cliAccepted.LISTEN_START_REFUSED_FLAGS as readonly string[]).includes(flag)), "profile"])].sort());
+  assert.match(source, /if \(LISTEN_START_REFUSED_FLAGS\.length > 0 && deferOverValue !== undefined\) \{\s*throw new Error\(listenerDeferOverRefusedSentence\(\)\)/);
+});
+
+test("removing a handler refusal makes its flag reappear in help", { timeout: 10_000 }, async () => {
+  const cliSource = await readFile(resolve("src/cli.ts"), "utf8");
+  const onboardingSource = await readFile(resolve("src/onboarding-cli.ts"), "utf8");
+  for (const name of ["LISTEN_START_REFUSED_FLAGS", "SESSION_START_REFUSED_FLAGS", "LOGOUT_REFUSED_FLAGS", "INBOX_FOLLOW_REFUSED_FLAGS", "ACCEPT_LINK_REFUSED_FLAGS"]) {
+    assert.match(cliSource, new RegExp(`if \\([^\\n]*${name}\\.`), `${name} is not used by its handler`);
+  }
+  for (const name of ["CHECK_MESSAGE_REFUSED_FLAGS", "CHECK_HOOK_REFUSED_FLAGS"]) {
+    assert.match(onboardingSource, new RegExp(`${name}\\.some\\(flag => args\\.has\\(flag\\)\\)`), `${name} is not used by its handler`);
+  }
+  const cases: { key: string; flags: readonly string[] }[] = [
+    { key: "listen.start", flags: cliAccepted.LISTEN_START_REFUSED_FLAGS },
+    { key: "session.start", flags: cliAccepted.SESSION_START_REFUSED_FLAGS },
+    { key: "logout", flags: cliAccepted.LOGOUT_REFUSED_FLAGS },
+    { key: "check.message", flags: CHECK_MESSAGE_REFUSED_FLAGS },
+    { key: "check.hook", flags: CHECK_HOOK_REFUSED_FLAGS },
+    { key: "inbox.follow", flags: cliAccepted.INBOX_FOLLOW_REFUSED_FLAGS },
+    { key: "accept.linkStdin", flags: cliAccepted.ACCEPT_LINK_REFUSED_FLAGS },
+  ];
+  const variantKeys = new Set(Object.keys(VARIANT_HELP_FLAGS));
+  const rendered = (key: string): string => {
+    const [verb, action] = key.split(".");
+    const entry = entries().find(row => row.key === verb)?.entry;
+    if (!variantKeys.has(key) || !entry) return commandHelpLines(verb, action);
+    const variants = Object.entries(entry.variants);
+    const index = variants.findIndex(([name]) => name === action);
+    assert.ok(index >= 0, key);
+    const section = commandHelpLines(verb);
+    const start = section.indexOf(`  ${variants[index]![1].help[0]}`);
+    const end = variants[index + 1] ? section.indexOf(`  ${variants[index + 1]![1].help[0]}`, start + 1) : section.length;
+    return section.slice(start, end);
+  };
+  for (const { key, flags } of cases) {
+    const mutable = flags as string[];
+    const flag = mutable[0]!;
+    assert.ok(!rendered(key).includes(`--${flag}`), `${key} initially shows refused --${flag}`);
+    mutable.splice(0, 1);
+    try { assert.ok(rendered(key).includes(`--${flag}`), `${key} did not reveal removed --${flag}`); }
+    finally { mutable.splice(0, 0, flag); }
+  }
 });
 
 test("no unused parser option gate remains beside the help renderer", { timeout: 10_000 }, async () => {
@@ -266,13 +307,19 @@ test("every help entry references a handler flag constant instead of a copied li
     .flatMap(statement => [...statement.declarationList.declarations])
     .find(item => item.name.getText(source) === "HANDLER_HELP_FLAGS");
   assert.ok(declaration?.initializer && ts.isObjectLiteralExpression(declaration.initializer));
-  const rows = new Map(declaration.initializer.properties.filter(ts.isPropertyAssignment).map(item => [
-    item.name.getText(source).replace(/^"|"$/g, ""), item.initializer.getText(source),
+  const rows = new Map(declaration.initializer.properties.filter((item): item is ts.PropertyAssignment | ts.GetAccessorDeclaration => ts.isPropertyAssignment(item) || ts.isGetAccessorDeclaration(item)).map(item => [
+    item.name.getText(source).replace(/^"|"$/g, ""), ts.isPropertyAssignment(item) ? item.initializer.getText(source) : item.getText(source),
   ]));
   assert.deepEqual([...rows.keys()].sort(), entries().map(row => row.key).sort());
   for (const [key, value] of rows) {
     assert.match(value, /(?:ACCEPTED_FLAGS|CHECK_FLAGS|RECEIVE_COMMON_FLAGS)/, key);
-    assert.doesNotMatch(value, /\["[a-z][a-z-]*",\s*"[a-z][a-z-]*"/, `${key} copied a flag list`);
+    const property = declaration.initializer.properties.find(item => (ts.isPropertyAssignment(item) || ts.isGetAccessorDeclaration(item)) && item.name.getText(source).replace(/^"|"$/g, "") === key);
+    assert.ok(property && (ts.isPropertyAssignment(property) || ts.isGetAccessorDeclaration(property)));
+    const visit = (node: ts.Node): void => {
+      assert.ok(!ts.isArrayLiteralExpression(node), `${key} must not contain an array literal`);
+      ts.forEachChild(node, visit);
+    };
+    visit(ts.isPropertyAssignment(property) ? property.initializer : property);
   }
 });
 
@@ -286,12 +333,40 @@ test("each direct help row names a constant read by its selected handler", { tim
   const help = declaration("HANDLER_HELP_FLAGS");
   assert.ok(commands?.initializer && ts.isObjectLiteralExpression(commands.initializer));
   assert.ok(help?.initializer && ts.isObjectLiteralExpression(help.initializer));
-  const helpRows = new Map(help.initializer.properties.filter(ts.isPropertyAssignment)
-    .map(item => [item.name.getText(cli).replace(/^"|"$/g, ""), item.initializer.getText(cli)]));
+  const helpRows = new Map(help.initializer.properties.filter((item): item is ts.PropertyAssignment | ts.GetAccessorDeclaration => ts.isPropertyAssignment(item) || ts.isGetAccessorDeclaration(item))
+    .map(item => [item.name.getText(cli).replace(/^"|"$/g, ""), ts.isPropertyAssignment(item) ? item.initializer.getText(cli) : item.getText(cli)]));
   const shapeReaders = (source: ts.SourceFile, name: string): string => {
     const functionNode = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name);
     return functionNode?.getText(source) ?? "";
   };
+  const selectedShapes: Record<string, readonly string[]> = {
+    "hook.check": ["RUN_HOOK_1_ACCEPTED_FLAGS"],
+    "hook.install": ["HOOK_INSTALL_ACCEPTED_FLAGS"],
+    "hook.uninstall": ["HOOK_UNINSTALL_ACCEPTED_FLAGS"],
+    "invite.create": ["RUN_INVITE_2_ACCEPTED_FLAGS"],
+    "invite.revoke": ["RUN_INVITE_1_ACCEPTED_FLAGS"],
+    "target.show": ["RUN_TARGET_1_ACCEPTED_FLAGS"],
+    "target.set": ["RUN_TARGET_2_ACCEPTED_FLAGS"],
+    "target.clear": ["RUN_TARGET_3_ACCEPTED_FLAGS"],
+    "principal.create": ["RUN_PRINCIPAL_1_ACCEPTED_FLAGS"],
+    "principal.revoke": ["RUN_PRINCIPAL_2_ACCEPTED_FLAGS"],
+    "token.revoke": ["RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS", "RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS"],
+    feedback: ["FEEDBACK_ACCEPTED_FLAGS"],
+    "file.put": ["FILE_PUT_ACCEPTED_FLAGS"],
+    "file.ls": ["FILE_LS_ACCEPTED_FLAGS"],
+    "file.get": ["FILE_GET_ACCEPTED_FLAGS"],
+    "file.rm": ["FILE_CONTEXT_BASE_ACCEPTED_FLAGS"],
+    "file.restore": ["FILE_CONTEXT_BASE_ACCEPTED_FLAGS"],
+    "brain.ls": ["FILE_CONTEXT_BASE_ACCEPTED_FLAGS"],
+    "brain.get": ["BRAIN_GET_ACCEPTED_FLAGS"],
+    "brain.put": ["BRAIN_PUT_ACCEPTED_FLAGS"],
+    "working-on": ["POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS"],
+    note: ["POST_SIGNAL_NOTE_ACCEPTED_FLAGS"],
+    ask: ["POST_SIGNAL_ASK_ACCEPTED_FLAGS"],
+    reply: ["REPLY_ACCEPTED_FLAGS"],
+    feed: ["SIGNAL_READ_FEED_ACCEPTED_FLAGS"],
+  };
+  const variantGroups = new Set(["setup", "check", "resume", "inbox", "accept"]);
   const inspectEntry = (key: string, call: ts.CallExpression): void => {
     const config = call.arguments[0];
     assert.ok(config && ts.isObjectLiteralExpression(config), key);
@@ -305,9 +380,16 @@ test("each direct help row names a constant read by its selected handler", { tim
     if (handlerName === "runPostSignal") body += shapeReaders(cli, "postSignalAllowedFlags");
     if (handlerName === "runReply") body += shapeReaders(cli, "replyAllowedFlags");
     if (key === "token.revoke") body += shapeReaders(cli, "runTokenRevoke");
-    const flags = [...(helpRows.get(key) ?? "").matchAll(/\b[A-Z][A-Z0-9_]*_FLAGS\b/g)].map(match => match[0]!);
+    const flags = [...(helpRows.get(key) ?? "").matchAll(/\b[A-Z][A-Z0-9_]*_FLAGS\b/g)]
+      .map(match => match[0]!).filter(flag => !flag.endsWith("REFUSED_FLAGS"));
     assert.ok(flags.length > 0, `${key} has no help shape constant`);
     for (const flag of flags) assert.match(body, new RegExp(`\\b${flag}\\b`), `${key} help uses ${flag} but ${handlerName ?? "inline handler"} does not`);
+    if (!variantGroups.has(key)) {
+      const reached = [...body.matchAll(/args\.assertShape\(\s*([A-Z][A-Z0-9_]*_FLAGS)\b/g)].map(match => match[1]!);
+      const expected = selectedShapes[key] ?? [...new Set(reached)];
+      assert.ok(expected.length > 0, `${key} has no selected handler shape`);
+      assert.deepEqual([...new Set(flags)].sort(), [...new Set(expected)].sort(), `${key} help does not match its selected branch`);
+    }
   };
   let checked = 0;
   for (const property of commands.initializer.properties.filter(ts.isPropertyAssignment)) {
@@ -328,6 +410,39 @@ test("each direct help row names a constant read by its selected handler", { tim
     }
   }
   assert.equal(checked, 67, "reconcile command table rows; dynamic session and selected variants have dedicated tests");
+});
+
+test("multi-action handlers select the direct help shape for their branch", { timeout: 10_000 }, async () => {
+  const source = ts.createSourceFile("src/cli.ts", await readFile(resolve("src/cli.ts"), "utf8"), ts.ScriptTarget.Latest, true);
+  const cases = [
+    ["runInvite", 'args.positionals[1] === "revoke"', "RUN_INVITE_1_ACCEPTED_FLAGS"],
+    ["runTarget", 'action === "show"', "RUN_TARGET_1_ACCEPTED_FLAGS"],
+    ["runTarget", 'action === "set"', "RUN_TARGET_2_ACCEPTED_FLAGS"],
+    ["runTarget", 'action === "clear"', "RUN_TARGET_3_ACCEPTED_FLAGS"],
+    ["runPrincipal", 'action === "create"', "RUN_PRINCIPAL_1_ACCEPTED_FLAGS"],
+    ["runPrincipal", 'action === "revoke"', "RUN_PRINCIPAL_2_ACCEPTED_FLAGS"],
+    ["runHook", 'command === "check"', "RUN_HOOK_1_ACCEPTED_FLAGS"],
+  ] as const;
+  for (const [handler, predicate, shape] of cases) {
+    const declaration = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === handler);
+    assert.ok(declaration && ts.isFunctionDeclaration(declaration));
+    const branch = declaration.body?.statements.find(node => ts.isIfStatement(node) && node.expression.getText(source) === predicate);
+    assert.ok(branch && ts.isIfStatement(branch), `${handler} has no ${predicate} branch`);
+    const calls: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && node.expression.getText(source) === "args.assertShape") calls.push(node.arguments[0]?.getText(source) ?? "");
+      ts.forEachChild(node, visit);
+    };
+    visit(branch.thenStatement);
+    assert.deepEqual(calls, [shape], `${handler} ${predicate} selects the wrong shape`);
+  }
+  const invite = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "runInvite");
+  assert.ok(invite && ts.isFunctionDeclaration(invite));
+  assert.ok(invite.body?.statements.some(node => ts.isExpressionStatement(node) && node.getText(source).includes("args.assertShape(RUN_INVITE_2_ACCEPTED_FLAGS")), "invite create must select its shape after the revoke branch");
+  assert.match(invite.getText(source), /if \(args\.positionals\[1\] === "revoke"\)[\s\S]*?return;\s*}\s*args\.assertShape\(RUN_INVITE_2_ACCEPTED_FLAGS/);
+  const hook = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "runHook");
+  assert.ok(hook && ts.isFunctionDeclaration(hook));
+  assert.match(hook.getText(source), /args\.assertShape\(command === "install" \? HOOK_INSTALL_ACCEPTED_FLAGS : HOOK_UNINSTALL_ACCEPTED_FLAGS/);
 });
 
 test("handler help omits refused resume, dogfood and command flags", { timeout: 10_000 }, () => {

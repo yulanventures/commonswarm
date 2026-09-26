@@ -14,6 +14,7 @@ import {
   ONBOARDING_VALUE_FLAGS,
   CHECK_FLAGS,
   CHECK_HOOK_REFUSED_FLAGS,
+  CHECK_MESSAGE_REFUSED_FLAGS,
   RECEIVE_COMMON_FLAGS,
   RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
   RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
@@ -2353,6 +2354,8 @@ async function runLegacyAccept(args: Arguments): Promise<void> {
   });
 }
 
+export const ACCEPT_LINK_REFUSED_FLAGS = ["url", "anon-key"] as const;
+
 function progressWriter(json: boolean): (progress: AcceptProgress) => void {
   return (progress) =>
     writeAcceptProgress(progress, {
@@ -2366,7 +2369,7 @@ async function runLinkAccept(
   args: Arguments,
   payload: InviteLinkPayload,
 ): Promise<void> {
-  if (args.has("url") || args.has("anon-key")) {
+  if (ACCEPT_LINK_REFUSED_FLAGS.some(flag => args.has(flag))) {
     throw new Error(
       "an invite link supplies its complete Cloud target; do not combine it with --url or --anon-key",
     );
@@ -3340,11 +3343,13 @@ export function listenerPollIntervalMs(value: string | undefined): number {
 }
 
 /** Parse the public route before credentials or network work. */
+export const LISTEN_START_REFUSED_FLAGS = ["defer-over"] as const;
+
 export function listenerRouteConfiguration(
   routeValue: string | undefined,
   deferOverValue: string | undefined,
 ): { routeMode: ListenerRouteMode; deferOverChars: number | null } {
-  if (deferOverValue !== undefined) {
+  if (LISTEN_START_REFUSED_FLAGS.length > 0 && deferOverValue !== undefined) {
     throw new Error(listenerDeferOverRefusedSentence());
   }
   const routeMode = routeValue ?? LISTENER_ROUTE_MODES[0];
@@ -4570,12 +4575,16 @@ async function runResume(args: Arguments): Promise<void> {
 
 export const SIGNAL_READ_FEED_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
 export const SIGNAL_READ_INBOX_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "wait", "follow", "ndjson", "notify", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS] as const;
+export const INBOX_FOLLOW_REFUSED_FLAGS = ["wait", "notify", "channel", "json"] as const;
 
 async function runSignalRead(
   args: Arguments,
   inbox: boolean,
 ): Promise<void> {
   const notify = inbox && args.has(NOTIFY_FLAG);
+  if (inbox && args.has("follow") && INBOX_FOLLOW_REFUSED_FLAGS.includes("notify") && notify) {
+    throw new Error("inbox --follow cannot be combined with --notify");
+  }
   args.assertShape(notify ? NOTIFY_ACCEPTED_FLAGS : inbox ? SIGNAL_READ_INBOX_ACCEPTED_FLAGS : SIGNAL_READ_FEED_ACCEPTED_FLAGS, 1);
 
   if (notify) {
@@ -4587,16 +4596,16 @@ async function runSignalRead(
     if (!args.has("ndjson")) {
       throw new Error("inbox --follow requires --ndjson");
     }
-    if (args.has("channel")) {
+    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("channel") && args.has("channel")) {
       /* Refused rather than ignored. The follow loop pages a backlog with its
        * own query and cursor, and accepting a filter it does not apply would
        * hand a caller a stream that silently contains everything. */
       throw new Error("inbox --follow cannot be combined with --channel");
     }
-    if (args.optional("wait") !== undefined) {
+    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("wait") && args.optional("wait") !== undefined) {
       throw new Error("inbox --follow cannot be combined with --wait");
     }
-    if (args.has("json")) {
+    if (INBOX_FOLLOW_REFUSED_FLAGS.includes("json") && args.has("json")) {
       throw new Error("inbox --follow --ndjson cannot be combined with --json");
     }
     await runInboxFollowCommand(args);
@@ -7501,6 +7510,7 @@ export const SESSION_HUMAN_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "p
 export const SESSION_STATUS_ACCEPTED_FLAGS = ["host-session-id", ...TARGET_FLAGS, ...CREDENTIAL_FLAGS, "session-context", "json"] as const;
 export const SESSION_PROFILE_STATUS_ACCEPTED_FLAGS = [...SESSION_STATUS_ACCEPTED_FLAGS, "workspace-id"] as const;
 export const SESSION_START_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "mode", "provider", "host-session-id", "host-label", "session-context", "json", "foreground"] as const;
+export const SESSION_START_REFUSED_FLAGS = ["agent-token-stdin"] as const;
 
 async function runSession(args: Arguments): Promise<void> {
   const action = args.positionals[1];
@@ -7621,7 +7631,7 @@ async function runSession(args: Arguments): Promise<void> {
   );
   const agent = await agentCredential(args);
   const tokenFile = args.optional("agent-token-file");
-  if (tokenFile === undefined || !isAbsolute(tokenFile)) {
+  if (SESSION_START_REFUSED_FLAGS.some(flag => args.has(flag)) || tokenFile === undefined || !isAbsolute(tokenFile)) {
     throw new Error(
       "session start needs --agent-token-file <absolute-path> so the context can reference the sole token file",
     );
@@ -9179,10 +9189,11 @@ async function runLogin(args: Arguments): Promise<void> {
 }
 
 export const RUN_LOGOUT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "device", "all-devices", "local"] as const;
+export const LOGOUT_REFUSED_FLAGS = ["device"] as const;
 
 async function runLogout(args: Arguments): Promise<void> {
   args.assertShape(RUN_LOGOUT_1_ACCEPTED_FLAGS, 1);
-  if (args.optional("device") !== undefined) {
+  if (LOGOUT_REFUSED_FLAGS.some(flag => args.optional(flag) !== undefined)) {
     throw new Error(
       "--device is deferred until the server-side device authority endpoint ships",
     );
@@ -9786,12 +9797,16 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
 };
 
 /** Help uses handler shapes. The dispatch table's flags remain the recorded parser baseline. */
+function mergeHelpFlags(...lists: readonly (readonly string[])[]): readonly string[] {
+  return [...new Set(lists.flat())];
+}
+
 export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
   "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
   "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
   "mcp.connect": RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
-  setup: [...RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, ...RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, ...RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS],
+  setup: mergeHelpFlags(RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS),
   check: CHECK_FLAGS,
   "receive.configure": RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS,
   "receive.status": RECEIVE_COMMON_FLAGS,
@@ -9803,18 +9818,18 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
   "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
   "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
-  "listen.start": LISTEN_START_ACCEPTED_FLAGS.filter(flag => flag !== "defer-over"),
+  get "listen.start"() { return LISTEN_START_ACCEPTED_FLAGS.filter(flag => !LISTEN_START_REFUSED_FLAGS.includes(flag as "defer-over")); },
   "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.stop": LISTEN_STATUS_ACCEPTED_FLAGS,
   "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
-  "session.start": SESSION_START_ACCEPTED_FLAGS.filter(flag => flag !== "agent-token-stdin"),
+  get "session.start"() { return SESSION_START_ACCEPTED_FLAGS.filter(flag => !(SESSION_START_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "session.status": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
   "session.stop": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
   "session.enable": SESSION_HUMAN_ACCEPTED_FLAGS,
   "session.disable": SESSION_HUMAN_ACCEPTED_FLAGS,
   "session.recover": SESSION_HUMAN_ACCEPTED_FLAGS,
   login: RUN_LOGIN_1_ACCEPTED_FLAGS,
-  logout: RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => flag !== "device"),
+  get logout() { return RUN_LOGOUT_1_ACCEPTED_FLAGS.filter(flag => !LOGOUT_REFUSED_FLAGS.includes(flag as "device")); },
   "invite.create": RUN_INVITE_2_ACCEPTED_FLAGS,
   "invite.revoke": RUN_INVITE_1_ACCEPTED_FLAGS,
   "member.remove": RUN_MEMBER_1_ACCEPTED_FLAGS,
@@ -9824,7 +9839,7 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "target.clear": RUN_TARGET_3_ACCEPTED_FLAGS,
   status: RUN_STATUS_1_ACCEPTED_FLAGS,
   whoami: RUN_WHOAMI_1_ACCEPTED_FLAGS,
-  resume: [...RUN_RESUME_1_ACCEPTED_FLAGS, ...RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS],
+  resume: mergeHelpFlags(RUN_RESUME_1_ACCEPTED_FLAGS, RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS),
   feedback: FEEDBACK_ACCEPTED_FLAGS,
   "channel.create": RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
   "channel.ls": RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
@@ -9845,15 +9860,15 @@ export const HANDLER_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   reply: REPLY_ACCEPTED_FLAGS,
   receipt: RUN_RECEIPT_1_ACCEPTED_FLAGS,
   feed: SIGNAL_READ_FEED_ACCEPTED_FLAGS,
-  inbox: [...SIGNAL_READ_INBOX_ACCEPTED_FLAGS, ...NOTIFY_ACCEPTED_FLAGS],
+  inbox: mergeHelpFlags(SIGNAL_READ_INBOX_ACCEPTED_FLAGS, NOTIFY_ACCEPTED_FLAGS),
   workspaces: RUN_WORKSPACES_1_ACCEPTED_FLAGS,
   use: RUN_USE_1_ACCEPTED_FLAGS,
   new: RUN_NEW_1_ACCEPTED_FLAGS,
-  accept: [...RUN_ACCEPT_1_ACCEPTED_FLAGS, ...RUN_ACCEPT_2_ACCEPTED_FLAGS, ...INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS],
+  accept: mergeHelpFlags(RUN_ACCEPT_1_ACCEPTED_FLAGS, RUN_ACCEPT_2_ACCEPTED_FLAGS, INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS),
   "principal.create": RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
   "principal.revoke": RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
   "token.mint": RUN_TOKEN_1_ACCEPTED_FLAGS,
-  "token.revoke": [...RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS, ...RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS],
+  "token.revoke": mergeHelpFlags(RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS, RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS),
   "grant.resume": RUN_GRANT_1_ACCEPTED_FLAGS,
   "link.new": RUN_LINK_NEW_1_ACCEPTED_FLAGS,
   "link.revoke": RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
@@ -9867,14 +9882,14 @@ export const VARIANT_HELP_FLAGS: Readonly<Record<string, readonly string[]>> = {
   "setup.version": RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
   "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
   "check.messages": CHECK_FLAGS.filter(flag => flag !== "message-id" && flag !== "hook"),
-  "check.message": CHECK_FLAGS.filter(flag => flag !== "force" && flag !== "full" && flag !== "hook"),
-  "check.hook": CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)),
+  get "check.message"() { return CHECK_FLAGS.filter(flag => flag !== "force" && flag !== "hook" && !(CHECK_MESSAGE_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  get "check.hook"() { return CHECK_FLAGS.filter(flag => !(CHECK_HOOK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
   "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
   "inbox.read": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => flag !== "follow" && flag !== "ndjson" && flag !== "notify"),
   "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
-  "inbox.follow": SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !["wait", "notify", "channel", "json"].includes(flag)),
-  "accept.linkStdin": RUN_ACCEPT_1_ACCEPTED_FLAGS.filter(flag => flag !== "url" && flag !== "anon-key"),
+  get "inbox.follow"() { return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter(flag => !(INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(flag)); },
+  get "accept.linkStdin"() { return RUN_ACCEPT_1_ACCEPTED_FLAGS.filter(flag => !(ACCEPT_LINK_REFUSED_FLAGS as readonly string[]).includes(flag)); },
   "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
   "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS,
 };
