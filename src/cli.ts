@@ -780,6 +780,10 @@ export class Arguments {
     });
   }
 
+  originalOptionEntries(): ReadonlyArray<Readonly<{ name: string; value?: string }>> {
+    return this.originalOptions;
+  }
+
   // Main swallowed hook-check errors only when `hook check` preceded every
   // option. Parsed `positionals` alone loses that order, so the parser records
   // this subset and error handling can use the selected entry plus parsed data.
@@ -885,17 +889,32 @@ class UsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
 const shellArgument = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-export const inboxFollowStep = (since: string, args?: Arguments): string => {
-  const flags = ["url", "anon-key", "workspace-id", "agent-token-file", "profile"]
-    .flatMap(flag => {
-      const value = args?.optional(flag);
-      return value === undefined ? [] : [`--${flag}`, shellArgument(value)];
-    });
-  return `cswarm inbox --follow --ndjson ${[...flags, "--since", shellArgument(since)].join(" ")}`;
+// The continuation replaces --since and the follow selector. A page limit,
+// output shape, and the separate notify selector do not carry into the stream.
+export const INBOX_FOLLOW_STEP_DROP_FLAGS = ["limit", "json", "ndjson"] as const;
+export const inboxFollowStep = (since: string, args?: Arguments): { command: string | null; refused: string | null } => {
+  const flags: string[] = [];
+  for (const { name, value } of args?.originalOptionEntries() ?? []) {
+    if (name === "since" || name === INBOX_READ_SELECTOR_FLAGS[0] || name === INBOX_READ_SELECTOR_FLAGS[2] ||
+        (INBOX_FOLLOW_STEP_DROP_FLAGS as readonly string[]).includes(name)) continue;
+    if ((INBOX_FOLLOW_REFUSED_FLAGS as readonly string[]).includes(name) ||
+        !(SIGNAL_READ_INBOX_ACCEPTED_FLAGS as readonly string[]).includes(name) &&
+        !("flags" in AGENT_COMMANDS.inbox && AGENT_COMMANDS.inbox.flags.includes(name))) {
+      return { command: null, refused: name };
+    }
+    flags.push(`--${name}`);
+    if (value !== undefined) flags.push(shellArgument(value));
+  }
+  return { command: `cswarm inbox --follow --ndjson ${[...flags, "--since", shellArgument(since)].join(" ")}`, refused: null };
 };
-export const inboxMoreNotice = (last: SignalCursor, since: string, args?: Arguments): string =>
-  `More inbox messages may remain. Stopped after ${last.created_at} (id ${last.id}). ` +
-  `Rerunning with the same --since re-reads from ${since}, including this timestamp; to read in order, run ${inboxFollowStep(since, args)}.`;
+export const inboxMoreNotice = (last: SignalCursor, since: string, args?: Arguments): string => {
+  const step = inboxFollowStep(since, args);
+  return `More inbox messages may remain. Stopped after ${last.created_at} (id ${last.id}). ` +
+    `Rerunning with the same --since re-reads from ${since}, including this timestamp; ` +
+    (step.command === null
+      ? `inbox --follow cannot carry --${step.refused}, so there is no equivalent follow step for this read.`
+      : `to read in order, ${args?.originalOptionEntries().some(option => option.name === "agent-token-stdin") ? "pipe the same token again and " : ""}run ${step.command}.`);
+};
 
 /** Non-command guidance appended after the command table's generated synopses. */
 const USAGE_GUIDANCE = `Inbox paging:
