@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:http";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { EXIT_NOTIFY_LEASE_LOST } from "../../src/cloud/wake-lease-constants.js";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { agentCredentialStore, credentialLineageKey } from "../../src/cloud/agent-credential.js";
+import { AgentCredentialSession } from "../../src/cloud/renewal.js";
 import { defaultSessionContextPath, newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { AGENT_SESSION_ID_HEADER } from "../../src/cloud/session-contract.js";
 import { renderResume, type ResumeInspection } from "../../src/resume.js";
@@ -335,6 +336,39 @@ test("unmanaged credential starts and holds a lease until clean stop", { timeout
     assert.equal((await watch.exit).code, 143);
     assert.ok(f.seen.some(command => command.kind === "release_wake_lease"));
   } finally { await f.cleanup(); }
+});
+
+test("watcher starts after a crashed reclaim gate owner", { timeout: 10_000 }, async () => {
+  const f = await fixture("unmanaged");
+  const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  let watch: ReturnType<typeof f.start> | null = null;
+  try {
+    assert.ok(owner.pid);
+    const directory = join(f.root, "state", "cswarm", "arrival-cursors");
+    const lockPath = join(directory, "host-id-rotation.lock");
+    const gate = `${lockPath}.reclaim`;
+    await mkdir(gate, { recursive: true, mode: 0o700 });
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "old-lock" }), { mode: 0o600 });
+    await writeFile(join(gate, "owner.json"), JSON.stringify({ pid: owner.pid, host: hostname(),
+      createdAt: Date.now(), startTime: Date.now(), ownerId: "old-gate" }), { mode: 0o600 });
+    owner.kill("SIGKILL");
+    await new Promise<void>(resolve => owner.once("close", () => resolve()));
+    watch = f.start();
+    const deadline = Date.now() + 4_000;
+    while (!f.seen.some(command => command.kind === "claim_wake_lease") && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.ok(f.seen.some(command => command.kind === "claim_wake_lease"), "watcher passed the crashed gate");
+    watch.stop();
+    assert.equal((await watch.exit).code, 143);
+    await assert.rejects(access(gate), { code: "ENOENT" });
+  } finally {
+    if (watch) { watch.stop(); await watch.exit.catch(() => undefined); }
+    owner.kill("SIGKILL");
+    if (owner.exitCode === null && owner.signalCode === null) await new Promise<void>(resolve => owner.once("close", () => resolve()));
+    await f.cleanup();
+  }
 });
 
 test("SIGINT releases the held lease before exit 130", { timeout: 10_000 }, async () => {
@@ -915,11 +949,12 @@ test("profile resume falls back when the renewal record is insecure", { timeout:
       stateDirectory: join(f.root, "state", "cswarm", "agent-credentials") });
     const missing = await agentCredentialStore({ target: cloudTarget(f.url, f.anonKey),
       lineageKey: credentialLineageKey(`swm_agt_${"A".repeat(43)}`),
-      stateDirectory: join(f.root, "missing-renewal-directory") });
+      stateDirectory: join(f.root, "missing-renewal-directory"), readOnly: true });
     assert.equal(await missing.read(), null);
     await assert.rejects(access(dirname(missing.location)), { code: "ENOENT" });
     await mkdir(dirname(store.location), { recursive: true, mode: 0o700 });
     await writeFile(store.location, "{broken", { mode: 0o600 });
+    await chmod(dirname(store.location), 0o755);
     const before = await readFile(store.location);
     const beforeMode = (await stat(dirname(store.location))).mode & 0o777;
     const resumed = await runProfileResume(f, profilePath, "renewed-host");
@@ -929,6 +964,37 @@ test("profile resume falls back when the renewal record is insecure", { timeout:
     assert.deepEqual(await readFile(store.location), before);
     assert.equal((await stat(dirname(store.location))).mode & 0o777, beforeMode);
   } finally { await f.cleanup(); }
+});
+
+test("resume read stays read-only while renewal read repairs directory mode", { timeout: 3_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-renewal-read-mode-"));
+  const options = { target: cloudTarget("http://127.0.0.1:54321", "anon"),
+    lineageKey: "a".repeat(32), stateDirectory: join(root, "successors") };
+  try {
+    const renewal = await agentCredentialStore(options);
+    const record = { version: 1 as const, token: `swm_agt_${"B".repeat(43)}`,
+      tokenId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", principalId: principal,
+      runId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", rootTokenId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      generation: 1, issuedAt: Date.now(), expiresAt: Date.now() + 60_000,
+      horizonExpiresAt: null, successorsRemaining: null, pendingRenewal: null };
+    await renewal.write(record);
+    await chmod(options.stateDirectory, 0o755);
+    const resume = await agentCredentialStore({ ...options, readOnly: true });
+    await assert.rejects(resume.read(), /directory must be mode 0700/);
+    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o755);
+    assert.deepEqual(await renewal.read(), record);
+    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o700);
+    await chmod(options.stateDirectory, 0o755);
+    const sessionOptions = { target: options.target, workspaceId: workspace,
+      presented: { token: `swm_agt_${"A".repeat(43)}`, tokenId: record.rootTokenId,
+        principalId: principal, runId: record.runId, expiresAt: record.expiresAt + 1_000_000 },
+      store: renewal, now: () => 0 };
+    const session = await AgentCredentialSession.open(sessionOptions);
+    assert.equal(await session.bearer(), record.token);
+    assert.equal((await stat(options.stateDirectory)).mode & 0o777, 0o700);
+    await writeFile(renewal.location, "{broken", { mode: 0o600 });
+    await assert.rejects(AgentCredentialSession.open(sessionOptions));
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("profile resume reports wrong-agent and unparseable credentials as snapshots", { timeout: 12_000 }, async () => {

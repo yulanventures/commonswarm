@@ -763,8 +763,11 @@ export class AgentCredentialSession {
     let adopted: AgentCredentialRecord | null = null;
     let pending: PendingRenewal | null = null;
     if (options.store) {
+      // Repair an owned directory before the lock checks its mode. The authoritative
+      // record is still read again while holding the lock below.
+      await options.store.read();
       await options.store.withLock(async () => {
-        const record = await options.store!.read().catch(() => null);
+        const record = await options.store!.read();
         if (!record) return;
         /* The principal is compared only when BOTH sides name one. A pending-only record
          * — written before any successor exists, to hold the replay id — deliberately
@@ -946,7 +949,7 @@ export class AgentCredentialSession {
     // write race pending-command.ts documents, and the loser must adopt the winner's
     // successor rather than spend a second one from the grant.
     await store.withLock(async () => {
-      const record = await store.read().catch(() => null);
+      const record = await store.read();
       if (
         record &&
         record.token !== null &&
@@ -1039,8 +1042,7 @@ export class AgentCredentialSession {
   private async adoptStored(): Promise<void> {
     const store = this.options.store;
     if (!store) return;
-    const record = await store.withLock(async () => await store.read().catch(() => null))
-      .catch(() => null);
+    const record = await store.withLock(async () => await store.read());
     if (record && record.rootTokenId === this.rootTokenId) this.adopt(record);
   }
 

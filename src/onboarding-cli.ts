@@ -293,7 +293,7 @@ export async function runResumeSnapshot(args: OnboardingArguments): Promise<void
   let renewalStoreReason: string | null = null;
   const renewed = credential === null ? null : await (async () => {
     const store = await agentCredentialStore({ target: cloudTarget(profile.url, profile.anon_key),
-      lineageKey: credentialLineageKey(credential.token) });
+      lineageKey: credentialLineageKey(credential.token), readOnly: true });
     return await store.read().catch(() => {
       renewalStoreReason = "the saved renewal record could not be read; using the profile credential file";
       return null;
