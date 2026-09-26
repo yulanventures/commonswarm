@@ -145,9 +145,19 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
-test("every CLI timeout mapping citation points to its measured source line", { timeout: 10_000 }, async () => {
+test("shipped timeout mapping stays byte-identical to main", { timeout: 10_000 }, async () => {
+  const current = await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8");
+  const main = execFileSync("git", ["show", "main:scripts/timeout-table/mapping.json"], { cwd: repo, encoding: "utf8", timeout: 5_000 });
+  const shipped = (source: string) => source.slice(source.indexOf('"v0.1.71"'), source.indexOf('"HEAD"', source.indexOf('"v0.1.71"')));
+  assert.equal(shipped(current), shipped(main));
+});
+
+test("HEAD timeout mapping citations point to their measured source lines", { timeout: 10_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
-  const lines = (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n");
+  const sources: Record<string, string[]> = {
+    "src/cli.ts": (await readFile(join(repo, "src/cli.ts"), "utf8")).split("\n"),
+    "src/onboarding-cli.ts": (await readFile(join(repo, "src/onboarding-cli.ts"), "utf8")).split("\n"),
+  };
   const patterns: Record<string, RegExp> = {
     "src/cli.ts:setTimeout": /const timer = setTimeout\(done, 250\)/,
     "src/cli.ts:setTimeout#2": /const hardExit = setTimeout\(/,
@@ -156,21 +166,26 @@ test("every CLI timeout mapping citation points to its measured source line", { 
     "src/cli.ts:deliveryHoldBudgetMs": /deliveryHoldBudgetMs: turnBudgetMs/,
     "src/cloud/agent-check-budget.ts:HOST_HOOK_PROCESS_DEADLINE_MS": /const hardExit = setTimeout\(/,
   };
-  let count = 0;
-  for (const [ref, inventory] of Object.entries(mapping.refs as Record<string, { rows: Record<string, { citation: string }> }>)) {
-    for (const [id, row] of Object.entries(inventory.rows)) {
-      const part = row.citation.match(/src\/cli\.ts:(\d+)(?:-(\d+))?/);
-      if (!part) continue;
-      count++;
-      const pattern = patterns[id];
-      assert.ok(pattern, `${ref} ${id} has no citation assertion`);
-      const from = Number(part[1]);
-      const to = Number(part[2] ?? part[1]);
-      assert.ok(from > 0 && to >= from && to <= lines.length, `${ref} ${id}: ${row.citation}`);
-      assert.match(lines.slice(from - 1, to).join("\n"), pattern, `${ref} ${id}: ${row.citation}`);
+  let cliCount = 0;
+  let onboardingCount = 0;
+  const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
+  for (const [id, row] of Object.entries(rows)) {
+    for (const match of row.citation.matchAll(/(src\/(?:cli|onboarding-cli)\.ts):(\d+)(?:-(\d+))?/g)) {
+      const [, file, first, last] = match;
+      const lines = sources[file!]!;
+      const from = Number(first);
+      const to = Number(last ?? first);
+      assert.ok(from > 0 && to >= from && to <= lines.length, `HEAD ${id}: ${row.citation}`);
+      const pattern = file === "src/onboarding-cli.ts"
+        ? id === "src/onboarding-cli.ts:setTimeout" ? /const timer = setTimeout\(/ : /const hardExit = setTimeout\(/
+        : patterns[id];
+      assert.ok(pattern, `HEAD ${id} has no citation assertion`);
+      assert.match(lines.slice(from - 1, to).join("\n"), pattern, `HEAD ${id}: ${row.citation}`);
+      if (file === "src/cli.ts") cliCount++; else onboardingCount++;
     }
   }
-  assert.equal(count, 10, "reconcile every CLI citation across mapped refs");
+  assert.equal(cliCount, 5, "reconcile HEAD CLI citations");
+  assert.equal(onboardingCount, 2, "reconcile HEAD onboarding citations");
 });
 
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {
