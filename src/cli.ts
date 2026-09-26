@@ -81,6 +81,11 @@ import {
   type StreamRoute,
 } from "./cloud/command-client.js";
 import {
+  isReplyStatus,
+  REPLY_STATUSES,
+  type ReplyStatus,
+} from "./cloud/reply-status.js";
+import {
   ChannelListError,
   channelSelectorProblem,
   CHANNEL_PURPOSE_MAX,
@@ -636,7 +641,7 @@ export const KNOWN_FLAGS = new Set([
   "permissions", "principal-id", "provider", "purpose", "renewal-grant-id", "repo", "reveal-anon-key", "route", "run-id", "since", "site", "slug", "state-dir",
   "thread",
   "poll-interval", "renewal-horizon-days", "request-id", "standing", "task-id", "to", "token-id", "ttl-ms", "turn-budget", "uid", "until", "url", "user", "version", "wait", "workspace-id", "write",
-  "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt",
+  "session-context", "host-session-id", "host-label", "allow-duplicate-name", "mode", "grok-bot-agent-id", "signal-id", "receipt", "status",
 ]);
 
 export const BOOLEAN_FLAGS = new Set([
@@ -907,6 +912,9 @@ class UsageError extends Error {}
 
 /** A local login option refusal, distinguished so shells receive usage exit 2. */
 class LoginProviderError extends Error {}
+
+/** A local reply-shape refusal with the stable code and usage exit requested by callers. */
+class ReplyStatusUsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
 const shellArgument = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
@@ -4055,6 +4063,18 @@ async function runReply(args: Arguments): Promise<void> {
   const allowedFlags = replyAllowedFlags();
   const inThread = args.has("thread");
   const broadcastToChannel = args.has("broadcast-to-channel");
+  const requestedStatus = args.optional("status");
+  if (inThread && requestedStatus !== undefined) {
+    throw new ReplyStatusUsageError(
+      "reply_status_thread: --status applies only to a private reply; remove --thread or --status",
+    );
+  }
+  if (requestedStatus !== undefined && !isReplyStatus(requestedStatus)) {
+    throw new UsageError(`--status must be ${REPLY_STATUSES.join("|")}`);
+  }
+  const replyStatus: ReplyStatus | undefined = inThread
+    ? undefined
+    : requestedStatus ?? "answered";
   if (broadcastToChannel && !inThread) {
     /* The edge refuses this pairing too, with its own generated sentence. It is
      * refused here as well because nothing has been sent yet and the reader can
@@ -4097,6 +4117,7 @@ async function runReply(args: Arguments): Promise<void> {
     to_user_id: null,
     to_agent_principal_id: null,
     in_reply_to: inThread ? null : signalId.toLowerCase(),
+    ...(replyStatus === undefined ? {} : { reply_status: replyStatus }),
     about: null,
     ...(attachments.length === 0 ? {} : { attachments }),
     ...(untilMs === undefined ? {} : { until_ms: untilMs }),
@@ -4166,6 +4187,7 @@ export const REPLY_ACCEPTED_FLAGS = [
     ...BODY_FLAGS,
     "attach",
     "broadcast-to-channel",
+    "status",
     "thread",
     "until",
     "json",
@@ -10109,7 +10131,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
   ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "status", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--status <${REPLY_STATUSES.join("|")}>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
   receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
   feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
   inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
@@ -10422,7 +10444,7 @@ function markRestartable(error: Error): Error {
 }
 
 function exitCodeFor(error: unknown): number {
-  if (error instanceof LoginProviderError) return 2;
+  if (error instanceof LoginProviderError || error instanceof ReplyStatusUsageError) return 2;
   if (error instanceof NotifyStdoutClosedError) return EXIT_NOTIFY_ORPHANED;
   if (error instanceof WakeLeaseLostError) return error.exitCode;
   return error instanceof Error ? restartableExit.get(error) ?? 1 : 1;

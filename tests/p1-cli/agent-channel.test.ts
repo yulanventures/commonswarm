@@ -151,7 +151,10 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     assert.deepEqual(tools.map(tool => tool.name), [CHANNEL_RECEIPT_TOOL, CHANNEL_REPLY_TOOL]);
     assert.deepEqual(tools[1]!.inputSchema, {
       type: "object", additionalProperties: false,
-      properties: { signal_id: { type: "string" }, body: { type: "string" } },
+      properties: {
+        signal_id: { type: "string" }, body: { type: "string" },
+        status: { type: "string", enum: ["answered", "failed", "declined"] },
+      },
       required: ["signal_id", "body"],
     });
     await requestReceiveCanary(profile, "host-session");
@@ -237,7 +240,7 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
     assert.equal(replyRequestIds.at(-1), unreadableId, "an unreadable refusal keeps its pending command id");
     ambiguousReplies = true;
     const ambiguousStart = replyRequestIds.length;
-    const ambiguous = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: INCOMING, body: "answer" } });
+    const ambiguous = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: INCOMING, body: "answer", status: "declined" } });
     assert.equal(ambiguous.isError, true);
     assert.match(JSON.stringify(ambiguous.content), /reply_outcome_unknown.*Retry the same reply/);
     const ambiguousIds = replyRequestIds.slice(ambiguousStart);
@@ -262,13 +265,14 @@ test("stdio channel emits an idle canary, requires this session's receipt, and s
       signal_id: teammateMeta.signal_id, receipt: teammateMeta.receipt, host_session_id: "host-session",
     } });
     assert.equal(received.isError, undefined);
-    const replied = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: INCOMING, body: "answer" } });
+    const replied = await client.callTool({ name: CHANNEL_REPLY_TOOL, arguments: { signal_id: INCOMING, body: "answer", status: "declined" } });
     assert.equal(replied.isError, undefined);
     assert.match(JSON.stringify(replied.content), new RegExp(REPLY));
     assert.equal(replyRequestIds.at(-1), ambiguousIds[0], "a later tool retry replays the pending command id");
     assert.deepEqual(replyRequests.at(-1), {
       kind: "post_signal", signal_kind: "note", body: "answer", to_user_id: null,
       to_agent_principal_id: null, in_reply_to: INCOMING, about: null,
+      reply_status: "declined",
     });
     await eventually(() => acks.length === 3);
     await eventually(() => notifications.filter(n => n.method === "notifications/claude/channel").length === 4);

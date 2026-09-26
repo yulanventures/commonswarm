@@ -295,6 +295,8 @@ export interface PostSignalCommand {
   to_agent_principal_id: string | null;
   /** Correlates a reply to the signal it answers. Always sent (null when absent). */
   in_reply_to: string | null;
+  /** Outcome attached only to a private reply. Absent remains valid for old clients. */
+  reply_status?: import("./reply-status.js").ReplyStatus;
   about: string | null;
   /** Ordered, immutable references to committed workspace file versions. */
   attachments?: Array<{ file_id: string; version_n: number }>;
@@ -328,6 +330,8 @@ export interface SignalRecord {
   to: string | null;
   to_agent: string | null;
   in_reply_to: string | null;
+  /** Null for non-replies and replies written by clients predating reply status. */
+  reply_status?: import("./reply-status.js").ReplyStatus | null;
   about: string | null;
   kind: SignalKind;
   body: string;
@@ -1276,6 +1280,9 @@ export class ThinCommandClient {
       to_user_id: request.command.to_user_id,
       to_agent_principal_id: request.command.to_agent_principal_id,
       in_reply_to: request.command.in_reply_to,
+      ...(request.command.reply_status === undefined
+        ? {}
+        : { reply_status: request.command.reply_status }),
       about: request.command.about,
       ...(request.command.attachments === undefined
         ? {}
