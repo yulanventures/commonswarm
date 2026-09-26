@@ -8,7 +8,7 @@ import { AGENT_SESSION_PROOF_REFUSAL_CODES } from "../cloud/session-wire.js";
 import { FileLockTimeoutError, StoredRecordOversizedError } from "../cloud/storage.js";
 import { FileCommandRefused, FileTransportError } from "../cloud/files.js";
 import { FilePutPreflightError, RequestIdConflict } from "../cloud/exact-file-put.js";
-import { isAskChainRefusalCode } from "../cloud/ask-chain-constants.js";
+import { isAskChainRefusalCode, printableAskRefusalMessage } from "../cloud/ask-chain-constants.js";
 
 type Action = "retry the same call" | "retry this call with the same request_id" | "fix the named argument" | "a person must restore this agent's access outside this session" | "stop and tell the operator" | "stop and keep the same request id" | "use a new request_id for new content" | "read the topic again and use a NEW request_id for new content" | "check the named arguments; if they are right, a person may need to restore this agent's access" | "check the arguments; if the problem stays, ask a person" | "restart this MCP server with the current host session" | "wait, then retry the same call with the same request_id";
 type Sentence = { message: string; next_step: Action };
@@ -93,7 +93,7 @@ export const MCP_ERROR_SENTENCES: Readonly<Record<string, Sentence>> = {
   channel_archived: entry("The channel argument names an archived channel.", FIX),
   invalid_request: entry("The service did not accept the named arguments.", FIX),
   payload_too_large: entry("The body or about argument is too large.", FIX),
-  rate_limited: entry("The signal rate limit for this agent or its workspace was reached; it resets within an hour.", WAIT_AND_RETRY),
+  rate_limited: entry("The service rate limit was reached.", WAIT_AND_RETRY),
   ...Object.fromEntries(AGENT_SESSION_PROOF_REFUSAL_CODES.map(code =>
     [code, entry("The current host session was refused by the service.", RESTART_SESSION)])),
   unauthenticated: entry("The service refused this agent's credential.", PERSON),
@@ -179,7 +179,8 @@ export function mapMcpError(error: unknown): { code: string; message: string; ne
     : "mcp_call_failed";
   const safeCode = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) && !code.includes("--") ? code : "mcp_call_failed";
   if (error instanceof CommandHttpError && isAskChainRefusalCode(error.code)) {
-    return { code: error.code, message: error.message, next_step: CHECK_ARGUMENTS, status: error.status };
+    return { code: error.code, message: printableAskRefusalMessage(error.message),
+      next_step: error.code === "rate_limited" ? WAIT_AND_RETRY : CHECK_ARGUMENTS, status: error.status };
   }
   const fileStatus = error instanceof FileCommandRefused ? error.status : null;
   const sentence = fileStatus !== null && (fileStatus >= 500 || fileStatus === 429)

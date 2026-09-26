@@ -20,7 +20,7 @@ import { sessionProofOf } from "./session-context.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
 import { AGENT_CHECK_TIMEOUT_MS } from "./agent-check-budget.js";
 import { DeliveryCommandClient, DeliveryHttpError } from "./delivery.js";
-import { replaceHandledAsks } from "./ask-chain-context.js";
+import { mergeHandledAsks, startHandledAskTurn } from "./ask-chain-context.js";
 
 export {
   AGENT_CHECK_OUTPUT_ALLOWANCE_MS,
@@ -210,6 +210,7 @@ export async function checkAgentMessages(options: {
 }): Promise<AgentCheckResult> {
   const startedAt = Date.now();
   const profilePath = privatePath(options.profilePath);
+  const askTurnGeneration = await startHandledAskTurn(profilePath, options.hostSessionId);
   const profile = await readAgentProfile(profilePath, options.hostSessionId);
   const path = checkStatePath(profilePath, options.hostSessionId);
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
@@ -311,7 +312,7 @@ export async function checkAgentMessages(options: {
           const visible = lastVisibleId === undefined
             ? presented
             : presented.slice(0, presented.findIndex(row => row.id === lastVisibleId) + 1);
-          await replaceHandledAsks(profilePath, options.hostSessionId,
+          await mergeHandledAsks(profilePath, options.hostSessionId, askTurnGeneration,
             visible.filter(row => row.kind === "ask").map(row => row.id));
         };
         const directedIds = presented.filter(row => row.kind === "ask" || row.kind === "note").map(row => row.id);

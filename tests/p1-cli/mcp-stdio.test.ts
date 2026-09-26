@@ -62,7 +62,7 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
   let renewals = 0;
   const committed = new Map<string, object>();
   let readRefusal = false, sendRefusal = false, readError: { status: number; code: string } | null = null;
-  let sendError: { status: number; code: string } | null = null;
+  let sendError: { status: number; code: string; message?: string } | null = null;
   let serverConflict = false, lostAttempts = 0, delayAnswer = false, malformedAnswer = false;
   let workspaceName = "Test workspace";
   let ambiguousRecipient = false, malformedRead = false, renewalReason: string | null = null;
@@ -139,7 +139,8 @@ async function fixture(incomingBody = "A teammate's full message", expiresAt = "
       }
       if (body.command?.kind === "post_signal") {
         posts.push(body);
-        if (sendError) return send(sendError.status, { error: sendError.code });
+        if (sendError) return send(sendError.status, { error: sendError.code,
+          ...(sendError.message === undefined ? {} : { message: sendError.message }) });
         if (serverConflict) { serverConflict = false; return send(409, { error: "command_id_conflict", message: "Request ID conflicts with another command." }); }
         if (sendRefusal) return send(403, { error: "signal_refused", message: "Signal refused." });
         const previous = committed.get(body.command_id);
@@ -289,7 +290,9 @@ test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeou
       note: { body: "note", request_id: "request03" }, reply: { signal_id: ID, body: "answer", request_id: "request04" },
       working_on: { body: "work", request_id: "request05" } })) {
       const result = (await f.call(name, args)).value;
-      assert.deepEqual(Object.keys(result), ["signal_id", "kind", "created_at", "in_reply_to", "channel_id"]);
+      assert.deepEqual(Object.keys(result), ["signal_id", "kind", "created_at", "in_reply_to", "channel_id",
+        ...(name === "ask" ? ["parent_context"] : [])]);
+      if (name === "ask") assert.match(result.parent_context, /parent_signal_id/);
     }
     assert.equal(f.posts.length, 4);
     assert.equal(f.posts[0].command.to_user_id, OWNER);
@@ -318,18 +321,19 @@ test("MCP stdio tool table, allow-lists, every happy path and refusal", { timeou
   } finally { await f.close(); }
 });
 
-test("MCP ask chooses one turn parent, explains ambiguity, and explicit input wins", { timeout: 15_000 }, async () => {
+test("MCP unbound asks never share automatic parents and explicit input wins", { timeout: 15_000 }, async () => {
   const f = await fixture();
   const explicit = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   try {
     await f.call("check");
-    const automatic = await f.call("ask", { body: "automatic", to: "Owner", request_id: "parent001" });
-    assert.equal(automatic.value.parent_context, undefined);
-    assert.equal(f.posts.at(-1)!.command.parent_signal_id, ID);
+    const firstSession = await f.call("ask", { body: "automatic", to: "Owner", request_id: "parent001" });
+    assert.match(firstSession.value.parent_context, /parent_signal_id/);
+    assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "parent_signal_id"), false);
 
     await replaceHandledAsks(f.profile, undefined, [ID, explicit]);
-    const ambiguous = await f.call("ask", { body: "ambiguous", to: "Owner", request_id: "parent002" });
-    assert.match(ambiguous.value.parent_context, /parent_signal_id/);
+    assert.ok(!(await readdir(join(f.root, "profile"))).includes("handled-asks-manual.json"));
+    const secondSession = await f.call("ask", { body: "second session", to: "Owner", request_id: "parent002" });
+    assert.match(secondSession.value.parent_context, /parent_signal_id/);
     assert.equal(Object.hasOwn(f.posts.at(-1)!.command, "parent_signal_id"), false);
 
     const chosen = await f.call("ask", { body: "explicit", to: "Owner", request_id: "parent003", parent_signal_id: explicit });
@@ -345,6 +349,14 @@ test("MCP ask returns each chain refusal's server sentence unchanged", () => {
       code, message: sentence, next_step: "check the arguments; if the problem stays, ask a person", status: 409,
     });
   }
+  const sentence = "Ask rate limit reached; retry after 37 seconds.";
+  assert.deepEqual(mapMcpError(new CommandHttpError(429, sentence, "rate_limited")), {
+    code: "rate_limited", message: sentence,
+    next_step: "wait, then retry the same call with the same request_id", status: 429,
+  });
+  const unsafe = mapMcpError(new CommandHttpError(429, `Retry\u001b[2J\n${"x".repeat(1_200)}`, "rate_limited"));
+  assert.equal(unsafe.message.length, 1_000);
+  assert.doesNotMatch(unsafe.message, /\u001b|\n/);
 });
 
 test("MCP stdio file_put and brain_put replay, conflict, and preflight", { timeout: 30_000 }, async () => {
@@ -778,12 +790,12 @@ test("MCP stdio edge refusal codes give exact post and read next steps", { timeo
       [409, "channel_archived", "The channel argument names an archived channel.", "fix the named argument"],
       [400, "invalid_request", "The service did not accept the named arguments.", "fix the named argument"],
       [413, "payload_too_large", "The body or about argument is too large.", "fix the named argument"],
-      [429, "rate_limited", "The signal rate limit for this agent or its workspace was reached; it resets within an hour.", "wait, then retry the same call with the same request_id"],
+      [429, "rate_limited", "Ask rate limit reached; retry after 37 seconds.", "wait, then retry the same call with the same request_id"],
       [418, "new_code", "The service returned new_code with status 418.", "check the arguments; if the problem stays, ask a person"],
     ] as const;
     let index = 0;
     for (const [status, code, message, next_step] of writeCases) {
-      f.setSendError({ status, code });
+      f.setSendError({ status, code, ...(code === "rate_limited" ? { message } : {}) });
       const name = status === 403 ? ["ask", "note", "reply", "working_on"] : ["note"];
       for (const tool of name) {
         const request_id = `edge${String(++index).padStart(4, "0")}`;

@@ -16,8 +16,17 @@ export const ASK_CHAIN_REFUSAL_CODES = [
   "chain_loop",
   "chain_too_long",
   "chain_too_wide",
+  "rate_limited",
 ] as const;
 
 export function isAskChainRefusalCode(value: unknown): value is typeof ASK_CHAIN_REFUSAL_CODES[number] {
   return typeof value === "string" && (ASK_CHAIN_REFUSAL_CODES as readonly string[]).includes(value);
+}
+
+/** Preserve ordinary service prose while preventing terminal/control injection and oversized tool results. */
+export function printableAskRefusalMessage(message: string): string {
+  return message
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+    .slice(0, 1_000);
 }

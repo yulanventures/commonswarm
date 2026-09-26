@@ -940,7 +940,7 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
   const credential = join(profileDir, "credential.json");
   await mkdir(profileDir, { mode: 0o700 });
   const commands: Array<Record<string, unknown>> = [];
-  let refusal: { code: string; message: string } | null = null;
+  let refusal: { status: number; code: string; message: string } | null = null;
   const server = createServer((request, response) => {
     let raw = "";
     request.setEncoding("utf8");
@@ -958,7 +958,7 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
       }
       commands.push(envelope.command);
       if (refusal) {
-        response.statusCode = 409;
+        response.statusCode = refusal.status;
         response.end(JSON.stringify({ error: refusal.code, message: refusal.message }));
         return;
       }
@@ -983,31 +983,36 @@ test("CLI ask parent flag, turn default, ambiguity notice, and chain refusals", 
     assert.equal(commands.at(-1)!.parent_signal_id, explicitParent);
     assert.doesNotMatch(explicit.stderr, /--parent/);
 
-    await replaceHandledAsks(profile, undefined, [SIGNAL]);
-    const automatic = await runCli(["ask", "automatic", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    await replaceHandledAsks(profile, "session-a", [SIGNAL]);
+    const automatic = await runCli(["ask", "automatic", "--profile", profile, "--host-session-id", "session-a", "--to", "Owner", "--json"], "", env);
     assert.equal(automatic.code, 0, automatic.stderr);
     assert.equal(commands.at(-1)!.parent_signal_id, SIGNAL);
 
-    await replaceHandledAsks(profile, undefined, []);
-    const root = await runCli(["ask", "root", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    const root = await runCli(["ask", "root", "--profile", profile, "--host-session-id", "session-b", "--to", "Owner", "--json"], "", env);
     assert.equal(root.code, 0, root.stderr);
     assert.doesNotThrow(() => JSON.parse(root.stdout), "--json stdout remains one JSON document");
     assert.match(root.stderr, /--parent/);
     assert.equal(Object.hasOwn(commands.at(-1)!, "parent_signal_id"), false);
 
-    await replaceHandledAsks(profile, undefined, [SIGNAL, explicitParent]);
-    const ambiguous = await runCli(["ask", "ambiguous", "--profile", profile, "--to", "Owner", "--json"], "", env);
+    await replaceHandledAsks(profile, "session-a", [SIGNAL, explicitParent]);
+    const ambiguous = await runCli(["ask", "ambiguous", "--profile", profile, "--host-session-id", "session-a", "--to", "Owner", "--json"], "", env);
     assert.equal(ambiguous.code, 0, ambiguous.stderr);
     assert.match(ambiguous.stderr, /--parent/);
     assert.equal(Object.hasOwn(commands.at(-1)!, "parent_signal_id"), false);
 
     for (const code of ["chain_parent_invalid", "chain_loop", "chain_too_long", "chain_too_wide"]) {
       const message = `server sentence for ${code}`;
-      refusal = { code, message };
+      refusal = { status: 409, code, message };
       const refused = await runCli(["ask", code, "--profile", profile, "--to", "Owner", "--parent", SIGNAL], "", env);
       assert.equal(refused.code, 1);
       assert.equal(refused.stderr, `cswarm: ${message}\n`);
     }
+    const minuteMessage = "Ask rate limit reached; retry after 37 seconds.";
+    refusal = { status: 429, code: "rate_limited", message: minuteMessage };
+    const rateLimited = await runCli(["ask", "rate", "--profile", profile, "--to", "Owner", "--parent", SIGNAL], "", env);
+    assert.equal(rateLimited.code, 1);
+    assert.equal(rateLimited.stderr, `cswarm: ${minuteMessage}\n`);
+    assert.doesNotMatch(rateLimited.stderr, /may have posted|within an hour/);
   } finally {
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

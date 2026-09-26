@@ -323,7 +323,7 @@ import {
   readAgentDeliveryReceipts,
 } from "./cloud/delivery-receipts.js";
 import { ASK_PARENT_CLI_SENTENCE, defaultAskParent } from "./cloud/ask-chain-context.js";
-import { isAskChainRefusalCode } from "./cloud/ask-chain-constants.js";
+import { isAskChainRefusalCode, printableAskRefusalMessage } from "./cloud/ask-chain-constants.js";
 import {
   DELIVERY_HANDLED_OUTCOMES,
   H0_SEAT_CLAIM_REFUSED_CODE,
@@ -3831,7 +3831,9 @@ async function runPostSignal(
     result = await postSignalCommand(cloud, credential, command);
   } catch (error) {
     if (kind === "ask") {
-      if (error instanceof CommandHttpError && isAskChainRefusalCode(error.code)) throw error;
+      if (error instanceof CommandHttpError && isAskChainRefusalCode(error.code)) {
+        throw new CommandHttpError(error.status, printableAskRefusalMessage(error.message), error.code);
+      }
       throw new Error(
         askCreateFailureMessage(credential.selectedWorkspace, error),
       );
