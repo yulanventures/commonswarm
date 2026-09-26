@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { checkedSince, INBOX_SINCE_PAGE_CAP, readDirectedInboxSince, readSignals, InboxSinceError } from "../../src/cloud/signals.js";
-import { assertInboxWorkspace, inboxMoreNotice } from "../../src/cli.js";
+import { Arguments, assertInboxWorkspace, inboxFollowRefusal, inboxMoreNotice } from "../../src/cli.js";
 
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const PRINCIPAL = "22222222-2222-4222-8222-222222222222";
@@ -97,10 +97,36 @@ test("inbox drain stops at the exact cursor and explains equal-timestamp rereads
   assert.equal(requests[1]?.after_id, many[99]!.id);
   assert.match(notice, new RegExp(`Stopped after ${many[999]!.created_at} \\(id ${many[999]!.id}\\)`));
   assert.match(notice, /same --since re-reads from 2026-09-25T01:00:00.000Z, including this timestamp/);
-  assert.match(notice, /inbox --follow to read in order/);
+  assert.match(notice, /cswarm inbox --follow --ndjson --since '2026-09-25T01:00:00.000Z'/);
   assert.doesNotMatch(notice, /rerun with --since 2026-/i);
   assert.match(inboxMoreNotice({ created_at: many[999]!.created_at, id: many[999]!.id }, "2026-09-24T00:00:00.000Z"),
     /same --since re-reads from 2026-09-24T00:00:00.000Z, including this timestamp/);
+});
+
+test("the cap notice's exact next step parses as inbox follow with its original target and since", { timeout: 10_000 }, () => {
+  const since = "2026-09-24T00:00:00.000Z";
+  for (const flags of [
+    ["--url", "http://127.0.0.1:9", "--anon-key", "public-test-key", "--workspace-id", WORKSPACE],
+    ["--url", "http://127.0.0.1:9", "--agent-token-file", "/tmp/fixture token", "--workspace-id", WORKSPACE],
+    ["--url", "http://127.0.0.1:9", "--profile", "/tmp/fixture profile"],
+  ]) {
+    const original = new Arguments(["inbox", "--since", since, ...flags]);
+    const notice = inboxMoreNotice({ created_at: rows[0]!.created_at, id: rows[0]!.id }, since, original);
+    const printed = notice.match(/run (cswarm inbox .+)\.$/)?.[1];
+    assert.ok(printed, notice);
+    const words = printed.match(/'[^']*'|\S+/g)?.map(word => word.startsWith("'") ? word.slice(1, -1) : word);
+    assert.ok(words);
+    assert.equal(words.shift(), "cswarm");
+    const parsed = new Arguments(words);
+    assert.deepEqual(parsed.positionals, ["inbox"]);
+    assert.equal(parsed.has("follow"), true);
+    assert.equal(parsed.has("ndjson"), true);
+    assert.equal(inboxFollowRefusal(parsed), null);
+    for (let index = 0; index < flags.length; index += 2) {
+      assert.equal(parsed.required(flags[index]!.slice(2)), flags[index + 1]);
+    }
+    assert.equal(parsed.required("since"), since);
+  }
 });
 
 test("inbox drain paging failures are typed", { timeout: 10_000 }, async () => {

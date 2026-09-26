@@ -884,9 +884,18 @@ const TASK_FLAGS = [
 class UsageError extends Error {}
 
 export const INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
-export const inboxMoreNotice = (last: SignalCursor, since: string): string =>
+const shellArgument = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+export const inboxFollowStep = (since: string, args?: Arguments): string => {
+  const flags = ["url", "anon-key", "workspace-id", "agent-token-file", "profile"]
+    .flatMap(flag => {
+      const value = args?.optional(flag);
+      return value === undefined ? [] : [`--${flag}`, shellArgument(value)];
+    });
+  return `cswarm inbox --follow --ndjson ${[...flags, "--since", shellArgument(since)].join(" ")}`;
+};
+export const inboxMoreNotice = (last: SignalCursor, since: string, args?: Arguments): string =>
   `More inbox messages may remain. Stopped after ${last.created_at} (id ${last.id}). ` +
-  `Rerunning with the same --since re-reads from ${since}, including this timestamp; use inbox --follow to read in order.`;
+  `Rerunning with the same --since re-reads from ${since}, including this timestamp; to read in order, run ${inboxFollowStep(since, args)}.`;
 
 /** Non-command guidance appended after the command table's generated synopses. */
 const USAGE_GUIDANCE = `Inbox paging:
@@ -4713,7 +4722,7 @@ async function runSignalRead(
       { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows, {
         waited,
         timedOut,
-      }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince, queryBase.since!) }
+      }), ...(moreSince !== undefined ? { notice: inboxMoreNotice(moreSince, queryBase.since!, args) }
         : inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit
         ? { notice: INBOX_LIMIT_NOTICE } : {}) },
     );
@@ -4762,7 +4771,7 @@ async function runSignalRead(
   if (inbox && queryBase.limit !== undefined && rows.length >= queryBase.limit) {
     process.stdout.write(`${INBOX_LIMIT_NOTICE}\n`);
   }
-  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since!)}\n`);
+  if (moreSince !== undefined) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since!, args)}\n`);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
