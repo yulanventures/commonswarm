@@ -1675,7 +1675,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8060-8076",
+          "citation": "src/cli.ts:8062-8078",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1689,7 +1689,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3366",
+          "citation": "src/cli.ts:3368",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1775,7 +1775,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8111; src/onboarding-cli.ts:94",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8113; src/onboarding-cli.ts:94",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -2373,7 +2373,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:37,881-928",
+          "citation": "src/cloud/signals.ts:38,881-929",
           "detail": "Per-request signal read ceiling. The measured helper calls readAgentSignalPage (agent page, /functions/v1/read, body included). The same constant also bounds the members directory, human PostgREST /rest/v1/signals, retries, and delivery-receipt reads, which are not run.",
           "operation": {
             "name": "signal-read",
@@ -2391,7 +2391,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:895",
+          "citation": "src/cloud/signals.ts:929",
           "detail": "fetchSignalRead default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -2409,7 +2409,7 @@
             "/functions/v1/read",
             "/rest/v1/..."
           ],
-          "citation": "src/cloud/signals.ts:1008",
+          "citation": "src/cloud/signals.ts:1042",
           "detail": "fetchSignalReadRetrying default timeoutMs = SIGNAL_READ_TIMEOUT_MS.",
           "operation": {
             "name": "signal-read-site",
@@ -3116,7 +3116,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6743",
+          "citation": "src/cli.ts:6745",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3130,7 +3130,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:6944",
+          "citation": "src/cli.ts:6946",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",

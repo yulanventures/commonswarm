@@ -202,6 +202,27 @@ test("HEAD timeout mapping citations point to their measured source lines", { ti
   assert.equal(onboardingCount, 2, "reconcile HEAD onboarding citations");
 });
 
+test("HEAD signal read citations resolve for each mapped row", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const lines = (await readFile(join(repo, "src/cloud/signals.ts"), "utf8")).split("\n");
+  const expected: Record<string, { citation: string; sites: Array<[number, RegExp]> }> = {
+    "src/cloud/signals.ts:SIGNAL_READ_TIMEOUT_MS": { citation: "src/cloud/signals.ts:38,881-929",
+      sites: [[38, /export const SIGNAL_READ_TIMEOUT_MS/], [929, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs": { citation: "src/cloud/signals.ts:929",
+      sites: [[929, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+    "src/cloud/signals.ts:timeoutMs#2": { citation: "src/cloud/signals.ts:1042",
+      sites: [[1042, /timeoutMs: number = SIGNAL_READ_TIMEOUT_MS/]] },
+  };
+  const rows = mapping.refs.HEAD.rows as Record<string, { citation: string }>;
+  for (const [id, target] of Object.entries(expected)) {
+    const row = rows[id];
+    assert.ok(row, id);
+    assert.equal(row.citation, target.citation, id);
+    for (const [line, pattern] of target.sites) assert.match(lines[line - 1] ?? "", pattern, `${id}: ${line}`);
+  }
+  assert.equal(Object.keys(expected).length, 3);
+});
+
 test("HEAD onboarding stdin timer is labeled for hook input", { timeout: 10_000 }, async () => {
   const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
   const row = mapping.refs.HEAD.rows["src/onboarding-cli.ts:setTimeout"];
