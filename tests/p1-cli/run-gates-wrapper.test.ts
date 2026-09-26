@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -158,4 +159,70 @@ test("server mode is refused with exit 3 and starts no stack", () => {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+// p1-cli mode runs only under HezLead's terms (2026-09-26). The controls point the OrbStack probe at a harmless dummy
+// process; the wrapper honors that override only for names with the control prefix.
+const pressureLevel = spawnSync("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], { encoding: "utf8" }).stdout?.trim() ?? "";
+const p1CliSkip = process.platform !== "darwin" ? "macOS memory-pressure probe only"
+  : pressureLevel !== "1" ? `memory pressure level is ${pressureLevel || "unknown"}, and p1-cli mode would refuse` : false;
+
+function fakeP1CliWorktree(scratch: string, command: string): string {
+  const worktree = join(scratch, "wt");
+  mkdirSync(join(worktree, "site"), { recursive: true });
+  writeFileSync(join(worktree, "package.json"), JSON.stringify({ name: "fake", private: true, scripts: { "test:p1-cli": command } }));
+  return worktree;
+}
+
+function startDummy(name: string) {
+  return spawn("bash", ["-c", `exec -a ${name} sleep 60`], { stdio: "ignore" });
+}
+
+test("p1-cli mode kills the suite and fails the moment OrbStack appears", { skip: p1CliSkip, timeout: 60_000 }, async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  const name = `run-gates-control-orb-${randomBytes(6).toString("hex")}`;
+  let dummy: ReturnType<typeof startDummy> | undefined;
+  try {
+    const worktree = fakeP1CliWorktree(scratch, "sleep 40");
+    const log = join(scratch, "gate.log");
+    const started = Date.now();
+    const wrapper = spawn("bash", [script, worktree, log, "HEAD", "p1-cli"], { env: { ...wrapperEnv, RUN_GATES_ORB_PATTERN: name }, stdio: "ignore" });
+    const exited = new Promise<number | null>(done => wrapper.on("close", code => done(code)));
+    await new Promise(done => setTimeout(done, 2_000));
+    dummy = startDummy(name);
+    const code = await exited;
+    assert.equal(code, 1);
+    assert.ok(Date.now() - started < 30_000, "the suite was stopped, not run to its end");
+    const body = readFileSync(log, "utf8");
+    assert.match(body, /^memory pressure level 1; OrbStack off; no other run of this wrapper$/m);
+    assert.match(body, /^STOPPED: OrbStack appeared during the gate; the gate was killed$/m);
+  } finally {
+    dummy?.kill("SIGKILL");
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("p1-cli mode refuses to start while OrbStack runs", { skip: p1CliSkip, timeout: 30_000 }, async () => {
+  const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
+  const name = `run-gates-control-orb-${randomBytes(6).toString("hex")}`;
+  const dummy = startDummy(name);
+  try {
+    await new Promise(done => setTimeout(done, 500));
+    const worktree = fakeP1CliWorktree(scratch, "echo SHOULD-NOT-RUN");
+    const log = join(scratch, "gate.log");
+    const result = spawnSync("bash", [script, worktree, log, "HEAD", "p1-cli"], { encoding: "utf8", timeout: 25_000, env: { ...wrapperEnv, RUN_GATES_ORB_PATTERN: name } });
+    assert.equal(result.status, 3, result.stdout + result.stderr);
+    const body = readFileSync(log, "utf8");
+    assert.match(body, /refuse: OrbStack is running/);
+    assert.doesNotMatch(body, /EXIT|SHOULD-NOT-RUN/);
+  } finally {
+    dummy.kill("SIGKILL");
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test("the OrbStack probe accepts only a control-prefixed override", () => {
+  const source = readFileSync(script, "utf8");
+  assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) orb_pattern=\$RUN_GATES_ORB_PATTERN ;; \*\) orb_pattern="OrbStack Helper" ;; esac/);
+  assert.match(source, /kern\.memorystatus_vm_pressure_level/);
 });
