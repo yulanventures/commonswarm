@@ -164,6 +164,7 @@ test("broadcast roster is distinguishable from an addressed pending delivery", a
   assert.deepEqual(broadcast, {
     addressed: false,
     receipts: [],
+    replies: [],
     broadcast_roster: {
       members: { total: 0, seen: 0, returned: 0, limit: 50, truncated: false },
       agents: {
@@ -416,7 +417,7 @@ test("a cut roster section reports the hidden remainder instead of none", () => 
 
 test("same-workspace different sender and another-workspace caller see no receipts", () => {
   const hidden = parseDeliveryReceiptResult({ addressed: null, receipts: [] });
-  assert.deepEqual(hidden, { addressed: null, receipts: [] });
+  assert.deepEqual(hidden, { addressed: null, receipts: [], replies: [] });
 });
 
 test("every ledger state stays distinct, including queued, observed, and replied", () => {

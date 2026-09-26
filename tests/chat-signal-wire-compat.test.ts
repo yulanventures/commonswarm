@@ -571,7 +571,9 @@ test("a validation reason is safe to return because the validator cannot know an
   );
   const start = command.indexOf("function validateCommand(");
   assert.notEqual(start, -1, "validateCommand must still exist to guard");
-  const signature = command.slice(start, command.indexOf("{", command.indexOf("reason: string }", start)));
+  // The return type may carry a constant `error` code beside the reason (G3c's reply_status codes);
+  // the signature ends at the first "{" after the reason field, which is the function body.
+  const signature = command.slice(start, command.indexOf("{", command.indexOf("reason: string", start)));
   assert.ok(
     signature.includes("value: unknown,"),
     "validateCommand takes the caller's own body",
