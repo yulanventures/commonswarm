@@ -2418,7 +2418,7 @@ function progressWriter(json: boolean): (progress: AcceptProgress) => void {
 
 async function runLinkAccept(
   args: Arguments,
-  payload: InviteLinkPayload,
+  payload: InviteLinkPayload, provider: LoginProvider,
 ): Promise<void> {
   if (ACCEPT_LINK_REFUSED_FLAGS.some(flag => args.has(flag))) {
     throw new Error(
@@ -2464,7 +2464,7 @@ async function runLinkAccept(
       selectedStore: CredentialStore,
     ): Promise<AcceptSession> {
       const result = await login({
-        target: selected,
+        target: selected, provider,
         store: selectedStore,
         openBrowser: args.has("no-browser") ? async () => false : undefined,
         input: args.has("no-browser") ? process.stdin : undefined,
@@ -2480,6 +2480,7 @@ async function runLinkAccept(
     target: cloud,
     store: credentials,
     runtime,
+    loginProviderLabel: loginProviderLabel(provider),
     ...(args.optional("name") === undefined
       ? {}
       : { explicitName: args.required("name") }),
@@ -2498,10 +2499,9 @@ async function runLinkAccept(
     })}\n`);
   }
 }
+export const RUN_ACCEPT_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name", "provider"] as const;
 
-export const RUN_ACCEPT_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name"] as const;
-
-export const RUN_ACCEPT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name"] as const;
+export const RUN_ACCEPT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name", "provider"] as const;
 
 async function runAccept(args: Arguments): Promise<void> {
   if (args.has("link-stdin")) {
@@ -2510,7 +2510,7 @@ async function runAccept(args: Arguments): Promise<void> {
       1,
     );
     const payload = decodeInviteLink(await stdinInviteLink());
-    await runLinkAccept(args, payload);
+    await runLinkAccept(args, payload, loginProvider(args));
     return;
   }
   if (args.has("invitation-token-stdin")) {
@@ -2534,7 +2534,7 @@ async function runAccept(args: Arguments): Promise<void> {
   process.stderr.write(
     "Warning: positional invite links may be recorded in shell history and process listings; prefer --link-stdin.\n",
   );
-  await runLinkAccept(args, parsed.payload);
+  await runLinkAccept(args, parsed.payload, loginProvider(args));
 }
 
 export const RUN_PRINCIPAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"] as const;
@@ -9842,9 +9842,9 @@ const resumeVariants = {
   profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]"]),
 };
 const acceptVariants = {
-  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]"]),
+  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), [`cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--provider ${LOGIN_PROVIDER_USAGE}] [--no-browser] [--json]`]),
   legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin [--url <url> --anon-key <key>]"]),
-  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]  # unsafe: shell history/process list", "cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list"]),
+  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), [`cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--provider ${LOGIN_PROVIDER_USAGE}] [--no-browser] [--json]  # unsafe: shell history/process list`, "cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list"]),
 };
 const inboxVariants = {
   read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]"]),
@@ -10116,7 +10116,7 @@ export const AGENT_COMMANDS: Record<string, AgentCommandRoot> = {
   workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
   new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]`] }),
-  accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
+  accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "provider", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
   principal: group({
     create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]"] }),
     revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>"] }),

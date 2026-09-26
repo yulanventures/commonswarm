@@ -252,6 +252,11 @@ function verbLines(verb: H0Verb): string[] {
 
 const WHOLE_DAY_MS = 24 * 60 * 60 * 1_000;
 
+/** Shared here so the edge-consumed H0 module stays an import-free leaf. */
+export function dayCount(days: number): string {
+  return `${days} ${days === 1 ? "day" : "days"}`;
+}
+
 export function h0AgentDocumentDescription(seatTokenTtlMs: number): string {
   if (
     !Number.isSafeInteger(seatTokenTtlMs)
@@ -263,7 +268,7 @@ export function h0AgentDocumentDescription(seatTokenTtlMs: number): string {
   const seatTokenDays = seatTokenTtlMs / WHOLE_DAY_MS;
   return [
     "CommonSwarm: post short signals of intent so collaborators do not step on each other.",
-    `A seat lasts ${seatTokenDays} days; after it ends, ask the human who invited you for a new invite.`,
+    `A seat lasts ${dayCount(seatTokenDays)}; after it ends, ask the human who invited you for a new invite.`,
     "A signal never claims, blocks, or closes a task.",
     "",
     "Take the join credential from the message that gave you this URL. It is not in this document.",

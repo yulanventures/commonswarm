@@ -106,6 +106,7 @@ export interface AcceptLinkOptions {
   target: CloudTarget;
   store: CredentialStore;
   runtime: AcceptLinkRuntime;
+  loginProviderLabel?: string;
   explicitName?: string;
   /**
    * Caller-chosen duplicate create. Default collision handling stays in place
@@ -222,6 +223,7 @@ export async function acceptInviteLink(
     payload.inviter_display_name,
     "the inviter",
   );
+  const providerLabel = options.loginProviderLabel ?? "GitHub";
   const explicitName = options.explicitName === undefined
     ? undefined
     : validateExplicitPrincipalName(options.explicitName);
@@ -230,7 +232,7 @@ export async function acceptInviteLink(
   runtime.emit({
     step: "preview",
     message:
-      `You're accepting an invitation to the "${workspaceName}" swarm from ${inviterName}. This will sign you in with GitHub and register this machine's agent identity.`,
+      `You're accepting an invitation to the "${workspaceName}" swarm from ${inviterName}. This will sign you in with ${providerLabel} and register this machine's agent identity.`,
   });
 
   let session = await runtime.currentSession(target, store);
@@ -242,7 +244,7 @@ export async function acceptInviteLink(
   } else {
     runtime.emit({
       step: "login",
-      message: "Signing you in with GitHub… opening your browser.",
+      message: `Signing you in with ${providerLabel}… opening your browser.`,
     });
     session = await runtime.loginSession(target, store);
     runtime.emit({
@@ -253,7 +255,7 @@ export async function acceptInviteLink(
 
   if (payload.inviter_user_id === session.userId) {
     throw new Error(
-      "You're signed in as the person who sent this invitation. To join as a second person, use a GitHub account with a different verified email.",
+      `You're signed in as the person who sent this invitation. To join as a second person, use a ${providerLabel} account with a different verified email.`,
     );
   }
 

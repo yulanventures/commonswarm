@@ -59,6 +59,7 @@ import type {
   AgentCredentialStore,
 } from "./agent-credential.js";
 import { parseOptionalWakeHint, type WakeHint } from "./wake.js";
+import { dayCount } from "../h0/verbs.js";
 
 /* THE NUMBERS. Decided centrally so the CLI, the site and the server cannot drift.
  * TTL is deliberately absent from that list: renewal does not change it. */
@@ -101,7 +102,7 @@ export function describeMintRenewal(
   return (
     "While a cswarm process remains running and secure local state is available, " +
     "this credential rotates before expiry. A person is asked to authorise it again in " +
-    `${days} days. A stopped or idle CLI cannot renew it.\n`
+    `${dayCount(days)}. A stopped or idle CLI cannot renew it.\n`
   );
 }
 
@@ -123,7 +124,6 @@ export const RENEWAL_LEAD_FRACTION = 0.1;
 export const RENEWAL_LEAD_FLOOR_MS = 5 * 60_000;
 /** Never renew this far ahead, however long the token; an 8h token would waste half of it. */
 export const RENEWAL_LEAD_CEILING_MS = 15 * 60_000;
-
 /** How long an interrupted renewal stays replayable before its command id is abandoned. */
 export const RENEWAL_PENDING_RECOVERY_MS = 60 * 60_000;
 

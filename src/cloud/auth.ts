@@ -446,10 +446,10 @@ async function discoverSoleWorkspace(
 
 export async function login(options: LoginOptions): Promise<LoginResult> {
   const output = options.output ?? process.stderr;
-  // Invite acceptance predates provider selection and still narrates a GitHub
-  // sign-in. The login command passes its Google default explicitly; embedded
-  // callers that omit the option retain their existing GitHub behavior.
-  const provider = options.provider ?? "github";
+  // Keep embedded callers aligned with the CLI's declared provider order. The
+  // first provider is the product default everywhere a caller omits the option.
+  // Explicit callers still select either supported provider in the normal way.
+  const provider = options.provider ?? LOGIN_PROVIDERS[0];
   const state = base64Url(randomBytes(32));
   const verifier = pkceVerifier();
   const memory = new MemoryStorage();

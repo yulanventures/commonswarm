@@ -22,9 +22,10 @@ import ts from "typescript";
 
 import {
   H0_MAX_CONCURRENT_WAITS, H0_REGISTRATION_NAME_MAX, H0_REQUEST_ID_RE,
-  H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, h0Verb, h0AgentDocumentDescription,
+  H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, dayCount, h0Verb, h0AgentDocumentDescription,
   type H0Verb,
 } from "../../src/h0/verbs.js";
+import { describeMintRenewal } from "../../src/cloud/renewal.js";
 import { H0_SEAT_TOKEN_TTL_MS } from "../../src/protocol/index.js";
 import {
   REGISTRATION_SEAT_REVOKED,
@@ -277,6 +278,23 @@ test("the document derives its whole-day seat lifetime from H0_SEAT_TOKEN_TTL_MS
   assert.throws(
     () => h0AgentDocumentDescription(H0_SEAT_TOKEN_TTL_MS - 1),
     /positive whole number of days/,
+  );
+});
+
+test("dayCount pluralizes one, multiple, and fractional days", () => {
+  assert.equal(dayCount(1), "1 day");
+  assert.equal(dayCount(2), "2 days");
+  assert.equal(dayCount(1.5), "1.5 days");
+});
+
+test("one-day credential and seat sentences use the singular", () => {
+  assert.match(
+    describeMintRenewal(true, 1),
+    /A person is asked to authorise it again in 1 day\./,
+  );
+  assert.match(
+    h0AgentDocumentDescription(24 * 60 * 60 * 1_000),
+    /^A seat lasts 1 day; after it ends, ask the human who invited you for a new invite\.$/m,
   );
 });
 

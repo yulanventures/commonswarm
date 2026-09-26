@@ -289,9 +289,56 @@ test("login help derives its provider option from LOGIN_PROVIDERS", async () => 
   }
 });
 
-test("built invite acceptance retains its existing GitHub sign-in", async () => {
+test("built invite acceptance selects the requested provider and defaults to Google", async () => {
   const server = await fixtureServer();
-  const home = await mkdtemp(join(tmpdir(), "cswarm-login-provider-accept-"));
+  try {
+    for (const [flag, expected] of [
+      [undefined, LOGIN_PROVIDERS[0]],
+      ["github", "github"],
+    ] as const) {
+      const home = await mkdtemp(join(tmpdir(), "cswarm-login-provider-accept-"));
+      try {
+        const link = encodeInviteLink({
+          v: 1,
+          url: server.url,
+          anon_key: "provider-test-anon-key",
+          workspace_id: randomUUID(),
+          invitation_token: `swm_inv_${randomBytes(32).toString("base64url")}`,
+          workspace_name: "Provider test",
+          inviter_display_name: "Taylor",
+          inviter_user_id: randomUUID(),
+        });
+        const running = startCli(home, [
+          "accept",
+          "--link-stdin",
+          "--no-browser",
+          "--force-file-store",
+          ...(flag === undefined ? [] : ["--provider", flag]),
+        ]);
+        running.writeInput(`${link}\n`);
+        const authorizationUrl = await running.authorizationUrl;
+        running.stop();
+        const result = await running.result;
+        const label = loginProviderLabel(expected);
+
+        assert.equal(authorizationUrl.searchParams.get("provider"), expected);
+        assert.match(result.stdout, new RegExp(`This will sign you in with ${label}`));
+        assert.match(
+          result.stderr,
+          new RegExp(`Open this URL in a browser to sign in with ${label}:`),
+        );
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("invalid accept providers exit 2 before any request", async () => {
+  const server = await fixtureServer();
+  const home = await mkdtemp(join(tmpdir(), "cswarm-login-provider-accept-invalid-"));
   try {
     const link = encodeInviteLink({
       v: 1,
@@ -306,23 +353,37 @@ test("built invite acceptance retains its existing GitHub sign-in", async () => 
     const running = startCli(home, [
       "accept",
       "--link-stdin",
+      "--provider",
+      "gitlab",
       "--no-browser",
       "--force-file-store",
     ]);
+    void running.authorizationUrl.catch(() => undefined);
     running.writeInput(`${link}\n`);
-    const authorizationUrl = await running.authorizationUrl;
-    running.stop();
     const result = await running.result;
 
-    assert.equal(authorizationUrl.searchParams.get("provider"), "github");
-    assert.match(result.stdout, /This will sign you in with GitHub/);
-    assert.match(
+    assert.equal(result.code, 2);
+    assert.equal(result.stdout, "");
+    assert.equal(
       result.stderr,
-      /Open this URL in a browser to sign in with GitHub:/,
+      `cswarm: --provider must be one of: ${LOGIN_PROVIDERS.join(", ")}\n`,
     );
-    assert.doesNotMatch(result.stderr, /sign in with Github:/);
+    assert.equal(server.requests(), 0);
   } finally {
     await server.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("accept help derives its provider option from LOGIN_PROVIDERS", async () => {
+  const home = await mkdtemp(join(tmpdir(), "cswarm-login-provider-accept-help-"));
+  try {
+    const result = await runCli(home, ["accept", "--help"]);
+    const option = `\\[--provider ${LOGIN_PROVIDERS.join("\\|")}\\]`;
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stdout.match(new RegExp(option, "g"))?.length, 2);
+    assert.equal(result.stderr, "");
+  } finally {
     await rm(home, { recursive: true, force: true });
   }
 });
