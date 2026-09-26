@@ -594,6 +594,11 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
       assert.ok(declaration.initializer.expression.elements.some(element =>
         ts.isSpreadElement(element) && ts.isIdentifier(element.expression) && element.expression.text === "BODY_FLAGS"
       ), `${name} must spread BODY_FLAGS`);
+      const foreignBodySpreads = declaration.initializer.expression.elements
+        .filter(ts.isSpreadElement)
+        .map(element => element.expression.getText(cliSourceFile))
+        .filter(spread => spread !== "BODY_FLAGS" && spread.toLowerCase().includes("body"));
+      assert.deepEqual(foreignBodySpreads, [], `${name} must not spread alternative body flag lists: ${foreignBodySpreads.join(", ")}`);
     }
 
     const bodyStringLiterals: string[] = [];
