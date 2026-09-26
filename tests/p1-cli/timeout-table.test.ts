@@ -145,11 +145,26 @@ test("MCP register abort-timer citation points to the actual timer line", { time
   assert.match(source.split("\n")[Number(match[1]) - 1] ?? "", /const timer = setTimeout\(\(\) => controller\.abort\(\), MCP_REGISTER_TIMEOUT_MS\)/);
 });
 
+function shippedMainRef(hasRef: (ref: string) => boolean = ref => {
+  try {
+    execFileSync("git", ["show-ref", "--verify", "--quiet", ref], { cwd: repo, timeout: 5_000 });
+    return true;
+  } catch { return false; }
+}): string {
+  if (hasRef("refs/heads/main")) return "main";
+  if (hasRef("refs/remotes/origin/main")) return "origin/main";
+  throw new Error("main or origin/main is required to pin the shipped timeout mapping");
+}
+
 test("shipped timeout mapping stays byte-identical to main", { timeout: 10_000 }, async () => {
   const current = await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8");
-  const main = execFileSync("git", ["show", "main:scripts/timeout-table/mapping.json"], { cwd: repo, encoding: "utf8", timeout: 5_000 });
+  const main = execFileSync("git", ["show", `${shippedMainRef()}:scripts/timeout-table/mapping.json`], { cwd: repo, encoding: "utf8", timeout: 5_000 });
   const shipped = (source: string) => source.slice(source.indexOf('"v0.1.71"'), source.indexOf('"HEAD"', source.indexOf('"v0.1.71"')));
   assert.equal(shipped(current), shipped(main));
+  const fallback = shippedMainRef(ref => ref === "refs/remotes/origin/main");
+  assert.equal(fallback, "origin/main");
+  const originMain = execFileSync("git", ["show", `${fallback}:scripts/timeout-table/mapping.json`], { cwd: repo, encoding: "utf8", timeout: 5_000 });
+  assert.equal(shipped(current), shipped(originMain));
 });
 
 test("HEAD timeout mapping citations point to their measured source lines", { timeout: 10_000 }, async () => {
@@ -186,6 +201,13 @@ test("HEAD timeout mapping citations point to their measured source lines", { ti
   }
   assert.equal(cliCount, 5, "reconcile HEAD CLI citations");
   assert.equal(onboardingCount, 2, "reconcile HEAD onboarding citations");
+});
+
+test("HEAD onboarding stdin timer is labeled for hook input", { timeout: 10_000 }, async () => {
+  const mapping = JSON.parse(await readFile(join(repo, "scripts/timeout-table/mapping.json"), "utf8"));
+  const row = mapping.refs.HEAD.rows["src/onboarding-cli.ts:setTimeout"];
+  assert.equal(row.operation.name, "hook-stdin");
+  assert.match(row.detail, /hook-stdin/);
 });
 
 test("Fold 3 records the removed real-main timeout assertion and its pre-merge reason", { timeout: 10000 }, async () => {

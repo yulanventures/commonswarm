@@ -584,16 +584,18 @@ test("body source runtime gate: KNOWN_FLAGS carries flag names for error text, p
       ? ["POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS", "POST_SIGNAL_NOTE_ACCEPTED_FLAGS", "POST_SIGNAL_ASK_ACCEPTED_FLAGS"]
       : ["REPLY_ACCEPTED_FLAGS"];
     for (const name of names) assert.match(returned, new RegExp(`\\b${name}\\b`));
-    for (const name of ["POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS", "REPLY_ACCEPTED_FLAGS"]) {
+    for (const name of names) {
       if (!names.includes(name)) continue;
       const declaration = cliSourceFile.statements.filter(ts.isVariableStatement)
         .flatMap(statement => [...statement.declarationList.declarations])
         .find(item => item.name.getText(cliSourceFile) === name);
       assert.ok(declaration?.initializer && ts.isAsExpression(declaration.initializer), name);
       assert.ok(ts.isArrayLiteralExpression(declaration.initializer.expression), name);
-      assert.ok(declaration.initializer.expression.elements.some(element =>
-        ts.isSpreadElement(element) && ts.isIdentifier(element.expression) && element.expression.text === "BODY_FLAGS"
-      ), `${name} must spread BODY_FLAGS`);
+      if (name === "POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS" || name === "REPLY_ACCEPTED_FLAGS") {
+        assert.ok(declaration.initializer.expression.elements.some(element =>
+          ts.isSpreadElement(element) && ts.isIdentifier(element.expression) && element.expression.text === "BODY_FLAGS"
+        ), `${name} must spread BODY_FLAGS`);
+      }
       const foreignBodySpreads = declaration.initializer.expression.elements
         .filter(ts.isSpreadElement)
         .map(element => element.expression.getText(cliSourceFile))
