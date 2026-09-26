@@ -128,6 +128,7 @@ export interface HydratedDelivery {
     to: string | null;
     to_agent: string | null;
     in_reply_to: string | null;
+    chain_hop: number | null;
     about: string | null;
     kind: string;
     body: string;
@@ -494,6 +495,7 @@ export async function hydrateDeliveryRefs(
     to_user_id: string | null;
     to_agent_principal_id: string | null;
     in_reply_to: string | null;
+    chain_hop: number | null;
     about: string | null;
     kind: string;
     body: string;
@@ -518,6 +520,7 @@ export async function hydrateDeliveryRefs(
       s.to_user_id,
       s.to_agent_principal_id,
       s.in_reply_to,
+      s.chain_hop,
       s.about,
       s.kind,
       s.body,
@@ -631,6 +634,7 @@ export async function hydrateDeliveryRefs(
          * WHERE re-checked that the sender addressed them. */
         to_agent: args.recipientPrincipalId,
         in_reply_to: signal.in_reply_to,
+        chain_hop: signal.chain_hop,
         about: signal.about,
         kind: signal.kind,
         body: signal.body,

@@ -888,7 +888,7 @@ async function handle(
       SELECT
         s.id, s.workspace_id, s."from", s.from_kind, s."to",
         s.about, s.kind, s.body, s.until, s.created_at,
-        s.to_agent, s.in_reply_to, s.reply_status, s.attachments,
+        s.to_agent, s.in_reply_to, s.reply_status, s.chain_hop, s.attachments,
         s.channel_id, s.thread_root_id, s.broadcast_to_channel,
         s.recipients,
         CASE

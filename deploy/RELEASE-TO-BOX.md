@@ -999,10 +999,10 @@ SQL
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
   test "$CATALOG_AFTER" = t
-  # Item G's functional proofs need observations from the NEW edge. These
+  # These functional proofs need observations from the NEW edge. These
   # versions run after section 6 and their seeded command, never at this step.
   if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260927000001 ] \
-    && [ "$VERSION" != 20260927000002 ]; then
+    && [ "$VERSION" != 20260927000002 ] && [ "$VERSION" != 20260927000003 ]; then
     release_psql_ro --file "/proof/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
@@ -1310,6 +1310,27 @@ test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
 This proof never runs from section 5's automatic functional-proof step. A
 missing variable, a wrong seat/workspace pair, or no route timestamp from the
 last three minutes fails the proof.
+
+For migration `20260927000003`, use dedicated live seats to create a root ask,
+its child, and that child's child through the new command edge. Record the
+workspace, all three signal ids, and a member user who owns one of the seats.
+Then run the functional proof exactly as follows; it uses session-level
+settings, performs only reads, and has no outer transaction:
+
+```sh
+release_psql_ro -v item_t3_workspace_id="$ITEM_T3_WORKSPACE_ID" \
+  -v item_t3_root_signal_id="$ITEM_T3_ROOT_SIGNAL_ID" \
+  -v item_t3_hop1_signal_id="$ITEM_T3_HOP1_SIGNAL_ID" \
+  -v item_t3_hop2_signal_id="$ITEM_T3_HOP2_SIGNAL_ID" \
+  -v item_t3_reader_user_id="$ITEM_T3_READER_USER_ID" \
+  --file "/proof/20260927000003-functional.sql" \
+  >"$PROOF_DIR/20260927000003-functional.txt"
+test "$(cat "$PROOF_DIR/20260927000003-functional.txt")" = t
+```
+
+This proof never runs from section 5's automatic functional-proof step. A
+missing value, a row outside the named workspace, a broken chain, or a reader
+who cannot see all three asks fails the proof.
 
 If the recycle timer was stopped, restart and verify it before closing a
 successful release:

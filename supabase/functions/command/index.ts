@@ -52,6 +52,12 @@ import {
 import { optionalWake } from "../_shared/wake.ts";
 import { WAKE_LEASE_STALE_MS } from "../../../src/cloud/wake-lease-constants.ts";
 import {
+  ASK_PAIR_PER_10_MINUTES,
+  ASK_SENDER_PER_MINUTE,
+  CHAIN_MAX_CHILDREN,
+  CHAIN_MAX_HOPS,
+} from "../../../src/cloud/ask-chain-constants.ts";
+import {
   isReplyStatus,
   REPLY_STATUSES,
   type ReplyStatus,
@@ -254,6 +260,7 @@ interface SignalCommand {
   to_user_id: string | null;
   to_agent_principal_id?: string | null;
   in_reply_to?: string | null;
+  parent_signal_id?: string;
   reply_status?: ReplyStatus;
   about: string | null;
   attachments?: SignalAttachmentRef[];
@@ -300,6 +307,7 @@ interface SignalRecord {
   to: string | null;
   to_agent: string | null;
   in_reply_to: string | null;
+  chain_hop: number | null;
   reply_status: ReplyStatus | null;
   about: string | null;
   kind: SignalKind;
@@ -1949,9 +1957,19 @@ function validateCommand(
       ? sanitizeSignalText(cmd.about) || null
       : null;
     const toAgentPrincipalId = modernShape
-      ? cmd.to_agent_principal_id
+      ? typeof cmd.to_agent_principal_id === "string"
+        ? cmd.to_agent_principal_id.toLowerCase()
+        : cmd.to_agent_principal_id
       : null;
     const inReplyTo = modernShape ? cmd.in_reply_to : null;
+    const hasParentSignalId = Object.hasOwn(cmd, "parent_signal_id");
+    const parentSignalId = hasParentSignalId ? cmd.parent_signal_id : undefined;
+    /* parent_signal_id is optional only for asks. Other signal kinds keep the
+     * existing unknown-key refusal, and the internal chain columns never enter
+     * this allow-list at all. */
+    const parentKeys = hasParentSignalId && cmd.signal_kind === "ask"
+      ? ["parent_signal_id"]
+      : [];
     const hasReplyStatus = Object.hasOwn(cmd, "reply_status");
     const replyStatus = hasReplyStatus ? cmd.reply_status : undefined;
     if (hasReplyStatus && threadRoot !== null) {
@@ -2004,6 +2022,7 @@ function validateCommand(
       ...attachmentKeys,
       ...optionalKeys,
       ...chatKeys,
+      ...parentKeys,
       ...(hasReplyStatus ? ["reply_status"] : []),
     ]);
     const baseValid = keysOk &&
@@ -2064,6 +2083,10 @@ function validateCommand(
       ) &&
       (!Object.hasOwn(cmd, "attachments") ||
         parseSignalAttachmentRefs(cmd.attachments) !== null) &&
+      (!hasParentSignalId ||
+        (cmd.signal_kind === "ask" &&
+          threadRoot === null &&
+          typeof parentSignalId === "string" && UUID_RE.test(parentSignalId))) &&
       /* thread_root_id's uuid shape is checked INSIDE chatSignalShapeProblem,
        * not here. Keeping a copy on the edge meant a bad uuid was refused with
        * the generic reason before the chat sentence could run, which is exactly
@@ -2093,6 +2116,9 @@ function validateCommand(
             }
             : {}),
           ...(hasReplyStatus ? { reply_status: replyStatus as ReplyStatus } : {}),
+          ...(hasParentSignalId
+            ? { parent_signal_id: (parentSignalId as string).toLowerCase() }
+            : {}),
           about: sanitizedAbout,
           ...(attachments === undefined ? {} : { attachments: attachments! }),
           ...(cmd.until_ms === undefined
@@ -5224,32 +5250,42 @@ async function createSelfServeWorkspace(
 }
 
 interface SignalRateLimit {
-  bucket: "credential" | "workspace";
+  bucket: "credential" | "workspace" | "ask_sender" | "ask_pair";
   limit: number;
   resetsAt: string;
+  description: string;
 }
 
 /**
  * The one fixed-window counter in this function: an atomic upsert into
- * swarm.rate_buckets on the hour boundary, clamped so a flood cannot grow the
- * integer without bound. Shared by the signal limits and the §8 spend proxies —
- * a second mechanism would be a second set of edge cases for no gain.
+ * swarm.rate_buckets on the selected hour, minute, or ten-minute boundary,
+ * clamped so a flood cannot grow the integer without bound. Shared by signal
+ * limits and the §8 spend proxies; callers choose only the window boundary.
  */
 async function incrementRateBucket(
   tx: Sql,
   bucketKey: string,
   limit: number,
+  window: "hour" | "minute" | "10_minutes" = "hour",
 ): Promise<{ count: number; resetsAt: string }> {
+  const windowStart = window === "minute"
+    ? tx`date_trunc('minute', statement_timestamp())`
+    : window === "10_minutes"
+    ? tx`date_trunc('hour', statement_timestamp())
+        + floor(date_part('minute', statement_timestamp()) / 10) * interval '10 minutes'`
+    : tx`date_trunc('hour', statement_timestamp())`;
+  const windowMinutes = window === "minute" ? 1 : window === "10_minutes" ? 10 : 60;
   const rows = await tx<{ count: number; resets_at: Date }[]>`
     INSERT INTO swarm.rate_buckets (bucket_key, window_start, count)
     VALUES (
       ${bucketKey},
-      date_trunc('hour', statement_timestamp()),
+      ${windowStart},
       1
     )
     ON CONFLICT (bucket_key, window_start) DO UPDATE
     SET count = LEAST(swarm.rate_buckets.count + 1, ${limit + 1})
-    RETURNING count, window_start + interval '1 hour' AS resets_at
+    RETURNING count,
+      window_start + ${windowMinutes} * interval '1 minute' AS resets_at
   `;
   const row = rows[0];
   if (!row) throw new Error("signal rate bucket did not return a row");
@@ -5370,6 +5406,8 @@ async function enforceSignalRate(
   tx: Sql,
   auth: AuthContext,
   workspaceId: string,
+  command: SignalCommand,
+  target: SignalWriteTarget,
 ): Promise<SignalRateLimit | null> {
   const credentialIdentity = auth.credentialKind === "agent"
     ? auth.credentialId
@@ -5387,6 +5425,7 @@ async function enforceSignalRate(
       bucket: "credential",
       limit: SIGNAL_CREDENTIAL_LIMIT,
       resetsAt: credential.resetsAt,
+      description: `${SIGNAL_CREDENTIAL_LIMIT} signals/hour`,
     };
   }
   const workspace = await incrementRateBucket(
@@ -5399,7 +5438,49 @@ async function enforceSignalRate(
       bucket: "workspace",
       limit: SIGNAL_WORKSPACE_LIMIT,
       resetsAt: workspace.resetsAt,
+      description: `${SIGNAL_WORKSPACE_LIMIT} signals/hour`,
     };
+  }
+  const senderPrincipal = auth.actor.agent_principal;
+  if (command.signal_kind === "ask" && senderPrincipal !== null) {
+    /* Principal, not credential, is the identity. Two live tokens for the same
+     * seat therefore spend the same minute and pair budgets. */
+    const sender = await incrementRateBucket(
+      tx,
+      `ask:sender:${workspaceId}:${senderPrincipal}`,
+      ASK_SENDER_PER_MINUTE,
+      "minute",
+    );
+    if (sender.count > ASK_SENDER_PER_MINUTE) {
+      return {
+        bucket: "ask_sender",
+        limit: ASK_SENDER_PER_MINUTE,
+        resetsAt: sender.resetsAt,
+        description: `${ASK_SENDER_PER_MINUTE} asks/minute`,
+      };
+    }
+
+    const recipients = signalRecipientSet(command.to ?? null, {
+      to_user_id: target.toUserId,
+      to_agent_principal_id: target.toAgentPrincipalId,
+    });
+    for (const recipient of recipients) {
+      if (recipient.kind !== "agent") continue;
+      const pair = await incrementRateBucket(
+        tx,
+        `ask:pair:${workspaceId}:${senderPrincipal}:${recipient.id}`,
+        ASK_PAIR_PER_10_MINUTES,
+        "10_minutes",
+      );
+      if (pair.count > ASK_PAIR_PER_10_MINUTES) {
+        return {
+          bucket: "ask_pair",
+          limit: ASK_PAIR_PER_10_MINUTES,
+          resetsAt: pair.resetsAt,
+          description: `${ASK_PAIR_PER_10_MINUTES} asks/10 minutes`,
+        };
+      }
+    }
   }
   return null;
 }
@@ -8827,6 +8908,17 @@ interface SignalPlacement {
   untilExplicit: boolean;
 }
 
+type AskChainRefusal =
+  | "chain_parent_invalid"
+  | "chain_loop"
+  | "chain_too_long"
+  | "chain_too_wide";
+
+type PostSignalOutcome =
+  | { status: "inserted"; signal: SignalRecord }
+  | { status: "thread_horizon" }
+  | { status: "chain_refused"; error: AskChainRefusal };
+
 async function postSignal(
   tx: Sql,
   route: Route,
@@ -8835,26 +8927,55 @@ async function postSignal(
   target: SignalWriteTarget,
   attachments: readonly SignalAttachment[],
   placement: SignalPlacement,
-): Promise<SignalRecord | null> {
+): Promise<PostSignalOutcome> {
   const untilMs = placement.untilMs;
   const signalId = crypto.randomUUID();
+  const parentSignalId = command.parent_signal_id ?? null;
+  const isChainAsk = command.signal_kind === "ask" && placement.threadRootId === null;
+  const recipientSet = signalRecipientSet(command.to ?? null, {
+    to_user_id: target.toUserId,
+    to_agent_principal_id: target.toAgentPrincipalId,
+  });
+  const agentRecipientIds = recipientSet
+    .filter((recipient) => recipient.kind === "agent")
+    .map((recipient) => recipient.id);
+  const chainedRecipientId = recipientSet.length === 1 &&
+      recipientSet[0]?.kind === "agent"
+    ? recipientSet[0].id
+    : null;
+  const chainedShapeValid = chainedRecipientId !== null;
+
+  /* The count still happens in the INSERT statement. This transaction lock
+   * serializes that statement for one parent so two simultaneous callers do
+   * not both observe child count 2 and create children 3 and 4. It reveals
+   * nothing about whether the parent exists. */
+  if (parentSignalId !== null) {
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${route.workspaceId}:${parentSignalId}`}, 0)
+      )
+    `;
+  }
   const rows = await tx<{
-    id: string;
-    workspace_id: string;
-    from_principal: string;
-    from_kind: CredentialKind;
+    inserted: boolean;
+    refusal_code: AskChainRefusal | "thread_horizon" | null;
+    id: string | null;
+    workspace_id: string | null;
+    from_principal: string | null;
+    from_kind: CredentialKind | null;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
     in_reply_to: string | null;
     reply_status: ReplyStatus | null;
     about: string | null;
-    kind: SignalKind;
-    body: string;
-    until: Date;
-    created_at: Date;
+    kind: SignalKind | null;
+    body: string | null;
+    until: Date | null;
+    created_at: Date | null;
     channel_id: string | null;
     thread_root_id: string | null;
-    broadcast_to_channel: boolean;
+    broadcast_to_channel: boolean | null;
+    chain_hop: number | null;
   }[]>`
     WITH candidate AS (
       /* The value that will actually be stored, computed ONCE so the WHERE
@@ -8891,60 +9012,207 @@ async function postSignal(
         END,
         statement_timestamp() + interval '1 millisecond'
       ) AS until_value
+    ),
+    parent_candidate AS (
+      SELECT parent.*
+      FROM swarm.signals AS parent
+      WHERE ${parentSignalId}::uuid IS NOT NULL
+        AND ${auth.credentialKind} = 'agent'
+        AND parent.id = ${parentSignalId}::uuid
+        AND parent.workspace_id = ${route.workspaceId}::uuid
+        AND parent.kind = 'ask'
+        AND parent.until > statement_timestamp()
+        AND (
+          parent.to_agent_principal_id = ${auth.actor.agent_principal}::uuid
+          OR EXISTS (
+            SELECT 1
+            FROM swarm.signal_recipients AS addressed
+            WHERE addressed.signal_id = parent.id
+              AND addressed.workspace_id = parent.workspace_id
+              AND addressed.recipient_agent_principal_id = ${auth.actor.agent_principal}::uuid
+          )
+        )
+    ),
+    parent_context AS (
+      SELECT
+        parent.id,
+        COALESCE(parent.chain_root_id, parent.id) AS effective_root_id,
+        COALESCE(parent.chain_hop, 0)::int AS effective_hop,
+        COALESCE(
+          parent.chain_participants,
+          ARRAY(
+            SELECT DISTINCT listed.participant
+            FROM (
+              SELECT CASE WHEN parent.from_kind = 'agent'
+                THEN parent.from_principal ELSE NULL END AS participant
+              UNION ALL SELECT parent.to_agent_principal_id
+              UNION ALL
+              SELECT recipient.recipient_agent_principal_id
+              FROM swarm.signal_recipients AS recipient
+              WHERE recipient.signal_id = parent.id
+                AND recipient.workspace_id = parent.workspace_id
+            ) AS listed
+            WHERE listed.participant IS NOT NULL
+            ORDER BY listed.participant
+          )
+        ) AS effective_participants
+      FROM parent_candidate AS parent
+    ),
+    chain_context AS (
+      SELECT
+        CASE
+          WHEN NOT ${isChainAsk} THEN NULL
+          WHEN ${parentSignalId}::uuid IS NULL THEN ${signalId}::uuid
+          ELSE parent.effective_root_id
+        END AS chain_root_id,
+        CASE
+          WHEN NOT ${isChainAsk} THEN NULL
+          WHEN ${parentSignalId}::uuid IS NULL THEN 0
+          ELSE parent.effective_hop + 1
+        END::smallint AS chain_hop,
+        CASE
+          WHEN NOT ${isChainAsk} THEN NULL
+          WHEN ${parentSignalId}::uuid IS NULL THEN ARRAY(
+            SELECT DISTINCT participant
+            FROM unnest(
+              array_remove(
+                ARRAY[${auth.actor.agent_principal}::uuid] || ${agentRecipientIds}::uuid[],
+                NULL
+              )
+            ) AS participant
+            ORDER BY participant
+          )
+          ELSE ARRAY(
+            SELECT DISTINCT participant
+            FROM unnest(
+              parent.effective_participants
+                || ARRAY[${auth.actor.agent_principal}::uuid, ${chainedRecipientId}::uuid]
+            ) AS participant
+            WHERE participant IS NOT NULL
+            ORDER BY participant
+          )
+        END AS chain_participants,
+        CASE
+          WHEN NOT ${isChainAsk}
+            OR ${parentSignalId}::uuid IS NULL THEN NULL
+          WHEN parent.id IS NULL OR NOT ${chainedShapeValid}
+            THEN 'chain_parent_invalid'
+          WHEN ${chainedRecipientId}::uuid = ${auth.actor.agent_principal}::uuid
+            OR ${chainedRecipientId}::uuid = ANY(parent.effective_participants)
+            THEN 'chain_loop'
+          WHEN parent.effective_hop + 1 > ${CHAIN_MAX_HOPS}
+            THEN 'chain_too_long'
+          WHEN (
+            SELECT count(*)
+            FROM swarm.signals AS child
+            WHERE child.workspace_id = ${route.workspaceId}::uuid
+              AND child.parent_signal_id = parent.id
+          ) >= ${CHAIN_MAX_CHILDREN}
+            THEN 'chain_too_wide'
+          ELSE NULL
+        END::text AS refusal_code
+      FROM (SELECT 1) AS one
+      LEFT JOIN parent_context AS parent ON true
+    ),
+    inserted AS (
+      INSERT INTO swarm.signals (
+        id, workspace_id, from_principal, from_kind,
+        to_user_id, to_agent_principal_id, in_reply_to, reply_status,
+        about, kind, body, until, created_at,
+        channel_id, thread_root_id, broadcast_to_channel,
+        parent_signal_id, chain_root_id, chain_hop, chain_participants
+      )
+    /* SELECT ... WHERE, not VALUES, so the thread horizon and every declared
+     * parent rule are evaluated in the writing statement. A handler pre-check
+     * cannot provide that guarantee: liveness and child count can change before
+     * the insert. The final SELECT turns a filtered insert into a typed refusal. */
+      SELECT
+        ${signalId}::uuid,
+        ${route.workspaceId}::uuid,
+        ${canonicalPrincipal(auth.actor)}::uuid,
+        ${auth.credentialKind},
+        ${target.toUserId}::uuid,
+        ${target.toAgentPrincipalId}::uuid,
+        ${target.inReplyTo}::uuid,
+        ${command.reply_status ?? null},
+        ${command.about},
+        ${command.signal_kind},
+        ${command.body},
+        candidate.until_value,
+        statement_timestamp(),
+        ${placement.channelId}::uuid,
+        ${placement.threadRootId}::uuid,
+        ${placement.broadcastToChannel},
+        ${parentSignalId}::uuid,
+        chain.chain_root_id,
+        chain.chain_hop,
+        chain.chain_participants
+      FROM candidate
+      CROSS JOIN chain_context AS chain
+      WHERE (
+          ${placement.untilCeiling}::timestamptz IS NULL
+          OR candidate.until_value <= ${placement.untilCeiling}::timestamptz
+        )
+        AND chain.refusal_code IS NULL
+      RETURNING
+        id, workspace_id, from_principal, from_kind,
+        to_user_id, to_agent_principal_id, in_reply_to, reply_status,
+        about, kind, body, until, created_at,
+        channel_id, thread_root_id, broadcast_to_channel, chain_hop
     )
-    INSERT INTO swarm.signals (
-      id, workspace_id, from_principal, from_kind,
-      to_user_id, to_agent_principal_id, in_reply_to, reply_status,
-      about, kind, body, until, created_at,
-      channel_id, thread_root_id, broadcast_to_channel
-    )
-    /* SELECT ... WHERE, not VALUES, so the fits-in-the-thread test and the
-     * write are ONE statement. A pre-check in the handler cannot give this
-     * guarantee: statement_timestamp() advances between statements, so a
-     * horizon that fit when it was checked can stop fitting before the insert,
-     * and the caller would be silently shortened instead of refused. Zero rows
-     * back is the refusal, and the handler turns it into a 409. */
     SELECT
-      ${signalId}::uuid,
-      ${route.workspaceId}::uuid,
-      ${canonicalPrincipal(auth.actor)}::uuid,
-      ${auth.credentialKind},
-      ${target.toUserId}::uuid,
-      ${target.toAgentPrincipalId}::uuid,
-      ${target.inReplyTo}::uuid,
-      ${command.reply_status ?? null},
-      ${command.about},
-      ${command.signal_kind},
-      ${command.body},
-      candidate.until_value,
-      statement_timestamp(),
-      ${placement.channelId}::uuid,
-      ${placement.threadRootId}::uuid,
-      ${placement.broadcastToChannel}
+      true AS inserted,
+      NULL::text AS refusal_code,
+      inserted.*
+    FROM inserted
+    UNION ALL
+    SELECT
+      false AS inserted,
+      COALESCE(chain.refusal_code, 'thread_horizon') AS refusal_code,
+      NULL::uuid AS id,
+      NULL::uuid AS workspace_id,
+      NULL::uuid AS from_principal,
+      NULL::text AS from_kind,
+      NULL::uuid AS to_user_id,
+      NULL::uuid AS to_agent_principal_id,
+      NULL::uuid AS in_reply_to,
+      NULL::text AS reply_status,
+      NULL::text AS about,
+      NULL::text AS kind,
+      NULL::text AS body,
+      NULL::timestamptz AS until,
+      NULL::timestamptz AS created_at,
+      NULL::uuid AS channel_id,
+      NULL::uuid AS thread_root_id,
+      NULL::boolean AS broadcast_to_channel,
+      NULL::smallint AS chain_hop
     FROM candidate
-    WHERE
-      ${placement.untilCeiling}::timestamptz IS NULL
-      OR candidate.until_value <= ${placement.untilCeiling}::timestamptz
-    RETURNING
-      id, workspace_id, from_principal, from_kind,
-      to_user_id, to_agent_principal_id, in_reply_to, reply_status,
-      about, kind, body, until, created_at,
-      channel_id, thread_root_id, broadcast_to_channel
+    CROSS JOIN chain_context AS chain
+    WHERE NOT EXISTS (SELECT 1 FROM inserted)
   `;
   const signal = rows[0];
-  /* Zero rows is the atomic refusal above, not a failure. Every other reason an
-   * insert could return nothing is impossible here: there is no ON CONFLICT and
-   * no other WHERE arm. */
-  if (!signal) {
-    /* Zero rows is the atomic refusal above, not a failure. It is reachable on
-     * BOTH the explicit and the defaulted path: the floor can raise a defaulted
-     * value past the ceiling when a stall eats the root's margin, and refusing
-     * is better than storing a reply that outlives its thread. Every other
-     * reason an insert could return nothing is impossible here: no ON CONFLICT,
-     * and no WHERE arm but the ceiling. */
-    if (placement.untilCeiling !== null) return null;
-    throw new Error("signal insert did not return a row");
+  /* The statement always returns one inserted row or one typed refusal row. */
+  if (!signal) throw new Error("signal insert outcome did not return a row");
+  if (!signal.inserted) {
+    if (signal.refusal_code === "thread_horizon") {
+      return { status: "thread_horizon" };
+    }
+    if (
+      signal.refusal_code === "chain_parent_invalid" ||
+      signal.refusal_code === "chain_loop" ||
+      signal.refusal_code === "chain_too_long" ||
+      signal.refusal_code === "chain_too_wide"
+    ) {
+      return { status: "chain_refused", error: signal.refusal_code };
+    }
+    throw new Error("signal insert returned an unknown refusal");
   }
+  if (
+    signal.id === null || signal.workspace_id === null ||
+    signal.from_principal === null || signal.from_kind === null ||
+    signal.kind === null || signal.body === null || signal.until === null ||
+    signal.created_at === null || signal.broadcast_to_channel === null
+  ) throw new Error("inserted signal returned null required fields");
   /* One row per recipient, in the order the sender named them. Position 0
    * repeats the scalar recipient on the signal row on purpose: the table then
    * means exactly "what the caller addressed", with no arity-dependent branch.
@@ -8992,7 +9260,7 @@ async function postSignal(
       )
     `;
   }
-  return {
+  return { status: "inserted", signal: {
     id: signal.id,
     workspace_id: signal.workspace_id,
     from: signal.from_principal,
@@ -9000,6 +9268,7 @@ async function postSignal(
     to: signal.to_user_id,
     to_agent: signal.to_agent_principal_id,
     in_reply_to: signal.in_reply_to,
+    chain_hop: signal.chain_hop,
     reply_status: signal.reply_status,
     about: signal.about,
     kind: signal.kind,
@@ -9011,7 +9280,7 @@ async function postSignal(
     thread_root_id: signal.thread_root_id,
     broadcast_to_channel: signal.broadcast_to_channel,
     recipients: signalRecipientSet(command.to ?? null, signal),
-  };
+  } };
 }
 
 /**
@@ -9995,10 +10264,12 @@ async function handleTransaction(
         tx,
         auth,
         route.workspaceId,
+        command,
+        signalTarget,
       );
       if (rateLimit !== null) {
         const detail =
-          `${rateLimit.bucket} limit ${rateLimit.limit} signals/hour; resets at ${rateLimit.resetsAt}`;
+          `${rateLimit.bucket} limit ${rateLimit.description}; resets at ${rateLimit.resetsAt}`;
         await insertAudit(tx, {
           auth,
           commandKind: kind,
@@ -10122,7 +10393,7 @@ async function handleTransaction(
       const placementChannelId = threadResolution.threadRootId !== null
         ? threadResolution.rootChannelId
         : channelResolution.channelId;
-      const signal = await postSignal(
+      const postOutcome = await postSignal(
         tx,
         route,
         auth,
@@ -10138,7 +10409,35 @@ async function handleTransaction(
           untilExplicit: command.until_ms !== undefined,
         },
       );
-      if (signal === null) {
+      if (postOutcome.status === "chain_refused") {
+        const messages: Record<AskChainRefusal, string> = {
+          chain_parent_invalid:
+            "That parent ask is not available for this follow-up, so this ask was not sent. You can still reply to the ask you received.",
+          chain_loop:
+            "This ask would go back to an agent that is already part of this request chain, so it was not sent. You can still reply to the ask you received.",
+          chain_too_long:
+            `This request chain already has ${CHAIN_MAX_HOPS} hops, so this ask was not sent. You can still reply to the ask you received.`,
+          chain_too_wide:
+            `This ask already has ${CHAIN_MAX_CHILDREN} follow-up asks, so this one was not sent. You can still reply to the ask you received.`,
+        };
+        await insertAudit(tx, {
+          auth,
+          commandKind: kind,
+          workspaceId: route.workspaceId,
+          streamId: route.streamId,
+          outcome: "domain",
+          reason: postOutcome.error,
+          hash,
+        });
+        return {
+          status: 409,
+          body: {
+            error: postOutcome.error,
+            message: messages[postOutcome.error],
+          },
+        };
+      }
+      if (postOutcome.status === "thread_horizon") {
         /* The atomic arm fired: the horizon fit when it was checked and no
          * longer fit when the row was written. Refusing is the honest answer;
          * storing a shorter horizon than the caller named is the branch this
@@ -10173,6 +10472,7 @@ async function handleTransaction(
           },
         };
       }
+      const signal = postOutcome.signal;
       const signalResponse: StoredResponse = {
         ok: true,
         event_ids: [],
