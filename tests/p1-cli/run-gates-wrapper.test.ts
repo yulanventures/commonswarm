@@ -182,11 +182,13 @@ test("p1-cli mode kills the suite and fails the moment OrbStack appears", { skip
   const scratch = mkdtempSync(join(tmpdir(), "run-gates-control-"));
   const name = `run-gates-control-orb-${randomBytes(6).toString("hex")}`;
   let dummy: ReturnType<typeof startDummy> | undefined;
+  let wrapperProcess: ReturnType<typeof spawn> | undefined;
   try {
     const worktree = fakeP1CliWorktree(scratch, "sleep 40");
     const log = join(scratch, "gate.log");
     const started = Date.now();
     const wrapper = spawn("bash", [script, worktree, log, "HEAD", "p1-cli"], { env: { ...wrapperEnv, RUN_GATES_ORB_PATTERN: name }, stdio: "ignore" });
+    wrapperProcess = wrapper;
     const exited = new Promise<number | null>(done => wrapper.on("close", code => done(code)));
     await new Promise(done => setTimeout(done, 2_000));
     dummy = startDummy(name);
@@ -198,6 +200,7 @@ test("p1-cli mode kills the suite and fails the moment OrbStack appears", { skip
     assert.match(body, /^STOPPED: OrbStack appeared during the gate; the gate was killed$/m);
   } finally {
     dummy?.kill("SIGKILL");
+    if (wrapperProcess && wrapperProcess.exitCode === null) wrapperProcess.kill("SIGTERM");
     rmSync(scratch, { recursive: true, force: true });
   }
 });
@@ -221,8 +224,10 @@ test("p1-cli mode refuses to start while OrbStack runs", { skip: p1CliSkip, time
   }
 });
 
-test("the OrbStack probe accepts only a control-prefixed override", () => {
+test("the OrbStack probe always checks the real helper and accepts only a control-prefixed extra name", () => {
   const source = readFileSync(script, "utf8");
-  assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) orb_pattern=\$RUN_GATES_ORB_PATTERN ;; \*\) orb_pattern="OrbStack Helper" ;; esac/);
+  assert.match(source, /case "\$\{RUN_GATES_ORB_PATTERN:-\}" in run-gates-control-orb-\*\) extra_orb=\$RUN_GATES_ORB_PATTERN ;; \*\) extra_orb= ;; esac/);
+  // The real probe is unconditional: an override can add a name, never switch the OrbStack check off.
+  assert.match(source, /orb_running\(\) \{\n  if pgrep -f "OrbStack Helper" >\/dev\/null 2>&1 \|\| \{/);
   assert.match(source, /kern\.memorystatus_vm_pressure_level/);
 });

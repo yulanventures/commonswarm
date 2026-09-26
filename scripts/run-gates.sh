@@ -36,10 +36,15 @@ for b in docker docker-compose orb orbctl supabase; do
     [ ! -e "$d/node_modules/.bin/$b" ] || { echo "refuse: $d/node_modules/.bin/$b would shadow the blocking stand-in" >&2; rm -rf -- "$T"; exit 3; }
     up=$(dirname "$d"); [ "$up" != "$d" ] || break; d=$up; done
 done
-# The controls may point the OrbStack probe at a dummy process; any other value is ignored.
-case "${RUN_GATES_ORB_PATTERN:-}" in run-gates-control-orb-*) orb_pattern=$RUN_GATES_ORB_PATTERN ;; *) orb_pattern="OrbStack Helper" ;; esac
-orb_running() { pgrep -f "$orb_pattern" >/dev/null 2>&1 && echo yes || echo no; }
-other_runs() { # live runs of this wrapper other than this run: not an ancestor of it, not a descendant of it
+# The real OrbStack helper always counts. The controls may ADD a dummy process name (control prefix only); an
+# override can never replace or switch off the real probe.
+case "${RUN_GATES_ORB_PATTERN:-}" in run-gates-control-orb-*) extra_orb=$RUN_GATES_ORB_PATTERN ;; *) extra_orb= ;; esac
+orb_running() {
+  if pgrep -f "OrbStack Helper" >/dev/null 2>&1 || { [ -n "$extra_orb" ] && pgrep -f "$extra_orb" >/dev/null 2>&1; }
+  then echo yes; else echo no; fi; }
+# Live runs of this wrapper other than this run. An ancestor wrapper is not "another run": this run was started
+# inside it (the wrapper's own controls run p1-cli-mode wrappers from inside a suite), so it is part of that run.
+other_runs() {
   local anc=" $$ " a=$$ p q
   while [ "${a:-1}" -gt 1 ]; do a=$(ps -o ppid= -p "$a" 2>/dev/null | tr -d ' '); anc="$anc${a:-1} "; done
   for p in $(pgrep -f '^(/bin/)?bash [^ ]*run-gates[^ /]*\.sh ' 2>/dev/null); do  # a wrapper process, not a mention
@@ -63,8 +68,9 @@ run() { # run one gate command under the temp home, in its own process group; ki
     ( while kill -0 "$pgid" 2>/dev/null; do
         if [ "$(orb_running)" = yes ]; then
           echo "STOPPED: OrbStack appeared during the gate; the gate was killed" >> "$log"
-          kill -TERM -- -"$pgid" 2>/dev/null; sleep 2; kill -9 -- -"$pgid" 2>/dev/null; break; fi
-        sleep 3; done ) &
+          kill -TERM -- -"$pgid" 2>/dev/null; sleep 2
+          ! pgrep -g "$pgid" >/dev/null 2>&1 || kill -9 -- -"$pgid" 2>/dev/null; break; fi
+        sleep 1; done ) &
     watcher=$!
   fi
   wait "$pgid"; local rc=$?
@@ -116,6 +122,8 @@ if [ -s "$shims/calls" ]; then
   grep -E "﹣ |# SKIP" "$log" | sed 's/^[[:space:]]*//; s/ ([0-9.]*ms)//' | sort -u | head -20 | sed 's/^/  skipped: /' | tee -a "$log"; fi
 ! grep -q "^STOPPED: OrbStack appeared" "$log" || status=1
 orb_after=$(orb_running)
+if [ "${watch_orb:-0}" = 1 ] && [ "$orb_after" = yes ]; then # it was off before; it may have appeared between polls
+  echo "STOPPED: OrbStack was running at the end of the p1-cli run" | tee -a "$log"; status=1; fi
 echo "orbstack running: before=$orb_before after=$orb_after" | tee -a "$log"
 [ "$orb_before/$orb_after" != "no/yes" ] || echo "WARNING: OrbStack started during the run; the stand-ins block this run's gates, so check other sessions" | tee -a "$log"
 after=$(snapshot | sort)
