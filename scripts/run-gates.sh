@@ -13,9 +13,11 @@ T=$(mktemp -d /tmp/lane-home.XXXXXX) || exit 1
 case "$T" in /tmp/*|/private/tmp/*) ;; *) echo "refuse: temp home $T is not under /tmp" >&2; exit 3;; esac
 [ "$T" != "$real_home" ] || { echo "refuse: temp home equals the passwd home" >&2; exit 3; }
 [ -d "$wt" ] || { echo "refuse: no worktree at $wt" >&2; exit 3; }
-snapshot() { # every write class: the two cswarm trees in full, plus top-level names and mtimes of the home, .config and .claude
+snapshot() { # every write class: the two cswarm trees in full, plus the top-level names under the home, .config and .claude
   for d in "$real_home/.cswarm" "$real_home/.config/cswarm"; do [ -e "$d" ] && find "$d" -mindepth 1 -print 2>/dev/null; done
-  for d in "$real_home" "$real_home/.config" "$real_home/.claude"; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -exec stat -f '%m %N' {} + 2>/dev/null; done
+  # Top levels by NAME only: on this shared host other agents change mtimes under their own directories every
+  # few seconds (measured 2026-09-26: ~/.hermes and ~/.grokbot during a 20 s control run), so mtimes are noise here.
+  for d in "$real_home" "$real_home/.config" "$real_home/.claude"; do [ -d "$d" ] && find "$d" -mindepth 1 -maxdepth 1 -print 2>/dev/null; done
   } 
 before=$(snapshot | sort)
 run() { # run one gate command under the temp home, in its own process group; kill what it leaves behind
