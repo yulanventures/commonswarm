@@ -444,6 +444,8 @@ export class CommandHttpError extends Error {
     readonly status: number,
     message = `command failed (HTTP ${status})`,
     readonly code?: string,
+    /** The parsed refusal is retained only for a caller that owns its rendering. */
+    readonly response?: unknown,
   ) {
     super(message);
     this.name = "CommandHttpError";
@@ -1075,7 +1077,8 @@ export class ThinCommandClient {
       }
       throw createWorkspaceError(response.status, body);
     }
-    if (response.status === 403) {
+    const isJoinCredentialMint = command.kind === "mint_agent_join_credential";
+    if (response.status === 403 && !isJoinCredentialMint) {
       // Invitation failures are deliberately byte-identical. Do not decode or
       // branch on their body; recovery is membership-side.
       throw new CommandHttpError(403, `command failed (HTTP 403)`, "forbidden");
@@ -1089,10 +1092,16 @@ export class ThinCommandClient {
         throw new ReauthenticationRequired();
       }
       const slug = typeof error === "string" ? error : undefined;
+      const serverMessage = raw && typeof raw === "object" && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>).message
+        : undefined;
       throw new CommandHttpError(
         response.status,
-        `command failed (HTTP ${response.status}): ${slug ?? "unknown_error"}`,
+        isJoinCredentialMint && typeof serverMessage === "string" && serverMessage.length > 0
+          ? serverMessage
+          : `command failed (HTTP ${response.status}): ${slug ?? "unknown_error"}`,
         slug,
+        isJoinCredentialMint ? raw : undefined,
       );
     }
     const body = responseBody(raw);

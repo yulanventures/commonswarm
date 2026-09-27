@@ -3278,7 +3278,7 @@
           "endpoints": [
             "/functions/v1/h0/register"
           ],
-          "citation": "src/cloud/mcp-connect.ts:798",
+          "citation": "src/cloud/mcp-connect.ts:825",
           "detail": "Abort timer for the H0 register POST.",
           "operation": {
             "name": "mcp-register",
@@ -3294,7 +3294,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/mcp-connect.ts:326",
+          "citation": "src/cloud/mcp-connect.ts:353",
           "detail": "Local stty process deadline for hidden input.",
           "operation": {
             "name": "mcp-hidden-input",
