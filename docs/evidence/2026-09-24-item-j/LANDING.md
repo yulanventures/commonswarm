@@ -59,3 +59,16 @@ diff-check 0.
 - Production query plans (measured locally 2.4-5.6 ms at about 3.8k agents and 3.1k credentials; no new index).
 - Follow-ups: the server test runs the catalog-digest check before the behaviour checks (reorder it); the setup-error
   text is its own item (Strategist).
+
+## Done-test on production (2026-09-27, Anvil; ruling by the CSwarm Strategist)
+
+- With a page reload, the J done-test PASSES on production in the Cold Agent Test workspace: an issued code shows
+  "Invited, not connected" with its age in `cswarm members` and the app roster, and the row clears after connect.
+- Part (a), the same test WITHOUT a reload in a visible tab, is CLOSED as a test-environment effect. On the Mac mini
+  Chrome never became the front app (an Electron app stayed in front through activate_tab, AppleScript activate,
+  `open -a`, System Events and Dock clicks), so `document.visibilityState` stayed `hidden`. The app's poll does not
+  run in a hidden tab, and no `read` POST and no row update happened in 90 s. The test seat (`74d481b8`) is revoked.
+- So the visible-tab poll is covered by the code and the site suite, NOT by a production measurement. The
+  Strategist ruled: do not try it again on the mini.
+- Raw notes and screenshots stay outside the repository in Anvil's UAT folder on the mini
+  (`anvil-work/uat-20260927/`, `visible-tab-test.md` and `part-b-rerun.md`), because they hold account details.
