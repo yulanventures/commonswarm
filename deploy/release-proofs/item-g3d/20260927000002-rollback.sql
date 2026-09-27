@@ -4,7 +4,11 @@
 --   release_psql --file /proof/20260927000002-rollback.sql
 -- Stage this file and 20260927000002-rollback-catalog.sql in /proof first.
 \set ON_ERROR_STOP 1
+\if :{?release_proof_outer_transaction}
+SAVEPOINT release_proof_outer_transaction_guard;
+\else
 BEGIN;
+\endif
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
@@ -16,9 +20,13 @@ DROP TABLE swarm.agent_presence;
 DELETE FROM swarm.config WHERE key = 'current_client_build';
 DELETE FROM supabase_migrations.schema_migrations WHERE version = '20260927000002';
 
-\i /proof/20260927000002-rollback-catalog.sql
+\ir 20260927000002-rollback-catalog.sql
 \if :rollback_ok
-  COMMIT;
+  \if :{?release_proof_outer_transaction}
+    RELEASE SAVEPOINT release_proof_outer_transaction_guard;
+  \else
+    COMMIT;
+  \endif
 \else
   ROLLBACK;
   DO $fail$ BEGIN RAISE EXCEPTION 'agent-presence rollback catalog proof FAILED; transaction rolled back'; END $fail$;
