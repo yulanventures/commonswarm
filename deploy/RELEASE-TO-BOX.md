@@ -107,6 +107,124 @@ Record approvals, affected surfaces, the backup-age agreement, commands, exit
 codes, and safe verification output in `run.log`. Never record an environment
 file, credential, curl authorization file, or secret value.
 
+Before the apply, Anvil connects to the box as root and creates the copy-back
+manifest. Set `KIND_LIST` to the same approved surfaces used by the apply block,
+list every pending migration version, and list the subset whose functional
+proof produces a `.txt` file during this window. Set the three named switches
+when the window includes the section 4 H0 ledger backfill, the guarded stack
+switch, or the section 8 backup-status proof. Add exact relative paths from the
+item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
+item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
+other `*.log`, any `*.err` file (the copy-back block handles those), or anything
+under `database/logs/`. The manifest is built only from the explicit arrays
+below, never from `find`:
+
+```sh
+(
+  set -euo pipefail
+  SHA=<sha>
+  KIND_LIST='<edge|stack|edge stack>'
+  H0_LEDGER_BACKFILL='<yes-or-no>'
+  GUARDED_STACK_SWITCH='<yes-or-no>'
+  BACKUP_STATUS_PROOF='<yes-or-no>'
+  MIGRATION_VERSIONS=(
+    # <approved-14-digit-version>
+  )
+  FUNCTIONAL_VERSIONS=(
+    # <approved-14-digit-version-with-functional-txt-output>
+  )
+  ITEM_COPY_BACK_FILES=(
+    # '<exact-relative-path-from-the-item-box-plan>'
+  )
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  COPY_BACK_LIST="$PROOF_DIR/copy-back.list"
+  COPY_BACK_FILES=(
+    copy-back.list
+    gate-evidence.txt
+    box-archive.sha256
+  )
+
+  test "${#SHA}" -eq 40
+  case " $KIND_LIST " in
+    *' edge '*|*' stack '*) ;;
+    *) false ;;
+  esac
+  for KIND in $KIND_LIST; do
+    case "$KIND" in edge|stack) ;; *) false ;; esac
+  done
+  for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF"; do
+    case "$SWITCH" in yes|no) ;; *) false ;; esac
+  done
+  install -d -m 0700 -o root -g root "$PROOF_DIR"
+  case " $KIND_LIST " in
+    *' edge '*)
+      COPY_BACK_FILES+=(
+        edge.SHA256SUMS
+        edge-with-override.SHA256SUMS
+        required-edge-env.json
+        edge-env-source-check.txt
+        edge-probe-start.txt
+        h0-note-unauth.json
+      )
+      ;;
+  esac
+  case " $KIND_LIST " in
+    *' stack '*) COPY_BACK_FILES+=(stack.SHA256SUMS) ;;
+  esac
+  if [ "$H0_LEDGER_BACKFILL" = yes ]; then
+    COPY_BACK_FILES+=(h0-ledger-before.txt h0-ledger-after.txt)
+  fi
+  if [ "$GUARDED_STACK_SWITCH" = yes ]; then
+    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    COPY_BACK_FILES+=(stack-switch-timers.txt)
+  fi
+  if [ "$BACKUP_STATUS_PROOF" = yes ]; then
+    COPY_BACK_FILES+=(backup-status.json)
+  fi
+  if [ "${#MIGRATION_VERSIONS[@]}" -gt 0 ]; then
+    COPY_BACK_FILES+=(
+      migration-files.txt
+      migration-files.sha256
+      ledger-before.txt
+      pending-versions.txt
+      migration-state-before.txt
+      migration-state-after.txt
+      cron-before.txt
+      cron-after.txt
+      cron-before-sorted.txt
+      cron-after-sorted.txt
+      cron-added.txt
+      cron-removed.txt
+      verification-sql.sha256
+    )
+  fi
+  for VERSION in "${MIGRATION_VERSIONS[@]}"; do
+    case "$VERSION" in (*[!0-9]*|'') false ;; esac
+    test "${#VERSION}" -eq 14
+    COPY_BACK_FILES+=("${VERSION}-catalog.sql" "${VERSION}-functional.sql")
+  done
+  for VERSION in "${FUNCTIONAL_VERSIONS[@]}"; do
+    case "$VERSION" in (*[!0-9]*|'') false ;; esac
+    test "${#VERSION}" -eq 14
+    printf '%s\n' "${MIGRATION_VERSIONS[@]}" | grep -qFx "$VERSION"
+    COPY_BACK_FILES+=("${VERSION}-functional.txt")
+  done
+  COPY_BACK_FILES+=("${ITEM_COPY_BACK_FILES[@]}")
+
+  for path in "${COPY_BACK_FILES[@]}"; do
+    test -n "$path"
+    case "$path" in
+      /*|./*|../*|*/../*|*.log|*.err|database/logs/*|*/database/logs/*|window.env|*/window.env) false ;;
+    esac
+  done
+  test -z "$(printf '%s\n' "${COPY_BACK_FILES[@]}" | LC_ALL=C sort | uniq -d)"
+  install -m 0600 -o root -g root /dev/null "$COPY_BACK_LIST"
+  printf '%s\n' "${COPY_BACK_FILES[@]}" >"$COPY_BACK_LIST"
+  test "$(stat -c '%U:%G:%a' "$COPY_BACK_LIST")" = root:root:600
+  grep -qFx 'copy-back.list' "$COPY_BACK_LIST"
+)
+```
+
 For a database release, CSwarmDevLead places the reviewed catalog and functional
 verification SQL in `EVIDENCE_DIR` before Anvil continues. Derive the
 environment-name inventory from the same exact-SHA archive on the Mac.
@@ -205,7 +323,9 @@ switch. A missing path or comparison error is a stop. H0 does not switch
 On 2026-09-22 HezLead observed that edge release directories are owned by
 `commonswarm:commonswarm` with mode `0750`, while stack release directories use
 mode `0755`. The block records both previous release paths before any switch,
-creates the releases, and writes the durable window state.
+creates the releases, and writes the durable window state. Set the approved UTC
+window start and end once in this block; every later box block reads them from
+`window.env`.
 
 ```sh
 (
@@ -222,6 +342,8 @@ sudo -n -i
   set -euo pipefail
   SHA=<sha>
   KIND_LIST='<edge|stack|edge stack>'
+  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   ARCHIVE=/tmp/commonswarm-release.tar
   EXPECTED_ARCHIVE_SHA256=<sha256-from-Mac-evidence>
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -238,6 +360,16 @@ sudo -n -i
   for KIND in $KIND_LIST; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
+  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
+    case "$T" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+      *) false ;;
+    esac
+    date -u -d "$T" +%s >/dev/null
+  done
+  RECYCLE_TIMER_STOPPED=0
+  BACKUP_TIMERS_STOPPED=0
+  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
 
   install -d -m 0700 -o root -g root "$PROOF_DIR"
   sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
@@ -266,14 +398,16 @@ sudo -n -i
 
   WINDOW_ENV="$PROOF_DIR/window.env"
   {
-    printf 'SHA=%q\n' "$SHA"
-    printf 'KIND_LIST=%q\n' "$KIND_LIST"
-    printf 'NEW_EDGE=%q\n' "$NEW_EDGE"
-    printf 'NEW_STACK=%q\n' "$NEW_STACK"
-    printf 'PREVIOUS_EDGE=%q\n' "$PREVIOUS_EDGE"
-    printf 'PREVIOUS_STACK=%q\n' "$PREVIOUS_STACK"
-    printf 'RECYCLE_TIMER_STOPPED=0\n'
-    printf 'BACKUP_TIMERS_STOPPED=0\n'
+    printf "%s='%s'\n" SHA "$SHA"
+    printf "%s='%s'\n" KIND_LIST "$KIND_LIST"
+    printf "%s='%s'\n" WINDOW_START_UTC "$WINDOW_START_UTC"
+    printf "%s='%s'\n" WINDOW_END_UTC "$WINDOW_END_UTC"
+    printf "%s='%s'\n" NEW_EDGE "$NEW_EDGE"
+    printf "%s='%s'\n" NEW_STACK "$NEW_STACK"
+    printf "%s='%s'\n" PREVIOUS_EDGE "$PREVIOUS_EDGE"
+    printf "%s='%s'\n" PREVIOUS_STACK "$PREVIOUS_STACK"
+    printf "%s='%s'\n" RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
+    printf "%s='%s'\n" BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
   } >"$WINDOW_ENV"
   chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
@@ -295,7 +429,7 @@ inventory. HezLead reviews this exact list for secrets before transfer:
   test -d "$EVIDENCE_DIR"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
-  printf '%s\n' required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
+  printf '%s\n' gate-evidence.txt required-edge-env.json edge-env-source-check.txt >>"$PROOF_LIST"
   chmod 0600 "$PROOF_LIST"
   cat "$PROOF_LIST"
 )
@@ -368,21 +502,16 @@ the previous release directory. Do not delete either release during the window.
 After the window, Anvil copies the curated proof files back to
 `docs/evidence/<UTC-date>-release-<short-sha>/`. CSwarmDevLead reviews and
 commits that evidence afterwards; the evidence must contain no secrets and no
-complete environment file. Before copying, HezLead writes the exact approved
-relative paths, one per line, to `$PROOF_DIR/copy-back.list`; it must include
-itself. Logs are never copied because they may contain request data. The list
-must not contain `window.env`, anything under `database/logs/`, or any name
-ending in `.log`. Create the list with a protected editor as root and mode
-`0600` (a protected editor or a root-owned script is fine); do not generate it
-from `find`.
-
-Write this list at preflight (section 1), from the copy-back paths named in the
-item's box plan, so it exists on the box before the window closes. If the list
-is missing at copy-back time, stop and ask HezLead; do not reconstruct it from
-the directory. Before copying, remove any EMPTY `*.err` file in `$PROOF_DIR`
+complete environment file. Use only the root-owned `copy-back.list` created by
+the section 1 preflight block. It includes itself and the applicable standard
+evidence plus the exact item-specific paths from the box plan. Logs are never
+copied because they may contain request data. If the list is missing at
+copy-back time, stop and ask HezLead; do not reconstruct it from the directory.
+Before copying, remove any EMPTY `*.err` file in `$PROOF_DIR`
 (for example an empty `functional.err`); a non-empty `.err` file is evidence:
-list it and copy it back. The window is closed by HezLead; Anvil runs the close
-steps and reports each one.
+the copy-back block appends its exact basename to the existing manifest and
+copies it back. The window is closed by HezLead; Anvil runs the close steps and
+reports each one.
 
 ```sh
 (
@@ -398,11 +527,23 @@ steps and reports each one.
   test -f "$PROOF_DIR/copy-back.list"
   test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
   grep -qFx 'copy-back.list' "$PROOF_DIR/copy-back.list"
+  shopt -s nullglob
+  for ERR_FILE in "$PROOF_DIR"/*.err; do
+    ERR_NAME="${ERR_FILE##*/}"
+    if [ ! -s "$ERR_FILE" ]; then
+      rm -f -- "$ERR_FILE"
+    elif ! grep -qFx "$ERR_NAME" "$PROOF_DIR/copy-back.list"; then
+      printf '%s\n' "$ERR_NAME" >>"$PROOF_DIR/copy-back.list"
+    fi
+  done
+  shopt -u nullglob
+  test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
+  test -z "$(LC_ALL=C sort "$PROOF_DIR/copy-back.list" | uniq -d)"
   while IFS= read -r path; do
     test -n "$path"
     while [[ "$path" == ./* ]]; do path="${path#./}"; done
     case "$path" in
-      ''|/*|../*|*/../*|*.log|database/logs/*|window.env) false ;;
+      ''|/*|../*|*/../*|*.log|database/logs/*|*/database/logs/*|window.env|*/window.env) false ;;
     esac
     test -f "$PROOF_DIR/$path"
   done <"$PROOF_DIR/copy-back.list"
@@ -524,9 +665,10 @@ approved target-only file; never fall back to a historical file.
 Run this once for the window. It uses the repository's
 `make-pg-service.mjs` convention: the URL stays in a mode-`0600` file, the
 password stays in a libpq pass file, and neither appears in argv. The generated
-root-only session helper survives a lost shell. Every database block sources it
-after `window.env`. `release_psql_ro` forces catalog and functional proof calls
-into read-only transactions with `PGOPTIONS`.
+root-only session helper survives a lost shell. In every database block, source
+`window.env` first and the session helper second; never reverse or omit that
+order. `release_psql_ro` forces catalog and functional proof calls into
+read-only transactions with `PGOPTIONS`.
 
 ```sh
 (
@@ -1070,18 +1212,16 @@ the exact `/home/commonswarm/edge/releases/<sha>/` directory, not through the
 installed by HezLead on 2026-09-22: `OnCalendar=*-*-* 03,09,15,21:30:00 UTC`,
 `Persistent=false`; its service runs `docker restart --time 30
 commonswarm-edge-edge-runtime-1`. Check it with `systemctl cat
-commonswarm-edge-recycle.timer` before the window. Set the approved window's
-UTC start and end in the block below. Only if it overlaps the ten minutes on
-either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the timer and start it
-after verification.
+commonswarm-edge-recycle.timer` before the window. The block below reads the
+approved UTC start and end saved in `window.env`. Only if the window overlaps
+the ten minutes on either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the
+timer and start it after verification.
 
 ```sh
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
-  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
     case "$T" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
@@ -1290,10 +1430,67 @@ switched and healthy", CSwarmDevLead runs
 from the Mac mini with the two seats minted for the window (see the item's box plan,
 `docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md` rows 3-6) and sends
 HezLead `SEED_NOTE_ID=<uuid>` or the STOP line. HezLead passes the id to Anvil.
-Anvil runs `release_psql_ro -v item_g_seed_signal_id="$SEED_SIGNAL_ID" --file
-"/proof/20260925000001-functional.sql"` and saves its output as section 5 does.
+Anvil runs the proof and saves its output as section 5 does:
+
+```sh
+(
+  set -euo pipefail
+  SEED_NOTE_ID='<uuid-from-HezLead>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -v item_g_seed_signal_id="$SEED_NOTE_ID" \
+    --file "/proof/20260925000001-functional.sql" \
+    >"$PROOF_DIR/20260925000001-functional.txt"
+)
+```
+
 A missing seed is a failed proof. Do not run this proof in section 5's pre-edge
 Verify step.
+
+For migration `20260926000001`, run the item G lane 2b renew gate after the new
+edge is healthy. The lead sends HezLead `G2B_PRINCIPAL_ID=<uuid>` and the time
+of the last successful renew. Within three minutes of that renew, Anvil runs:
+
+```sh
+(
+  set -euo pipefail
+  G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -v item_g2b_principal_id="$G2B_PRINCIPAL_ID" \
+    --file "/proof/20260926000001-functional.sql" \
+    >"$PROOF_DIR/20260926000001-functional.txt"
+)
+```
+
+The proof must exit zero before the lead releases the gate's lease. Do not run
+this proof in section 5's pre-edge Verify step.
+
+For migration `20260927000001`, use the new edge to create one human-authored
+signal and one private reply with a status. Record the workspace, signal,
+reply, and author user ids, then run:
+
+```sh
+(
+  set -euo pipefail
+  ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
+  ITEM_G3C_SIGNAL_ID='<signal-uuid>'
+  ITEM_G3C_REPLY_ID='<reply-uuid>'
+  ITEM_G3C_AUTHOR_USER_ID='<author-user-uuid>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -v item_g3c_workspace_id="$ITEM_G3C_WORKSPACE_ID" \
+    -v item_g3c_signal_id="$ITEM_G3C_SIGNAL_ID" \
+    -v item_g3c_reply_id="$ITEM_G3C_REPLY_ID" \
+    -v item_g3c_author_user_id="$ITEM_G3C_AUTHOR_USER_ID" \
+    --file "/proof/20260927000001-functional.sql" \
+    >"$PROOF_DIR/20260927000001-functional.txt"
+  test "$(cat "$PROOF_DIR/20260927000001-functional.txt")" = t
+)
+```
+
+This proof never runs from section 5's automatic functional-proof step. A
+missing id, invisible reply, or reply without a status fails the proof.
 
 For migration `20260927000002`, use a dedicated live agent seat to make one
 successful routed command through the new edge (`claim_wake_lease`,
@@ -1303,11 +1500,18 @@ the functional proof exactly as follows; it uses session-level settings and no
 outer transaction:
 
 ```sh
-release_psql_ro -v item_g3d_principal_id="$ITEM_G3D_PRINCIPAL_ID" \
-  -v item_g3d_workspace_id="$ITEM_G3D_WORKSPACE_ID" \
-  --file "/proof/20260927000002-functional.sql" \
-  >"$PROOF_DIR/20260927000002-functional.txt"
-test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
+(
+  set -euo pipefail
+  ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
+  ITEM_G3D_WORKSPACE_ID='<workspace-uuid>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -v item_g3d_principal_id="$ITEM_G3D_PRINCIPAL_ID" \
+    -v item_g3d_workspace_id="$ITEM_G3D_WORKSPACE_ID" \
+    --file "/proof/20260927000002-functional.sql" \
+    >"$PROOF_DIR/20260927000002-functional.txt"
+  test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
+)
 ```
 
 This proof never runs from section 5's automatic functional-proof step. A
@@ -1321,14 +1525,24 @@ Then run the functional proof exactly as follows; it uses session-level
 settings, performs only reads, and has no outer transaction:
 
 ```sh
-release_psql_ro -v item_t3_workspace_id="$ITEM_T3_WORKSPACE_ID" \
-  -v item_t3_root_signal_id="$ITEM_T3_ROOT_SIGNAL_ID" \
-  -v item_t3_hop1_signal_id="$ITEM_T3_HOP1_SIGNAL_ID" \
-  -v item_t3_hop2_signal_id="$ITEM_T3_HOP2_SIGNAL_ID" \
-  -v item_t3_reader_user_id="$ITEM_T3_READER_USER_ID" \
-  --file "/proof/20260927000003-functional.sql" \
-  >"$PROOF_DIR/20260927000003-functional.txt"
-test "$(cat "$PROOF_DIR/20260927000003-functional.txt")" = t
+(
+  set -euo pipefail
+  ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
+  ITEM_T3_ROOT_SIGNAL_ID='<root-signal-uuid>'
+  ITEM_T3_HOP1_SIGNAL_ID='<first-child-signal-uuid>'
+  ITEM_T3_HOP2_SIGNAL_ID='<second-child-signal-uuid>'
+  ITEM_T3_READER_USER_ID='<reader-user-uuid>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  release_psql_ro -v item_t3_workspace_id="$ITEM_T3_WORKSPACE_ID" \
+    -v item_t3_root_signal_id="$ITEM_T3_ROOT_SIGNAL_ID" \
+    -v item_t3_hop1_signal_id="$ITEM_T3_HOP1_SIGNAL_ID" \
+    -v item_t3_hop2_signal_id="$ITEM_T3_HOP2_SIGNAL_ID" \
+    -v item_t3_reader_user_id="$ITEM_T3_READER_USER_ID" \
+    --file "/proof/20260927000003-functional.sql" \
+    >"$PROOF_DIR/20260927000003-functional.txt"
+  test "$(cat "$PROOF_DIR/20260927000003-functional.txt")" = t
+)
 ```
 
 This proof never runs from section 5's automatic functional-proof step. A
