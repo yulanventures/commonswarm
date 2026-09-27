@@ -19,7 +19,12 @@ Brief: `docs/design/2026-09-26-CP-CONSUMER-POSITIONING-BRIEF.md`, section CP1 (v
 
 The 15 failures are the same set (set comparison: 0 new, 0 fixed); they are item CP follow-up 2.
 
-## Still to do before the site release
+## Before the site release
 
-Tom signs in on the web once with Google (the first real Google web round trip), and the same-email linking proof
-(a read-only count through HezLead, or Tom's sign-in). Tom's yes on the CP3 copy.
+- **Google web round trip: DONE** (Anvil for Tom, 2026-09-27, live site): a Google sign-in as tom@chartingalpha.com
+  returned to /app signed in. It is a NEW account, because Tom's usual account (GitHub Ridgeio) uses a different email;
+  that is the expected result under brain v2. Evidence: `/Users/yulanbot/anvil-work/uat-20260927/` on the mini.
+- **Same-email linking: NOT ESTABLISHED.** HezLead's read-only count on production (2026-09-26): 0 accounts with both
+  a Google and a GitHub identity (any Google 2, any GitHub 3). No same-email pair exists to prove it; this does not
+  block the release (Strategist ruling 2026-09-27).
+- Tom's yes on the CP3 copy: given 2026-09-26 (see `CP3-LANDING.md`).
