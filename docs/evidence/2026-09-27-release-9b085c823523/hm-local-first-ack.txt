@@ -1,0 +1,17 @@
+{
+  "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+  "principal_id": "fb9de4e3-000c-4230-a7e0-b35fec362302",
+  "signal_id": "962788c6-a69e-439d-bf36-5591fe9b9d46",
+  "acked_at": "2026-09-27T18:13:00.229803+00:00",
+  "ack_outcome": "observed",
+  "last_lease_id": null,
+  "last_leased_by": null,
+  "release_sha": "9b085c82352390cf8f0fe515c02b3ccff423476a",
+  "client": "released cswarm 0.1.80",
+  "sender_principal_id": "29bf679e-df26-4253-90f7-91795ead0834",
+  "seed_signal_id": "37661ddb-7010-4cf9-8288-334e3be7ad5a",
+  "seat_before": true,
+  "wake_after": true,
+  "sender_revocation": "accepted",
+  "recipient_revocation": "accepted"
+}
