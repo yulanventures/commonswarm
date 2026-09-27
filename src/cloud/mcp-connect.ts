@@ -718,13 +718,13 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
     // A pending record is the sole exception for an orphan credential.
     if (!pending && await pathExists(path)) {
       if (await completedProfileAt(path) || !await repairableProfileAt(path) || !await readComplete(path)) {
-        throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+        throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
       }
     }
     if (!pending && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
       throw new McpConnectError("profile_exists", await emptyClaimAt(join(profileDir, CONNECT_PROFILE_FILES.credential))
-        ? "This directory holds an empty claim file without a profile. Keep the file and use a new --profile path for a new agent."
-        : "This directory holds a credential without a profile. Keep the credential and use a new --profile path for a new agent.");
+        ? `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`
+        : `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
     }
     const name = options.name ?? "MCP agent";
     if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
@@ -751,7 +751,7 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           (!await pathExists(path) || (await repairableProfileAt(path) && !await completedProfileAt(path)))) {
         return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
           if (await completedProfileAt(path) || (await pathExists(path) && !await repairableProfileAt(path))) {
-            throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+            throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
           }
           const profileState = await pathExists(path) ? await emptyClaimAt(path) ? `an empty ${basename(path)} claim file` : `damaged ${basename(path)}` : `no ${basename(path)}`;
           const credentialPath = join(profileDir, CONNECT_PROFILE_FILES.credential);
@@ -783,9 +783,9 @@ export async function connectMcp(options: McpConnectOptions): Promise<McpConnect
           return connectedResult(path, restored);
         }, { publishLink: options.publishLink });
       }
-      if ((!current && await pathExists(path)) || (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))) {
-        throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
-      }
+      if (!current && await pathExists(path)) throw new McpConnectError("profile_exists", `The connect was refused because ${path} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
+      if (!current && await pathExists(join(profileDir, CONNECT_PROFILE_FILES.credential)))
+        throw new McpConnectError("profile_exists", `The connect was refused because ${join(profileDir, CONNECT_PROFILE_FILES.credential)} already exists. No blocking file was deleted. Pass --profile with a profile file in a different directory.`);
       if (pending?.attemptId !== current?.attemptId) {
         throw new McpConnectError("connect_pending_changed", "The interrupted connect changed while entering the code. Run mcp connect again.");
       }

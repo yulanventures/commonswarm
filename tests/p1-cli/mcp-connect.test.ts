@@ -361,7 +361,17 @@ test("Fold 9 unsupported hard links use exclusive final creation and recover a w
     assert.equal((await readAgentProfile(path)).principal_id, PRINCIPAL);
     assert.equal((await readProfileCredential(await readAgentProfile(path))).token, TOKEN);
     assert.deepEqual((await readdir(dirname(path))).filter(name => name === CONNECT_PROFILE_FILES.credential), [CONNECT_PROFILE_FILES.credential]);
-    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), { code: "profile_exists" });
+    const profileBefore = await readFile(path);
+    const credentialBefore = await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential));
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher }), error => {
+      assert.equal((error as { code: string }).code, "profile_exists");
+      assert.ok(String(error).includes(path));
+      assert.match(String(error), /No blocking file was deleted/);
+      assert.match(String(error), /Pass --profile with a profile file in a different directory/);
+      return true;
+    });
+    assert.deepEqual(await readFile(path), profileBefore);
+    assert.deepEqual(await readFile(join(dirname(path), CONNECT_PROFILE_FILES.credential)), credentialBefore);
     assert.equal(posts, 2);
     for (const code of ["ENOTSUP", "ENOSYS", "EXDEV"] as const) {
       const file = join(dirname(path), `${code}.json`);
@@ -839,8 +849,10 @@ test("Fold 11 clear and later refusal name an empty credential claim", { timeout
     await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN,
       fetcher: f.fetcher }), error => {
       assert.equal((error as { code: string }).code, "profile_exists");
-      assert.match(String(error), /holds an empty claim file without a profile/);
-      assert.doesNotMatch(String(error), /holds a credential/);
+      assert.ok(String(error).includes(credential));
+      assert.match(String(error), /No blocking file was deleted/);
+      assert.match(String(error), /Pass --profile with a profile file in a different directory/);
+      assert.doesNotMatch(String(error), /empty claim|credential without a profile/);
       return true;
     });
     assert.equal((await readFile(credential)).length, 0);
@@ -1061,13 +1073,13 @@ test("mcp code renders join-code mint refusals from the server response", async 
 });
 
 test("mcp code preserves other stable mint-refusal codes and keeps unlabelled failures generic", async () => {
-  for (const [code, message] of [
-    ["workspace_principal_limit_reached", "This workspace cannot add another principal."],
-    ["forbidden", "You cannot mint a connect code in this workspace."],
+  for (const [payload, code, message] of [
+    [{ error: "principal_limit_reached", limit: 50 }, "principal_limit_reached", "command failed (HTTP 403): principal_limit_reached"],
+    [{ error: "forbidden", message: "You cannot mint a connect code in this workspace." }, "forbidden", "You cannot mint a connect code in this workspace."],
   ] as const) {
     await assert.rejects(
       mintMcpCode(TARGET, "human-test-access", WS, async () =>
-        Response.json({ error: code, message }, { status: 403 })),
+        Response.json(payload, { status: 403 })),
       error => {
         assert.equal(mcpFailureCode(error, "code"), code);
         assert.equal(mcpFailureMessage(error, "code"), message);
@@ -1124,6 +1136,11 @@ test("equals-style option errors never echo an option value on three commands", 
 test("fresh connect without an anon key names only the accepted flag", { timeout: 10000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-fresh-"));
   try {
+    const missingUrl = await cli(["mcp", "connect"], { HOME: root });
+    assert.equal(missingUrl.code, 1);
+    assert.match(missingUrl.stderr, /\[connect_url_required\]/);
+    assert.match(missingUrl.stderr, /--url <project-url>/);
+    assert.match(missingUrl.stderr, /connect line from `cswarm mcp code`/);
     const result = await cli(["mcp", "connect", "--url", TARGET.url], { HOME: root, SWARM_CLOUD_ANON_KEY: "ignored-public-key" });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /--anon-key/);
@@ -1920,7 +1937,13 @@ test("Fold 7 replace failure unlinks its temp and a killed replacement temp is r
     await once(child, "exit");
     child = null;
     assert.equal((await readdir(dirname(path))).filter(name => /^credential\.json\.\d+\.[0-9a-f]{12}\.tmp$/.test(name)).length, 1);
-    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), { code: "profile_exists" });
+    await assert.rejects(connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher }), error => {
+      assert.equal((error as { code: string }).code, "profile_exists");
+      assert.ok(String(error).includes(path));
+      assert.match(String(error), /No blocking file was deleted/);
+      assert.doesNotMatch(String(error), /Nothing was deleted/);
+      return true;
+    });
     assert.deepEqual((await readdir(dirname(path))).filter(name => name.startsWith("credential.json.")), []);
     assert.deepEqual(await readFile(credential), before);
     assert.equal(f.calls(), 1);
@@ -2864,9 +2887,9 @@ test("mcp code prints server refusals from the command endpoint", { timeout: 150
     assert.equal(result.stderr.slice(result.stderr.lastIndexOf("cswarm: ")), `cswarm: [join_credential_limit_reached] ${message}\n`);
   }
 
-  const stable = await mcpCodeRefusal({ error: "workspace_principal_limit_reached", message: "This workspace cannot add another principal." }, 403);
+  const stable = await mcpCodeRefusal({ error: "principal_limit_reached", limit: 50 }, 403);
   assert.equal(stable.code, 1);
-  assert.equal(stable.stderr.slice(stable.stderr.lastIndexOf("cswarm: ")), "cswarm: [workspace_principal_limit_reached] This workspace cannot add another principal.\n");
+  assert.equal(stable.stderr.slice(stable.stderr.lastIndexOf("cswarm: ")), "cswarm: [principal_limit_reached] command failed (HTTP 403): principal_limit_reached\n");
 
   const unlabelled = await mcpCodeRefusal({}, 503);
   assert.equal(unlabelled.code, 1);
@@ -2967,7 +2990,48 @@ test("two concurrent connects for one profile serialize before a second POST", {
     assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
     const loser = results.find(result => result.status === "rejected") as PromiseRejectedResult;
     assert.equal(loser.reason.code, "profile_exists");
+    assert.ok(String(loser.reason).includes(path));
+    assert.equal(String(loser.reason).includes(join(dirname(path), CONNECT_PROFILE_FILES.credential)), false);
+    assert.match(String(loser.reason), /No blocking file was deleted/);
+    assert.match(String(loser.reason), /Pass --profile with a profile file in a different directory/);
+    assert.equal((await stat(path)).isFile(), true);
+    assert.equal((await stat(join(dirname(path), CONNECT_PROFILE_FILES.credential))).isFile(), true);
   } finally { await f.close(); }
+});
+
+test("post-code profile refusals name only the existing blocking path", { timeout: 10000 }, async () => {
+  for (const kind of ["credential-only", "profile-only"] as const) {
+    const f = await fixture();
+    try {
+      const path = join(f.root, kind, "profile.json");
+      const credential = join(dirname(path), CONNECT_PROFILE_FILES.credential);
+      const complete = join(dirname(path), CONNECT_PROFILE_FILES.complete);
+      await connectMcp({ target: TARGET, profilePath: path, readCode: async () => JOIN, fetcher: f.fetcher });
+      if (kind === "credential-only") await unlink(path);
+      else {
+        await unlink(credential);
+        await writeFile(path, "", { mode: 0o600 });
+      }
+      const kept = kind === "credential-only" ? credential : path;
+      const absent = kind === "credential-only" ? path : credential;
+      const keptBytes = await readFile(kept);
+      const completeBytes = await readFile(complete);
+      await assert.rejects(connectMcp({ target: TARGET, profilePath: path,
+        readCode: async () => `swm_join_${"K".repeat(43)}`,
+        fetcher: async () => { throw new Error("unexpected POST"); } }), error => {
+        assert.equal((error as { code: string }).code, "profile_exists");
+        assert.ok(String(error).includes(kept));
+        assert.equal(String(error).includes(absent), false);
+        assert.match(String(error), /No blocking file was deleted/);
+        assert.match(String(error), /Pass --profile with a profile file in a different directory/);
+        return true;
+      });
+      assert.deepEqual(await readFile(kept), keptBytes);
+      assert.deepEqual(await readFile(complete), completeBytes);
+      await assert.rejects(stat(absent), { code: "ENOENT" });
+      assert.equal(f.calls(), 1, "post-code refusal does not register again");
+    } finally { await f.close(); }
+  }
 });
 
 test("register redirects do not forward a join code to another origin", { timeout: 10000 }, async () => {
