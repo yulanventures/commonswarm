@@ -1,0 +1,643 @@
+{
+  "version": 1,
+  "header": "GATE PASS",
+  "status": "PASS",
+  "outcome": "PASS",
+  "release_gate": true,
+  "rounds": 50,
+  "reason": null,
+  "started_at": "2026-09-27T03:59:59.654Z",
+  "finished_at": "2026-09-27T04:00:22.891Z",
+  "principal_id": "63cff933-1eb5-4469-9676-c00fb93c637a",
+  "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+  "watcher_id": "44c1ae1d-8623-44a3-8388-450a3ec8d559",
+  "generation": 1,
+  "host_label": "g2b-renew-gate",
+  "thresholds": {
+    "renew_timeout_ms": 15000,
+    "renew_timeout_source": "src/cloud/wake-lease.ts:64",
+    "check_budget_ms": 3900,
+    "check_budget_source": "src/cloud/agent-check-budget.ts:22",
+    "check_budget_is_gate": false
+  },
+  "renew": {
+    "n": 50,
+    "p50_ms": 197.5,
+    "p95_ms": 287.23,
+    "max_ms": 612.15,
+    "first_call_ms": 197.94,
+    "succeeded": 50,
+    "calls": [
+      {
+        "round": 1,
+        "elapsed_ms": 197.94,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 2,
+        "elapsed_ms": 271.19,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 3,
+        "elapsed_ms": 186.87,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 4,
+        "elapsed_ms": 185.84,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 5,
+        "elapsed_ms": 186.51,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 6,
+        "elapsed_ms": 191.23,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 7,
+        "elapsed_ms": 195.53,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 8,
+        "elapsed_ms": 198.52,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 9,
+        "elapsed_ms": 202.94,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 10,
+        "elapsed_ms": 219.98,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 11,
+        "elapsed_ms": 319.32,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 12,
+        "elapsed_ms": 195.03,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 13,
+        "elapsed_ms": 197.5,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 14,
+        "elapsed_ms": 202.18,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 15,
+        "elapsed_ms": 196.28,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 16,
+        "elapsed_ms": 240.2,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 17,
+        "elapsed_ms": 612.15,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 18,
+        "elapsed_ms": 192.93,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 19,
+        "elapsed_ms": 190.5,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 20,
+        "elapsed_ms": 230.88,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 21,
+        "elapsed_ms": 187.18,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 22,
+        "elapsed_ms": 184.23,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 23,
+        "elapsed_ms": 189.76,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 24,
+        "elapsed_ms": 184.16,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 25,
+        "elapsed_ms": 252.87,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 26,
+        "elapsed_ms": 201.83,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 27,
+        "elapsed_ms": 195.02,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 28,
+        "elapsed_ms": 202.31,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 29,
+        "elapsed_ms": 193.1,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 30,
+        "elapsed_ms": 287.23,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 31,
+        "elapsed_ms": 194.13,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 32,
+        "elapsed_ms": 228.18,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 33,
+        "elapsed_ms": 188.01,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 34,
+        "elapsed_ms": 192.94,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 35,
+        "elapsed_ms": 195.88,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 36,
+        "elapsed_ms": 192.36,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 37,
+        "elapsed_ms": 227.14,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 38,
+        "elapsed_ms": 198.17,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 39,
+        "elapsed_ms": 262.05,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 40,
+        "elapsed_ms": 188.03,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 41,
+        "elapsed_ms": 199.61,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 42,
+        "elapsed_ms": 208.09,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 43,
+        "elapsed_ms": 194.9,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 44,
+        "elapsed_ms": 260.59,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 45,
+        "elapsed_ms": 205.83,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 46,
+        "elapsed_ms": 196.58,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 47,
+        "elapsed_ms": 198.24,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 48,
+        "elapsed_ms": 205.22,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 49,
+        "elapsed_ms": 194.34,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 50,
+        "elapsed_ms": 197.76,
+        "ok": true,
+        "code": "ok"
+      }
+    ]
+  },
+  "check": {
+    "n": 50,
+    "p50_ms": 215.98,
+    "p95_ms": 302.61,
+    "max_ms": 597.59,
+    "first_call_ms": 379.18,
+    "succeeded": 50,
+    "calls": [
+      {
+        "round": 1,
+        "elapsed_ms": 379.18,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 2,
+        "elapsed_ms": 231.95,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 3,
+        "elapsed_ms": 597.59,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 4,
+        "elapsed_ms": 218.41,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 5,
+        "elapsed_ms": 302.61,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 6,
+        "elapsed_ms": 211.23,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 7,
+        "elapsed_ms": 259.29,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 8,
+        "elapsed_ms": 212.91,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 9,
+        "elapsed_ms": 214.35,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 10,
+        "elapsed_ms": 204.84,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 11,
+        "elapsed_ms": 207.74,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 12,
+        "elapsed_ms": 211.96,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 13,
+        "elapsed_ms": 236.29,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 14,
+        "elapsed_ms": 204.25,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 15,
+        "elapsed_ms": 204.69,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 16,
+        "elapsed_ms": 212.7,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 17,
+        "elapsed_ms": 224.76,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 18,
+        "elapsed_ms": 215.97,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 19,
+        "elapsed_ms": 217.43,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 20,
+        "elapsed_ms": 215.02,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 21,
+        "elapsed_ms": 208.52,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 22,
+        "elapsed_ms": 254.67,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 23,
+        "elapsed_ms": 211.97,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 24,
+        "elapsed_ms": 207.34,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 25,
+        "elapsed_ms": 220.93,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 26,
+        "elapsed_ms": 294.26,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 27,
+        "elapsed_ms": 217.93,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 28,
+        "elapsed_ms": 241.97,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 29,
+        "elapsed_ms": 235.08,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 30,
+        "elapsed_ms": 213.47,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 31,
+        "elapsed_ms": 219.85,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 32,
+        "elapsed_ms": 201.94,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 33,
+        "elapsed_ms": 208.7,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 34,
+        "elapsed_ms": 258.21,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 35,
+        "elapsed_ms": 215.98,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 36,
+        "elapsed_ms": 214.13,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 37,
+        "elapsed_ms": 216.7,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 38,
+        "elapsed_ms": 218.96,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 39,
+        "elapsed_ms": 211.84,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 40,
+        "elapsed_ms": 278.95,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 41,
+        "elapsed_ms": 210.68,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 42,
+        "elapsed_ms": 289.97,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 43,
+        "elapsed_ms": 210.03,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 44,
+        "elapsed_ms": 216.16,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 45,
+        "elapsed_ms": 292.66,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 46,
+        "elapsed_ms": 208.56,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 47,
+        "elapsed_ms": 255.52,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 48,
+        "elapsed_ms": 208.88,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 49,
+        "elapsed_ms": 275.22,
+        "ok": true,
+        "code": "ok"
+      },
+      {
+        "round": 50,
+        "elapsed_ms": 212.31,
+        "ok": true,
+        "code": "ok"
+      }
+    ]
+  }
+}

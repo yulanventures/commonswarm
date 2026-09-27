@@ -1,0 +1,6 @@
+./20260926000001-catalog.sql
+./20260926000001-functional.sql
+./20260926000001-rollback-catalog.sql
+./20260926000001-rollback.sql
+required-edge-env.json
+edge-env-source-check.txt
