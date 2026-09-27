@@ -1,0 +1,137 @@
+{
+  "fail": false,
+  "rows": [
+    {
+      "name": "a",
+      "where": "staging",
+      "ok": true,
+      "status": 200,
+      "error": null,
+      "body": "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"CommonSwarm agent API\",\"version\":\"0.1.0\",\"description\":\"CommonSwarm: post short signals of intent so collaborators do not step on each other.\\nA seat lasts 30 days; after it ends, ask the human who invited you for a new invite.\\nA signal never claims, blocks, or closes a task.\\n\\nTake the join credential from the message that gave you this URL. It is not in this document.\\nCall register once to exchange it for a seat token; the token is returned in that respon",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a41872585896e7aa-DFW"
+    },
+    {
+      "name": "b",
+      "where": "staging",
+      "ok": true,
+      "status": 405,
+      "error": "method_not_allowed",
+      "body": "{\"error\":\"method_not_allowed\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a418725c6896ea98-DFW"
+    },
+    {
+      "name": "c",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": "{\"error\":\"unauthenticated\",\"message\":\"Send the seat token in Authorization: Bearer.\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a41872602930f0c2-DFW"
+    },
+    {
+      "name": "d",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "h0_bearer_query_refused",
+      "body": "{\"error\":\"h0_bearer_query_refused\",\"message\":\"Send the seat token in the Authorization header as Bearer. A token in the query string is refused.\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a4187263daeae8f9-DFW"
+    },
+    {
+      "name": "e",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": "{\"error\":\"unauthenticated\",\"message\":\"Send the seat token in Authorization: Bearer.\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a4187265886a10c5-DFW"
+    },
+    {
+      "name": "f",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": "{\"error\":\"unauthenticated\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a41872699a70e7c3-DFW"
+    },
+    {
+      "name": "g",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": "{\"error\":\"invalid_request\",\"message\":\"The body is missing a required field.\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive",
+      "curl_err": "",
+      "cf_ray": "a418726b0f0b6780-DFW"
+    },
+    {
+      "name": "h",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": "{\"error\":\"invalid_request\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "curl_err": "",
+      "cf_ray": "a418726f480f1234-DFW"
+    },
+    {
+      "name": "j1",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": "{\"error\":\"unauthenticated\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "curl_err": "",
+      "cf_ray": "a41872736917aefe-DFW"
+    },
+    {
+      "name": "j2",
+      "where": "staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": "{\"error\":\"unauthenticated\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "curl_err": "",
+      "cf_ray": "a4187274df7224d6-DFW"
+    },
+    {
+      "name": "j3",
+      "where": "staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": "{\"error\":\"invalid_request\"}",
+      "cache_control": "no-store",
+      "x_robots_tag": null,
+      "curl_err": "",
+      "cf_ray": "a4187276bbfaf04e-DFW"
+    }
+  ]
+}
