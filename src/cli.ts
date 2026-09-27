@@ -314,7 +314,7 @@ import {
   writeArrivalMonitorLine,
 } from "./cloud/arrival-watch.js";
 import { lsofStdoutConsumer } from "./stdout-consumer.js";
-import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseTransientError } from "./cloud/wake-lease.js";
+import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseReadError, WakeLeaseTransientError, type AgentWakeLease } from "./cloud/wake-lease.js";
 import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
 const LISTENER_STOP_WAIT_TIMEOUT_MS = 30_000;
 import {
@@ -375,6 +375,8 @@ import {
   readListenerCredentialState,
   runListenerHookCheck, HOOK_CHECK_TIMEOUT_MS, hookProcessDeadlineDelayMs,
   renderListenerAttendanceCanary,
+  renderAttendedAttendanceCanary,
+  runAttendedAttendanceCanary,
   runListenerAttendanceCanary,
   writeListenerCredentialState,
   LISTENER_DELIVERY_FAILING_THRESHOLD,
@@ -5045,7 +5047,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     : `a live session context for this seat was verified at ${liveContextPath}; retry from that host session using this path`;
   const remedyFallback = fallback;
 
-  const httpClient = new ListenerHttpClient();
+  const [httpClient, attendedCanaryHttpClient] = [new ListenerHttpClient(), new ListenerHttpClient()];
   const testCheckMs = process.env.NODE_ENV === "test" &&
       new URL(cloud.url).hostname === "127.0.0.1"
     ? Number(process.env.CSWARM_TEST_NOTIFY_CHECK_MS)
@@ -5063,6 +5065,25 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
   const { lockPath } = locks;
   const wake = createWakeSubscriber({ target: cloud });
   let stopRenewal: (() => void) | null = null;
+  let attendedCanaryTask: Promise<void> | null = null;
+  let attendedCanarySignalId: string | null = null;
+  let markAttendedCanaryAccepted = () => {};
+  const attendedCanaryAccepted = new Promise<void>(resolvePromise => {
+    markAttendedCanaryAccepted = resolvePromise;
+  });
+  let markAttendedCanaryEmitted = () => {};
+  const attendedCanaryEmitted = new Promise<void>(resolvePromise => {
+    markAttendedCanaryEmitted = resolvePromise;
+  });
+  const waitForAttendedCanaryEmission = () => new Promise<void>(resolvePromise => {
+    if (controller.signal.aborted) { resolvePromise(); return; }
+    const done = () => {
+      controller.signal.removeEventListener("abort", done);
+      resolvePromise();
+    };
+    controller.signal.addEventListener("abort", done, { once: true });
+    void attendedCanaryEmitted.then(done);
+  });
   let cleanStop = false;
   let leaseBearer = selected.bearer;
   try {
@@ -5142,6 +5163,45 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       wake,
       stdoutConsumer: lsofStdoutConsumer(Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2))),
       stdoutCheckIntervalMs,
+      onReady: async () => {
+        if (attendedCanaryTask !== null) return;
+        attendedCanaryTask = (async () => {
+          const canaryPaths = listenerPaths({
+            profileId: cloud.profileId,
+            workspaceId: selected.selectedWorkspace,
+            principalId,
+          });
+          const listenerStatus = await readListenerStatusIfPresent(canaryPaths);
+          if (LISTENER_RUNNING_STATES.includes(listenerStatus?.state ?? "stopped")) return;
+          const canary = await runAttendedAttendanceCanary({
+            target: cloud,
+            workspaceId: selected.selectedWorkspace,
+            principalId,
+            watcherId,
+            generation,
+            checkWaitMs: 10_000,
+            fetcher: attendedCanaryHttpClient.fetch,
+            signal: controller.signal,
+            credential: async () => leaseBearer,
+            afterAccepted: async signalId => {
+              attendedCanarySignalId = signalId;
+              markAttendedCanaryAccepted();
+              await waitForAttendedCanaryEmission();
+            },
+          });
+          if (controller.signal.aborted) return;
+          // stdout is the Monitor wake surface. The self-note notification is
+          // the one intentional wake; report the result on stderr, not twice.
+          process.stderr.write(`${args.has("json")
+            ? JSON.stringify({ type: "attended_canary", ...canary })
+            : renderAttendedAttendanceCanary(canary)}\n`);
+        })().catch((error) => {
+          if (!controller.signal.aborted) {
+            process.stderr.write(`cswarm: attended canary could not complete: ${error instanceof Error ? error.message : String(error)}. The watcher remains active. Next: run \`cswarm listen canary\` from this seat to retry.\n`);
+          }
+        });
+        await Promise.race([attendedCanaryAccepted, attendedCanaryTask]);
+      },
       readPage: async ({ after, baseline, limit }) => {
         const token = selected.session
           ? await selected.session.bearer()
@@ -5176,6 +5236,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
             ? JSON.stringify(notification)
             : formatArrivalNotification(notification),
         );
+        if (signal.id === attendedCanarySignalId) markAttendedCanaryEmitted();
       },
       afterEmitBatch: async (signals) => {
         await reportRenderedBroadcasts(
@@ -5211,7 +5272,9 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     throw error;
   } finally {
     stopRenewal?.();
-    httpClient.close();
+    controller.abort();
+    await attendedCanaryTask;
+    for (const client of [httpClient, attendedCanaryHttpClient]) client.close();
     await wake.close();
     if (generation !== null && (cleanStop || stopSignal !== null)) {
       try {
@@ -7886,33 +7949,72 @@ async function runListenCanary(args: Arguments): Promise<void> {
     ...(stateDirectory ? { stateDirectory } : {}),
   });
   const waitMs = parseWaitSeconds(args.optional("wait") ?? "10") * 1_000;
+  const listenerStatus = await readListenerStatusIfPresent(paths);
+  const localWatcherId = await arrivalWatchLockIdentity(
+    arrivalWatchLockPath(cloud, workspaceId, principalId),
+  );
+  const listenerRunning = LISTENER_RUNNING_STATES.includes(listenerStatus?.state ?? "stopped");
+  let wakeLease: AgentWakeLease | null = null;
+  let wakeLeaseViewMissing = false;
+  if (localWatcherId !== null && !listenerRunning) {
+    try {
+      wakeLease = await readAgentWakeLease(cloud, workspaceId, agent.token);
+    } catch (error) {
+      if (error instanceof WakeLeaseReadError &&
+          (error.status === 400 || error.status === 404)) {
+        wakeLeaseViewMissing = true;
+      } else {
+        const detail = error instanceof WakeLeaseReadError && error.status !== null
+          ? `failed (HTTP ${error.status})`
+          : "could not reach the cloud service";
+        throw new Error(
+          `listen canary did not post a note because the wake-lease read ${detail}. The watcher's lease is unknown. Next: retry \`cswarm listen canary\` when the read service is reachable.`,
+          { cause: error },
+        );
+      }
+    }
+  }
+  const attended = localWatcherId !== null && !listenerRunning &&
+    (wakeLeaseViewMissing || wakeLease?.watcher_id === localWatcherId);
   const httpClient = new ListenerHttpClient();
-  let result: Awaited<ReturnType<typeof runListenerAttendanceCanary>>;
+  let result: Awaited<ReturnType<typeof runListenerAttendanceCanary>> |
+    Awaited<ReturnType<typeof runAttendedAttendanceCanary>>;
   try {
-    result = await runListenerAttendanceCanary({
-      target: cloud,
-      workspaceId,
-      principalId,
-      paths,
-      waitMs,
-      fetcher: httpClient.fetch,
-      // Canary must remain read-only apart from its one self-note. It therefore
-      // uses the presented token and never enters the renewal/mint path.
-      credential: async () => agent.token,
-    });
+    result = attended
+      ? await runAttendedAttendanceCanary({
+        target: cloud,
+        workspaceId,
+        principalId,
+        watcherId: localWatcherId,
+        generation: wakeLease?.generation ?? null,
+        checkWaitMs: waitMs,
+        fetcher: httpClient.fetch,
+        credential: async () => agent.token,
+      })
+      : await runListenerAttendanceCanary({
+        target: cloud,
+        workspaceId,
+        principalId,
+        paths,
+        waitMs,
+        fetcher: httpClient.fetch,
+        // Canary must remain read-only apart from its one self-note. It therefore
+        // uses the presented token and never enters the renewal/mint path.
+        credential: async () => agent.token,
+      });
   } finally {
     httpClient.close();
   }
   if (args.has("json")) {
-    printJson({
-      workspaceId,
-      principalId,
-      ...result,
-    });
+    printJson(attended
+      ? { workspaceId, principalId, variant: "attended", ...result }
+      : { workspaceId, principalId, ...result });
     return;
   }
   process.stdout.write(
-    `${renderListenerAttendanceCanary(result, workspaceId, principalId)}\n`,
+    `${attended
+      ? renderAttendedAttendanceCanary(result as Awaited<ReturnType<typeof runAttendedAttendanceCanary>>)
+      : renderListenerAttendanceCanary(result as Awaited<ReturnType<typeof runListenerAttendanceCanary>>, workspaceId, principalId)}\n`,
   );
 }
 

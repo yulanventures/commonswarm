@@ -243,6 +243,22 @@ test("a fresh remote holder refuses start with host and takeover command", { tim
   } finally { await f.cleanup(); }
 });
 
+test("notify starts exactly one attended canary after its lease claim", { timeout: 8_000 }, async () => {
+  const f = await fixture("unmanaged");
+  try {
+    const watch = f.start();
+    const deadline = Date.now() + 5_000;
+    while (!f.seen.some(command => command.kind === "post_signal") && Date.now() < deadline) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, 25));
+    }
+    assert.equal(f.seen[0]?.kind, "claim_wake_lease");
+    assert.equal(f.seen.filter(command => command.kind === "post_signal").length, 1);
+    watch.stop();
+    const result = await watch.exit;
+    assert.equal(result.code, 143, result.stderr);
+  } finally { await f.cleanup(); }
+});
+
 test("the non-stdin holder command runs exactly as printed through the shell", { timeout: 8_000 }, async () => {
   const f = await fixture("refuse");
   let child: ChildProcess | null = null;

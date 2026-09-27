@@ -748,6 +748,8 @@ export async function runArrivalWatch(options: {
   emit(signal: SignalRecord): Promise<void>;
   /** Runs after one page's lines were emitted, with only those lines. */
   afterEmitBatch?: (signals: readonly SignalRecord[]) => Promise<void> | void;
+  /** Runs once after the first safe page establishes the watcher cursor. */
+  onReady?: () => Promise<void> | void;
   onRetry?: (error: Error, delayMs: number) => void;
   onRecovery?: () => void;
   sleep?: (ms: number) => Promise<void>;
@@ -778,6 +780,7 @@ export async function runArrivalWatch(options: {
     throw new RangeError("stdout check interval must be within the idle poll cap");
   }
   let nextStdoutCheckAt = now();
+  let ready = false;
   const cancelled = () => options.signal?.aborted === true;
 
   const inspectStdout = async (): Promise<void> => {
@@ -948,6 +951,14 @@ export async function runArrivalWatch(options: {
         cursor = page.nextCursor;
         await options.store.write(cursor);
         baseline = false;
+        if (!ready) {
+          ready = true;
+          await options.onReady?.();
+          // onReady may post the notify canary. Read again immediately so a
+          // Realtime broadcast sent before SUBSCRIBED cannot strand that note
+          // behind the five-minute push reconcile.
+          if (options.onReady !== undefined && !cancelled()) continue;
+        }
         if (cancelled()) break;
         noteCycle();
         await waitForTrigger(false);
@@ -966,6 +977,14 @@ export async function runArrivalWatch(options: {
         await options.afterEmitBatch?.(emittedSignals);
       }
       if (cancelled()) break;
+
+      if (!ready) {
+        ready = true;
+        await options.onReady?.();
+        // Existing cursors can have rows on their first page. Surface those
+        // first, then read once more for anything onReady posted.
+        if (options.onReady !== undefined && !cancelled()) continue;
+      }
 
       const fullPage = page.rawCount >= SIGNAL_FOLLOW_PAGE_LIMIT;
       if (fullPage) {
