@@ -10022,7 +10022,7 @@ async function runMcpConnect(args: Arguments): Promise<void> {
         : `${removed} No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.\n`);
     return;
   }
-  if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
+  if (!args.has("url")) throw new AgentSetupError("connect_url_required", "No project URL was provided. Pass --url <project-url>; the connect line from `cswarm mcp code` shows it.");
   const explicitUrl = args.required("url");
   const explicitAnonKey = args.optional("anon-key");
   if (explicitAnonKey === undefined) {
