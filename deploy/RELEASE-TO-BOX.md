@@ -205,7 +205,9 @@ switch. A missing path or comparison error is a stop. H0 does not switch
 On 2026-09-22 HezLead observed that edge release directories are owned by
 `commonswarm:commonswarm` with mode `0750`, while stack release directories use
 mode `0755`. The block records both previous release paths before any switch,
-creates the releases, and writes the durable window state.
+creates the releases, and writes the durable window state. Set the approved UTC
+window start and end once in this block; every later box block reads them from
+`window.env`.
 
 ```sh
 (
@@ -222,6 +224,8 @@ sudo -n -i
   set -euo pipefail
   SHA=<sha>
   KIND_LIST='<edge|stack|edge stack>'
+  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   ARCHIVE=/tmp/commonswarm-release.tar
   EXPECTED_ARCHIVE_SHA256=<sha256-from-Mac-evidence>
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -238,6 +242,16 @@ sudo -n -i
   for KIND in $KIND_LIST; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
+  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
+    case "$T" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+      *) false ;;
+    esac
+    date -u -d "$T" +%s >/dev/null
+  done
+  RECYCLE_TIMER_STOPPED=0
+  BACKUP_TIMERS_STOPPED=0
+  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
 
   install -d -m 0700 -o root -g root "$PROOF_DIR"
   sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
@@ -266,14 +280,16 @@ sudo -n -i
 
   WINDOW_ENV="$PROOF_DIR/window.env"
   {
-    printf 'SHA=%q\n' "$SHA"
-    printf 'KIND_LIST=%q\n' "$KIND_LIST"
-    printf 'NEW_EDGE=%q\n' "$NEW_EDGE"
-    printf 'NEW_STACK=%q\n' "$NEW_STACK"
-    printf 'PREVIOUS_EDGE=%q\n' "$PREVIOUS_EDGE"
-    printf 'PREVIOUS_STACK=%q\n' "$PREVIOUS_STACK"
-    printf 'RECYCLE_TIMER_STOPPED=0\n'
-    printf 'BACKUP_TIMERS_STOPPED=0\n'
+    printf "%s='%s'\n" SHA "$SHA"
+    printf "%s='%s'\n" KIND_LIST "$KIND_LIST"
+    printf "%s='%s'\n" WINDOW_START_UTC "$WINDOW_START_UTC"
+    printf "%s='%s'\n" WINDOW_END_UTC "$WINDOW_END_UTC"
+    printf "%s='%s'\n" NEW_EDGE "$NEW_EDGE"
+    printf "%s='%s'\n" NEW_STACK "$NEW_STACK"
+    printf "%s='%s'\n" PREVIOUS_EDGE "$PREVIOUS_EDGE"
+    printf "%s='%s'\n" PREVIOUS_STACK "$PREVIOUS_STACK"
+    printf "%s='%s'\n" RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
+    printf "%s='%s'\n" BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
   } >"$WINDOW_ENV"
   chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
@@ -1070,18 +1086,16 @@ the exact `/home/commonswarm/edge/releases/<sha>/` directory, not through the
 installed by HezLead on 2026-09-22: `OnCalendar=*-*-* 03,09,15,21:30:00 UTC`,
 `Persistent=false`; its service runs `docker restart --time 30
 commonswarm-edge-edge-runtime-1`. Check it with `systemctl cat
-commonswarm-edge-recycle.timer` before the window. Set the approved window's
-UTC start and end in the block below. Only if it overlaps the ten minutes on
-either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the timer and start it
-after verification.
+commonswarm-edge-recycle.timer` before the window. The block below reads the
+approved UTC start and end saved in `window.env`. Only if the window overlaps
+the ten minutes on either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the
+timer and start it after verification.
 
 ```sh
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
-  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
     case "$T" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
