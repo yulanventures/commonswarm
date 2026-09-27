@@ -585,3 +585,372 @@ Do not republish `0.1.80`, invent a new version, or update `current_client_build
 - A completed migration, edge switch, site release, roster check or closed window.
 
 The prior window’s PASS results do not establish these new results. HezLead closes this window only against its own recorded evidence.
+## ADDENDUM — Local-wake control with a fresh recipient (replaces the b817513b steps)
+
+HM lane 4 is live at `9b085c82352390cf8f0fe515c02b3ccff423476a`. This replaces the revoked `b817513b` recipient, its credential refresh, and the original seat-before/seed/wake-after sequence. It proves **post-release eligibility for a fresh local recipient**, not preservation of a pre-existing seat across the migration.
+
+The other Cold Agent Test seats have no observed ACK and no credential available for this control. Do not mint credentials for them. The original migration requires a prior unclaimed `observed` ACK after the release cutoff; lane 4 preserves that requirement and adds `turn_only = false`. The ACK timestamp is `swarm.signal_deliveries.acked_at`, with outcome in `ack_outcome`; the delivery recipient column is `recipient_agent_principal_id`, projected as `principal_id` by the eligibility view. Sources: `supabase/migrations/20260925000001_unclaimed_observed_ack.sql:75–98`; `supabase/migrations/20260928000001_hm_agent_transport.sql:69–92`.
+
+### Execution prerequisites
+
+Anvil runs the Mac commands as Tom under his standing order, using the **released `cswarm` 0.1.80** and Tom’s existing production human session. None of these steps needs lane 4’s client: ordinary note/check traffic suffices, and SQL checks the transport columns. Source: `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:236–268`.
+
+Reuse the plan’s protected directory and verified `anon-key.txt`: directory mode `0700`, file mode `0600`. If the key file is missing, prepare it using the established site-meta fetch and SHA-256 comparison with the CLI’s configured key; never print or pass its value in argv. Sources: `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:328–347`; `docs/evidence/2026-09-25-item-g-lane2b/BOX-WINDOW.md:64–65`.
+
+The box’s existing database session must still be available. Source `window.env` before its session helper, as required by `deploy/RELEASE-TO-BOX.md:685–693`. SSH uses the established Mac-to-box path (`deploy/RELEASE-TO-BOX.md:544`).
+
+**Constraint discrepancy:** the repository’s `release_psql_ro` implementation invokes Docker internally (`deploy/RELEASE-TO-BOX.md:744–761`). The commands below use that required helper and contain no direct Docker command. If “no docker” also forbids the helper’s implementation, these requirements conflict; resolve that before execution.
+
+Run the following Mac blocks in order in the same Bash session. Stop on any failure; preserve protected artifacts for inspection and cleanup.
+
+### 1. Create and mint R and S
+
+This follows the plan’s create/mint/connection/setup form, with both seats newly created and isolated beneath a fresh scratch directory. R is `hm4-local-recv-0927`; S is `hm4-local-send-0927`. Sources: `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:351–415`; `src/cli.ts:2544–2575`, `src/cli.ts:2703–2748`.
+
+```bash
+bash
+set -euo pipefail
+umask 077
+
+WS=c2ea0541-f56d-4c73-bf71-56c5405c4934
+ROOT="$HOME/.config/cswarm/box-hm4-20260928"
+ANON_FILE="$ROOT/anon-key.txt"
+
+test ! -L "$ROOT"
+test ! -L "$ANON_FILE"
+test "$(stat -f %Lp "$ROOT")" = 700
+test "$(stat -f %Lp "$ANON_FILE")" = 600
+test -s "$ANON_FILE"
+
+RUN_ROOT="$(mktemp -d "$ROOT/fresh-local.XXXXXX")"
+chmod 0700 "$RUN_ROOT"
+printf 'Protected scratch directory: %s\n' "$RUN_ROOT"
+
+lower() { tr 'A-Z' 'a-z'; }
+principal_id() {
+  python3 - "$1" <<'PY'
+import json, sys, uuid
+print(uuid.UUID(json.load(open(sys.argv[1]))["principal_id"]))
+PY
+}
+
+mint_seat() {
+  local NAME="$1" SLUG="$2" D PID
+  D="$RUN_ROOT/$SLUG"
+  test ! -e "$D"
+  mkdir -m 0700 "$D"
+  install -m 0600 /dev/null "$D/mint.log"
+
+  cswarm principal create --workspace-id "$WS" --name "$NAME" \
+    >"$D/principal.json" 2>>"$D/mint.log"
+  PID="$(principal_id "$D/principal.json" 2>>"$D/mint.log")"
+
+  cswarm token mint --workspace-id "$WS" --principal-id "$PID" \
+    --run-id "$(uuidgen | lower)" --task-id "$(uuidgen | lower)" \
+    --epoch 1 --ttl-ms 21600000 --renewal-horizon-days 1 \
+    >"$D/credential-mint.json" 2>>"$D/mint.log"
+
+  python3 - "$ANON_FILE" "$D/credential-mint.json" \
+    "$D/connection.json" "$WS" "$PID" 2>>"$D/mint.log" <<'PY'
+import json, pathlib, sys
+anon_file, credential_file, output_file, workspace_id, principal_id = sys.argv[1:]
+anon_key = pathlib.Path(anon_file).read_text().strip()
+credential = json.loads(pathlib.Path(credential_file).read_text())
+assert anon_key and credential["principal_id"] == principal_id
+connection = {
+    "version": 1,
+    "url": "https://api.commonswarm.com",
+    "anon_key": anon_key,
+    "workspace_id": workspace_id,
+    "principal_id": principal_id,
+    "credential": credential,
+}
+pathlib.Path(output_file).write_text(json.dumps(connection) + "\n")
+PY
+
+  cswarm setup --connection-file "$D/connection.json" \
+    --profile "$D/profile.json" --host-session-id manual --json \
+    >"$D/setup.json" 2>>"$D/mint.log"
+
+  chmod 0600 "$D"/*.json "$D/mint.log"
+}
+
+mint_seat hm4-local-recv-0927 local
+mint_seat hm4-local-send-0927 sender
+
+RECIPIENT="$(principal_id "$RUN_ROOT/local/principal.json")"
+SENDER="$(principal_id "$RUN_ROOT/sender/principal.json")"
+test "$RECIPIENT" != "$SENDER"
+printf 'R=%s\nS=%s\n' "$RECIPIENT" "$SENDER"
+```
+
+Do not bypass duplicate-name refusal or rerun minting into partially populated directories. All credential-bearing output remains in protected files.
+
+### 2. Send the primer, run R’s check once, and prove its first ACK
+
+The note command and signal-ID extraction follow `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:432–438`. Check accepts an explicit profile (`src/cli.ts:10121–10130`) and sends an unclaimed observation after presenting mail (`src/cloud/agent-check.ts:310–361`).
+
+**Check output or exit status alone is insufficient:** ACK failures can leave both unchanged (`src/cloud/agent-check.ts:425–426`). Require the database record below before proceeding.
+
+```bash
+cswarm note "HM4 fresh local wake control: observation primer." \
+  --profile "$RUN_ROOT/sender/profile.json" --to "$RECIPIENT" --json \
+  >"$RUN_ROOT/primer.json" 2>>"$RUN_ROOT/sender/mint.log"
+
+PRIMER_ID="$(python3 - "$RUN_ROOT/primer.json" <<'PY'
+import json, sys, uuid
+print(uuid.UUID(json.load(open(sys.argv[1]))["signal"]["id"]))
+PY
+)"
+
+cswarm check --profile "$RUN_ROOT/local/profile.json" \
+  --host-session-id manual --json \
+  >"$RUN_ROOT/first-check.json" 2>>"$RUN_ROOT/local/mint.log"
+
+ssh ops@100.115.66.74 \
+  "sudo -n -i bash -s -- $RECIPIENT $PRIMER_ID" \
+  >"$RUN_ROOT/hm-local-first-ack.txt" <<'BOX'
+set -euo pipefail
+umask 077
+. /home/commonswarm/stack/release-proofs/9b085c82352390cf8f0fe515c02b3ccff423476a/window.env
+. "/run/commonswarm-release-${SHA}-session.sh"
+
+cat >"$APPLY_SQL" <<'SQL'
+SELECT json_build_object(
+  'workspace_id', d.workspace_id,
+  'principal_id', d.recipient_agent_principal_id,
+  'signal_id', d.signal_id,
+  'acked_at', d.acked_at,
+  'ack_outcome', d.ack_outcome,
+  'last_lease_id', d.last_lease_id,
+  'last_leased_by', d.last_leased_by
+)
+FROM swarm.signal_deliveries d
+WHERE d.workspace_id = 'c2ea0541-f56d-4c73-bf71-56c5405c4934'::uuid
+  AND d.recipient_agent_principal_id = :'recipient'::uuid
+  AND d.signal_id = :'primer'::uuid
+  AND d.ack_outcome = 'observed'
+  AND d.last_lease_id IS NULL
+  AND d.last_leased_by IS NULL
+  AND d.acked_at >= (
+    SELECT applied_at FROM swarm.wake_path_release WHERE singleton
+  );
+SQL
+
+release_psql_ro -Atq -v recipient="$1" -v primer="$2" \
+  --file /run/commonswarm-release-apply.sql
+BOX
+
+python3 - "$RUN_ROOT/hm-local-first-ack.txt" "$RECIPIENT" "$PRIMER_ID" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["workspace_id"] == "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+assert r["principal_id"] == sys.argv[2] and r["signal_id"] == sys.argv[3]
+assert r["acked_at"] and r["ack_outcome"] == "observed"
+assert r["last_lease_id"] is None and r["last_leased_by"] is None
+print("first observed ACK: PASS")
+PY
+```
+
+An empty result, missing timestamp, or failed assertion stops the control. The query uses the exact unclaimed-observation columns and release boundary required by the live view (`supabase/migrations/20260928000001_hm_agent_transport.sql:87–92`).
+
+### 3. Run seat-before for R; require `t`
+
+This retains the plan’s active-principal, active-membership, active-workspace, unmanaged and non-registrar gate, parameterized with R’s ID. Here “before” means **before the second note**, after the first ACK; it is not a pre-migration measurement. All gate columns come from `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:294–316`.
+
+```bash
+ssh ops@100.115.66.74 \
+  "sudo -n -i bash -s -- $RECIPIENT" \
+  >"$RUN_ROOT/hm-local-seat-before.txt" <<'BOX'
+set -euo pipefail
+. /home/commonswarm/stack/release-proofs/9b085c82352390cf8f0fe515c02b3ccff423476a/window.env
+. "/run/commonswarm-release-${SHA}-session.sh"
+
+cat >"$APPLY_SQL" <<'SQL'
+SELECT EXISTS (
+  SELECT 1
+  FROM swarm.agent_principals p
+  JOIN swarm.memberships m
+    ON m.workspace_id = p.workspace_id
+   AND m.user_id = p.owner_user_id
+   AND m.revoked_at IS NULL
+  JOIN swarm.workspaces w
+    ON w.workspace_id = p.workspace_id
+   AND w.archived_at IS NULL
+  WHERE p.principal_id = :'recipient'::uuid
+    AND p.workspace_id = 'c2ea0541-f56d-4c73-bf71-56c5405c4934'::uuid
+    AND p.revoked_at IS NULL
+    AND p.managed_at IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM swarm.agent_join_credentials c
+      WHERE c.registrar_principal_id = p.principal_id
+    )
+);
+SQL
+
+release_psql_ro -Atq -v recipient="$1" \
+  --file /run/commonswarm-release-apply.sql \
+  >"$PROOF_DIR/hm-local-seat-before.txt"
+test "$(cat "$PROOF_DIR/hm-local-seat-before.txt")" = t
+cat "$PROOF_DIR/hm-local-seat-before.txt"
+BOX
+
+test "$(cat "$RUN_ROOT/hm-local-seat-before.txt")" = t
+```
+
+### 4. Seed the second note and run wake-after; require `t`
+
+**Do not run R’s `check` between this seed and the completed wake-after query. Do not start a listener, watcher, receive path or other consumer.** ACKing the second note removes it from eligibility because the view requires `d.acked_at IS NULL` (`supabase/migrations/20260928000001_hm_agent_transport.sql:76`).
+
+The seed and proof retain the plan’s exact-note check, replacing the fixed recipient with R. Sources: `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:465–507`. The `transport` and `turn_only` defaults are defined at `supabase/migrations/20260928000001_hm_agent_transport.sql:4–10`.
+
+```bash
+cswarm note "HM4 local wake control: leave unobserved until SQL proof." \
+  --profile "$RUN_ROOT/sender/profile.json" --to "$RECIPIENT" --json \
+  >"$RUN_ROOT/pending.json" 2>>"$RUN_ROOT/sender/mint.log"
+
+HM_SIGNAL_ID="$(python3 - "$RUN_ROOT/pending.json" <<'PY'
+import json, sys, uuid
+print(uuid.UUID(json.load(open(sys.argv[1]))["signal"]["id"]))
+PY
+)"
+
+ssh ops@100.115.66.74 \
+  "sudo -n -i bash -s -- $RECIPIENT $HM_SIGNAL_ID" \
+  >"$RUN_ROOT/hm-local-wake-after.txt" <<'BOX'
+set -euo pipefail
+. /home/commonswarm/stack/release-proofs/9b085c82352390cf8f0fe515c02b3ccff423476a/window.env
+. "/run/commonswarm-release-${SHA}-session.sh"
+
+cat >"$APPLY_SQL" <<'SQL'
+SELECT EXISTS (
+  SELECT 1
+  FROM swarm.wake_path_eligible_deliveries d
+  JOIN swarm.agent_principals p
+    ON p.workspace_id = d.workspace_id
+   AND p.principal_id = d.principal_id
+  WHERE d.workspace_id = 'c2ea0541-f56d-4c73-bf71-56c5405c4934'::uuid
+    AND d.principal_id = :'recipient'::uuid
+    AND d.signal_id = :'hm_signal_id'::uuid
+    AND p.transport = 'local'
+    AND p.turn_only = false
+    AND p.revoked_at IS NULL
+);
+SQL
+
+release_psql_ro -Atq -v recipient="$1" -v hm_signal_id="$2" \
+  --file /run/commonswarm-release-apply.sql \
+  >"$PROOF_DIR/hm-local-wake-after.txt"
+test "$(cat "$PROOF_DIR/hm-local-wake-after.txt")" = t
+cat "$PROOF_DIR/hm-local-wake-after.txt"
+BOX
+
+test "$(cat "$RUN_ROOT/hm-local-wake-after.txt")" = t
+```
+
+A `t` proves that this exact delivery is eligible for R after its first observed ACK. It does not prove that a listener woke or a model started.
+
+### 5. Revoke both fresh principals, preserve evidence, and remove scratch
+
+Revoke S and R using IDs reread from their own `principal.json`, through Tom’s human session. Do not pass an agent profile to principal administration. The CLI requires an accepted revocation and returns the principal ID (`src/cli.ts:2578–2607`).
+
+```bash
+for SLUG in sender local; do
+  PID="$(principal_id "$RUN_ROOT/$SLUG/principal.json")"
+  cswarm principal revoke --workspace-id "$WS" --principal-id "$PID" --json \
+    >"$RUN_ROOT/$SLUG/revoked.json" 2>>"$RUN_ROOT/$SLUG/mint.log"
+  python3 - "$RUN_ROOT/$SLUG/revoked.json" "$PID" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["status"] == "accepted" and r["principal_id"] == sys.argv[2]
+PY
+done
+```
+
+Retain these three non-secret records with the window’s evidence commit:
+
+- `hm-local-seat-before.txt`: exactly `t`.
+- `hm-local-wake-after.txt`: exactly `t`.
+- `hm-local-first-ack.txt`: R, primer ID, observed outcome and server ACK timestamp; append the sender, seed and cleanup facts below.
+
+The two box filenames already belong to the approved copy-back inputs. The first-ACK record is curated Mac-side output, consistent with the plan’s separate handling of client-control evidence. Sources: `docs/evidence/2026-09-28-box-hm4/BOX-WINDOW.md:117–131`; `deploy/RELEASE-TO-BOX.md:524–531`.
+
+From the repository root:
+
+```bash
+python3 - "$RUN_ROOT/hm-local-first-ack.txt" "$SENDER" "$HM_SIGNAL_ID" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+r = json.loads(p.read_text())
+r.update({
+    "release_sha": "9b085c82352390cf8f0fe515c02b3ccff423476a",
+    "client": "released cswarm 0.1.80",
+    "sender_principal_id": sys.argv[2],
+    "seed_signal_id": sys.argv[3],
+    "seat_before": True,
+    "wake_after": True,
+    "sender_revocation": "accepted",
+    "recipient_revocation": "accepted",
+})
+p.write_text(json.dumps(r, indent=2) + "\n")
+PY
+
+EVIDENCE_DIR="$PWD/docs/evidence/2026-09-28-box-hm4"
+test -d "$EVIDENCE_DIR"
+for FILE in hm-local-seat-before.txt hm-local-wake-after.txt hm-local-first-ack.txt; do
+  install -m 0600 "$RUN_ROOT/$FILE" "$EVIDENCE_DIR/$FILE"
+  cmp "$RUN_ROOT/$FILE" "$EVIDENCE_DIR/$FILE"
+done
+```
+
+The reviewed plan contains no explicit guarded scratch-removal implementation. The following supplies that missing block under `AGENTS.md:155–162`: resolve paths, constrain deletion to this invocation’s `mktemp` directory, and exercise refusal controls before deleting. It preserves the parent directory and its anon-key file.
+
+```bash
+python3 - "$RUN_ROOT" "$ROOT" <<'PY'
+import json, os, pathlib, shutil, sys
+
+raw, parent_raw = sys.argv[1:]
+home = pathlib.Path.home().resolve()
+parent = pathlib.Path(parent_raw).resolve(strict=True)
+root_path = pathlib.Path(raw)
+root = root_path.resolve(strict=True)
+
+if (not raw or root_path.is_symlink()
+        or root == home or root == pathlib.Path("/")
+        or root.parent != parent
+        or not root.name.startswith("fresh-local.")
+        or root.stat().st_uid != os.getuid()):
+    raise SystemExit("Refusing scratch removal")
+
+def checked(candidate):
+    if not candidate:
+        raise ValueError("empty path")
+    p = pathlib.Path(candidate)
+    resolved = p.resolve()
+    if p.is_symlink() or resolved in (home, pathlib.Path("/")):
+        raise ValueError("unsafe path")
+    if resolved != root and root not in resolved.parents:
+        raise ValueError("outside this scratch root")
+    return resolved
+
+for forbidden in ("", "/", str(home), str(parent), str(parent / "outside-control")):
+    try:
+        checked(forbidden)
+    except ValueError:
+        pass
+    else:
+        raise SystemExit("Removal refusal control failed")
+
+assert checked(str(root)) == root
+for slug in ("sender", "local"):
+    p = json.loads((root / slug / "principal.json").read_text())
+    r = json.loads((root / slug / "revoked.json").read_text())
+    assert r["status"] == "accepted"
+    assert r["principal_id"] == p["principal_id"]
+
+shutil.rmtree(checked(raw))
+print("Fresh-recipient scratch removed")
+PY
+```
+
+Commit the three curated evidence files with the window’s evidence commit. Keep profiles, credentials, connection files, raw check output and mint logs out of that commit.
