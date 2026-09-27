@@ -10,22 +10,22 @@ SELECT
     AND has_table_privilege('swarm_command', c.oid, 'INSERT')
     AND has_table_privilege('swarm_command', c.oid, 'UPDATE')
     FROM pg_class c WHERE c.oid = to_regclass('swarm.agent_presence')), false)
-  AND COALESCE((SELECT array_agg(column_name ORDER BY ordinal_position) = ARRAY[
+  AND COALESCE((SELECT array_agg(column_name::text ORDER BY ordinal_position) = ARRAY[
       'workspace_id', 'principal_id', 'last_command_at', 'client_build',
       'watcher_at', 'channel_at', 'listener_at', 'turn_at'
-    ]
+    ]::text[]
     FROM information_schema.columns
-    WHERE table_schema = 'swarm' AND table_name = 'agent_presence'), false)
+    WHERE table_schema::text = 'swarm' AND table_name::text = 'agent_presence'), false)
   AND COALESCE((SELECT count(*) = 2 FROM pg_constraint
     WHERE conrelid = to_regclass('swarm.agent_presence')
       AND contype IN ('p', 'f')), false)
   AND EXISTS (SELECT 1 FROM pg_policy
     WHERE polrelid = to_regclass('swarm.agent_presence')
       AND polname = 'agent_presence_command_all')
-  AND COALESCE((SELECT data_type = 'text' AND is_nullable = 'YES'
+  AND COALESCE((SELECT data_type::text = 'text' AND is_nullable::text = 'YES'
     FROM information_schema.columns
-    WHERE table_schema = 'swarm' AND table_name = 'signal_deliveries'
-      AND column_name = 'ack_via'), false)
+    WHERE table_schema::text = 'swarm' AND table_name::text = 'signal_deliveries'
+      AND column_name::text = 'ack_via'), false)
   AND COALESCE((SELECT count(*) = 1 AND bool_and(
       pg_get_constraintdef(oid) LIKE '%ack_via%leased%unclaimed%')
     FROM pg_constraint
@@ -43,12 +43,12 @@ SELECT
     AND pg_get_viewdef(c.oid) LIKE '%is_member%'
     AND pg_get_viewdef(c.oid) NOT LIKE '%SELECT *%'
     FROM pg_class c WHERE c.oid = to_regclass('swarm_read.agent_presence')), false)
-  AND COALESCE((SELECT array_agg(column_name ORDER BY ordinal_position) = ARRAY[
+  AND COALESCE((SELECT array_agg(column_name::text ORDER BY ordinal_position) = ARRAY[
       'workspace_id', 'principal_id', 'last_command_at', 'client_build',
       'watcher_at', 'channel_at', 'listener_at', 'turn_at',
       'last_ack_via', 'last_ack_at', 'current_client_build'
-    ]
+    ]::text[]
     FROM information_schema.columns
-    WHERE table_schema = 'swarm_read' AND table_name = 'agent_presence'), false)
+    WHERE table_schema::text = 'swarm_read' AND table_name::text = 'agent_presence'), false)
   AS catalog_ok
 \gset
