@@ -103,6 +103,9 @@ async function handle(request: Request): Promise<Response> {
 
     const agent = await loadAgentCredential(tx, tokenHash);
     if (agent === null) return json(401, { error: "unauthenticated" });
+    if (agent.transport !== "local") {
+      return json(403, { error: "transport_unavailable" });
+    }
     const memberships = await tx<{
       membership_revoked_at: Date | null;
       workspace_archived_at: Date | null;

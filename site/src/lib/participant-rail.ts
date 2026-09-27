@@ -12,10 +12,13 @@ export interface RailAgent {
   name: string;
   ownerUserId: string;
   model?: string | null;
+  transport?: "local" | "hosted_mcp";
 }
 
 export interface RosterAgent extends RailAgent {
   model: string | null;
+  transport: "local" | "hosted_mcp";
+  turnOnly: boolean;
 }
 
 export interface RosterAgentRow {
@@ -23,6 +26,8 @@ export interface RosterAgentRow {
   name?: unknown;
   model?: unknown;
   owner_user_id?: unknown;
+  transport?: unknown;
+  turn_only?: unknown;
 }
 
 export type ParticipantGroup<TMember extends RailMember, TAgent extends RailAgent> =
@@ -70,6 +75,8 @@ export const rosterAgentsFromRows = (rows: RosterAgentRow[]): RosterAgent[] =>
       principalId: String(row.principal_id ?? ''),
       name: String(row.name ?? 'Unnamed agent'),
       model: row.model == null ? null : String(row.model),
+      transport: row.transport === 'hosted_mcp' ? 'hosted_mcp' : 'local',
+      turnOnly: row.turn_only === true,
       ownerUserId: String(row.owner_user_id ?? ''),
     }))
     .filter((agent) => agent.principalId.length > 0);
@@ -110,6 +117,11 @@ export const renderSidebarParticipants = <
     name.textContent = label;
     name.title = label;
     copy.append(name);
+    const transport = document.createElement('span');
+    transport.textContent = agent.transport === 'hosted_mcp'
+      ? 'Hosted MCP'
+      : 'Local';
+    copy.append(transport);
     if (agent.model) {
       const model = document.createElement('span');
       model.textContent = agent.model;

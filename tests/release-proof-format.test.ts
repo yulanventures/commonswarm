@@ -48,3 +48,57 @@ test("controls: the check rejects a trailing semicolon, a missing \\gset and the
   assert.match(proofFormatProblem("x/1-rollback-catalog.sql", good)!, /rollback_ok/);
   assert.equal(proofFormatProblem("x/1-rollback-catalog.sql", "SELECT true AS rollback_ok\n\\gset\n"), null);
 });
+
+const repoFile = (relative: string): string =>
+  readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
+
+function selectBody(source: string, start: string): string {
+  const at = source.indexOf(start);
+  assert.notEqual(at, -1, `missing ${start}`);
+  const select = source.indexOf("SELECT", at);
+  const end = source.indexOf(";", select);
+  assert.notEqual(select, -1, `missing SELECT after ${start}`);
+  assert.notEqual(end, -1, `missing terminator after ${start}`);
+  return source.slice(select, end + 1);
+}
+
+test("HM transport migration changes only wake turn-only eligibility", () => {
+  const migration = repoFile("supabase/migrations/20260928000001_hm_agent_transport.sql");
+  const prior = repoFile("supabase/migrations/20260925000001_unclaimed_observed_ack.sql");
+  assert.doesNotMatch(migration, /^\s*(?:BEGIN|COMMIT)\s*;/m);
+  const before = selectBody(prior, "CREATE VIEW swarm.wake_path_eligible_deliveries");
+  const after = selectBody(migration, "CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries");
+  assert.equal(after.replace("  AND p.turn_only = false\n", ""), before);
+  assert.equal(after.split("p.turn_only = false").length, 2);
+  assert.match(migration, /REVOKE ALL ON swarm\.wake_path_eligible_deliveries\s+FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;/);
+});
+
+test("HM rollback holds the complete prior roster and wake definitions", () => {
+  const rollback = repoFile("deploy/release-proofs/item-hm/20260928000001-rollback.sql");
+  const priorRoster = repoFile("supabase/migrations/20260916000001_agent_join_credentials.sql");
+  const priorWake = repoFile("supabase/migrations/20260925000001_unclaimed_observed_ack.sql");
+  assert.equal(
+    selectBody(rollback, "CREATE VIEW swarm_read.agent_principals"),
+    selectBody(priorRoster, "CREATE OR REPLACE VIEW swarm_read.agent_principals"),
+  );
+  assert.equal(
+    selectBody(rollback, "CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries"),
+    selectBody(priorWake, "CREATE VIEW swarm.wake_path_eligible_deliveries"),
+  );
+  assert.doesNotMatch(rollback, /regexp_replace|pg_get_viewdef|EXECUTE\s+format/i);
+  assert.match(rollback, /DROP FUNCTION swarm\.agent_principal_transport\(uuid\);/);
+  assert.match(rollback, /GRANT SELECT ON swarm_read\.agent_principals TO authenticated, swarm_read;/);
+  assert.match(rollback, /REVOKE ALL ON swarm_read\.agent_principals FROM anon;/);
+  assert.match(rollback, /REVOKE ALL ON swarm\.wake_path_eligible_deliveries\s+FROM PUBLIC, anon, authenticated, swarm_read, swarm_command;/);
+});
+
+test("HM functional proof selects its own live local principal", () => {
+  const proof = repoFile(
+    "deploy/release-proofs/item-hm/20260928000001-functional.sql",
+  );
+  assert.match(proof, /p\.principal_id::text AS item_hm_principal_id/);
+  assert.match(proof, /p\.transport = 'local'/);
+  assert.match(proof, /p\.turn_only = false/);
+  assert.match(proof, /LIMIT 1\s+\\gset/);
+  assert.doesNotMatch(proof, /item_hm_principal_id is required/);
+});

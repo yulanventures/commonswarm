@@ -393,14 +393,16 @@ test("participant navigation uses human presence and agent model identity", asyn
   const rail = await renderParticipantRailFixture(
     [{ userId: "dana", name: "Dana Rivera", role: "owner" }],
     [
-      { principal_id: "atlas", name: "Atlas", model: "Claude Opus", owner_user_id: "dana" },
-      { principal_id: "orphan", name: "Orphan", model: "GPT-5", owner_user_id: "former" },
+      { principal_id: "atlas", name: "Atlas", model: "Claude Opus", transport: "local", turn_only: false, owner_user_id: "dana" },
+      { principal_id: "orphan", name: "Orphan", model: "GPT-5", transport: "hosted_mcp", turn_only: true, owner_user_id: "former" },
     ],
   );
 
   assert.match(rail.innerHtml, /dashboard__presence-dot/);
   assert.match(rail.innerHtml, /dashboard__sidebar-model-glyph/);
   assert.match(rail.innerHtml, />Claude Opus</);
+  assert.match(rail.innerHtml, />Local</);
+  assert.match(rail.innerHtml, />Hosted MCP</);
   assert.match(rail.innerHtml, />operated by Owner unavailable</);
   assert.doesNotMatch(rail.innerHtml, /dashboard__sidebar-agent-avatar/);
   assert.doesNotMatch(rail.innerHtml, />AGENT</);

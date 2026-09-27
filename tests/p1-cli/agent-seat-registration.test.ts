@@ -60,6 +60,8 @@ function state(): WorkspaceState {
         owner_user_id: OWNER,
         name: "duplicate label",
         model: null,
+        transport: "local",
+        turn_only: false,
         created_at: 1,
         revoked_at: null,
       },

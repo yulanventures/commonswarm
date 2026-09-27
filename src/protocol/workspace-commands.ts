@@ -741,6 +741,8 @@ export function decideWorkspace(
         owner_user_id: user_id,
         name: cmd.name,
         model: null,
+        transport: 'local',
+        turn_only: false,
         created_at: ctx.now,
       }),
       env(ctx, 'AgentTokenMinted', {
@@ -970,6 +972,8 @@ export function decideWorkspace(
           owner_user_id: user_id,
           name: cmd.name,
           model: cmd.model ?? null,
+          transport: 'local',
+          turn_only: false,
           created_at: ctx.now,
         }),
       ]);

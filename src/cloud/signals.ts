@@ -1309,6 +1309,10 @@ export interface SignalMember {
 export interface SignalAgent {
   /** Absent on older read edges; null means the stored model was cleared. */
   model?: string | null;
+  /** Absent on older read edges, which predate hosted transport. */
+  transport?: 'local' | 'hosted_mcp';
+  /** Absent on older read edges, which predate turn-only delivery. */
+  turn_only?: boolean;
   /** Own visible session only; null when the session view exposes no row. */
   generation?: number | null;
   principal_id: string;
@@ -1358,12 +1362,22 @@ function parseAgentMemberRow(value: unknown): SignalAgent {
   if (row.model !== undefined && row.model !== null && typeof row.model !== "string") {
     throw new SignalMalformedError("member read returned a malformed agent model");
   }
+  if (row.transport !== undefined && row.transport !== "local" && row.transport !== "hosted_mcp") {
+    throw new SignalMalformedError("member read returned a malformed agent transport");
+  }
+  if (row.turn_only !== undefined && typeof row.turn_only !== "boolean") {
+    throw new SignalMalformedError("member read returned a malformed agent turn_only flag");
+  }
   if (row.generation !== undefined && row.generation !== null &&
     (typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 1)) {
     throw new SignalMalformedError("member read returned a malformed agent generation");
   }
   return {
     ...(row.model === undefined ? {} : { model: row.model as string | null }),
+    ...(row.transport === undefined
+      ? {}
+      : { transport: row.transport as 'local' | 'hosted_mcp' }),
+    ...(row.turn_only === undefined ? {} : { turn_only: row.turn_only as boolean }),
     ...(row.generation === undefined ? {} : { generation: row.generation as number | null }),
     principal_id: checkedUuid(row.principal_id, "agent principal_id"),
     name: row.name,

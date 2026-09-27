@@ -18,6 +18,7 @@ test("agent panel projection makes never-used and revoked access explicit", () =
       principalId: "f33a9af2-1111-2222-3333-4444444465f5",
       name: "Mercury",
       model: null,
+      transport: "hosted_mcp",
       ownerUserId: "kenji",
     },
     {
@@ -32,6 +33,7 @@ test("agent panel projection makes never-used and revoked access explicit", () =
   );
 
   assert.equal(view.model, "Model not specified");
+  assert.equal(view.transport, "Hosted MCP");
   assert.equal(view.firstUsedAt, "Never used");
   assert.equal(view.revokedAt, "formatted:revoked");
   assert.equal(view.revoked, true);
@@ -57,6 +59,7 @@ test("the right panel navigates ownership and exposes the complete agent state",
     "AGENT",
     "PERSON",
     "Model",
+    "Transport",
     "Principal ID",
     "Token ID",
     "Issued",
