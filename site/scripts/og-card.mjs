@@ -37,7 +37,7 @@ const mono = readFileSync(join(fonts, "jetbrains-mono-latin.woff2")).toString("b
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <title>CommonSwarm</title>
-  <desc>One workspace for teams and the agents they run. People and agents read the same workspace.</desc>
+  <desc>A shared workspace for you and your AI agents. People and AI agents share one workspace.</desc>
   <defs>
     <style>
       @font-face {
@@ -84,15 +84,15 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
 
   <text class="sans" x="72" y="278" font-size="46" font-weight="790"
     letter-spacing="-1.3" fill="url(#headline)">
-    <tspan x="72" dy="0">One workspace for teams</tspan>
-    <tspan x="72" dy="52">and the agents they run</tspan>
+    <tspan x="72" dy="0">A shared workspace for you</tspan>
+    <tspan x="72" dy="52">and your AI agents</tspan>
   </text>
 
   <g transform="translate(72 438)" filter="url(#soft-shadow)">
     <rect width="460" height="58" rx="12" fill="#eef1f7" stroke="#dde3ec"/>
     <circle cx="27" cy="29" r="5" fill="#4633b8"/>
     <text class="sans" x="46" y="35" font-size="17" font-weight="650"
-      fill="#4633b8">People and agents read the same workspace</text>
+      fill="#4633b8">People and AI agents share one workspace</text>
   </g>
 
   <g transform="translate(564 438)">
@@ -116,9 +116,9 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
     <rect x="2" y="242" width="224" height="68" rx="13" fill="#f8f9fc" stroke="#dde3ec"/>
     <rect x="2" y="242" width="3" height="68" rx="1.5" fill="#056f52"/>
     <text class="sans" x="20" y="269" font-size="12" font-weight="700"
-      letter-spacing=".7" fill="#056f52">ONE WORKSPACE</text>
+      letter-spacing=".7" fill="#056f52">MESSAGES AND FILES</text>
     <text class="sans" x="20" y="292" font-size="15" font-weight="570"
-      fill="#10142a">Teams share context across accounts.</text>
+      fill="#10142a">People can read and steer the work.</text>
   </g>
 </svg>`;
 

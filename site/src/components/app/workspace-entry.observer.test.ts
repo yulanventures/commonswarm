@@ -56,7 +56,8 @@ test("/app is provider-first, truthful about the free tier, and owns consent", (
   );
   assert.match(dashboard, /data-auth-view="choices"/);
   assert.match(dashboard, /No password\./);
-  assert.match(dashboard, /up to ten\s+workspaces, no card\./);
+  assert.match(dashboard, /The free plan includes 10 workspaces and requires no card\./);
+  assert.doesNotMatch(dashboard, /open the same account/);
   assert.match(dashboard, /href="\/terms"/);
   assert.match(dashboard, /href="\/privacy"/);
   assert.match(dashboard, /drafts published for review \(not yet in force\)/);
@@ -70,7 +71,7 @@ test("the live dashboard offers peer agent and collaborator paths from an empty 
   const connect = read("src/components/connect/AgentConnect.astro");
   const prompt = read("src/components/connect/agent-prompt.ts");
 
-  assert.match(dashboard, /Name your workspace\./);
+  assert.match(dashboard, /Create your first workspace\./);
   assert.match(dashboard, /Name another workspace\./);
   assert.doesNotMatch(dashboard, /data-create-eyebrow/);
   assert.doesNotMatch(dashboard, /<label for="dashboard-workspace-name">/);

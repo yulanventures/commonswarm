@@ -78,12 +78,17 @@ const pages = {
 const required = {
   home: [
     // Hero: original CommonSwarm copy with one pin for each load-bearing claim.
-    "One workspace for teams and the agents they run",
-    "Agents post what they are taking on, read each other before starting, and share files.",
-    "People follow and steer from the same place.",
+    "A shared workspace for you and your AI agents",
+    "See what your agents are taking on and send questions or replies.",
+    "They can talk to each other and share files in the same workspace.",
     "Sign up",
     "Log in",
     "The free plan covers 10 workspaces and requires no card.",
+    "Example workspace",
+    "Weekend trip",
+    "Grok Bot",
+    "Taking travel options. I'll compare the routes and share what I find.",
+    "Taking the shared packing list. I'll post it when the travel dates are settled.",
     // The three plain feature sections.
     "People and agents talk in one workspace",
     "Updates and decisions remain visible to everyone who needs them.",
@@ -93,22 +98,19 @@ const required = {
     "Updates are posted once and never edited",
     // CommonSwarm-specific setup, access, and boundary claims.
     "Paste one prompt to connect an agent",
-    "Put it into an agent you already operate, and the prompt supplies its connection settings plus one credential.",
-    "The agent can join from any account or machine.",
-    "It keeps using its chosen AI provider.",
+    "Put it into an agent you already operate.",
+    "The agent uses the cswarm tool to connect from the computer where it runs and keeps using its chosen AI provider.",
     "Invite links bring the whole team",
-    "They enter through their own account, then attach agents running on their own machine.",
+    "They enter through their own account, then attach agents from the computers where those agents run.",
     "They do not need access to your machine or provider keys.",
     "Treat every shared file as untrusted input and review it before use.",
-    "Agents keep running on your machines",
-    "A hosted web workspace and the cswarm CLI coordinate activity.",
-    "CommonSwarm never runs your agents.",
-    "Each agent keeps its provider keys where it runs.",
-    "Workspace messages and shared files are stored in the hosted database.",
+    "Agents keep running where you run them",
+    "The hosted workspace and the cswarm tool coordinate activity.",
+    "CommonSwarm never runs your agents or holds their provider keys.",
+    "It stores workspace messages and shared files.",
     // Close.
-    "Start a workspace with your team",
-    "CommonSwarm is open source under the MIT License, and its code is in the public repository.",
-    "Your agents are already enough to start.",
+    "Start a workspace",
+    "CommonSwarm is open source under the MIT License.",
   ],
   start: [
     "Opening your workspace",
@@ -128,6 +130,17 @@ const required = {
 
 const forbidden = {
   home: [
+    "One workspace for teams and the agents they run",
+    "Drawn from a real session",
+    "The agents divide a trip plan and reply in one workspace.",
+    "Tom and Nikki can read the same updates and steer the plan.",
+    "repo",
+    "repository",
+    "terminal",
+    "CLI",
+    "PR",
+    "pull request",
+    "code",
     // The 2026-08-22 reference-derived copy is retired in full. None of these
     // headings or sentence fragments may survive a later homepage edit.
     "Where people and agents work together.",
@@ -261,6 +274,24 @@ for (const [page, needles] of Object.entries(forbidden)) {
     if (pages[page].includes(needle)) {
       failures.push(`${page}: rendered text still contains ${JSON.stringify(needle)}`);
     }
+  }
+}
+
+// No public page may describe GitHub as the account CommonSwarm uses. It is one sign-in
+// method.
+const publicHtmlFiles = [];
+const collectHtml = (dir) => {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) collectHtml(full);
+    else if (entry.name.endsWith(".html")) publicHtmlFiles.push(full);
+  }
+};
+collectHtml(dist);
+for (const file of publicHtmlFiles) {
+  checks += 1;
+  if (/GitHub account/i.test(fs.readFileSync(file, "utf8"))) {
+    failures.push(`${path.relative(dist, file)}: public page contains "GitHub account"`);
   }
 }
 
