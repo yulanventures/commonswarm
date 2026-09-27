@@ -12,7 +12,7 @@ import { deleteSecureJsonFile, ensureSecureStateDirectory, isPublishedOwnerFileT
 import { ONBOARDING_UUID, type AgentConnectionEnvelope } from "./agent-onboarding-contract.js";
 import { type CloudTarget } from "./config.js";
 import { quoteAgentArgument } from "./agent-onboarding-contract.js";
-import { ThinCommandClient } from "./command-client.js";
+import { CommandHttpError, ThinCommandClient } from "./command-client.js";
 import { H0_REGISTRATION_NAME_MAX } from "../h0/verbs.js";
 import { REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "./mcp-register-refusals.js";
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileName, reservedConnectProfileNames } from "./connect-profile-files.js";
@@ -20,6 +20,8 @@ import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProf
 const JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
 const SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
 export const MCP_REGISTER_TIMEOUT_MS = 10_000;
+/** The mint request and its refusal advice share this one expiry window. */
+export const MCP_CONNECT_CODE_TTL_HOURS = 1;
 const OUTCOME_UNKNOWN = "The register outcome is unknown. Run the same cswarm mcp connect command again with the same code. If recovery fails, ask the operator to inspect this attempt before starting another connect.";
 const PENDING_FILE = CONNECT_PROFILE_FILES.pending;
 const COMPLETE_FILE = CONNECT_PROFILE_FILES.complete;
@@ -303,11 +305,36 @@ export class McpConnectError extends AgentSetupError {
   constructor(code: string, message: string) { super(code, message); }
 }
 
+const STABLE_SERVER_CODE = /^[a-z][a-z0-9_]*$/;
+
+function mintRefusalMessage(error: CommandHttpError): string {
+  if (error.code !== "join_credential_limit_reached") return error.message;
+  const response = record(error.response);
+  const scope = response?.scope;
+  const limit = response?.limit;
+  if ((scope !== "identity" && scope !== "workspace") ||
+      typeof limit !== "number" || !Number.isSafeInteger(limit) || limit < 1) {
+    return error.message;
+  }
+  const subject = scope === "identity" ? "You already have" : "This workspace already has";
+  const hours = `${MCP_CONNECT_CODE_TTL_HOURS} ${MCP_CONNECT_CODE_TTL_HOURS === 1 ? "hour" : "hours"}`;
+  return `${subject} ${limit} unused connect codes. Each one expires ${hours} after it was issued. \`cswarm members\` lists them; try again when one expires.`;
+}
+
 export async function mintMcpCode(target: CloudTarget, accessToken: string, workspaceId: string, fetcher: typeof fetch = fetch): Promise<{ code: string; expires_at: string }> {
-  const result = await new ThinCommandClient(target, fetcher).sendConnect({
-    credential: accessToken, workspaceId,
-    command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 },
-  });
+  let result;
+  try {
+    result = await new ThinCommandClient(target, fetcher).sendConnect({
+      credential: accessToken, workspaceId,
+      command: { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: MCP_CONNECT_CODE_TTL_HOURS },
+    });
+  } catch (error) {
+    if (error instanceof CommandHttpError &&
+        typeof error.code === "string" && STABLE_SERVER_CODE.test(error.code)) {
+      throw new McpConnectError(error.code, mintRefusalMessage(error));
+    }
+    throw error;
+  }
   const body = result.response;
   if (body.status !== "accepted" || typeof body.join_credential !== "string" ||
       !JOIN_CODE.test(body.join_credential) || typeof body.expires_at !== "string" ||

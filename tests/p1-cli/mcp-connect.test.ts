@@ -13,12 +13,12 @@ import { after, before, test } from "node:test";
 import { cloudTarget } from "../../src/cloud/config.js";
 import { mcpFailureCode, mcpFailureMessage } from "../../src/cli.js";
 import { writeCurrentTarget } from "../../src/cloud/current-target.js";
-import { classifyAttemptMarkerReadFailure, classifyConnectReservedPath, classifyDirectoryFailure, clearMcpConnect, connectMcp, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
+import { classifyAttemptMarkerReadFailure, classifyConnectReservedPath, classifyDirectoryFailure, clearMcpConnect, connectMcp, MCP_CONNECT_CODE_TTL_HOURS, mintMcpCode, readHiddenJoinCode, renderMcpCode, renderMcpConnect, type HiddenTerminal } from "../../src/cloud/mcp-connect.js";
 import { readAgentProfile, readProfileCredential, saveAgentProfile } from "../../src/cloud/agent-profile.js";
 import { setupAgent } from "../../src/cloud/agent-setup.js";
 import { Arguments } from "../../src/cli.js";
 import { REGISTER_REFUSALS, REGISTER_NO_SEAT_THIS_ATTEMPT, REGISTER_EXISTING_SEAT_REFUSALS } from "../../src/cloud/mcp-register-refusals.js";
-import { withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
+import { credentialStore, withFileLock, writeSecureJsonFile, writeSecureJsonFileExclusive } from "../../src/cloud/storage.js";
 import { AGENT_CREDENTIAL_MESSAGE_D088 } from "../../src/cloud/agent-credential-input.js";
 import { CONNECT_PROFILE_FILES, connectProfileReservedPaths, reservedConnectProfileNames } from "../../src/cloud/connect-profile-files.js";
 import { MCP_ERROR_SENTENCES } from "../../src/mcp/errors.js";
@@ -1035,12 +1035,54 @@ test("mcp code uses the human bearer and one-seat, one-hour mint", { timeout: 10
     assert.equal((init?.headers as Record<string, string>).authorization, "Bearer human-test-access");
     const body = JSON.parse(String(init?.body));
     assert.equal(body.workspace_id, WS);
-    assert.deepEqual(body.command, { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: 1 });
+    assert.deepEqual(body.command, { kind: "mint_agent_join_credential", seat_cap: 1, ttl_hours: MCP_CONNECT_CODE_TTL_HOURS });
     return Response.json({ status: "accepted", ok: true, event_ids: [], join_credential: JOIN, expires_at: "2099-01-01T00:00:00Z" });
   };
   assert.deepEqual(await mintMcpCode(TARGET, "human-test-access", WS, fetcher), { code: JOIN, expires_at: "2099-01-01T00:00:00Z" });
   assert.match(renderMcpCode({ code: JOIN, expires_at: "2099-01-01T00:00:00Z" }, TARGET), new RegExp(`Expires: 2099-01-01T00:00:00Z\\nOn the agent host run: cswarm mcp connect --url ${TARGET.url} --anon-key ${TARGET.anonKey}`));
   assert.equal(calls, 1);
+});
+
+test("mcp code renders join-code mint refusals from the server response", async () => {
+  for (const [scope, limit, expected] of [
+    ["identity", 5, "You already have 5 unused connect codes. Each one expires 1 hour after it was issued. `cswarm members` lists them; try again when one expires."],
+    ["workspace", 20, "This workspace already has 20 unused connect codes. Each one expires 1 hour after it was issued. `cswarm members` lists them; try again when one expires."],
+  ] as const) {
+    await assert.rejects(
+      mintMcpCode(TARGET, "human-test-access", WS, async () =>
+        Response.json({ error: "join_credential_limit_reached", scope, limit }, { status: 403 })),
+      error => {
+        assert.equal(mcpFailureCode(error, "code"), "join_credential_limit_reached");
+        assert.equal(mcpFailureMessage(error, "code"), expected);
+        return true;
+      },
+    );
+  }
+});
+
+test("mcp code preserves other stable mint-refusal codes and keeps unlabelled failures generic", async () => {
+  for (const [code, message] of [
+    ["workspace_principal_limit_reached", "This workspace cannot add another principal."],
+    ["forbidden", "You cannot mint a connect code in this workspace."],
+  ] as const) {
+    await assert.rejects(
+      mintMcpCode(TARGET, "human-test-access", WS, async () =>
+        Response.json({ error: code, message }, { status: 403 })),
+      error => {
+        assert.equal(mcpFailureCode(error, "code"), code);
+        assert.equal(mcpFailureMessage(error, "code"), message);
+        return true;
+      },
+    );
+  }
+  await assert.rejects(
+    mintMcpCode(TARGET, "human-test-access", WS, async () => Response.json({}, { status: 503 })),
+    error => {
+      assert.equal(mcpFailureCode(error, "code"), "mcp_code_failed");
+      assert.equal(mcpFailureMessage(error, "code"), "command failed (HTTP 503): unknown_error");
+      return true;
+    },
+  );
 });
 
 test("register refusal table and seat-state sets are generated from the server handlers", { timeout: 10000 }, async () => {
@@ -2751,6 +2793,85 @@ async function cli(argv: string[], env: Record<string, string>, input?: string) 
   try { const code = await new Promise<number | null>(done => child.on("close", done)); return { code, stdout, stderr }; }
   finally { clearTimeout(timer); }
 }
+
+async function mcpCodeRefusal(body: Record<string, unknown>, status: number) {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-code-refusal-"));
+  const userId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const server = createServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/auth/v1/token") {
+      const now = new Date().toISOString();
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        access_token: "fixture-access-token",
+        token_type: "bearer",
+        expires_in: 3600,
+        refresh_token: "fixture-rotated-refresh-token",
+        user: {
+          id: userId,
+          aud: "authenticated",
+          role: "authenticated",
+          email: "person@example.test",
+          email_confirmed_at: now,
+          confirmed_at: now,
+          last_sign_in_at: now,
+          app_metadata: { provider: "email", providers: ["email"] },
+          user_metadata: {},
+          identities: [],
+          created_at: now,
+          updated_at: now,
+          is_anonymous: false,
+        },
+      }));
+      return;
+    }
+    assert.equal(url.pathname, "/functions/v1/command");
+    response.writeHead(status, { "content-type": "application/json" });
+    response.end(JSON.stringify(body));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  try {
+    const store = await credentialStore({
+      target: cloudTarget(url, "public-test-key"),
+      stateDirectory: join(root, ".cswarm", "credentials.d"),
+      forceFile: true,
+      platform: "linux",
+      warn: () => undefined,
+    });
+    await store.write({ version: 1, refreshToken: "fixture-refresh-token", generation: 0,
+      deviceId: "ffffffff-ffff-4fff-8fff-ffffffffffff", userId });
+    await store.writeProfile({ version: 1, userId, workspaceId: null, pendingCommands: {} });
+    return await cli(["mcp", "code", "--url", url, "--anon-key", "public-test-key",
+      "--workspace-id", WS, "--force-file-store"], { HOME: root, SWARM_ALLOW_INSECURE_STORE: "1" });
+  } finally {
+    await new Promise<void>(resolveClose => server.close(() => resolveClose()));
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("mcp code prints server refusals from the command endpoint", { timeout: 15000 }, async () => {
+  for (const [scope, limit, message] of [
+    ["identity", 5, "You already have 5 unused connect codes. Each one expires 1 hour after it was issued. `cswarm members` lists them; try again when one expires."],
+    ["workspace", 20, "This workspace already has 20 unused connect codes. Each one expires 1 hour after it was issued. `cswarm members` lists them; try again when one expires."],
+  ] as const) {
+    const result = await mcpCodeRefusal({ error: "join_credential_limit_reached", scope, limit }, 403);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    assert.equal(result.stderr.slice(result.stderr.lastIndexOf("cswarm: ")), `cswarm: [join_credential_limit_reached] ${message}\n`);
+  }
+
+  const stable = await mcpCodeRefusal({ error: "workspace_principal_limit_reached", message: "This workspace cannot add another principal." }, 403);
+  assert.equal(stable.code, 1);
+  assert.equal(stable.stderr.slice(stable.stderr.lastIndexOf("cswarm: ")), "cswarm: [workspace_principal_limit_reached] This workspace cannot add another principal.\n");
+
+  const unlabelled = await mcpCodeRefusal({}, 503);
+  assert.equal(unlabelled.code, 1);
+  assert.equal(unlabelled.stderr.slice(unlabelled.stderr.lastIndexOf("cswarm: ")), "cswarm: [mcp_code_failed] command failed (HTTP 503): unknown_error\n");
+});
 
 test("CLI refuses argv, file and environment code inputs", { timeout: 15000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-mcp-argv-"));
