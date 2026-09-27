@@ -35,6 +35,11 @@ const routes = [
     path: "/acceptable-use",
     file: "acceptable-use/index.html",
   },
+  {
+    name: "grok-bot",
+    path: "/guides/grok-bot",
+    file: "guides/grok-bot/index.html",
+  },
 ];
 
 const decode = (value) =>
