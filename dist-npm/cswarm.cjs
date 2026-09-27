@@ -44,6 +44,991 @@ var __toESM = (mod, isNodeMode, target2) => (target2 = mod != null ? __create(__
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
+// src/cloud/connect-profile-files.ts
+function reservedConnectProfileName(name) {
+  const lower = name.toLowerCase();
+  if ([
+    CONNECT_PROFILE_FILES.pending,
+    CONNECT_PROFILE_FILES.complete,
+    CONNECT_PROFILE_FILES.attemptMarker,
+    CONNECT_PROFILE_FILES.credential,
+    CONNECT_PROFILE_FILES.setupLock,
+    CONNECT_PROFILE_FILES.connectLock
+  ].some((base) => lower === base)) return true;
+  return CONNECT_PROFILE_FILES.temporaryPattern.test(lower);
+}
+function reservedConnectProfileNames() {
+  return [
+    CONNECT_PROFILE_FILES.pending,
+    CONNECT_PROFILE_FILES.complete,
+    CONNECT_PROFILE_FILES.attemptMarker,
+    CONNECT_PROFILE_FILES.credential,
+    CONNECT_PROFILE_FILES.setupLock,
+    CONNECT_PROFILE_FILES.connectLock,
+    ...CONNECT_PROFILE_FILES.temporaryBases.map((base) => `${base}.<pid>.<12 hex>.tmp`),
+    "<profile-name>.<pid>.<12 hex>.tmp"
+  ].join(", ");
+}
+function connectProfileReservedPaths(profileName, entries) {
+  const fixed = /* @__PURE__ */ new Set([
+    CONNECT_PROFILE_FILES.pending,
+    CONNECT_PROFILE_FILES.complete,
+    CONNECT_PROFILE_FILES.attemptMarker,
+    CONNECT_PROFILE_FILES.credential,
+    CONNECT_PROFILE_FILES.setupLock,
+    CONNECT_PROFILE_FILES.connectLock,
+    profileName
+  ]);
+  for (const entry2 of entries) {
+    if (reservedConnectProfileName(entry2) || entry2 === profileName || CONNECT_PROFILE_FILES.temporaryPattern.test(entry2) && entry2.startsWith(`${profileName}.`)) fixed.add(entry2);
+  }
+  return [...fixed];
+}
+var CONNECT_PROFILE_FILES;
+var init_connect_profile_files = __esm({
+  "src/cloud/connect-profile-files.ts"() {
+    "use strict";
+    CONNECT_PROFILE_FILES = {
+      pending: "connect-pending.json",
+      complete: "connect-complete.json",
+      attemptMarker: "connect-profile-attempt.json",
+      credential: "credential.json",
+      setupLock: "setup.lock",
+      connectLock: "mcp-connect.lock",
+      temporaryBases: ["connect-pending.json", "connect-complete.json", "connect-profile-attempt.json", "credential.json", "profile.json"],
+      temporaryPattern: /^.+\.\d+\.[0-9a-f]{12}\.tmp$/i,
+      temporaryName: (path, pid, hex) => `${path}.${pid}.${hex}.tmp`
+    };
+  }
+});
+
+// src/cloud/storage.ts
+function isStoredRecordOversized(error2) {
+  return error2 instanceof StoredRecordOversizedError;
+}
+function defaultCredentialStateDirectory() {
+  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".cswarm", "credentials.d");
+}
+function mode(statMode) {
+  return statMode & 511;
+}
+function assertOwnedByCurrentUser(uid2) {
+  if (typeof process.getuid === "function" && uid2 !== process.getuid()) {
+    throw new Error("credential path is not owned by the current user");
+  }
+}
+async function existingSecureDirectory(path) {
+  try {
+    const info = await (0, import_promises.lstat)(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new Error(`credential directory is not a real directory: ${path}`);
+    }
+    assertOwnedByCurrentUser(info.uid);
+    if (mode(info.mode) !== 448) {
+      throw new Error(
+        `credential directory must be mode 0700 (found ${mode(info.mode).toString(8)}): ${path}`
+      );
+    }
+  } catch (error2) {
+    if (error2.code === "ENOENT") return false;
+    throw error2;
+  }
+  return true;
+}
+async function secureDirectory(path) {
+  if (await existingSecureDirectory(path)) return;
+  await (0, import_promises.mkdir)(path, { recursive: true, mode: 448 });
+  await (0, import_promises.chmod)(path, 448);
+  const info = await (0, import_promises.lstat)(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`credential directory is not a real directory: ${path}`);
+  }
+  assertOwnedByCurrentUser(info.uid);
+  if (mode(info.mode) !== 448) {
+    throw new Error(`credential directory could not be secured to mode 0700: ${path}`);
+  }
+}
+async function ensureSecureStateDirectory(path) {
+  if (!(0, import_node_path.isAbsolute)(path)) {
+    throw new Error("secure state directory must be absolute");
+  }
+  await secureDirectory(path);
+}
+async function secureCredentialFile(path) {
+  const info = await (0, import_promises.lstat)(path);
+  if (!info.isFile() || info.isSymbolicLink()) {
+    throw new Error(`credential file is not a regular file: ${path}`);
+  }
+  assertOwnedByCurrentUser(info.uid);
+  if (mode(info.mode) !== 384) {
+    throw new Error(
+      `credential file must be mode 0600 (found ${mode(info.mode).toString(8)}): ${path}`
+    );
+  }
+}
+function parseRecord(raw) {
+  let value;
+  try {
+    if (raw.startsWith("{")) {
+      value = JSON.parse(raw);
+    } else {
+      const [version4, refreshToken, generation, deviceId, userId, ...extra] = raw.split("|");
+      if (extra.length > 0) throw new Error("extra compact credential fields");
+      value = {
+        version: Number(version4),
+        refreshToken,
+        generation: Number(generation),
+        deviceId,
+        userId
+      };
+    }
+  } catch {
+    throw new Error("stored credential record is malformed");
+  }
+  if (value.version !== 1 || typeof value.refreshToken !== "string" || value.refreshToken.length < 8 || value.refreshToken.length > 2048 || /[|\u0000-\u001f\u007f]/.test(value.refreshToken) || !Number.isSafeInteger(value.generation) || (value.generation ?? -1) < 0 || typeof value.deviceId !== "string" || !UUID_RE.test(value.deviceId) || typeof value.userId !== "string" || !UUID_RE.test(value.userId)) {
+    throw new Error("stored credential record is malformed");
+  }
+  return value;
+}
+function keychainRecord(record3) {
+  const validated = parseRecord(JSON.stringify(record3));
+  const compact = [
+    validated.version,
+    validated.refreshToken,
+    validated.generation,
+    validated.deviceId,
+    validated.userId
+  ].join("|");
+  if (Buffer.byteLength(compact, "utf8") > MAX_KEYCHAIN_RECORD_BYTES) {
+    throw new Error(
+      "refresh credential is too large for secure macOS Keychain CLI input"
+    );
+  }
+  return compact;
+}
+function emptyProfile() {
+  return {
+    version: 1,
+    userId: null,
+    workspaceId: null,
+    email: null,
+    principalId: null,
+    principalName: null,
+    pendingCommands: {}
+  };
+}
+function parseProfile(raw) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("stored credential profile is malformed");
+  }
+  const pending = value.pendingCommands;
+  if (value.version !== 1 || !(value.userId === null || typeof value.userId === "string" && UUID_RE.test(value.userId)) || !(value.workspaceId === null || typeof value.workspaceId === "string" && UUID_RE.test(value.workspaceId)) || !(value.email === void 0 || value.email === null || typeof value.email === "string" && value.email.length >= 3 && value.email.length <= 320 && !/[\u0000-\u001f\u007f-\u009f]/.test(value.email)) || !(value.principalId === void 0 || value.principalId === null || typeof value.principalId === "string" && UUID_RE.test(value.principalId)) || !(value.principalName === void 0 || value.principalName === null || typeof value.principalName === "string" && value.principalName.length >= 1 && value.principalName.length <= 80 && /^[a-z0-9._@-]+$/.test(value.principalName)) || !pending || typeof pending !== "object" || Array.isArray(pending) || Object.keys(pending).length > MAX_PENDING_COMMANDS) {
+    throw new Error("stored credential profile is malformed");
+  }
+  for (const [intentHash2, record3] of Object.entries(pending)) {
+    if (!SHA256_RE.test(intentHash2) || !record3 || typeof record3 !== "object" || Array.isArray(record3) || typeof record3.commandId !== "string" || !COMMAND_ID_RE.test(record3.commandId) || typeof record3.kind !== "string" || record3.kind.length < 1 || record3.kind.length > 64 || !Number.isSafeInteger(record3.createdAt) || record3.createdAt < 0) {
+      throw new Error("stored credential profile is malformed");
+    }
+  }
+  return value;
+}
+function hostIdRemovalStep(path, directory) {
+  return `rm ${directory ? "-r " : ""}-- '${path.replaceAll("'", `'"'"'`)}'`;
+}
+function fileLockTimeoutSentence(lockName, path, ownerPid, gate = false, ownerHost) {
+  const label = gate ? `${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate directory` : lockName === "host-id-rotation" ? "host-id rotation lock" : /^[0-9a-f]{24}$/.test(lockName) ? "credential refresh lock" : `${lockName} lock`;
+  let liveOwner = false;
+  if (ownerPid !== void 0 && (ownerHost === void 0 || ownerHost === (0, import_node_os.hostname)())) {
+    try {
+      process.kill(ownerPid, 0);
+      liveOwner = true;
+    } catch (error2) {
+      liveOwner = error2.code === "EPERM";
+    }
+  }
+  const next = liveOwner ? "Wait for its owner to exit, then retry. If its owner is gone, remove" : "No live owner was identified; remove";
+  return `timed out waiting for the ${label} at ${path} (owner pid ${ownerPid ?? "unknown"}, host ${ownerHost ?? "unknown"}). ${next} ${gate ? "that directory" : "that lock file"} with ${hostIdRemovalStep(path, gate)} and retry.`;
+}
+async function publishCompleteOwnerFile(path, record3, options = {}) {
+  const tempPath = `${path}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.tmp`;
+  const temp = await (0, import_promises.open)(tempPath, "wx", 384);
+  let retained = false;
+  try {
+    await temp.chmod(384);
+    await temp.writeFile(record3, "utf8");
+    await temp.sync();
+    await options.onBeforePublish?.();
+    try {
+      await (options.publishLink ?? import_promises.link)(tempPath, path);
+    } catch (error2) {
+      const code = error2.code;
+      const published = code === "EEXIST" ? await (0, import_promises.lstat)(path).catch(() => null) : null;
+      const source = published ? await (0, import_promises.lstat)(tempPath).catch(() => null) : null;
+      if (published && source && published.dev === source.dev && published.ino === source.ino) {
+      } else if (["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(code ?? "")) {
+        await (0, import_promises.symlink)(tempPath, path);
+        retained = true;
+      } else throw error2;
+    }
+    return retained ? tempPath : null;
+  } finally {
+    await temp.close();
+    if (!retained) await (0, import_promises.unlink)(tempPath).catch(() => void 0);
+  }
+}
+function isPublishedOwnerFileTarget(path, target2, publishedPath = path, requiredHexLength) {
+  const suffix = /\.\d+\.([0-9a-f]+)\.tmp$/.exec(target2);
+  return (0, import_node_path.dirname)(target2) === (0, import_node_path.dirname)(path) && target2.startsWith(`${publishedPath}.`) && suffix !== null && (requiredHexLength === void 0 || target2 === `${publishedPath}${suffix[0]}` && suffix[1]?.length === requiredHexLength);
+}
+async function removePublishedOwnerFile(path, publishedPath = path) {
+  const target2 = await (0, import_promises.readlink)(path).catch(() => null);
+  await (0, import_promises.unlink)(path);
+  if (target2 !== null && isPublishedOwnerFileTarget(path, target2, publishedPath)) {
+    await (0, import_promises.unlink)(target2).catch(() => void 0);
+  }
+}
+async function unreadableOwnerIdentity(path, info) {
+  if (!info) return null;
+  const target2 = info.isSymbolicLink() ? await (0, import_promises.readlink)(path).catch(() => null) : null;
+  if (info.isSymbolicLink() && target2 === null) return null;
+  return { dev: info.dev, ino: info.ino, target: target2 };
+}
+function sameUnreadableOwner(a, b2) {
+  return b2 !== null && a.dev === b2.dev && a.ino === b2.ino && a.target === b2.target;
+}
+async function removeObservedOwnerFile(path, expected) {
+  const moved = `${path}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.stale`;
+  try {
+    await (0, import_promises.rename)(path, moved);
+  } catch (error2) {
+    if (error2.code === "ENOENT") return false;
+    throw error2;
+  }
+  const movedRaw = await (0, import_promises.readFile)(moved, "utf8").catch(() => null);
+  const movedInfo = await (0, import_promises.lstat)(moved).catch(() => null);
+  const movedIdentity = typeof expected === "object" && expected !== null ? await unreadableOwnerIdentity(moved, movedInfo) : null;
+  if (typeof expected === "object" && expected !== null ? movedRaw !== null || !sameUnreadableOwner(expected, movedIdentity) : movedRaw !== expected) {
+    const target2 = await (0, import_promises.readlink)(moved).catch(() => null);
+    const restored = await (movedInfo?.isDirectory() ? (0, import_promises.rename)(moved, path) : target2 === null ? (0, import_promises.link)(moved, path) : (0, import_promises.symlink)(target2, path)).then(() => true).catch((error2) => {
+      if (error2.code === "EEXIST") return false;
+      throw error2;
+    });
+    if (restored && !movedInfo?.isDirectory()) await (0, import_promises.unlink)(moved);
+    return false;
+  }
+  if (movedInfo?.isDirectory()) await (0, import_promises.rm)(moved, { recursive: true });
+  else await removePublishedOwnerFile(moved, path);
+  return true;
+}
+function releaseHeldFileLocksSync() {
+  for (const [lockPath, { createdAt, ownerId }] of heldFileLocks) {
+    try {
+      const owner = JSON.parse((0, import_node_fs.readFileSync)(lockPath, "utf8"));
+      if (owner.pid === process.pid && owner.createdAt === createdAt && owner.ownerId === ownerId) {
+        const moved = `${lockPath}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.done`;
+        (0, import_node_fs.renameSync)(lockPath, moved);
+        const movedOwner = JSON.parse((0, import_node_fs.readFileSync)(moved, "utf8"));
+        if (movedOwner.pid === process.pid && movedOwner.createdAt === createdAt && movedOwner.ownerId === ownerId) {
+          const target2 = readlinkSyncSafe(moved);
+          (0, import_node_fs.unlinkSync)(moved);
+          if (target2 && (0, import_node_path.dirname)(target2) === (0, import_node_path.dirname)(lockPath) && target2.startsWith(`${lockPath}.`) && /\.\d+\.[0-9a-f]+\.tmp$/.test(target2)) {
+            try {
+              (0, import_node_fs.unlinkSync)(target2);
+            } catch {
+            }
+          }
+        } else {
+          try {
+            const target2 = readlinkSyncSafe(moved);
+            if (target2 === null) (0, import_node_fs.linkSync)(moved, lockPath);
+            else (0, import_node_fs.symlinkSync)(target2, lockPath);
+            (0, import_node_fs.unlinkSync)(moved);
+          } catch {
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  heldFileLocks.clear();
+}
+function readlinkSyncSafe(path) {
+  try {
+    return (0, import_node_fs.readlinkSync)(path);
+  } catch {
+    return null;
+  }
+}
+async function deadLockOwnerRecord(lockPath, publishedAgeMs, startLookup = pidStartMs) {
+  let raw = null;
+  let owner;
+  try {
+    raw = await (0, import_promises.readFile)(lockPath, "utf8");
+    owner = JSON.parse(raw);
+  } catch {
+    return publishedAgeMs >= LOCK_STALE_MS ? raw ?? UNREADABLE_OWNER_RECORD : null;
+  }
+  if (!owner || typeof owner !== "object") return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+  if (owner.host !== (0, import_node_os.hostname)()) return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
+    return publishedAgeMs >= LOCK_STALE_MS ? raw : null;
+  }
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error2) {
+    if (error2.code === "ESRCH") return raw;
+    if (error2.code !== "EPERM") throw error2;
+  }
+  return generalLockOwnerStale(owner.createdAt, startLookup(owner.pid), publishedAgeMs) ? raw : null;
+}
+function generalLockOwnerStale(createdAt, pidStart, publishedAgeMs) {
+  if (pidStart === null || typeof createdAt !== "number" || !Number.isFinite(createdAt)) {
+    return publishedAgeMs >= LOCK_STALE_MS;
+  }
+  return pidStart > createdAt + 2e3;
+}
+function pidStartMs(pid, runPs = import_node_child_process.execFileSync, timeoutMs = 1e3) {
+  if (pid === process.pid) return THIS_PROCESS_START_MS;
+  try {
+    const text = runPs(
+      "/bin/ps",
+      ["-o", "lstart=", "-p", String(pid)],
+      { encoding: "utf8", timeout: Math.max(1, Math.min(1e3, timeoutMs)), env: { ...process.env, LC_ALL: "C" } }
+    ).trim();
+    const parsed = Date.parse(text);
+    return Number.isFinite(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+async function staleHostIdOwnerRecord(lockPath, incompleteAgeMs) {
+  const raw = await (0, import_promises.readFile)(lockPath, "utf8").catch(() => null);
+  if (raw === null) return null;
+  let owner;
+  try {
+    owner = JSON.parse(raw);
+  } catch {
+    return incompleteAgeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null;
+  }
+  if (owner?.host !== void 0 && owner.host !== (0, import_node_os.hostname)()) return raw;
+  if (!owner || typeof owner.createdAt !== "number" || !Number.isSafeInteger(owner.createdAt) || typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || typeof owner.startTime !== "number") {
+    return incompleteAgeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS ? raw : null;
+  }
+  try {
+    process.kill(owner.pid, 0);
+  } catch (error2) {
+    if (error2.code === "ESRCH") return raw;
+    if (error2.code === "EPERM") return null;
+    throw error2;
+  }
+  const start = pidStartMs(owner.pid);
+  return start !== null && Math.abs(start - owner.startTime) > 2e3 ? raw : null;
+}
+async function cleanupDeadOwnerTemps(stateDirectory2, lockFileName) {
+  const prefix = `${lockFileName}.`;
+  const activeTarget = await (0, import_promises.readlink)((0, import_node_path.join)(stateDirectory2, lockFileName)).catch(() => null);
+  for (const name of await (0, import_promises.readdir)(stateDirectory2)) {
+    const match = new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:reclaim\\.)?(\\d+)\\.[0-9a-f]+\\.(?:tmp|stale|done)$`).exec(name);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    if (pid === process.pid) continue;
+    try {
+      process.kill(pid, 0);
+    } catch (error2) {
+      if (error2.code === "ESRCH" && (0, import_node_path.join)(stateDirectory2, name) !== activeTarget) {
+        await (0, import_promises.rm)((0, import_node_path.join)(stateDirectory2, name), { recursive: true, force: true });
+      }
+    }
+  }
+}
+function gateOwnerChanged(reclaimPath, phase2) {
+  const lockName = (0, import_node_path.basename)(reclaimPath).replace(/\.lock\.reclaim$/, "");
+  return new Error(`${lockName === "host-id-rotation" ? "host-id" : lockName} reclaim gate owner changed at ${reclaimPath} ${phase2}. Retry the command; if its owner is gone, remove that directory with ${hostIdRemovalStep(reclaimPath, true)} and retry.`);
+}
+async function releaseReclaimGate(reclaimPath, ownerId) {
+  const ownerPath = (0, import_node_path.join)(reclaimPath, "owner.json");
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const current = await (0, import_promises.readFile)(ownerPath, "utf8").catch(() => null);
+    let ours = false;
+    try {
+      ours = current !== null && JSON.parse(current).ownerId === ownerId;
+    } catch {
+    }
+    if (ours) {
+      const movedGate = `${reclaimPath}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.done`;
+      const moved = await (0, import_promises.rename)(reclaimPath, movedGate).then(() => true).catch((error2) => {
+        if (error2.code !== "ENOENT") throw error2;
+        return false;
+      });
+      if (moved) {
+        const raw = await (0, import_promises.readFile)((0, import_node_path.join)(movedGate, "owner.json"), "utf8").catch(() => null);
+        if (raw === current) {
+          await (0, import_promises.rm)(movedGate, { recursive: true, force: true });
+          return;
+        }
+        if (!await (0, import_promises.stat)(reclaimPath).then(() => true).catch(() => false)) {
+          await (0, import_promises.rename)(movedGate, reclaimPath).catch(() => void 0);
+        }
+      }
+    }
+    if (attempt === 0) await (0, import_promises2.setTimeout)(25);
+  }
+  throw gateOwnerChanged(reclaimPath, "before release");
+}
+async function withFileLock(stateDirectory2, lockName, work, options = {}) {
+  await secureDirectory(stateDirectory2);
+  const lockPath = (0, import_node_path.join)(stateDirectory2, `${lockName}.lock`);
+  const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > LOCK_TIMEOUT_MS) {
+    throw new Error(`${lockName} lock timeout is invalid`);
+  }
+  const deadline = Date.now() + timeoutMs;
+  let handle = null;
+  let createdAt = 0;
+  const ownerId = (0, import_node_crypto.randomBytes)(8).toString("hex");
+  let gateOwnerChangeRetries = 0;
+  while (handle === null) {
+    try {
+      createdAt = Date.now();
+      if (options.stalePolicy === "host-id") {
+        const record3 = JSON.stringify({
+          pid: process.pid,
+          host: (0, import_node_os.hostname)(),
+          createdAt,
+          startTime: THIS_PROCESS_START_MS,
+          ownerId
+        });
+        await publishCompleteOwnerFile(
+          lockPath,
+          record3,
+          { publishLink: options.publishLink, onBeforePublish: options.onBeforePublish }
+        );
+        handle = await (0, import_promises.open)(lockPath, "r");
+      } else {
+        await publishCompleteOwnerFile(
+          lockPath,
+          JSON.stringify({
+            pid: process.pid,
+            host: (0, import_node_os.hostname)(),
+            createdAt,
+            startTime: THIS_PROCESS_START_MS,
+            ownerId
+          }),
+          { publishLink: options.publishLink, onBeforePublish: options.onBeforePublish }
+        );
+        handle = await (0, import_promises.open)(lockPath, "r");
+      }
+    } catch (error2) {
+      if (error2.code !== "EEXIST") throw error2;
+      const pathInfo = await (0, import_promises.lstat)(lockPath).catch(() => null);
+      const lockInfo = await (0, import_promises.stat)(lockPath).catch(() => null);
+      const dangling = lockInfo === null && pathInfo !== null;
+      const deadCandidate = dangling ? "" : lockInfo ? options.stalePolicy === "host-id" ? await staleHostIdOwnerRecord(lockPath, Date.now() - (pathInfo?.mtimeMs ?? lockInfo.mtimeMs)) : await deadLockOwnerRecord(lockPath, Date.now() - (pathInfo?.ctimeMs ?? lockInfo.ctimeMs), options.pidStartLookup) : null;
+      const deadRecord = deadCandidate === UNREADABLE_OWNER_RECORD ? await unreadableOwnerIdentity(lockPath, pathInfo) : deadCandidate;
+      if (deadRecord !== null) {
+        const reclaimPath = `${lockPath}.reclaim`;
+        const gateOwnerPath = (0, import_node_path.join)(reclaimPath, "owner.json");
+        const temporaryGate = `${reclaimPath}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.tmp`;
+        try {
+          await (0, import_promises.mkdir)(temporaryGate, { mode: 448 });
+          const ownerFile = await (0, import_promises.open)((0, import_node_path.join)(temporaryGate, "owner.json"), "wx", 384);
+          try {
+            await ownerFile.writeFile(JSON.stringify({
+              pid: process.pid,
+              host: (0, import_node_os.hostname)(),
+              createdAt: Date.now(),
+              publishedByRename: true,
+              startTime: THIS_PROCESS_START_MS,
+              ownerId
+            }));
+            await ownerFile.sync();
+          } finally {
+            await ownerFile.close();
+          }
+          await options.onBeforeGatePublish?.();
+          if (await (0, import_promises.stat)(reclaimPath).then(() => true).catch(() => false)) {
+            throw Object.assign(new Error("reclaim gate already exists"), { code: "EEXIST" });
+          }
+          await (0, import_promises.rename)(temporaryGate, reclaimPath);
+        } catch (gateError) {
+          await (0, import_promises.rm)(temporaryGate, { recursive: true, force: true });
+          if (!["EEXIST", "ENOTEMPTY"].includes(gateError.code ?? "")) {
+            throw gateError;
+          }
+          const initialGateOwner = await (0, import_promises.readFile)(gateOwnerPath, "utf8").catch(() => null);
+          const gateInfo = await (0, import_promises.stat)(reclaimPath).catch(() => null);
+          await options.onAfterGateStat?.();
+          const gateOwner = await (0, import_promises.readFile)(gateOwnerPath, "utf8").catch(() => null);
+          let abandoned = false;
+          let recordedPid;
+          let completeLocalOwner = false;
+          let gateOwnerId;
+          if (gateOwner !== null) {
+            try {
+              const owner = JSON.parse(gateOwner);
+              if (Number.isSafeInteger(owner?.pid) && owner.pid > 0) recordedPid = owner.pid;
+              if (typeof owner.ownerId === "string") gateOwnerId = owner.ownerId;
+              completeLocalOwner = owner.host === (0, import_node_os.hostname)() && recordedPid !== void 0 && Number.isFinite(owner.startTime) && owner.startTime > 0;
+              if (completeLocalOwner) {
+                let gone = false;
+                try {
+                  process.kill(owner.pid, 0);
+                } catch (error3) {
+                  if (error3.code === "ESRCH") gone = true;
+                  else if (error3.code !== "EPERM") throw error3;
+                }
+                const start = gone ? null : pidStartMs(owner.pid);
+                abandoned = gone || start !== null && Math.abs(start - owner.startTime) > 2e3;
+              }
+            } catch {
+            }
+          }
+          if (gateInfo && Date.now() - gateInfo.ctimeMs >= HOST_ID_LOCK_INCOMPLETE_GRACE_MS && !completeLocalOwner) abandoned = true;
+          const currentInfo = await (0, import_promises.stat)(reclaimPath).catch(() => null);
+          const currentOwner = await (0, import_promises.readFile)(gateOwnerPath, "utf8").catch(() => null);
+          let currentOwnerId;
+          try {
+            currentOwnerId = JSON.parse(currentOwner ?? "null")?.ownerId;
+          } catch {
+          }
+          if (!gateInfo || !currentInfo || initialGateOwner !== gateOwner || currentInfo.dev !== gateInfo.dev || currentInfo.ino !== gateInfo.ino || currentInfo.ctimeMs !== gateInfo.ctimeMs || currentInfo.mtimeMs !== gateInfo.mtimeMs || currentOwner !== gateOwner || currentOwnerId !== gateOwnerId) abandoned = false;
+          if (abandoned) {
+            await options.onBeforeGateStaleMove?.();
+            const movedGate = `${reclaimPath}.${process.pid}.${(0, import_node_crypto.randomBytes)(8).toString("hex")}.stale`;
+            const moved = await (0, import_promises.rename)(reclaimPath, movedGate).then(() => true).catch((error3) => {
+              if (error3.code !== "ENOENT") throw error3;
+              return false;
+            });
+            if (moved) {
+              const movedOwner = await (0, import_promises.readFile)((0, import_node_path.join)(movedGate, "owner.json"), "utf8").catch(() => null);
+              if (movedOwner !== gateOwner) {
+                if (!await (0, import_promises.stat)(reclaimPath).then(() => true).catch(() => false)) {
+                  await (0, import_promises.rename)(movedGate, reclaimPath).catch(() => void 0);
+                }
+                if (gateOwnerChangeRetries++ === 0) continue;
+                throw gateOwnerChanged(reclaimPath, "during stale takeover");
+              }
+              await (0, import_promises.rm)(movedGate, { recursive: true, force: true });
+            }
+          }
+          if (Date.now() >= deadline) throw new FileLockTimeoutError(lockName, reclaimPath, recordedPid, true);
+          await (0, import_promises2.setTimeout)(25);
+          continue;
+        }
+        try {
+          const freshPathInfo = await (0, import_promises.lstat)(lockPath).catch(() => null);
+          const freshInfo = await (0, import_promises.stat)(lockPath).catch(() => null);
+          const freshDangling = freshInfo === null && freshPathInfo !== null;
+          const freshCandidate = freshDangling ? "" : freshInfo && (options.stalePolicy === "host-id" ? await staleHostIdOwnerRecord(lockPath, Date.now() - (freshPathInfo?.mtimeMs ?? freshInfo.mtimeMs)) : await deadLockOwnerRecord(lockPath, Date.now() - (freshPathInfo?.ctimeMs ?? freshInfo.ctimeMs), options.pidStartLookup));
+          const stillStale = freshCandidate === UNREADABLE_OWNER_RECORD ? await unreadableOwnerIdentity(lockPath, freshPathInfo) : freshCandidate;
+          const sameRecord = typeof deadRecord === "object" ? typeof stillStale === "object" && stillStale !== null && sameUnreadableOwner(deadRecord, stillStale) : stillStale === deadRecord;
+          if (sameRecord) {
+            await options.onBeforeStaleMove?.();
+            if (!await removeObservedOwnerFile(lockPath, deadRecord === "" && freshDangling ? null : deadRecord)) {
+              throw new Error(`${lockName} lock owner changed during stale takeover`);
+            }
+          }
+        } finally {
+          await releaseReclaimGate(reclaimPath, ownerId);
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        const owner = await (0, import_promises.readFile)(lockPath, "utf8").then((raw) => JSON.parse(raw)).catch(() => null);
+        throw new FileLockTimeoutError(lockName, lockPath, owner?.pid, false, owner?.host);
+      }
+      await (0, import_promises2.setTimeout)(25 + (0, import_node_crypto.randomBytes)(1)[0] % 75);
+    }
+  }
+  heldFileLocks.set(lockPath, { createdAt, ownerId });
+  if (!heldFileLockExitHookInstalled) {
+    heldFileLockExitHookInstalled = true;
+    process.on("exit", releaseHeldFileLocksSync);
+  }
+  try {
+    await cleanupDeadOwnerTemps(stateDirectory2, `${lockName}.lock`);
+    return await work();
+  } finally {
+    heldFileLocks.delete(lockPath);
+    await handle.close();
+    const current = await (0, import_promises.readFile)(lockPath, "utf8").catch(() => null);
+    const ours = current === null ? false : (() => {
+      try {
+        const owner = JSON.parse(current);
+        return owner.pid === process.pid && owner.createdAt === createdAt && owner.ownerId === ownerId;
+      } catch {
+        return false;
+      }
+    })();
+    if (ours) await removeObservedOwnerFile(lockPath, current).catch(() => void 0);
+  }
+}
+async function writeSecureJsonFile(path, serialized, write = async (handle, contents) => {
+  await handle.writeFile(contents, "utf8");
+}) {
+  await secureDirectory((0, import_node_path.dirname)(path));
+  try {
+    await secureCredentialFile(path);
+  } catch (error2) {
+    if (error2.code !== "ENOENT") throw error2;
+  }
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, (0, import_node_crypto.randomBytes)(6).toString("hex"));
+  const handle = await (0, import_promises.open)(temporary, "wx", 384);
+  try {
+    await handle.chmod(384);
+    await write(handle, serialized);
+    await handle.sync();
+    await handle.close();
+    await secureCredentialFile(temporary);
+    await (0, import_promises.rename)(temporary, path);
+  } catch (error2) {
+    await handle.close().catch(() => void 0);
+    await (0, import_promises.unlink)(temporary).catch(() => void 0);
+    throw error2;
+  }
+}
+async function writeSecureJsonFileExclusive(path, serialized, write = async (handle, contents) => {
+  await handle.writeFile(contents, "utf8");
+}, publishLink = import_promises.link, claimIdentity = (handle) => handle.stat()) {
+  await secureDirectory((0, import_node_path.dirname)(path));
+  const temporary = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, (0, import_node_crypto.randomBytes)(6).toString("hex"));
+  const handle = await (0, import_promises.open)(temporary, "wx", 384);
+  try {
+    await handle.chmod(384);
+    await write(handle, serialized);
+    await handle.sync();
+    await handle.close();
+    try {
+      await publishLink(temporary, path);
+    } catch (error2) {
+      if (!["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV"].includes(error2.code ?? "")) throw error2;
+      const final = await (0, import_promises.open)(path, "wx", 384);
+      try {
+        const fallback = CONNECT_PROFILE_FILES.temporaryName(path, process.pid, (0, import_node_crypto.randomBytes)(6).toString("hex"));
+        const fallbackHandle = await (0, import_promises.open)(fallback, "wx", 384);
+        try {
+          await fallbackHandle.chmod(384);
+          await write(fallbackHandle, serialized);
+          await fallbackHandle.sync();
+          await fallbackHandle.close();
+          const claim2 = await claimIdentity(final);
+          const current = await (0, import_promises.lstat)(path).catch(() => null);
+          if (!current || current.dev !== claim2.dev || current.ino !== claim2.ino) {
+            throw Object.assign(new Error("exclusive claim changed before publication"), { code: "EEXIST" });
+          }
+          await (0, import_promises.rename)(fallback, path);
+        } catch (writeError) {
+          await fallbackHandle.close().catch(() => void 0);
+          throw writeError;
+        } finally {
+          await (0, import_promises.unlink)(fallback).catch(() => void 0);
+        }
+      } catch (writeError) {
+        const current = await (0, import_promises.lstat)(path).catch(() => null);
+        const claim2 = await claimIdentity(final);
+        if (current && claim2.dev === current.dev && claim2.ino === current.ino) await (0, import_promises.unlink)(path).catch(() => void 0);
+        throw writeError;
+      } finally {
+        await final.close().catch(() => void 0);
+      }
+    }
+  } catch (error2) {
+    await handle.close().catch(() => void 0);
+    throw error2;
+  } finally {
+    await (0, import_promises.unlink)(temporary).catch(() => void 0);
+  }
+}
+async function readSecureJsonFile(path, maxBytes) {
+  await secureDirectory((0, import_node_path.dirname)(path));
+  try {
+    await secureCredentialFile(path);
+    const raw = await (0, import_promises.readFile)(path, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+      throw new StoredRecordOversizedError();
+    }
+    return raw;
+  } catch (error2) {
+    if (error2.code === "ENOENT") return null;
+    throw error2;
+  }
+}
+async function readSecureJsonFileIfPresent(path, maxBytes) {
+  if (!await existingSecureDirectory((0, import_node_path.dirname)(path))) return null;
+  try {
+    await secureCredentialFile(path);
+    const raw = await (0, import_promises.readFile)(path, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+      throw new StoredRecordOversizedError();
+    }
+    return raw;
+  } catch (error2) {
+    if (error2.code === "ENOENT") return null;
+    throw error2;
+  }
+}
+async function deleteSecureJsonFile(path) {
+  await secureDirectory((0, import_node_path.dirname)(path));
+  try {
+    await secureCredentialFile(path);
+    await (0, import_promises.unlink)(path);
+  } catch (error2) {
+    if (error2.code !== "ENOENT") throw error2;
+  }
+}
+async function run(executable, args, input, detached = false) {
+  return await new Promise((resolve8, reject) => {
+    const child = (0, import_node_child_process2.spawn)(executable, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: process.env,
+      detached
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolve8({ code: code ?? 1, stdout, stderr }));
+    if (input !== void 0) child.stdin.end(`${input}
+`);
+    else child.stdin.end();
+  });
+}
+async function securityAvailable(path) {
+  try {
+    await (0, import_promises.access)(path, import_node_fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function credentialStore(options) {
+  const stateDirectory2 = options.stateDirectory ?? defaultCredentialStateDirectory();
+  const platform2 = options.platform ?? process.platform;
+  const securityPath = options.securityPath ?? "/usr/bin/security";
+  const warn = options.warn ?? ((message) => process.stderr.write(`${message}
+`));
+  if (!options.forceFile && platform2 === "darwin" && await securityAvailable(securityPath)) {
+    return new MacKeychainStore(
+      stateDirectory2,
+      options.target.profileId,
+      securityPath
+    );
+  }
+  const allowed = options.allowFileFallback ?? process.env.SWARM_ALLOW_INSECURE_STORE !== "0";
+  if (!allowed) {
+    throw new Error(
+      "no OS keychain is available and the secure-file fallback is disabled"
+    );
+  }
+  if (platform2 === "win32") {
+    throw new Error(
+      "no supported OS keychain is available and file permissions cannot be verified on this platform"
+    );
+  }
+  return new SecureFileStore(stateDirectory2, options.target.profileId, warn);
+}
+async function agentSignalPendingStore(options) {
+  if (!UUID_RE.test(options.principalId)) {
+    throw new Error("agent principal id must be a UUID");
+  }
+  const configured = options.stateDirectory ?? process.env.SWARM_AGENT_STATE_DIR ?? (process.env.XDG_STATE_HOME ? (0, import_node_path.join)(process.env.XDG_STATE_HOME, "cswarm", "agent-pending") : (0, import_node_path.join)((0, import_node_os.homedir)(), ".cswarm", "agent-state"));
+  if (!(0, import_node_path.isAbsolute)(configured)) {
+    throw new Error("agent pending state directory must be an absolute path");
+  }
+  const store2 = new SecureFileStore(
+    configured,
+    `agent-${options.target.profileId}-${options.principalId.toLowerCase()}`,
+    () => void 0
+  );
+  await store2.withLock(async () => {
+    await store2.readProfile();
+  });
+  return store2;
+}
+var import_node_fs, import_node_child_process, import_promises, import_node_os, import_node_path, import_node_crypto, import_node_child_process2, import_promises2, KEYCHAIN_SERVICE, LOCK_STALE_MS, HOST_ID_LOCK_INCOMPLETE_GRACE_MS, LOCK_TIMEOUT_MS, MAX_KEYCHAIN_RECORD_BYTES, MAX_PROFILE_BYTES, MAX_PENDING_COMMANDS, UUID_RE, COMMAND_ID_RE, SHA256_RE, FALLBACK_WARNING, StoredRecordOversizedError, FileLockTimeoutError, heldFileLocks, heldFileLockExitHookInstalled, UNREADABLE_OWNER_RECORD, THIS_PROCESS_START_MS, LockedCredentialStore, MacKeychainStore, SecureFileStore;
+var init_storage = __esm({
+  "src/cloud/storage.ts"() {
+    "use strict";
+    import_node_fs = require("node:fs");
+    import_node_child_process = require("node:child_process");
+    import_promises = require("node:fs/promises");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    import_node_crypto = require("node:crypto");
+    import_node_child_process2 = require("node:child_process");
+    import_promises2 = require("node:timers/promises");
+    init_connect_profile_files();
+    KEYCHAIN_SERVICE = "com.commonswarm.cli";
+    LOCK_STALE_MS = 6e4;
+    HOST_ID_LOCK_INCOMPLETE_GRACE_MS = 2e3;
+    LOCK_TIMEOUT_MS = 3e4;
+    MAX_KEYCHAIN_RECORD_BYTES = 126;
+    MAX_PROFILE_BYTES = 64 * 1024;
+    MAX_PENDING_COMMANDS = 32;
+    UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
+    SHA256_RE = /^[0-9a-f]{64}$/;
+    FALLBACK_WARNING = "\u26A0 no OS keychain found. Storing the rotating refresh credential in a 0600 file under a 0700 directory. This is less protected than a keychain.";
+    StoredRecordOversizedError = class extends Error {
+      name = "StoredRecordOversizedError";
+      constructor() {
+        super("stored record is larger than this store accepts");
+      }
+    };
+    FileLockTimeoutError = class extends Error {
+      constructor(lockName, lockPath, ownerPid, gate = false, ownerHost) {
+        super(fileLockTimeoutSentence(lockName, lockPath ?? "", ownerPid, gate, ownerHost));
+        this.lockName = lockName;
+        this.lockPath = lockPath;
+        this.ownerPid = ownerPid;
+        this.gate = gate;
+        this.ownerHost = ownerHost;
+      }
+      lockName;
+      lockPath;
+      ownerPid;
+      gate;
+      ownerHost;
+      name = "FileLockTimeoutError";
+      code = "file_lock_timeout";
+    };
+    heldFileLocks = /* @__PURE__ */ new Map();
+    heldFileLockExitHookInstalled = false;
+    UNREADABLE_OWNER_RECORD = /* @__PURE__ */ Symbol("unreadable owner record");
+    THIS_PROCESS_START_MS = Date.now() - process.uptime() * 1e3;
+    LockedCredentialStore = class {
+      constructor(stateDirectory2, lockName) {
+        this.stateDirectory = stateDirectory2;
+        this.lockName = lockName;
+        this.profilePath = (0, import_node_path.join)(stateDirectory2, `${lockName}.profile.json`);
+      }
+      stateDirectory;
+      lockName;
+      profilePath;
+      async readProfile() {
+        let raw;
+        try {
+          raw = await readSecureJsonFile(this.profilePath, MAX_PROFILE_BYTES);
+        } catch (error2) {
+          if (isStoredRecordOversized(error2)) {
+            throw new Error("stored credential profile is malformed");
+          }
+          throw error2;
+        }
+        return raw === null ? emptyProfile() : parseProfile(raw);
+      }
+      async writeProfile(profile) {
+        const serialized = JSON.stringify(parseProfile(JSON.stringify(profile)));
+        if (Buffer.byteLength(serialized, "utf8") > MAX_PROFILE_BYTES) {
+          throw new Error("stored credential profile is too large");
+        }
+        await writeSecureJsonFile(this.profilePath, serialized);
+      }
+      async withLock(work) {
+        return await withFileLock(this.stateDirectory, this.lockName, work);
+      }
+    };
+    MacKeychainStore = class extends LockedCredentialStore {
+      constructor(stateDirectory2, profileId, securityPath) {
+        super(stateDirectory2, profileId);
+        this.securityPath = securityPath;
+        this.account = `refresh:${profileId}`;
+      }
+      securityPath;
+      kind = "keychain";
+      location = "macOS Keychain";
+      account;
+      async read() {
+        const result = await run(this.securityPath, [
+          "find-generic-password",
+          "-a",
+          this.account,
+          "-s",
+          KEYCHAIN_SERVICE,
+          "-w"
+        ]);
+        if (result.code === 44) return null;
+        if (result.code !== 0) {
+          throw new Error("unable to read the refresh credential from macOS Keychain");
+        }
+        return parseRecord(result.stdout.trimEnd());
+      }
+      async write(record3) {
+        const serialized = keychainRecord(record3);
+        const result = await run(
+          this.securityPath,
+          [
+            "add-generic-password",
+            "-U",
+            "-a",
+            this.account,
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w"
+          ],
+          // macOS `security -w` prompts twice. A detached child has no controlling
+          // TTY, so both prompts consume this pipe instead of exposing or blocking
+          // on an interactive refresh-token prompt.
+          `${serialized}
+${serialized}`,
+          true
+        );
+        if (result.code !== 0) {
+          throw new Error("unable to write the refresh credential to macOS Keychain");
+        }
+      }
+      async delete() {
+        const result = await run(this.securityPath, [
+          "delete-generic-password",
+          "-a",
+          this.account,
+          "-s",
+          KEYCHAIN_SERVICE
+        ]);
+        if (result.code !== 0 && result.code !== 44) {
+          throw new Error("unable to delete the refresh credential from macOS Keychain");
+        }
+      }
+    };
+    SecureFileStore = class extends LockedCredentialStore {
+      constructor(stateDirectory2, profileId, warn) {
+        super(stateDirectory2, profileId);
+        this.warn = warn;
+        this.location = (0, import_node_path.join)(stateDirectory2, `${profileId}.json`);
+      }
+      warn;
+      kind = "file";
+      location;
+      warning() {
+        this.warn(`${FALLBACK_WARNING} Path: ${this.location}`);
+      }
+      async read() {
+        this.warning();
+        const raw = await readSecureJsonFile(this.location, MAX_PROFILE_BYTES);
+        return raw === null ? null : parseRecord(raw);
+      }
+      async write(record3) {
+        this.warning();
+        await writeSecureJsonFile(this.location, JSON.stringify(record3));
+      }
+      async delete() {
+        this.warning();
+        await deleteSecureJsonFile(this.location);
+      }
+    };
+  }
+});
+
 // src/cloud/signal-duration.ts
 function signalDuration(value) {
   if (value === void 0) return void 0;
@@ -89,7 +1074,7 @@ function cloudTarget(url, anonKey) {
   return {
     url: normalized,
     anonKey: anonKey.trim(),
-    profileId: (0, import_node_crypto.createHash)("sha256").update(normalized).digest("hex").slice(0, 24)
+    profileId: (0, import_node_crypto2.createHash)("sha256").update(normalized).digest("hex").slice(0, 24)
   };
 }
 function commandEndpoint(target2) {
@@ -101,11 +1086,11 @@ function readEndpoint(target2) {
 function authStorageKey(target2) {
   return `cswarm-${target2.profileId}-auth`;
 }
-var import_node_crypto, CLIENT_PROTOCOL_VERSION;
+var import_node_crypto2, CLIENT_PROTOCOL_VERSION;
 var init_config = __esm({
   "src/cloud/config.ts"() {
     "use strict";
-    import_node_crypto = require("node:crypto");
+    import_node_crypto2 = require("node:crypto");
     CLIENT_PROTOCOL_VERSION = "0.1.0";
   }
 });
@@ -255,7 +1240,7 @@ function parseAgentCredentialInput(value, source) {
     invalidKeys.push("status");
   }
   for (const key2 of ["principal_id", "token_id", "run_id"]) {
-    if (Object.hasOwn(artifact, key2) && (typeof artifact[key2] !== "string" || !UUID_RE2.test(artifact[key2]))) {
+    if (Object.hasOwn(artifact, key2) && (typeof artifact[key2] !== "string" || !UUID_RE4.test(artifact[key2]))) {
       invalidKeys.push(key2);
     }
   }
@@ -291,11 +1276,11 @@ function parseAgentCredentialInput(value, source) {
     durable: true
   };
 }
-var UUID_RE2, AGENT_TOKEN_RE, AGENT_CREDENTIAL_MESSAGE, AGENT_CREDENTIAL_MESSAGE_D088, ACCEPTED_AGENT_CREDENTIAL_MESSAGES, AgentCredentialInputError, AGENT_CREDENTIAL_REQUIRED_FIELDS, AGENT_CREDENTIAL_OPTIONAL_FIELDS, ALLOWED_ARTIFACT_KEYS;
+var UUID_RE4, AGENT_TOKEN_RE, AGENT_CREDENTIAL_MESSAGE, AGENT_CREDENTIAL_MESSAGE_D088, ACCEPTED_AGENT_CREDENTIAL_MESSAGES, AgentCredentialInputError, AGENT_CREDENTIAL_REQUIRED_FIELDS, AGENT_CREDENTIAL_OPTIONAL_FIELDS, ALLOWED_ARTIFACT_KEYS;
 var init_agent_credential_input = __esm({
   "src/cloud/agent-credential-input.ts"() {
     "use strict";
-    UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
     AGENT_CREDENTIAL_MESSAGE = "Agent credential minted. It is bound to this task and run so the agent's work stays scoped and attributable.";
     AGENT_CREDENTIAL_MESSAGE_D088 = "Agent credential minted. It is bound to this run, so the agent's work is attributable to it.";
@@ -329,524 +1314,6 @@ var init_agent_credential_input = __esm({
   }
 });
 
-// src/cloud/storage.ts
-function isStoredRecordOversized(error2) {
-  return error2 instanceof StoredRecordOversizedError;
-}
-function defaultCredentialStateDirectory() {
-  return (0, import_node_path.join)((0, import_node_os.homedir)(), ".cswarm", "credentials.d");
-}
-function mode(statMode) {
-  return statMode & 511;
-}
-function assertOwnedByCurrentUser(uid2) {
-  if (typeof process.getuid === "function" && uid2 !== process.getuid()) {
-    throw new Error("credential path is not owned by the current user");
-  }
-}
-async function existingSecureDirectory(path) {
-  try {
-    const info = await (0, import_promises.lstat)(path);
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new Error(`credential directory is not a real directory: ${path}`);
-    }
-    assertOwnedByCurrentUser(info.uid);
-    if (mode(info.mode) !== 448) {
-      throw new Error(
-        `credential directory must be mode 0700 (found ${mode(info.mode).toString(8)}): ${path}`
-      );
-    }
-  } catch (error2) {
-    if (error2.code === "ENOENT") return false;
-    throw error2;
-  }
-  return true;
-}
-async function secureDirectory(path) {
-  if (await existingSecureDirectory(path)) return;
-  await (0, import_promises.mkdir)(path, { recursive: true, mode: 448 });
-  await (0, import_promises.chmod)(path, 448);
-  const info = await (0, import_promises.lstat)(path);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error(`credential directory is not a real directory: ${path}`);
-  }
-  assertOwnedByCurrentUser(info.uid);
-  if (mode(info.mode) !== 448) {
-    throw new Error(`credential directory could not be secured to mode 0700: ${path}`);
-  }
-}
-async function ensureSecureStateDirectory(path) {
-  if (!(0, import_node_path.isAbsolute)(path)) {
-    throw new Error("secure state directory must be absolute");
-  }
-  await secureDirectory(path);
-}
-async function secureCredentialFile(path) {
-  const info = await (0, import_promises.lstat)(path);
-  if (!info.isFile() || info.isSymbolicLink()) {
-    throw new Error(`credential file is not a regular file: ${path}`);
-  }
-  assertOwnedByCurrentUser(info.uid);
-  if (mode(info.mode) !== 384) {
-    throw new Error(
-      `credential file must be mode 0600 (found ${mode(info.mode).toString(8)}): ${path}`
-    );
-  }
-}
-function parseRecord(raw) {
-  let value;
-  try {
-    if (raw.startsWith("{")) {
-      value = JSON.parse(raw);
-    } else {
-      const [version4, refreshToken, generation, deviceId, userId, ...extra] = raw.split("|");
-      if (extra.length > 0) throw new Error("extra compact credential fields");
-      value = {
-        version: Number(version4),
-        refreshToken,
-        generation: Number(generation),
-        deviceId,
-        userId
-      };
-    }
-  } catch {
-    throw new Error("stored credential record is malformed");
-  }
-  if (value.version !== 1 || typeof value.refreshToken !== "string" || value.refreshToken.length < 8 || value.refreshToken.length > 2048 || /[|\u0000-\u001f\u007f]/.test(value.refreshToken) || !Number.isSafeInteger(value.generation) || (value.generation ?? -1) < 0 || typeof value.deviceId !== "string" || !UUID_RE3.test(value.deviceId) || typeof value.userId !== "string" || !UUID_RE3.test(value.userId)) {
-    throw new Error("stored credential record is malformed");
-  }
-  return value;
-}
-function keychainRecord(record3) {
-  const validated = parseRecord(JSON.stringify(record3));
-  const compact = [
-    validated.version,
-    validated.refreshToken,
-    validated.generation,
-    validated.deviceId,
-    validated.userId
-  ].join("|");
-  if (Buffer.byteLength(compact, "utf8") > MAX_KEYCHAIN_RECORD_BYTES) {
-    throw new Error(
-      "refresh credential is too large for secure macOS Keychain CLI input"
-    );
-  }
-  return compact;
-}
-function emptyProfile() {
-  return {
-    version: 1,
-    userId: null,
-    workspaceId: null,
-    email: null,
-    principalId: null,
-    principalName: null,
-    pendingCommands: {}
-  };
-}
-function parseProfile(raw) {
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("stored credential profile is malformed");
-  }
-  const pending = value.pendingCommands;
-  if (value.version !== 1 || !(value.userId === null || typeof value.userId === "string" && UUID_RE3.test(value.userId)) || !(value.workspaceId === null || typeof value.workspaceId === "string" && UUID_RE3.test(value.workspaceId)) || !(value.email === void 0 || value.email === null || typeof value.email === "string" && value.email.length >= 3 && value.email.length <= 320 && !/[\u0000-\u001f\u007f-\u009f]/.test(value.email)) || !(value.principalId === void 0 || value.principalId === null || typeof value.principalId === "string" && UUID_RE3.test(value.principalId)) || !(value.principalName === void 0 || value.principalName === null || typeof value.principalName === "string" && value.principalName.length >= 1 && value.principalName.length <= 80 && /^[a-z0-9._@-]+$/.test(value.principalName)) || !pending || typeof pending !== "object" || Array.isArray(pending) || Object.keys(pending).length > MAX_PENDING_COMMANDS) {
-    throw new Error("stored credential profile is malformed");
-  }
-  for (const [intentHash2, record3] of Object.entries(pending)) {
-    if (!SHA256_RE.test(intentHash2) || !record3 || typeof record3 !== "object" || Array.isArray(record3) || typeof record3.commandId !== "string" || !COMMAND_ID_RE.test(record3.commandId) || typeof record3.kind !== "string" || record3.kind.length < 1 || record3.kind.length > 64 || !Number.isSafeInteger(record3.createdAt) || record3.createdAt < 0) {
-      throw new Error("stored credential profile is malformed");
-    }
-  }
-  return value;
-}
-function releaseHeldFileLocksSync() {
-  for (const [lockPath, createdAt] of heldFileLocks) {
-    try {
-      const owner = JSON.parse((0, import_node_fs.readFileSync)(lockPath, "utf8"));
-      if (owner.pid === process.pid && owner.createdAt === createdAt) (0, import_node_fs.unlinkSync)(lockPath);
-    } catch {
-    }
-  }
-  heldFileLocks.clear();
-}
-async function deadLockOwnerRecord(lockPath) {
-  let raw;
-  let owner;
-  try {
-    raw = await (0, import_promises.readFile)(lockPath, "utf8");
-    owner = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (owner.host !== (0, import_node_os.hostname)()) return null;
-  if (typeof owner.pid !== "number" || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || owner.pid === process.pid) {
-    return null;
-  }
-  try {
-    process.kill(owner.pid, 0);
-    return null;
-  } catch (error2) {
-    return error2.code === "ESRCH" ? raw : null;
-  }
-}
-async function withFileLock(stateDirectory2, lockName, work, options = {}) {
-  await secureDirectory(stateDirectory2);
-  const lockPath = (0, import_node_path.join)(stateDirectory2, `${lockName}.lock`);
-  const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS;
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > LOCK_TIMEOUT_MS) {
-    throw new Error("credential refresh lock timeout is invalid");
-  }
-  const deadline = Date.now() + timeoutMs;
-  let handle = null;
-  let createdAt = 0;
-  while (handle === null) {
-    try {
-      handle = await (0, import_promises.open)(lockPath, "wx", 384);
-      createdAt = Date.now();
-      await handle.writeFile(
-        JSON.stringify({ pid: process.pid, host: (0, import_node_os.hostname)(), createdAt }),
-        "utf8"
-      );
-    } catch (error2) {
-      if (error2.code !== "EEXIST") throw error2;
-      const lockInfo = await (0, import_promises.stat)(lockPath).catch(() => null);
-      if (lockInfo && Date.now() - lockInfo.mtimeMs > LOCK_STALE_MS) {
-        await (0, import_promises.unlink)(lockPath).catch(() => void 0);
-        continue;
-      }
-      const deadRecord = lockInfo ? await deadLockOwnerRecord(lockPath) : null;
-      if (deadRecord !== null) {
-        const current = await (0, import_promises.readFile)(lockPath, "utf8").catch(() => null);
-        if (current === deadRecord) await (0, import_promises.unlink)(lockPath).catch(() => void 0);
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new FileLockTimeoutError(lockName);
-      }
-      await (0, import_promises2.setTimeout)(25 + (0, import_node_crypto2.randomBytes)(1)[0] % 75);
-    }
-  }
-  heldFileLocks.set(lockPath, createdAt);
-  if (!heldFileLockExitHookInstalled) {
-    heldFileLockExitHookInstalled = true;
-    process.on("exit", releaseHeldFileLocksSync);
-  }
-  try {
-    return await work();
-  } finally {
-    heldFileLocks.delete(lockPath);
-    await handle.close();
-    const current = await (0, import_promises.readFile)(lockPath, "utf8").catch(() => null);
-    const ours = current === null ? false : (() => {
-      try {
-        const owner = JSON.parse(current);
-        return owner.pid === process.pid && owner.createdAt === createdAt;
-      } catch {
-        return false;
-      }
-    })();
-    if (ours) await (0, import_promises.unlink)(lockPath).catch(() => void 0);
-  }
-}
-async function writeSecureJsonFile(path, serialized) {
-  await secureDirectory((0, import_node_path.dirname)(path));
-  try {
-    await secureCredentialFile(path);
-  } catch (error2) {
-    if (error2.code !== "ENOENT") throw error2;
-  }
-  const temporary = `${path}.${process.pid}.${(0, import_node_crypto2.randomBytes)(6).toString("hex")}.tmp`;
-  const handle = await (0, import_promises.open)(temporary, "wx", 384);
-  try {
-    await handle.writeFile(serialized, "utf8");
-    await handle.sync();
-    await handle.close();
-    await (0, import_promises.rename)(temporary, path);
-  } catch (error2) {
-    await handle.close().catch(() => void 0);
-    await (0, import_promises.unlink)(temporary).catch(() => void 0);
-    throw error2;
-  }
-  await (0, import_promises.chmod)(path, 384);
-  await secureCredentialFile(path);
-}
-async function readSecureJsonFile(path, maxBytes) {
-  await secureDirectory((0, import_node_path.dirname)(path));
-  try {
-    await secureCredentialFile(path);
-    const raw = await (0, import_promises.readFile)(path, "utf8");
-    if (Buffer.byteLength(raw, "utf8") > maxBytes) {
-      throw new StoredRecordOversizedError();
-    }
-    return raw;
-  } catch (error2) {
-    if (error2.code === "ENOENT") return null;
-    throw error2;
-  }
-}
-async function readSecureJsonFileIfPresent(path, maxBytes) {
-  if (!await existingSecureDirectory((0, import_node_path.dirname)(path))) return null;
-  try {
-    await secureCredentialFile(path);
-    const raw = await (0, import_promises.readFile)(path, "utf8");
-    if (Buffer.byteLength(raw, "utf8") > maxBytes) {
-      throw new StoredRecordOversizedError();
-    }
-    return raw;
-  } catch (error2) {
-    if (error2.code === "ENOENT") return null;
-    throw error2;
-  }
-}
-async function deleteSecureJsonFile(path) {
-  await secureDirectory((0, import_node_path.dirname)(path));
-  try {
-    await secureCredentialFile(path);
-    await (0, import_promises.unlink)(path);
-  } catch (error2) {
-    if (error2.code !== "ENOENT") throw error2;
-  }
-}
-async function run(executable, args, input, detached = false) {
-  return await new Promise((resolve7, reject) => {
-    const child = (0, import_node_child_process.spawn)(executable, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
-      detached
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", reject);
-    child.on("close", (code) => resolve7({ code: code ?? 1, stdout, stderr }));
-    if (input !== void 0) child.stdin.end(`${input}
-`);
-    else child.stdin.end();
-  });
-}
-async function securityAvailable(path) {
-  try {
-    await (0, import_promises.access)(path, import_node_fs.constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function credentialStore(options) {
-  const stateDirectory2 = options.stateDirectory ?? defaultCredentialStateDirectory();
-  const platform = options.platform ?? process.platform;
-  const securityPath = options.securityPath ?? "/usr/bin/security";
-  const warn = options.warn ?? ((message) => process.stderr.write(`${message}
-`));
-  if (!options.forceFile && platform === "darwin" && await securityAvailable(securityPath)) {
-    return new MacKeychainStore(
-      stateDirectory2,
-      options.target.profileId,
-      securityPath
-    );
-  }
-  const allowed = options.allowFileFallback ?? process.env.SWARM_ALLOW_INSECURE_STORE !== "0";
-  if (!allowed) {
-    throw new Error(
-      "no OS keychain is available and the secure-file fallback is disabled"
-    );
-  }
-  if (platform === "win32") {
-    throw new Error(
-      "no supported OS keychain is available and file permissions cannot be verified on this platform"
-    );
-  }
-  return new SecureFileStore(stateDirectory2, options.target.profileId, warn);
-}
-async function agentSignalPendingStore(options) {
-  if (!UUID_RE3.test(options.principalId)) {
-    throw new Error("agent principal id must be a UUID");
-  }
-  const configured = options.stateDirectory ?? process.env.SWARM_AGENT_STATE_DIR ?? (process.env.XDG_STATE_HOME ? (0, import_node_path.join)(process.env.XDG_STATE_HOME, "cswarm", "agent-pending") : (0, import_node_path.join)((0, import_node_os.homedir)(), ".cswarm", "agent-state"));
-  if (!(0, import_node_path.isAbsolute)(configured)) {
-    throw new Error("agent pending state directory must be an absolute path");
-  }
-  const store2 = new SecureFileStore(
-    configured,
-    `agent-${options.target.profileId}-${options.principalId.toLowerCase()}`,
-    () => void 0
-  );
-  await store2.withLock(async () => {
-    await store2.readProfile();
-  });
-  return store2;
-}
-var import_node_fs, import_promises, import_node_os, import_node_path, import_node_crypto2, import_node_child_process, import_promises2, KEYCHAIN_SERVICE, LOCK_STALE_MS, LOCK_TIMEOUT_MS, MAX_KEYCHAIN_RECORD_BYTES, MAX_PROFILE_BYTES, MAX_PENDING_COMMANDS, UUID_RE3, COMMAND_ID_RE, SHA256_RE, FALLBACK_WARNING, StoredRecordOversizedError, FileLockTimeoutError, heldFileLocks, heldFileLockExitHookInstalled, LockedCredentialStore, MacKeychainStore, SecureFileStore;
-var init_storage = __esm({
-  "src/cloud/storage.ts"() {
-    "use strict";
-    import_node_fs = require("node:fs");
-    import_promises = require("node:fs/promises");
-    import_node_os = require("node:os");
-    import_node_path = require("node:path");
-    import_node_crypto2 = require("node:crypto");
-    import_node_child_process = require("node:child_process");
-    import_promises2 = require("node:timers/promises");
-    KEYCHAIN_SERVICE = "com.commonswarm.cli";
-    LOCK_STALE_MS = 6e4;
-    LOCK_TIMEOUT_MS = 3e4;
-    MAX_KEYCHAIN_RECORD_BYTES = 126;
-    MAX_PROFILE_BYTES = 64 * 1024;
-    MAX_PENDING_COMMANDS = 32;
-    UUID_RE3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,72}$/;
-    SHA256_RE = /^[0-9a-f]{64}$/;
-    FALLBACK_WARNING = "\u26A0 no OS keychain found. Storing the rotating refresh credential in a 0600 file under a 0700 directory. This is less protected than a keychain.";
-    StoredRecordOversizedError = class extends Error {
-      name = "StoredRecordOversizedError";
-      constructor() {
-        super("stored record is larger than this store accepts");
-      }
-    };
-    FileLockTimeoutError = class extends Error {
-      constructor(lockName) {
-        super("timed out waiting for the credential refresh lock");
-        this.lockName = lockName;
-      }
-      lockName;
-      name = "FileLockTimeoutError";
-      code = "file_lock_timeout";
-    };
-    heldFileLocks = /* @__PURE__ */ new Map();
-    heldFileLockExitHookInstalled = false;
-    LockedCredentialStore = class {
-      constructor(stateDirectory2, lockName) {
-        this.stateDirectory = stateDirectory2;
-        this.lockName = lockName;
-        this.profilePath = (0, import_node_path.join)(stateDirectory2, `${lockName}.profile.json`);
-      }
-      stateDirectory;
-      lockName;
-      profilePath;
-      async readProfile() {
-        let raw;
-        try {
-          raw = await readSecureJsonFile(this.profilePath, MAX_PROFILE_BYTES);
-        } catch (error2) {
-          if (isStoredRecordOversized(error2)) {
-            throw new Error("stored credential profile is malformed");
-          }
-          throw error2;
-        }
-        return raw === null ? emptyProfile() : parseProfile(raw);
-      }
-      async writeProfile(profile) {
-        const serialized = JSON.stringify(parseProfile(JSON.stringify(profile)));
-        if (Buffer.byteLength(serialized, "utf8") > MAX_PROFILE_BYTES) {
-          throw new Error("stored credential profile is too large");
-        }
-        await writeSecureJsonFile(this.profilePath, serialized);
-      }
-      async withLock(work) {
-        return await withFileLock(this.stateDirectory, this.lockName, work);
-      }
-    };
-    MacKeychainStore = class extends LockedCredentialStore {
-      constructor(stateDirectory2, profileId, securityPath) {
-        super(stateDirectory2, profileId);
-        this.securityPath = securityPath;
-        this.account = `refresh:${profileId}`;
-      }
-      securityPath;
-      kind = "keychain";
-      location = "macOS Keychain";
-      account;
-      async read() {
-        const result = await run(this.securityPath, [
-          "find-generic-password",
-          "-a",
-          this.account,
-          "-s",
-          KEYCHAIN_SERVICE,
-          "-w"
-        ]);
-        if (result.code === 44) return null;
-        if (result.code !== 0) {
-          throw new Error("unable to read the refresh credential from macOS Keychain");
-        }
-        return parseRecord(result.stdout.trimEnd());
-      }
-      async write(record3) {
-        const serialized = keychainRecord(record3);
-        const result = await run(
-          this.securityPath,
-          [
-            "add-generic-password",
-            "-U",
-            "-a",
-            this.account,
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-w"
-          ],
-          // macOS `security -w` prompts twice. A detached child has no controlling
-          // TTY, so both prompts consume this pipe instead of exposing or blocking
-          // on an interactive refresh-token prompt.
-          `${serialized}
-${serialized}`,
-          true
-        );
-        if (result.code !== 0) {
-          throw new Error("unable to write the refresh credential to macOS Keychain");
-        }
-      }
-      async delete() {
-        const result = await run(this.securityPath, [
-          "delete-generic-password",
-          "-a",
-          this.account,
-          "-s",
-          KEYCHAIN_SERVICE
-        ]);
-        if (result.code !== 0 && result.code !== 44) {
-          throw new Error("unable to delete the refresh credential from macOS Keychain");
-        }
-      }
-    };
-    SecureFileStore = class extends LockedCredentialStore {
-      constructor(stateDirectory2, profileId, warn) {
-        super(stateDirectory2, profileId);
-        this.warn = warn;
-        this.location = (0, import_node_path.join)(stateDirectory2, `${profileId}.json`);
-      }
-      warn;
-      kind = "file";
-      location;
-      warning() {
-        this.warn(`${FALLBACK_WARNING} Path: ${this.location}`);
-      }
-      async read() {
-        this.warning();
-        const raw = await readSecureJsonFile(this.location, MAX_PROFILE_BYTES);
-        return raw === null ? null : parseRecord(raw);
-      }
-      async write(record3) {
-        this.warning();
-        await writeSecureJsonFile(this.location, JSON.stringify(record3));
-      }
-      async delete() {
-        this.warning();
-        await deleteSecureJsonFile(this.location);
-      }
-    };
-  }
-});
-
 // src/cloud/agent-credential.ts
 function credentialLineageKey(rootToken) {
   return (0, import_node_crypto3.createHash)("sha256").update(rootToken).digest("hex").slice(0, 32);
@@ -854,7 +1321,7 @@ function credentialLineageKey(rootToken) {
 function defaultAgentCredentialDirectory() {
   const configured = process.env.SWARM_AGENT_STATE_DIR;
   if (configured) return configured;
-  return process.env.XDG_STATE_HOME ? (0, import_node_path2.join)(process.env.XDG_STATE_HOME, "cswarm", "agent-credentials") : (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".cswarm", "agent-credentials");
+  return process.env.XDG_STATE_HOME ? (0, import_node_path3.join)(process.env.XDG_STATE_HOME, "cswarm", "agent-credentials") : (0, import_node_path3.join)((0, import_node_os2.homedir)(), ".cswarm", "agent-credentials");
 }
 function parseAgentCredentialRecord(raw) {
   let value;
@@ -863,9 +1330,9 @@ function parseAgentCredentialRecord(raw) {
   } catch {
     throw new Error("stored agent credential record is malformed");
   }
-  if (value.version !== 1 || !(value.token === null || typeof value.token === "string" && AGENT_TOKEN_RE2.test(value.token)) || !(value.tokenId === null || typeof value.tokenId === "string" && UUID_RE4.test(value.tokenId)) || !(value.principalId === null || typeof value.principalId === "string" && UUID_RE4.test(value.principalId)) || !(value.runId === null || typeof value.runId === "string" && UUID_RE4.test(value.runId)) || // A record naming a secret must name the token it belongs to, and vice versa; half of
+  if (value.version !== 1 || !(value.token === null || typeof value.token === "string" && AGENT_TOKEN_RE2.test(value.token)) || !(value.tokenId === null || typeof value.tokenId === "string" && UUID_RE5.test(value.tokenId)) || !(value.principalId === null || typeof value.principalId === "string" && UUID_RE5.test(value.principalId)) || !(value.runId === null || typeof value.runId === "string" && UUID_RE5.test(value.runId)) || // A record naming a secret must name the token it belongs to, and vice versa; half of
   // an identity is a record no reader can check the lineage of.
-  value.token === null !== (value.tokenId === null) || !(value.rootTokenId === null || typeof value.rootTokenId === "string" && UUID_RE4.test(value.rootTokenId)) || !Number.isSafeInteger(value.generation) || (value.generation ?? -1) < 0 || !Number.isSafeInteger(value.issuedAt) || (value.issuedAt ?? -1) < 0 || !(value.expiresAt === null || Number.isSafeInteger(value.expiresAt) && (value.expiresAt ?? -1) >= 0) || // A live successor with no deadline could never be renewed on time.
+  value.token === null !== (value.tokenId === null) || !(value.rootTokenId === null || typeof value.rootTokenId === "string" && UUID_RE5.test(value.rootTokenId)) || !Number.isSafeInteger(value.generation) || (value.generation ?? -1) < 0 || !Number.isSafeInteger(value.issuedAt) || (value.issuedAt ?? -1) < 0 || !(value.expiresAt === null || Number.isSafeInteger(value.expiresAt) && (value.expiresAt ?? -1) >= 0) || // A live successor with no deadline could never be renewed on time.
   value.token !== null && value.expiresAt === null || !(value.horizonExpiresAt === null || Number.isSafeInteger(value.horizonExpiresAt) && (value.horizonExpiresAt ?? -1) >= 0) || !(value.successorsRemaining === null || Number.isSafeInteger(value.successorsRemaining) && (value.successorsRemaining ?? -1) >= 0) || !isPendingRenewal(value.pendingRenewal)) {
     throw new Error("stored agent credential record is malformed");
   }
@@ -882,15 +1349,15 @@ async function agentCredentialStore(options) {
     throw new Error("agent credential lineage key must be 32 lowercase hex characters");
   }
   const directory = options.stateDirectory ?? defaultAgentCredentialDirectory();
-  if (!(0, import_node_path2.isAbsolute)(directory)) {
+  if (!(0, import_node_path3.isAbsolute)(directory)) {
     throw new Error("agent credential state directory must be an absolute path");
   }
   const name = `successor-${options.target.profileId}-${options.lineageKey}`;
-  const location2 = (0, import_node_path2.join)(directory, `${name}.json`);
+  const location2 = (0, import_node_path3.join)(directory, `${name}.json`);
   return {
     location: location2,
     async read() {
-      const raw = await readSecureJsonFile(location2, MAX_RECORD_BYTES);
+      const raw = await (options.readOnly ? readSecureJsonFileIfPresent : readSecureJsonFile)(location2, MAX_RECORD_BYTES);
       return raw === null ? null : parseAgentCredentialRecord(raw);
     },
     async write(record3) {
@@ -907,15 +1374,15 @@ async function agentCredentialStore(options) {
     }
   };
 }
-var import_node_crypto3, import_node_os2, import_node_path2, UUID_RE4, AGENT_TOKEN_RE2, MAX_RECORD_BYTES;
+var import_node_crypto3, import_node_os2, import_node_path3, UUID_RE5, AGENT_TOKEN_RE2, MAX_RECORD_BYTES;
 var init_agent_credential = __esm({
   "src/cloud/agent-credential.ts"() {
     "use strict";
     import_node_crypto3 = require("node:crypto");
     import_node_os2 = require("node:os");
-    import_node_path2 = require("node:path");
+    import_node_path3 = require("node:path");
     init_storage();
-    UUID_RE4 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     AGENT_TOKEN_RE2 = /^swm_agt_[A-Za-z0-9_-]{43}$/;
     MAX_RECORD_BYTES = 4 * 1024;
   }
@@ -937,7 +1404,7 @@ function nullableTimestamp(value, field) {
   return text;
 }
 function uuid2(value, field) {
-  if (typeof value !== "string" || !UUID_RE5.test(value)) {
+  if (typeof value !== "string" || !UUID_RE6.test(value)) {
     throw new Error(`renewal grant read returned malformed ${field}`);
   }
   return value.toLowerCase();
@@ -1014,7 +1481,7 @@ async function readRenewalGrants(target2, credential, workspaceId2, fetcher = fe
   }
   return grants.map(parseGrant);
 }
-function orList(items) {
+function orList2(items) {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0];
   return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
@@ -1027,7 +1494,7 @@ function describeRenewalGrant(grant) {
   const lines = grant.kind === "standing" ? [`Grant: standing \u2014 ${STANDING_GRANT_RULES.join(" ")}`] : [`Grant: timeboxed \u2014 renewal horizon ${grant.horizon_expires_at}.`];
   if (grant.suspended_at !== null) {
     lines.push(
-      `PAUSED since ${grant.suspended_at} after ${STANDING_IDLE_PAUSE_DAYS} days with no use. This is not revoked and the agent is not gone. Next step: ${orList(STANDING_RESUME_ACTORS)} runs cswarm grant resume --renewal-grant-id ${grant.renewal_grant_id}`
+      `PAUSED since ${grant.suspended_at} after ${STANDING_IDLE_PAUSE_DAYS} days with no use. This is not revoked and the agent is not gone. Next step: ${orList2(STANDING_RESUME_ACTORS)} runs cswarm grant resume --renewal-grant-id ${grant.renewal_grant_id}`
     );
   }
   if (grant.revoked_at !== null) {
@@ -1037,19 +1504,19 @@ function describeRenewalGrant(grant) {
   }
   return lines;
 }
-var UUID_RE5, STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, STANDING_RESUME_ACTORS_SENTENCE, STANDING_GRANT_RULES;
+var UUID_RE6, STANDING_IDLE_PAUSE_DAYS, STANDING_RESUME_ACTORS, STANDING_RESUME_ACTORS_SENTENCE, STANDING_GRANT_RULES;
 var init_renewal_grants = __esm({
   "src/cloud/renewal-grants.ts"() {
     "use strict";
     init_config();
-    UUID_RE5 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE6 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     STANDING_IDLE_PAUSE_DAYS = 14;
     STANDING_RESUME_ACTORS = [
       "a workspace owner",
       "an admin",
       "the member who added the agent"
     ];
-    STANDING_RESUME_ACTORS_SENTENCE = orList(STANDING_RESUME_ACTORS);
+    STANDING_RESUME_ACTORS_SENTENCE = orList2(STANDING_RESUME_ACTORS);
     STANDING_GRANT_RULES = [
       "Access does not expire.",
       `${STANDING_IDLE_PAUSE_DAYS} days with no use pauses it; ${STANDING_RESUME_ACTORS_SENTENCE} can resume it.`,
@@ -1207,10 +1674,10 @@ async function requestSuccessor(options) {
       throw new RenewalMalformedResponseError("renewal response was not valid JSON");
     }
   }
-  if (options.listenerMode && response.status !== 401 && response.status !== 403 && body2.principal_id !== void 0 && body2.principal_id !== null && (typeof body2.principal_id !== "string" || !UUID_RE6.test(body2.principal_id))) {
+  if (options.listenerMode && response.status !== 401 && response.status !== 403 && body2.principal_id !== void 0 && body2.principal_id !== null && (typeof body2.principal_id !== "string" || !UUID_RE7.test(body2.principal_id))) {
     throw new RenewalMalformedResponseError("renewal response carried a malformed principal_id");
   }
-  const principalId = typeof body2.principal_id === "string" && UUID_RE6.test(body2.principal_id) ? body2.principal_id.toLowerCase() : null;
+  const principalId = typeof body2.principal_id === "string" && UUID_RE7.test(body2.principal_id) ? body2.principal_id.toLowerCase() : null;
   if (response.status === 401 || response.status === 403) {
     if (options.listenerMode) {
       if (response.status === 401 && body2.error === "unauthenticated") {
@@ -1337,7 +1804,7 @@ async function requestSuccessor(options) {
   }
   const tokenId = typeof body2.token_id === "string" ? body2.token_id : "";
   const runId = typeof body2.run_id === "string" ? body2.run_id : "";
-  if (!UUID_RE6.test(tokenId) || !UUID_RE6.test(runId) || principalId === null) {
+  if (!UUID_RE7.test(tokenId) || !UUID_RE7.test(runId) || principalId === null) {
     if (!options.listenerMode) throw new RenewalRefused(
       response.status,
       "incomplete_successor",
@@ -1409,7 +1876,7 @@ async function requestSuccessor(options) {
     ...wake === void 0 ? {} : { wake }
   };
 }
-var import_node_crypto4, AGENT_TOKEN_DEFAULT_TTL_MS, AGENT_TOKEN_MAX_TTL_MS, RENEWAL_HORIZON_DEFAULT_MS, RENEWAL_HORIZON_MAX_MS, RENEWAL_LEAD_FRACTION, RENEWAL_LEAD_FLOOR_MS, RENEWAL_LEAD_CEILING_MS, RENEWAL_PENDING_RECOVERY_MS, RENEW_TIMEOUT_MS, UUID_RE6, AGENT_TOKEN_RE3, RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended, RenewalUnsupported, RenewalSuperseded, RenewalOutcomeUnknown, RenewalMalformedResponseError, RenewalCredentialCheckError, RenewalRetryError, RenewalRefused, RenewalUpgradeRequiredError, RENEWAL_UPGRADE_LISTENER_ACTION, RENEWAL_UPGRADE_COMMAND_ACTION, REVOCATION_REASONS_LIST, REVOCATION_REASONS, REVOKED_MESSAGE, LOCALLY_EXPIRED_MESSAGE, UNEXPLAINED_REFUSAL_MESSAGE, AgentCredentialSession;
+var import_node_crypto4, AGENT_TOKEN_DEFAULT_TTL_MS, AGENT_TOKEN_MAX_TTL_MS, RENEWAL_HORIZON_DEFAULT_MS, RENEWAL_HORIZON_MAX_MS, RENEWAL_LEAD_FRACTION, RENEWAL_LEAD_FLOOR_MS, RENEWAL_LEAD_CEILING_MS, RENEWAL_PENDING_RECOVERY_MS, RENEW_TIMEOUT_MS, UUID_RE7, AGENT_TOKEN_RE3, RenewalReauthorisationRequired, RenewalRevoked, RenewalSuspended, RenewalUnsupported, RenewalSuperseded, RenewalOutcomeUnknown, RenewalMalformedResponseError, RenewalCredentialCheckError, RenewalRetryError, RenewalRefused, RenewalUpgradeRequiredError, RENEWAL_UPGRADE_LISTENER_ACTION, RENEWAL_UPGRADE_COMMAND_ACTION, REVOCATION_REASONS_LIST, REVOCATION_REASONS, REVOKED_MESSAGE, LOCALLY_EXPIRED_MESSAGE, UNEXPLAINED_REFUSAL_MESSAGE, AgentCredentialSession;
 var init_renewal = __esm({
   "src/cloud/renewal.ts"() {
     "use strict";
@@ -1426,7 +1893,7 @@ var init_renewal = __esm({
     RENEWAL_LEAD_CEILING_MS = 15 * 6e4;
     RENEWAL_PENDING_RECOVERY_MS = 60 * 6e4;
     RENEW_TIMEOUT_MS = 3e4;
-    UUID_RE6 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     AGENT_TOKEN_RE3 = /^swm_agt_[A-Za-z0-9_-]{43}$/;
     RenewalReauthorisationRequired = class extends Error {
       constructor(reason, principalId, message) {
@@ -2744,8 +3211,8 @@ function signalRetryDelayMs(retry, baseMs, random) {
 async function waitForSignalRetry(delayMs, deadline, callerAbort) {
   if (delayMs === 0) return "elapsed";
   let timer2;
-  const elapsed = new Promise((resolve7) => {
-    timer2 = setTimeout(() => resolve7("elapsed"), delayMs);
+  const elapsed = new Promise((resolve8) => {
+    timer2 = setTimeout(() => resolve8("elapsed"), delayMs);
   });
   try {
     const outcome = await raceSignalDeadline(elapsed, deadline, callerAbort);
@@ -3216,12 +3683,12 @@ var init_command_client = __esm({
         }
         const controller = new AbortController();
         let releaseDeadline;
-        const deadline = new Promise((resolve7) => {
-          releaseDeadline = resolve7;
+        const deadline = new Promise((resolve8) => {
+          releaseDeadline = resolve8;
         });
         let releaseCallerAbort;
-        const callerAbort = new Promise((resolve7) => {
-          releaseCallerAbort = resolve7;
+        const callerAbort = new Promise((resolve8) => {
+          releaseCallerAbort = resolve8;
         });
         let deadlineReached = false;
         const timer2 = setTimeout(() => {
@@ -3387,11 +3854,11 @@ async function lstatPath(path) {
   }
 }
 async function assertNotInsideRepository(absolute) {
-  let current = (0, import_node_path3.dirname)(absolute);
-  const root = (0, import_node_path3.parse)(current).root || "/";
+  let current = (0, import_node_path4.dirname)(absolute);
+  const root = (0, import_node_path4.parse)(current).root || "/";
   while (true) {
     try {
-      const info = await (0, import_promises3.lstat)((0, import_node_path3.join)(current, ".git"));
+      const info = await (0, import_promises3.lstat)((0, import_node_path4.join)(current, ".git"));
       if (info.isDirectory() || info.isFile() || info.isSymbolicLink()) {
         throw new SessionContextError(
           "session_context_inside_repository",
@@ -3402,13 +3869,13 @@ async function assertNotInsideRepository(absolute) {
       if (error2 instanceof SessionContextError) throw error2;
     }
     if (current === root) return;
-    const parent = (0, import_node_path3.dirname)(current);
+    const parent = (0, import_node_path4.dirname)(current);
     if (parent === current) return;
     current = parent;
   }
 }
 async function assertSafeAncestors(absolute) {
-  const parent = (0, import_node_path3.dirname)((0, import_node_path3.resolve)(absolute));
+  const parent = (0, import_node_path4.dirname)((0, import_node_path4.resolve)(absolute));
   let info;
   try {
     info = await lstatPath(parent);
@@ -3470,25 +3937,25 @@ async function ensureOwnedDirectory(path) {
   await assertOwnedDirectory(path, 448);
 }
 async function assertSafeContextPath(path) {
-  if (!(0, import_node_path3.isAbsolute)(path)) {
+  if (!(0, import_node_path4.isAbsolute)(path)) {
     throw new SessionContextError(
       "session_context_path_not_absolute",
       "session context path must be absolute"
     );
   }
-  const absolute = (0, import_node_path3.resolve)(path);
+  const absolute = (0, import_node_path4.resolve)(path);
   await assertSafeAncestors(absolute);
   await assertNotInsideRepository(absolute);
   return absolute;
 }
 async function assertSafeTokenFilePath(path) {
-  if (!(0, import_node_path3.isAbsolute)(path)) {
+  if (!(0, import_node_path4.isAbsolute)(path)) {
     throw new SessionContextError(
       "session_context_token_file_invalid",
       "token file path must be absolute"
     );
   }
-  const absolute = (0, import_node_path3.resolve)(path);
+  const absolute = (0, import_node_path4.resolve)(path);
   let info;
   try {
     info = await (0, import_promises3.lstat)(absolute);
@@ -3517,7 +3984,7 @@ async function assertSafeTokenFilePath(path) {
       `token file must be mode 0600 (found ${modeOf(info.mode).toString(8)})`
     );
   }
-  const parent = (0, import_node_path3.dirname)(absolute);
+  const parent = (0, import_node_path4.dirname)(absolute);
   const parentInfo = await (0, import_promises3.lstat)(parent);
   if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) {
     throw new SessionContextError(
@@ -3536,11 +4003,11 @@ async function assertSafeTokenFilePath(path) {
 }
 function defaultSessionRootDirectory() {
   const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg && (0, import_node_path3.isAbsolute)(xdg)) return (0, import_node_path3.join)(xdg, "cswarm", "sessions");
-  return (0, import_node_path3.join)((0, import_node_os3.homedir)(), ".config", "cswarm", "sessions");
+  if (xdg && (0, import_node_path4.isAbsolute)(xdg)) return (0, import_node_path4.join)(xdg, "cswarm", "sessions");
+  return (0, import_node_path4.join)((0, import_node_os3.homedir)(), ".config", "cswarm", "sessions");
 }
 function defaultSessionContextPath(workspaceId2, principalId, sessionId) {
-  return (0, import_node_path3.join)(
+  return (0, import_node_path4.join)(
     defaultSessionRootDirectory(),
     workspaceId2.toLowerCase(),
     principalId.toLowerCase(),
@@ -3575,7 +4042,7 @@ function parseSessionContext(raw) {
   const releasedAt = parseReleasedAt(row.released_at);
   const sessionKey = typeof row.session_key === "string" ? row.session_key : null;
   const keyOk = sessionKey !== null && (releasedAt !== null ? sessionKey === "" || isSessionKey(sessionKey) : isSessionKey(sessionKey));
-  if (row.version !== SESSION_CONTEXT_VERSION || typeof row.url !== "string" || !URL_RE.test(row.url) || typeof row.profile_id !== "string" || !/^[0-9a-f]{24}$/.test(row.profile_id) || typeof row.workspace_id !== "string" || !UUID_RE7.test(row.workspace_id) || typeof row.principal_id !== "string" || !UUID_RE7.test(row.principal_id) || typeof row.session_id !== "string" || !isSessionUuid(row.session_id) || typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 0 || sessionKey === null || !keyOk || provider === null || mode3 === null || typeof row.host_session_id !== "string" || row.host_session_id.length < 1 || row.host_session_id.length > 200 || typeof row.token_file !== "string" || !(0, import_node_path3.isAbsolute)(row.token_file) || typeof row.acquire_command_id !== "string" || !/^[A-Za-z0-9_-]{8,72}$/.test(row.acquire_command_id) || !(row.host_label === null || typeof row.host_label === "string" && row.host_label.length <= 120) || releasedAt === void 0) {
+  if (row.version !== SESSION_CONTEXT_VERSION || typeof row.url !== "string" || !URL_RE.test(row.url) || typeof row.profile_id !== "string" || !/^[0-9a-f]{24}$/.test(row.profile_id) || typeof row.workspace_id !== "string" || !UUID_RE8.test(row.workspace_id) || typeof row.principal_id !== "string" || !UUID_RE8.test(row.principal_id) || typeof row.session_id !== "string" || !isSessionUuid(row.session_id) || typeof row.generation !== "number" || !Number.isSafeInteger(row.generation) || row.generation < 0 || sessionKey === null || !keyOk || provider === null || mode3 === null || typeof row.host_session_id !== "string" || row.host_session_id.length < 1 || row.host_session_id.length > 200 || typeof row.token_file !== "string" || !(0, import_node_path4.isAbsolute)(row.token_file) || typeof row.acquire_command_id !== "string" || !/^[A-Za-z0-9_-]{8,72}$/.test(row.acquire_command_id) || !(row.host_label === null || typeof row.host_label === "string" && row.host_label.length <= 120) || releasedAt === void 0) {
     throw new SessionContextError(
       "session_context_corrupt",
       "session context fields are malformed"
@@ -3680,7 +4147,7 @@ function newSessionBinding(input) {
 }
 async function writeSessionContext(path, document2) {
   const absolute = await assertSafeContextPath(path);
-  await ensureOwnedDirectory((0, import_node_path3.dirname)(absolute));
+  await ensureOwnedDirectory((0, import_node_path4.dirname)(absolute));
   await assertSafeTokenFilePath(document2.token_file);
   const serialized = `${JSON.stringify(document2, null, 2)}
 `;
@@ -3741,8 +4208,8 @@ async function readSessionContextIfPresent(path) {
     throw error2;
   }
 }
-async function listSessionContexts(workspaceId2, principalId) {
-  const directory = (0, import_node_path3.join)(
+async function listSessionContextFiles(workspaceId2, principalId) {
+  const directory = (0, import_node_path4.join)(
     defaultSessionRootDirectory(),
     workspaceId2.toLowerCase(),
     principalId.toLowerCase()
@@ -3757,13 +4224,19 @@ async function listSessionContexts(workspaceId2, principalId) {
   for (const name of names.sort()) {
     if (!name.endsWith(".json")) continue;
     try {
-      const context = await readSessionContextIfPresent((0, import_node_path3.join)(directory, name));
-      if (context !== null) contexts.push(context);
+      const path = (0, import_node_path4.join)(directory, name);
+      const context = await readSessionContextIfPresent(path);
+      if (context !== null && context.workspace_id.toLowerCase() === workspaceId2.toLowerCase() && context.principal_id.toLowerCase() === principalId.toLowerCase()) {
+        contexts.push({ path, context });
+      }
     } catch {
       continue;
     }
   }
   return contexts;
+}
+async function listSessionContexts(workspaceId2, principalId) {
+  return (await listSessionContextFiles(workspaceId2, principalId)).map(({ context }) => context);
 }
 function assertLocalSessionBinding(context, input) {
   if (input.target.url !== context.url || input.target.profileId !== context.profile_id) {
@@ -3790,7 +4263,7 @@ function assertLocalSessionBinding(context, input) {
       "--url does not match the session context"
     );
   }
-  if (input.tokenFile !== void 0 && input.tokenFile !== null && (0, import_node_path3.resolve)(input.tokenFile) !== (0, import_node_path3.resolve)(context.token_file)) {
+  if (input.tokenFile !== void 0 && input.tokenFile !== null && (0, import_node_path4.resolve)(input.tokenFile) !== (0, import_node_path4.resolve)(context.token_file)) {
     throw new SessionContextError(
       "session_identity_mismatch",
       "--agent-token-file does not match the session context token file"
@@ -3829,9 +4302,9 @@ function assertAcquireBindingMatches(existing, requested) {
   );
 }
 function sessionReceiverLockPath(contextPath) {
-  const name = (0, import_node_path3.basename)(contextPath);
+  const name = (0, import_node_path4.basename)(contextPath);
   const stem = name.endsWith(".json") ? name.slice(0, -".json".length) : name;
-  return (0, import_node_path3.join)((0, import_node_path3.dirname)(contextPath), `${stem}.receiver.lock`);
+  return (0, import_node_path4.join)((0, import_node_path4.dirname)(contextPath), `${stem}.receiver.lock`);
 }
 function pidIsAlive(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -3898,7 +4371,7 @@ async function holdSessionReceiverLock(contextPath, kind, pid = process.pid) {
     );
   }
   const absolute = await assertSafeContextPath(contextPath);
-  await ensureOwnedDirectory((0, import_node_path3.dirname)(absolute));
+  await ensureOwnedDirectory((0, import_node_path4.dirname)(absolute));
   const lockPath = sessionReceiverLockPath(absolute);
   const wanted = { version: 1, kind, pid };
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -3937,19 +4410,19 @@ async function releaseSessionReceiverLockIfHeld(contextPath, pid = process.pid) 
   if (existing === null || existing.pid !== pid) return;
   await (0, import_promises3.unlink)(lockPath).catch(() => void 0);
 }
-var import_node_crypto7, import_promises3, import_node_os3, import_node_path3, UUID_RE7, MAX_CONTEXT_BYTES, URL_RE, SessionContextError, SESSION_ACQUIRE_BINDING_FIELDS, SESSION_RECEIVER_KINDS, RECEIVER_LOCK_MAX_BYTES;
+var import_node_crypto7, import_promises3, import_node_os3, import_node_path4, UUID_RE8, MAX_CONTEXT_BYTES, URL_RE, SessionContextError, SESSION_ACQUIRE_BINDING_FIELDS, SESSION_RECEIVER_KINDS, RECEIVER_LOCK_MAX_BYTES;
 var init_session_context = __esm({
   "src/cloud/session-context.ts"() {
     "use strict";
     import_node_crypto7 = require("node:crypto");
     import_promises3 = require("node:fs/promises");
     import_node_os3 = require("node:os");
-    import_node_path3 = require("node:path");
+    import_node_path4 = require("node:path");
     init_storage();
     init_session_contract();
     init_session_proof();
     init_command_client();
-    UUID_RE7 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE8 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     MAX_CONTEXT_BYTES = 16 * 1024;
     URL_RE = /^https?:\/\/[^/\s]+$/i;
     SessionContextError = class extends Error {
@@ -4235,15 +4708,19 @@ function requireProfileHost(profile, hostSessionId) {
   }
 }
 function privatePath(path) {
-  if (path.startsWith("~/")) path = (0, import_node_path4.join)((0, import_node_os4.homedir)(), path.slice(2));
-  if (!(0, import_node_path4.isAbsolute)(path) || /[\u0000-\u001f\u007f]/.test(path)) {
-    throw new AgentSetupError("profile_path_invalid", "Use an absolute private file path outside a repository.");
+  if (path.startsWith("~/")) path = (0, import_node_path5.join)((0, import_node_os4.homedir)(), path.slice(2));
+  if (!(0, import_node_path5.isAbsolute)(path) || /[\u0000-\u001f\u007f]/.test(path)) {
+    throw new AgentSetupError("profile_path_invalid", profilePathRemedy());
   }
-  return (0, import_node_path4.resolve)(path);
+  return (0, import_node_path5.resolve)(path);
+}
+function profilePathRemedy() {
+  const example = agentProfilePath("<deployment>", "<workspace-id>", "<principal-id>", "~/.cswarm");
+  return `Use an absolute private file path outside a repository, for example ${example}. Run cswarm profile ls to find saved profiles.`;
 }
 async function assertPrivateLocation(path) {
   const absolute = privatePath(path);
-  let current = (0, import_node_path4.dirname)(absolute);
+  let current = (0, import_node_path5.dirname)(absolute);
   while (true) {
     try {
       const info = await (0, import_promises4.lstat)(current);
@@ -4252,10 +4729,10 @@ async function assertPrivateLocation(path) {
         if (current !== "/tmp" && current !== "/var") {
           throw new AgentSetupError("profile_symlink", "A private state path must not pass through a symlink.");
         }
-        await assertPrivateLocation((0, import_node_path4.join)(resolved, "probe"));
+        await assertPrivateLocation((0, import_node_path5.join)(resolved, "probe"));
       }
       try {
-        await (0, import_promises4.lstat)((0, import_node_path4.join)(current, ".git"));
+        await (0, import_promises4.lstat)((0, import_node_path5.join)(current, ".git"));
         throw new AgentSetupError("profile_inside_repository", "Keep the connection file and agent profile outside repositories.");
       } catch (error2) {
         if (error2.code !== "ENOENT") throw error2;
@@ -4263,7 +4740,7 @@ async function assertPrivateLocation(path) {
     } catch (error2) {
       if (error2.code !== "ENOENT") throw error2;
     }
-    const parent = (0, import_node_path4.dirname)(current);
+    const parent = (0, import_node_path5.dirname)(current);
     if (parent === current) break;
     current = parent;
   }
@@ -4312,9 +4789,81 @@ function checkedTarget2(url, anonKey) {
 }
 function defaultAgentProfilePath(connection2) {
   const target2 = checkedTarget2(connection2.url, connection2.anon_key);
-  return (0, import_node_path4.join)((0, import_node_os4.homedir)(), ".cswarm", "agents", target2.profileId, connection2.workspace_id, connection2.principal_id, "profile.json");
+  return agentProfilePath(target2.profileId, connection2.workspace_id, connection2.principal_id);
 }
-async function readAgentProfile(path, hostSessionId) {
+async function refusePendingConnectProfile(path) {
+  const pending = (0, import_node_path5.join)((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.pending);
+  const present = await (0, import_promises4.lstat)(pending).then(() => true, (error2) => {
+    if (error2.code === "ENOENT") return false;
+    throw error2;
+  });
+  if (present) throw new AgentSetupError("setup_connect_pending", `This directory holds ${pending}. Keep it and use a new --profile path for setup.`);
+}
+function agentProfilePath(deployment, workspace, principal, root = agentProfileRoot()) {
+  return (0, import_node_path5.join)(root, "agents", deployment, workspace, principal, "profile.json");
+}
+function agentProfileRoot() {
+  return (0, import_node_path5.join)((0, import_node_os4.homedir)(), ".cswarm");
+}
+async function registeredProfilePaths(root) {
+  const raw = await readSecureJsonFileIfPresent((0, import_node_path5.join)(root, PROFILE_REGISTRY), PROFILE_REGISTRY_MAX_BYTES);
+  if (raw === null) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  if (!Array.isArray(parsed) || parsed.some((path) => typeof path !== "string" || !(0, import_node_path5.isAbsolute)(path))) {
+    throw new AgentSetupError("profile_registry_invalid", "The saved profile inventory is damaged.");
+  }
+  return parsed;
+}
+async function listAgentProfiles() {
+  const root = agentProfileRoot();
+  let registered = [];
+  const failures = [];
+  try {
+    registered = await registeredProfilePaths(root);
+  } catch {
+    failures.push({ path: (0, import_node_path5.join)(root, PROFILE_REGISTRY), error: "profile_registry_invalid" });
+  }
+  const paths = new Set(registered);
+  const walk = async (directory) => {
+    let entries;
+    try {
+      entries = await (0, import_promises4.readdir)(directory, { withFileTypes: true });
+    } catch (error2) {
+      const code = error2.code;
+      if (code === "ENOENT" && directory === root) return;
+      failures.push({ path: directory, error: code === "ENOENT" ? "directory_missing" : "directory_unreadable" });
+      return;
+    }
+    for (const entry2 of entries) {
+      const path = (0, import_node_path5.join)(directory, entry2.name);
+      if (entry2.isDirectory()) await walk(path);
+      else if (entry2.isFile() && entry2.name === "profile.json") paths.add(path);
+    }
+  };
+  await walk(root);
+  const profiles = [...failures];
+  for (const path of [...paths].sort()) {
+    try {
+      const profile = await readAgentProfile(path, void 0, true);
+      profiles.push({
+        path,
+        principal_id: profile.principal_id,
+        workspace_id: profile.workspace_id,
+        ...profile.workspace_name ? { workspace_name: profile.workspace_name } : {},
+        url_host: new URL(profile.url).host
+      });
+    } catch (error2) {
+      profiles.push({ path, error: error2 instanceof AgentSetupError ? error2.code : "profile_unreadable" });
+    }
+  }
+  return { searched_roots: [root], profiles };
+}
+async function readAgentProfile(path, hostSessionId, listing = false) {
   path = await assertPrivateLocation(path);
   const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
   if (raw === null) throw new AgentSetupError("profile_missing", "The agent profile is missing. Run cswarm setup with the connection file.");
@@ -4325,13 +4874,13 @@ async function readAgentProfile(path, hostSessionId) {
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   const required2 = ["version", "url", "anon_key", "workspace_id", "principal_id", "credential_file"];
-  const keys = Object.keys(p ?? {}).sort().join();
-  const keysAccepted = keys === [...required2].sort().join() || keys === [...required2, "workspace_name"].sort().join() || keys === [...required2, "host_session_id"].sort().join() || keys === [...required2, "workspace_name", "host_session_id"].sort().join();
-  if (!p || p.version !== 1 || !keysAccepted || p.host_session_id !== void 0 && (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200) || p.workspace_name !== void 0 && (typeof p.workspace_name !== "string" || p.workspace_name.length > 200) || typeof p.url !== "string" || typeof p.anon_key !== "string" || typeof p.workspace_id !== "string" || !ONBOARDING_UUID.test(p.workspace_id) || typeof p.principal_id !== "string" || !ONBOARDING_UUID.test(p.principal_id) || p.credential_file !== (0, import_node_path4.join)((0, import_node_path4.dirname)(path), "credential.json")) {
+  const keys = Object.keys(p ?? {});
+  const keysAccepted = required2.every((key2) => keys.includes(key2)) && keys.every((key2) => required2.includes(key2) || ["workspace_name", "host_session_id"].includes(key2));
+  if (!p || p.version !== 1 || !keysAccepted || p.host_session_id !== void 0 && (typeof p.host_session_id !== "string" || p.host_session_id.length < 1 || p.host_session_id.length > 200) || p.workspace_name !== void 0 && (typeof p.workspace_name !== "string" || p.workspace_name.length > 200) || typeof p.url !== "string" || typeof p.anon_key !== "string" || typeof p.workspace_id !== "string" || !ONBOARDING_UUID.test(p.workspace_id) || typeof p.principal_id !== "string" || !ONBOARDING_UUID.test(p.principal_id) || p.credential_file !== (0, import_node_path5.join)((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.credential)) {
     throw new AgentSetupError("profile_invalid", "The agent profile is damaged. Run setup again.");
   }
   checkedTarget2(p.url, p.anon_key);
-  requireProfileHost(p, hostSessionId);
+  if (!listing) requireProfileHost(p, hostSessionId);
   return p;
 }
 async function readProfileCredential(profile) {
@@ -4347,7 +4896,9 @@ async function openProfileCredential(profile, fetcher = fetch) {
   const store2 = await agentCredentialStore({ target: target2, lineageKey: credentialLineageKey(agent.token) });
   return AgentCredentialSession.open({ target: target2, workspaceId: profile.workspace_id, presented: agent, store: store2, fetcher });
 }
-async function saveAgentProfile(path, connection2, workspaceName, hostSessionId, refuseExisting = false) {
+async function saveAgentProfile(path, connection2, workspaceName, hostSessionId, refuseExisting = false, allowOrphanCredentialOrRegistryWrite = false, revokedOrphanPrincipalId, exclusiveWrite = writeSecureJsonFileExclusive, connectAttemptId, explicitRegistryWrite = writeSecureJsonFile) {
+  const allowOrphanCredential = typeof allowOrphanCredentialOrRegistryWrite === "boolean" ? allowOrphanCredentialOrRegistryWrite : false;
+  const registryWrite = typeof allowOrphanCredentialOrRegistryWrite === "function" ? allowOrphanCredentialOrRegistryWrite : explicitRegistryWrite;
   path = await assertPrivateLocation(path);
   const profile = {
     version: 1,
@@ -4355,14 +4906,15 @@ async function saveAgentProfile(path, connection2, workspaceName, hostSessionId,
     anon_key: connection2.anon_key,
     workspace_id: connection2.workspace_id,
     principal_id: connection2.principal_id,
-    credential_file: (0, import_node_path4.join)((0, import_node_path4.dirname)(path), "credential.json"),
+    credential_file: (0, import_node_path5.join)((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.credential),
     /* Only when the server actually gave one. The key is omitted rather than written null, so
-     * a profile from a deployment that does not send the name keeps exactly the six keys every
-     * released client already accepts. */
+     * an unbound profile without a workspace name keeps exactly the six keys every released
+     * client already accepts. */
     ...workspaceName === void 0 ? {} : { workspace_name: workspaceName },
     ...hostSessionId === void 0 || hostSessionId === "manual" ? {} : { host_session_id: hostSessionId }
   };
-  await withFileLock((0, import_node_path4.dirname)(path), "setup", async () => {
+  const save = async () => withFileLock((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+    if (connectAttemptId === void 0) await refusePendingConnectProfile(path);
     const existingRaw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
     if (existingRaw !== null) {
       if (refuseExisting) throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
@@ -4371,12 +4923,66 @@ async function saveAgentProfile(path, connection2, workspaceName, hostSessionId,
         throw new AgentSetupError("profile_conflict", "This profile belongs to another workspace or agent. Use a different profile path.");
       }
     }
-    if (refuseExisting && await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) !== null) {
+    const existingCredential = refuseExisting ? await readSecureJsonFileIfPresent(profile.credential_file, ONBOARDING_MAX_FILE_BYTES) : null;
+    if (refuseExisting && existingCredential !== null && !allowOrphanCredential) {
       throw new AgentSetupError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
     }
-    await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection2.credential));
+    const unfinishedClaim = refuseExisting && allowOrphanCredential && existingCredential === "";
+    if (existingCredential !== null && existingCredential !== JSON.stringify(connection2.credential) && !unfinishedClaim) {
+      if (!refuseExisting || !allowOrphanCredential || revokedOrphanPrincipalId !== connection2.principal_id) {
+        throw new AgentSetupError("profile_conflict", "The existing credential differs from the resumed attempt. Inspect the connection before retrying.");
+      }
+      const old = parseAgentCredentialInput(existingCredential, { kind: "file", path: profile.credential_file });
+      if (!old.durable || old.principalId !== revokedOrphanPrincipalId) {
+        throw new AgentSetupError("profile_conflict", "The existing credential belongs to another agent. Inspect the connection before retrying.");
+      }
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection2.credential));
+    }
+    if (unfinishedClaim) {
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection2.credential));
+    } else if (existingCredential === null && refuseExisting) {
+      await exclusiveWrite(profile.credential_file, JSON.stringify(connection2.credential));
+    } else if (existingCredential === null) {
+      await writeSecureJsonFile(profile.credential_file, JSON.stringify(connection2.credential));
+    }
+    if (connectAttemptId !== void 0) await writeSecureJsonFile((0, import_node_path5.join)((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.attemptMarker), JSON.stringify({ attemptId: connectAttemptId }));
     await writeSecureJsonFile(path, JSON.stringify(profile));
   });
+  if (connectAttemptId === void 0) {
+    await withFileLock((0, import_node_path5.dirname)(path), CONNECT_PROFILE_FILES.connectLock.slice(0, -5), save);
+  } else {
+    await save();
+  }
+  const root = agentProfileRoot();
+  let movedRegistry;
+  try {
+    await withFileLock(root, "profile-registry", async () => {
+      let paths;
+      try {
+        paths = await registeredProfilePaths(root);
+      } catch (error2) {
+        if (!(error2 instanceof AgentSetupError) || error2.code !== "profile_registry_invalid") throw error2;
+        const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+        movedRegistry = (0, import_node_path5.join)(root, `${PROFILE_REGISTRY}.damaged-${stamp}`);
+        await (0, import_promises4.rename)((0, import_node_path5.join)(root, PROFILE_REGISTRY), movedRegistry);
+        paths = [];
+      }
+      if (!paths.includes(path)) await registryWrite((0, import_node_path5.join)(root, PROFILE_REGISTRY), JSON.stringify([...paths, path]));
+    });
+    if (movedRegistry) process.stderr.write(`cswarm: Profile saved; damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)} and rebuilt.
+`);
+  } catch {
+    let modeCause = false;
+    let symlinkCause = false;
+    try {
+      const stat3 = await (0, import_promises4.lstat)(root);
+      modeCause = (stat3.mode & 511) !== 448;
+      symlinkCause = stat3.isSymbolicLink();
+    } catch {
+    }
+    process.stderr.write(modeCause ? symlinkCause ? "cswarm: Profile saved; inventory unavailable. ~/.cswarm must be a real private directory.\n" : "cswarm: Profile saved; inventory unavailable. Run chmod 700 ~/.cswarm to enable it.\n" : `cswarm: Profile saved; inventory unavailable.${movedRegistry ? ` Damaged inventory moved to ~/.cswarm/${movedRegistry.split("/").at(-1)}.` : ""} Run cswarm profile ls to inspect saved profiles.
+`);
+  }
   return profile;
 }
 function profileScopeKey(hostSessionId) {
@@ -4387,11 +4993,11 @@ function profileTarget(profile) {
 }
 async function profileSessionContext(profile, hostSessionId) {
   if (hostSessionId === void 0 || hostSessionId === "manual") return null;
-  const contexts = (await listSessionContexts(profile.workspace_id, profile.principal_id)).filter((c) => sessionProofOf(c) !== null);
+  const contexts = (await listSessionContextFiles(profile.workspace_id, profile.principal_id)).filter(({ context: context2 }) => sessionProofOf(context2) !== null);
   if (contexts.length === 0) return null;
-  const matches = contexts.filter((c) => c.host_session_id === hostSessionId);
+  const matches = contexts.filter(({ context: context2 }) => context2.host_session_id === hostSessionId);
   if (matches.length !== 1) throw new AgentSetupError("profile_session_conflict", "This agent has no single managed context for this host session. Check cswarm session status; do not use another session's context.");
-  const context = matches[0];
+  const { context, path } = matches[0];
   assertLocalSessionBinding(context, {
     target: profileTarget(profile),
     tokenPrincipalId: profile.principal_id,
@@ -4399,25 +5005,347 @@ async function profileSessionContext(profile, hostSessionId) {
     tokenFile: profile.credential_file,
     hostSessionId
   });
-  return { context, path: defaultSessionContextPath(profile.workspace_id, profile.principal_id, context.session_id) };
+  return { context, path };
 }
-var import_node_crypto8, import_promises4, import_node_os4, import_node_path4, ONBOARDING_MAX_FILE_BYTES;
+var import_node_crypto8, import_promises4, import_node_os4, import_node_path5, ONBOARDING_MAX_FILE_BYTES, PROFILE_REGISTRY, PROFILE_REGISTRY_MAX_BYTES;
 var init_agent_profile = __esm({
   "src/cloud/agent-profile.ts"() {
     "use strict";
     import_node_crypto8 = require("node:crypto");
     import_promises4 = require("node:fs/promises");
     import_node_os4 = require("node:os");
-    import_node_path4 = require("node:path");
+    import_node_path5 = require("node:path");
     init_config();
     init_agent_credential_input();
     init_agent_credential();
     init_renewal();
     init_session_context();
     init_storage();
+    init_connect_profile_files();
     init_agent_onboarding_contract();
     init_agent_connection_token();
     ONBOARDING_MAX_FILE_BYTES = 16 * 1024;
+    PROFILE_REGISTRY = "profile-paths.json";
+    PROFILE_REGISTRY_MAX_BYTES = 1024 * 1024;
+  }
+});
+
+// src/cloud/session-errors.ts
+function agentSessionErrorFromBody(status, body2) {
+  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
+    return null;
+  }
+  const error2 = body2.error;
+  if (typeof error2 !== "string" || !isAgentSessionErrorCode(error2)) return null;
+  return new AgentSessionError(status, error2);
+}
+var SESSION_ERROR_MESSAGES, AgentSessionError, SESSION_CLIENT_ERROR_MESSAGES, AgentSessionClientError;
+var init_session_errors = __esm({
+  "src/cloud/session-errors.ts"() {
+    "use strict";
+    init_command_client();
+    init_session_contract();
+    SESSION_ERROR_MESSAGES = {
+      session_proof_missing: "this agent is managed; a session proof is required before a write",
+      session_proof_invalid: "the session proof was rejected",
+      session_expired: "the execution session has expired; stop dispatch and recover",
+      session_retired: "this execution UUID is retired and cannot be used again",
+      session_conflict: "another live execution session already holds this agent",
+      session_not_managed: "managed sessions are not enabled for this agent; an owner or admin must enable them first",
+      session_already_managed: "managed sessions are already enabled for this agent",
+      session_leases_live: "legacy delivery leases are still live for this agent; stop the old receiver and wait for them to expire before enabling",
+      delivery_not_surfaced: "cannot mark an ask observed on a managed agent until it was surfaced into the bound host conversation"
+    };
+    AgentSessionError = class extends Error {
+      constructor(status, code) {
+        super(SESSION_ERROR_MESSAGES[code]);
+        this.status = status;
+        this.code = code;
+      }
+      status;
+      code;
+      name = "AgentSessionError";
+    };
+    SESSION_CLIENT_ERROR_MESSAGES = {
+      session_generation_invalid: "the session command returned a missing or invalid generation"
+    };
+    AgentSessionClientError = class extends Error {
+      constructor(code) {
+        super(SESSION_CLIENT_ERROR_MESSAGES[code]);
+        this.code = code;
+      }
+      code;
+      name = "AgentSessionClientError";
+    };
+  }
+});
+
+// src/cloud/session-client.ts
+async function postSessionCommand(options, input) {
+  const fetcher = options.fetcher ?? fetch;
+  const controller = new AbortController();
+  const timer2 = setTimeout(
+    () => controller.abort(),
+    options.timeoutMs ?? 3e4
+  );
+  const headers = {
+    authorization: `Bearer ${input.credential}`,
+    apikey: options.target.anonKey,
+    "content-type": "application/json",
+    ...input.proof ? proofHeaders(input.proof) : {},
+    ...input.acquireProof ? {
+      [AGENT_SESSION_ID_HEADER]: input.acquireProof.session_id,
+      [AGENT_SESSION_KEY_HEADER]: input.acquireProof.key
+    } : {}
+  };
+  let response;
+  try {
+    response = await fetcher(commandEndpoint(options.target), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        command_id: input.commandId,
+        client_version: CLIENT_PROTOCOL_VERSION,
+        workspace_id: input.workspaceId,
+        stream: { kind: "workspace" },
+        command: input.command
+      }),
+      signal: controller.signal
+    });
+  } catch (error2) {
+    const safeHeaders = JSON.stringify(redactSessionHeaders(headers));
+    if (error2.name === "AbortError") {
+      throw new CommandTransportError(
+        `session command timed out ${safeHeaders}`
+      );
+    }
+    throw new CommandTransportError(
+      `session command failed before a response ${safeHeaders}`
+    );
+  } finally {
+    clearTimeout(timer2);
+  }
+  let body2 = null;
+  try {
+    body2 = JSON.parse(await response.text());
+  } catch {
+    body2 = null;
+  }
+  if (!response.ok) {
+    const sessionError = agentSessionErrorFromBody(response.status, body2);
+    if (sessionError) throw sessionError;
+    throw new CommandTransportError(
+      `session command failed (HTTP ${response.status})`
+    );
+  }
+  return { status: response.status, body: body2 };
+}
+function acceptedGeneration(body2) {
+  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
+    throw new CommandTransportError("session command returned a malformed body");
+  }
+  const row = body2;
+  if (typeof row.generation === "number" && Number.isSafeInteger(row.generation) && row.generation >= 1) {
+    return row.generation;
+  }
+  throw new AgentSessionClientError("session_generation_invalid");
+}
+function optionalString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+function optionalGeneration(value) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) {
+    return value;
+  }
+  if (typeof value === "string" && /^[1-9][0-9]*$/.test(value)) {
+    const generation = Number(value);
+    return Number.isSafeInteger(generation) ? generation : null;
+  }
+  return null;
+}
+function parseServerSessionStatus(body2, principalId) {
+  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
+    throw new CommandTransportError("session status read returned a malformed body");
+  }
+  const row = body2;
+  const identity = row.identity !== null && typeof row.identity === "object" && !Array.isArray(row.identity) ? row.identity : null;
+  const agents = Array.isArray(row.agents) ? row.agents : [];
+  const wanted = principalId.toLowerCase();
+  const match = agents.find((agent) => {
+    if (agent === null || typeof agent !== "object" || Array.isArray(agent)) {
+      return false;
+    }
+    const id = agent.principal_id;
+    return typeof id === "string" && id.toLowerCase() === wanted;
+  });
+  const managedAt = optionalString(match?.managed_at) ?? optionalString(identity?.managed_at);
+  const lifecycle = match?.lifecycle_state === "enabled" || match?.lifecycle_state === "disabled" ? match.lifecycle_state : null;
+  return {
+    principal_id: wanted,
+    session_id: optionalString(match?.session_id)?.toLowerCase() ?? null,
+    generation: optionalGeneration(match?.generation),
+    lifecycle_state: lifecycle,
+    is_live: match?.is_live === true,
+    provider: optionalString(match?.provider),
+    host_label: optionalString(match?.host_label),
+    host_session_ref: optionalString(match?.host_session_ref),
+    started_at: optionalString(match?.started_at),
+    renewed_at: optionalString(match?.renewed_at),
+    expired_at: optionalString(match?.expired_at),
+    managed_at: managedAt
+  };
+}
+var AgentSessionClient, SessionStatusHttpError;
+var init_session_client = __esm({
+  "src/cloud/session-client.ts"() {
+    "use strict";
+    init_config();
+    init_command_client();
+    init_session_contract();
+    init_session_errors();
+    init_session_proof();
+    AgentSessionClient = class {
+      constructor(options) {
+        this.options = options;
+      }
+      options;
+      async acquire(request) {
+        const commandId = request.commandId ?? request.context.acquire_command_id;
+        const { body: body2 } = await postSessionCommand(this.options, {
+          credential: request.credential,
+          workspaceId: request.workspaceId,
+          commandId,
+          /* The server (session-wire.ts parseAgentSessionAcquireHeaders) reads the
+             session id and the private key from the proof headers and stores only
+             the key's digest; the body carries no key material and no digest. The
+             generation header is omitted: nothing has been acquired yet. */
+          acquireProof: {
+            session_id: request.context.session_id,
+            key: request.context.session_key
+          },
+          command: {
+            kind: ACQUIRE_AGENT_SESSION_KIND,
+            session_id: request.context.session_id,
+            provider: request.context.provider,
+            host_label: request.context.host_label,
+            host_session_ref: request.context.host_session_id
+          }
+        });
+        return { generation: acceptedGeneration(body2), commandId };
+      }
+      async renew(credential, workspaceId2, proof, commandId) {
+        await postSessionCommand(this.options, {
+          credential,
+          workspaceId: workspaceId2,
+          commandId: commandId ?? newCommandId(),
+          proof,
+          command: {
+            kind: RENEW_AGENT_SESSION_KIND,
+            session_id: proof.session_id,
+            generation: proof.generation
+          }
+        });
+      }
+      async release(credential, workspaceId2, proof, commandId) {
+        await postSessionCommand(this.options, {
+          credential,
+          workspaceId: workspaceId2,
+          commandId: commandId ?? newCommandId(),
+          proof,
+          command: {
+            kind: RELEASE_AGENT_SESSION_KIND,
+            session_id: proof.session_id,
+            generation: proof.generation
+          }
+        });
+      }
+      async enable(request) {
+        await postSessionCommand(this.options, {
+          credential: request.credential,
+          workspaceId: request.workspaceId,
+          commandId: request.commandId ?? newCommandId(),
+          command: {
+            kind: ENABLE_AGENT_MANAGEMENT_KIND,
+            principal_id: request.principalId
+          }
+        });
+      }
+      async disable(request) {
+        await postSessionCommand(this.options, {
+          credential: request.credential,
+          workspaceId: request.workspaceId,
+          commandId: request.commandId ?? newCommandId(),
+          command: {
+            kind: DISABLE_AGENT_MANAGEMENT_KIND,
+            principal_id: request.principalId
+          }
+        });
+      }
+      async recover(request) {
+        await postSessionCommand(this.options, {
+          credential: request.credential,
+          workspaceId: request.workspaceId,
+          commandId: request.commandId ?? newCommandId(),
+          command: {
+            kind: RECOVER_AGENT_SESSION_KIND,
+            principal_id: request.principalId
+          }
+        });
+      }
+      /** Read-only members resource: server session fields for this principal. */
+      async readStatus(input) {
+        const fetcher = this.options.fetcher ?? fetch;
+        const controller = new AbortController();
+        const timer2 = setTimeout(
+          () => controller.abort(),
+          this.options.timeoutMs ?? 3e4
+        );
+        const headers = {
+          authorization: `Bearer ${input.credential}`,
+          apikey: this.options.target.anonKey,
+          "content-type": "application/json"
+        };
+        let response;
+        try {
+          response = await fetcher(readEndpoint(this.options.target), {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              resource: "members",
+              workspace_id: input.workspaceId
+            }),
+            signal: controller.signal
+          });
+        } catch (error2) {
+          if (error2.name === "AbortError") {
+            throw new CommandTransportError("session status read timed out");
+          }
+          throw new CommandTransportError(
+            "session status read failed before a response"
+          );
+        } finally {
+          clearTimeout(timer2);
+        }
+        let body2 = null;
+        try {
+          body2 = JSON.parse(await response.text());
+        } catch {
+          body2 = null;
+        }
+        if (!response.ok) {
+          throw new SessionStatusHttpError(response.status);
+        }
+        return parseServerSessionStatus(body2, input.principalId);
+      }
+    };
+    SessionStatusHttpError = class extends Error {
+      constructor(status) {
+        super(`session status read failed (HTTP ${status})`);
+        this.status = status;
+      }
+      status;
+      name = "SessionStatusHttpError";
+    };
   }
 });
 
@@ -4462,7 +5390,7 @@ function validatedPayload(value) {
     throw new Error("invite link target is malformed");
   }
   cloudTarget(value.url, value.anon_key);
-  if (typeof value.workspace_id !== "string" || !UUID_RE8.test(value.workspace_id)) {
+  if (typeof value.workspace_id !== "string" || !UUID_RE9.test(value.workspace_id)) {
     throw new Error("invite link workspace_id must be a UUID");
   }
   if (typeof value.invitation_token !== "string") {
@@ -4472,7 +5400,7 @@ function validatedPayload(value) {
   if (typeof value.workspace_name !== "string" || typeof value.inviter_display_name !== "string" || value.workspace_name.length > MAX_LABEL_INPUT_LENGTH || value.inviter_display_name.length > MAX_LABEL_INPUT_LENGTH) {
     throw new Error("invite link display labels are malformed");
   }
-  if (value.inviter_user_id !== void 0 && (typeof value.inviter_user_id !== "string" || !UUID_RE8.test(value.inviter_user_id))) {
+  if (value.inviter_user_id !== void 0 && (typeof value.inviter_user_id !== "string" || !UUID_RE9.test(value.inviter_user_id))) {
     throw new Error("invite link inviter_user_id must be a UUID");
   }
   return value;
@@ -4553,8 +5481,8 @@ function parseAcceptPositional(value) {
   throw new Error(`${ACCEPT_INPUT_ERROR}; use --link-stdin to keep the link out of shell history`);
 }
 function loopback(target2) {
-  const hostname3 = new URL(target2.url).hostname;
-  return hostname3 === "127.0.0.1" || hostname3 === "localhost";
+  const hostname4 = new URL(target2.url).hostname;
+  return hostname4 === "127.0.0.1" || hostname4 === "localhost";
 }
 function devOrigins(value) {
   const origins = /* @__PURE__ */ new Set();
@@ -4605,7 +5533,7 @@ async function requirePinnedOrigin(target2, options) {
     throw new Error(`origin confirmation did not exactly match ${host}; refusing before login`);
   }
 }
-var import_node_crypto9, MAX_LINK_PAYLOAD_BYTES, MAX_LABEL_INPUT_LENGTH, CONTROL_GLOBAL_RE, ANSI_ESCAPE_GLOBAL_RE, UUID_RE8, STRICT_BASE64URL_RE, RAW_BASE64_PAYLOAD_CANDIDATE_RE, CURRENT_INVITE_SCHEME, RETIRED_INVITE_SCHEME, INVITE_WRAPPER_ERROR, ACCEPT_INPUT_ERROR, RETIRED_CLOUD_ORIGIN, PRODUCTION_CLOUD_ORIGINS;
+var import_node_crypto9, MAX_LINK_PAYLOAD_BYTES, MAX_LABEL_INPUT_LENGTH, CONTROL_GLOBAL_RE, ANSI_ESCAPE_GLOBAL_RE, UUID_RE9, STRICT_BASE64URL_RE, RAW_BASE64_PAYLOAD_CANDIDATE_RE, CURRENT_INVITE_SCHEME, RETIRED_INVITE_SCHEME, INVITE_WRAPPER_ERROR, ACCEPT_INPUT_ERROR, RETIRED_CLOUD_ORIGIN, PRODUCTION_CLOUD_ORIGINS;
 var init_invite_link = __esm({
   "src/cloud/invite-link.ts"() {
     "use strict";
@@ -4616,7 +5544,7 @@ var init_invite_link = __esm({
     MAX_LABEL_INPUT_LENGTH = 1024;
     CONTROL_GLOBAL_RE = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
     ANSI_ESCAPE_GLOBAL_RE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
-    UUID_RE8 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     STRICT_BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
     RAW_BASE64_PAYLOAD_CANDIDATE_RE = /^[A-Za-z0-9+/_=-]+$/;
     CURRENT_INVITE_SCHEME = "cswarm://accept/";
@@ -4632,7 +5560,7 @@ var init_invite_link = __esm({
 
 // src/cloud/workspaces.ts
 function resolveWorkspaceMember(selector, members2) {
-  if (UUID_RE9.test(selector)) {
+  if (UUID_RE10.test(selector)) {
     const selected = members2.find(
       (member) => member.user_id === selector.toLowerCase()
     );
@@ -4666,7 +5594,7 @@ function sortWorkspaces(workspaces) {
   );
 }
 function checkedUuid(value, field) {
-  if (typeof value !== "string" || !UUID_RE9.test(value)) {
+  if (typeof value !== "string" || !UUID_RE10.test(value)) {
     throw new Error(`workspace read returned a malformed ${field}`);
   }
   return value.toLowerCase();
@@ -4985,13 +5913,13 @@ async function updateWorkspaceDefaultAfterClose(store2, userId, closedWorkspaceI
 }
 function workspaceOverride(explicit, environmental) {
   if (explicit !== void 0) {
-    if (!UUID_RE9.test(explicit)) {
+    if (!UUID_RE10.test(explicit)) {
       throw new Error("--workspace-id must be a UUID");
     }
     return explicit.toLowerCase();
   }
   if (environmental) {
-    if (!UUID_RE9.test(environmental)) {
+    if (!UUID_RE10.test(environmental)) {
       throw new Error("SWARM_CLOUD_WORKSPACE_ID must be a UUID");
     }
     return environmental.toLowerCase();
@@ -5051,7 +5979,7 @@ async function selectWorkspace(selector, workspaces, store2, userId) {
 function resolveWorkspaceSelector(selector, workspaces) {
   const sorted = sortWorkspaces(workspaces);
   let selected;
-  if (UUID_RE9.test(selector)) {
+  if (UUID_RE10.test(selector)) {
     const normalized = selector.toLowerCase();
     selected = sorted.find(
       (workspace) => workspace.workspace_id === normalized
@@ -5069,8 +5997,8 @@ function resolveWorkspaceSelector(selector, workspaces) {
   if (!selected) throw new WorkspaceUnavailableError();
   return selected;
 }
-function holderLabel(holder) {
-  return holder.name === null ? holder.id : `${holder.name} (${holder.id})`;
+function holderLabel(holder2) {
+  return holder2.name === null ? holder2.id : `${holder2.name} (${holder2.id})`;
 }
 function relativeMagnitude(milliseconds) {
   const magnitude = Math.abs(milliseconds);
@@ -5160,13 +6088,13 @@ function renderStatus(options) {
   }
   return lines.join("\n");
 }
-var UUID_RE9, ROLES, MemberSelectionError, DEFAULT_MEMBERSHIP_REVOKED, PROJECT_NOT_AVAILABLE, ARCHIVED_PROJECT_NOT_AVAILABLE, WorkspaceCliError, WorkspaceResolutionError, WorkspaceUnavailableError, WorkspaceAmbiguousNameError;
+var UUID_RE10, ROLES, MemberSelectionError, DEFAULT_MEMBERSHIP_REVOKED, PROJECT_NOT_AVAILABLE, ARCHIVED_PROJECT_NOT_AVAILABLE, WorkspaceCliError, WorkspaceResolutionError, WorkspaceUnavailableError, WorkspaceAmbiguousNameError;
 var init_workspaces = __esm({
   "src/cloud/workspaces.ts"() {
     "use strict";
     init_invite_link();
     init_renewal_grants();
-    UUID_RE9 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE10 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     ROLES = /* @__PURE__ */ new Set(["owner", "admin", "member"]);
     MemberSelectionError = class extends Error {
       constructor(code, message, matches = []) {
@@ -5303,7 +6231,7 @@ function parseSignalAttachments(value, options = {}) {
       throw new SignalAttachmentMalformedError("signal read returned a malformed attachment");
     }
     const row = valueAtPosition;
-    if (typeof row.file_id !== "string" || !UUID_RE10.test(row.file_id) || typeof row.version_n !== "number" || !Number.isSafeInteger(row.version_n) || row.version_n < 1 || typeof row.name !== "string" || row.name.length < 1 || row.name.length > 255 || typeof row.content_type !== "string" || row.content_type.length < 1 || typeof row.size_bytes !== "number" || !Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0) {
+    if (typeof row.file_id !== "string" || !UUID_RE11.test(row.file_id) || typeof row.version_n !== "number" || !Number.isSafeInteger(row.version_n) || row.version_n < 1 || typeof row.name !== "string" || row.name.length < 1 || row.name.length > 255 || typeof row.content_type !== "string" || row.content_type.length < 1 || typeof row.size_bytes !== "number" || !Number.isSafeInteger(row.size_bytes) || row.size_bytes < 0) {
       throw new SignalAttachmentMalformedError("signal read returned malformed attachment metadata");
     }
     const fileId = row.file_id.toLowerCase();
@@ -5323,7 +6251,7 @@ function parseSignalAttachments(value, options = {}) {
   return attachments;
 }
 function attachmentRetrievalCommand(workspaceId2, attachment) {
-  if (!UUID_RE10.test(workspaceId2) || !UUID_RE10.test(attachment.file_id)) {
+  if (!UUID_RE11.test(workspaceId2) || !UUID_RE11.test(attachment.file_id)) {
     throw new Error("attachment retrieval command needs UUID identifiers");
   }
   if (!Number.isSafeInteger(attachment.version_n) || attachment.version_n < 1) {
@@ -5337,12 +6265,12 @@ function formatAttachmentSize(bytes) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-var SIGNAL_ATTACHMENT_MAX, UUID_RE10, SignalAttachmentMalformedError;
+var SIGNAL_ATTACHMENT_MAX, UUID_RE11, SignalAttachmentMalformedError;
 var init_attachments = __esm({
   "src/cloud/attachments.ts"() {
     "use strict";
     SIGNAL_ATTACHMENT_MAX = 8;
-    UUID_RE10 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    UUID_RE11 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     SignalAttachmentMalformedError = class extends Error {
       name = "SignalAttachmentMalformedError";
     };
@@ -5362,7 +6290,7 @@ function plainMalformedError(message) {
   return error2;
 }
 function checkedUuid2(value, field) {
-  if (typeof value !== "string" || !UUID_RE11.test(value)) {
+  if (typeof value !== "string" || !UUID_RE12.test(value)) {
     throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
   return value.toLowerCase();
@@ -5376,7 +6304,7 @@ function checkedBoolean(value, field) {
   }
   return value;
 }
-function checkedTimestamp(value, field) {
+function checkedTimestamp2(value, field) {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
     throw new SignalMalformedError(`signal read returned a malformed ${field}`);
   }
@@ -5485,8 +6413,8 @@ function parseSignalRecord(value, options = {}) {
     attachments: parseSignalAttachments(row.attachments, {
       enabled: options.attachmentsEnabled !== false
     }),
-    until: checkedTimestamp(row.until, "until"),
-    created_at: checkedTimestamp(row.created_at, "created_at"),
+    until: checkedTimestamp2(row.until, "until"),
+    created_at: checkedTimestamp2(row.created_at, "created_at"),
     sender_owner_relation: senderOwnerRelation,
     /* ABSENT AND NULL ARE DIFFERENT HERE, and the difference is a claim.
      *
@@ -5521,7 +6449,7 @@ function cursorFromUnknown(value) {
   const row = value;
   try {
     return {
-      created_at: checkedTimestamp(row.created_at, "created_at"),
+      created_at: checkedTimestamp2(row.created_at, "created_at"),
       id: checkedUuid2(row.id, "id")
     };
   } catch {
@@ -5558,7 +6486,7 @@ function compareSignalCursor(a, b2) {
 function checkedAfter(value) {
   if (value === void 0) return void 0;
   return {
-    created_at: checkedTimestamp(value.created_at, "after.created_at"),
+    created_at: checkedTimestamp2(value.created_at, "after.created_at"),
     id: checkedUuid2(value.id, "after.id")
   };
 }
@@ -5742,8 +6670,8 @@ async function fetchSignalRead(fetcher, input, init, timeoutMs = SIGNAL_READ_TIM
   const signal = init.signal ? AbortSignal.any([init.signal, deadlineController.signal]) : deadlineController.signal;
   let onAbort = () => {
   };
-  const aborted2 = new Promise((resolve7) => {
-    onAbort = () => resolve7("timeout");
+  const aborted2 = new Promise((resolve8) => {
+    onAbort = () => resolve8("timeout");
     if (signal.aborted) {
       onAbort();
     } else {
@@ -5798,7 +6726,7 @@ async function fetchSignalRead(fetcher, input, init, timeoutMs = SIGNAL_READ_TIM
     signal.removeEventListener("abort", onAbort);
   }
 }
-async function fetchSignalReadRetrying(fetcher, input, init, timeoutMs = SIGNAL_READ_TIMEOUT_MS, sleep2 = (ms) => new Promise((resolve7) => setTimeout(resolve7, ms))) {
+async function fetchSignalReadRetrying(fetcher, input, init, timeoutMs = SIGNAL_READ_TIMEOUT_MS, sleep2 = (ms) => new Promise((resolve8) => setTimeout(resolve8, ms))) {
   let result = await fetchSignalRead(fetcher, input, init, timeoutMs);
   for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
     if (result === null || result.response.ok) return result;
@@ -6087,12 +7015,15 @@ async function readAgentSignalDirectory(target2, token, workspaceId2, fetcherOrO
   return {
     members: payload.members.map(parseMemberRow),
     agents,
-    ...payload.identity === void 0 ? {} : { identity: parseAgentIdentity(payload.identity) }
+    ...payload.identity === void 0 ? {} : (() => {
+      const identity = parseAgentIdentity(payload.identity);
+      return { identity, sessionStatus: parseServerSessionStatus(body2, identity.principal_id) };
+    })()
   };
 }
 function resolveSignalRecipient(selector, directory) {
   const resolved = Array.isArray(directory) ? { members: directory, agents: [] } : directory;
-  if (UUID_RE11.test(selector)) {
+  if (UUID_RE12.test(selector)) {
     const normalized = selector.toLowerCase();
     const member = resolved.members.find((row) => row.user_id === normalized);
     const agent = resolved.agents.find(
@@ -6145,7 +7076,7 @@ function nextWaitSleepMs(nowMs, deadlineMs, pollMs = SIGNAL_WAIT_POLL_MS) {
 }
 async function pollForSignals(options) {
   const now = options.now ?? Date.now;
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   const pollMs = options.pollMs ?? SIGNAL_WAIT_POLL_MS;
   const probe = async () => {
     try {
@@ -6170,10 +7101,10 @@ async function pollForSignals(options) {
   return { signals: [], timedOut: true };
 }
 function normalizedSignalQuery(query) {
-  if (!UUID_RE11.test(query.workspaceId)) {
+  if (!UUID_RE12.test(query.workspaceId)) {
     throw new Error("--workspace-id must be a UUID");
   }
-  if (query.in_reply_to !== void 0 && !UUID_RE11.test(query.in_reply_to)) {
+  if (query.in_reply_to !== void 0 && !UUID_RE12.test(query.in_reply_to)) {
     throw new Error("in_reply_to must be a signal UUID");
   }
   const after = checkedAfter(query.after);
@@ -6221,6 +7152,47 @@ async function readSignals(target2, credential, query, fetcherOrOptions = fetch)
       maxMalformedRows: 0
     }
   )).signals;
+}
+async function readDirectedInboxSince(target2, credential, query, fetcherOrOptions = fetch) {
+  const rows3 = [];
+  let after;
+  const pageSize = 100;
+  const options = normalizeReadOptions(fetcherOrOptions);
+  const started = options.now();
+  let pages = 0;
+  const deadlineMs = Math.min(options.deadlineMs ?? Infinity, started + INBOX_SINCE_TIME_CAP_MS);
+  while (true) {
+    let page;
+    try {
+      page = await readAgentSignalPage(target2, credential, {
+        ...query,
+        inbox: true,
+        ascending: true,
+        limit: pageSize,
+        ...after ? { after } : {}
+      }, { ...options, deadlineMs });
+    } catch (error2) {
+      if (error2 instanceof SignalReadTimeoutError && after && rows3.length > 0) {
+        if (typeof fetcherOrOptions !== "function") fetcherOrOptions.onTruncated?.(after);
+        return rows3.reverse();
+      }
+      throw error2;
+    }
+    if (!page.capabilities.cursorAfter || page.legacyCursorFallback) {
+      throw new InboxSinceError("inbox_paging_unsupported", "This deployment cannot page inbox --since without gaps. Update the read service.");
+    }
+    pages += 1;
+    rows3.push(...page.signals);
+    if (page.rawCount < pageSize) return rows3.reverse();
+    if (page.nextCursor === null || after && page.nextCursor.created_at === after.created_at && page.nextCursor.id === after.id) {
+      throw new InboxSinceError("inbox_page_stalled", "The inbox page did not advance. Retry after the read service is updated.");
+    }
+    after = page.nextCursor;
+    if (pages >= INBOX_SINCE_PAGE_CAP || options.now() - started >= INBOX_SINCE_TIME_CAP_MS) {
+      if (typeof fetcherOrOptions !== "function") fetcherOrOptions.onTruncated?.(after);
+      return rows3.reverse();
+    }
+  }
 }
 async function settleSignalAuthorLabels(labels) {
   return await labels.catch(() => ({
@@ -6515,14 +7487,14 @@ async function runInboxFollow(options) {
     let timer2;
     let onAbort;
     try {
-      await new Promise((resolve7) => {
+      await new Promise((resolve8) => {
         let settled = false;
         const finish = () => {
           if (settled) return;
           settled = true;
           if (timer2 !== void 0) clearTimeout(timer2);
           if (onAbort && abort) abort.removeEventListener("abort", onAbort);
-          resolve7();
+          resolve8();
         };
         if (abort) {
           if (abort.aborted) {
@@ -6679,7 +7651,7 @@ async function runInboxFollow(options) {
     }
   }
 }
-var UUID_RE11, SIGNAL_KINDS, SIGNAL_BODY_DISPLAY_MAX, SIGNAL_ABOUT_DISPLAY_MAX, SIGNAL_READ_TIMEOUT_MS, SignalReadTimeoutError, SignalHostPortsExhaustedError, SIGNAL_WAIT_MIN_SECONDS, SIGNAL_WAIT_MAX_SECONDS, SIGNAL_WAIT_POLL_MS, SIGNAL_FOLLOW_POLL_MS, SIGNAL_FOLLOW_BACKOFF_INITIAL_MS, SIGNAL_FOLLOW_BACKOFF_MAX_MS, SIGNAL_FOLLOW_SEEN_MAX, SIGNAL_FOLLOW_POST_EMIT_MS, SIGNAL_FOLLOW_PAGE_LIMIT, SignalHttpError, SignalTransportError, LocalCredentialSecretAbsentError, ListenerCredentialStateMismatchError, SignalMalformedError, SignalRecipientError, plainHttpRetryAfterMs, plainHttpStatus, plainHttpEnvelope, plainTransportErrors, plainTransportFailureCodes, plainMalformedErrors, SENDER_OWNER_RELATIONS, SIGNAL_RECIPIENT_KINDS, READ_RETRY_ATTEMPTS, READ_RETRY_BASE_MS, SIGNAL_STATUS_UNAVAILABLE_MESSAGE, ASK_WAIT_TIMEOUT_MESSAGE, BoundedSignalIdSet, DEFAULT_REFUSAL_TOLERANCE_MS, MAX_REFUSAL_TOLERANCE_MS, CONFIRMED_CREDENTIAL_LOSS_CODES, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES, READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
+var UUID_RE12, SIGNAL_KINDS, SIGNAL_BODY_DISPLAY_MAX, SIGNAL_ABOUT_DISPLAY_MAX, SIGNAL_READ_TIMEOUT_MS, SignalReadTimeoutError, SignalHostPortsExhaustedError, SIGNAL_WAIT_MIN_SECONDS, SIGNAL_WAIT_MAX_SECONDS, SIGNAL_WAIT_POLL_MS, SIGNAL_FOLLOW_POLL_MS, SIGNAL_FOLLOW_BACKOFF_INITIAL_MS, SIGNAL_FOLLOW_BACKOFF_MAX_MS, SIGNAL_FOLLOW_SEEN_MAX, SIGNAL_FOLLOW_POST_EMIT_MS, SIGNAL_FOLLOW_PAGE_LIMIT, SignalHttpError, SignalTransportError, LocalCredentialSecretAbsentError, ListenerCredentialStateMismatchError, SignalMalformedError, SignalRecipientError, plainHttpRetryAfterMs, plainHttpStatus, plainHttpEnvelope, plainTransportErrors, plainTransportFailureCodes, plainMalformedErrors, SENDER_OWNER_RELATIONS, SIGNAL_RECIPIENT_KINDS, INBOX_SINCE_EXAMPLE, SINCE_OFFSET_GUIDANCE, READ_RETRY_ATTEMPTS, READ_RETRY_BASE_MS, INBOX_SINCE_PAGE_CAP, INBOX_SINCE_TIME_CAP_MS, InboxSinceError, SIGNAL_STATUS_UNAVAILABLE_MESSAGE, ASK_WAIT_TIMEOUT_MESSAGE, BoundedSignalIdSet, DEFAULT_REFUSAL_TOLERANCE_MS, MAX_REFUSAL_TOLERANCE_MS, CONFIRMED_CREDENTIAL_LOSS_CODES, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODES, READ_CONFIRMED_CREDENTIAL_LOSS_CODE_SET, COMMAND_CONFIRMED_CREDENTIAL_LOSS_CODE_SET;
 var init_signals = __esm({
   "src/cloud/signals.ts"() {
     "use strict";
@@ -6689,15 +7661,16 @@ var init_signals = __esm({
     init_error_envelope();
     init_attachments();
     init_wake();
-    UUID_RE11 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    init_session_client();
+    UUID_RE12 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     SIGNAL_KINDS = /* @__PURE__ */ new Set(["working-on", "note", "ask"]);
     SIGNAL_BODY_DISPLAY_MAX = 8e3;
     SIGNAL_ABOUT_DISPLAY_MAX = 500;
     SIGNAL_READ_TIMEOUT_MS = 3e4;
     SignalReadTimeoutError = class extends Error {
-      constructor(message = "signal read timed out", phase = "response") {
+      constructor(message = "signal read timed out", phase2 = "response") {
         super(message);
-        this.phase = phase;
+        this.phase = phase2;
         this.name = "SignalReadTimeoutError";
       }
       phase;
@@ -6778,8 +7751,19 @@ var init_signals = __esm({
       "user",
       "agent"
     ]);
+    INBOX_SINCE_EXAMPLE = "2026-09-25T12:00:00+00:00";
+    SINCE_OFFSET_GUIDANCE = `For --since, include a time zone when using a timestamp, for example ${INBOX_SINCE_EXAMPLE}.`;
     READ_RETRY_ATTEMPTS = 2;
     READ_RETRY_BASE_MS = 250;
+    INBOX_SINCE_PAGE_CAP = 10;
+    INBOX_SINCE_TIME_CAP_MS = 2e4;
+    InboxSinceError = class extends Error {
+      constructor(code, message) {
+        super(message);
+        this.code = code;
+      }
+      code;
+    };
     SIGNAL_STATUS_UNAVAILABLE_MESSAGE = "Signal summary is temporarily unavailable; core workspace status is still shown.";
     ASK_WAIT_TIMEOUT_MESSAGE = "Ask shared. No reply arrived before the wait ended; the ask remains live. Check for a reply with: cswarm inbox";
     BoundedSignalIdSet = class {
@@ -6848,7 +7832,763 @@ var init_agent_check_budget = __esm({
   }
 });
 
+// src/cloud/session-ack.ts
+function managedAckMessage(code) {
+  return MANAGED_ACK_MESSAGES[code];
+}
+function canAckManagedDelivery(input) {
+  if (input.proof === null) return { ok: false, code: "ack_proof_missing" };
+  if (input.proof.session_id !== input.context.session_id || input.proof.generation !== input.context.generation || input.proof.key !== input.context.session_key || input.context.generation < 1) {
+    return { ok: false, code: "ack_proof_stale" };
+  }
+  if (!input.injectionSucceeded) {
+    return { ok: false, code: "ack_injection_unproven" };
+  }
+  if (!input.hostIdentityTrusted || input.observedHostSessionId === null) {
+    return { ok: false, code: "ack_host_session_untrusted" };
+  }
+  if (input.observedHostSessionId !== input.context.host_session_id) {
+    return { ok: false, code: "ack_host_session_mismatch" };
+  }
+  return { ok: true };
+}
+function assertManagedAckAllowed(input) {
+  const decision = canAckManagedDelivery(input);
+  if (!decision.ok) throw new ManagedAckRefusedError(decision.code);
+}
+function managedAckInput(input) {
+  return {
+    context: input.context,
+    proof: input.proof !== void 0 ? input.proof : sessionProofOf(input.context),
+    injectionSucceeded: input.injectionSucceeded,
+    observedHostSessionId: input.observedHostSessionId,
+    hostIdentityTrusted: input.hostIdentityTrusted
+  };
+}
+var ManagedAckRefusedError, MANAGED_ACK_MESSAGES;
+var init_session_ack = __esm({
+  "src/cloud/session-ack.ts"() {
+    "use strict";
+    init_session_context();
+    ManagedAckRefusedError = class extends Error {
+      constructor(code) {
+        super(managedAckMessage(code));
+        this.code = code;
+      }
+      code;
+      name = "ManagedAckRefusedError";
+    };
+    MANAGED_ACK_MESSAGES = {
+      ack_proof_missing: "cannot mark an ask received without a current session proof",
+      ack_proof_stale: "cannot mark an ask received with a stale session proof",
+      ack_injection_unproven: "cannot mark an ask received until it is injected into the bound host conversation",
+      ack_host_session_mismatch: "cannot mark an ask received: the host conversation is not the bound session",
+      ack_host_session_untrusted: "cannot mark an ask received: the host did not prove the current conversation"
+    };
+  }
+});
+
+// src/cloud/delivery.ts
+function orList3(values2) {
+  return values2.length <= 1 ? values2.join("") : `${values2.slice(0, -1).join(", ")}, or ${values2[values2.length - 1]}`;
+}
+function observationCommandId(signalId) {
+  checkedUuidRequest(signalId, "signalId");
+  return `observe_${signalId.toLowerCase().replaceAll("-", "")}`;
+}
+function checkedUuid3(value, field) {
+  if (typeof value !== "string" || !UUID_RE13.test(value)) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  return value.toLowerCase();
+}
+function isLeapYear(year) {
+  return year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+}
+function daysInMonth(year, month) {
+  switch (month) {
+    case 1:
+    case 3:
+    case 5:
+    case 7:
+    case 8:
+    case 10:
+    case 12:
+      return 31;
+    case 4:
+    case 6:
+    case 9:
+    case 11:
+      return 30;
+    case 2:
+      return isLeapYear(year) ? 29 : 28;
+    default:
+      return 0;
+  }
+}
+function checkedRfc3339Timestamp(value, field) {
+  if (typeof value !== "string") {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  const match = RFC3339_TIMESTAMP_RE.exec(value);
+  if (!match) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  const hour = parseInt(match[4], 10);
+  const minute = parseInt(match[5], 10);
+  const second = parseInt(match[6], 10);
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  if (match[7] !== void 0 && match[8] !== void 0) {
+    const offsetHour = Math.abs(parseInt(match[7], 10));
+    const offsetMin = parseInt(match[8], 10);
+    if (offsetHour > 23 || offsetMin < 0 || offsetMin > 59) {
+      throw new DeliveryMalformedResponseError(
+        `delivery response returned a malformed ${field}`
+      );
+    }
+  }
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  return value;
+}
+function checkedLiveLease(leasedUntil, now) {
+  if (Date.parse(leasedUntil) <= now()) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned an already expired lease"
+    );
+  }
+}
+function checkedRelation(value) {
+  if (typeof value !== "string" || !SENDER_OWNER_RELATIONS2.has(value)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery response returned a malformed sender_owner_relation"
+    );
+  }
+  return value;
+}
+function checkedNonNegativeCount(value, field) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+  return value;
+}
+function checkedClaimCapabilities(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response is missing delivery capabilities"
+    );
+  }
+  const row = value;
+  for (const marker of ["delivery_claim", "delivery_ack", "sender_owner_relation"]) {
+    if (row[marker] !== 1) {
+      throw new DeliveryMalformedResponseError(
+        `delivery claim response is missing the ${marker} capability`
+      );
+    }
+  }
+  return { deliveryClaim: true, deliveryAck: true, senderOwnerRelation: true };
+}
+function checkedOptionalUuidArray(value, field) {
+  if (value === void 0) return;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !UUID_RE13.test(item))) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+}
+function checkedOptionalArray(value, field) {
+  if (value === void 0) return;
+  if (!Array.isArray(value)) {
+    throw new DeliveryMalformedResponseError(
+      `delivery response returned a malformed ${field}`
+    );
+  }
+}
+function checkedRecipientSlot(row) {
+  const hasPosition = Object.hasOwn(row, "recipient_position");
+  const hasCount = Object.hasOwn(row, "recipient_count");
+  if (!hasPosition && !hasCount) return { position: null, count: null };
+  if (!hasPosition || !hasCount) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a recipient position without its count"
+    );
+  }
+  const position = checkedNonNegativeCount(
+    row.recipient_position,
+    "recipient_position"
+  );
+  const count2 = checkedNonNegativeCount(row.recipient_count, "recipient_count");
+  if (count2 < 1 || position >= count2) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a recipient position outside its set"
+    );
+  }
+  return { position, count: count2 };
+}
+function parseDeliveryRow(value, expected, index, now) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a malformed delivery row"
+    );
+  }
+  const row = value;
+  let signal;
+  try {
+    signal = parseSignalRecord(row.signal);
+  } catch {
+    throw new DeliveryMalformedResponseError(
+      `delivery claim response returned a malformed signal at ${index}`
+    );
+  }
+  if (signal.workspace_id !== expected.workspaceId) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a signal for another workspace"
+    );
+  }
+  if (signal.to_agent !== expected.principalId) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a signal addressed to another agent"
+    );
+  }
+  if (!DELIVERY_KINDS.has(signal.kind)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned a non-direct signal kind"
+    );
+  }
+  const senderOwnerRelation = checkedRelation(row.sender_owner_relation);
+  const leaseId = checkedUuid3(row.lease_id, "lease_id");
+  const leasedUntil = checkedRfc3339Timestamp(row.leased_until, "leased_until");
+  checkedLiveLease(leasedUntil, now);
+  const slot = checkedRecipientSlot(row);
+  signal.sender_owner_relation = senderOwnerRelation;
+  return {
+    signal,
+    leaseId,
+    leasedUntil,
+    senderOwnerRelation,
+    recipientPosition: slot.position,
+    recipientCount: slot.count
+  };
+}
+function parseClaimSuccess(body2, expected, now) {
+  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
+    throw new DeliveryMalformedResponseError("delivery claim response was not an object");
+  }
+  const row = body2;
+  if (row.status !== "accepted" || row.ok !== true) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response did not report accepted ok"
+    );
+  }
+  const capabilities = checkedClaimCapabilities(row.capabilities);
+  checkedOptionalUuidArray(row.event_ids, "event_ids");
+  checkedOptionalArray(row.events, "events");
+  if (!Array.isArray(row.deliveries)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response is missing its deliveries array"
+    );
+  }
+  const deliveries = row.deliveries.map(
+    (item, index) => parseDeliveryRow(item, expected, index, now)
+  );
+  const signalIds = /* @__PURE__ */ new Set();
+  const leaseIds = /* @__PURE__ */ new Set();
+  for (const delivery of deliveries) {
+    if (signalIds.has(delivery.signal.id)) {
+      throw new DeliveryMalformedResponseError(
+        "delivery claim response repeats a signal id"
+      );
+    }
+    signalIds.add(delivery.signal.id);
+    if (leaseIds.has(delivery.leaseId)) {
+      throw new DeliveryMalformedResponseError(
+        "delivery claim response repeats a lease id"
+      );
+    }
+    leaseIds.add(delivery.leaseId);
+  }
+  if (deliveries.length > 1) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned more than one delivery"
+    );
+  }
+  const pendingDeliveryCount = checkedNonNegativeCount(
+    row.pending_delivery_count,
+    "pending_delivery_count"
+  );
+  const terminalDeliveryFailureCount = checkedNonNegativeCount(
+    row.terminal_delivery_failure_count,
+    "terminal_delivery_failure_count"
+  );
+  if (deliveries.length > pendingDeliveryCount) {
+    throw new DeliveryMalformedResponseError(
+      "delivery claim response returned more deliveries than its pending count"
+    );
+  }
+  let wake;
+  try {
+    wake = parseOptionalWakeHint(row.wake);
+  } catch {
+    throw new DeliveryMalformedResponseError("delivery claim response wake field is malformed");
+  }
+  return {
+    capabilities,
+    deliveries,
+    pendingDeliveryCount,
+    terminalDeliveryFailureCount,
+    ...wake === void 0 ? {} : { wake }
+  };
+}
+function parseAckSuccess(body2, expected) {
+  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
+    throw new DeliveryMalformedResponseError(
+      "delivery acknowledgement response was not an object"
+    );
+  }
+  const row = body2;
+  if (row.status !== "accepted" || row.ok !== true) {
+    throw new DeliveryMalformedResponseError(
+      "delivery acknowledgement response did not report accepted ok"
+    );
+  }
+  checkedOptionalUuidArray(row.event_ids, "event_ids");
+  checkedOptionalArray(row.events, "events");
+  if (row.signal_id !== expected.signalId) {
+    throw new DeliveryMalformedResponseError(
+      "delivery acknowledgement response echoed a different signal id"
+    );
+  }
+  if (row.outcome !== expected.outcome) {
+    throw new DeliveryMalformedResponseError(
+      "delivery acknowledgement response echoed a different outcome"
+    );
+  }
+}
+function checkedCommandId(value) {
+  if (typeof value !== "string" || !COMMAND_ID_VALIDATOR_RE.test(value)) {
+    throw new Error(
+      "a delivery command id must be 8..72 characters of [A-Za-z0-9_-]"
+    );
+  }
+  return value;
+}
+function checkedUuidRequest(value, field) {
+  if (!UUID_RE13.test(value)) {
+    throw new Error(`${field} must be a UUID for an agent delivery command`);
+  }
+}
+function assertAckRequest(request) {
+  checkedCommandId(request.commandId);
+  assertAgentToken(request.credential);
+  checkedUuidRequest(request.workspaceId, "workspaceId");
+  checkedUuidRequest(request.signalId, "signalId");
+  checkedUuidRequest(request.leaseId, "leaseId");
+  checkedUuidRequest(request.listenerInstanceId, "listenerInstanceId");
+  if (!DELIVERY_ACK_OUTCOMES.has(request.outcome)) {
+    throw new Error(
+      `a delivery outcome must be ${orList3([...DELIVERY_ACK_OUTCOMES])}`
+    );
+  }
+  if (request.outcome === "failed_terminal") {
+    if (typeof request.lastErrorCode !== "string" || !FAILED_TERMINAL_CODES_SET.has(request.lastErrorCode)) {
+      throw new Error(
+        `a failed_terminal acknowledgement requires one of ${orList3([...FAILED_TERMINAL_CODES_SET])}`
+      );
+    }
+  } else if (request.lastErrorCode !== null) {
+    throw new Error(
+      "a non-failed acknowledgement must send lastErrorCode null"
+    );
+  }
+}
+function boundedDeliveryErrorCode(body2) {
+  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
+    return null;
+  }
+  const error2 = body2.error;
+  if (typeof error2 === "string" && SERVER_ERROR_CODES_SET.has(error2)) {
+    return error2;
+  }
+  return null;
+}
+function refusal(response, text) {
+  let code = DELIVERY_UNKNOWN_ERROR_CODE;
+  let recognizedEnvelope = false;
+  try {
+    const recognizedCode = boundedDeliveryErrorCode(JSON.parse(text));
+    if (recognizedCode !== null) {
+      code = recognizedCode;
+      recognizedEnvelope = true;
+    }
+  } catch {
+  }
+  const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
+  return new DeliveryHttpError(
+    response.status,
+    code,
+    `delivery command failed (HTTP ${response.status}): ${code}`,
+    retryAfterMs,
+    recognizedEnvelope
+  );
+}
+function successBody(response, text, verb) {
+  let body2;
+  try {
+    body2 = JSON.parse(text);
+  } catch {
+    throw new DeliveryResponseError(
+      `${verb} response was not JSON (HTTP ${response.status})`
+    );
+  }
+  if (!body2 || typeof body2 !== "object" || Array.isArray(body2) || body2.status !== "accepted" || body2.ok !== true) {
+    throw new DeliveryResponseError(`${verb} response did not carry an accepted envelope`);
+  }
+  return body2;
+}
+var UUID_RE13, RFC3339_TIMESTAMP_RE, DELIVERY_KINDS, SENDER_OWNER_RELATIONS2, DELIVERY_ACK_OUTCOMES, DELIVERY_HANDLED_OUTCOMES, DELIVERY_PROVIDER_PROVEN_OUTCOMES, DELIVERY_REQUEST_TIMEOUT_MS, COMMAND_ID_VALIDATOR_RE, FAILED_TERMINAL_CODES_SET, H0_SEAT_CLAIM_REFUSED_CODE, H0_SEAT_LISTENER_STOP_SENTENCE, DELIVERY_FAILED_TERMINAL_CODES, DELIVERY_SESSION_PROOF_CODES, DELIVERY_SERVER_ERROR_CODES, SERVER_ERROR_CODES_SET, DELIVERY_UNKNOWN_ERROR_CODE, DeliveryTransportError, DeliveryHttpError, DeliveryProtocolError, DeliveryResponseError, DeliveryMalformedResponseError, DeliveryCommandClient;
+var init_delivery = __esm({
+  "src/cloud/delivery.ts"() {
+    "use strict";
+    init_command_client();
+    init_config();
+    init_signals();
+    init_wake();
+    init_session_ack();
+    init_session_wire();
+    UUID_RE13 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    RFC3339_TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-]\d{2}):(\d{2}))$/i;
+    DELIVERY_KINDS = /* @__PURE__ */ new Set(["ask", "note"]);
+    SENDER_OWNER_RELATIONS2 = /* @__PURE__ */ new Set([
+      "same_owner",
+      "cross_owner",
+      "unknown"
+    ]);
+    DELIVERY_ACK_OUTCOMES = /* @__PURE__ */ new Set([
+      "replied",
+      "observed",
+      "queued",
+      "expired",
+      "failed_terminal"
+    ]);
+    DELIVERY_HANDLED_OUTCOMES = new Set(
+      [...DELIVERY_ACK_OUTCOMES].filter(
+        (outcome) => outcome === "replied" || outcome === "observed"
+      )
+    );
+    DELIVERY_PROVIDER_PROVEN_OUTCOMES = new Set(
+      [...DELIVERY_ACK_OUTCOMES].filter((outcome) => outcome === "replied")
+    );
+    DELIVERY_REQUEST_TIMEOUT_MS = 3e4;
+    COMMAND_ID_VALIDATOR_RE = /^[A-Za-z0-9_-]{8,72}$/;
+    FAILED_TERMINAL_CODES_SET = /* @__PURE__ */ new Set([
+      "provider_refused",
+      "local_effect_failed",
+      "host_session_failed",
+      "credential_unavailable"
+    ]);
+    H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
+    H0_SEAT_LISTENER_STOP_SENTENCE = "This seat receives messages through the h0 poll. The listener has stopped; no further listener action is needed for this seat";
+    DELIVERY_FAILED_TERMINAL_CODES = Object.freeze([
+      "provider_refused",
+      "local_effect_failed",
+      "host_session_failed",
+      "credential_unavailable"
+    ]);
+    DELIVERY_SESSION_PROOF_CODES = Object.freeze([
+      "session_proof_missing",
+      "session_proof_invalid",
+      "session_expired",
+      "session_conflict"
+    ]);
+    DELIVERY_SERVER_ERROR_CODES = Object.freeze([
+      "unauthenticated",
+      "fresh_auth_required",
+      "invalid_request",
+      "payload_too_large",
+      "forbidden",
+      "delivery_unavailable",
+      "delivery_ack_conflict",
+      "delivery_not_surfaced",
+      "command_id_conflict",
+      "rate_limited",
+      "upgrade_required",
+      "temporarily_unavailable",
+      "internal_error",
+      ...DELIVERY_SESSION_PROOF_CODES,
+      H0_SEAT_CLAIM_REFUSED_CODE
+    ]);
+    SERVER_ERROR_CODES_SET = new Set(
+      DELIVERY_SERVER_ERROR_CODES
+    );
+    DELIVERY_UNKNOWN_ERROR_CODE = "unknown_error";
+    DeliveryTransportError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryTransportError";
+      }
+    };
+    DeliveryHttpError = class extends Error {
+      constructor(status, code, message, retryAfterMs = null, recognizedEnvelope = true) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.retryAfterMs = retryAfterMs;
+        this.recognizedEnvelope = recognizedEnvelope;
+        this.name = "DeliveryHttpError";
+      }
+      status;
+      code;
+      retryAfterMs;
+      recognizedEnvelope;
+    };
+    DeliveryProtocolError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryProtocolError";
+      }
+    };
+    DeliveryResponseError = class extends DeliveryProtocolError {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryResponseError";
+      }
+    };
+    DeliveryMalformedResponseError = class extends DeliveryResponseError {
+      constructor(message) {
+        super(message);
+        this.name = "DeliveryMalformedResponseError";
+      }
+    };
+    DeliveryCommandClient = class {
+      constructor(target2, fetcher = fetch, options = {}) {
+        this.target = target2;
+        this.fetcher = fetcher;
+        this.deadlineMs = options.deadlineMs ?? DELIVERY_REQUEST_TIMEOUT_MS;
+        this.now = options.now ?? Date.now;
+        this.clearTimeoutFn = options.clearTimeout ?? ((timer2) => clearTimeout(timer2));
+        this.createAbortControllerFn = options.createAbortController ?? (() => new AbortController());
+      }
+      target;
+      fetcher;
+      deadlineMs;
+      now;
+      clearTimeoutFn;
+      createAbortControllerFn;
+      async post(request, command2, verb) {
+        if (this.deadlineMs <= 0) {
+          throw new DeliveryTransportError(`${verb} request timed out`);
+        }
+        const deadlineController = this.createAbortControllerFn();
+        let timedOut = false;
+        const signal = deadlineController.signal;
+        let onAbort = () => {
+        };
+        const aborted2 = new Promise((resolve8) => {
+          onAbort = () => resolve8("timeout");
+          if (signal.aborted) {
+            onAbort();
+          } else {
+            signal.addEventListener("abort", onAbort, { once: true });
+          }
+        });
+        const timer2 = setTimeout(() => {
+          timedOut = true;
+          deadlineController.abort();
+        }, this.deadlineMs);
+        try {
+          if (signal.aborted) {
+            throw new DeliveryTransportError(`${verb} request timed out`);
+          }
+          const read = (async () => {
+            let response;
+            try {
+              response = await this.fetcher(commandEndpoint(this.target), {
+                method: "POST",
+                headers: {
+                  authorization: `Bearer ${request.credential}`,
+                  apikey: this.target.anonKey,
+                  "content-type": "application/json"
+                },
+                body: JSON.stringify({
+                  command_id: request.commandId,
+                  client_version: CLIENT_PROTOCOL_VERSION,
+                  workspace_id: request.workspaceId.toLowerCase(),
+                  stream: { kind: "workspace" },
+                  command: command2
+                }),
+                signal
+              });
+            } catch (error2) {
+              if (signal.aborted || timedOut || error2?.name === "AbortError") {
+                return "timeout";
+              }
+              throw new DeliveryTransportError(
+                `${verb} request failed before a response`
+              );
+            }
+            if (signal.aborted || timedOut) return "timeout";
+            let text;
+            try {
+              text = await response.text();
+            } catch {
+              if (signal.aborted || timedOut) return "timeout";
+              throw new DeliveryTransportError(
+                `${verb} response body was interrupted`
+              );
+            }
+            if (signal.aborted || timedOut) return "timeout";
+            return { response, text };
+          })();
+          const raced = await Promise.race([read, aborted2]);
+          if (raced === "timeout") {
+            throw new DeliveryTransportError(`${verb} request timed out`);
+          }
+          return raced;
+        } finally {
+          this.clearTimeoutFn(timer2);
+          signal.removeEventListener("abort", onAbort);
+        }
+      }
+      /** Claim the caller's own single unacked direct-signal delivery row. */
+      async claimAgentInbox(request) {
+        checkedCommandId(request.commandId);
+        assertAgentToken(request.credential);
+        checkedUuidRequest(request.workspaceId, "workspaceId");
+        checkedUuidRequest(request.listenerInstanceId, "listenerInstanceId");
+        checkedUuidRequest(request.expectedPrincipalId, "expectedPrincipalId");
+        const { response, text } = await this.post(request, {
+          kind: "claim_agent_inbox",
+          listener_instance_id: request.listenerInstanceId.toLowerCase(),
+          limit: 1
+        }, "delivery claim");
+        if (!response.ok) throw refusal(response, text);
+        const parsed = parseClaimSuccess(
+          successBody(response, text, "delivery claim"),
+          {
+            workspaceId: request.workspaceId.toLowerCase(),
+            principalId: request.expectedPrincipalId.toLowerCase()
+          },
+          this.now
+        );
+        return {
+          httpStatus: response.status,
+          capabilities: parsed.capabilities,
+          deliveries: parsed.deliveries,
+          pendingDeliveryCount: parsed.pendingDeliveryCount,
+          terminalDeliveryFailureCount: parsed.terminalDeliveryFailureCount,
+          ...parsed.wake === void 0 ? {} : { wake: parsed.wake }
+        };
+      }
+      /** Acknowledge one leased delivery with an exact terminal outcome. */
+      async ackAgentDelivery(request) {
+        if (request.managedAck !== void 0) {
+          assertManagedAckAllowed(request.managedAck);
+        }
+        assertAckRequest(request);
+        const { response, text } = await this.post(request, {
+          kind: "ack_agent_delivery",
+          signal_id: request.signalId.toLowerCase(),
+          lease_id: request.leaseId.toLowerCase(),
+          listener_instance_id: request.listenerInstanceId.toLowerCase(),
+          outcome: request.outcome,
+          last_error_code: request.lastErrorCode,
+          ...request.surfaced === void 0 ? {} : { [ACK_AGENT_DELIVERY_SURFACED_FIELD]: request.surfaced }
+        }, "delivery acknowledgement");
+        if (!response.ok) throw refusal(response, text);
+        parseAckSuccess(
+          successBody(response, text, "delivery acknowledgement"),
+          {
+            signalId: request.signalId.toLowerCase(),
+            outcome: request.outcome
+          }
+        );
+        return {
+          httpStatus: response.status,
+          signalId: request.signalId.toLowerCase(),
+          outcome: request.outcome
+        };
+      }
+      /** Mark a queued delivery observed only after the interactive hook surfaced it. */
+      async observeQueuedAgentDelivery(request) {
+        if (request.managedAck !== void 0) {
+          assertManagedAckAllowed(request.managedAck);
+        }
+        checkedCommandId(request.commandId);
+        assertAgentToken(request.credential);
+        checkedUuidRequest(request.workspaceId, "workspaceId");
+        checkedUuidRequest(request.signalId, "signalId");
+        const { response, text } = await this.post(request, {
+          kind: "ack_agent_delivery",
+          signal_id: request.signalId.toLowerCase(),
+          lease_id: null,
+          listener_instance_id: null,
+          outcome: "observed",
+          last_error_code: null,
+          ...request.surfaced === void 0 ? {} : { [ACK_AGENT_DELIVERY_SURFACED_FIELD]: request.surfaced }
+        }, "delivery observation");
+        if (!response.ok) throw refusal(response, text);
+        parseAckSuccess(
+          successBody(response, text, "delivery observation"),
+          {
+            signalId: request.signalId.toLowerCase(),
+            outcome: "observed"
+          }
+        );
+        return {
+          httpStatus: response.status,
+          signalId: request.signalId.toLowerCase(),
+          outcome: "observed"
+        };
+      }
+      async observeUnclaimedAgentDelivery(request) {
+        checkedCommandId(request.commandId);
+        assertAgentToken(request.credential);
+        checkedUuidRequest(request.workspaceId, "workspaceId");
+        checkedUuidRequest(request.signalId, "signalId");
+        const { response, text } = await this.post(request, {
+          kind: "ack_agent_delivery",
+          signal_id: request.signalId.toLowerCase(),
+          lease_id: null,
+          listener_instance_id: null,
+          outcome: "observed",
+          last_error_code: null,
+          [ACK_AGENT_DELIVERY_SURFACED_FIELD]: true,
+          unclaimed: true
+        }, "unclaimed delivery observation");
+        if (!response.ok) throw refusal(response, text);
+        parseAckSuccess(successBody(response, text, "unclaimed delivery observation"), {
+          signalId: request.signalId.toLowerCase(),
+          outcome: "observed"
+        });
+        return { httpStatus: response.status, signalId: request.signalId.toLowerCase(), outcome: "observed" };
+      }
+    };
+  }
+});
+
 // src/cloud/agent-check.ts
+function queuedRetries(state, ids) {
+  const queued = new Set(ids);
+  return Object.fromEntries(Object.entries(state.pending_observed_retries ?? {}).filter(([id]) => queued.has(id)));
+}
 function checkTimeoutError() {
   return new AgentSetupError(
     "check_timeout",
@@ -6891,7 +8631,7 @@ function assertProfileIdentity(profile, directory) {
   }
 }
 function checkStatePath(profilePath, hostSessionId) {
-  return (0, import_node_path5.join)((0, import_node_path5.dirname)(profilePath), "check.json");
+  return (0, import_node_path6.join)((0, import_node_path6.dirname)(profilePath), "check.json");
 }
 async function readCheckState(path) {
   const raw = await readSecureJsonFileIfPresent(path, 16 * 1024 * 1024);
@@ -6902,7 +8642,7 @@ async function readCheckState(path) {
   } catch {
     throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing.");
   }
-  if (!state || state.version !== 1 || !Array.isArray(state.messages) || state.messages.length > AGENT_CHECK_CACHE_LIMIT || state.cursor !== null && (!state.cursor || !ONBOARDING_UUID.test(state.cursor.id) || !Number.isFinite(Date.parse(state.cursor.created_at)))) {
+  if (!state || state.version !== 1 || !Array.isArray(state.messages) || state.messages.length > AGENT_CHECK_CACHE_LIMIT || state.pending_observed_ids !== void 0 && (!Array.isArray(state.pending_observed_ids) || state.pending_observed_ids.length > AGENT_CHECK_CACHE_LIMIT || state.pending_observed_ids.some((id) => typeof id !== "string" || !ONBOARDING_UUID.test(id))) || state.pending_observed_next !== void 0 && (!Number.isSafeInteger(state.pending_observed_next) || state.pending_observed_next < 0) || state.pending_observed_retries !== void 0 && (typeof state.pending_observed_retries !== "object" || state.pending_observed_retries === null || Object.entries(state.pending_observed_retries).some(([id, retry]) => !ONBOARDING_UUID.test(id) || !retry || !Number.isSafeInteger(retry.attempts) || retry.attempts < 0 || !Number.isFinite(retry.first_at) || retry.next_at !== void 0 && !Number.isFinite(retry.next_at))) || state.cursor !== null && (!state.cursor || !ONBOARDING_UUID.test(state.cursor.id) || !Number.isFinite(Date.parse(state.cursor.created_at)))) {
     throw new AgentSetupError("check_state_invalid", "The message cursor is damaged. Restore the check state before continuing.");
   }
   try {
@@ -6910,6 +8650,7 @@ async function readCheckState(path) {
   } catch {
     throw new AgentSetupError("check_state_invalid", "The saved messages are damaged. Restore the check state before continuing.");
   }
+  state.pending_observed_retries = queuedRetries(state, state.pending_observed_ids ?? []);
   return state;
 }
 async function checkAgentMessages(options) {
@@ -6920,9 +8661,10 @@ async function checkAgentMessages(options) {
   const timeoutMs = options.timeoutMs ?? AGENT_CHECK_TIMEOUT_MS;
   const deadlineMs = Math.min(startedAt + timeoutMs, options.deadlineAtMs ?? Number.POSITIVE_INFINITY);
   try {
-    return await withFileLock((0, import_node_path5.dirname)(path), "check", async () => {
+    const checked = await withFileLock((0, import_node_path6.dirname)(path), "check", async () => {
       const state = await readCheckState(path);
-      return withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
+      let ackAfterCommit;
+      const result = await withAgentDeadline(Math.max(1, deadlineMs - Date.now()), async (bounded, signal) => {
         const managed = await profileSessionContext(profile, options.hostSessionId);
         const fetcher = bindSessionProof(bounded, managed ? sessionProofOf(managed.context) : null);
         const credential = await openProfileCredential(profile, fetcher);
@@ -6978,7 +8720,7 @@ async function checkAgentMessages(options) {
         }
         const hasMore = consumed < page.signals.length || page.rawCount >= AGENT_CHECK_PAGE_SIZE;
         const rawName = directory.identity?.workspace_name;
-        const result = {
+        const result2 = {
           checked: true,
           cached: false,
           messages: messages2,
@@ -6994,26 +8736,133 @@ async function checkAgentMessages(options) {
         };
         if (presented.length > 0) await writeSecureJsonFile(path, JSON.stringify(cached2));
         signal.throwIfAborted();
-        await options.present(result);
+        await options.present(result2);
+        const directedIds = presented.filter((row) => row.kind === "ask" || row.kind === "note").map((row) => row.id);
+        const pendingIds = [.../* @__PURE__ */ new Set([...state.pending_observed_ids ?? [], ...directedIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
+        const ackPending = async () => {
+          const committed = await readCheckState(path);
+          const queued = committed.pending_observed_ids ?? [];
+          const start = queued.length === 0 ? 0 : (committed.pending_observed_next ?? 0) % queued.length;
+          const batch = [...queued.slice(start), ...queued.slice(0, start)].slice(0, AGENT_CHECK_ACK_BATCH_LIMIT);
+          const removed = /* @__PURE__ */ new Set();
+          const retryUpdates = /* @__PURE__ */ new Map();
+          const persist = async (attempt, rotate = false) => {
+            await withFileLock((0, import_node_path6.dirname)(path), "check", async () => {
+              const current = await readCheckState(path);
+              const remaining = (current.pending_observed_ids ?? []).filter((value) => !removed.has(value));
+              const retries = { ...current.pending_observed_retries ?? {} };
+              for (const [id, retry] of retryUpdates) retries[id] = retry;
+              if (attempt) retries[attempt.id] = attempt.retry;
+              await writeSecureJsonFile(path, JSON.stringify({
+                ...current,
+                pending_observed_ids: remaining,
+                pending_observed_retries: queuedRetries({ ...current, pending_observed_retries: retries }, remaining),
+                ...rotate ? { pending_observed_next: remaining.length === 0 ? 0 : (start + batch.length) % remaining.length } : {}
+              }));
+            }, { timeoutMs: Math.max(1, Math.floor(deadlineMs - Date.now())) });
+            removed.clear();
+            retryUpdates.clear();
+          };
+          for (const id of batch) {
+            const now = Date.now();
+            const remainingMs = deadlineMs - now;
+            if (remainingMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) break;
+            const prior = committed.pending_observed_retries?.[id] ?? { attempts: 0, first_at: now };
+            if (now - prior.first_at >= AGENT_CHECK_ACK_MAX_AGE_MS) {
+              removed.add(id);
+              continue;
+            }
+            if ((prior.next_at ?? 0) > now) continue;
+            const attempts = prior.attempts + 1;
+            const backoff2 = Math.min(
+              AGENT_CHECK_ACK_RETRY_MAX_MS,
+              AGENT_CHECK_ACK_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 8)
+            );
+            await persist({ id, retry: { attempts, first_at: prior.first_at, next_at: now + remainingMs + backoff2 } });
+            try {
+              const client = new DeliveryCommandClient(target2, fetcher, {
+                deadlineMs: Math.min(AGENT_CHECK_TIMEOUT_MS, Math.max(1, deadlineMs - Date.now()))
+              });
+              await client.observeUnclaimedAgentDelivery({
+                workspaceId: profile.workspace_id,
+                credential: token,
+                commandId: (0, import_node_crypto10.randomUUID)(),
+                signalId: id
+              });
+              removed.add(id);
+            } catch (error2) {
+              const terminal = error2 instanceof DeliveryHttpError && (error2.status === 403 || error2.status === 404 || error2.status === 409 || error2.status === 400 && error2.code === "invalid_request");
+              if (terminal) removed.add(id);
+              else if (deadlineMs - Date.now() >= AGENT_CHECK_ACK_MIN_REMAINING_MS)
+                retryUpdates.set(id, { attempts, first_at: prior.first_at, next_at: Date.now() + backoff2 });
+            }
+          }
+          const writeBudgetMs = Math.floor(deadlineMs - Date.now());
+          if (writeBudgetMs < AGENT_CHECK_ACK_MIN_REMAINING_MS) return;
+          if (batch.length > 0 || removed.size > 0 || retryUpdates.size > 0) await persist(void 0, true);
+        };
         if (presented.length > 0) {
           if (options.deferCursorCommit) {
-            options.deferCursorCommit((lastVisibleId) => withFileLock((0, import_node_path5.dirname)(path), "check", async () => {
+            options.deferCursorCommit((lastVisibleId) => withFileLock((0, import_node_path6.dirname)(path), "check", async () => {
               const current = await readCheckState(path);
               const visible = lastVisibleId === void 0 ? cursor : presented.find((row) => row.id === lastVisibleId);
               const candidate = visible ? { id: visible.id, created_at: visible.created_at } : null;
               if (candidate && (!current.cursor || compareSignalCursor(candidate, current.cursor) > 0)) {
-                await writeSecureJsonFile(path, JSON.stringify({ ...current, cursor: candidate }));
+                const visibleIds = presented.slice(0, presented.findIndex((row) => row.id === lastVisibleId) + 1).filter((row) => row.kind === "ask" || row.kind === "note").map((row) => row.id);
+                const pendingVisibleIds = [.../* @__PURE__ */ new Set([...current.pending_observed_ids ?? [], ...visibleIds])].slice(-AGENT_CHECK_CACHE_LIMIT);
+                await writeSecureJsonFile(path, JSON.stringify({
+                  ...current,
+                  cursor: candidate,
+                  pending_observed_ids: pendingVisibleIds,
+                  pending_observed_retries: queuedRetries(current, pendingVisibleIds)
+                }));
+              }
+            }).then(async () => {
+              try {
+                await ackPending();
+              } catch {
               }
             }));
           } else {
-            await writeSecureJsonFile(path, JSON.stringify({ ...cached2, cursor }));
+            await writeSecureJsonFile(path, JSON.stringify({
+              ...cached2,
+              cursor,
+              pending_observed_ids: pendingIds,
+              pending_observed_retries: queuedRetries(cached2, pendingIds)
+            }));
+            ackAfterCommit = ackPending;
+          }
+        } else if (pendingIds.length > 0) {
+          if (options.deferCursorCommit) {
+            options.deferCursorCommit(async () => {
+              try {
+                await ackPending();
+              } catch {
+              }
+            });
+          } else {
+            ackAfterCommit = ackPending;
           }
         }
-        return result;
+        return result2;
       }, options.fetcher);
+      return { result, ackAfterCommit };
     }, { timeoutMs: Math.min(Math.max(0, Math.floor(deadlineMs - Date.now())), 3e4) });
+    if (checked.ackAfterCommit) {
+      try {
+        await checked.ackAfterCommit();
+      } catch {
+      }
+    }
+    return checked.result;
   } catch (error2) {
-    if (error2 instanceof FileLockTimeoutError || error2 instanceof SignalReadTimeoutError) {
+    if (error2 instanceof FileLockTimeoutError) {
+      throw new AgentSetupError(
+        "check_timeout",
+        `The message check timed out on a local lock: ${error2.message}`
+      );
+    }
+    if (error2 instanceof SignalReadTimeoutError) {
       throw checkTimeoutError();
     }
     throw error2;
@@ -7036,11 +8885,12 @@ function renderAgentCheck(result) {
 ${JSON.stringify(result)}
 `;
 }
-var import_node_path5, AGENT_CHECK_PAGE_SIZE, AGENT_CHECK_PREVIEW_CHARS, AGENT_CHECK_BODY_BUDGET, AGENT_CHECK_CACHE_LIMIT, shellQuote;
+var import_node_path6, import_node_crypto10, AGENT_CHECK_PAGE_SIZE, AGENT_CHECK_PREVIEW_CHARS, AGENT_CHECK_BODY_BUDGET, AGENT_CHECK_CACHE_LIMIT, AGENT_CHECK_ACK_BATCH_LIMIT, AGENT_CHECK_ACK_MIN_REMAINING_MS, AGENT_CHECK_ACK_MAX_AGE_MS, AGENT_CHECK_ACK_RETRY_BASE_MS, AGENT_CHECK_ACK_RETRY_MAX_MS, shellQuote;
 var init_agent_check = __esm({
   "src/cloud/agent-check.ts"() {
     "use strict";
-    import_node_path5 = require("node:path");
+    import_node_path6 = require("node:path");
+    import_node_crypto10 = require("node:crypto");
     init_signals();
     init_storage();
     init_agent_profile();
@@ -7048,11 +8898,17 @@ var init_agent_check = __esm({
     init_session_context();
     init_agent_onboarding_contract();
     init_agent_check_budget();
+    init_delivery();
     init_agent_check_budget();
     AGENT_CHECK_PAGE_SIZE = 20;
     AGENT_CHECK_PREVIEW_CHARS = 1e3;
     AGENT_CHECK_BODY_BUDGET = 4e3;
     AGENT_CHECK_CACHE_LIMIT = 200;
+    AGENT_CHECK_ACK_BATCH_LIMIT = AGENT_CHECK_PAGE_SIZE;
+    AGENT_CHECK_ACK_MIN_REMAINING_MS = 50;
+    AGENT_CHECK_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
+    AGENT_CHECK_ACK_RETRY_BASE_MS = 250;
+    AGENT_CHECK_ACK_RETRY_MAX_MS = 6e4;
     shellQuote = quoteAgentArgument;
   }
 });
@@ -7119,7 +8975,7 @@ function checkedHostSessionId(value) {
   return value;
 }
 function receiveBindingPath(profile, hostSessionId) {
-  return (0, import_node_path6.join)((0, import_node_path6.dirname)(privatePath(profile)), `receive-${profileScopeKey(checkedHostSessionId(hostSessionId))}.json`);
+  return (0, import_node_path7.join)((0, import_node_path7.dirname)(privatePath(profile)), `receive-${profileScopeKey(checkedHostSessionId(hostSessionId))}.json`);
 }
 async function readReceiveBinding(profile, hostSessionId) {
   profile = privatePath(profile);
@@ -7143,7 +8999,7 @@ async function readReceiveBinding(profile, hostSessionId) {
 async function updateReceiveBinding(profile, host, update) {
   await readAgentProfile(profile, host);
   const path = receiveBindingPath(profile, host);
-  return withFileLock((0, import_node_path6.dirname)(path), `receive-${profileScopeKey(host)}`, async () => {
+  return withFileLock((0, import_node_path7.dirname)(path), `receive-${profileScopeKey(host)}`, async () => {
     const current = await readReceiveBinding(profile, host);
     if (current === null) throw new AgentSetupError("receive_not_configured", "Configure this session's receive mode first.");
     const next = update(current);
@@ -7217,24 +9073,24 @@ async function ignoreLocalHook(cwd, file) {
     if (error2.code === "ENOENT" || error2.code === 128) return;
     throw error2;
   }
-  const relative = file.slice(root.length + 1);
-  const tracked = (await exec("git", ["-C", root, "ls-files", "--", relative])).stdout.trim();
+  const relative2 = file.slice(root.length + 1);
+  const tracked = (await exec("git", ["-C", root, "ls-files", "--", relative2])).stdout.trim();
   if (tracked) throw new AgentSetupError("hook_file_tracked", "This host settings file is tracked by git. Use a local untracked host configuration for this agent.");
   try {
-    await exec("git", ["-C", root, "check-ignore", "--quiet", "--", relative]);
+    await exec("git", ["-C", root, "check-ignore", "--quiet", "--", relative2]);
     return;
   } catch (error2) {
     if (error2.code !== 1) throw error2;
   }
-  const exclude = (0, import_node_path6.resolve)(root, (await exec("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"])).stdout.trim());
+  const exclude = (0, import_node_path7.resolve)(root, (await exec("git", ["-C", root, "rev-parse", "--git-path", "info/exclude"])).stdout.trim());
   const exists = await ownedRegular(exclude);
   const before = exists ? await (0, import_promises6.readFile)(exclude, "utf8") : "";
-  await (0, import_promises6.mkdir)((0, import_node_path6.dirname)(exclude), { recursive: true });
-  await (0, import_promises6.writeFile)(exclude, `${before}${before.endsWith("\n") || !before ? "" : "\n"}/${relative.replace(/[\\*?\[\] #!]/g, "\\$&")}
+  await (0, import_promises6.mkdir)((0, import_node_path7.dirname)(exclude), { recursive: true });
+  await (0, import_promises6.writeFile)(exclude, `${before}${before.endsWith("\n") || !before ? "" : "\n"}/${relative2.replace(/[\\*?\[\] #!]/g, "\\$&")}
 `, { mode: 384 });
 }
 async function installReceiveHooks(binding, command2) {
-  const folder = (0, import_node_path6.join)(binding.cwd, binding.provider === "claude" ? ".claude" : ".codex");
+  const folder = (0, import_node_path7.join)(binding.cwd, binding.provider === "claude" ? ".claude" : ".codex");
   try {
     const info = await (0, import_promises6.lstat)(folder);
     if (!info.isDirectory() || info.isSymbolicLink() || process.getuid && info.uid !== process.getuid()) throw new AgentSetupError("hook_directory_unsafe", "The host settings directory must be owned and must not be a symlink.");
@@ -7242,9 +9098,9 @@ async function installReceiveHooks(binding, command2) {
     if (error2.code !== "ENOENT") throw error2;
   }
   await (0, import_promises6.mkdir)(folder, { recursive: true, mode: 448 });
-  const file = (0, import_node_path6.join)(folder, binding.provider === "claude" ? "settings.local.json" : "hooks.json");
-  const lock = (0, import_node_crypto10.createHash)("sha256").update(file).digest("hex");
-  await withFileLock((0, import_node_path6.join)((0, import_node_os5.homedir)(), ".cswarm", "hook-locks"), lock, async () => {
+  const file = (0, import_node_path7.join)(folder, binding.provider === "claude" ? "settings.local.json" : "hooks.json");
+  const lock = (0, import_node_crypto11.createHash)("sha256").update(file).digest("hex");
+  await withFileLock((0, import_node_path7.join)((0, import_node_os5.homedir)(), ".cswarm", "hook-locks"), lock, async () => {
     const before = await ownedRegular(file) ? await (0, import_promises6.readFile)(file, "utf8") : "{}";
     let settings;
     try {
@@ -7257,18 +9113,25 @@ async function installReceiveHooks(binding, command2) {
 `;
     await ignoreLocalHook(binding.cwd, file);
     if (before === next) return;
-    if (before !== "{}") await writeSecureJsonFile((0, import_node_path6.join)((0, import_node_path6.dirname)(binding.profile), "hook-backups", `${lock}-${(0, import_node_crypto10.randomUUID)()}.json`), before);
-    const temp = `${file}.${(0, import_node_crypto10.randomUUID)()}.tmp`;
+    if (before !== "{}") await writeSecureJsonFile((0, import_node_path7.join)((0, import_node_path7.dirname)(binding.profile), "hook-backups", `${lock}-${(0, import_node_crypto11.randomUUID)()}.json`), before);
+    const temp = `${file}.${(0, import_node_crypto11.randomUUID)()}.tmp`;
     await (0, import_promises6.writeFile)(temp, next, { mode: 384, flag: "wx" });
     await (0, import_promises6.rename)(temp, file);
   });
   return file;
 }
+function parseReceiveMode(value) {
+  if (!RECEIVE_MODES.includes(value)) throw new AgentSetupError("receive_mode_invalid", `--mode must be ${RECEIVE_MODES.join(" or ")}.`);
+  return value;
+}
+function parseReceiveProvider(value) {
+  if (!RECEIVE_PROVIDERS.includes(value)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+  return value;
+}
 async function configureAgentReceive(options) {
   const profile = privatePath(options.profilePath);
-  if (!RECEIVE_MODES.includes(options.mode)) throw new AgentSetupError("receive_mode_invalid", `--mode must be ${RECEIVE_MODES.join(" or ")}.`);
-  const provider = options.provider ?? "instructions";
-  if (!RECEIVE_PROVIDERS.includes(provider)) throw new AgentSetupError("receive_provider_invalid", `--provider must be ${RECEIVE_PROVIDERS.join(" or ")}.`);
+  parseReceiveMode(options.mode);
+  const provider = parseReceiveProvider(options.provider ?? "instructions");
   if (options.grokBotAgentId !== void 0 && !ONBOARDING_UUID.test(options.grokBotAgentId)) throw new AgentSetupError("grok_bot_agent_id_required", "Supply --grok-bot-agent-id with this Bot's agent UUID.");
   if (options.grokBotAgentId !== void 0 && provider !== "grok-bot") throw new AgentSetupError("grok_bot_agent_id_unsupported", "Use --grok-bot-agent-id only with --provider grok-bot.");
   const openedProfile = await readAgentProfile(profile, options.hostSessionId);
@@ -7282,7 +9145,7 @@ async function configureAgentReceive(options) {
     await findGrokBotGateway(options.gatewayPaths);
   }
   const cwd = await (0, import_promises6.realpath)(options.cwd ?? process.cwd());
-  return withFileLock((0, import_node_path6.dirname)(profile), `receive-${profileScopeKey(host)}`, async () => {
+  return withFileLock((0, import_node_path7.dirname)(profile), `receive-${profileScopeKey(host)}`, async () => {
     const existing = await readReceiveBinding(profile, host);
     if (existing && existing.provider !== provider) throw new AgentSetupError("receive_provider_conflict", "This session ID already has a different host binding. Use the current host's session ID.");
     if (existing && existing.cwd !== cwd) throw new AgentSetupError("receive_directory_conflict", "This session is bound to a different project directory. Configure from that directory.");
@@ -7319,7 +9182,7 @@ async function configureAgentReceive(options) {
     }
     let startCommand = null;
     if (options.mode === "wake" && provider === "claude") {
-      const config2 = (0, import_node_path6.join)((0, import_node_path6.dirname)(profile), `claude-channel-${profileScopeKey(host)}.json`);
+      const config2 = (0, import_node_path7.join)((0, import_node_path7.dirname)(profile), `claude-channel-${profileScopeKey(host)}.json`);
       await writeSecureJsonFile(config2, JSON.stringify({ mcpServers: {
         cswarm: { command: options.execution.command, args: [...options.execution.args, "receive", "serve", "--profile", profile, "--host-session-id", host] }
       } }, null, 2));
@@ -7365,7 +9228,7 @@ async function requestReceiveCanary(profile, host) {
       ...binding,
       wake_verified_at: null,
       ...binding.provider === "grok-bot" ? { idle: false, last_turn_ended_at: null } : {},
-      canary: { nonce: (0, import_node_crypto10.randomUUID)(), requested_at: (/* @__PURE__ */ new Date()).toISOString(), signal_id: null, emitted_while_idle: false, received_at: null }
+      canary: { nonce: (0, import_node_crypto11.randomUUID)(), requested_at: (/* @__PURE__ */ new Date()).toISOString(), signal_id: null, emitted_while_idle: false, received_at: null }
     };
   });
   const openedProfile = await readAgentProfile(profile, host);
@@ -7373,15 +9236,15 @@ async function requestReceiveCanary(profile, host) {
   const boundAction = next.provider === "grok-bot" ? action.replace(" with this profile and host-session-id", "") : action;
   return { state: "pending", next_action: boundProfileCommands(openedProfile.host_session_id ? boundAction : action, profile, openedProfile.host_session_id), host_session_id: next.host_session_id };
 }
-var import_node_crypto10, import_node_child_process2, import_promises6, import_node_os5, import_node_path6, import_node_util, exec, RECEIVE_HEARTBEAT_MAX_AGE_MS, RECEIVE_HOOK_EVENTS;
+var import_node_crypto11, import_node_child_process3, import_promises6, import_node_os5, import_node_path7, import_node_util, exec, RECEIVE_HEARTBEAT_MAX_AGE_MS, RECEIVE_HOOK_EVENTS;
 var init_agent_receive = __esm({
   "src/cloud/agent-receive.ts"() {
     "use strict";
-    import_node_crypto10 = require("node:crypto");
-    import_node_child_process2 = require("node:child_process");
+    import_node_crypto11 = require("node:crypto");
+    import_node_child_process3 = require("node:child_process");
     import_promises6 = require("node:fs/promises");
     import_node_os5 = require("node:os");
-    import_node_path6 = require("node:path");
+    import_node_path7 = require("node:path");
     import_node_util = require("node:util");
     init_agent_onboarding_contract();
     init_agent_profile();
@@ -7389,13 +9252,13 @@ var init_agent_receive = __esm({
     init_agent_check_budget();
     init_storage();
     init_agent_grok_bot_gateway();
-    exec = (0, import_node_util.promisify)(import_node_child_process2.execFile);
+    exec = (0, import_node_util.promisify)(import_node_child_process3.execFile);
     RECEIVE_HEARTBEAT_MAX_AGE_MS = 15e3;
     RECEIVE_HOOK_EVENTS = ["UserPromptSubmit", "SessionStart", "Stop"];
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/util.js
+// node_modules/zod/v4/core/util.js
 var util_exports = {};
 __export(util_exports, {
   BIGINT_FORMAT_RANGES: () => BIGINT_FORMAT_RANGES,
@@ -8136,7 +9999,7 @@ function constantCatch(value) {
 }
 var EVALUATING, captureStackTrace, allowsEval, getParsedType, propertyKeyTypes, primitiveTypes, NUMBER_FORMAT_RANGES, BIGINT_FORMAT_RANGES, highSurrogate, Class, installing, broke, breaker, CONSTANT_CATCH;
 var init_util = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/util.js"() {
+  "node_modules/zod/v4/core/util.js"() {
     init_core();
     EVALUATING = /* @__PURE__ */ Symbol("evaluating");
     captureStackTrace = "captureStackTrace" in Error ? Error.captureStackTrace : (..._args) => {
@@ -8237,7 +10100,7 @@ var init_util = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/core.js
+// node_modules/zod/v4/core/core.js
 function newError(Definition) {
   const E = _E;
   if (E) {
@@ -8341,7 +10204,7 @@ function config(newConfig) {
 }
 var _a, _zodDesc, _E, $ZodAsyncError, $ZodEncodeError, globalConfig;
 var init_core = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/core.js"() {
+  "node_modules/zod/v4/core/core.js"() {
     init_util();
     _zodDesc = { value: void 0, enumerable: false };
     _E = "captureStackTrace" in Error ? Error : null;
@@ -8361,7 +10224,7 @@ var init_core = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/errors.js
+// node_modules/zod/v4/core/errors.js
 function _getMessage() {
   const internals = this._zod;
   internals.message ?? (internals.message = JSON.stringify(internals.def, jsonStringifyReplacer, 2));
@@ -8442,7 +10305,7 @@ function formatError(error2, mapper = (issue2) => issue2.message) {
 }
 var _messageDesc, _zodDesc2, _issuesDesc, _installedToString, initializer, $ZodError, $ZodRealError;
 var init_errors = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/errors.js"() {
+  "node_modules/zod/v4/core/errors.js"() {
     init_core();
     init_util();
     _messageDesc = {
@@ -8487,13 +10350,13 @@ var init_errors = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/parse.js
+// node_modules/zod/v4/core/parse.js
 function finalizeParams(callee, params) {
   return { callee: params?.callee ?? callee, Err: params?.Err };
 }
 var _parse, _parseAsync, _safeParse, safeParse, _safeParseAsync, safeParseAsync, _encode, _decode, _encodeAsync, _decodeAsync, _safeEncode, _safeDecode, _safeEncodeAsync, _safeDecodeAsync;
 var init_parse = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/parse.js"() {
+  "node_modules/zod/v4/core/parse.js"() {
     init_core();
     init_errors();
     init_util();
@@ -8598,7 +10461,7 @@ var init_parse = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/regexes.js
+// node_modules/zod/v4/core/regexes.js
 function nanoidOfLength(length) {
   return new RegExp(`^[a-zA-Z0-9_-]{${length}}$`);
 }
@@ -8626,7 +10489,7 @@ function datetime(args) {
 }
 var cuid, cuid2, ulid, xid, ksuid, nanoid, duration, guid, uuid3, email, _emoji, ipv4, ipv6, cidrv4, cidrv6, base64, base64url, httpProtocol, e164, dateSource, date, string, integer, number, boolean, _null, lowercase, uppercase;
 var init_regexes = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/regexes.js"() {
+  "node_modules/zod/v4/core/regexes.js"() {
     cuid = /^[cC][0-9a-z]{6,}$/;
     cuid2 = /^[0-9a-z]+$/;
     ulid = /^[0-7][0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{25}$/;
@@ -8665,10 +10528,10 @@ var init_regexes = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/checks.js
+// node_modules/zod/v4/core/checks.js
 var $ZodCheck, _whenHasLength, numericOriginMap, $ZodCheckLessThan, $ZodCheckGreaterThan, $ZodCheckMultipleOf, $ZodCheckNumberFormat, $ZodCheckMaxLength, $ZodCheckMinLength, $ZodCheckLengthEquals, $ZodCheckStringFormat, $ZodCheckRegex, $ZodCheckLowerCase, $ZodCheckUpperCase, $ZodCheckIncludes, $ZodCheckStartsWith, $ZodCheckEndsWith, $ZodCheckOverwrite;
 var init_checks = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/checks.js"() {
+  "node_modules/zod/v4/core/checks.js"() {
     init_core();
     init_regexes();
     init_util();
@@ -9064,10 +10927,10 @@ var init_checks = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/doc.js
+// node_modules/zod/v4/core/doc.js
 var Doc;
 var init_doc = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/doc.js"() {
+  "node_modules/zod/v4/core/doc.js"() {
     Doc = class {
       constructor(args = [], closed = {}) {
         this.content = [];
@@ -9106,10 +10969,10 @@ ${content.join("\n")}
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/versions.js
+// node_modules/zod/v4/core/versions.js
 var version;
 var init_versions = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/versions.js"() {
+  "node_modules/zod/v4/core/versions.js"() {
     version = {
       major: 4,
       minor: 5,
@@ -9118,7 +10981,7 @@ var init_versions = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/schemas.js
+// node_modules/zod/v4/core/schemas.js
 function standardProps(inst) {
   return {
     validate: (value) => {
@@ -9145,9 +11008,9 @@ function parseURLObject(trimmed, def) {
 function stripTabAndNewline(value) {
   return value.replace(asciiTabOrNewline, "");
 }
-function urlHostnameOk(url, hostname3) {
-  hostname3.lastIndex = 0;
-  return hostname3.test(url.hostname);
+function urlHostnameOk(url, hostname4) {
+  hostname4.lastIndex = 0;
+  return hostname4.test(url.hostname);
 }
 function urlProtocolOk(url, protocol) {
   protocol.lastIndex = 0;
@@ -9506,7 +11369,7 @@ function handleRefineResult(result, payload, input, inst) {
 }
 var $ZodType, toStandardResult, $ZodString, $ZodStringFormat, $ZodGUID, $ZodUUID, $ZodEmail, URL_BAD_FORMAT, URL_UNPARSEABLE, asciiTabOrNewline, $ZodURL, $ZodEmoji, $ZodNanoID, $ZodCUID, $ZodCUID2, $ZodULID, $ZodXID, $ZodKSUID, $ZodISODateTime, $ZodISODate, $ZodISOTime, $ZodISODuration, $ZodIPv4, ipv6Alphabet, $ZodIPv6, $ZodCIDRv4, $ZodCIDRv6, $ZodBase64, $ZodBase64URL, $ZodE164, $ZodJWT, $ZodNumber, $ZodNumberFormat, $ZodBoolean, $ZodNull, $ZodUnknown, $ZodNever, $ZodArray, NO_SYMBOL_KEYS, propShapes, $ZodObject, $ZodObjectJIT, $ZodUnion, $ZodDiscriminatedUnion, $ZodIntersection, $ZodRecord, $ZodEnum, $ZodLiteral, $ZodTransform, $ZodOptional, $ZodExactOptional, $ZodNullable, $ZodDefault, $ZodPrefault, $ZodNonOptional, $ZodCatch, $ZodPipe, $ZodPreprocess, $ZodReadonly, $ZodCustom;
 var init_schemas = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/schemas.js"() {
+  "node_modules/zod/v4/core/schemas.js"() {
     init_checks();
     init_core();
     init_doc();
@@ -10719,7 +12582,7 @@ var init_schemas = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/memoizer.js
+// node_modules/zod/v4/core/memoizer.js
 function cloneIssues(issues) {
   return issues.map((iss) => iss.path ? { ...iss, path: iss.path.slice() } : { ...iss });
 }
@@ -10852,7 +12715,7 @@ function isBackEdge(ctx, value) {
 }
 var $ZodCyclicError, STATE, NO_ISSUES, recursive, handoff, open3, memo;
 var init_memoizer = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/memoizer.js"() {
+  "node_modules/zod/v4/core/memoizer.js"() {
     $ZodCyclicError = class extends Error {
       constructor() {
         super(`Cannot parse a reference cycle that closes through a transform`);
@@ -10961,7 +12824,7 @@ var init_memoizer = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/locales/en.js
+// node_modules/zod/v4/locales/en.js
 function en_default() {
   return {
     localeError: error()
@@ -10969,7 +12832,7 @@ function en_default() {
 }
 var error;
 var init_en = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/locales/en.js"() {
+  "node_modules/zod/v4/locales/en.js"() {
     init_util();
     error = () => {
       const Sizable = {
@@ -11090,19 +12953,19 @@ var init_en = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/locales/index.js
+// node_modules/zod/v4/locales/index.js
 var init_locales = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/locales/index.js"() {
+  "node_modules/zod/v4/locales/index.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/registries.js
+// node_modules/zod/v4/core/registries.js
 function registry2() {
   return new $ZodRegistry();
 }
 var _a2, $ZodRegistry, globalRegistry;
 var init_registries = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/registries.js"() {
+  "node_modules/zod/v4/core/registries.js"() {
     $ZodRegistry = class {
       constructor() {
         this._map = /* @__PURE__ */ new WeakMap();
@@ -11148,13 +13011,13 @@ var init_registries = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/compile.js
+// node_modules/zod/v4/core/compile.js
 var init_compile = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/compile.js"() {
+  "node_modules/zod/v4/core/compile.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/api.js
+// node_modules/zod/v4/core/api.js
 // @__NO_SIDE_EFFECTS__
 function _string(Class2, params) {
   return new Class2({
@@ -11683,13 +13546,13 @@ function _check(fn, params) {
   return ch;
 }
 var init_api = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/api.js"() {
+  "node_modules/zod/v4/core/api.js"() {
     init_checks();
     init_util();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/to-json-schema.js
+// node_modules/zod/v4/core/to-json-schema.js
 function assignProps(target2, ...sources) {
   for (const source of sources) {
     for (const key2 of Reflect.ownKeys(source)) {
@@ -12206,7 +14069,7 @@ function isTransforming(_schema, _ctx) {
 }
 var FOLDABLE_KEYS, UNION_KEYS, createToJSONSchemaMethod, createStandardJSONSchemaMethod;
 var init_to_json_schema = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/to-json-schema.js"() {
+  "node_modules/zod/v4/core/to-json-schema.js"() {
     init_registries();
     init_util();
     FOLDABLE_KEYS = /* @__PURE__ */ new Set(["type", "properties", "required", "additionalProperties"]);
@@ -12227,7 +14090,7 @@ var init_to_json_schema = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/json-schema-processors.js
+// node_modules/zod/v4/core/json-schema-processors.js
 function inputOptin(schema2) {
   const def = schema2._zod.def;
   if (def.type === "pipe" && def.in._zod.traits.has("$ZodTransform")) {
@@ -12315,7 +14178,7 @@ function serializeDefaultValue(value, schema2, ctx, json, params) {
 }
 var formatMap, stringProcessor, numberProcessor, booleanProcessor, nullProcessor, neverProcessor, unknownProcessor, enumProcessor, literalProcessor, customProcessor, transformProcessor, arrayProcessor, objectProcessor, unionProcessor, intersectionProcessor, pendingRecords, recordProcessor, nullableProcessor, nonoptionalProcessor, UNREPRESENTABLE_DEFAULT, defaultProcessor, prefaultProcessor, catchProcessor, pipeProcessor, readonlyProcessor, optionalProcessor;
 var init_json_schema_processors = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/json-schema-processors.js"() {
+  "node_modules/zod/v4/core/json-schema-processors.js"() {
     init_regexes();
     init_to_json_schema();
     init_util();
@@ -12678,15 +14541,15 @@ var init_json_schema_processors = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/json-schema.js
+// node_modules/zod/v4/core/json-schema.js
 var init_json_schema = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/json-schema.js"() {
+  "node_modules/zod/v4/core/json-schema.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/index.js
+// node_modules/zod/v4/core/index.js
 var init_core2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/core/index.js"() {
+  "node_modules/zod/v4/core/index.js"() {
     init_core();
     init_parse();
     init_errors();
@@ -12706,40 +14569,40 @@ var init_core2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/parse.js
+// node_modules/zod/v4/mini/parse.js
 var init_parse2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/parse.js"() {
+  "node_modules/zod/v4/mini/parse.js"() {
     init_core2();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/schemas.js
+// node_modules/zod/v4/mini/schemas.js
 var init_schemas2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/schemas.js"() {
+  "node_modules/zod/v4/mini/schemas.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/checks.js
+// node_modules/zod/v4/mini/checks.js
 var init_checks2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/checks.js"() {
+  "node_modules/zod/v4/mini/checks.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/iso.js
+// node_modules/zod/v4/mini/iso.js
 var init_iso = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/iso.js"() {
+  "node_modules/zod/v4/mini/iso.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/coerce.js
+// node_modules/zod/v4/mini/coerce.js
 var init_coerce = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/coerce.js"() {
+  "node_modules/zod/v4/mini/coerce.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/external.js
+// node_modules/zod/v4/mini/external.js
 var init_external = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/mini/external.js"() {
+  "node_modules/zod/v4/mini/external.js"() {
     init_core2();
     init_parse2();
     init_schemas2();
@@ -12750,14 +14613,14 @@ var init_external = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4-mini/index.js
+// node_modules/zod/v4-mini/index.js
 var init_v4_mini = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4-mini/index.js"() {
+  "node_modules/zod/v4-mini/index.js"() {
     init_external();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
 function isZ4Schema(s) {
   const schema2 = s;
   return !!schema2._zod;
@@ -12820,19 +14683,19 @@ function getLiteralValue(schema2) {
   return void 0;
 }
 var init_zod_compat = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js"() {
     init_v4_mini();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/checks.js
+// node_modules/zod/v4/classic/checks.js
 var init_checks3 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/checks.js"() {
+  "node_modules/zod/v4/classic/checks.js"() {
     init_core2();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/errors.js
+// node_modules/zod/v4/classic/errors.js
 function _lazyMethod(proto, key2, make) {
   Object.defineProperty(proto, key2, {
     configurable: true,
@@ -12849,7 +14712,7 @@ function _lazyMethod(proto, key2, make) {
 }
 var _installedErrorProtos, initializer2, ZodRealError;
 var init_errors2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/errors.js"() {
+  "node_modules/zod/v4/classic/errors.js"() {
     init_core2();
     init_core2();
     init_util();
@@ -12885,10 +14748,10 @@ var init_errors2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/parse.js
+// node_modules/zod/v4/classic/parse.js
 var parse2, parseAsync2, safeParse3, safeParseAsync2, encode2, decode2, encodeAsync2, decodeAsync2, safeEncode2, safeDecode2, safeEncodeAsync2, safeDecodeAsync2;
 var init_parse3 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/parse.js"() {
+  "node_modules/zod/v4/classic/parse.js"() {
     init_core2();
     init_errors2();
     parse2 = /* @__PURE__ */ _parse(ZodRealError);
@@ -12906,7 +14769,7 @@ var init_parse3 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/schemas.js
+// node_modules/zod/v4/classic/schemas.js
 function _ensureDefaultLocale() {
   if (!globalConfig.localeError)
     config(en_default());
@@ -13096,7 +14959,7 @@ function preprocess(fn, schema2) {
 }
 var ZodType, _ZodString, ZodString, ZodStringFormat, ZodISODateTime, ZodISODate, ZodISOTime, ZodISODuration, ZodEmail, ZodGUID, ZodUUID, ZodURL, ZodEmoji, ZodNanoID, ZodCUID, ZodCUID2, ZodULID, ZodXID, ZodKSUID, ZodIPv4, ZodIPv6, ZodCIDRv4, ZodCIDRv6, ZodBase64, ZodBase64URL, ZodE164, ZodJWT, ZodNumber, ZodNumberFormat, ZodBoolean, ZodNull, ZodUnknown, ZodNever, ZodArray, ZodObject, ZodUnion, ZodDiscriminatedUnion, ZodIntersection, ZodRecord, ZodEnum, ZodLiteral, ZodTransform, ZodOptional, ZodExactOptional, ZodNullable, ZodDefault, ZodPrefault, ZodNonOptional, ZodCatch, ZodPipe, ZodPreprocess, ZodReadonly, ZodCustom;
 var init_schemas3 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/schemas.js"() {
+  "node_modules/zod/v4/classic/schemas.js"() {
     init_core2();
     init_core2();
     init_json_schema_processors();
@@ -13839,16 +15702,16 @@ var init_schemas3 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/compat.js
+// node_modules/zod/v4/classic/compat.js
 var ZodFirstPartyTypeKind;
 var init_compat = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/compat.js"() {
+  "node_modules/zod/v4/classic/compat.js"() {
     /* @__PURE__ */ (function(ZodFirstPartyTypeKind2) {
     })(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/iso.js
+// node_modules/zod/v4/classic/iso.js
 var iso_exports2 = {};
 __export(iso_exports2, {
   ZodISODate: () => ZodISODate,
@@ -13873,22 +15736,22 @@ function duration2(params) {
   return _isoDuration(ZodISODuration, params);
 }
 var init_iso2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/iso.js"() {
+  "node_modules/zod/v4/classic/iso.js"() {
     init_core2();
     init_schemas3();
     init_schemas3();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/coerce.js
+// node_modules/zod/v4/classic/coerce.js
 var init_coerce2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/coerce.js"() {
+  "node_modules/zod/v4/classic/coerce.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/external.js
+// node_modules/zod/v4/classic/external.js
 var init_external2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/external.js"() {
+  "node_modules/zod/v4/classic/external.js"() {
     init_core2();
     init_schemas3();
     init_checks3();
@@ -13901,24 +15764,24 @@ var init_external2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/index.js
+// node_modules/zod/v4/classic/index.js
 var init_classic = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/classic/index.js"() {
+  "node_modules/zod/v4/classic/index.js"() {
     init_external2();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/index.js
+// node_modules/zod/v4/index.js
 var init_v4 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod/v4/index.js"() {
+  "node_modules/zod/v4/index.js"() {
     init_classic();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/types.js
 var LATEST_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS, RELATED_TASK_META_KEY, JSONRPC_VERSION, AssertObjectSchema, ProgressTokenSchema, CursorSchema, TaskCreationParamsSchema, TaskMetadataSchema, RelatedTaskMetadataSchema, RequestMetaSchema, BaseRequestParamsSchema, TaskAugmentedRequestParamsSchema, isTaskAugmentedRequestParams, RequestSchema, NotificationsParamsSchema, NotificationSchema, ResultSchema, RequestIdSchema, JSONRPCRequestSchema, isJSONRPCRequest, JSONRPCNotificationSchema, isJSONRPCNotification, JSONRPCResultResponseSchema, isJSONRPCResultResponse, ErrorCode, JSONRPCErrorResponseSchema, isJSONRPCErrorResponse, JSONRPCMessageSchema, JSONRPCResponseSchema, EmptyResultSchema, CancelledNotificationParamsSchema, CancelledNotificationSchema, IconSchema, IconsSchema, BaseMetadataSchema, ImplementationSchema, FormElicitationCapabilitySchema, ElicitationCapabilitySchema, ClientTasksCapabilitySchema, ServerTasksCapabilitySchema, ClientCapabilitiesSchema, InitializeRequestParamsSchema, InitializeRequestSchema, ServerCapabilitiesSchema, InitializeResultSchema, InitializedNotificationSchema, PingRequestSchema, ProgressSchema, ProgressNotificationParamsSchema, ProgressNotificationSchema, PaginatedRequestParamsSchema, PaginatedRequestSchema, PaginatedResultSchema, TaskStatusSchema, TaskSchema, CreateTaskResultSchema, TaskStatusNotificationParamsSchema, TaskStatusNotificationSchema, GetTaskRequestSchema, GetTaskResultSchema, GetTaskPayloadRequestSchema, GetTaskPayloadResultSchema, ListTasksRequestSchema, ListTasksResultSchema, CancelTaskRequestSchema, CancelTaskResultSchema, ResourceContentsSchema, TextResourceContentsSchema, Base64Schema, BlobResourceContentsSchema, RoleSchema, AnnotationsSchema, ResourceSchema, ResourceTemplateSchema, ListResourcesRequestSchema, ListResourcesResultSchema, ListResourceTemplatesRequestSchema, ListResourceTemplatesResultSchema, ResourceRequestParamsSchema, ReadResourceRequestParamsSchema, ReadResourceRequestSchema, ReadResourceResultSchema, ResourceListChangedNotificationSchema, SubscribeRequestParamsSchema, SubscribeRequestSchema, UnsubscribeRequestParamsSchema, UnsubscribeRequestSchema, ResourceUpdatedNotificationParamsSchema, ResourceUpdatedNotificationSchema, PromptArgumentSchema, PromptSchema, ListPromptsRequestSchema, ListPromptsResultSchema, GetPromptRequestParamsSchema, GetPromptRequestSchema, TextContentSchema, ImageContentSchema, AudioContentSchema, ToolUseContentSchema, EmbeddedResourceSchema, ResourceLinkSchema, ContentBlockSchema, PromptMessageSchema, GetPromptResultSchema, PromptListChangedNotificationSchema, ToolAnnotationsSchema, ToolExecutionSchema, ToolSchema, ListToolsRequestSchema, ListToolsResultSchema, CallToolResultSchema, CompatibilityCallToolResultSchema, CallToolRequestParamsSchema, CallToolRequestSchema, ToolListChangedNotificationSchema, ListChangedOptionsBaseSchema, LoggingLevelSchema, SetLevelRequestParamsSchema, SetLevelRequestSchema, LoggingMessageNotificationParamsSchema, LoggingMessageNotificationSchema, ModelHintSchema, ModelPreferencesSchema, ToolChoiceSchema, ToolResultContentSchema, SamplingContentSchema, SamplingMessageContentBlockSchema, SamplingMessageSchema, CreateMessageRequestParamsSchema, CreateMessageRequestSchema, CreateMessageResultSchema, CreateMessageResultWithToolsSchema, BooleanSchemaSchema, StringSchemaSchema, NumberSchemaSchema, UntitledSingleSelectEnumSchemaSchema, TitledSingleSelectEnumSchemaSchema, LegacyTitledEnumSchemaSchema, SingleSelectEnumSchemaSchema, UntitledMultiSelectEnumSchemaSchema, TitledMultiSelectEnumSchemaSchema, MultiSelectEnumSchemaSchema, EnumSchemaSchema, PrimitiveSchemaDefinitionSchema, ElicitRequestFormParamsSchema, ElicitRequestURLParamsSchema, ElicitRequestParamsSchema, ElicitRequestSchema, ElicitationCompleteNotificationParamsSchema, ElicitationCompleteNotificationSchema, ElicitResultSchema, ResourceTemplateReferenceSchema, PromptReferenceSchema, CompleteRequestParamsSchema, CompleteRequestSchema, CompleteResultSchema, RootSchema, ListRootsRequestSchema, ListRootsResultSchema, RootsListChangedNotificationSchema, ClientRequestSchema, ClientNotificationSchema, ClientResultSchema, ServerRequestSchema, ServerNotificationSchema, ServerResultSchema, McpError, UrlElicitationRequiredError;
 var init_types = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/types.js"() {
     init_v4();
     LATEST_PROTOCOL_VERSION = "2025-11-25";
     SUPPORTED_PROTOCOL_VERSIONS = [LATEST_PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"];
@@ -15439,135 +17302,135 @@ var init_types = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/interfaces.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/interfaces.js
 function isTerminal(status) {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 var init_interfaces = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/interfaces.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/interfaces.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/Options.js
+// node_modules/zod-to-json-schema/dist/esm/Options.js
 var init_Options = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/Options.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/Options.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/Refs.js
+// node_modules/zod-to-json-schema/dist/esm/Refs.js
 var init_Refs = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/Refs.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/Refs.js"() {
     init_Options();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/errorMessages.js
+// node_modules/zod-to-json-schema/dist/esm/errorMessages.js
 var init_errorMessages = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/errorMessages.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/errorMessages.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/getRelativePath.js
+// node_modules/zod-to-json-schema/dist/esm/getRelativePath.js
 var init_getRelativePath = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/getRelativePath.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/getRelativePath.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/any.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/any.js
 var init_any = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/any.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/any.js"() {
     init_getRelativePath();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/array.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/array.js
 var init_array = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/array.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/array.js"() {
     init_errorMessages();
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/bigint.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/bigint.js
 var init_bigint = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/bigint.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/bigint.js"() {
     init_errorMessages();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/boolean.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/boolean.js
 var init_boolean = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/boolean.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/boolean.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/branded.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/branded.js
 var init_branded = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/branded.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/branded.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/catch.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/catch.js
 var init_catch = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/catch.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/catch.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/date.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/date.js
 var init_date = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/date.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/date.js"() {
     init_errorMessages();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/default.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/default.js
 var init_default = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/default.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/default.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/effects.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/effects.js
 var init_effects = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/effects.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/effects.js"() {
     init_parseDef();
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/enum.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/enum.js
 var init_enum = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/enum.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/enum.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/intersection.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/intersection.js
 var init_intersection = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/intersection.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/intersection.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/literal.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/literal.js
 var init_literal = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/literal.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/literal.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/string.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/string.js
 var ALPHA_NUMERIC;
 var init_string = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/string.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/string.js"() {
     init_errorMessages();
     ALPHA_NUMERIC = new Set("ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvxyz0123456789");
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/record.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/record.js
 var init_record = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/record.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/record.js"() {
     init_parseDef();
     init_string();
     init_branded();
@@ -15575,124 +17438,124 @@ var init_record = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/map.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/map.js
 var init_map = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/map.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/map.js"() {
     init_parseDef();
     init_record();
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/nativeEnum.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/nativeEnum.js
 var init_nativeEnum = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/nativeEnum.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/nativeEnum.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/never.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/never.js
 var init_never = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/never.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/never.js"() {
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/null.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/null.js
 var init_null = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/null.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/null.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/union.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/union.js
 var init_union = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/union.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/union.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/nullable.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/nullable.js
 var init_nullable = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/nullable.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/nullable.js"() {
     init_parseDef();
     init_union();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/number.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/number.js
 var init_number = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/number.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/number.js"() {
     init_errorMessages();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/object.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/object.js
 var init_object = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/object.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/object.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/optional.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/optional.js
 var init_optional = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/optional.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/optional.js"() {
     init_parseDef();
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/pipeline.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/pipeline.js
 var init_pipeline = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/pipeline.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/pipeline.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/promise.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/promise.js
 var init_promise = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/promise.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/promise.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/set.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/set.js
 var init_set = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/set.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/set.js"() {
     init_errorMessages();
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/tuple.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/tuple.js
 var init_tuple = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/tuple.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/tuple.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/undefined.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/undefined.js
 var init_undefined = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/undefined.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/undefined.js"() {
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/unknown.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/unknown.js
 var init_unknown = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/unknown.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/unknown.js"() {
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/readonly.js
+// node_modules/zod-to-json-schema/dist/esm/parsers/readonly.js
 var init_readonly = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parsers/readonly.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parsers/readonly.js"() {
     init_parseDef();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/selectParser.js
+// node_modules/zod-to-json-schema/dist/esm/selectParser.js
 var init_selectParser = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/selectParser.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/selectParser.js"() {
     init_any();
     init_array();
     init_bigint();
@@ -15726,9 +17589,9 @@ var init_selectParser = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parseDef.js
+// node_modules/zod-to-json-schema/dist/esm/parseDef.js
 var init_parseDef = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parseDef.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parseDef.js"() {
     init_Options();
     init_selectParser();
     init_getRelativePath();
@@ -15736,24 +17599,24 @@ var init_parseDef = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parseTypes.js
+// node_modules/zod-to-json-schema/dist/esm/parseTypes.js
 var init_parseTypes = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/parseTypes.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/parseTypes.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/zodToJsonSchema.js
+// node_modules/zod-to-json-schema/dist/esm/zodToJsonSchema.js
 var init_zodToJsonSchema = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/zodToJsonSchema.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/zodToJsonSchema.js"() {
     init_parseDef();
     init_Refs();
     init_any();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/index.js
+// node_modules/zod-to-json-schema/dist/esm/index.js
 var init_esm = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/zod-to-json-schema/dist/esm/index.js"() {
+  "node_modules/zod-to-json-schema/dist/esm/index.js"() {
     init_Options();
     init_Refs();
     init_errorMessages();
@@ -15796,7 +17659,7 @@ var init_esm = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-json-schema-compat.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-json-schema-compat.js
 function getMethodLiteral(schema2) {
   const shape = getObjectShape(schema2);
   const methodSchema = shape?.method;
@@ -15817,13 +17680,13 @@ function parseWithCompat(schema2, data) {
   return result.data;
 }
 var init_zod_json_schema_compat = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-json-schema-compat.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-json-schema-compat.js"() {
     init_zod_compat();
     init_esm();
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js
 function isPlainObject2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -15845,7 +17708,7 @@ function mergeCapabilities(base, additional) {
 }
 var DEFAULT_REQUEST_TIMEOUT_MSEC, Protocol;
 var init_protocol2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js"() {
     init_zod_compat();
     init_types();
     init_interfaces();
@@ -16349,7 +18212,7 @@ var init_protocol2 = __esm({
               return;
             }
             const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-            await new Promise((resolve7) => setTimeout(resolve7, pollInterval));
+            await new Promise((resolve8) => setTimeout(resolve8, pollInterval));
             options?.signal?.throwIfAborted();
           }
         } catch (error2) {
@@ -16366,7 +18229,7 @@ var init_protocol2 = __esm({
        */
       request(request, resultSchema, options) {
         const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-        return new Promise((resolve7, reject) => {
+        return new Promise((resolve8, reject) => {
           const earlyReject = (error2) => {
             reject(error2);
           };
@@ -16444,7 +18307,7 @@ var init_protocol2 = __esm({
               if (!parseResult.success) {
                 reject(parseResult.error);
               } else {
-                resolve7(parseResult.data);
+                resolve8(parseResult.data);
               }
             } catch (error2) {
               reject(error2);
@@ -16705,12 +18568,12 @@ var init_protocol2 = __esm({
           }
         } catch {
         }
-        return new Promise((resolve7, reject) => {
+        return new Promise((resolve8, reject) => {
           if (signal.aborted) {
             reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
             return;
           }
-          const timeoutId = setTimeout(resolve7, interval);
+          const timeoutId = setTimeout(resolve8, interval);
           signal.addEventListener("abort", () => {
             clearTimeout(timeoutId);
             reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -16786,9 +18649,9 @@ var init_protocol2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/code.js
+// node_modules/ajv/dist/compile/codegen/code.js
 var require_code = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/code.js"(exports2) {
+  "node_modules/ajv/dist/compile/codegen/code.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.regexpCode = exports2.getEsmExportName = exports2.getProperty = exports2.safeStringify = exports2.stringify = exports2.strConcat = exports2.addCodeArg = exports2.str = exports2._ = exports2.nil = exports2._Code = exports2.Name = exports2.IDENTIFIER = exports2._CodeOrName = void 0;
@@ -16940,9 +18803,9 @@ var require_code = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/scope.js
+// node_modules/ajv/dist/compile/codegen/scope.js
 var require_scope = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/scope.js"(exports2) {
+  "node_modules/ajv/dist/compile/codegen/scope.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.ValueScope = exports2.ValueScopeName = exports2.Scope = exports2.varKinds = exports2.UsedValueState = void 0;
@@ -17085,9 +18948,9 @@ var require_scope = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/index.js
+// node_modules/ajv/dist/compile/codegen/index.js
 var require_codegen = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/codegen/index.js"(exports2) {
+  "node_modules/ajv/dist/compile/codegen/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.or = exports2.and = exports2.not = exports2.CodeGen = exports2.operators = exports2.varKinds = exports2.ValueScopeName = exports2.ValueScope = exports2.Scope = exports2.Name = exports2.regexpCode = exports2.stringify = exports2.getProperty = exports2.nil = exports2.strConcat = exports2.str = exports2._ = void 0;
@@ -17163,11 +19026,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants2);
+          this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -17184,10 +19047,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants2);
+        this.rhs = optimizeExpr(this.rhs, names, constants3);
         return this;
       }
       get names() {
@@ -17248,8 +19111,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants2) {
-        this.code = optimizeExpr(this.code, names, constants2);
+      optimizeNames(names, constants3) {
+        this.code = optimizeExpr(this.code, names, constants3);
         return this;
       }
       get names() {
@@ -17278,12 +19141,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants2))
+          if (n.optimizeNames(names, constants3))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -17336,12 +19199,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a3;
-        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
-        if (!(super.optimizeNames(names, constants2) || this.else))
+        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants3);
+        if (!(super.optimizeNames(names, constants3) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants2);
+        this.condition = optimizeExpr(this.condition, names, constants3);
         return this;
       }
       get names() {
@@ -17364,10 +19227,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants2);
+        this.iteration = optimizeExpr(this.iteration, names, constants3);
         return this;
       }
       get names() {
@@ -17403,10 +19266,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants2) {
-        if (!super.optimizeNames(names, constants2))
+      optimizeNames(names, constants3) {
+        if (!super.optimizeNames(names, constants3))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants2);
+        this.iterable = optimizeExpr(this.iterable, names, constants3);
         return this;
       }
       get names() {
@@ -17448,11 +19311,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants2) {
+      optimizeNames(names, constants3) {
         var _a3, _b;
-        super.optimizeNames(names, constants2);
-        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
+        super.optimizeNames(names, constants3);
+        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants3);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants3);
         return this;
       }
       get names() {
@@ -17753,7 +19616,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants2) {
+    function optimizeExpr(expr, names, constants3) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -17768,14 +19631,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants2[n.str];
+        const c = constants3[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants3[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -17805,9 +19668,9 @@ var require_codegen = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/util.js
+// node_modules/ajv/dist/compile/util.js
 var require_util = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/util.js"(exports2) {
+  "node_modules/ajv/dist/compile/util.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.checkStrictMode = exports2.getErrorPath = exports2.Type = exports2.useFunc = exports2.setEvaluated = exports2.evaluatedPropsToName = exports2.mergeEvaluated = exports2.eachItem = exports2.unescapeJsonPointer = exports2.escapeJsonPointer = exports2.escapeFragment = exports2.unescapeFragment = exports2.schemaRefOrVal = exports2.schemaHasRulesButRef = exports2.schemaHasRules = exports2.checkUnknownRules = exports2.alwaysValidSchema = exports2.toHash = void 0;
@@ -17972,9 +19835,9 @@ var require_util = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/names.js
+// node_modules/ajv/dist/compile/names.js
 var require_names = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/names.js"(exports2) {
+  "node_modules/ajv/dist/compile/names.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -18011,9 +19874,9 @@ var require_names = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/errors.js
+// node_modules/ajv/dist/compile/errors.js
 var require_errors = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/errors.js"(exports2) {
+  "node_modules/ajv/dist/compile/errors.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.extendErrors = exports2.resetErrorsCount = exports2.reportExtraError = exports2.reportError = exports2.keyword$DataError = exports2.keywordError = void 0;
@@ -18133,9 +19996,9 @@ var require_errors = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/boolSchema.js
+// node_modules/ajv/dist/compile/validate/boolSchema.js
 var require_boolSchema = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/boolSchema.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/boolSchema.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.boolOrEmptySchema = exports2.topBoolOrEmptySchema = void 0;
@@ -18184,9 +20047,9 @@ var require_boolSchema = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/rules.js
+// node_modules/ajv/dist/compile/rules.js
 var require_rules = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/rules.js"(exports2) {
+  "node_modules/ajv/dist/compile/rules.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getRules = exports2.isJSONType = void 0;
@@ -18215,9 +20078,9 @@ var require_rules = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/applicability.js
+// node_modules/ajv/dist/compile/validate/applicability.js
 var require_applicability = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/applicability.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/applicability.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.shouldUseRule = exports2.shouldUseGroup = exports2.schemaHasRulesForType = void 0;
@@ -18238,9 +20101,9 @@ var require_applicability = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/dataType.js
+// node_modules/ajv/dist/compile/validate/dataType.js
 var require_dataType = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/dataType.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/dataType.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.reportTypeError = exports2.checkDataTypes = exports2.checkDataType = exports2.coerceAndCheckDataType = exports2.getJSONTypes = exports2.getSchemaTypes = exports2.DataType = void 0;
@@ -18422,9 +20285,9 @@ var require_dataType = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/defaults.js
+// node_modules/ajv/dist/compile/validate/defaults.js
 var require_defaults = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/defaults.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/defaults.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.assignDefaults = void 0;
@@ -18459,9 +20322,9 @@ var require_defaults = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/code.js
+// node_modules/ajv/dist/vocabularies/code.js
 var require_code2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/code.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/code.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateUnion = exports2.validateArray = exports2.usePattern = exports2.callValidateCode = exports2.schemaProperties = exports2.allSchemaProperties = exports2.noPropertyInData = exports2.propertyInData = exports2.isOwnProperty = exports2.hasPropFunc = exports2.reportMissingProp = exports2.checkMissingProp = exports2.checkReportMissingProp = void 0;
@@ -18592,9 +20455,9 @@ var require_code2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/keyword.js
+// node_modules/ajv/dist/compile/validate/keyword.js
 var require_keyword = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/keyword.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/keyword.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateKeywordUsage = exports2.validSchemaType = exports2.funcKeywordCode = exports2.macroKeywordCode = void 0;
@@ -18710,9 +20573,9 @@ var require_keyword = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/subschema.js
+// node_modules/ajv/dist/compile/validate/subschema.js
 var require_subschema = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/subschema.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/subschema.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.extendSubschemaMode = exports2.extendSubschemaData = exports2.getSubschema = void 0;
@@ -18793,9 +20656,9 @@ var require_subschema = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-deep-equal/index.js
+// node_modules/fast-deep-equal/index.js
 var require_fast_deep_equal = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-deep-equal/index.js"(exports2, module2) {
+  "node_modules/fast-deep-equal/index.js"(exports2, module2) {
     "use strict";
     module2.exports = function equal(a, b2) {
       if (a === b2) return true;
@@ -18828,9 +20691,9 @@ var require_fast_deep_equal = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/json-schema-traverse/index.js
+// node_modules/json-schema-traverse/index.js
 var require_json_schema_traverse = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/json-schema-traverse/index.js"(exports2, module2) {
+  "node_modules/json-schema-traverse/index.js"(exports2, module2) {
     "use strict";
     var traverse = module2.exports = function(schema2, opts, cb) {
       if (typeof opts == "function") {
@@ -18916,9 +20779,9 @@ var require_json_schema_traverse = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/resolve.js
+// node_modules/ajv/dist/compile/resolve.js
 var require_resolve = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/resolve.js"(exports2) {
+  "node_modules/ajv/dist/compile/resolve.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getSchemaRefs = exports2.resolveUrl = exports2.normalizeId = exports2._getFullPath = exports2.getFullPath = exports2.inlineRef = void 0;
@@ -19072,9 +20935,9 @@ var require_resolve = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/index.js
+// node_modules/ajv/dist/compile/validate/index.js
 var require_validate = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/validate/index.js"(exports2) {
+  "node_modules/ajv/dist/compile/validate/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getData = exports2.KeywordCxt = exports2.validateFunctionCode = void 0;
@@ -19580,9 +21443,9 @@ var require_validate = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/validation_error.js
+// node_modules/ajv/dist/runtime/validation_error.js
 var require_validation_error = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/validation_error.js"(exports2) {
+  "node_modules/ajv/dist/runtime/validation_error.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var ValidationError = class extends Error {
@@ -19596,9 +21459,9 @@ var require_validation_error = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/ref_error.js
+// node_modules/ajv/dist/compile/ref_error.js
 var require_ref_error = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/ref_error.js"(exports2) {
+  "node_modules/ajv/dist/compile/ref_error.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var resolve_1 = require_resolve();
@@ -19613,9 +21476,9 @@ var require_ref_error = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/index.js
+// node_modules/ajv/dist/compile/index.js
 var require_compile = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/compile/index.js"(exports2) {
+  "node_modules/ajv/dist/compile/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.resolveSchema = exports2.getCompilingSchema = exports2.resolveRef = exports2.compileSchema = exports2.SchemaEnv = void 0;
@@ -19737,7 +21600,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve7.call(this, root, ref);
+      let _sch = resolve8.call(this, root, ref);
       if (_sch === void 0) {
         const schema2 = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -19764,7 +21627,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve7(root, ref) {
+    function resolve8(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -19837,9 +21700,9 @@ var require_compile = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/refs/data.json
+// node_modules/ajv/dist/refs/data.json
 var require_data = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/refs/data.json"(exports2, module2) {
+  "node_modules/ajv/dist/refs/data.json"(exports2, module2) {
     module2.exports = {
       $id: "https://raw.githubusercontent.com/ajv-validator/ajv/master/lib/refs/data.json#",
       description: "Meta-schema for $data reference (JSON AnySchema extension proposal)",
@@ -19856,9 +21719,9 @@ var require_data = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/lib/utils.js
+// node_modules/fast-uri/lib/utils.js
 var require_utils = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/lib/utils.js"(exports2, module2) {
+  "node_modules/fast-uri/lib/utils.js"(exports2, module2) {
     "use strict";
     var isUUID = RegExp.prototype.test.bind(/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/iu);
     var isIPv4 = RegExp.prototype.test.bind(/^(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]\d|\d)$/u);
@@ -20358,9 +22221,9 @@ var require_utils = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/lib/schemes.js
+// node_modules/fast-uri/lib/schemes.js
 var require_schemes = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/lib/schemes.js"(exports2, module2) {
+  "node_modules/fast-uri/lib/schemes.js"(exports2, module2) {
     "use strict";
     var { isUUID } = require_utils();
     var URN_REG = /^([\da-z][\d\-a-z]{0,31}):((?:[\w!$'()*+,\-./:;=@]|%[\da-f]{2})+)$/iu;
@@ -20569,9 +22432,9 @@ var require_schemes = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/index.js
+// node_modules/fast-uri/index.js
 var require_fast_uri = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/fast-uri/index.js"(exports2, module2) {
+  "node_modules/fast-uri/index.js"(exports2, module2) {
     "use strict";
     var { normalizeIPv6, removeDotSegments, recomposeAuthority, normalizePercentEncoding, normalizePathEncoding, serializePathEncoding, normalizeQueryFragmentEncoding, encodeQuery, encodeFragment, reescapeHostDelimiters, isIPv4, nonSimpleDomain } = require_utils();
     var { SCHEMES, getSchemeHandler } = require_schemes();
@@ -20594,7 +22457,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve7(baseURI, relativeURI, options) {
+    function resolve8(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -20627,49 +22490,49 @@ var require_fast_uri = __commonJS({
       schemelessOptions.skipEscape = true;
       return serialize(resolved, schemelessOptions);
     }
-    function resolveComponent(base, relative, options, skipNormalization) {
+    function resolveComponent(base, relative2, options, skipNormalization) {
       const target2 = {};
       if (!skipNormalization) {
         base = parse4(serialize(base, options), options);
-        relative = parse4(serialize(relative, options), options);
+        relative2 = parse4(serialize(relative2, options), options);
       }
       options = options || {};
-      if (!options.tolerant && relative.scheme) {
-        target2.scheme = relative.scheme;
-        target2.userinfo = relative.userinfo;
-        target2.host = relative.host;
-        target2.port = relative.port;
-        target2.path = removeDotSegments(relative.path || "");
-        target2.query = relative.query;
+      if (!options.tolerant && relative2.scheme) {
+        target2.scheme = relative2.scheme;
+        target2.userinfo = relative2.userinfo;
+        target2.host = relative2.host;
+        target2.port = relative2.port;
+        target2.path = removeDotSegments(relative2.path || "");
+        target2.query = relative2.query;
       } else {
-        if (relative.userinfo !== void 0 || relative.host !== void 0 || relative.port !== void 0) {
-          target2.userinfo = relative.userinfo;
-          target2.host = relative.host;
-          target2.port = relative.port;
-          target2.path = removeDotSegments(relative.path || "");
-          target2.query = relative.query;
+        if (relative2.userinfo !== void 0 || relative2.host !== void 0 || relative2.port !== void 0) {
+          target2.userinfo = relative2.userinfo;
+          target2.host = relative2.host;
+          target2.port = relative2.port;
+          target2.path = removeDotSegments(relative2.path || "");
+          target2.query = relative2.query;
         } else {
-          if (!relative.path) {
+          if (!relative2.path) {
             target2.path = base.path;
-            if (relative.query !== void 0) {
-              target2.query = relative.query;
+            if (relative2.query !== void 0) {
+              target2.query = relative2.query;
             } else {
               target2.query = base.query;
             }
           } else {
-            if (relative.path[0] === "/") {
-              target2.path = removeDotSegments(relative.path);
+            if (relative2.path[0] === "/") {
+              target2.path = removeDotSegments(relative2.path);
             } else {
               if ((base.userinfo !== void 0 || base.host !== void 0 || base.port !== void 0) && !base.path) {
-                target2.path = "/" + relative.path;
+                target2.path = "/" + relative2.path;
               } else if (!base.path) {
-                target2.path = relative.path;
+                target2.path = relative2.path;
               } else {
-                target2.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative.path;
+                target2.path = base.path.slice(0, base.path.lastIndexOf("/") + 1) + relative2.path;
               }
               target2.path = removeDotSegments(target2.path);
             }
-            target2.query = relative.query;
+            target2.query = relative2.query;
           }
           target2.userinfo = base.userinfo;
           target2.host = base.host;
@@ -20677,7 +22540,7 @@ var require_fast_uri = __commonJS({
         }
         target2.scheme = base.scheme;
       }
-      target2.fragment = relative.fragment;
+      target2.fragment = relative2.fragment;
       return target2;
     }
     function equal(uriA, uriB, options) {
@@ -20962,7 +22825,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve7,
+      resolve: resolve8,
       resolveComponent,
       equal,
       serialize,
@@ -20974,9 +22837,9 @@ var require_fast_uri = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/uri.js
+// node_modules/ajv/dist/runtime/uri.js
 var require_uri = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/uri.js"(exports2) {
+  "node_modules/ajv/dist/runtime/uri.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var uri = require_fast_uri();
@@ -20985,9 +22848,9 @@ var require_uri = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/core.js
+// node_modules/ajv/dist/core.js
 var require_core = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/core.js"(exports2) {
+  "node_modules/ajv/dist/core.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.CodeGen = exports2.Name = exports2.nil = exports2.stringify = exports2.str = exports2._ = exports2.KeywordCxt = void 0;
@@ -21596,9 +23459,9 @@ var require_core = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/id.js
+// node_modules/ajv/dist/vocabularies/core/id.js
 var require_id = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/id.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/core/id.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var def = {
@@ -21611,9 +23474,9 @@ var require_id = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/ref.js
+// node_modules/ajv/dist/vocabularies/core/ref.js
 var require_ref = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/ref.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/core/ref.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.callRef = exports2.getValidate = void 0;
@@ -21733,9 +23596,9 @@ var require_ref = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/index.js
+// node_modules/ajv/dist/vocabularies/core/index.js
 var require_core2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/core/index.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/core/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var id_1 = require_id();
@@ -21754,9 +23617,9 @@ var require_core2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitNumber.js
+// node_modules/ajv/dist/vocabularies/validation/limitNumber.js
 var require_limitNumber = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitNumber.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/limitNumber.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -21786,9 +23649,9 @@ var require_limitNumber = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/multipleOf.js
+// node_modules/ajv/dist/vocabularies/validation/multipleOf.js
 var require_multipleOf = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/multipleOf.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/multipleOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -21814,9 +23677,9 @@ var require_multipleOf = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/ucs2length.js
+// node_modules/ajv/dist/runtime/ucs2length.js
 var require_ucs2length = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/ucs2length.js"(exports2) {
+  "node_modules/ajv/dist/runtime/ucs2length.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     function ucs2length(str) {
@@ -21840,9 +23703,9 @@ var require_ucs2length = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitLength.js
+// node_modules/ajv/dist/vocabularies/validation/limitLength.js
 var require_limitLength = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitLength.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/limitLength.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -21872,9 +23735,9 @@ var require_limitLength = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/pattern.js
+// node_modules/ajv/dist/vocabularies/validation/pattern.js
 var require_pattern = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/pattern.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/pattern.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -21909,9 +23772,9 @@ var require_pattern = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitProperties.js
+// node_modules/ajv/dist/vocabularies/validation/limitProperties.js
 var require_limitProperties = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitProperties.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/limitProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -21938,9 +23801,9 @@ var require_limitProperties = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/required.js
+// node_modules/ajv/dist/vocabularies/validation/required.js
 var require_required = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/required.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/required.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -22020,9 +23883,9 @@ var require_required = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitItems.js
+// node_modules/ajv/dist/vocabularies/validation/limitItems.js
 var require_limitItems = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/limitItems.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/limitItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22049,9 +23912,9 @@ var require_limitItems = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/equal.js
+// node_modules/ajv/dist/runtime/equal.js
 var require_equal = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/runtime/equal.js"(exports2) {
+  "node_modules/ajv/dist/runtime/equal.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var equal = require_fast_deep_equal();
@@ -22060,9 +23923,9 @@ var require_equal = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/uniqueItems.js
+// node_modules/ajv/dist/vocabularies/validation/uniqueItems.js
 var require_uniqueItems = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/uniqueItems.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/uniqueItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var dataType_1 = require_dataType();
@@ -22127,9 +23990,9 @@ var require_uniqueItems = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/const.js
+// node_modules/ajv/dist/vocabularies/validation/const.js
 var require_const = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/const.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/const.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22156,9 +24019,9 @@ var require_const = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/enum.js
+// node_modules/ajv/dist/vocabularies/validation/enum.js
 var require_enum = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/enum.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/enum.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22205,9 +24068,9 @@ var require_enum = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/index.js
+// node_modules/ajv/dist/vocabularies/validation/index.js
 var require_validation = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/validation/index.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/validation/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var limitNumber_1 = require_limitNumber();
@@ -22243,9 +24106,9 @@ var require_validation = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/additionalItems.js
+// node_modules/ajv/dist/vocabularies/applicator/additionalItems.js
 var require_additionalItems = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/additionalItems.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/additionalItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateAdditionalItems = void 0;
@@ -22296,9 +24159,9 @@ var require_additionalItems = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/items.js
+// node_modules/ajv/dist/vocabularies/applicator/items.js
 var require_items = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/items.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/items.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateTuple = void 0;
@@ -22353,9 +24216,9 @@ var require_items = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/prefixItems.js
+// node_modules/ajv/dist/vocabularies/applicator/prefixItems.js
 var require_prefixItems = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/prefixItems.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/prefixItems.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var items_1 = require_items();
@@ -22370,9 +24233,9 @@ var require_prefixItems = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/items2020.js
+// node_modules/ajv/dist/vocabularies/applicator/items2020.js
 var require_items2020 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/items2020.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/items2020.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22405,9 +24268,9 @@ var require_items2020 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/contains.js
+// node_modules/ajv/dist/vocabularies/applicator/contains.js
 var require_contains = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/contains.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/contains.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22499,9 +24362,9 @@ var require_contains = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/dependencies.js
+// node_modules/ajv/dist/vocabularies/applicator/dependencies.js
 var require_dependencies = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/dependencies.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/dependencies.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.validateSchemaDeps = exports2.validatePropertyDeps = exports2.error = void 0;
@@ -22593,9 +24456,9 @@ var require_dependencies = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/propertyNames.js
+// node_modules/ajv/dist/vocabularies/applicator/propertyNames.js
 var require_propertyNames = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/propertyNames.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/propertyNames.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22636,9 +24499,9 @@ var require_propertyNames = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js
+// node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js
 var require_additionalProperties = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/additionalProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -22742,9 +24605,9 @@ var require_additionalProperties = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/properties.js
+// node_modules/ajv/dist/vocabularies/applicator/properties.js
 var require_properties = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/properties.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/properties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var validate_1 = require_validate();
@@ -22800,9 +24663,9 @@ var require_properties = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/patternProperties.js
+// node_modules/ajv/dist/vocabularies/applicator/patternProperties.js
 var require_patternProperties = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/patternProperties.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/patternProperties.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -22874,9 +24737,9 @@ var require_patternProperties = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/not.js
+// node_modules/ajv/dist/vocabularies/applicator/not.js
 var require_not = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/not.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/not.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -22905,9 +24768,9 @@ var require_not = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/anyOf.js
+// node_modules/ajv/dist/vocabularies/applicator/anyOf.js
 var require_anyOf = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/anyOf.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/anyOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var code_1 = require_code2();
@@ -22922,9 +24785,9 @@ var require_anyOf = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/oneOf.js
+// node_modules/ajv/dist/vocabularies/applicator/oneOf.js
 var require_oneOf = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/oneOf.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/oneOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -22980,9 +24843,9 @@ var require_oneOf = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/allOf.js
+// node_modules/ajv/dist/vocabularies/applicator/allOf.js
 var require_allOf = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/allOf.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/allOf.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -23007,9 +24870,9 @@ var require_allOf = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/if.js
+// node_modules/ajv/dist/vocabularies/applicator/if.js
 var require_if = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/if.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/if.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -23076,9 +24939,9 @@ var require_if = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/thenElse.js
+// node_modules/ajv/dist/vocabularies/applicator/thenElse.js
 var require_thenElse = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/thenElse.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/thenElse.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var util_1 = require_util();
@@ -23094,9 +24957,9 @@ var require_thenElse = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/index.js
+// node_modules/ajv/dist/vocabularies/applicator/index.js
 var require_applicator = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/applicator/index.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/applicator/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var additionalItems_1 = require_additionalItems();
@@ -23142,9 +25005,9 @@ var require_applicator = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/format/format.js
+// node_modules/ajv/dist/vocabularies/format/format.js
 var require_format = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/format/format.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/format/format.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -23232,9 +25095,9 @@ var require_format = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/format/index.js
+// node_modules/ajv/dist/vocabularies/format/index.js
 var require_format2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/format/index.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/format/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var format_1 = require_format();
@@ -23243,9 +25106,9 @@ var require_format2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/metadata.js
+// node_modules/ajv/dist/vocabularies/metadata.js
 var require_metadata = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/metadata.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/metadata.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.contentVocabulary = exports2.metadataVocabulary = void 0;
@@ -23266,9 +25129,9 @@ var require_metadata = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/draft7.js
+// node_modules/ajv/dist/vocabularies/draft7.js
 var require_draft7 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/draft7.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/draft7.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var core_1 = require_core2();
@@ -23288,9 +25151,9 @@ var require_draft7 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/discriminator/types.js
+// node_modules/ajv/dist/vocabularies/discriminator/types.js
 var require_types = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/discriminator/types.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/discriminator/types.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.DiscrError = void 0;
@@ -23302,9 +25165,9 @@ var require_types = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/discriminator/index.js
+// node_modules/ajv/dist/vocabularies/discriminator/index.js
 var require_discriminator = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/vocabularies/discriminator/index.js"(exports2) {
+  "node_modules/ajv/dist/vocabularies/discriminator/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var codegen_1 = require_codegen();
@@ -23407,9 +25270,9 @@ var require_discriminator = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/refs/json-schema-draft-07.json
+// node_modules/ajv/dist/refs/json-schema-draft-07.json
 var require_json_schema_draft_07 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/refs/json-schema-draft-07.json"(exports2, module2) {
+  "node_modules/ajv/dist/refs/json-schema-draft-07.json"(exports2, module2) {
     module2.exports = {
       $schema: "http://json-schema.org/draft-07/schema#",
       $id: "http://json-schema.org/draft-07/schema#",
@@ -23564,9 +25427,9 @@ var require_json_schema_draft_07 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/ajv.js
+// node_modules/ajv/dist/ajv.js
 var require_ajv = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv/dist/ajv.js"(exports2, module2) {
+  "node_modules/ajv/dist/ajv.js"(exports2, module2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.MissingRefError = exports2.ValidationError = exports2.CodeGen = exports2.Name = exports2.nil = exports2.stringify = exports2.str = exports2._ = exports2.KeywordCxt = exports2.Ajv = void 0;
@@ -23634,9 +25497,9 @@ var require_ajv = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/formats.js
+// node_modules/ajv-formats/dist/formats.js
 var require_formats = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/formats.js"(exports2) {
+  "node_modules/ajv-formats/dist/formats.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.formatNames = exports2.fastFormats = exports2.fullFormats = void 0;
@@ -23837,9 +25700,9 @@ var require_formats = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/limit.js
+// node_modules/ajv-formats/dist/limit.js
 var require_limit = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/limit.js"(exports2) {
+  "node_modules/ajv-formats/dist/limit.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.formatLimitDefinition = void 0;
@@ -23909,9 +25772,9 @@ var require_limit = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/index.js
+// node_modules/ajv-formats/dist/index.js
 var require_dist = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/ajv-formats/dist/index.js"(exports2, module2) {
+  "node_modules/ajv-formats/dist/index.js"(exports2, module2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var formats_1 = require_formats();
@@ -23951,7 +25814,7 @@ var require_dist = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js
 function createDefaultAjvInstance() {
   const ajv = new import_ajv.default({
     strict: false,
@@ -23965,7 +25828,7 @@ function createDefaultAjvInstance() {
 }
 var import_ajv, import_ajv_formats, AjvJsonSchemaValidator;
 var init_ajv_provider = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js"() {
     import_ajv = __toESM(require_ajv(), 1);
     import_ajv_formats = __toESM(require_dist(), 1);
     AjvJsonSchemaValidator = class {
@@ -24024,10 +25887,10 @@ var init_ajv_provider = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/server.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/server.js
 var ExperimentalServerTasks;
 var init_server = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/server.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/server.js"() {
     init_types();
     ExperimentalServerTasks = class {
       constructor(_server) {
@@ -24243,7 +26106,7 @@ var init_server = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js
 function assertToolsCallTaskCapability(requests, method, entityName) {
   if (!requests) {
     throw new Error(`${entityName} does not support task creation (required for ${method})`);
@@ -24278,14 +26141,14 @@ function assertClientRequestTaskCapability(requests, method, entityName) {
   }
 }
 var init_helpers = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js"() {
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js
 var Server;
 var init_server2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js"() {
     init_protocol2();
     init_types();
     init_ajv_provider();
@@ -24664,7 +26527,7 @@ var init_server2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js
 function deserializeMessage(line) {
   return JSONRPCMessageSchema.parse(JSON.parse(line));
 }
@@ -24673,7 +26536,7 @@ function serializeMessage(message) {
 }
 var STDIO_DEFAULT_MAX_BUFFER_SIZE, ReadBuffer;
 var init_stdio = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/shared/stdio.js"() {
     init_types();
     STDIO_DEFAULT_MAX_BUFFER_SIZE = 10 * 1024 * 1024;
     ReadBuffer = class {
@@ -24707,10 +26570,10 @@ var init_stdio = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
+// node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js
 var import_node_process, StdioServerTransport;
 var init_stdio2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js"() {
+  "node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js"() {
     import_node_process = __toESM(require("node:process"), 1);
     init_stdio();
     StdioServerTransport = class {
@@ -24768,12 +26631,12 @@ var init_stdio2 = __esm({
         this.onclose?.();
       }
       send(message) {
-        return new Promise((resolve7) => {
+        return new Promise((resolve8) => {
           const json = serializeMessage(message);
           if (this._stdout.write(json)) {
-            resolve7();
+            resolve8();
           } else {
-            this._stdout.once("drain", resolve7);
+            this._stdout.once("drain", resolve8);
           }
         });
       }
@@ -24781,737 +26644,7 @@ var init_stdio2 = __esm({
   }
 });
 
-// src/cloud/session-ack.ts
-function managedAckMessage(code) {
-  return MANAGED_ACK_MESSAGES[code];
-}
-function canAckManagedDelivery(input) {
-  if (input.proof === null) return { ok: false, code: "ack_proof_missing" };
-  if (input.proof.session_id !== input.context.session_id || input.proof.generation !== input.context.generation || input.proof.key !== input.context.session_key || input.context.generation < 1) {
-    return { ok: false, code: "ack_proof_stale" };
-  }
-  if (!input.injectionSucceeded) {
-    return { ok: false, code: "ack_injection_unproven" };
-  }
-  if (!input.hostIdentityTrusted || input.observedHostSessionId === null) {
-    return { ok: false, code: "ack_host_session_untrusted" };
-  }
-  if (input.observedHostSessionId !== input.context.host_session_id) {
-    return { ok: false, code: "ack_host_session_mismatch" };
-  }
-  return { ok: true };
-}
-function assertManagedAckAllowed(input) {
-  const decision = canAckManagedDelivery(input);
-  if (!decision.ok) throw new ManagedAckRefusedError(decision.code);
-}
-function managedAckInput(input) {
-  return {
-    context: input.context,
-    proof: input.proof !== void 0 ? input.proof : sessionProofOf(input.context),
-    injectionSucceeded: input.injectionSucceeded,
-    observedHostSessionId: input.observedHostSessionId,
-    hostIdentityTrusted: input.hostIdentityTrusted
-  };
-}
-var ManagedAckRefusedError, MANAGED_ACK_MESSAGES;
-var init_session_ack = __esm({
-  "src/cloud/session-ack.ts"() {
-    "use strict";
-    init_session_context();
-    ManagedAckRefusedError = class extends Error {
-      constructor(code) {
-        super(managedAckMessage(code));
-        this.code = code;
-      }
-      code;
-      name = "ManagedAckRefusedError";
-    };
-    MANAGED_ACK_MESSAGES = {
-      ack_proof_missing: "cannot mark an ask received without a current session proof",
-      ack_proof_stale: "cannot mark an ask received with a stale session proof",
-      ack_injection_unproven: "cannot mark an ask received until it is injected into the bound host conversation",
-      ack_host_session_mismatch: "cannot mark an ask received: the host conversation is not the bound session",
-      ack_host_session_untrusted: "cannot mark an ask received: the host did not prove the current conversation"
-    };
-  }
-});
-
-// src/cloud/delivery.ts
-function orList2(values2) {
-  return values2.length <= 1 ? values2.join("") : `${values2.slice(0, -1).join(", ")}, or ${values2[values2.length - 1]}`;
-}
-function observationCommandId(signalId) {
-  checkedUuidRequest(signalId, "signalId");
-  return `observe_${signalId.toLowerCase().replaceAll("-", "")}`;
-}
-function checkedUuid3(value, field) {
-  if (typeof value !== "string" || !UUID_RE12.test(value)) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  return value.toLowerCase();
-}
-function isLeapYear(year) {
-  return year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
-}
-function daysInMonth(year, month) {
-  switch (month) {
-    case 1:
-    case 3:
-    case 5:
-    case 7:
-    case 8:
-    case 10:
-    case 12:
-      return 31;
-    case 4:
-    case 6:
-    case 9:
-    case 11:
-      return 30;
-    case 2:
-      return isLeapYear(year) ? 29 : 28;
-    default:
-      return 0;
-  }
-}
-function checkedRfc3339Timestamp(value, field) {
-  if (typeof value !== "string") {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  const match = RFC3339_TIMESTAMP_RE.exec(value);
-  if (!match) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  const year = parseInt(match[1], 10);
-  const month = parseInt(match[2], 10);
-  const day = parseInt(match[3], 10);
-  const hour = parseInt(match[4], 10);
-  const minute = parseInt(match[5], 10);
-  const second = parseInt(match[6], 10);
-  if (month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month) || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  if (match[7] !== void 0 && match[8] !== void 0) {
-    const offsetHour = Math.abs(parseInt(match[7], 10));
-    const offsetMin = parseInt(match[8], 10);
-    if (offsetHour > 23 || offsetMin < 0 || offsetMin > 59) {
-      throw new DeliveryMalformedResponseError(
-        `delivery response returned a malformed ${field}`
-      );
-    }
-  }
-  if (!Number.isFinite(Date.parse(value))) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  return value;
-}
-function checkedLiveLease(leasedUntil, now) {
-  if (Date.parse(leasedUntil) <= now()) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned an already expired lease"
-    );
-  }
-}
-function checkedRelation(value) {
-  if (typeof value !== "string" || !SENDER_OWNER_RELATIONS2.has(value)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery response returned a malformed sender_owner_relation"
-    );
-  }
-  return value;
-}
-function checkedNonNegativeCount(value, field) {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-  return value;
-}
-function checkedClaimCapabilities(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response is missing delivery capabilities"
-    );
-  }
-  const row = value;
-  for (const marker of ["delivery_claim", "delivery_ack", "sender_owner_relation"]) {
-    if (row[marker] !== 1) {
-      throw new DeliveryMalformedResponseError(
-        `delivery claim response is missing the ${marker} capability`
-      );
-    }
-  }
-  return { deliveryClaim: true, deliveryAck: true, senderOwnerRelation: true };
-}
-function checkedOptionalUuidArray(value, field) {
-  if (value === void 0) return;
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !UUID_RE12.test(item))) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-}
-function checkedOptionalArray(value, field) {
-  if (value === void 0) return;
-  if (!Array.isArray(value)) {
-    throw new DeliveryMalformedResponseError(
-      `delivery response returned a malformed ${field}`
-    );
-  }
-}
-function checkedRecipientSlot(row) {
-  const hasPosition = Object.hasOwn(row, "recipient_position");
-  const hasCount = Object.hasOwn(row, "recipient_count");
-  if (!hasPosition && !hasCount) return { position: null, count: null };
-  if (!hasPosition || !hasCount) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a recipient position without its count"
-    );
-  }
-  const position = checkedNonNegativeCount(
-    row.recipient_position,
-    "recipient_position"
-  );
-  const count2 = checkedNonNegativeCount(row.recipient_count, "recipient_count");
-  if (count2 < 1 || position >= count2) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a recipient position outside its set"
-    );
-  }
-  return { position, count: count2 };
-}
-function parseDeliveryRow(value, expected, index, now) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a malformed delivery row"
-    );
-  }
-  const row = value;
-  let signal;
-  try {
-    signal = parseSignalRecord(row.signal);
-  } catch {
-    throw new DeliveryMalformedResponseError(
-      `delivery claim response returned a malformed signal at ${index}`
-    );
-  }
-  if (signal.workspace_id !== expected.workspaceId) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a signal for another workspace"
-    );
-  }
-  if (signal.to_agent !== expected.principalId) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a signal addressed to another agent"
-    );
-  }
-  if (!DELIVERY_KINDS.has(signal.kind)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned a non-direct signal kind"
-    );
-  }
-  const senderOwnerRelation = checkedRelation(row.sender_owner_relation);
-  const leaseId = checkedUuid3(row.lease_id, "lease_id");
-  const leasedUntil = checkedRfc3339Timestamp(row.leased_until, "leased_until");
-  checkedLiveLease(leasedUntil, now);
-  const slot = checkedRecipientSlot(row);
-  signal.sender_owner_relation = senderOwnerRelation;
-  return {
-    signal,
-    leaseId,
-    leasedUntil,
-    senderOwnerRelation,
-    recipientPosition: slot.position,
-    recipientCount: slot.count
-  };
-}
-function parseClaimSuccess(body2, expected, now) {
-  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
-    throw new DeliveryMalformedResponseError("delivery claim response was not an object");
-  }
-  const row = body2;
-  if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response did not report accepted ok"
-    );
-  }
-  const capabilities = checkedClaimCapabilities(row.capabilities);
-  checkedOptionalUuidArray(row.event_ids, "event_ids");
-  checkedOptionalArray(row.events, "events");
-  if (!Array.isArray(row.deliveries)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response is missing its deliveries array"
-    );
-  }
-  const deliveries = row.deliveries.map(
-    (item, index) => parseDeliveryRow(item, expected, index, now)
-  );
-  const signalIds = /* @__PURE__ */ new Set();
-  const leaseIds = /* @__PURE__ */ new Set();
-  for (const delivery of deliveries) {
-    if (signalIds.has(delivery.signal.id)) {
-      throw new DeliveryMalformedResponseError(
-        "delivery claim response repeats a signal id"
-      );
-    }
-    signalIds.add(delivery.signal.id);
-    if (leaseIds.has(delivery.leaseId)) {
-      throw new DeliveryMalformedResponseError(
-        "delivery claim response repeats a lease id"
-      );
-    }
-    leaseIds.add(delivery.leaseId);
-  }
-  if (deliveries.length > 1) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned more than one delivery"
-    );
-  }
-  const pendingDeliveryCount = checkedNonNegativeCount(
-    row.pending_delivery_count,
-    "pending_delivery_count"
-  );
-  const terminalDeliveryFailureCount = checkedNonNegativeCount(
-    row.terminal_delivery_failure_count,
-    "terminal_delivery_failure_count"
-  );
-  if (deliveries.length > pendingDeliveryCount) {
-    throw new DeliveryMalformedResponseError(
-      "delivery claim response returned more deliveries than its pending count"
-    );
-  }
-  let wake;
-  try {
-    wake = parseOptionalWakeHint(row.wake);
-  } catch {
-    throw new DeliveryMalformedResponseError("delivery claim response wake field is malformed");
-  }
-  return {
-    capabilities,
-    deliveries,
-    pendingDeliveryCount,
-    terminalDeliveryFailureCount,
-    ...wake === void 0 ? {} : { wake }
-  };
-}
-function parseAckSuccess(body2, expected) {
-  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
-    throw new DeliveryMalformedResponseError(
-      "delivery acknowledgement response was not an object"
-    );
-  }
-  const row = body2;
-  if (row.status !== "accepted" || row.ok !== true) {
-    throw new DeliveryMalformedResponseError(
-      "delivery acknowledgement response did not report accepted ok"
-    );
-  }
-  checkedOptionalUuidArray(row.event_ids, "event_ids");
-  checkedOptionalArray(row.events, "events");
-  if (row.signal_id !== expected.signalId) {
-    throw new DeliveryMalformedResponseError(
-      "delivery acknowledgement response echoed a different signal id"
-    );
-  }
-  if (row.outcome !== expected.outcome) {
-    throw new DeliveryMalformedResponseError(
-      "delivery acknowledgement response echoed a different outcome"
-    );
-  }
-}
-function checkedCommandId(value) {
-  if (typeof value !== "string" || !COMMAND_ID_VALIDATOR_RE.test(value)) {
-    throw new Error(
-      "a delivery command id must be 8..72 characters of [A-Za-z0-9_-]"
-    );
-  }
-  return value;
-}
-function checkedUuidRequest(value, field) {
-  if (!UUID_RE12.test(value)) {
-    throw new Error(`${field} must be a UUID for an agent delivery command`);
-  }
-}
-function assertAckRequest(request) {
-  checkedCommandId(request.commandId);
-  assertAgentToken(request.credential);
-  checkedUuidRequest(request.workspaceId, "workspaceId");
-  checkedUuidRequest(request.signalId, "signalId");
-  checkedUuidRequest(request.leaseId, "leaseId");
-  checkedUuidRequest(request.listenerInstanceId, "listenerInstanceId");
-  if (!DELIVERY_ACK_OUTCOMES.has(request.outcome)) {
-    throw new Error(
-      `a delivery outcome must be ${orList2([...DELIVERY_ACK_OUTCOMES])}`
-    );
-  }
-  if (request.outcome === "failed_terminal") {
-    if (typeof request.lastErrorCode !== "string" || !FAILED_TERMINAL_CODES_SET.has(request.lastErrorCode)) {
-      throw new Error(
-        `a failed_terminal acknowledgement requires one of ${orList2([...FAILED_TERMINAL_CODES_SET])}`
-      );
-    }
-  } else if (request.lastErrorCode !== null) {
-    throw new Error(
-      "a non-failed acknowledgement must send lastErrorCode null"
-    );
-  }
-}
-function boundedDeliveryErrorCode(body2) {
-  if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) {
-    return null;
-  }
-  const error2 = body2.error;
-  if (typeof error2 === "string" && SERVER_ERROR_CODES_SET.has(error2)) {
-    return error2;
-  }
-  return null;
-}
-function refusal(response, text) {
-  let code = DELIVERY_UNKNOWN_ERROR_CODE;
-  let recognizedEnvelope = false;
-  try {
-    const recognizedCode = boundedDeliveryErrorCode(JSON.parse(text));
-    if (recognizedCode !== null) {
-      code = recognizedCode;
-      recognizedEnvelope = true;
-    }
-  } catch {
-  }
-  const retryAfterMs = parseRetryAfterMs(response.headers.get("retry-after"));
-  return new DeliveryHttpError(
-    response.status,
-    code,
-    `delivery command failed (HTTP ${response.status}): ${code}`,
-    retryAfterMs,
-    recognizedEnvelope
-  );
-}
-function successBody(response, text, verb) {
-  let body2;
-  try {
-    body2 = JSON.parse(text);
-  } catch {
-    throw new DeliveryResponseError(
-      `${verb} response was not JSON (HTTP ${response.status})`
-    );
-  }
-  if (!body2 || typeof body2 !== "object" || Array.isArray(body2) || body2.status !== "accepted" || body2.ok !== true) {
-    throw new DeliveryResponseError(`${verb} response did not carry an accepted envelope`);
-  }
-  return body2;
-}
-var UUID_RE12, RFC3339_TIMESTAMP_RE, DELIVERY_KINDS, SENDER_OWNER_RELATIONS2, DELIVERY_ACK_OUTCOMES, DELIVERY_HANDLED_OUTCOMES, DELIVERY_PROVIDER_PROVEN_OUTCOMES, DELIVERY_REQUEST_TIMEOUT_MS, COMMAND_ID_VALIDATOR_RE, FAILED_TERMINAL_CODES_SET, H0_SEAT_CLAIM_REFUSED_CODE, H0_SEAT_LISTENER_STOP_SENTENCE, DELIVERY_FAILED_TERMINAL_CODES, DELIVERY_SESSION_PROOF_CODES, DELIVERY_SERVER_ERROR_CODES, SERVER_ERROR_CODES_SET, DELIVERY_UNKNOWN_ERROR_CODE, DeliveryTransportError, DeliveryHttpError, DeliveryProtocolError, DeliveryResponseError, DeliveryMalformedResponseError, DeliveryCommandClient;
-var init_delivery = __esm({
-  "src/cloud/delivery.ts"() {
-    "use strict";
-    init_command_client();
-    init_config();
-    init_signals();
-    init_wake();
-    init_session_ack();
-    init_session_wire();
-    UUID_RE12 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    RFC3339_TIMESTAMP_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-]\d{2}):(\d{2}))$/i;
-    DELIVERY_KINDS = /* @__PURE__ */ new Set(["ask", "note"]);
-    SENDER_OWNER_RELATIONS2 = /* @__PURE__ */ new Set([
-      "same_owner",
-      "cross_owner",
-      "unknown"
-    ]);
-    DELIVERY_ACK_OUTCOMES = /* @__PURE__ */ new Set([
-      "replied",
-      "observed",
-      "queued",
-      "expired",
-      "failed_terminal"
-    ]);
-    DELIVERY_HANDLED_OUTCOMES = new Set(
-      [...DELIVERY_ACK_OUTCOMES].filter(
-        (outcome) => outcome === "replied" || outcome === "observed"
-      )
-    );
-    DELIVERY_PROVIDER_PROVEN_OUTCOMES = new Set(
-      [...DELIVERY_ACK_OUTCOMES].filter((outcome) => outcome === "replied")
-    );
-    DELIVERY_REQUEST_TIMEOUT_MS = 3e4;
-    COMMAND_ID_VALIDATOR_RE = /^[A-Za-z0-9_-]{8,72}$/;
-    FAILED_TERMINAL_CODES_SET = /* @__PURE__ */ new Set([
-      "provider_refused",
-      "local_effect_failed",
-      "host_session_failed",
-      "credential_unavailable"
-    ]);
-    H0_SEAT_CLAIM_REFUSED_CODE = "h0_seat_uses_poll";
-    H0_SEAT_LISTENER_STOP_SENTENCE = "This seat receives messages through the h0 poll. The listener has stopped; no further listener action is needed for this seat";
-    DELIVERY_FAILED_TERMINAL_CODES = Object.freeze([
-      "provider_refused",
-      "local_effect_failed",
-      "host_session_failed",
-      "credential_unavailable"
-    ]);
-    DELIVERY_SESSION_PROOF_CODES = Object.freeze([
-      "session_proof_missing",
-      "session_proof_invalid",
-      "session_expired",
-      "session_conflict"
-    ]);
-    DELIVERY_SERVER_ERROR_CODES = Object.freeze([
-      "unauthenticated",
-      "fresh_auth_required",
-      "invalid_request",
-      "payload_too_large",
-      "forbidden",
-      "delivery_unavailable",
-      "delivery_ack_conflict",
-      "delivery_not_surfaced",
-      "command_id_conflict",
-      "rate_limited",
-      "upgrade_required",
-      "temporarily_unavailable",
-      "internal_error",
-      ...DELIVERY_SESSION_PROOF_CODES,
-      H0_SEAT_CLAIM_REFUSED_CODE
-    ]);
-    SERVER_ERROR_CODES_SET = new Set(
-      DELIVERY_SERVER_ERROR_CODES
-    );
-    DELIVERY_UNKNOWN_ERROR_CODE = "unknown_error";
-    DeliveryTransportError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "DeliveryTransportError";
-      }
-    };
-    DeliveryHttpError = class extends Error {
-      constructor(status, code, message, retryAfterMs = null, recognizedEnvelope = true) {
-        super(message);
-        this.status = status;
-        this.code = code;
-        this.retryAfterMs = retryAfterMs;
-        this.recognizedEnvelope = recognizedEnvelope;
-        this.name = "DeliveryHttpError";
-      }
-      status;
-      code;
-      retryAfterMs;
-      recognizedEnvelope;
-    };
-    DeliveryProtocolError = class extends Error {
-      constructor(message) {
-        super(message);
-        this.name = "DeliveryProtocolError";
-      }
-    };
-    DeliveryResponseError = class extends DeliveryProtocolError {
-      constructor(message) {
-        super(message);
-        this.name = "DeliveryResponseError";
-      }
-    };
-    DeliveryMalformedResponseError = class extends DeliveryResponseError {
-      constructor(message) {
-        super(message);
-        this.name = "DeliveryMalformedResponseError";
-      }
-    };
-    DeliveryCommandClient = class {
-      constructor(target2, fetcher = fetch, options = {}) {
-        this.target = target2;
-        this.fetcher = fetcher;
-        this.deadlineMs = options.deadlineMs ?? DELIVERY_REQUEST_TIMEOUT_MS;
-        this.now = options.now ?? Date.now;
-        this.clearTimeoutFn = options.clearTimeout ?? ((timer2) => clearTimeout(timer2));
-        this.createAbortControllerFn = options.createAbortController ?? (() => new AbortController());
-      }
-      target;
-      fetcher;
-      deadlineMs;
-      now;
-      clearTimeoutFn;
-      createAbortControllerFn;
-      async post(request, command2, verb) {
-        if (this.deadlineMs <= 0) {
-          throw new DeliveryTransportError(`${verb} request timed out`);
-        }
-        const deadlineController = this.createAbortControllerFn();
-        let timedOut = false;
-        const signal = deadlineController.signal;
-        let onAbort = () => {
-        };
-        const aborted2 = new Promise((resolve7) => {
-          onAbort = () => resolve7("timeout");
-          if (signal.aborted) {
-            onAbort();
-          } else {
-            signal.addEventListener("abort", onAbort, { once: true });
-          }
-        });
-        const timer2 = setTimeout(() => {
-          timedOut = true;
-          deadlineController.abort();
-        }, this.deadlineMs);
-        try {
-          if (signal.aborted) {
-            throw new DeliveryTransportError(`${verb} request timed out`);
-          }
-          const read = (async () => {
-            let response;
-            try {
-              response = await this.fetcher(commandEndpoint(this.target), {
-                method: "POST",
-                headers: {
-                  authorization: `Bearer ${request.credential}`,
-                  apikey: this.target.anonKey,
-                  "content-type": "application/json"
-                },
-                body: JSON.stringify({
-                  command_id: request.commandId,
-                  client_version: CLIENT_PROTOCOL_VERSION,
-                  workspace_id: request.workspaceId.toLowerCase(),
-                  stream: { kind: "workspace" },
-                  command: command2
-                }),
-                signal
-              });
-            } catch (error2) {
-              if (signal.aborted || timedOut || error2?.name === "AbortError") {
-                return "timeout";
-              }
-              throw new DeliveryTransportError(
-                `${verb} request failed before a response`
-              );
-            }
-            if (signal.aborted || timedOut) return "timeout";
-            let text;
-            try {
-              text = await response.text();
-            } catch {
-              if (signal.aborted || timedOut) return "timeout";
-              throw new DeliveryTransportError(
-                `${verb} response body was interrupted`
-              );
-            }
-            if (signal.aborted || timedOut) return "timeout";
-            return { response, text };
-          })();
-          const raced = await Promise.race([read, aborted2]);
-          if (raced === "timeout") {
-            throw new DeliveryTransportError(`${verb} request timed out`);
-          }
-          return raced;
-        } finally {
-          this.clearTimeoutFn(timer2);
-          signal.removeEventListener("abort", onAbort);
-        }
-      }
-      /** Claim the caller's own single unacked direct-signal delivery row. */
-      async claimAgentInbox(request) {
-        checkedCommandId(request.commandId);
-        assertAgentToken(request.credential);
-        checkedUuidRequest(request.workspaceId, "workspaceId");
-        checkedUuidRequest(request.listenerInstanceId, "listenerInstanceId");
-        checkedUuidRequest(request.expectedPrincipalId, "expectedPrincipalId");
-        const { response, text } = await this.post(request, {
-          kind: "claim_agent_inbox",
-          listener_instance_id: request.listenerInstanceId.toLowerCase(),
-          limit: 1
-        }, "delivery claim");
-        if (!response.ok) throw refusal(response, text);
-        const parsed = parseClaimSuccess(
-          successBody(response, text, "delivery claim"),
-          {
-            workspaceId: request.workspaceId.toLowerCase(),
-            principalId: request.expectedPrincipalId.toLowerCase()
-          },
-          this.now
-        );
-        return {
-          httpStatus: response.status,
-          capabilities: parsed.capabilities,
-          deliveries: parsed.deliveries,
-          pendingDeliveryCount: parsed.pendingDeliveryCount,
-          terminalDeliveryFailureCount: parsed.terminalDeliveryFailureCount,
-          ...parsed.wake === void 0 ? {} : { wake: parsed.wake }
-        };
-      }
-      /** Acknowledge one leased delivery with an exact terminal outcome. */
-      async ackAgentDelivery(request) {
-        if (request.managedAck !== void 0) {
-          assertManagedAckAllowed(request.managedAck);
-        }
-        assertAckRequest(request);
-        const { response, text } = await this.post(request, {
-          kind: "ack_agent_delivery",
-          signal_id: request.signalId.toLowerCase(),
-          lease_id: request.leaseId.toLowerCase(),
-          listener_instance_id: request.listenerInstanceId.toLowerCase(),
-          outcome: request.outcome,
-          last_error_code: request.lastErrorCode,
-          ...request.surfaced === void 0 ? {} : { [ACK_AGENT_DELIVERY_SURFACED_FIELD]: request.surfaced }
-        }, "delivery acknowledgement");
-        if (!response.ok) throw refusal(response, text);
-        parseAckSuccess(
-          successBody(response, text, "delivery acknowledgement"),
-          {
-            signalId: request.signalId.toLowerCase(),
-            outcome: request.outcome
-          }
-        );
-        return {
-          httpStatus: response.status,
-          signalId: request.signalId.toLowerCase(),
-          outcome: request.outcome
-        };
-      }
-      /** Mark a queued delivery observed only after the interactive hook surfaced it. */
-      async observeQueuedAgentDelivery(request) {
-        if (request.managedAck !== void 0) {
-          assertManagedAckAllowed(request.managedAck);
-        }
-        checkedCommandId(request.commandId);
-        assertAgentToken(request.credential);
-        checkedUuidRequest(request.workspaceId, "workspaceId");
-        checkedUuidRequest(request.signalId, "signalId");
-        const { response, text } = await this.post(request, {
-          kind: "ack_agent_delivery",
-          signal_id: request.signalId.toLowerCase(),
-          lease_id: null,
-          listener_instance_id: null,
-          outcome: "observed",
-          last_error_code: null,
-          ...request.surfaced === void 0 ? {} : { [ACK_AGENT_DELIVERY_SURFACED_FIELD]: request.surfaced }
-        }, "delivery observation");
-        if (!response.ok) throw refusal(response, text);
-        parseAckSuccess(
-          successBody(response, text, "delivery observation"),
-          {
-            signalId: request.signalId.toLowerCase(),
-            outcome: "observed"
-          }
-        );
-        return {
-          httpStatus: response.status,
-          signalId: request.signalId.toLowerCase(),
-          outcome: "observed"
-        };
-      }
-    };
-  }
-});
-
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/tslib/tslib.es6.mjs
+// node_modules/tslib/tslib.es6.mjs
 var tslib_es6_exports = {};
 __export(tslib_es6_exports, {
   __addDisposableResource: () => __addDisposableResource,
@@ -25630,11 +26763,11 @@ function __metadata(metadataKey, metadataValue) {
 }
 function __awaiter(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve7) {
-      resolve7(value);
+    return value instanceof P ? value : new P(function(resolve8) {
+      resolve8(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve7, reject) {
+  return new (P || (P = Promise))(function(resolve8, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -25650,7 +26783,7 @@ function __awaiter(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve7(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve8(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -25841,14 +26974,14 @@ function __asyncValues(o) {
   }, i);
   function verb(n) {
     i[n] = o[n] && function(v) {
-      return new Promise(function(resolve7, reject) {
-        v = o[n](v), settle(resolve7, reject, v.done, v.value);
+      return new Promise(function(resolve8, reject) {
+        v = o[n](v), settle(resolve8, reject, v.done, v.value);
       });
     };
   }
-  function settle(resolve7, reject, d, v) {
+  function settle(resolve8, reject, d, v) {
     Promise.resolve(v).then(function(v2) {
-      resolve7({ value: v2, done: d });
+      resolve8({ value: v2, done: d });
     }, reject);
   }
 }
@@ -25950,7 +27083,7 @@ function __rewriteRelativeImportExtension(path, preserveJsx) {
 }
 var extendStatics, __assign, __createBinding, __setModuleDefault, ownKeys, _SuppressedError, tslib_es6_default;
 var init_tslib_es6 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/tslib/tslib.es6.mjs"() {
+  "node_modules/tslib/tslib.es6.mjs"() {
     extendStatics = function(d, b2) {
       extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b3) {
         d2.__proto__ = b3;
@@ -26036,9 +27169,9 @@ var init_tslib_es6 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/helper.js
+// node_modules/@supabase/functions-js/dist/main/helper.js
 var require_helper = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/helper.js"(exports2) {
+  "node_modules/@supabase/functions-js/dist/main/helper.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.resolveFetch = void 0;
@@ -26052,9 +27185,9 @@ var require_helper = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/types.js
+// node_modules/@supabase/functions-js/dist/main/types.js
 var require_types2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/types.js"(exports2) {
+  "node_modules/@supabase/functions-js/dist/main/types.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.FunctionRegion = exports2.FunctionsHttpError = exports2.FunctionsRelayError = exports2.FunctionsFetchError = exports2.FunctionsError = void 0;
@@ -26112,9 +27245,9 @@ var require_types2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/FunctionsClient.js
+// node_modules/@supabase/functions-js/dist/main/FunctionsClient.js
 var require_FunctionsClient = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/FunctionsClient.js"(exports2) {
+  "node_modules/@supabase/functions-js/dist/main/FunctionsClient.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.FunctionsClient = void 0;
@@ -26398,9 +27531,9 @@ var require_FunctionsClient = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/index.js
+// node_modules/@supabase/functions-js/dist/main/index.js
 var require_main = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/functions-js/dist/main/index.js"(exports2) {
+  "node_modules/@supabase/functions-js/dist/main/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.FunctionRegion = exports2.FunctionsRelayError = exports2.FunctionsHttpError = exports2.FunctionsFetchError = exports2.FunctionsError = exports2.FunctionsClient = void 0;
@@ -26427,20 +27560,20 @@ var require_main = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/postgrest-js/dist/index.mjs
+// node_modules/@supabase/postgrest-js/dist/index.mjs
 function sleep(ms, signal) {
-  return new Promise((resolve7) => {
+  return new Promise((resolve8) => {
     if (signal === null || signal === void 0 ? void 0 : signal.aborted) {
-      resolve7();
+      resolve8();
       return;
     }
     const id = setTimeout(() => {
       signal === null || signal === void 0 || signal.removeEventListener("abort", onAbort);
-      resolve7();
+      resolve8();
     }, ms);
     function onAbort() {
       clearTimeout(id);
-      resolve7();
+      resolve8();
     }
     signal === null || signal === void 0 || signal.addEventListener("abort", onAbort);
   });
@@ -26504,7 +27637,7 @@ function _objectSpread2(e) {
 }
 var DEFAULT_MAX_RETRIES, getRetryDelay, RETRYABLE_STATUS_CODES, RETRYABLE_METHODS, PostgrestError, PostgrestBuilder, PostgrestTransformBuilder, PostgrestReservedCharsRegexp, PostgrestFilterBuilder, PostgrestQueryBuilder, PostgrestClient;
 var init_dist = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/postgrest-js/dist/index.mjs"() {
+  "node_modules/@supabase/postgrest-js/dist/index.mjs"() {
     DEFAULT_MAX_RETRIES = 3;
     getRetryDelay = (attemptIndex) => Math.min(1e3 * 2 ** attemptIndex, 3e4);
     RETRYABLE_STATUS_CODES = [520, 503];
@@ -26732,9 +27865,9 @@ var init_dist = __esm({
               if ((fetchError === null || fetchError === void 0 ? void 0 : fetchError.name) === "AbortError" || (fetchError === null || fetchError === void 0 ? void 0 : fetchError.code) === "ABORT_ERR") throw fetchError;
               if (!RETRYABLE_METHODS.includes(_this.method)) throw fetchError;
               if (_this.retryEnabled && attemptCount < DEFAULT_MAX_RETRIES) {
-                const delay3 = getRetryDelay(attemptCount);
+                const delay4 = getRetryDelay(attemptCount);
                 attemptCount++;
-                await sleep(delay3, _this.signal);
+                await sleep(delay4, _this.signal);
                 continue;
               }
               throw fetchError;
@@ -26742,10 +27875,10 @@ var init_dist = __esm({
             if (shouldRetry(_this.method, res$1.status, attemptCount, _this.retryEnabled)) {
               var _res$headers$get, _res$headers;
               const retryAfterHeader = (_res$headers$get = (_res$headers = res$1.headers) === null || _res$headers === void 0 ? void 0 : _res$headers.get("Retry-After")) !== null && _res$headers$get !== void 0 ? _res$headers$get : null;
-              const delay3 = retryAfterHeader !== null ? Math.max(0, parseInt(retryAfterHeader, 10) || 0) * 1e3 : getRetryDelay(attemptCount);
+              const delay4 = retryAfterHeader !== null ? Math.max(0, parseInt(retryAfterHeader, 10) || 0) * 1e3 : getRetryDelay(attemptCount);
               await res$1.text();
               attemptCount++;
-              await sleep(delay3, _this.signal);
+              await sleep(delay4, _this.signal);
               continue;
             }
             return await _this.processResponse(res$1);
@@ -30210,9 +31343,9 @@ ${cause.stack}`;
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/websocket-factory.js
+// node_modules/@supabase/realtime-js/dist/main/lib/websocket-factory.js
 var require_websocket_factory = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/websocket-factory.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/websocket-factory.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.WebSocketFactory = void 0;
@@ -30321,9 +31454,9 @@ Suggested solution: ${env.workaround}`;
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/version.js
+// node_modules/@supabase/realtime-js/dist/main/lib/version.js
 var require_version = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/version.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/version.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.version = void 0;
@@ -30331,9 +31464,9 @@ var require_version = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/constants.js
+// node_modules/@supabase/realtime-js/dist/main/lib/constants.js
 var require_constants = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/constants.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/constants.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.CONNECTION_STATE = exports2.TRANSPORTS = exports2.CHANNEL_EVENTS = exports2.CHANNEL_STATES = exports2.SOCKET_STATES = exports2.MAX_PUSH_BUFFER_SIZE = exports2.WS_CLOSE_NORMAL = exports2.DEFAULT_TIMEOUT = exports2.VERSION = exports2.DEFAULT_VSN = exports2.VSN_2_0_0 = exports2.VSN_1_0_0 = exports2.DEFAULT_VERSION = void 0;
@@ -30379,9 +31512,9 @@ var require_constants = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/serializer.js
+// node_modules/@supabase/realtime-js/dist/main/lib/serializer.js
 var require_serializer = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/serializer.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/serializer.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var Serializer = class {
@@ -30533,9 +31666,9 @@ var require_serializer = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/transformers.js
+// node_modules/@supabase/realtime-js/dist/main/lib/transformers.js
 var require_transformers = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/transformers.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/transformers.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.httpEndpointURL = exports2.toTimestampString = exports2.toArray = exports2.toJson = exports2.toNumber = exports2.toBoolean = exports2.convertCell = exports2.convertColumn = exports2.convertChangeData = exports2.PostgresTypes = void 0;
@@ -30712,9 +31845,9 @@ var require_transformers = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/phoenix/priv/static/phoenix.cjs.js
+// node_modules/@supabase/phoenix/priv/static/phoenix.cjs.js
 var require_phoenix_cjs = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/phoenix/priv/static/phoenix.cjs.js"(exports2, module2) {
+  "node_modules/@supabase/phoenix/priv/static/phoenix.cjs.js"(exports2, module2) {
     "use strict";
     var __defProp2 = Object.defineProperty;
     var __getOwnPropDesc2 = Object.getOwnPropertyDescriptor;
@@ -32564,9 +33697,9 @@ var require_phoenix_cjs = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/presenceAdapter.js
+// node_modules/@supabase/realtime-js/dist/main/phoenix/presenceAdapter.js
 var require_presenceAdapter = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/presenceAdapter.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/phoenix/presenceAdapter.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var phoenix_1 = require_phoenix_cjs();
@@ -32662,9 +33795,9 @@ var require_presenceAdapter = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimePresence.js
+// node_modules/@supabase/realtime-js/dist/main/RealtimePresence.js
 var require_RealtimePresence = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimePresence.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/RealtimePresence.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.REALTIME_PRESENCE_LISTEN_EVENTS = void 0;
@@ -32706,9 +33839,9 @@ var require_RealtimePresence = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/normalizeChannelError.js
+// node_modules/@supabase/realtime-js/dist/main/lib/normalizeChannelError.js
 var require_normalizeChannelError = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/lib/normalizeChannelError.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/lib/normalizeChannelError.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.normalizeChannelError = normalizeChannelError;
@@ -32732,9 +33865,9 @@ var require_normalizeChannelError = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/channelAdapter.js
+// node_modules/@supabase/realtime-js/dist/main/phoenix/channelAdapter.js
 var require_channelAdapter = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/channelAdapter.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/phoenix/channelAdapter.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var constants_1 = require_constants();
@@ -32839,9 +33972,9 @@ var require_channelAdapter = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimePostgresFilterBuilder.js
+// node_modules/@supabase/realtime-js/dist/main/RealtimePostgresFilterBuilder.js
 var require_RealtimePostgresFilterBuilder = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimePostgresFilterBuilder.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/RealtimePostgresFilterBuilder.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.postgresChangesFilter = exports2.RealtimePostgresFilterBuilder = void 0;
@@ -32963,9 +34096,9 @@ var require_RealtimePostgresFilterBuilder = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimeChannel.js
+// node_modules/@supabase/realtime-js/dist/main/RealtimeChannel.js
 var require_RealtimeChannel = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimeChannel.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/RealtimeChannel.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.REALTIME_CHANNEL_STATES = exports2.REALTIME_SUBSCRIBE_STATES = exports2.REALTIME_LISTEN_TYPES = exports2.REALTIME_POSTGRES_CHANGES_LISTEN_EVENT = exports2.postgresChangesFilter = exports2.RealtimePostgresFilterBuilder = void 0;
@@ -33512,15 +34645,15 @@ var require_RealtimeChannel = __commonJS({
             }
           }
         } else {
-          return new Promise((resolve7) => {
+          return new Promise((resolve8) => {
             var _a4, _b2, _c;
             const push = this.channelAdapter.push(args.type, args, opts.timeout || this.timeout);
             if (args.type === "broadcast" && !((_c = (_b2 = (_a4 = this.params) === null || _a4 === void 0 ? void 0 : _a4.config) === null || _b2 === void 0 ? void 0 : _b2.broadcast) === null || _c === void 0 ? void 0 : _c.ack)) {
-              resolve7("ok");
+              resolve8("ok");
             }
-            push.receive("ok", () => resolve7("ok"));
-            push.receive("error", () => resolve7("error"));
-            push.receive("timeout", () => resolve7("timed out"));
+            push.receive("ok", () => resolve8("ok"));
+            push.receive("error", () => resolve8("error"));
+            push.receive("timeout", () => resolve8("timed out"));
           });
         }
       }
@@ -33545,8 +34678,8 @@ var require_RealtimeChannel = __commonJS({
        * @category Realtime
        */
       async unsubscribe(timeout = this.timeout) {
-        return new Promise((resolve7) => {
-          this.channelAdapter.unsubscribe(timeout).receive("ok", () => resolve7("ok")).receive("timeout", () => resolve7("timed out")).receive("error", () => resolve7("error"));
+        return new Promise((resolve8) => {
+          this.channelAdapter.unsubscribe(timeout).receive("ok", () => resolve8("ok")).receive("timeout", () => resolve8("timed out")).receive("error", () => resolve8("error"));
         });
       }
       /**
@@ -33631,8 +34764,8 @@ var require_RealtimeChannel = __commonJS({
       }
       /** @internal */
       _notThisChannelEvent(event, ref) {
-        const { close, error: error2, leave, join: join23 } = constants_1.CHANNEL_EVENTS;
-        const events = [close, error2, leave, join23];
+        const { close, error: error2, leave, join: join25 } = constants_1.CHANNEL_EVENTS;
+        const events = [close, error2, leave, join25];
         return ref && events.includes(event) && ref !== this.joinPush.ref;
       }
       /** @internal */
@@ -33694,9 +34827,9 @@ var require_RealtimeChannel = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/socketAdapter.js
+// node_modules/@supabase/realtime-js/dist/main/phoenix/socketAdapter.js
 var require_socketAdapter = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/phoenix/socketAdapter.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/phoenix/socketAdapter.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var phoenix_1 = require_phoenix_cjs();
@@ -33754,11 +34887,11 @@ var require_socketAdapter = __commonJS({
         this.socket.connect();
       }
       disconnect(callback, code, reason, timeout = 1e4) {
-        return new Promise((resolve7) => {
-          setTimeout(() => resolve7("timeout"), timeout);
+        return new Promise((resolve8) => {
+          setTimeout(() => resolve8("timeout"), timeout);
           this.socket.disconnect(() => {
             callback();
-            resolve7("ok");
+            resolve8("ok");
           }, code, reason);
         });
       }
@@ -33812,9 +34945,9 @@ var require_socketAdapter = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimeClient.js
+// node_modules/@supabase/realtime-js/dist/main/RealtimeClient.js
 var require_RealtimeClient = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/RealtimeClient.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/RealtimeClient.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -34466,9 +35599,9 @@ var require_RealtimeClient = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/index.js
+// node_modules/@supabase/realtime-js/dist/main/index.js
 var require_main2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/realtime-js/dist/main/index.js"(exports2) {
+  "node_modules/@supabase/realtime-js/dist/main/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.WebSocketFactory = exports2.REALTIME_CHANNEL_STATES = exports2.REALTIME_SUBSCRIBE_STATES = exports2.REALTIME_PRESENCE_LISTEN_EVENTS = exports2.REALTIME_POSTGRES_CHANGES_LISTEN_EVENT = exports2.REALTIME_LISTEN_TYPES = exports2.postgresChangesFilter = exports2.RealtimePostgresFilterBuilder = exports2.RealtimeClient = exports2.RealtimeChannel = exports2.RealtimePresence = void 0;
@@ -34505,7 +35638,7 @@ var require_main2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/iceberg-js/dist/index.mjs
+// node_modules/iceberg-js/dist/index.mjs
 function buildUrl(baseUrl, path, query) {
   const url = new URL(path, baseUrl);
   if (query) {
@@ -34581,7 +35714,7 @@ function namespaceToPath2(namespace) {
 }
 var IcebergError, NamespaceOperations, TableOperations, IcebergRestCatalog;
 var init_dist2 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/iceberg-js/dist/index.mjs"() {
+  "node_modules/iceberg-js/dist/index.mjs"() {
     IcebergError = class extends Error {
       constructor(message, opts) {
         super(message);
@@ -35043,7 +36176,7 @@ var init_dist2 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/storage-js/dist/index.mjs
+// node_modules/@supabase/storage-js/dist/index.mjs
 function _typeof2(o) {
   "@babel/helpers - typeof";
   return _typeof2 = "function" == typeof Symbol && "symbol" == typeof Symbol.iterator ? function(o$1) {
@@ -35111,7 +36244,7 @@ function normalizeHeaders(headers) {
   return result;
 }
 async function _handleRequest(fetcher, method, url, options, parameters, body2, namespace) {
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     fetcher(url, _getRequestParams(method, options, parameters, body2)).then((result) => {
       if (!result.ok) throw result;
       if (options === null || options === void 0 ? void 0 : options.noResolveJson) return result;
@@ -35121,7 +36254,7 @@ async function _handleRequest(fetcher, method, url, options, parameters, body2, 
         if (!contentType || !contentType.includes("application/json")) return {};
       }
       return result.json();
-    }).then((data) => resolve7(data)).catch((error2) => handleError(error2, reject, options, namespace));
+    }).then((data) => resolve8(data)).catch((error2) => handleError(error2, reject, options, namespace));
   });
 }
 function createFetchApi(namespace = "storage") {
@@ -35145,7 +36278,7 @@ function createFetchApi(namespace = "storage") {
 }
 var StorageError, StorageApiError, StorageUnknownError, resolveFetch, isPlainObject3, recursiveToCamel, isValidBucketName, encodeStoragePath, _getErrorMessage, handleError, _getRequestParams, defaultApi, get, post, put, head, remove, vectorsApi, BaseApiClient, _Symbol$toStringTag$1, StreamDownloadBuilder, _Symbol$toStringTag, BlobDownloadBuilder, DEFAULT_SEARCH_OPTIONS, DEFAULT_FILE_OPTIONS, StorageFileApi, version2, DEFAULT_HEADERS, StorageBucketApi, StorageAnalyticsClient, VectorIndexApi, VectorDataApi, VectorBucketApi, StorageVectorsClient, VectorBucketScope, VectorIndexScope, StorageClient;
 var init_dist3 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/storage-js/dist/index.mjs"() {
+  "node_modules/@supabase/storage-js/dist/index.mjs"() {
     init_dist2();
     StorageError = class extends Error {
       constructor(message, namespace = "storage", status, statusCode) {
@@ -37839,9 +38972,9 @@ var init_dist3 = __esm({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/version.js
+// node_modules/@supabase/auth-js/dist/main/lib/version.js
 var require_version2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/version.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/version.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.version = void 0;
@@ -37849,9 +38982,9 @@ var require_version2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/constants.js
+// node_modules/@supabase/auth-js/dist/main/lib/constants.js
 var require_constants2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/constants.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/constants.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.JWKS_TTL = exports2.BASE64URL_REGEX = exports2.API_VERSIONS = exports2.API_VERSION_HEADER_NAME = exports2.NETWORK_FAILURE = exports2.DEFAULT_HEADERS = exports2.AUDIENCE = exports2.STORAGE_KEY = exports2.GOTRUE_URL = exports2.REFRESH_FAILURE_COOLDOWN_MS = exports2.EXPIRY_MARGIN_MS = exports2.AUTO_REFRESH_TICK_THRESHOLD = exports2.AUTO_REFRESH_TICK_DURATION_MS = void 0;
@@ -37881,9 +39014,9 @@ var require_constants2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/errors.js
+// node_modules/@supabase/auth-js/dist/main/lib/errors.js
 var require_errors2 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/errors.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/errors.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.AuthInvalidJwtError = exports2.AuthWeakPasswordError = exports2.AuthRefreshDiscardedError = exports2.AuthRetryableFetchError = exports2.AuthPKCECodeVerifierMissingError = exports2.AuthPKCEGrantCodeExchangeError = exports2.AuthImplicitGrantRedirectError = exports2.AuthInvalidCredentialsError = exports2.AuthInvalidTokenResponseError = exports2.AuthSessionMissingError = exports2.CustomAuthError = exports2.AuthUnknownError = exports2.AuthApiError = exports2.AuthError = void 0;
@@ -38039,9 +39172,9 @@ var require_errors2 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/base64url.js
+// node_modules/@supabase/auth-js/dist/main/lib/base64url.js
 var require_base64url = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/base64url.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/base64url.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.byteToBase64URL = byteToBase64URL;
@@ -38229,9 +39362,9 @@ var require_base64url = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/helpers.js
+// node_modules/@supabase/auth-js/dist/main/lib/helpers.js
 var require_helpers = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/helpers.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/helpers.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.Deferred = exports2.removeItemAsync = exports2.getItemAsync = exports2.setItemAsync = exports2.looksLikeFetchResponse = exports2.resolveFetch = exports2.supportsLocalStorage = exports2.isBrowser = void 0;
@@ -38551,9 +39684,9 @@ var require_helpers = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/fetch.js
+// node_modules/@supabase/auth-js/dist/main/lib/fetch.js
 var require_fetch = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/fetch.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/fetch.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.handleError = handleError2;
@@ -38735,9 +39868,9 @@ var require_fetch = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/types.js
+// node_modules/@supabase/auth-js/dist/main/lib/types.js
 var require_types3 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/types.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/types.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.SIGN_OUT_SCOPES = void 0;
@@ -38745,9 +39878,9 @@ var require_types3 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/GoTrueAdminApi.js
+// node_modules/@supabase/auth-js/dist/main/GoTrueAdminApi.js
 var require_GoTrueAdminApi = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/GoTrueAdminApi.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/GoTrueAdminApi.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -39191,9 +40324,9 @@ var require_GoTrueAdminApi = __commonJS({
           const total = (_e = response.headers.get("x-total-count")) !== null && _e !== void 0 ? _e : 0;
           const links = (_g = (_f = response.headers.get("link")) === null || _f === void 0 ? void 0 : _f.split(",")) !== null && _g !== void 0 ? _g : [];
           if (links.length > 0) {
-            links.forEach((link) => {
-              const page = parseInt(link.split(";")[0].split("=")[1].substring(0, 1));
-              const rel = JSON.parse(link.split(";")[1].split("=")[1]);
+            links.forEach((link4) => {
+              const page = parseInt(link4.split(";")[0].split("=")[1].substring(0, 1));
+              const rel = JSON.parse(link4.split(";")[1].split("=")[1]);
               pagination[`${rel}Page`] = page;
             });
             pagination.total = parseInt(total);
@@ -39547,9 +40680,9 @@ var require_GoTrueAdminApi = __commonJS({
           const total = (_e = response.headers.get("x-total-count")) !== null && _e !== void 0 ? _e : 0;
           const links = (_g = (_f = response.headers.get("link")) === null || _f === void 0 ? void 0 : _f.split(",")) !== null && _g !== void 0 ? _g : [];
           if (links.length > 0) {
-            links.forEach((link) => {
-              const page = parseInt(link.split(";")[0].split("=")[1].substring(0, 1));
-              const rel = JSON.parse(link.split(";")[1].split("=")[1]);
+            links.forEach((link4) => {
+              const page = parseInt(link4.split(";")[0].split("=")[1].substring(0, 1));
+              const rel = JSON.parse(link4.split(";")[1].split("=")[1]);
               pagination[`${rel}Page`] = page;
             });
             pagination.total = parseInt(total);
@@ -39831,9 +40964,9 @@ var require_GoTrueAdminApi = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/local-storage.js
+// node_modules/@supabase/auth-js/dist/main/lib/local-storage.js
 var require_local_storage = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/local-storage.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/local-storage.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.memoryLocalStorageAdapter = memoryLocalStorageAdapter;
@@ -39853,9 +40986,9 @@ var require_local_storage = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/locks.js
+// node_modules/@supabase/auth-js/dist/main/lib/locks.js
 var require_locks = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/locks.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/locks.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.ProcessLockAcquireTimeoutError = exports2.NavigatorLockAcquireTimeoutError = exports2.LockAcquireTimeoutError = exports2.internals = void 0;
@@ -40031,9 +41164,9 @@ var require_locks = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/polyfills.js
+// node_modules/@supabase/auth-js/dist/main/lib/polyfills.js
 var require_polyfills = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/polyfills.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/polyfills.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.polyfillGlobalThis = polyfillGlobalThis;
@@ -40058,9 +41191,9 @@ var require_polyfills = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/web3/ethereum.js
+// node_modules/@supabase/auth-js/dist/main/lib/web3/ethereum.js
 var require_ethereum = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/web3/ethereum.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/web3/ethereum.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getAddress = getAddress;
@@ -40136,9 +41269,9 @@ ${suffix}`;
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/webauthn.errors.js
+// node_modules/@supabase/auth-js/dist/main/lib/webauthn.errors.js
 var require_webauthn_errors = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/webauthn.errors.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/webauthn.errors.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.WebAuthnUnknownError = exports2.WebAuthnError = void 0;
@@ -40327,9 +41460,9 @@ var require_webauthn_errors = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/webauthn.js
+// node_modules/@supabase/auth-js/dist/main/lib/webauthn.js
 var require_webauthn = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/lib/webauthn.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/lib/webauthn.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.WebAuthnApi = exports2.DEFAULT_REQUEST_OPTIONS = exports2.DEFAULT_CREATION_OPTIONS = exports2.webAuthnAbortService = exports2.WebAuthnAbortService = exports2.identifyAuthenticationError = exports2.identifyRegistrationError = exports2.isWebAuthnError = exports2.WebAuthnError = void 0;
@@ -40499,10 +41632,10 @@ var require_webauthn = __commonJS({
         authenticatorAttachment: (_a3 = credentialWithAttachment.authenticatorAttachment) !== null && _a3 !== void 0 ? _a3 : void 0
       };
     }
-    function isValidDomain(hostname3) {
+    function isValidDomain(hostname4) {
       return (
         // Consider localhost valid as well since it's okay wrt Secure Contexts
-        hostname3 === "localhost" || /^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i.test(hostname3)
+        hostname4 === "localhost" || /^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i.test(hostname4)
       );
     }
     function browserSupportsWebAuthn() {
@@ -40886,9 +42019,9 @@ var require_webauthn = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/GoTrueClient.js
+// node_modules/@supabase/auth-js/dist/main/GoTrueClient.js
 var require_GoTrueClient = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/GoTrueClient.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/GoTrueClient.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -46026,9 +47159,9 @@ var require_GoTrueClient = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/AuthAdminApi.js
+// node_modules/@supabase/auth-js/dist/main/AuthAdminApi.js
 var require_AuthAdminApi = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/AuthAdminApi.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/AuthAdminApi.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -46038,9 +47171,9 @@ var require_AuthAdminApi = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/AuthClient.js
+// node_modules/@supabase/auth-js/dist/main/AuthClient.js
 var require_AuthClient = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/AuthClient.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/AuthClient.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     var tslib_1 = (init_tslib_es6(), __toCommonJS(tslib_es6_exports));
@@ -46050,9 +47183,9 @@ var require_AuthClient = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/index.js
+// node_modules/@supabase/auth-js/dist/main/index.js
 var require_main3 = __commonJS({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/auth-js/dist/main/index.js"(exports2) {
+  "node_modules/@supabase/auth-js/dist/main/index.js"(exports2) {
     "use strict";
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.processLock = exports2.lockInternals = exports2.NavigatorLockAcquireTimeoutError = exports2.navigatorLock = exports2.AuthClient = exports2.AuthAdminApi = exports2.GoTrueClient = exports2.GoTrueAdminApi = void 0;
@@ -46083,7 +47216,7 @@ var require_main3 = __commonJS({
   }
 });
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/supabase-js/dist/index.mjs
+// node_modules/@supabase/supabase-js/dist/index.mjs
 var dist_exports = {};
 __export(dist_exports, {
   FunctionRegion: () => import_functions_js.FunctionRegion,
@@ -46098,11 +47231,11 @@ __export(dist_exports, {
 });
 function __awaiter2(thisArg, _arguments, P, generator) {
   function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve7) {
-      resolve7(value);
+    return value instanceof P ? value : new P(function(resolve8) {
+      resolve8(value);
     });
   }
-  return new (P || (P = Promise))(function(resolve7, reject) {
+  return new (P || (P = Promise))(function(resolve8, reject) {
     function fulfilled(value) {
       try {
         step(generator.next(value));
@@ -46118,7 +47251,7 @@ function __awaiter2(thisArg, _arguments, P, generator) {
       }
     }
     function step(result) {
-      result.done ? resolve7(result.value) : adopt(result.value).then(fulfilled, rejected);
+      result.done ? resolve8(result.value) : adopt(result.value).then(fulfilled, rejected);
     }
     step((generator = generator.apply(thisArg, _arguments || [])).next());
   });
@@ -46190,12 +47323,12 @@ function shouldPropagateToTarget(targetUrl, targets) {
   }
   return false;
 }
-function matchStringTarget(hostname3, target2) {
-  if (target2 === hostname3) return true;
+function matchStringTarget(hostname4, target2) {
+  if (target2 === hostname4) return true;
   if (target2.startsWith("*.")) {
     const domain = target2.slice(2);
-    if (hostname3.endsWith(domain)) {
-      if (hostname3 === domain || hostname3.endsWith("." + domain)) return true;
+    if (hostname4.endsWith(domain)) {
+      if (hostname4 === domain || hostname4.endsWith("." + domain)) return true;
     }
   }
   return false;
@@ -46322,7 +47455,7 @@ function shouldShowDeprecationWarning() {
 }
 var import_functions_js, import_realtime_js, import_auth_js, version3, JS_ENV, JS_RUNTIME_VERSION, _Deno$version, _process$version, _runtimeMeta, DEFAULT_HEADERS2, DEFAULT_GLOBAL_OPTIONS, DEFAULT_DB_OPTIONS, DEFAULT_AUTH_OPTIONS, DEFAULT_REALTIME_OPTIONS, DEFAULT_TRACE_PROPAGATION_OPTIONS, otelModulePromise, OTEL_PKG, resolveFetch2, resolveHeadersConstructor, isNewApiKey, TEMP_KEY_PREFIX, warnedKeySubtypes, checkApiKeyFormat, fetchWithAuth, SupabaseAuthClient, SupabaseClient, createClient;
 var init_dist4 = __esm({
-  "../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/@supabase/supabase-js/dist/index.mjs"() {
+  "node_modules/@supabase/supabase-js/dist/index.mjs"() {
     import_functions_js = __toESM(require_main(), 1);
     init_dist();
     import_realtime_js = __toESM(require_main2(), 1);
@@ -46922,7 +48055,7 @@ function idlePollStatusSentence(currentMs) {
 function idlePollHelpSentence(defaultMs = IDLE_POLL_DEFAULT_MS) {
   return `listen start --poll-interval sets how long the listener waits after an empty claim (default ${formatIdlePollDuration(defaultMs)}). A whole number plus s or m (for example ${idlePollDurationHint()}), ${idlePollBoundSentence()}. Empty polls double that wait up to ${IDLE_POLL_MAX_LABEL}; any delivery resets it to the configured interval.`;
 }
-var IDLE_POLL_DEFAULT_MS, IDLE_POLL_MAX_MS, IDLE_POLL_MIN_MS, ARRIVAL_WATCH_POLL_MS, DURATION_RE, IDLE_POLL_MIN_LABEL, IDLE_POLL_DEFAULT_LABEL, IDLE_POLL_MAX_LABEL, IDLE_POLL_DURATION_EXAMPLES;
+var IDLE_POLL_DEFAULT_MS, IDLE_POLL_MAX_MS, IDLE_POLL_MIN_MS, ARRIVAL_WATCH_POLL_MS, WAKE_STALE_MULTIPLE, WAKE_STALE_MS, WAKE_STALE_LABEL, DURATION_RE, IDLE_POLL_MIN_LABEL, IDLE_POLL_DEFAULT_LABEL, IDLE_POLL_MAX_LABEL, IDLE_POLL_DURATION_EXAMPLES;
 var init_idle_poll = __esm({
   "src/cloud/idle-poll.ts"() {
     "use strict";
@@ -46930,6 +48063,9 @@ var init_idle_poll = __esm({
     IDLE_POLL_MAX_MS = 6e4;
     IDLE_POLL_MIN_MS = 1e3;
     ARRIVAL_WATCH_POLL_MS = IDLE_POLL_MAX_MS;
+    WAKE_STALE_MULTIPLE = 3;
+    WAKE_STALE_MS = IDLE_POLL_MAX_MS * WAKE_STALE_MULTIPLE;
+    WAKE_STALE_LABEL = formatIdlePollDuration(WAKE_STALE_MS);
     DURATION_RE = /^([1-9]\d*)(s|m)$/;
     IDLE_POLL_MIN_LABEL = formatIdlePollDuration(IDLE_POLL_MIN_MS);
     IDLE_POLL_DEFAULT_LABEL = formatIdlePollDuration(IDLE_POLL_DEFAULT_MS);
@@ -47155,13 +48291,13 @@ var init_wake2 = __esm({
         if (nowMs >= options.until) {
           return Promise.resolve("deadline");
         }
-        return new Promise((resolve7) => {
-          const delay3 = Math.max(0, options.until - this.now());
-          const timer2 = setTimeout(() => this.finishWait("deadline"), delay3);
+        return new Promise((resolve8) => {
+          const delay4 = Math.max(0, options.until - this.now());
+          const timer2 = setTimeout(() => this.finishWait("deadline"), delay4);
           const onAbort = () => this.finishWait("deadline");
           options.signal?.addEventListener("abort", onAbort, { once: true });
           this.waiter = {
-            resolve: resolve7,
+            resolve: resolve8,
             timer: timer2,
             onAbort,
             signal: options.signal
@@ -47272,319 +48408,6 @@ var init_wake2 = __esm({
           this.connectionState = "disconnected";
           this.subscribedAt = null;
         }
-      }
-    };
-  }
-});
-
-// src/cloud/session-errors.ts
-function agentSessionErrorFromBody(status, body2) {
-  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
-    return null;
-  }
-  const error2 = body2.error;
-  if (typeof error2 !== "string" || !isAgentSessionErrorCode(error2)) return null;
-  return new AgentSessionError(status, error2);
-}
-var SESSION_ERROR_MESSAGES, AgentSessionError, SESSION_CLIENT_ERROR_MESSAGES, AgentSessionClientError;
-var init_session_errors = __esm({
-  "src/cloud/session-errors.ts"() {
-    "use strict";
-    init_command_client();
-    init_session_contract();
-    SESSION_ERROR_MESSAGES = {
-      session_proof_missing: "this agent is managed; a session proof is required before a write",
-      session_proof_invalid: "the session proof was rejected",
-      session_expired: "the execution session has expired; stop dispatch and recover",
-      session_retired: "this execution UUID is retired and cannot be used again",
-      session_conflict: "another live execution session already holds this agent",
-      session_not_managed: "managed sessions are not enabled for this agent; an owner or admin must enable them first",
-      session_already_managed: "managed sessions are already enabled for this agent",
-      session_leases_live: "legacy delivery leases are still live for this agent; stop the old receiver and wait for them to expire before enabling",
-      delivery_not_surfaced: "cannot mark an ask observed on a managed agent until it was surfaced into the bound host conversation"
-    };
-    AgentSessionError = class extends Error {
-      constructor(status, code) {
-        super(SESSION_ERROR_MESSAGES[code]);
-        this.status = status;
-        this.code = code;
-      }
-      status;
-      code;
-      name = "AgentSessionError";
-    };
-    SESSION_CLIENT_ERROR_MESSAGES = {
-      session_generation_invalid: "the session command returned a missing or invalid generation"
-    };
-    AgentSessionClientError = class extends Error {
-      constructor(code) {
-        super(SESSION_CLIENT_ERROR_MESSAGES[code]);
-        this.code = code;
-      }
-      code;
-      name = "AgentSessionClientError";
-    };
-  }
-});
-
-// src/cloud/session-client.ts
-async function postSessionCommand(options, input) {
-  const fetcher = options.fetcher ?? fetch;
-  const controller = new AbortController();
-  const timer2 = setTimeout(
-    () => controller.abort(),
-    options.timeoutMs ?? 3e4
-  );
-  const headers = {
-    authorization: `Bearer ${input.credential}`,
-    apikey: options.target.anonKey,
-    "content-type": "application/json",
-    ...input.proof ? proofHeaders(input.proof) : {},
-    ...input.acquireProof ? {
-      [AGENT_SESSION_ID_HEADER]: input.acquireProof.session_id,
-      [AGENT_SESSION_KEY_HEADER]: input.acquireProof.key
-    } : {}
-  };
-  let response;
-  try {
-    response = await fetcher(commandEndpoint(options.target), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        command_id: input.commandId,
-        client_version: CLIENT_PROTOCOL_VERSION,
-        workspace_id: input.workspaceId,
-        stream: { kind: "workspace" },
-        command: input.command
-      }),
-      signal: controller.signal
-    });
-  } catch (error2) {
-    const safeHeaders = JSON.stringify(redactSessionHeaders(headers));
-    if (error2.name === "AbortError") {
-      throw new CommandTransportError(
-        `session command timed out ${safeHeaders}`
-      );
-    }
-    throw new CommandTransportError(
-      `session command failed before a response ${safeHeaders}`
-    );
-  } finally {
-    clearTimeout(timer2);
-  }
-  let body2 = null;
-  try {
-    body2 = JSON.parse(await response.text());
-  } catch {
-    body2 = null;
-  }
-  if (!response.ok) {
-    const sessionError = agentSessionErrorFromBody(response.status, body2);
-    if (sessionError) throw sessionError;
-    throw new CommandTransportError(
-      `session command failed (HTTP ${response.status})`
-    );
-  }
-  return { status: response.status, body: body2 };
-}
-function acceptedGeneration(body2) {
-  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
-    throw new CommandTransportError("session command returned a malformed body");
-  }
-  const row = body2;
-  if (typeof row.generation === "number" && Number.isSafeInteger(row.generation) && row.generation >= 1) {
-    return row.generation;
-  }
-  throw new AgentSessionClientError("session_generation_invalid");
-}
-function optionalString(value) {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-function optionalGeneration(value) {
-  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) {
-    return value;
-  }
-  if (typeof value === "string" && /^[1-9][0-9]*$/.test(value)) {
-    const generation = Number(value);
-    return Number.isSafeInteger(generation) ? generation : null;
-  }
-  return null;
-}
-function parseServerSessionStatus(body2, principalId) {
-  if (body2 === null || typeof body2 !== "object" || Array.isArray(body2)) {
-    throw new CommandTransportError("session status read returned a malformed body");
-  }
-  const row = body2;
-  const identity = row.identity !== null && typeof row.identity === "object" && !Array.isArray(row.identity) ? row.identity : null;
-  const agents = Array.isArray(row.agents) ? row.agents : [];
-  const wanted = principalId.toLowerCase();
-  const match = agents.find((agent) => {
-    if (agent === null || typeof agent !== "object" || Array.isArray(agent)) {
-      return false;
-    }
-    const id = agent.principal_id;
-    return typeof id === "string" && id.toLowerCase() === wanted;
-  });
-  const managedAt = optionalString(match?.managed_at) ?? optionalString(identity?.managed_at);
-  const lifecycle = match?.lifecycle_state === "enabled" || match?.lifecycle_state === "disabled" ? match.lifecycle_state : null;
-  return {
-    principal_id: wanted,
-    session_id: optionalString(match?.session_id)?.toLowerCase() ?? null,
-    generation: optionalGeneration(match?.generation),
-    lifecycle_state: lifecycle,
-    is_live: match?.is_live === true,
-    provider: optionalString(match?.provider),
-    host_label: optionalString(match?.host_label),
-    host_session_ref: optionalString(match?.host_session_ref),
-    started_at: optionalString(match?.started_at),
-    renewed_at: optionalString(match?.renewed_at),
-    expired_at: optionalString(match?.expired_at),
-    managed_at: managedAt
-  };
-}
-var AgentSessionClient;
-var init_session_client = __esm({
-  "src/cloud/session-client.ts"() {
-    "use strict";
-    init_config();
-    init_command_client();
-    init_session_contract();
-    init_session_errors();
-    init_session_proof();
-    AgentSessionClient = class {
-      constructor(options) {
-        this.options = options;
-      }
-      options;
-      async acquire(request) {
-        const commandId = request.commandId ?? request.context.acquire_command_id;
-        const { body: body2 } = await postSessionCommand(this.options, {
-          credential: request.credential,
-          workspaceId: request.workspaceId,
-          commandId,
-          /* The server (session-wire.ts parseAgentSessionAcquireHeaders) reads the
-             session id and the private key from the proof headers and stores only
-             the key's digest; the body carries no key material and no digest. The
-             generation header is omitted: nothing has been acquired yet. */
-          acquireProof: {
-            session_id: request.context.session_id,
-            key: request.context.session_key
-          },
-          command: {
-            kind: ACQUIRE_AGENT_SESSION_KIND,
-            session_id: request.context.session_id,
-            provider: request.context.provider,
-            host_label: request.context.host_label,
-            host_session_ref: request.context.host_session_id
-          }
-        });
-        return { generation: acceptedGeneration(body2), commandId };
-      }
-      async renew(credential, workspaceId2, proof, commandId) {
-        await postSessionCommand(this.options, {
-          credential,
-          workspaceId: workspaceId2,
-          commandId: commandId ?? newCommandId(),
-          proof,
-          command: {
-            kind: RENEW_AGENT_SESSION_KIND,
-            session_id: proof.session_id,
-            generation: proof.generation
-          }
-        });
-      }
-      async release(credential, workspaceId2, proof, commandId) {
-        await postSessionCommand(this.options, {
-          credential,
-          workspaceId: workspaceId2,
-          commandId: commandId ?? newCommandId(),
-          proof,
-          command: {
-            kind: RELEASE_AGENT_SESSION_KIND,
-            session_id: proof.session_id,
-            generation: proof.generation
-          }
-        });
-      }
-      async enable(request) {
-        await postSessionCommand(this.options, {
-          credential: request.credential,
-          workspaceId: request.workspaceId,
-          commandId: request.commandId ?? newCommandId(),
-          command: {
-            kind: ENABLE_AGENT_MANAGEMENT_KIND,
-            principal_id: request.principalId
-          }
-        });
-      }
-      async disable(request) {
-        await postSessionCommand(this.options, {
-          credential: request.credential,
-          workspaceId: request.workspaceId,
-          commandId: request.commandId ?? newCommandId(),
-          command: {
-            kind: DISABLE_AGENT_MANAGEMENT_KIND,
-            principal_id: request.principalId
-          }
-        });
-      }
-      async recover(request) {
-        await postSessionCommand(this.options, {
-          credential: request.credential,
-          workspaceId: request.workspaceId,
-          commandId: request.commandId ?? newCommandId(),
-          command: {
-            kind: RECOVER_AGENT_SESSION_KIND,
-            principal_id: request.principalId
-          }
-        });
-      }
-      /** Read-only members resource: server session fields for this principal. */
-      async readStatus(input) {
-        const fetcher = this.options.fetcher ?? fetch;
-        const controller = new AbortController();
-        const timer2 = setTimeout(
-          () => controller.abort(),
-          this.options.timeoutMs ?? 3e4
-        );
-        const headers = {
-          authorization: `Bearer ${input.credential}`,
-          apikey: this.options.target.anonKey,
-          "content-type": "application/json"
-        };
-        let response;
-        try {
-          response = await fetcher(readEndpoint(this.options.target), {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              resource: "members",
-              workspace_id: input.workspaceId
-            }),
-            signal: controller.signal
-          });
-        } catch (error2) {
-          if (error2.name === "AbortError") {
-            throw new CommandTransportError("session status read timed out");
-          }
-          throw new CommandTransportError(
-            "session status read failed before a response"
-          );
-        } finally {
-          clearTimeout(timer2);
-        }
-        let body2 = null;
-        try {
-          body2 = JSON.parse(await response.text());
-        } catch {
-          body2 = null;
-        }
-        if (!response.ok) {
-          throw new CommandTransportError(
-            `session status read failed (HTTP ${response.status})`
-          );
-        }
-        return parseServerSessionStatus(body2, input.principalId);
       }
     };
   }
@@ -47733,7 +48556,7 @@ __export(agent_channel_exports, {
   serveAgentChannel: () => serveAgentChannel
 });
 function channelReceiptPath(profile, host) {
-  return (0, import_node_path9.join)((0, import_node_path9.dirname)(privatePath(profile)), `channel-receipt-${profileScopeKey(host)}.json`);
+  return (0, import_node_path10.join)((0, import_node_path10.dirname)(privatePath(profile)), `channel-receipt-${profileScopeKey(host)}.json`);
 }
 async function confirmAgentChannel(options) {
   const { profilePath, hostSessionId: host } = options;
@@ -47742,7 +48565,7 @@ async function confirmAgentChannel(options) {
   if (!binding || binding.provider !== "grok-bot" || binding.requested_mode !== "wake" || !receiveStatus(binding).channel_running) {
     throw new AgentSetupError("channel_not_running", "Start this Bot session's receive serve process before confirming a wake.");
   }
-  const raw = await readSecureJsonFileIfPresent((0, import_node_path9.join)((0, import_node_path9.dirname)(privatePath(profilePath)), `channel-${profileScopeKey(host)}.json`), 128 * 1024);
+  const raw = await readSecureJsonFileIfPresent((0, import_node_path10.join)((0, import_node_path10.dirname)(privatePath(profilePath)), `channel-${profileScopeKey(host)}.json`), 128 * 1024);
   let journal;
   try {
     journal = JSON.parse(raw ?? "null");
@@ -47775,7 +48598,7 @@ async function serveAgentChannel(options) {
     throw new AgentSetupError("channel_not_configured", "Choose and configure wake mode for this session first.");
   }
   if (receiveStatus(initial).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel. Keep one receiver.");
-  const runtimeId = (0, import_node_crypto11.randomUUID)();
+  const runtimeId = (0, import_node_crypto12.randomUUID)();
   const startedAt = Date.now();
   const abort = new AbortController();
   let manager = null;
@@ -47803,8 +48626,8 @@ async function serveAgentChannel(options) {
       contextPath: managed.path
     });
   }
-  const journalPath = (0, import_node_path9.join)((0, import_node_path9.dirname)(profilePath), `channel-${profileScopeKey(host)}.json`);
-  let journal = { version: 1, listener_instance_id: (0, import_node_crypto11.randomUUID)(), pending: null };
+  const journalPath = (0, import_node_path10.join)((0, import_node_path10.dirname)(profilePath), `channel-${profileScopeKey(host)}.json`);
+  let journal = { version: 1, listener_instance_id: (0, import_node_crypto12.randomUUID)(), pending: null };
   const previous = await readSecureJsonFileIfPresent(journalPath, 128 * 1024);
   if (previous !== null) {
     try {
@@ -47819,7 +48642,7 @@ async function serveAgentChannel(options) {
       journal.pending.row.signal = parseSignalRecord(journal.pending.row.signal);
       if (!signalAddressesAgent(journal.pending.row.signal, profile.principal_id)) throw new AgentSetupError("channel_journal_invalid", "The stored delivery belongs to another agent.");
     }
-    if (journal.pending !== null && !journal.pending.confirmed) journal.pending.receipt = (0, import_node_crypto11.randomUUID)();
+    if (journal.pending !== null && !journal.pending.confirmed) journal.pending.receipt = (0, import_node_crypto12.randomUUID)();
   }
   const gate = new ChannelReceiptGate(host, journal.pending);
   const delivery = new DeliveryCommandClient(target2, authenticatedFetch, { deadlineMs: 1e4 });
@@ -47890,7 +48713,7 @@ async function serveAgentChannel(options) {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  await withFileLock((0, import_node_path9.dirname)(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
+  await withFileLock((0, import_node_path10.dirname)(profilePath), `channel-start-${profileScopeKey(host)}`, async () => {
     const binding = await readReceiveBinding(profilePath, host);
     if (binding && receiveStatus(binding).channel_running) throw new AgentSetupError("channel_already_running", "This session already has a live channel.");
     await updateReceiveBinding(profilePath, host, (b2) => ({
@@ -48065,7 +48888,7 @@ async function serveAgentChannel(options) {
             if (claimed.wake) wake.setTopic(claimed.wake.topic);
             const row = claimed.deliveries[0];
             if (row) {
-              gate.pending = { row, receipt: (0, import_node_crypto11.randomUUID)(), ack_command_id: newCommandId(), confirmed: false };
+              gate.pending = { row, receipt: (0, import_node_crypto12.randomUUID)(), ack_command_id: newCommandId(), confirmed: false };
               await persist();
             }
           } else {
@@ -48113,12 +48936,12 @@ async function serveAgentChannel(options) {
     process.off("SIGINT", stop);
   }
 }
-var import_node_crypto11, import_node_path9, import_promises7, CHANNEL_RECEIPT_TOOL, CHANNEL_RECEIPT_FIELDS, CHANNEL_HEARTBEAT_MS, CHANNEL_POLL_MS, ChannelReceiptGate;
+var import_node_crypto12, import_node_path10, import_promises7, CHANNEL_RECEIPT_TOOL, CHANNEL_RECEIPT_FIELDS, CHANNEL_HEARTBEAT_MS, CHANNEL_POLL_MS, ChannelReceiptGate;
 var init_agent_channel = __esm({
   "src/cloud/agent-channel.ts"() {
     "use strict";
-    import_node_crypto11 = require("node:crypto");
-    import_node_path9 = require("node:path");
+    import_node_crypto12 = require("node:crypto");
+    import_node_path10 = require("node:path");
     import_promises7 = require("node:timers/promises");
     init_server2();
     init_stdio2();
@@ -48220,6 +49043,468 @@ var init_agent_channel_grok_bot = __esm({
     init_agent_profile();
     init_agent_profile();
     init_agent_check();
+  }
+});
+
+// src/cloud/files.ts
+function contentTypeForName(name) {
+  const lower = name.toLowerCase();
+  let best = null;
+  let bestLength = 0;
+  for (const [extension, type] of CONTENT_TYPES) {
+    if (lower.endsWith(extension) && extension.length > bestLength) {
+      best = type;
+      bestLength = extension.length;
+    }
+  }
+  return best;
+}
+function allowedExtensionList() {
+  return [...CONTENT_TYPES.keys()].join(", ");
+}
+async function sendFileCommand(options, command2) {
+  const fetcher = options.fetcher ?? fetch;
+  const controller = new AbortController();
+  const timer2 = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response;
+  try {
+    response = await fetcher(commandEndpoint(options.target), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${options.credential}`,
+        apikey: options.target.anonKey,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        command_id: options.commandId ?? newCommandId(),
+        client_version: "0.1.0",
+        workspace_id: options.workspaceId,
+        stream: { kind: "workspace" },
+        command: command2
+      }),
+      signal: controller.signal
+    });
+  } catch (error2) {
+    if (error2.name === "AbortError") {
+      throw new FileTransportError("file command timed out", true);
+    }
+    throw new FileTransportError("file command failed before a response", true);
+  } finally {
+    clearTimeout(timer2);
+  }
+  const body2 = await response.json().catch(() => null);
+  if (!response.ok) {
+    const code = typeof body2?.error === "string" ? body2.error : "http_error";
+    const message = typeof body2?.message === "string" ? body2.message : `file command failed (HTTP ${response.status}) DEBUGBODY=${JSON.stringify(body2).slice(0, 300)}`;
+    const scope = typeof body2?.scope === "string" ? body2.scope : null;
+    const limit = typeof body2?.limit === "number" ? body2.limit : null;
+    const resets_at = typeof body2?.resets_at === "string" ? body2.resets_at : null;
+    throw new FileCommandRefused(response.status, code, message, scope, limit, resets_at);
+  }
+  if (!body2 || typeof body2 !== "object") {
+    throw new FileTransportError("file command returned a malformed response");
+  }
+  return body2;
+}
+function fileVersionCreate(options, input) {
+  const ifVersion = input.ifVersion ?? null;
+  return sendFileCommand(options, {
+    kind: "file_version_create",
+    file_id: input.fileId,
+    version_id: input.versionId,
+    name: input.name,
+    declared_size_bytes: input.declaredSizeBytes,
+    content_type: input.contentType,
+    /* The server validates an exact key set, so the key is sent only when a
+     * precondition was asked for. An unconditional write is byte-identical to
+     * what every earlier client sent. */
+    ...ifVersion === null ? {} : { if_version: ifVersion }
+  });
+}
+function fileVersionCommit(options, input) {
+  return sendFileCommand(options, {
+    kind: "file_version_commit",
+    file_id: input.fileId,
+    version_id: input.versionId,
+    sha256: input.sha256
+  });
+}
+function fileDownloadUrl(options, input) {
+  return sendFileCommand(options, {
+    kind: "file_download_url",
+    file_id: input.fileId,
+    version_n: input.versionN
+  });
+}
+function fileTombstone(options, input) {
+  return sendFileCommand(options, {
+    kind: "file_tombstone",
+    file_id: input.fileId
+  });
+}
+function fileRestore(options, input) {
+  return sendFileCommand(options, {
+    kind: "file_restore",
+    file_id: input.fileId
+  });
+}
+function absoluteStorageUrl(target2, path) {
+  if (!path.startsWith("/")) {
+    throw new FileTransportError(
+      "the server returned a storage path that is not relative; refusing to compose a URL from it"
+    );
+  }
+  return `${target2.url}${path}`;
+}
+async function putObject(target2, uploadPath, bytes, contentType, fetcher = fetch, allowExisting = false) {
+  let response;
+  try {
+    response = await fetcher(absoluteStorageUrl(target2, uploadPath), {
+      method: "PUT",
+      headers: { "content-type": contentType },
+      /* Node's Buffer types as Uint8Array<ArrayBufferLike>, which the DOM-lib
+       * BodyInit rejects since TS 5.7; the runtime accepts it. */
+      body: bytes
+    });
+  } catch {
+    throw new FileTransportError("the upload PUT failed before a response", true);
+  }
+  if (!response.ok) {
+    if (allowExisting && (response.status === 409 || response.status === 400)) {
+      const body2 = await response.json().catch(() => null);
+      if ((response.status === 409 || body2?.statusCode === "409") && (body2?.error === "Duplicate" || body2?.error === "ResourceAlreadyExists")) return "already_exists";
+    }
+    throw new FileTransportError(
+      allowExisting ? `the upload PUT was refused (HTTP ${response.status}). Retry with the same request id; the pending slot expires within three hours` : `the upload PUT was refused (HTTP ${response.status}). Nothing went live, and this attempt's pending slot expires on its own within three hours. Check cswarm file ls, then re-run cswarm file put \u2014 a re-run is a new upload attempt with fresh ids`
+    );
+  }
+  return "uploaded";
+}
+async function onceRetried(step, budget) {
+  const now = budget?.now ?? Date.now;
+  const deadlineMs = budget === void 0 ? void 0 : Math.min(
+    budget.deadlineMs ?? Number.POSITIVE_INFINITY,
+    now() + (budget.timeoutMs ?? REQUEST_TIMEOUT_MS)
+  );
+  const attempt = deadlineMs === void 0 ? {} : { deadlineMs, now };
+  const run2 = budget === void 0 ? step : () => step(attempt);
+  try {
+    return await run2();
+  } catch (error2) {
+    if (error2 instanceof FileTransportError && error2.noResponse) {
+      if (deadlineMs !== void 0 && deadlineMs - now() < (budget?.retryFloorMs ?? READ_RETRY_FLOOR_MS)) {
+        throw error2;
+      }
+      return await run2();
+    }
+    throw error2;
+  }
+}
+async function getObject(target2, downloadPath, fetcher = fetch, options = {}) {
+  let response;
+  let body2;
+  try {
+    ({ response, body: body2 } = await fetchWithDeadline(
+      fetcher,
+      absoluteStorageUrl(target2, downloadPath),
+      {},
+      async (received) => received.ok ? await received.arrayBuffer() : null,
+      options
+    ));
+  } catch {
+    throw new FileTransportError("the download did not complete", true);
+  }
+  if (!response.ok || body2 === null) {
+    throw new FileTransportError(
+      `the download was refused (HTTP ${response.status}); the signed URL lasts five minutes \u2014 request a fresh one with cswarm file get`
+    );
+  }
+  return new Uint8Array(body2);
+}
+function writeDestination(destination, bytes, force, writer) {
+  try {
+    writer(destination, bytes, { flag: force ? "w" : "wx" });
+  } catch (error2) {
+    if (error2.code === "EEXIST") {
+      throw new LocalFileExists(
+        `${destination} already exists locally; nothing was written. Pass --force to overwrite it, or --out <path> to write elsewhere`
+      );
+    }
+    throw error2;
+  }
+}
+function sha256Hex(bytes) {
+  return (0, import_node_crypto14.createHash)("sha256").update(bytes).digest("hex");
+}
+async function fetchWithDeadline(fetcher, input, init, consume, options = {}) {
+  const now = options.now ?? Date.now;
+  const remainingMs = options.deadlineMs === void 0 ? REQUEST_TIMEOUT_MS : Math.max(0, Math.min(REQUEST_TIMEOUT_MS, options.deadlineMs - now()));
+  const controller = new AbortController();
+  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+  const cancel = options.cancel ?? ((timer3) => clearTimeout(timer3));
+  const signal = options.signal === void 0 ? controller.signal : AbortSignal.any([options.signal, controller.signal]);
+  let rejectAbort;
+  const aborted2 = new Promise((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => {
+    rejectAbort?.(
+      signal.reason instanceof Error ? signal.reason : new DOMException("The read was aborted", "AbortError")
+    );
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  const timer2 = schedule(
+    () => controller.abort(new DOMException("The read timed out", "AbortError")),
+    remainingMs
+  );
+  try {
+    const response = await Promise.race([
+      fetcher(input, { ...init, signal }),
+      aborted2
+    ]);
+    const body2 = await Promise.race([consume(response), aborted2]);
+    return { response, body: body2 };
+  } finally {
+    cancel(timer2);
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+async function listFilesAsAgent(target2, credential, workspaceId2, fetcher = fetch, options = {}) {
+  let response;
+  let rawBody;
+  try {
+    ({ response, body: rawBody } = await fetchWithDeadline(
+      fetcher,
+      readEndpoint(target2),
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential}`,
+          apikey: target2.anonKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ resource: "files", workspace_id: workspaceId2 })
+      },
+      async (received) => received.ok ? await received.text() : null,
+      options
+    ));
+  } catch {
+    throw new FileTransportError("the file list did not complete", true);
+  }
+  if (!response.ok) {
+    throw new FileCommandRefused(
+      response.status,
+      "http_error",
+      `file list failed (HTTP ${response.status})`
+    );
+  }
+  let body2 = null;
+  try {
+    body2 = rawBody === null ? null : JSON.parse(rawBody);
+  } catch {
+    body2 = null;
+  }
+  if (!body2 || !Array.isArray(body2.files)) {
+    throw new FileTransportError("file list returned a malformed response");
+  }
+  return body2.files;
+}
+async function listFilesAsHuman(target2, accessToken, workspaceId2, fetcher = fetch, options = {}) {
+  const url = new URL("/rest/v1/files", target2.url);
+  url.searchParams.set("workspace_id", `eq.${workspaceId2}`);
+  url.searchParams.set(
+    "select",
+    "file_id,name,current_version,size_bytes,content_type,sha256,created_by_kind,created_by,uploaded_by_kind,uploaded_by,created_at,committed_at,tombstoned_at,live_version_count,retired_version_count"
+  );
+  url.searchParams.set("order", "name.asc");
+  let response;
+  let rawBody;
+  try {
+    ({ response, body: rawBody } = await fetchWithDeadline(
+      fetcher,
+      url.toString(),
+      {
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          apikey: target2.anonKey,
+          "accept-profile": "swarm_read"
+        }
+      },
+      async (received) => received.ok ? await received.text() : null,
+      options
+    ));
+  } catch {
+    throw new FileTransportError("the file list did not complete", true);
+  }
+  if (!response.ok) {
+    throw new FileCommandRefused(
+      response.status,
+      "http_error",
+      `file list failed (HTTP ${response.status})`
+    );
+  }
+  let body2 = null;
+  try {
+    body2 = rawBody === null ? null : JSON.parse(rawBody);
+  } catch {
+    body2 = null;
+  }
+  if (!Array.isArray(body2)) {
+    throw new FileTransportError("file list returned a malformed response");
+  }
+  return body2;
+}
+var import_node_crypto14, FILE_MAX_VERSION_BYTES, FILE_CONTENT_WARNING, CONTENT_TYPES, FileCommandRefused, FileTransportError, REQUEST_TIMEOUT_MS, READ_RETRY_FLOOR_MS, LocalFileExists;
+var init_files = __esm({
+  "src/cloud/files.ts"() {
+    "use strict";
+    import_node_crypto14 = require("node:crypto");
+    init_config();
+    init_command_client();
+    FILE_MAX_VERSION_BYTES = 25 * 1024 * 1024;
+    FILE_CONTENT_WARNING = "File types and archive contents are unverified. Treat downloads as untrusted input: no execution, size-bounded extraction, no unpack of archives you did not expect.";
+    CONTENT_TYPES = /* @__PURE__ */ new Map([
+      [".md", "text/markdown"],
+      [".txt", "text/plain"],
+      [".csv", "text/csv"],
+      // .html/.htm: a web/marketing team's deliverables (Fastio feedback 2026-08-19). Every
+      // download is served Content-Disposition: attachment (§5), never rendered inline, so HTML
+      // is no more dangerous than the .svg already permitted — the spec treats all downloads as
+      // untrusted attachments the consumer must not execute.
+      [".html", "text/html"],
+      [".htm", "text/html"],
+      [".json", "application/json"],
+      [".yaml", "application/yaml"],
+      [".yml", "application/yaml"],
+      [".pdf", "application/pdf"],
+      [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+      [".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+      [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+      [".png", "image/png"],
+      [".jpg", "image/jpeg"],
+      [".jpeg", "image/jpeg"],
+      [".gif", "image/gif"],
+      [".webp", "image/webp"],
+      [".svg", "image/svg+xml"],
+      [".zip", "application/zip"],
+      [".tar.gz", "application/gzip"]
+    ]);
+    FileCommandRefused = class extends Error {
+      constructor(status, code, message, scope = null, limit = null, resets_at = null) {
+        super(message);
+        this.status = status;
+        this.code = code;
+        this.scope = scope;
+        this.limit = limit;
+        this.resets_at = resets_at;
+      }
+      status;
+      code;
+      scope;
+      limit;
+      resets_at;
+      name = "FileCommandRefused";
+    };
+    FileTransportError = class extends Error {
+      /**
+       * True when the request did not complete: no response arrived, or an
+       * idempotent read's body stalled. Reads may retry; writes reuse the same ids
+       * because their outcome is unknown. A received refusal is never retried.
+       */
+      constructor(message, noResponse = false) {
+        super(message);
+        this.noResponse = noResponse;
+      }
+      noResponse;
+      name = "FileTransportError";
+    };
+    REQUEST_TIMEOUT_MS = 3e4;
+    READ_RETRY_FLOOR_MS = 2e3;
+    LocalFileExists = class extends Error {
+      name = "LocalFileExists";
+    };
+  }
+});
+
+// src/cloud/brain.ts
+function canonicalBrainTopic(value) {
+  const topic = value.trim().toLowerCase();
+  if (topic.length < 1 || topic.length > BRAIN_TOPIC_MAX_LENGTH || !BRAIN_TOPIC_RE.test(topic)) {
+    throw new BrainTopicError(
+      `brain topics use ${BRAIN_TOPIC_MAX_LENGTH} or fewer lowercase letters, numbers, dots, dashes, or underscores; start with a letter or number`
+    );
+  }
+  return topic;
+}
+function parseBrainTopicSelector(value) {
+  const at = value.lastIndexOf("@");
+  if (at < 0) return { topic: canonicalBrainTopic(value), version: null };
+  const rawVersion = value.slice(at + 1);
+  if (!/^[1-9][0-9]*$/.test(rawVersion)) {
+    throw new BrainTopicError("brain topic history uses <topic>@<positive-version>");
+  }
+  const version4 = Number(rawVersion);
+  if (!Number.isSafeInteger(version4)) {
+    throw new BrainTopicError("brain topic version is too large");
+  }
+  return {
+    topic: canonicalBrainTopic(value.slice(0, at)),
+    version: version4
+  };
+}
+function brainFileName(value) {
+  return `${BRAIN_FILE_PREFIX}${canonicalBrainTopic(value)}${BRAIN_FILE_SUFFIX}`;
+}
+function brainTopicFromFileName(name) {
+  const lower = name.toLowerCase();
+  if (!lower.startsWith(BRAIN_FILE_PREFIX) || !lower.endsWith(BRAIN_FILE_SUFFIX)) {
+    return null;
+  }
+  const topic = lower.slice(BRAIN_FILE_PREFIX.length, -BRAIN_FILE_SUFFIX.length);
+  try {
+    return canonicalBrainTopic(topic);
+  } catch (error2) {
+    if (error2 instanceof BrainTopicError) return null;
+    throw error2;
+  }
+}
+function nonNegativeCount(value) {
+  const count2 = Number(value);
+  return Number.isSafeInteger(count2) && count2 >= 0 ? count2 : null;
+}
+function brainVersionCounts(file) {
+  return {
+    live: nonNegativeCount(file.live_version_count) ?? file.current_version,
+    retired: nonNegativeCount(file.retired_version_count) ?? 0
+  };
+}
+function brainRowsFromFiles(rows3) {
+  return rows3.filter((row) => row.tombstoned_at === null).flatMap((file) => {
+    const topic = brainTopicFromFileName(file.name);
+    return topic === null ? [] : [{ topic, file }];
+  }).sort((left, right) => left.topic.localeCompare(right.topic));
+}
+function brainTopicSnapshots(rows3) {
+  return rows3.map(({ topic, file }) => ({
+    topic,
+    version: file.current_version,
+    updatedAt: file.committed_at ?? file.created_at
+  }));
+}
+function brainEndOfTaskNudge(outcomes) {
+  return outcomes.some((outcome) => outcome === "replied") ? BRAIN_END_OF_TASK_NUDGE : null;
+}
+var BRAIN_END_OF_TASK_NUDGE, BRAIN_TOPIC_RE, BrainTopicError;
+var init_brain = __esm({
+  "src/cloud/brain.ts"() {
+    "use strict";
+    init_brain_version_window();
+    BRAIN_END_OF_TASK_NUDGE = "Durable finding? cswarm brain put <topic> \u2014 see brain get brain-how-to";
+    BRAIN_TOPIC_RE = /^[a-z0-9][a-z0-9._-]*$/;
+    BrainTopicError = class extends Error {
+      name = "BrainTopicError";
+    };
   }
 });
 
@@ -48585,6 +49870,299 @@ var init_sanitize = __esm({
   }
 });
 
+// src/h0/verbs.ts
+var req2, opt, signalRename, idempotencyKey, H0_MAX_CONCURRENT_WAITS, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX, H0_REQUEST_ID_RE, H0_REGISTRATION_NAME_MAX, requestIdField, H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, WHOLE_DAY_MS;
+var init_verbs = __esm({
+  "src/h0/verbs.ts"() {
+    "use strict";
+    req2 = (name, nullable2 = false, note) => note === void 0 ? { name, presence: "required", nullable: nullable2 } : { name, presence: "required", nullable: nullable2, note };
+    opt = (name, nullable2 = false, note) => note === void 0 ? { name, presence: "omittable", nullable: nullable2 } : { name, presence: "omittable", nullable: nullable2, note };
+    signalRename = (name) => ({
+      target: "signal",
+      name
+    });
+    idempotencyKey = {
+      target: "command-envelope",
+      name: "command_id",
+      purpose: "idempotency-key"
+    };
+    H0_MAX_CONCURRENT_WAITS = 1;
+    H0_REQUEST_ID_MIN = 8;
+    H0_REQUEST_ID_MAX = 72;
+    H0_REQUEST_ID_RE = new RegExp(`^[A-Za-z0-9_-]{${H0_REQUEST_ID_MIN},${H0_REQUEST_ID_MAX}}$`);
+    H0_REGISTRATION_NAME_MAX = 80;
+    requestIdField = () => ({
+      ...opt("requestId", false, `reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`),
+      pattern: H0_REQUEST_ID_RE.source,
+      wire: idempotencyKey
+    });
+    H0_VERBS = [
+      {
+        name: "register",
+        auth: "join-credential",
+        summary: "Exchange the join credential from the paste for a seat token. Returned once, in this response body only.",
+        fields: [
+          req2("joinCredential"),
+          req2("attemptId", false, "client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response"),
+          { ...req2("name", false, `a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`), minLength: 1, maxLength: H0_REGISTRATION_NAME_MAX },
+          opt("icon", false, "accepted for link compatibility; this release does not store an icon")
+        ]
+      },
+      {
+        name: "poll",
+        auth: "seat-token",
+        summary: "Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused.",
+        fields: [
+          opt(
+            "wait",
+            false,
+            `seconds, at most 50. At most ${H0_MAX_CONCURRENT_WAITS} poll may wait at a time across the whole deployment. If this poll cannot wait, it returns at once and includes retryAfterSeconds. Poll again after that many seconds`
+          ),
+          opt("ackBatch", false, "the previous batchId; a TRANSPORT ack that advances no delivery state")
+        ]
+      },
+      {
+        name: "ack",
+        auth: "seat-token",
+        /*
+         * The field set below is measured against H0AckBody, the stricter H0 parser
+         * contract. The command edge also accepts the check-only `unclaimed` shape,
+         * which the H0 poll/ack endpoint does not accept.
+         */
+        summary: "Acknowledge ONE message after its local effect is persisted. Unacknowledged messages replay.",
+        fields: [
+          req2("signal_id"),
+          req2("lease_id", true, "null only when outcome is `observed`"),
+          req2("listener_instance_id", true, "null only when outcome is `observed`; otherwise the listener_instance_id poll returned"),
+          req2("outcome"),
+          req2("last_error_code", true, "PRESENT ALWAYS, null unless outcome is `failed_terminal`"),
+          opt("surfaced", false, "required for MANAGED principals; ignored for unmanaged")
+        ]
+      },
+      {
+        name: "ask",
+        auth: "seat-token",
+        summary: "Post a question to a person or agent. An ask wakes its recipient; a note does not.",
+        fields: [
+          req2("body"),
+          opt("to"),
+          requestIdField()
+        ]
+      },
+      {
+        name: "note",
+        auth: "seat-token",
+        summary: "Post a short signal of intent. Does not wake anyone.",
+        fields: [
+          req2("body"),
+          opt("to"),
+          requestIdField()
+        ]
+      },
+      {
+        name: "reply",
+        auth: "seat-token",
+        summary: "Reply to a message you received. Immutable, and addressed to the original author.",
+        fields: [
+          { ...req2("signal_id"), wire: signalRename("in_reply_to") },
+          req2("body"),
+          requestIdField()
+        ]
+      },
+      {
+        name: "working-on",
+        auth: "seat-token",
+        summary: "Say what you are working on so collaborators do not step on it. Claims nothing and blocks nobody.",
+        fields: [
+          req2("body"),
+          requestIdField()
+        ]
+      }
+    ];
+    H0_VERB_NAMES = H0_VERBS.map((v) => v.name);
+    H0_PREAUTH_VERBS = H0_VERBS.filter((v) => v.auth === "join-credential").map((v) => v.name);
+    WHOLE_DAY_MS = 24 * 60 * 60 * 1e3;
+  }
+});
+
+// src/cloud/exact-file-put.ts
+var exact_file_put_exports = {};
+__export(exact_file_put_exports, {
+  FilePutPreflightError: () => FilePutPreflightError,
+  RequestIdConflict: () => RequestIdConflict,
+  exactPutStateDir: () => exactPutStateDir,
+  executeExactPut: () => executeExactPut,
+  prepareExactPut: () => prepareExactPut,
+  uuidV5: () => uuidV5
+});
+function exactPutStateDir(profilePath) {
+  return (0, import_node_path21.join)((0, import_node_path21.dirname)(profilePath), "file-put-resume");
+}
+function uuidV5(name) {
+  const bytes = Buffer.from(NAMESPACE.replaceAll("-", ""), "hex");
+  const digest = (0, import_node_crypto25.createHash)("sha1").update(bytes).update(name).digest();
+  digest[6] = digest[6] & 15 | 80;
+  digest[8] = digest[8] & 63 | 128;
+  const hex = digest.subarray(0, 16).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function recordPath(input) {
+  const key2 = `${input.workspaceId}\0${input.principalId}\0${input.requestId}`;
+  return (0, import_node_path21.join)(input.stateDir, `${(0, import_node_crypto25.createHash)("sha256").update(key2).digest("hex")}.json`);
+}
+async function prune(dir, now, preserve) {
+  const names = (await (0, import_promises14.readdir)(dir)).filter((name) => /^[a-f0-9]{64}\.json$/.test(name));
+  const rows3 = await Promise.all(names.map(async (name) => {
+    try {
+      const raw = await readSecureJsonFileIfPresent((0, import_node_path21.join)(dir, name), 8192);
+      const saved = raw === null ? null : JSON.parse(raw);
+      if (raw !== null && (typeof saved?.updated_at !== "number" || !Number.isFinite(saved.updated_at))) throw new Error("invalid record");
+      return { name, updated: saved?.updated_at ?? 0 };
+    } catch {
+      process.stderr.write(`cswarm: skipped unreadable file put resume record ${name}
+`);
+      await (0, import_promises14.unlink)((0, import_node_path21.join)(dir, name)).catch(() => void 0);
+      return null;
+    }
+  })).then((rows4) => rows4.filter((row) => row !== null));
+  rows3.sort((a, b2) => b2.updated - a.updated);
+  await Promise.all(rows3.filter((row, index) => row.name !== preserve && (index >= MAX_RECORDS - 1 || now - row.updated > RECORD_LIFETIME_MS)).map((row) => (0, import_promises14.unlink)((0, import_node_path21.join)(dir, row.name)).catch(() => void 0)));
+}
+async function prepareExactPut(input) {
+  if (!H0_REQUEST_ID_RE.test(input.requestId)) throw new FilePutPreflightError("request_id_invalid", "The request id is invalid.");
+  if (input.bytes.byteLength === 0 || input.bytes.byteLength > FILE_MAX_VERSION_BYTES) {
+    throw new FilePutPreflightError("file_too_large", `The file must contain 1 to ${FILE_MAX_VERSION_BYTES} bytes.`);
+  }
+  const contentType = contentTypeForName(input.name);
+  if (contentType === null) throw new FilePutPreflightError("file_type_refused", `The name needs an allowed extension: ${allowedExtensionList()}`);
+  if (input.ifVersion !== void 0 && (!Number.isSafeInteger(input.ifVersion) || input.ifVersion < 0)) {
+    throw new FilePutPreflightError("if_version_invalid", "if_version must be a nonnegative integer.");
+  }
+  const sha2562 = sha256Hex(input.bytes);
+  const identity = [input.workspaceId, input.principalId, input.requestId, input.name.toLowerCase(), sha2562].join("\0");
+  const path = recordPath(input);
+  await ensureSecureStateDirectory(input.stateDir);
+  const now = (input.now ?? Date.now)();
+  return await withFileLock(input.stateDir, "file-put-resume", async () => {
+    await prune(input.stateDir, now, (0, import_node_path21.basename)(path));
+    const raw = await readSecureJsonFileIfPresent(path, 8192);
+    const prior = raw === null ? null : JSON.parse(raw);
+    if (prior && (prior.request_id !== input.requestId || prior.name.toLowerCase() !== input.name.toLowerCase() || prior.sha256 !== sha2562 || prior.size !== input.bytes.byteLength || prior.if_version !== (input.ifVersion ?? null))) throw new RequestIdConflict();
+    const record3 = prior ?? {
+      request_id: input.requestId,
+      name: input.name,
+      sha256: sha2562,
+      size: input.bytes.byteLength,
+      if_version: input.ifVersion ?? null,
+      file_id: uuidV5(`${identity}\0file`),
+      version_id: uuidV5(`${identity}\0version`),
+      create_command_id: uuidV5(`${identity}\0create`),
+      commit_command_id: uuidV5(`${identity}\0commit`),
+      phase: "prepared",
+      updated_at: now,
+      result: null
+    };
+    if (!prior) await writeSecureJsonFile(path, JSON.stringify(record3));
+    return { input, record: record3, path, existed: prior !== null, conflict_check: prior ? "available" : "unavailable", contentType };
+  });
+}
+async function phase(prepared, value, result = null) {
+  if (PHASE_ORDER[value] < PHASE_ORDER[prepared.record.phase]) return;
+  prepared.record.phase = value;
+  prepared.record.updated_at = (prepared.input.now ?? Date.now)();
+  prepared.record.result = result;
+  await writeSecureJsonFile(prepared.path, JSON.stringify(prepared.record));
+  prepared.input.onPhasePersisted?.(value);
+}
+async function executeExactPut(prepared) {
+  const { input, record: record3 } = prepared;
+  if (record3.phase === "committed" && record3.result) return { result: record3.result, outcome: "replayed", conflict_check: prepared.conflict_check };
+  if (record3.phase === "refused" && record3.refusal) throw new FileCommandRefused(record3.refusal.status, record3.refusal.code, `The service refused this file put (${record3.refusal.code}).`);
+  const priorPut = record3.phase === "putting" || record3.phase === "uploaded";
+  const send = { target: input.target, workspaceId: input.workspaceId, credential: input.credential, fetcher: input.fetcher };
+  const created = await onceRetried(() => fileVersionCreate({ ...send, commandId: record3.create_command_id }, {
+    fileId: record3.file_id,
+    versionId: record3.version_id,
+    name: record3.name,
+    declaredSizeBytes: record3.size,
+    contentType: prepared.contentType,
+    ...record3.if_version === null ? {} : { ifVersion: record3.if_version }
+  }));
+  await phase(prepared, "created");
+  await phase(prepared, "putting");
+  let attempted = false;
+  await onceRetried(async () => {
+    const replayedPut = priorPut || attempted;
+    attempted = true;
+    try {
+      return await putObject(input.target, created.upload_path, input.bytes, prepared.contentType, input.fetcher, true);
+    } catch (error2) {
+      if (replayedPut && error2 instanceof FileTransportError) return "already_exists";
+      throw error2;
+    }
+  });
+  await phase(prepared, "uploaded");
+  let result;
+  try {
+    result = await onceRetried(() => fileVersionCommit({ ...send, commandId: record3.commit_command_id }, {
+      fileId: created.file_id,
+      versionId: created.version_id,
+      sha256: record3.sha256
+    }));
+  } catch (error2) {
+    if (error2 instanceof FileCommandRefused && TERMINAL_COMMIT_CODES.has(error2.code)) {
+      record3.refusal = { status: error2.status, code: error2.code };
+      await phase(prepared, "refused");
+    }
+    throw error2;
+  }
+  await phase(prepared, "committed", result);
+  return {
+    result,
+    outcome: "committed",
+    conflict_check: prepared.conflict_check
+  };
+}
+var import_node_crypto25, import_promises14, import_node_path21, NAMESPACE, RECORD_LIFETIME_MS, MAX_RECORDS, TERMINAL_COMMIT_CODES, RequestIdConflict, FilePutPreflightError, PHASE_ORDER;
+var init_exact_file_put = __esm({
+  "src/cloud/exact-file-put.ts"() {
+    "use strict";
+    import_node_crypto25 = require("node:crypto");
+    import_promises14 = require("node:fs/promises");
+    import_node_path21 = require("node:path");
+    init_verbs();
+    init_storage();
+    init_files();
+    NAMESPACE = "1c20a85c-ff0f-4c85-90a3-83d83cfda936";
+    RECORD_LIFETIME_MS = 3 * 60 * 60 * 1e3;
+    MAX_RECORDS = 200;
+    TERMINAL_COMMIT_CODES = /* @__PURE__ */ new Set([
+      "file_version_precondition_failed",
+      "file_commit_conflict",
+      "file_size_exceeds_declaration",
+      "file_not_found",
+      "file_version_cap",
+      "command_id_conflict"
+    ]);
+    RequestIdConflict = class extends Error {
+      name = "RequestIdConflict";
+      code = "request_id_conflict";
+      constructor() {
+        super("This request id was already used for different file content or arguments.");
+      }
+    };
+    FilePutPreflightError = class extends Error {
+      constructor(code, message) {
+        super(message);
+        this.code = code;
+      }
+      code;
+      name = "FilePutPreflightError";
+    };
+    PHASE_ORDER = { prepared: 0, created: 1, putting: 2, uploaded: 3, committed: 4, refused: 4 };
+  }
+});
+
 // src/host/stderr-tail.ts
 function sanitizeStderrTail(raw) {
   return redactCredentialText(raw).slice(-TAIL_MAX_CHARS).trim();
@@ -48814,12 +50392,12 @@ var init_transport = __esm({
           method,
           ...params !== void 0 ? { params } : {}
         };
-        return new Promise((resolve7, reject) => {
+        return new Promise((resolve8, reject) => {
           const timer2 = setTimeout(() => {
             this.pending.delete(key2);
             reject(new AcpTimeoutError(`ACP request timed out: ${method}`));
           }, timeoutMs ?? this.requestTimeoutMs);
-          this.pending.set(key2, { resolve: resolve7, reject, timer: timer2, method });
+          this.pending.set(key2, { resolve: resolve8, reject, timer: timer2, method });
           try {
             this.writeFrame(frame);
           } catch (err) {
@@ -49020,7 +50598,7 @@ function assertAbsoluteExistingCwd(cwd) {
   if (!cwd || typeof cwd !== "string") {
     throw new AcpProtocolError("cwd is required", "invalid_cwd");
   }
-  if (!(0, import_node_path20.isAbsolute)(cwd)) {
+  if (!(0, import_node_path22.isAbsolute)(cwd)) {
     throw new AcpProtocolError("cwd must be an absolute path", "invalid_cwd");
   }
   let st;
@@ -49086,12 +50664,12 @@ function createBoundTransport(options) {
     }
   });
 }
-var import_node_fs3, import_node_path20, CANARY_TERMINAL_DENY_STATUSES, AcpHostSession;
+var import_node_fs3, import_node_path22, CANARY_TERMINAL_DENY_STATUSES, AcpHostSession;
 var init_session = __esm({
   "src/host/session.ts"() {
     "use strict";
     import_node_fs3 = require("node:fs");
-    import_node_path20 = require("node:path");
+    import_node_path22 = require("node:path");
     init_bounds();
     init_permission();
     init_sanitize();
@@ -49664,14 +51242,14 @@ function isPackagedClaudeBridge(executable) {
     "/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js"
   );
 }
-function resolvePackagedClaudeBridge(pathEnv, platform = process.platform) {
+function resolvePackagedClaudeBridge(pathEnv, platform2 = process.platform) {
   const pathValue = pathEnv ?? process.env.PATH ?? "";
-  const names = platform === "win32" ? ["claude-agent-acp.cmd"] : ["claude-agent-acp"];
-  for (const dir of pathValue.split(import_node_path21.delimiter)) {
+  const names = platform2 === "win32" ? ["claude-agent-acp.cmd"] : ["claude-agent-acp"];
+  for (const dir of pathValue.split(import_node_path23.delimiter)) {
     if (!dir) continue;
     for (const name of names) {
       try {
-        const candidate = resolvedClaudeCandidate((0, import_node_path21.join)(dir, name), platform);
+        const candidate = resolvedClaudeCandidate((0, import_node_path23.join)(dir, name), platform2);
         if (isPackagedClaudeBridge(candidate)) return candidate;
       } catch {
       }
@@ -49700,7 +51278,7 @@ function resolveWindowsNpmShim(shim) {
       `unrecognized claude-agent-acp npm shim: ${shim}`
     );
   }
-  const target2 = (0, import_node_path21.join)((0, import_node_path21.dirname)(shim), ...WINDOWS_NPM_ENTRYPOINT);
+  const target2 = (0, import_node_path23.join)((0, import_node_path23.dirname)(shim), ...WINDOWS_NPM_ENTRYPOINT);
   try {
     (0, import_node_fs4.accessSync)(target2, import_node_fs4.constants.R_OK);
     return (0, import_node_fs4.realpathSync)(target2);
@@ -49711,18 +51289,18 @@ function resolveWindowsNpmShim(shim) {
     );
   }
 }
-function resolvedClaudeCandidate(candidate, platform) {
+function resolvedClaudeCandidate(candidate, platform2) {
   (0, import_node_fs4.accessSync)(candidate, import_node_fs4.constants.X_OK);
   const real = (0, import_node_fs4.realpathSync)(candidate);
-  return platform === "win32" && (0, import_node_path21.extname)(real).toLowerCase() === ".cmd" ? resolveWindowsNpmShim(real) : real;
+  return platform2 === "win32" && (0, import_node_path23.extname)(real).toLowerCase() === ".cmd" ? resolveWindowsNpmShim(real) : real;
 }
-function resolveClaudeExecutable(executable = "claude-agent-acp", pathEnv, platform = process.platform) {
-  if ((0, import_node_path21.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
-    const abs = (0, import_node_path21.resolve)(executable);
-    const candidates = platform === "win32" && (0, import_node_path21.extname)(abs) === "" ? [`${abs}.cmd`] : [abs];
+function resolveClaudeExecutable(executable = "claude-agent-acp", pathEnv, platform2 = process.platform) {
+  if ((0, import_node_path23.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
+    const abs = (0, import_node_path23.resolve)(executable);
+    const candidates = platform2 === "win32" && (0, import_node_path23.extname)(abs) === "" ? [`${abs}.cmd`] : [abs];
     for (const candidate of candidates) {
       try {
-        return resolvedClaudeCandidate(candidate, platform);
+        return resolvedClaudeCandidate(candidate, platform2);
       } catch (error2) {
         if (error2 instanceof AcpHostError) throw error2;
       }
@@ -49730,13 +51308,13 @@ function resolveClaudeExecutable(executable = "claude-agent-acp", pathEnv, platf
     throw new AcpHostError("executable_missing", `not executable: ${abs}`);
   }
   const pathValue = pathEnv ?? process.env.PATH ?? "";
-  const names = platform === "win32" && (0, import_node_path21.extname)(executable) === "" ? [`${executable}.cmd`] : [executable];
-  for (const dir of pathValue.split(import_node_path21.delimiter)) {
+  const names = platform2 === "win32" && (0, import_node_path23.extname)(executable) === "" ? [`${executable}.cmd`] : [executable];
+  for (const dir of pathValue.split(import_node_path23.delimiter)) {
     if (!dir) continue;
     for (const name of names) {
-      const candidate = (0, import_node_path21.join)(dir, name);
+      const candidate = (0, import_node_path23.join)(dir, name);
       try {
-        return resolvedClaudeCandidate(candidate, platform);
+        return resolvedClaudeCandidate(candidate, platform2);
       } catch (error2) {
         if (error2 instanceof AcpHostError) throw error2;
       }
@@ -49747,8 +51325,8 @@ function resolveClaudeExecutable(executable = "claude-agent-acp", pathEnv, platf
     `claude-agent-acp executable not found on PATH: ${executable}`
   );
 }
-function buildClaudeLaunch(executable, args, platform = process.platform) {
-  return platform === "win32" && (0, import_node_path21.extname)(executable).toLowerCase() === ".js" ? { command: process.execPath, args: [executable, ...args] } : { command: executable, args: [...args] };
+function buildClaudeLaunch(executable, args, platform2 = process.platform) {
+  return platform2 === "win32" && (0, import_node_path23.extname)(executable).toLowerCase() === ".js" ? { command: process.execPath, args: [executable, ...args] } : { command: executable, args: [...args] };
 }
 function parseClaudeVersionOutput(stdout) {
   return parseProviderVersionOutput(stdout, /\bclaude-agent-acp\b/i);
@@ -49762,9 +51340,9 @@ function semanticVersion(value) {
 `, /\bnever-a-product-name\b/i);
 }
 function readPackageAtOrAbove(entrypoint, expectedName) {
-  let directory = (0, import_node_path21.dirname)(entrypoint);
+  let directory = (0, import_node_path23.dirname)(entrypoint);
   for (let depth = 0; depth < 5; depth += 1) {
-    const path = (0, import_node_path21.join)(directory, "package.json");
+    const path = (0, import_node_path23.join)(directory, "package.json");
     try {
       const row = JSON.parse((0, import_node_fs4.readFileSync)(path, "utf8"));
       if (row && typeof row === "object" && !Array.isArray(row) && row.name === expectedName) {
@@ -49772,7 +51350,7 @@ function readPackageAtOrAbove(entrypoint, expectedName) {
       }
     } catch {
     }
-    const parent = (0, import_node_path21.dirname)(directory);
+    const parent = (0, import_node_path23.dirname)(directory);
     if (parent === directory) break;
     directory = parent;
   }
@@ -49805,8 +51383,8 @@ async function readClaudeVersionOutput(executable, options) {
   const timeoutMs = options?.timeoutMs ?? ACP_VERSION_CHECK_TIMEOUT_MS;
   const env = options?.env ?? sanitizeChildEnv(process.env);
   const launch = buildClaudeLaunch(executable, ["--version"], options?.platform);
-  return await new Promise((resolve7, reject) => {
-    (0, import_node_child_process7.execFile)(
+  return await new Promise((resolve8, reject) => {
+    (0, import_node_child_process10.execFile)(
       launch.command,
       launch.args,
       { timeout: timeoutMs, encoding: "utf8", env },
@@ -49819,7 +51397,7 @@ async function readClaudeVersionOutput(executable, options) {
           );
           return;
         }
-        resolve7(out);
+        resolve8(out);
       }
     );
   });
@@ -49873,11 +51451,11 @@ function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve();
   }
-  return new Promise((resolve7) => {
-    const timer2 = setTimeout(resolve7, timeoutMs);
+  return new Promise((resolve8) => {
+    const timer2 = setTimeout(resolve8, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer2);
-      resolve7();
+      resolve8();
     });
   });
 }
@@ -50006,7 +51584,7 @@ async function openClaudeAcpSession(options) {
   }
   const args = buildClaudeAcpArgs();
   const launch = buildClaudeLaunch(executable, args);
-  const child = (0, import_node_child_process7.spawn)(launch.command, launch.args, {
+  const child = (0, import_node_child_process10.spawn)(launch.command, launch.args, {
     stdio: ["pipe", "pipe", "pipe"],
     env,
     cwd: options.cwd
@@ -50105,15 +51683,15 @@ async function openClaudeAcpSession(options) {
     throw error2;
   }
 }
-var import_node_child_process7, import_node_module, import_node_fs4, import_node_path21, CHILD_EXIT_WAIT_MS, CHILD_KILL_WAIT_MS, WINDOWS_NPM_SHIM_MAX_BYTES, WINDOWS_NPM_ENTRYPOINT;
+var import_node_child_process10, import_node_module, import_node_fs4, import_node_path23, CHILD_EXIT_WAIT_MS, CHILD_KILL_WAIT_MS, WINDOWS_NPM_SHIM_MAX_BYTES, WINDOWS_NPM_ENTRYPOINT;
 var init_claude = __esm({
   "src/host/claude.ts"() {
     "use strict";
     init_stderr_tail();
-    import_node_child_process7 = require("node:child_process");
+    import_node_child_process10 = require("node:child_process");
     import_node_module = require("node:module");
     import_node_fs4 = require("node:fs");
-    import_node_path21 = require("node:path");
+    import_node_path23 = require("node:path");
     init_bounds();
     init_env();
     init_session();
@@ -50165,7 +51743,7 @@ function resolveWindowsNpmShim2(shim) {
       `unrecognized codex-acp npm shim: ${shim}`
     );
   }
-  const target2 = (0, import_node_path22.join)((0, import_node_path22.dirname)(shim), ...WINDOWS_NPM_ENTRYPOINT2);
+  const target2 = (0, import_node_path24.join)((0, import_node_path24.dirname)(shim), ...WINDOWS_NPM_ENTRYPOINT2);
   try {
     (0, import_node_fs5.accessSync)(target2, import_node_fs5.constants.R_OK);
     return (0, import_node_fs5.realpathSync)(target2);
@@ -50176,18 +51754,18 @@ function resolveWindowsNpmShim2(shim) {
     );
   }
 }
-function resolvedCodexCandidate(candidate, platform) {
+function resolvedCodexCandidate(candidate, platform2) {
   (0, import_node_fs5.accessSync)(candidate, import_node_fs5.constants.X_OK);
   const real = (0, import_node_fs5.realpathSync)(candidate);
-  return platform === "win32" && (0, import_node_path22.extname)(real).toLowerCase() === ".cmd" ? resolveWindowsNpmShim2(real) : real;
+  return platform2 === "win32" && (0, import_node_path24.extname)(real).toLowerCase() === ".cmd" ? resolveWindowsNpmShim2(real) : real;
 }
-function resolveCodexExecutable(executable = "codex-acp", pathEnv, platform = process.platform) {
-  if ((0, import_node_path22.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
-    const abs = (0, import_node_path22.resolve)(executable);
-    const candidates = platform === "win32" && (0, import_node_path22.extname)(abs) === "" ? [`${abs}.cmd`] : [abs];
+function resolveCodexExecutable(executable = "codex-acp", pathEnv, platform2 = process.platform) {
+  if ((0, import_node_path24.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
+    const abs = (0, import_node_path24.resolve)(executable);
+    const candidates = platform2 === "win32" && (0, import_node_path24.extname)(abs) === "" ? [`${abs}.cmd`] : [abs];
     for (const candidate of candidates) {
       try {
-        return resolvedCodexCandidate(candidate, platform);
+        return resolvedCodexCandidate(candidate, platform2);
       } catch (error2) {
         if (error2 instanceof AcpHostError) throw error2;
       }
@@ -50195,13 +51773,13 @@ function resolveCodexExecutable(executable = "codex-acp", pathEnv, platform = pr
     throw new AcpHostError("executable_missing", `not executable: ${abs}`);
   }
   const pathValue = pathEnv ?? process.env.PATH ?? "";
-  const names = platform === "win32" && (0, import_node_path22.extname)(executable) === "" ? [`${executable}.cmd`] : [executable];
-  for (const dir of pathValue.split(import_node_path22.delimiter)) {
+  const names = platform2 === "win32" && (0, import_node_path24.extname)(executable) === "" ? [`${executable}.cmd`] : [executable];
+  for (const dir of pathValue.split(import_node_path24.delimiter)) {
     if (!dir) continue;
     for (const name of names) {
-      const candidate = (0, import_node_path22.join)(dir, name);
+      const candidate = (0, import_node_path24.join)(dir, name);
       try {
-        return resolvedCodexCandidate(candidate, platform);
+        return resolvedCodexCandidate(candidate, platform2);
       } catch (error2) {
         if (error2 instanceof AcpHostError) throw error2;
       }
@@ -50212,8 +51790,8 @@ function resolveCodexExecutable(executable = "codex-acp", pathEnv, platform = pr
     `codex-acp executable not found on PATH: ${executable}`
   );
 }
-function buildCodexLaunch(executable, args, platform = process.platform) {
-  return platform === "win32" && (0, import_node_path22.extname)(executable).toLowerCase() === ".js" ? { command: process.execPath, args: [executable, ...args] } : { command: executable, args: [...args] };
+function buildCodexLaunch(executable, args, platform2 = process.platform) {
+  return platform2 === "win32" && (0, import_node_path24.extname)(executable).toLowerCase() === ".js" ? { command: process.execPath, args: [executable, ...args] } : { command: executable, args: [...args] };
 }
 function parseCodexVersionOutput(stdout) {
   return parseProviderVersionOutput(stdout, /@agentclientprotocol\/codex-acp\b/i);
@@ -50224,8 +51802,8 @@ async function assertCodexVersionFloor(executable, options) {
   const timeoutMs = options?.timeoutMs ?? ACP_VERSION_CHECK_TIMEOUT_MS;
   const env = options?.env ?? sanitizeChildEnv(process.env);
   const launch = buildCodexLaunch(executable, ["--version"], options?.platform);
-  const stdout = await new Promise((resolve7, reject) => {
-    (0, import_node_child_process8.execFile)(
+  const stdout = await new Promise((resolve8, reject) => {
+    (0, import_node_child_process11.execFile)(
       launch.command,
       launch.args,
       { timeout: timeoutMs, encoding: "utf8", env },
@@ -50238,7 +51816,7 @@ async function assertCodexVersionFloor(executable, options) {
           );
           return;
         }
-        resolve7(out);
+        resolve8(out);
       }
     );
   });
@@ -50278,11 +51856,11 @@ function waitForChildExit2(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve();
   }
-  return new Promise((resolve7) => {
-    const timer2 = setTimeout(resolve7, timeoutMs);
+  return new Promise((resolve8) => {
+    const timer2 = setTimeout(resolve8, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer2);
-      resolve7();
+      resolve8();
     });
   });
 }
@@ -50337,7 +51915,7 @@ async function openCodexAcpSession(options) {
   }
   const args = buildCodexAcpArgs();
   const launch = buildCodexLaunch(executable, args);
-  const child = (0, import_node_child_process8.spawn)(launch.command, launch.args, {
+  const child = (0, import_node_child_process11.spawn)(launch.command, launch.args, {
     stdio: ["pipe", "pipe", "pipe"],
     env,
     cwd: options.cwd
@@ -50434,14 +52012,14 @@ async function openCodexAcpSession(options) {
     throw error2;
   }
 }
-var import_node_child_process8, import_node_fs5, import_node_path22, CHILD_EXIT_WAIT_MS2, CHILD_KILL_WAIT_MS2, WINDOWS_NPM_SHIM_MAX_BYTES2, WINDOWS_NPM_ENTRYPOINT2;
+var import_node_child_process11, import_node_fs5, import_node_path24, CHILD_EXIT_WAIT_MS2, CHILD_KILL_WAIT_MS2, WINDOWS_NPM_SHIM_MAX_BYTES2, WINDOWS_NPM_ENTRYPOINT2;
 var init_codex = __esm({
   "src/host/codex.ts"() {
     "use strict";
     init_stderr_tail();
-    import_node_child_process8 = require("node:child_process");
+    import_node_child_process11 = require("node:child_process");
     import_node_fs5 = require("node:fs");
-    import_node_path22 = require("node:path");
+    import_node_path24 = require("node:path");
     init_bounds();
     init_env();
     init_session();
@@ -50499,8 +52077,8 @@ function isProcessAlive(pid) {
   }
 }
 function resolveOpenCodeExecutable(executable = "opencode", pathEnv) {
-  if ((0, import_node_path23.isAbsolute)(executable) || executable.includes("/")) {
-    const abs = (0, import_node_path23.resolve)(executable);
+  if ((0, import_node_path25.isAbsolute)(executable) || executable.includes("/")) {
+    const abs = (0, import_node_path25.resolve)(executable);
     try {
       (0, import_node_fs6.accessSync)(abs, import_node_fs6.constants.X_OK);
     } catch {
@@ -50518,7 +52096,7 @@ function resolveOpenCodeExecutable(executable = "opencode", pathEnv) {
   const pathValue = pathEnv ?? process.env.PATH ?? "";
   for (const dir of pathValue.split(":")) {
     if (!dir) continue;
-    const candidate = (0, import_node_path23.join)(dir, executable);
+    const candidate = (0, import_node_path25.join)(dir, executable);
     try {
       (0, import_node_fs6.accessSync)(candidate, import_node_fs6.constants.X_OK);
       try {
@@ -50544,25 +52122,25 @@ function buildOpenCodeHomeOwner(options) {
     version: 1,
     pid: options.pid ?? process.pid,
     uid: uid2,
-    instanceId: options.instanceId ?? (0, import_node_crypto22.randomUUID)(),
+    instanceId: options.instanceId ?? (0, import_node_crypto26.randomUUID)(),
     role: options.role,
     createdAt: new Date((options.now ?? Date.now)()).toISOString()
   };
 }
 async function writeOpenCodeHomeOwner(home, owner) {
-  const path = (0, import_node_path23.join)(home, OPENCODE_HOME_OWNER_FILE);
-  await (0, import_promises13.writeFile)(path, `${JSON.stringify(owner)}
+  const path = (0, import_node_path25.join)(home, OPENCODE_HOME_OWNER_FILE);
+  await (0, import_promises15.writeFile)(path, `${JSON.stringify(owner)}
 `, {
     flag: "wx",
     mode: 384
   });
-  await (0, import_promises13.chmod)(path, 384);
+  await (0, import_promises15.chmod)(path, 384);
 }
 async function readOpenCodeHomeOwner(home) {
-  const path = (0, import_node_path23.join)(home, OPENCODE_HOME_OWNER_FILE);
+  const path = (0, import_node_path25.join)(home, OPENCODE_HOME_OWNER_FILE);
   let raw;
   try {
-    raw = await (0, import_promises13.readFile)(path, "utf8");
+    raw = await (0, import_promises15.readFile)(path, "utf8");
   } catch {
     return null;
   }
@@ -50577,16 +52155,16 @@ async function readOpenCodeHomeOwner(home) {
   }
 }
 async function releaseOpenCodeHome(home, instanceId) {
-  if (!(0, import_node_path23.isAbsolute)(home)) return;
+  if (!(0, import_node_path25.isAbsolute)(home)) return;
   const owner = await readOpenCodeHomeOwner(home);
   if (owner && owner.instanceId !== instanceId) {
     return;
   }
   try {
-    await (0, import_promises13.rm)(home, { recursive: true, force: true });
+    await (0, import_promises15.rm)(home, { recursive: true, force: true });
   } catch {
-    await (0, import_promises13.chmod)(home, 448);
-    await (0, import_promises13.rm)(home, { recursive: true, force: true });
+    await (0, import_promises15.chmod)(home, 448);
+    await (0, import_promises15.rm)(home, { recursive: true, force: true });
   }
 }
 function parseOpenCodeVersionOutput(stdout) {
@@ -50597,8 +52175,8 @@ async function assertOpenCodeVersionFloor(executable, options) {
   const lastMeasuredVersion = options?.lastMeasuredVersion ?? OPENCODE_LAST_MEASURED_VERSION;
   const timeoutMs = options?.timeoutMs ?? ACP_VERSION_CHECK_TIMEOUT_MS;
   const env = sanitizeChildEnv(options?.env ?? process.env);
-  const stdout = await new Promise((resolve7, reject) => {
-    (0, import_node_child_process9.execFile)(
+  const stdout = await new Promise((resolve8, reject) => {
+    (0, import_node_child_process12.execFile)(
       executable,
       ["--version"],
       { timeout: timeoutMs, encoding: "utf8", env },
@@ -50611,7 +52189,7 @@ async function assertOpenCodeVersionFloor(executable, options) {
           );
           return;
         }
-        resolve7(out);
+        resolve8(out);
       }
     );
   });
@@ -50654,7 +52232,7 @@ function buildOpenCodeSafeConfigJson(options) {
 async function readValidatedOpenCodeAuth(sourceAuthPath, options) {
   let info;
   try {
-    info = await (0, import_promises13.lstat)(sourceAuthPath);
+    info = await (0, import_promises15.lstat)(sourceAuthPath);
   } catch (error2) {
     if (error2.code === "ENOENT") {
       if (options?.allowMissing) return null;
@@ -50683,7 +52261,7 @@ async function readValidatedOpenCodeAuth(sourceAuthPath, options) {
       "OpenCode auth file exceeds the listener safety bound"
     );
   }
-  const raw = await (0, import_promises13.readFile)(sourceAuthPath);
+  const raw = await (0, import_promises15.readFile)(sourceAuthPath);
   if (raw.byteLength > MAX_OPENCODE_AUTH_BYTES) {
     throw new AcpHostError(
       "opencode_auth_too_large",
@@ -50702,66 +52280,66 @@ async function readValidatedOpenCodeAuth(sourceAuthPath, options) {
 }
 function resolveOpenCodeAuthSourcePath(parent = process.env) {
   const xdgData = parent.XDG_DATA_HOME;
-  if (typeof xdgData === "string" && (0, import_node_path23.isAbsolute)(xdgData)) {
-    return (0, import_node_path23.join)(xdgData, "opencode", "auth.json");
+  if (typeof xdgData === "string" && (0, import_node_path25.isAbsolute)(xdgData)) {
+    return (0, import_node_path25.join)(xdgData, "opencode", "auth.json");
   }
   const home = parent.HOME ?? (0, import_node_os9.homedir)();
-  return (0, import_node_path23.join)(home, ".local", "share", "opencode", "auth.json");
+  return (0, import_node_path25.join)(home, ".local", "share", "opencode", "auth.json");
 }
 async function prepareOpenCodeIsolatedHome(options) {
-  const home = options.home ?? await (0, import_promises13.mkdtemp)((0, import_node_path23.join)((0, import_node_os9.tmpdir)(), OPENCODE_HOME_PREFIX));
-  if (!(0, import_node_path23.isAbsolute)(home)) {
+  const home = options.home ?? await (0, import_promises15.mkdtemp)((0, import_node_path25.join)((0, import_node_os9.tmpdir)(), OPENCODE_HOME_PREFIX));
+  if (!(0, import_node_path25.isAbsolute)(home)) {
     throw new AcpHostError(
       "isolated_home_invalid",
       "isolated OpenCode home must be absolute"
     );
   }
-  await (0, import_promises13.chmod)(home, 448);
+  await (0, import_promises15.chmod)(home, 448);
   try {
-    const xdgConfig = (0, import_node_path23.join)(home, "xdg-config");
-    const xdgData = (0, import_node_path23.join)(home, "xdg-data");
-    const xdgCache = (0, import_node_path23.join)(home, "xdg-cache");
-    const xdgState = (0, import_node_path23.join)(home, "xdg-state");
+    const xdgConfig = (0, import_node_path25.join)(home, "xdg-config");
+    const xdgData = (0, import_node_path25.join)(home, "xdg-data");
+    const xdgCache = (0, import_node_path25.join)(home, "xdg-cache");
+    const xdgState = (0, import_node_path25.join)(home, "xdg-state");
     for (const dir of [xdgConfig, xdgData, xdgCache, xdgState]) {
-      await (0, import_promises13.mkdir)(dir, { recursive: true, mode: 448 });
-      await (0, import_promises13.chmod)(dir, 448);
+      await (0, import_promises15.mkdir)(dir, { recursive: true, mode: 448 });
+      await (0, import_promises15.chmod)(dir, 448);
     }
-    const configDir = (0, import_node_path23.join)(xdgConfig, "opencode");
-    const dataDir = (0, import_node_path23.join)(xdgData, "opencode");
-    await (0, import_promises13.mkdir)(configDir, { recursive: true, mode: 448 });
-    await (0, import_promises13.mkdir)(dataDir, { recursive: true, mode: 448 });
-    await (0, import_promises13.chmod)(configDir, 448);
-    await (0, import_promises13.chmod)(dataDir, 448);
-    const configPath = (0, import_node_path23.join)(configDir, "opencode.json");
-    await (0, import_promises13.writeFile)(
+    const configDir = (0, import_node_path25.join)(xdgConfig, "opencode");
+    const dataDir = (0, import_node_path25.join)(xdgData, "opencode");
+    await (0, import_promises15.mkdir)(configDir, { recursive: true, mode: 448 });
+    await (0, import_promises15.mkdir)(dataDir, { recursive: true, mode: 448 });
+    await (0, import_promises15.chmod)(configDir, 448);
+    await (0, import_promises15.chmod)(dataDir, 448);
+    const configPath = (0, import_node_path25.join)(configDir, "opencode.json");
+    await (0, import_promises15.writeFile)(
       configPath,
       buildOpenCodeSafeConfigJson(
         options.model ? { model: options.model } : void 0
       ),
       { flag: "wx", mode: 384 }
     );
-    await (0, import_promises13.chmod)(configPath, 384);
+    await (0, import_promises15.chmod)(configPath, 384);
     const sourceAuth = resolveOpenCodeAuthSourcePath(options.env ?? process.env);
     const authBytes = await readValidatedOpenCodeAuth(sourceAuth, {
       allowMissing: options.allowMissingAuth === true
     });
     if (authBytes) {
-      const destAuth = (0, import_node_path23.join)(dataDir, "auth.json");
-      await (0, import_promises13.writeFile)(destAuth, authBytes, { flag: "wx", mode: 384 });
-      await (0, import_promises13.chmod)(destAuth, 384);
+      const destAuth = (0, import_node_path25.join)(dataDir, "auth.json");
+      await (0, import_promises15.writeFile)(destAuth, authBytes, { flag: "wx", mode: 384 });
+      await (0, import_promises15.chmod)(destAuth, 384);
     }
     const owner = options.owner ?? buildOpenCodeHomeOwner({ role: "ephemeral" });
     await writeOpenCodeHomeOwner(home, owner);
     return home;
   } catch (error2) {
     if (!options.home) {
-      await (0, import_promises13.rm)(home, { recursive: true, force: true }).catch(() => void 0);
+      await (0, import_promises15.rm)(home, { recursive: true, force: true }).catch(() => void 0);
     }
     throw error2;
   }
 }
 function buildOpenCodeChildEnv(parent, home) {
-  if (!(0, import_node_path23.isAbsolute)(home)) {
+  if (!(0, import_node_path25.isAbsolute)(home)) {
     throw new AcpHostError(
       "isolated_home_invalid",
       "isolated OpenCode home must be absolute"
@@ -50771,20 +52349,20 @@ function buildOpenCodeChildEnv(parent, home) {
   return {
     ...base,
     HOME: home,
-    XDG_CONFIG_HOME: (0, import_node_path23.join)(home, "xdg-config"),
-    XDG_DATA_HOME: (0, import_node_path23.join)(home, "xdg-data"),
-    XDG_CACHE_HOME: (0, import_node_path23.join)(home, "xdg-cache"),
-    XDG_STATE_HOME: (0, import_node_path23.join)(home, "xdg-state"),
+    XDG_CONFIG_HOME: (0, import_node_path25.join)(home, "xdg-config"),
+    XDG_DATA_HOME: (0, import_node_path25.join)(home, "xdg-data"),
+    XDG_CACHE_HOME: (0, import_node_path25.join)(home, "xdg-cache"),
+    XDG_STATE_HOME: (0, import_node_path25.join)(home, "xdg-state"),
     // Measured 1.18.10: private home alone still merges project opencode.json.
     OPENCODE_DISABLE_PROJECT_CONFIG: "1"
   };
 }
 async function assertOpenCodeEffectiveConfig(options) {
-  const hostile = await (0, import_promises13.mkdtemp)((0, import_node_path23.join)((0, import_node_os9.tmpdir)(), "cswarm-opencode-hostile-"));
+  const hostile = await (0, import_promises15.mkdtemp)((0, import_node_path25.join)((0, import_node_os9.tmpdir)(), "cswarm-opencode-hostile-"));
   try {
-    await (0, import_promises13.chmod)(hostile, 448);
-    await (0, import_promises13.writeFile)(
-      (0, import_node_path23.join)(hostile, "opencode.json"),
+    await (0, import_promises15.chmod)(hostile, 448);
+    await (0, import_promises15.writeFile)(
+      (0, import_node_path25.join)(hostile, "opencode.json"),
       `${JSON.stringify({
         permission: {
           bash: "allow",
@@ -50796,8 +52374,8 @@ async function assertOpenCodeEffectiveConfig(options) {
 `,
       { mode: 384 }
     );
-    const stdout = await new Promise((resolve7, reject) => {
-      (0, import_node_child_process9.execFile)(
+    const stdout = await new Promise((resolve8, reject) => {
+      (0, import_node_child_process12.execFile)(
         options.executable,
         ["debug", "config", "--pure"],
         {
@@ -50816,7 +52394,7 @@ async function assertOpenCodeEffectiveConfig(options) {
             );
             return;
           }
-          resolve7(out);
+          resolve8(out);
         }
       );
     });
@@ -50846,7 +52424,7 @@ async function assertOpenCodeEffectiveConfig(options) {
     assertForcedAskPermissionMap(map);
     return { permission: map };
   } finally {
-    await (0, import_promises13.rm)(hostile, { recursive: true, force: true }).catch(() => void 0);
+    await (0, import_promises15.rm)(hostile, { recursive: true, force: true }).catch(() => void 0);
   }
 }
 function assertForcedAskPermissionMap(map) {
@@ -50897,15 +52475,15 @@ async function sweepStaleOpenCodeHomes(options) {
   let removed = 0;
   let entries;
   try {
-    entries = await (0, import_promises13.readdir)(root);
+    entries = await (0, import_promises15.readdir)(root);
   } catch {
     return 0;
   }
   for (const name of entries) {
     if (!name.startsWith(OPENCODE_HOME_PREFIX)) continue;
-    const full = (0, import_node_path23.join)(root, name);
+    const full = (0, import_node_path25.join)(root, name);
     try {
-      const st = await (0, import_promises13.lstat)(full);
+      const st = await (0, import_promises15.lstat)(full);
       if (!st.isDirectory() || st.isSymbolicLink()) continue;
       if (selfUid !== null && typeof st.uid === "number" && st.uid !== selfUid) {
         continue;
@@ -50919,12 +52497,12 @@ async function sweepStaleOpenCodeHomes(options) {
         if (alive(owner.pid)) {
           continue;
         }
-        await (0, import_promises13.rm)(full, { recursive: true, force: true });
+        await (0, import_promises15.rm)(full, { recursive: true, force: true });
         removed += 1;
         continue;
       }
       if (now - st.mtimeMs < maxAgeMs) continue;
-      await (0, import_promises13.rm)(full, { recursive: true, force: true });
+      await (0, import_promises15.rm)(full, { recursive: true, force: true });
       removed += 1;
     } catch {
     }
@@ -50935,11 +52513,11 @@ function waitForChildExit3(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve();
   }
-  return new Promise((resolve7) => {
-    const timer2 = setTimeout(() => resolve7(), timeoutMs);
+  return new Promise((resolve8) => {
+    const timer2 = setTimeout(() => resolve8(), timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer2);
-      resolve7();
+      resolve8();
     });
   });
 }
@@ -50985,10 +52563,10 @@ async function openOpenCodeAcpSession(options) {
   const disposeHome = async () => {
     if (createdHome) {
       try {
-        await (0, import_promises13.rm)(home, { recursive: true, force: true });
+        await (0, import_promises15.rm)(home, { recursive: true, force: true });
       } catch {
-        await (0, import_promises13.chmod)(home, 448);
-        await (0, import_promises13.rm)(home, { recursive: true, force: true });
+        await (0, import_promises15.chmod)(home, 448);
+        await (0, import_promises15.rm)(home, { recursive: true, force: true });
       }
     }
   };
@@ -51006,7 +52584,7 @@ async function openOpenCodeAcpSession(options) {
       });
     }
     const args = buildOpenCodeAcpArgs();
-    const child = (0, import_node_child_process9.spawn)(executable, args, {
+    const child = (0, import_node_child_process12.spawn)(executable, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env,
       cwd: options.cwd
@@ -51077,17 +52655,17 @@ async function openOpenCodeAcpSession(options) {
     throw err;
   }
 }
-var import_node_child_process9, import_node_crypto22, import_node_fs6, import_promises13, import_node_os9, import_node_path23, OPENCODE_HOME_OWNER_FILE, MAX_OPENCODE_AUTH_BYTES, OPENCODE_HOME_PREFIX, CHILD_EXIT_WAIT_MS3, CHILD_KILL_WAIT_MS3, STALE_HOME_MAX_AGE_MS;
+var import_node_child_process12, import_node_crypto26, import_node_fs6, import_promises15, import_node_os9, import_node_path25, OPENCODE_HOME_OWNER_FILE, MAX_OPENCODE_AUTH_BYTES, OPENCODE_HOME_PREFIX, CHILD_EXIT_WAIT_MS3, CHILD_KILL_WAIT_MS3, STALE_HOME_MAX_AGE_MS;
 var init_opencode = __esm({
   "src/host/opencode.ts"() {
     "use strict";
-    import_node_child_process9 = require("node:child_process");
-    import_node_crypto22 = require("node:crypto");
+    import_node_child_process12 = require("node:child_process");
+    import_node_crypto26 = require("node:crypto");
     init_stderr_tail();
     import_node_fs6 = require("node:fs");
-    import_promises13 = require("node:fs/promises");
+    import_promises15 = require("node:fs/promises");
     import_node_os9 = require("node:os");
-    import_node_path23 = require("node:path");
+    import_node_path25 = require("node:path");
     init_bounds();
     init_env();
     init_session();
@@ -51099,121 +52677,6 @@ var init_opencode = __esm({
     CHILD_EXIT_WAIT_MS3 = 3e3;
     CHILD_KILL_WAIT_MS3 = 1e3;
     STALE_HOME_MAX_AGE_MS = 60 * 60 * 1e3;
-  }
-});
-
-// src/h0/verbs.ts
-var req2, opt, signalRename, idempotencyKey, H0_MAX_CONCURRENT_WAITS, H0_REQUEST_ID_MIN, H0_REQUEST_ID_MAX, H0_REQUEST_ID_RE, H0_REGISTRATION_NAME_MAX, requestIdField, H0_VERBS, H0_VERB_NAMES, H0_PREAUTH_VERBS, WHOLE_DAY_MS;
-var init_verbs = __esm({
-  "src/h0/verbs.ts"() {
-    "use strict";
-    req2 = (name, nullable2 = false, note) => note === void 0 ? { name, presence: "required", nullable: nullable2 } : { name, presence: "required", nullable: nullable2, note };
-    opt = (name, nullable2 = false, note) => note === void 0 ? { name, presence: "omittable", nullable: nullable2 } : { name, presence: "omittable", nullable: nullable2, note };
-    signalRename = (name) => ({
-      target: "signal",
-      name
-    });
-    idempotencyKey = {
-      target: "command-envelope",
-      name: "command_id",
-      purpose: "idempotency-key"
-    };
-    H0_MAX_CONCURRENT_WAITS = 1;
-    H0_REQUEST_ID_MIN = 8;
-    H0_REQUEST_ID_MAX = 72;
-    H0_REQUEST_ID_RE = new RegExp(`^[A-Za-z0-9_-]{${H0_REQUEST_ID_MIN},${H0_REQUEST_ID_MAX}}$`);
-    H0_REGISTRATION_NAME_MAX = 80;
-    requestIdField = () => ({
-      ...opt("requestId", false, `reuse the same value when retrying this post; pattern ${H0_REQUEST_ID_RE.source}`),
-      pattern: H0_REQUEST_ID_RE.source,
-      wire: idempotencyKey
-    });
-    H0_VERBS = [
-      {
-        name: "register",
-        auth: "join-credential",
-        summary: "Exchange the join credential from the paste for a seat token. Returned once, in this response body only.",
-        fields: [
-          req2("joinCredential"),
-          req2("attemptId", false, "client-generated; retry with the same value while its token is unused to recover this seat and replace that token; a used or revoked seat returns 409; follow the message in that response"),
-          { ...req2("name", false, `a display label of 1..${H0_REGISTRATION_NAME_MAX} characters, not an identity -- duplicates are allowed here`), minLength: 1, maxLength: H0_REGISTRATION_NAME_MAX },
-          opt("icon", false, "accepted for link compatibility; this release does not store an icon")
-        ]
-      },
-      {
-        name: "poll",
-        auth: "seat-token",
-        summary: "Long-poll for messages. Returns your own unacknowledged leases first, then newly claimed rows, at most ten, oldest first. The response carries listener_instance_id; send that value on each ack. Send the previous batchId as ackBatch before a later poll claims new rows. A second poll while one is running is refused.",
-        fields: [
-          opt(
-            "wait",
-            false,
-            `seconds, at most 50. At most ${H0_MAX_CONCURRENT_WAITS} poll may wait at a time across the whole deployment. If this poll cannot wait, it returns at once and includes retryAfterSeconds. Poll again after that many seconds`
-          ),
-          opt("ackBatch", false, "the previous batchId; a TRANSPORT ack that advances no delivery state")
-        ]
-      },
-      {
-        name: "ack",
-        auth: "seat-token",
-        /*
-         * The field set below is measured against the command edge's
-         * `AckAgentDeliveryCommand` interface. The AST control checks name, presence, and
-         * nullability for every member except `kind`, which the H0 verb name supplies.
-         */
-        summary: "Acknowledge ONE message after its local effect is persisted. Unacknowledged messages replay.",
-        fields: [
-          req2("signal_id"),
-          req2("lease_id", true, "null only when outcome is `observed`"),
-          req2("listener_instance_id", true, "null only when outcome is `observed`; otherwise the listener_instance_id poll returned"),
-          req2("outcome"),
-          req2("last_error_code", true, "PRESENT ALWAYS, null unless outcome is `failed_terminal`"),
-          opt("surfaced", false, "required for MANAGED principals; ignored for unmanaged")
-        ]
-      },
-      {
-        name: "ask",
-        auth: "seat-token",
-        summary: "Post a question to a person or agent. An ask wakes its recipient; a note does not.",
-        fields: [
-          req2("body"),
-          opt("to"),
-          requestIdField()
-        ]
-      },
-      {
-        name: "note",
-        auth: "seat-token",
-        summary: "Post a short signal of intent. Does not wake anyone.",
-        fields: [
-          req2("body"),
-          opt("to"),
-          requestIdField()
-        ]
-      },
-      {
-        name: "reply",
-        auth: "seat-token",
-        summary: "Reply to a message you received. Immutable, and addressed to the original author.",
-        fields: [
-          { ...req2("signal_id"), wire: signalRename("in_reply_to") },
-          req2("body"),
-          requestIdField()
-        ]
-      },
-      {
-        name: "working-on",
-        auth: "seat-token",
-        summary: "Say what you are working on so collaborators do not step on it. Claims nothing and blocks nobody.",
-        fields: [
-          req2("body"),
-          requestIdField()
-        ]
-      }
-    ];
-    H0_VERB_NAMES = H0_VERBS.map((v) => v.name);
-    H0_PREAUTH_VERBS = H0_VERBS.filter((v) => v.auth === "join-credential").map((v) => v.name);
-    WHOLE_DAY_MS = 24 * 60 * 60 * 1e3;
   }
 });
 
@@ -51244,12 +52707,277 @@ var mcp_connect_exports = {};
 __export(mcp_connect_exports, {
   MCP_REGISTER_TIMEOUT_MS: () => MCP_REGISTER_TIMEOUT_MS,
   McpConnectError: () => McpConnectError,
+  classifyAttemptMarkerReadFailure: () => classifyAttemptMarkerReadFailure,
+  classifyConnectReservedPath: () => classifyConnectReservedPath,
+  classifyDirectoryFailure: () => classifyDirectoryFailure,
+  clearMcpConnect: () => clearMcpConnect,
   connectMcp: () => connectMcp,
   mintMcpCode: () => mintMcpCode,
   readHiddenJoinCode: () => readHiddenJoinCode,
   renderMcpCode: () => renderMcpCode,
   renderMcpConnect: () => renderMcpConnect
 });
+function parseComplete(raw) {
+  let value;
+  try {
+    value = record2(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+  if (!value || typeof value.attemptId !== "string" || !ONBOARDING_UUID.test(value.attemptId) || typeof value.url !== "string" || typeof value.codeHash !== "string" || !/^[0-9a-f]{64}$/.test(value.codeHash) || value.workspace_id !== void 0 && (typeof value.workspace_id !== "string" || !ONBOARDING_UUID.test(value.workspace_id)) || value.principal_id !== void 0 && (typeof value.principal_id !== "string" || !ONBOARDING_UUID.test(value.principal_id)) || value.run_id !== void 0 && (typeof value.run_id !== "string" || !ONBOARDING_UUID.test(value.run_id)) || value.anon_key !== void 0 && typeof value.anon_key !== "string") return null;
+  return value;
+}
+async function readComplete(path, strict = false) {
+  const file = completePath(path);
+  let raw;
+  try {
+    raw = await readSecureJsonFileIfPresent(file, 4096);
+  } catch {
+    const info = await (0, import_promises16.lstat)(file).catch(() => null);
+    if (info?.isFile() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 511) !== 384) {
+      throw new McpConnectError("connect_complete_mode", `The completed connect record at ${file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(file)}, then rerun the same command.`);
+    }
+    if (strict) throw new McpConnectError("connect_complete_unreadable", `The completed connect record at ${file} cannot be read safely. Inspect that file, then rerun the same command.`);
+    process.stderr.write(`Warning: completed connect record at ${file} cannot be read safely; continuing.
+`);
+    return null;
+  }
+  if (raw === null) return null;
+  const complete = parseComplete(raw);
+  if (!complete) process.stderr.write(`Warning: completed connect record at ${file} is damaged; continuing.
+`);
+  return complete;
+}
+async function checkedOrphan(path) {
+  const file = (0, import_node_path26.join)((0, import_node_path26.dirname)(path), CONNECT_PROFILE_FILES.credential);
+  const info = await (0, import_promises16.lstat)(file).catch((error2) => {
+    if (error2.code === "ENOENT") return null;
+    throw error2;
+  });
+  if (!info) return null;
+  if (info.isFile() && !info.isSymbolicLink() && (info.mode & 511) !== 384) {
+    throw new McpConnectError("connect_credential_mode", `The credential at ${file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(file)}, then rerun the same command.`);
+  }
+  if (!info.isFile() || info.isSymbolicLink() || info.size > ONBOARDING_MAX_FILE_BYTES) {
+    throw new McpConnectError("profile_conflict", `The credential at ${file} is not a bounded regular file. Inspect the connection before retrying.`);
+  }
+  if (info.size === 0) {
+    if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+      throw new McpConnectError("profile_conflict", `The credential at ${file} is not owned by the current user. Inspect the connection before retrying.`);
+    }
+    return null;
+  }
+  let raw;
+  try {
+    raw = await readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES);
+  } catch {
+    throw new McpConnectError("profile_conflict", `The credential at ${file} cannot be read safely. Inspect the connection before retrying.`);
+  }
+  if (raw === null) throw new McpConnectError("profile_conflict", `The credential at ${file} disappeared. Run the same command again.`);
+  try {
+    const parsed = parseAgentCredentialInput(raw, { kind: "file", path: file });
+    if (!parsed.durable || !parsed.principalId) throw new Error("missing principal");
+    return { principalId: parsed.principalId, raw };
+  } catch (error2) {
+    if (error2 instanceof AgentCredentialInputError && error2.code === "agent_credential_invalid_json") {
+      throw new McpConnectError("connect_credential_damaged", damagedCredentialMessage(file));
+    }
+    throw new McpConnectError("profile_conflict", `The credential at ${file} has no valid principal. Inspect the connection before retrying.`);
+  }
+}
+function processIsAlive2(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error2) {
+    return error2.code !== "ESRCH";
+  }
+}
+async function removeStaleConnectTemps(path) {
+  const dir = (0, import_node_path26.dirname)(path);
+  for (const entry2 of await (0, import_promises16.readdir)(dir)) {
+    const bases = [...CONNECT_PROFILE_FILES.temporaryBases, (0, import_node_path26.basename)(path)];
+    const match = new RegExp(`^(${bases.map((base) => base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\.(\\d+)\\.[0-9a-f]{12}\\.tmp$`).exec(entry2);
+    if (!match || processIsAlive2(Number(match[2]))) continue;
+    const file = (0, import_node_path26.join)(dir, entry2);
+    const info = await (0, import_promises16.lstat)(file);
+    if (!info.isFile() || info.isSymbolicLink() || typeof process.getuid === "function" && info.uid !== process.getuid()) {
+      throw new McpConnectError("profile_conflict", `Unsafe temporary file at ${file}. Inspect it before retrying.`);
+    }
+    await (0, import_promises16.unlink)(file);
+  }
+}
+async function cleanConnectTemps(path) {
+  await withFileLock((0, import_node_path26.dirname)(path), CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => removeStaleConnectTemps(path));
+}
+function codeHash(code, attemptId) {
+  return (0, import_node_crypto27.createHmac)("sha256", attemptId).update(code).digest("hex");
+}
+function sameCode(code, pending) {
+  return (0, import_node_crypto27.timingSafeEqual)(Buffer.from(codeHash(code, pending.attemptId), "hex"), Buffer.from(pending.codeHash, "hex"));
+}
+function pendingPath(profilePath) {
+  return (0, import_node_path26.join)((0, import_node_path26.dirname)(profilePath), PENDING_FILE);
+}
+function completePath(profilePath) {
+  return (0, import_node_path26.join)((0, import_node_path26.dirname)(profilePath), COMPLETE_FILE);
+}
+function clearCommand(profilePath) {
+  return `cswarm mcp connect --clear-pending --profile ${quoteAgentArgument(profilePath)}`;
+}
+function damagedProfileMessage(path) {
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  return `The profile file at ${path} is damaged. Run mv ${quoteAgentArgument(path)} ${quoteAgentArgument(`${path}.damaged-${stamp}`)}, then run the same command again.`;
+}
+function damagedCredentialMessage(path) {
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  return `The credential file at ${path} is damaged. Run mv ${quoteAgentArgument(path)} ${quoteAgentArgument(`${path}.damaged-${stamp}`)}, then run the same command again.`;
+}
+function isPermissionError(error2) {
+  return error2?.code === "EACCES" || error2?.code === "EPERM";
+}
+async function wrongModeAncestor(path, inspect = import_promises16.lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : void 0) {
+  for (let dir = path; ; dir = (0, import_node_path26.dirname)(dir)) {
+    const info = await inspect(dir).catch(() => null);
+    if (info?.isDirectory() && !info.isSymbolicLink() && (ownerUid === void 0 || info.uid === ownerUid) && (info.mode & 448) !== 448) return dir;
+    if ((0, import_node_path26.dirname)(dir) === dir) break;
+  }
+  return null;
+}
+async function unownedAncestor(path, inspect = import_promises16.lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : void 0, probeTraversal = (dir) => (0, import_promises16.access)(dir, import_node_fs7.constants.X_OK)) {
+  for (let dir = path; ; dir = (0, import_node_path26.dirname)(dir)) {
+    const info = await inspect(dir).catch(() => null);
+    if (info?.isDirectory() && !info.isSymbolicLink() && ownerUid !== void 0 && info.uid !== ownerUid) {
+      const denied = await probeTraversal(dir).then(() => false, isPermissionError);
+      if (denied) return dir;
+    }
+    if ((0, import_node_path26.dirname)(dir) === dir) break;
+  }
+  return null;
+}
+async function classifyDirectoryFailure(path, error2, inspect = import_promises16.lstat, ownerUid = typeof process.getuid === "function" ? process.getuid() : void 0, probeTraversal = (dir) => (0, import_promises16.access)(dir, import_node_fs7.constants.X_OK)) {
+  if (isPermissionError(error2)) {
+    const wrong = await wrongModeAncestor(path, inspect, ownerUid);
+    if (wrong) throw directoryModeError(wrong);
+    const unowned = await unownedAncestor(path, inspect, ownerUid, probeTraversal);
+    if (unowned) throw new McpConnectError("connect_directory_unowned", `The directory at ${unowned} is not owned by the current user. Ask its owner to repair access, then rerun the same command.`);
+  }
+  if (isPermissionError(error2)) throw new McpConnectError("connect_state_unavailable", `The connect directory at ${path} cannot be used safely. Inspect its access and rerun the same command.`);
+  throw error2;
+}
+function directoryModeError(dir) {
+  return new McpConnectError("connect_directory_mode", `The connect directory at ${dir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(dir)}, then rerun the same command.`);
+}
+async function classifyConnectReservedPath(path, probe = {}) {
+  const dir = (0, import_node_path26.dirname)(path);
+  const label = (0, import_node_path26.basename)(path) === probe.profileName || (0, import_node_path26.basename)(path) === "profile.json" ? "profile" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect attempt marker" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.pending ? "connect record" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.complete ? "completed connect record" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.credential ? "credential" : (0, import_node_path26.basename)(path).endsWith(".lock") ? "connect lock" : "connect file";
+  const code = (0, import_node_path26.basename)(path) === probe.profileName || (0, import_node_path26.basename)(path) === "profile.json" ? "connect_profile" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.attemptMarker ? "connect_marker" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.pending ? "connect_pending" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.complete ? "connect_complete" : (0, import_node_path26.basename)(path) === CONNECT_PROFILE_FILES.credential ? "connect_credential" : "connect_reserved";
+  const unreadable = () => ({
+    outcome: "unreadable",
+    path,
+    error: new McpConnectError(`${code}_unreadable`, `The ${label} at ${path} cannot be read safely. Inspect that file, then rerun the same command.`)
+  });
+  let directory;
+  try {
+    directory = await (probe.inspect ?? import_promises16.lstat)(dir);
+  } catch {
+    return unreadable();
+  }
+  if (!directory.isDirectory() || directory.isSymbolicLink() || typeof process.getuid === "function" && directory.uid !== process.getuid()) return unreadable();
+  if ((directory.mode & 511) !== 448) return { outcome: "wrong mode", path, error: directoryModeError(dir) };
+  let info;
+  try {
+    info = await (probe.inspect ?? import_promises16.lstat)(path);
+  } catch (error2) {
+    return error2.code === "ENOENT" ? { outcome: "absent", path } : unreadable();
+  }
+  const name = (0, import_node_path26.basename)(path);
+  if (info.isSymbolicLink() && (name === CONNECT_PROFILE_FILES.connectLock || name === CONNECT_PROFILE_FILES.setupLock)) {
+    const target2 = await (0, import_promises16.readlink)(path).catch(() => null);
+    const targetInfo = target2 !== null && isPublishedOwnerFileTarget(path, target2, path, 16) ? await (probe.inspect ?? import_promises16.lstat)(target2).catch(() => null) : null;
+    if (targetInfo?.isFile() && !targetInfo.isSymbolicLink() && typeof process.getuid === "function" && targetInfo.uid === process.getuid() && (targetInfo.mode & 511) === 384) return { outcome: "ok", path };
+    return unreadable();
+  }
+  if (!info.isFile() || info.isSymbolicLink() || typeof process.getuid === "function" && info.uid !== process.getuid()) return unreadable();
+  if ((info.mode & 511) !== 384) return {
+    outcome: "wrong mode",
+    path,
+    error: new McpConnectError(`${code}_mode`, `The ${label} at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`)
+  };
+  const afterMissingRead = async () => {
+    try {
+      await (probe.inspect ?? import_promises16.lstat)(path);
+    } catch (error2) {
+      if (error2.code === "ENOENT") return { outcome: "absent", path };
+    }
+    return unreadable();
+  };
+  try {
+    if (await (probe.read ?? ((file) => readSecureJsonFileIfPresent(file, ONBOARDING_MAX_FILE_BYTES)))(path) === null) return await afterMissingRead();
+  } catch (error2) {
+    return error2.code === "ENOENT" ? await afterMissingRead() : unreadable();
+  }
+  return { outcome: "ok", path };
+}
+async function requireConnectReservedPath(path, probe = {}) {
+  const result = await classifyConnectReservedPath(path, probe);
+  if (result.error) throw result.error;
+}
+async function preflightConnectReservedPaths(path, probe = {}) {
+  const dir = (0, import_node_path26.dirname)(path);
+  const entries = await (0, import_promises16.readdir)(dir);
+  for (const name of connectProfileReservedPaths((0, import_node_path26.basename)(path), entries)) {
+    await requireConnectReservedPath((0, import_node_path26.join)(dir, name), { ...probe, profileName: (0, import_node_path26.basename)(path) });
+  }
+}
+async function classifyAttemptMarkerReadFailure(markerPath) {
+  await requireConnectReservedPath(markerPath);
+  throw new McpConnectError("connect_marker_unreadable", `The connect attempt marker at ${markerPath} cannot be read safely. Inspect that file before retrying the same command.`);
+}
+async function privateConnectLocation(path) {
+  try {
+    return await assertPrivateLocation(path);
+  } catch (error2) {
+    if (!isPermissionError(error2)) throw error2;
+    let wrongAncestor = null;
+    try {
+      wrongAncestor = await wrongModeAncestor((0, import_node_path26.dirname)(privatePath(path)));
+    } catch {
+    }
+    if (wrongAncestor) throw directoryModeError(wrongAncestor);
+    return await classifyDirectoryFailure((0, import_node_path26.dirname)(privatePath(path)), error2);
+  }
+}
+async function readPending(profilePath) {
+  let raw;
+  try {
+    raw = await readSecureJsonFileIfPresent(pendingPath(profilePath), 4096);
+  } catch {
+    const info = await (0, import_promises16.lstat)(pendingPath(profilePath)).catch(() => null);
+    if (info?.isFile() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 511) !== 384) {
+      throw new McpConnectError("connect_pending_mode", `The connect record at ${pendingPath(profilePath)} needs mode 0600. Run chmod 600 ${quoteAgentArgument(pendingPath(profilePath))}, then rerun the same command.`);
+    }
+    throw new McpConnectError("connect_pending_unreadable", `The connect record at ${pendingPath(profilePath)} cannot be read safely. Inspect it and ask the operator to check the attempt before clearing it with ${clearCommand(profilePath)}.`);
+  }
+  if (raw === null) return null;
+  const value = parsePending(raw);
+  if (!value) {
+    throw new McpConnectError("connect_pending_invalid", `The connect record at ${pendingPath(profilePath)} is damaged. Inspect it and ask the operator to check the attempt before clearing it with ${clearCommand(profilePath)}.`);
+  }
+  return value;
+}
+function parsePending(raw) {
+  let value;
+  try {
+    value = record2(JSON.parse(raw));
+  } catch {
+    value = null;
+  }
+  if (!value || Object.keys(value).sort().join() !== ["attemptId", "url", "name", "codeHash", "createdAt"].sort().join() || typeof value.attemptId !== "string" || !ONBOARDING_UUID.test(value.attemptId) || typeof value.url !== "string" || typeof value.name !== "string" || typeof value.codeHash !== "string" || !/^[0-9a-f]{64}$/.test(value.codeHash) || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))) {
+    return null;
+  }
+  return value;
+}
 async function mintMcpCode(target2, accessToken, workspaceId2, fetcher = fetch) {
   const result = await new ThinCommandClient(target2, fetcher).sendConnect({
     credential: accessToken,
@@ -51270,7 +52998,7 @@ Give the code to the person at the agent host.
 `;
 }
 function terminalEcho(on) {
-  const result = (0, import_node_child_process10.spawnSync)("stty", [on ? "echo" : "-echo"], { stdio: ["inherit", "ignore", "ignore"], timeout: 2e3 });
+  const result = (0, import_node_child_process13.spawnSync)("stty", [on ? "echo" : "-echo"], { stdio: ["inherit", "ignore", "ignore"], timeout: 2e3 });
   if (result.status !== 0) throw new McpConnectError("terminal_unavailable", "A terminal with hidden input is required.");
 }
 async function readHiddenJoinCode(terminal = {
@@ -51318,11 +53046,11 @@ async function readHiddenJoinCode(terminal = {
     terminal.write("Connect code: ");
     const input = (0, import_node_readline.createInterface)({ input: terminal.input, terminal: false });
     try {
-      return await new Promise((resolve7, reject) => {
+      return await new Promise((resolve8, reject) => {
         let settled = false;
         input.once("line", (line) => {
           settled = true;
-          line.trim() ? resolve7(line) : reject(new McpConnectError("code_missing", "No code was entered. Run mcp connect again."));
+          line.trim() ? resolve8(line) : reject(new McpConnectError("code_missing", "No code was entered. Run mcp connect again."));
         });
         input.once("close", () => {
           if (!settled) reject(new McpConnectError("code_missing", "No code was entered. Run mcp connect again."));
@@ -51339,7 +53067,7 @@ async function readHiddenJoinCode(terminal = {
 }
 async function pathExists(path) {
   try {
-    await (0, import_promises14.lstat)(path);
+    await (0, import_promises16.lstat)(path);
     return true;
   } catch (error2) {
     if (error2.code === "ENOENT") return false;
@@ -51348,6 +53076,228 @@ async function pathExists(path) {
 }
 function record2(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+async function clearMcpConnect(profilePath, removeFile = import_promises16.unlink) {
+  const path = await privateConnectLocation(profilePath);
+  const dir = (0, import_node_path26.dirname)(path);
+  if (!await pathExists(dir)) return { completedProfile: null, credentialPresent: false, emptyClaimPresent: false, profilePresent: false, removed: "nothing" };
+  try {
+    await ensureSecureStateDirectory(dir);
+  } catch {
+    const info = await (0, import_promises16.lstat)(dir).catch(() => null);
+    if (info?.isDirectory() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 511) !== 448) {
+      throw new McpConnectError("connect_directory_mode", `The connect directory at ${dir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(dir)}, then run ${clearCommand(path)}.`);
+    }
+    throw new McpConnectError("connect_clear_unsafe", `The connect directory at ${dir} cannot be read safely.`);
+  }
+  await preflightConnectReservedPaths(path);
+  return await withFileLock(dir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+    await preflightConnectReservedPaths(path);
+    const hadPending = await pathExists(pendingPath(path));
+    const hadComplete = await pathExists(completePath(path));
+    if (!hadPending && !hadComplete) return { completedProfile: null, credentialPresent: await pathExists((0, import_node_path26.join)(dir, CONNECT_PROFILE_FILES.credential)), emptyClaimPresent: await emptyClaimAt((0, import_node_path26.join)(dir, CONNECT_PROFILE_FILES.credential)), profilePresent: await pathExists(path), removed: "nothing" };
+    await cleanConnectTemps(path);
+    const credential = (0, import_node_path26.join)(dir, CONNECT_PROFILE_FILES.credential);
+    let completedProfile = null;
+    for (const entry2 of await (0, import_promises16.readdir)(dir)) {
+      if (reservedConnectProfileName(entry2)) continue;
+      const candidate = (0, import_node_path26.join)(dir, entry2);
+      try {
+        if (candidate === path) {
+          const info = await (0, import_promises16.lstat)(candidate);
+          if (info.isFile() && !info.isSymbolicLink() && (info.mode & 511) !== 384) {
+            throw new McpConnectError("connect_profile_mode", `The profile at ${candidate} needs mode 0600. Run chmod 600 ${quoteAgentArgument(candidate)}, then rerun the same command.`);
+          }
+        }
+        const raw = await readSecureJsonFileIfPresent(candidate, ONBOARDING_MAX_FILE_BYTES);
+        if (raw === null) continue;
+        const hostSessionId = record2(JSON.parse(raw))?.host_session_id;
+        const profile = await readAgentProfile(candidate, typeof hostSessionId === "string" ? hostSessionId : void 0);
+        if (profile.credential_file === credential) {
+          const credentialInfo = await (0, import_promises16.lstat)(credential).catch(() => null);
+          if (credentialInfo?.isFile() && !credentialInfo.isSymbolicLink() && (credentialInfo.mode & 511) !== 384) {
+            throw new McpConnectError("connect_credential_mode", `The credential at ${credential} needs mode 0600. Run chmod 600 ${quoteAgentArgument(credential)}, then rerun the same command.`);
+          }
+          await readProfileCredential(profile);
+          completedProfile = candidate;
+        }
+      } catch (error2) {
+        if (error2 instanceof McpConnectError) throw error2;
+      }
+    }
+    let removedPending = false;
+    let removedComplete = false;
+    for (const file of [pendingPath(path), completePath(path)]) {
+      try {
+        const classified = await classifyConnectReservedPath(file, { profileName: (0, import_node_path26.basename)(path) });
+        if (classified.error) throw classified.error;
+        if (classified.outcome === "absent") continue;
+        await removeFile(file);
+        if (file === pendingPath(path)) removedPending = true;
+        else removedComplete = true;
+      } catch (error2) {
+        if (error2.code !== "ENOENT") throw error2;
+      }
+    }
+    if (hadPending ? !removedPending : !removedComplete) throw new McpConnectError("connect_pending_missing", `There is no interrupted connect record to clear at ${pendingPath(path)}.`);
+    return {
+      completedProfile,
+      credentialPresent: await pathExists(credential),
+      emptyClaimPresent: await emptyClaimAt(credential),
+      profilePresent: await pathExists(path),
+      removed: removedPending && removedComplete ? "pending record and completion record" : removedPending ? "pending record" : "completion record"
+    };
+  });
+}
+async function emptyClaimAt(path) {
+  const info = await (0, import_promises16.lstat)(path).catch(() => null);
+  return info !== null && info.isFile() && !info.isSymbolicLink() && info.size === 0;
+}
+async function defaultPendingProfile(target2, code, probe = {}) {
+  const base = (0, import_node_path26.join)(agentProfileRoot(), "agents");
+  let entries;
+  try {
+    entries = await (0, import_promises16.readdir)(base);
+  } catch (error2) {
+    if (error2.code === "ENOENT") return null;
+    if (["ENOTDIR", "EACCES", "EPERM"].includes(error2.code ?? "")) {
+      const wrongAncestor = isPermissionError(error2) ? await wrongModeAncestor(base) : null;
+      if (wrongAncestor) throw directoryModeError(wrongAncestor);
+      if (isPermissionError(error2)) await classifyDirectoryFailure(base, error2);
+      const info = await (0, import_promises16.lstat)(base).catch(() => null);
+      if (info?.isDirectory() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 511) !== 448) {
+        throw new McpConnectError("connect_directory_mode", `The default connect directory at ${base} needs mode 0700. Run chmod 700 ${quoteAgentArgument(base)}, then rerun the same command.`);
+      }
+      throw new McpConnectError("connect_state_unavailable", `The default connect directory at ${base} cannot be read. Inspect its access and rerun the same command.`);
+    }
+    throw error2;
+  }
+  const matches = [];
+  for (const entry2 of entries) {
+    if (!/^mcp-[0-9a-f-]{36}$/.test(entry2)) continue;
+    const path = (0, import_node_path26.join)(base, entry2, "profile.json");
+    let checkingReserved = false;
+    try {
+      await ensureSecureStateDirectory((0, import_node_path26.dirname)(path));
+      checkingReserved = true;
+      await preflightConnectReservedPaths(path, probe);
+      checkingReserved = false;
+      const complete = await readComplete(path);
+      if (complete?.url === target2.url && complete.codeHash === codeHash(code, complete.attemptId)) {
+        if (await pathExists(path) && !await completedProfileAt(path) && !(await repairableProfileAt(path) && await emptyClaimAt(path))) {
+          throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
+        }
+        matches.push(path);
+      }
+      const pending = await readPending(path);
+      if (pending?.url === target2.url && sameCode(code, pending) && !matches.includes(path)) matches.push(path);
+      if (!pending) {
+        const profileInfo = await (0, import_promises16.lstat)(path).catch(() => null);
+        if (profileInfo?.isFile() && !profileInfo.isSymbolicLink() && (profileInfo.mode & 511) !== 384) {
+          throw new McpConnectError("connect_profile_mode", `The profile at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`);
+        }
+        const credential = (0, import_node_path26.join)((0, import_node_path26.dirname)(path), CONNECT_PROFILE_FILES.credential);
+        const credentialInfo = await (0, import_promises16.lstat)(credential).catch(() => null);
+        if (credentialInfo?.isFile() && !credentialInfo.isSymbolicLink() && (credentialInfo.mode & 511) !== 384) {
+          throw new McpConnectError("connect_credential_mode", `The credential at ${credential} needs mode 0600. Run chmod 600 ${quoteAgentArgument(credential)}, then rerun the same command.`);
+        }
+      }
+    } catch (error2) {
+      if (checkingReserved || error2 instanceof McpConnectError && (error2.code === "connect_profile_mode" || error2.code === "connect_credential_mode" || error2.code === "connect_profile_damaged" || error2.code === "connect_complete_mode")) throw error2;
+      let raw = null;
+      let fileMode = null;
+      let directoryMode = null;
+      try {
+        const dirInfo = await (0, import_promises16.lstat)((0, import_node_path26.dirname)(path));
+        if (!dirInfo.isDirectory() && !dirInfo.isSymbolicLink()) continue;
+        if (dirInfo.isSymbolicLink()) throw new Error("linked directory");
+        if (typeof process.getuid === "function" && dirInfo.uid !== process.getuid()) throw new Error("unowned directory");
+        directoryMode = dirInfo.mode & 511;
+        if ((directoryMode & 64) === 0) {
+          throw new McpConnectError("connect_directory_mode", `The connect directory at ${(0, import_node_path26.dirname)(path)} needs mode 0700. Run chmod 700 ${quoteAgentArgument((0, import_node_path26.dirname)(path))}, then rerun the same command.`);
+        }
+        const fileInfo = await (0, import_promises16.lstat)(pendingPath(path));
+        if (!fileInfo.isFile() || fileInfo.isSymbolicLink()) throw new Error("unsafe pending file");
+        if (typeof process.getuid === "function" && fileInfo.uid !== process.getuid()) throw new Error("unowned pending file");
+        fileMode = fileInfo.mode & 511;
+        if (fileInfo.size > 4096) throw new Error("oversized pending file");
+        raw = await (0, import_promises16.readFile)(pendingPath(path), "utf8");
+        if (Buffer.byteLength(raw, "utf8") > 4096) throw new Error("oversized pending file");
+      } catch (error3) {
+        if (error3 instanceof McpConnectError) throw error3;
+        if (error3.code === "ENOENT") {
+          if (directoryMode !== null && directoryMode !== 448 && (await pathExists(path) || await pathExists((0, import_node_path26.join)((0, import_node_path26.dirname)(path), CONNECT_PROFILE_FILES.credential)) || await pathExists(completePath(path)))) {
+            throw new McpConnectError("connect_directory_mode", `The connect directory at ${(0, import_node_path26.dirname)(path)} needs mode 0700. Run chmod 700 ${quoteAgentArgument((0, import_node_path26.dirname)(path))}, then rerun the same command.`);
+          }
+          continue;
+        }
+        if (directoryMode !== null && directoryMode !== 448) {
+          throw new McpConnectError("connect_directory_mode", `The connect directory at ${(0, import_node_path26.dirname)(path)} needs mode 0700. Run chmod 700 ${quoteAgentArgument((0, import_node_path26.dirname)(path))}, then rerun the same command.`);
+        }
+        if (fileMode !== null && fileMode !== 384) {
+          throw new McpConnectError("connect_pending_mode", `The connect record at ${pendingPath(path)} needs mode 0600. Run chmod 600 ${quoteAgentArgument(pendingPath(path))}, then rerun the same command.`);
+        }
+        throw new McpConnectError("connect_pending_unreadable", `The possible connect record at ${pendingPath(path)} cannot be read or excluded. Inspect it and ask the operator to check the attempt before clearing it with ${clearCommand(path)}.`);
+      }
+      let loose = null;
+      try {
+        loose = record2(JSON.parse(raw));
+      } catch {
+      }
+      if (typeof loose?.url === "string" && loose.url !== target2.url) continue;
+      if (directoryMode !== 448 || fileMode !== 384) {
+        const fixes = [
+          directoryMode !== 448 ? `chmod 700 ${quoteAgentArgument((0, import_node_path26.dirname)(path))}` : null,
+          fileMode !== 384 ? `chmod 600 ${quoteAgentArgument(pendingPath(path))}` : null
+        ].filter(Boolean).join(" and ");
+        throw new McpConnectError("connect_pending_mode", `The possible connect record at ${pendingPath(path)} has the wrong mode. Run ${fixes}, then rerun the same command.`);
+      }
+      const candidate = parsePending(raw);
+      if (candidate && !sameCode(code, candidate)) continue;
+      const damaged = loose;
+      if (typeof damaged?.url === "string" && damaged.url !== target2.url) continue;
+      if (damaged?.url === target2.url) {
+        throw new McpConnectError("connect_pending_invalid", `The connect record at ${pendingPath(path)} is damaged. Inspect it and ask the operator to check the attempt before clearing it with ${clearCommand(path)}.`);
+      }
+      throw new McpConnectError("connect_pending_unreadable", `The possible connect record at ${pendingPath(path)} cannot be parsed or excluded. Inspect it and ask the operator to check the attempt before clearing it with ${clearCommand(path)}.`);
+    }
+  }
+  if (matches.length > 1) throw new McpConnectError("connect_pending_ambiguous", "More than one interrupted connect matches this code. Use --profile with the intended path.");
+  return matches[0] ?? null;
+}
+function connectedResult(path, profile) {
+  const arguments_ = ["mcp", "--profile", path, ...profile.host_session_id ? ["--host-session-id", profile.host_session_id] : []];
+  const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm ${arguments_.map(quoteAgentArgument).join(" ")}`;
+  const codex = `[mcp_servers.cswarm]
+command = "cswarm"
+args = ${JSON.stringify(arguments_)}`;
+  return { profile: path, principal_id: profile.principal_id, install: `${claude}
+${codex}` };
+}
+async function completedProfileAt(path) {
+  if (!await pathExists(path)) return null;
+  const profileInfo = await (0, import_promises16.lstat)(path);
+  if (profileInfo.isFile() && !profileInfo.isSymbolicLink() && (profileInfo.mode & 511) !== 384) {
+    throw new McpConnectError("connect_profile_mode", `The profile at ${path} needs mode 0600. Run chmod 600 ${quoteAgentArgument(path)}, then rerun the same command.`);
+  }
+  try {
+    const raw = await readSecureJsonFileIfPresent(path, ONBOARDING_MAX_FILE_BYTES);
+    const hostSessionId = raw === null ? void 0 : record2(JSON.parse(raw))?.host_session_id;
+    const profile = await readAgentProfile(path, typeof hostSessionId === "string" ? hostSessionId : void 0);
+    const credentialInfo = await (0, import_promises16.lstat)(profile.credential_file).catch(() => null);
+    if (credentialInfo?.isFile() && !credentialInfo.isSymbolicLink() && (credentialInfo.mode & 511) !== 384) {
+      throw new McpConnectError("connect_credential_mode", `The credential at ${profile.credential_file} needs mode 0600. Run chmod 600 ${quoteAgentArgument(profile.credential_file)}, then rerun the same command.`);
+    }
+    await readProfileCredential(profile);
+    return profile;
+  } catch (error2) {
+    if (error2 instanceof McpConnectError) throw error2;
+    return null;
+  }
+}
+async function repairableProfileAt(path) {
+  const info = await (0, import_promises16.lstat)(path).catch(() => null);
+  return info !== null && info.isFile() && !info.isSymbolicLink() && info.size <= ONBOARDING_MAX_FILE_BYTES && (info.mode & 511) === 384 && (typeof process.getuid !== "function" || info.uid === process.getuid());
 }
 function renderMcpConnect(result) {
   return `Profile: ${result.profile}
@@ -51360,14 +53310,32 @@ async function connectMcp(options) {
   if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(endpoint.hostname))) {
     throw new McpConnectError("connect_url_invalid", "Use an HTTPS deployment URL or a loopback test URL.");
   }
-  const path = await assertPrivateLocation(options.profilePath ?? (0, import_node_path24.join)((0, import_node_os10.homedir)(), ".cswarm", "agents", `mcp-${(0, import_node_crypto23.randomUUID)()}`, "profile.json"));
-  if (/swm_(?:join|agt)_/.test(path)) throw new McpConnectError("profile_path_invalid", "Use a profile path that contains no credential text.");
-  if ((0, import_node_path24.basename)(path).toLowerCase() === "credential.json" || path === (0, import_node_path24.join)((0, import_node_path24.dirname)(path), "credential.json")) {
-    throw new McpConnectError("profile_path_invalid", "The profile path cannot be credential.json.");
+  if (options.profilePath === void 0) {
+    const name = options.name ?? "MCP agent";
+    if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
+      throw new McpConnectError("connect_name_invalid", `Use a display name of 1 to ${H0_REGISTRATION_NAME_MAX} characters.`);
+    }
+    const code = (await (options.readCode ?? (() => readHiddenJoinCode(options.terminal)))()).trim();
+    if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
+    if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
+    const match = await defaultPendingProfile(options.target, code, { inspect: options.inspectReserved, read: options.readReserved });
+    return await connectMcp({ ...options, profilePath: match ?? (0, import_node_path26.join)(agentProfileRoot(), "agents", `mcp-${(0, import_node_crypto27.randomUUID)()}`, "profile.json"), readCode: async () => code });
   }
-  const profileDir = (0, import_node_path24.dirname)(path);
-  const createdDirectory = await (0, import_promises14.mkdir)(profileDir, { recursive: true, mode: 448 }) !== void 0;
-  const createdInfo = createdDirectory ? await (0, import_promises14.lstat)(profileDir) : null;
+  const path = await privateConnectLocation(options.profilePath);
+  if (/swm_(?:join|agt)_/.test(path)) throw new McpConnectError("profile_path_invalid", "Use a profile path that contains no credential text.");
+  if (reservedConnectProfileName((0, import_node_path26.basename)(path))) {
+    throw new McpConnectError("profile_path_reserved", `The profile path uses a reserved file name. Choose another basename. Reserved names: ${reservedConnectProfileNames()}.`);
+  }
+  const profileDir = (0, import_node_path26.dirname)(path);
+  let createdDirectory;
+  try {
+    createdDirectory = await (0, import_promises16.mkdir)(profileDir, { recursive: true, mode: 448 }) !== void 0;
+  } catch (error2) {
+    const wrongAncestor = isPermissionError(error2) ? await wrongModeAncestor(profileDir) : null;
+    if (wrongAncestor) throw directoryModeError(wrongAncestor);
+    return await classifyDirectoryFailure(profileDir, error2);
+  }
+  const createdInfo = createdDirectory ? await (0, import_promises16.lstat)(profileDir) : null;
   const cleanupOnSignal = () => {
     if (!createdInfo) return;
     try {
@@ -51377,114 +53345,267 @@ async function connectMcp(options) {
     }
   };
   try {
-    await ensureSecureStateDirectory(profileDir);
-    await (0, import_promises14.access)((0, import_node_path24.dirname)(path), import_node_fs7.constants.W_OK);
-    if (await pathExists(path) || await pathExists((0, import_node_path24.join)((0, import_node_path24.dirname)(path), "credential.json"))) {
-      throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
+    try {
+      await ensureSecureStateDirectory(profileDir);
+    } catch (error2) {
+      const wrongAncestor = isPermissionError(error2) ? await wrongModeAncestor(profileDir) : null;
+      if (wrongAncestor) throw directoryModeError(wrongAncestor);
+      if (isPermissionError(error2)) await classifyDirectoryFailure(profileDir, error2);
+      const info = await (0, import_promises16.lstat)(profileDir).catch(() => null);
+      if (info?.isDirectory() && !info.isSymbolicLink() && (typeof process.getuid !== "function" || info.uid === process.getuid()) && (info.mode & 511) !== 448) {
+        throw new McpConnectError("connect_directory_mode", `The connect directory at ${profileDir} needs mode 0700. Run chmod 700 ${quoteAgentArgument(profileDir)}, then rerun the same command.`);
+      }
+      throw new McpConnectError("connect_state_unavailable", `The connect directory at ${profileDir} cannot be used safely. Inspect the path and rerun the same command.`);
+    }
+    const reservedProbe = { inspect: options.inspectReserved, read: options.readReserved };
+    await preflightConnectReservedPaths(path, reservedProbe);
+    await withFileLock(
+      profileDir,
+      CONNECT_PROFILE_FILES.connectLock.slice(0, -5),
+      async () => {
+        await cleanConnectTemps(path);
+      },
+      { publishLink: options.publishLink }
+    );
+    try {
+      await (options.checkProfileAccess ?? import_promises16.access)((0, import_node_path26.dirname)(path), import_node_fs7.constants.W_OK);
+    } catch (error2) {
+      await classifyDirectoryFailure((0, import_node_path26.dirname)(path), error2);
+    }
+    const pending = await readPending(path);
+    if (!pending && await pathExists(path)) {
+      if (await completedProfileAt(path) || !await repairableProfileAt(path) || !await readComplete(path)) {
+        throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+      }
+    }
+    if (!pending && await pathExists((0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential)) && !await pathExists(completePath(path))) {
+      throw new McpConnectError("profile_exists", await emptyClaimAt((0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential)) ? "This directory holds an empty claim file without a profile. Keep the file and use a new --profile path for a new agent." : "This directory holds a credential without a profile. Keep the credential and use a new --profile path for a new agent.");
     }
     const name = options.name ?? "MCP agent";
     if (name.trim().length < 1 || name.length > H0_REGISTRATION_NAME_MAX) {
       throw new McpConnectError("connect_name_invalid", `Use a display name of 1 to ${H0_REGISTRATION_NAME_MAX} characters.`);
     }
+    if (pending && (pending.url !== options.target.url || pending.name !== name)) {
+      if (await completedProfileAt(path)) throw new McpConnectError("connect_pending_mismatch", "This directory already holds a working profile. Use a new --profile path for a new agent.");
+      throw new McpConnectError("connect_pending_mismatch", `The record at ${pendingPath(path)} belongs to another target or agent name. Rerun with the original target and name; ask the operator to inspect the attempt before clearing it with ${clearCommand(path)}.`);
+    }
+    if (pending) process.stderr.write(`Resuming interrupted connect at ${path}.
+`);
     const code = (await (options.readCode ?? (() => readHiddenJoinCode(options.terminal, cleanupOnSignal)))()).trim();
     if (!code) throw new McpConnectError("code_missing", "No code was entered. Run mcp connect again.");
     if (!JOIN_CODE.test(code)) throw new McpConnectError("join_credential_invalid", "The connect code is invalid. Nothing was sent.");
-    const controller = new AbortController();
-    const timer2 = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
-    let redirected = false;
-    const headersChannel = (0, import_node_diagnostics_channel2.channel)("undici:request:headers");
-    const onHeaders = (value) => {
-      const event = value;
-      if (event.request?.origin === options.target.url && event.request.path === "/functions/v1/h0/register" && event.request.method === "POST" && (event.response?.statusCode ?? 0) >= 300 && (event.response?.statusCode ?? 0) < 400) redirected = true;
-    };
-    headersChannel.subscribe(onHeaders);
-    let response;
-    try {
-      response = await (options.fetcher ?? fetch)(`${options.target.url}/functions/v1/h0/register`, {
-        method: "POST",
-        headers: { "content-type": "application/json", apikey: options.target.anonKey },
-        body: JSON.stringify({ joinCredential: code, attemptId: (0, import_node_crypto23.randomUUID)(), name }),
-        signal: controller.signal,
-        redirect: "error"
-      });
-    } catch {
-      clearTimeout(timer2);
-      if (redirected) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
-      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-    } finally {
-      headersChannel.unsubscribe(onHeaders);
+    if (pending && !sameCode(code, pending)) {
+      if (await completedProfileAt(path)) throw new McpConnectError("connect_code_mismatch", "This directory already holds a working profile. Use a new --profile path for a new agent.");
+      throw new McpConnectError("connect_code_mismatch", `The record at ${pendingPath(path)} belongs to another code. Rerun with the original code; ask the operator to inspect the attempt before clearing it with ${clearCommand(path)}.`);
     }
-    try {
-      let body2;
-      try {
-        body2 = record2(await response.json());
-      } catch {
-        body2 = null;
+    return await withFileLock(profileDir, CONNECT_PROFILE_FILES.connectLock.slice(0, -5), async () => {
+      await preflightConnectReservedPaths(path, reservedProbe);
+      await cleanConnectTemps(path);
+      const current = await readPending(path);
+      const complete = await readComplete(path, current !== null);
+      if (!current && complete?.url === options.target.url && complete.codeHash === codeHash(code, complete.attemptId) && (!await pathExists(path) || await repairableProfileAt(path) && !await completedProfileAt(path))) {
+        return await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+          if (await completedProfileAt(path) || await pathExists(path) && !await repairableProfileAt(path)) {
+            throw new McpConnectError("profile_exists", "This directory already holds a profile. Use a new --profile path for a new agent.");
+          }
+          const profileState = await pathExists(path) ? await emptyClaimAt(path) ? `an empty ${(0, import_node_path26.basename)(path)} claim file` : `damaged ${(0, import_node_path26.basename)(path)}` : `no ${(0, import_node_path26.basename)(path)}`;
+          const credentialPath = (0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential);
+          const credentialState = await emptyClaimAt(credentialPath) ? "an empty claim file at credential.json" : await pathExists(credentialPath) ? CONNECT_PROFILE_FILES.credential : `no ${CONNECT_PROFILE_FILES.credential}`;
+          const state = `This directory has ${credentialState}, ${profileState}, and ${completePath(path)}.`;
+          const newPath = `Use --profile <new path> for a new agent.`;
+          if (!complete.workspace_id || !complete.anon_key || !complete.principal_id || complete.anon_key !== options.target.anonKey) {
+            throw new McpConnectError("connect_completion_incomplete", `${state} The completion record cannot rebuild the profile. ${newPath}`);
+          }
+          let orphan;
+          try {
+            orphan = await checkedOrphan(path);
+          } catch (error2) {
+            if (error2 instanceof McpConnectError && error2.code === "connect_credential_mode") throw error2;
+            throw new McpConnectError("connect_completion_incomplete", `${state} The credential cannot rebuild the profile. ${newPath}`);
+          }
+          if (!orphan) throw new McpConnectError("connect_completion_incomplete", `${state} ${await emptyClaimAt(credentialPath) ? "The empty claim file has no credential." : "The credential is missing."} ${newPath}`);
+          if (orphan.principalId !== complete.principal_id) {
+            throw new McpConnectError("connect_completion_principal_mismatch", `The credential at ${(0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential)} belongs to a different principal than ${completePath(path)}. The profile was not rebuilt. Use --profile <new path> for a new agent.`);
+          }
+          const restored = {
+            version: 1,
+            url: complete.url,
+            anon_key: complete.anon_key,
+            workspace_id: complete.workspace_id,
+            principal_id: orphan.principalId,
+            credential_file: (0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential)
+          };
+          const markerPath = (0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
+          await requireConnectReservedPath(markerPath, reservedProbe);
+          await writeSecureJsonFile(markerPath, JSON.stringify({ attemptId: complete.attemptId }));
+          if (await pathExists(path)) await writeSecureJsonFile(path, JSON.stringify(restored));
+          else await writeSecureJsonFileExclusive(path, JSON.stringify(restored));
+          return connectedResult(path, restored);
+        }, { publishLink: options.publishLink });
       }
-      clearTimeout(timer2);
-      if (response.status >= 300 && response.status < 400) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
-      if (!response.ok) {
-        const errorCode = body2?.error;
-        if (typeof errorCode === "string" && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status)) {
-          const message = errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; this attempt created no seat." : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat; this attempt created no seat. Ask the operator." : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; this attempt created no seat." : REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status ? "This code was already used. If you did not use it, someone else may have: tell the operator to revoke that agent and issue a new code." : errorCode === "forbidden" ? "This code is unknown, expired or revoked; this attempt created no seat. Ask the operator for a new code." : "The request was refused; this attempt created no seat. Ask the operator for a new code.";
-          throw new McpConnectError(errorCode, message);
+      if (!current && await pathExists(path) || !current && await pathExists((0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.credential))) {
+        throw new McpConnectError("profile_exists", "This profile path already holds a connection. Choose a new profile path.");
+      }
+      if (pending?.attemptId !== current?.attemptId) {
+        throw new McpConnectError("connect_pending_changed", "The interrupted connect changed while entering the code. Run mcp connect again.");
+      }
+      if (current && await pathExists(path)) {
+        try {
+          const profile = await completedProfileAt(path);
+          if (!profile) throw new Error("profile is incomplete");
+          const markerPath = (0, import_node_path26.join)(profileDir, CONNECT_PROFILE_FILES.attemptMarker);
+          let marker = null;
+          try {
+            marker = await readSecureJsonFileIfPresent(markerPath, 4096);
+          } catch {
+            await classifyAttemptMarkerReadFailure(markerPath);
+          }
+          let markedAttempt;
+          try {
+            markedAttempt = record2(JSON.parse(marker ?? "null"))?.attemptId;
+          } catch {
+          }
+          if (markedAttempt !== current.attemptId) {
+            throw new McpConnectError("connect_profile_other_attempt", `The profile at ${path} was not written by the pending connect at ${pendingPath(path)}. Keep both files and use a new --profile path for a new agent.`);
+          }
+          if (profile.url !== options.target.url) throw new Error("wrong profile target");
+          const credential = await readProfileCredential(profile);
+          try {
+            await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({
+              attemptId: current.attemptId,
+              url: current.url,
+              codeHash: current.codeHash,
+              workspace_id: profile.workspace_id,
+              anon_key: profile.anon_key,
+              principal_id: profile.principal_id,
+              ...credential.runId ? { run_id: credential.runId } : {}
+            }));
+          } catch {
+            throw new McpConnectError("connect_complete_write_failed", `The working profile at ${path} was kept, but the completion record at ${completePath(path)} could not be written. Inspect the completion record and rerun the same command.`);
+          }
+          await deleteSecureJsonFile(pendingPath(path));
+          return connectedResult(path, profile);
+        } catch (error2) {
+          if (error2 instanceof McpConnectError) throw error2;
+          throw new McpConnectError("connect_profile_damaged", damagedProfileMessage(path));
         }
-        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
       }
-      if (body2?.status !== "accepted") throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-      if (typeof body2.workspace_id !== "string" || !ONBOARDING_UUID.test(body2.workspace_id) || typeof body2.principal_id !== "string" || !ONBOARDING_UUID.test(body2.principal_id) || typeof body2.run_id !== "string" || !ONBOARDING_UUID.test(body2.run_id) || typeof body2.token_id !== "string" || !ONBOARDING_UUID.test(body2.token_id) || typeof body2.agent_token !== "string" || !SEAT_TOKEN.test(body2.agent_token) || typeof body2.expires_at !== "string" || Number.isNaN(Date.parse(body2.expires_at))) {
-        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-      }
-      const connection2 = {
-        version: 1,
-        url: options.target.url,
-        anon_key: options.target.anonKey,
-        workspace_id: body2.workspace_id,
-        principal_id: body2.principal_id,
-        credential: {
-          message: AGENT_CREDENTIAL_MESSAGE_D088,
-          status: "accepted",
-          principal_id: body2.principal_id,
-          run_id: body2.run_id,
-          token_id: body2.token_id,
-          agent_token: body2.agent_token,
-          expires_at: body2.expires_at
-        }
+      let orphanPrincipalId;
+      if (current) orphanPrincipalId = (await checkedOrphan(path))?.principalId;
+      const attemptId = current?.attemptId ?? (0, import_node_crypto27.randomUUID)();
+      if (!current) await withFileLock(profileDir, CONNECT_PROFILE_FILES.setupLock.slice(0, -5), async () => {
+        await writeSecureJsonFile(pendingPath(path), JSON.stringify({ attemptId, url: options.target.url, name, codeHash: codeHash(code, attemptId), createdAt: (/* @__PURE__ */ new Date()).toISOString() }));
+      }, { publishLink: options.publishLink });
+      const controller = new AbortController();
+      const timer2 = setTimeout(() => controller.abort(), MCP_REGISTER_TIMEOUT_MS);
+      let redirected = false;
+      const headersChannel = (0, import_node_diagnostics_channel2.channel)("undici:request:headers");
+      const onHeaders = (value) => {
+        const event = value;
+        if (event.request?.origin === options.target.url && event.request.path === "/functions/v1/h0/register" && event.request.method === "POST" && (event.response?.statusCode ?? 0) >= 300 && (event.response?.statusCode ?? 0) < 400) redirected = true;
       };
-      await (options.saveProfile ?? saveAgentProfile)(path, connection2, void 0, void 0, true);
-      const claude = `claude mcp add --scope user --transport stdio cswarm -- cswarm mcp --profile ${quoteAgentArgument(path)}`;
-      const codex = `[mcp_servers.cswarm]
-command = "cswarm"
-args = ["mcp", "--profile", ${JSON.stringify(path)}]`;
-      return { profile: path, principal_id: body2.principal_id, install: `${claude}
-${codex}` };
-    } catch (error2) {
-      clearTimeout(timer2);
-      if (error2 instanceof McpConnectError && error2.code !== "register_outcome_unknown") throw error2;
-      throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
-    }
+      headersChannel.subscribe(onHeaders);
+      let response;
+      try {
+        response = await (options.fetcher ?? fetch)(`${options.target.url}/functions/v1/h0/register`, {
+          method: "POST",
+          headers: { "content-type": "application/json", apikey: options.target.anonKey },
+          body: JSON.stringify({ joinCredential: code, attemptId, name }),
+          signal: controller.signal,
+          redirect: "error"
+        });
+      } catch {
+        clearTimeout(timer2);
+        if (redirected) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
+        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+      } finally {
+        headersChannel.unsubscribe(onHeaders);
+      }
+      try {
+        let body2;
+        try {
+          body2 = record2(await response.json());
+        } catch {
+          body2 = null;
+        }
+        clearTimeout(timer2);
+        if (response.status >= 300 && response.status < 400) throw new McpConnectError("register_redirected", OUTCOME_UNKNOWN);
+        if (!response.ok) {
+          const errorCode = body2?.error;
+          if (typeof errorCode === "string" && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status)) {
+            const message = current && REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status ? errorCode === "upgrade_required" ? "Update cswarm and run the same mcp connect command again with the same code. The earlier attempt's outcome is unknown; ask the operator to inspect it if recovery fails." : errorCode === "principal_limit_reached" ? "The workspace is at its agent limit, and no seat exists for this attempt. Free a seat and run the same mcp connect command again with the same code." : errorCode === "forbidden" ? "The code is unknown, expired or no longer valid; the earlier attempt's outcome is unknown. Ask the operator to inspect it before clearing the pending record." : `The request was refused (${errorCode}); the earlier attempt's outcome is unknown. Ask the operator to inspect it before clearing the pending record.` : current && errorCode === "registration_token_already_used" ? "The server reports that this seat's token was used. Ask the operator to inspect the attempt before clearing the pending record." : current && errorCode === "registration_seat_revoked" ? `The server reports that this seat is no longer active. Clear its local record with ${clearCommand(path)} before a fresh connect.` : errorCode === "upgrade_required" ? "Update cswarm and run mcp connect again; this attempt created no seat." : errorCode === "principal_limit_reached" ? "The workspace has no free agent seat; this attempt created no seat. Ask the operator." : errorCode === "not_found" || errorCode === "method_not_allowed" ? "Check --url; this attempt created no seat." : REGISTER_EXISTING_SEAT_REFUSALS[errorCode] === response.status ? "The server reports that this code was already used. Ask the operator to inspect its seats before requesting a new code." : errorCode === "forbidden" ? "This code is unknown, expired or no longer valid; this attempt created no seat. Ask the operator for a new code." : "The request was refused; this attempt created no seat. Ask the operator for a new code.";
+            if (!current && (REGISTER_NO_SEAT_THIS_ATTEMPT[errorCode] === response.status || errorCode === "join_credential_seat_cap_reached")) await deleteSecureJsonFile(pendingPath(path));
+            throw new McpConnectError(errorCode, message);
+          }
+          throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+        }
+        if (body2?.status !== "accepted") throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+        if (typeof body2.workspace_id !== "string" || !ONBOARDING_UUID.test(body2.workspace_id) || typeof body2.principal_id !== "string" || !ONBOARDING_UUID.test(body2.principal_id) || typeof body2.run_id !== "string" || !ONBOARDING_UUID.test(body2.run_id) || typeof body2.token_id !== "string" || !ONBOARDING_UUID.test(body2.token_id) || typeof body2.agent_token !== "string" || !SEAT_TOKEN.test(body2.agent_token) || typeof body2.expires_at !== "string" || Number.isNaN(Date.parse(body2.expires_at))) {
+          throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+        }
+        const connection2 = {
+          version: 1,
+          url: options.target.url,
+          anon_key: options.target.anonKey,
+          workspace_id: body2.workspace_id,
+          principal_id: body2.principal_id,
+          credential: {
+            message: AGENT_CREDENTIAL_MESSAGE_D088,
+            status: "accepted",
+            principal_id: body2.principal_id,
+            run_id: body2.run_id,
+            token_id: body2.token_id,
+            agent_token: body2.agent_token,
+            expires_at: body2.expires_at
+          }
+        };
+        if (orphanPrincipalId && orphanPrincipalId !== connection2.principal_id) {
+          throw new McpConnectError("profile_conflict", "The saved credential belongs to another agent. Inspect the connection before retrying.");
+        }
+        const profile = await (options.saveProfile ?? saveAgentProfile)(path, connection2, void 0, void 0, true, current !== null, orphanPrincipalId, void 0, attemptId);
+        try {
+          await (options.writeCompletion ?? writeSecureJsonFile)(completePath(path), JSON.stringify({
+            attemptId,
+            url: options.target.url,
+            codeHash: codeHash(code, attemptId),
+            workspace_id: connection2.workspace_id,
+            anon_key: connection2.anon_key,
+            principal_id: connection2.principal_id,
+            run_id: body2.run_id
+          }));
+        } catch {
+          throw new McpConnectError("connect_complete_write_failed", `The profile at ${path} is saved and usable, but the completion record at ${completePath(path)} was not written. Inspect that record and run the same command again to finish the connect.`);
+        }
+        await deleteSecureJsonFile(pendingPath(path));
+        return connectedResult(path, profile);
+      } catch (error2) {
+        clearTimeout(timer2);
+        if (error2 instanceof McpConnectError && error2.code !== "register_outcome_unknown") throw error2;
+        throw new McpConnectError("register_outcome_unknown", OUTCOME_UNKNOWN);
+      }
+    }, { publishLink: options.publishLink });
   } finally {
     if (createdInfo) {
       try {
-        const current = await (0, import_promises14.lstat)(profileDir);
-        if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) await (options.removeEmptyDirectory ?? import_promises14.rmdir)(profileDir);
+        const current = await (0, import_promises16.lstat)(profileDir);
+        if (current.dev === createdInfo.dev && current.ino === createdInfo.ino) await (options.removeEmptyDirectory ?? import_promises16.rmdir)(profileDir);
       } catch {
       }
     }
   }
 }
-var import_node_crypto23, import_node_child_process10, import_node_diagnostics_channel2, import_node_fs7, import_promises14, import_node_os10, import_node_path24, import_node_readline, JOIN_CODE, SEAT_TOKEN, MCP_REGISTER_TIMEOUT_MS, OUTCOME_UNKNOWN, McpConnectError;
+var import_node_crypto27, import_node_child_process13, import_node_diagnostics_channel2, import_node_fs7, import_promises16, import_node_path26, import_node_readline, JOIN_CODE, SEAT_TOKEN, MCP_REGISTER_TIMEOUT_MS, OUTCOME_UNKNOWN, PENDING_FILE, COMPLETE_FILE, McpConnectError;
 var init_mcp_connect = __esm({
   "src/cloud/mcp-connect.ts"() {
     "use strict";
-    import_node_crypto23 = require("node:crypto");
-    import_node_child_process10 = require("node:child_process");
+    import_node_crypto27 = require("node:crypto");
+    import_node_child_process13 = require("node:child_process");
     import_node_diagnostics_channel2 = require("node:diagnostics_channel");
     import_node_fs7 = require("node:fs");
-    import_promises14 = require("node:fs/promises");
-    import_node_os10 = require("node:os");
-    import_node_path24 = require("node:path");
+    import_promises16 = require("node:fs/promises");
+    import_node_path26 = require("node:path");
     import_node_readline = require("node:readline");
+    init_agent_credential_input();
     init_agent_credential_input();
     init_agent_profile();
     init_storage();
@@ -51493,10 +53614,13 @@ var init_mcp_connect = __esm({
     init_command_client();
     init_verbs();
     init_mcp_register_refusals();
+    init_connect_profile_files();
     JOIN_CODE = /^swm_join_[A-Za-z0-9_-]{43}$/;
     SEAT_TOKEN = /^swm_agt_[A-Za-z0-9_-]{43}$/;
     MCP_REGISTER_TIMEOUT_MS = 1e4;
-    OUTCOME_UNKNOWN = "The seat may have been created. Ask the operator to revoke it with cswarm principal revoke and issue a new code.";
+    OUTCOME_UNKNOWN = "The register outcome is unknown. Run the same cswarm mcp connect command again with the same code. If recovery fails, ask the operator to inspect this attempt before starting another connect.";
+    PENDING_FILE = CONNECT_PROFILE_FILES.pending;
+    COMPLETE_FILE = CONNECT_PROFILE_FILES.complete;
     McpConnectError = class extends AgentSetupError {
       constructor(code, message) {
         super(code, message);
@@ -51514,6 +53638,10 @@ function validateMcpArguments(name, value) {
     const rule = tool.inputSchema.properties[key2];
     if (!rule) throw new Error(`Unknown argument: ${JSON.stringify(key2.slice(0, MCP_ARGUMENT_NAME_ECHO_MAX))}.`);
     const item = args[key2];
+    if (key2 === "if_version") {
+      if (typeof item !== "number" || !Number.isSafeInteger(item) || item < 0) throw new Error("Invalid argument: if_version.");
+      continue;
+    }
     if (typeof item !== "string" || rule.minLength !== void 0 && item.length < rule.minLength || rule.maxLength !== void 0 && item.length > rule.maxLength || rule.pattern !== void 0 && !new RegExp(rule.pattern).test(item) || (rule.not?.enum.includes(item) ?? false)) throw new Error(`Invalid argument: ${key2}.`);
     if (key2 === "until") {
       try {
@@ -51522,6 +53650,7 @@ function validateMcpArguments(name, value) {
         throw new Error("Invalid argument: until.");
       }
     }
+    if (key2 === "path" && !(0, import_node_path27.isAbsolute)(item)) throw new Error("Invalid argument: path.");
   }
   for (const key2 of tool.inputSchema.required) if (!Object.hasOwn(args, key2)) throw new Error(`Missing argument: ${key2}.`);
   if (typeof args.body === "string" && !args.body.trim()) throw new Error("Invalid argument: body.");
@@ -51601,11 +53730,12 @@ function capMcpResult(value) {
   if (Buffer.byteLength(raw) <= MCP_RESULT_MAX_BYTES) return value;
   return { truncated: true, message: "Result exceeds the MCP byte cap. Narrow the request." };
 }
-var MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, string3, body, requestId, UUID_LENGTH, uuid7, common, schema, MCP_TOOL_TABLE, MCP_TOOLS;
+var import_node_path27, MCP_ARGUMENT_NAME_ECHO_MAX, MCP_RESULT_MAX_BYTES, string3, body, requestId, UUID_LENGTH, uuid7, absolutePath, common, schema, MCP_TOOL_TABLE, MCP_TOOLS;
 var init_tools = __esm({
   "src/mcp/tools.ts"() {
     "use strict";
     init_verbs();
+    import_node_path27 = require("node:path");
     init_signal_limits();
     init_signal_duration();
     init_channels();
@@ -51622,6 +53752,7 @@ var init_tools = __esm({
     requestId = string3(H0_REQUEST_ID_MAX, H0_REQUEST_ID_MIN, H0_REQUEST_ID_RE.source);
     UUID_LENGTH = "00000000-0000-0000-0000-000000000000".length;
     uuid7 = string3(UUID_LENGTH, UUID_LENGTH, ONBOARDING_UUID.source.replaceAll("a-f", "a-fA-F").replaceAll("[89ab]", "[89abAB]"));
+    absolutePath = { ...string3(4096, 1), description: "Absolute path on this host." };
     common = { body, about: string3(SIGNAL_ABOUT_MAX), channel: { ...string3(CHANNEL_SLUG_MAX, 1, CHANNEL_SLUG_RE.source), not: { enum: RESERVED_CHANNEL_SLUGS } }, until: string3(void 0, void 0, SIGNAL_DURATION_RE.source), request_id: requestId };
     schema = (properties, required2 = []) => ({
       type: "object",
@@ -51636,7 +53767,9 @@ var init_tools = __esm({
       { name: "note", description: "Share a note. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ ...common, to: string3(SIGNAL_RECIPIENT_MAX, 1) }, ["body", "request_id"]), mapResult: mapSignal },
       { name: "reply", description: "Reply privately to a signal. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema({ signal_id: uuid7, body, request_id: requestId }, ["signal_id", "body", "request_id"]), mapResult: mapSignal },
       { name: "working_on", description: "Share current work. Channel slugs are lowercase. Retry with the same request_id and arguments if the outcome is unknown.", inputSchema: schema(common, ["body", "request_id"]), mapResult: mapSignal },
-      { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers }
+      { name: "members", description: "List members and agents in this workspace.", inputSchema: schema({}), mapResult: mapMembers },
+      { name: "file_put", description: "Upload a local file. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, path: absolutePath, name: string3(255, 1) }, ["request_id", "path"]), mapResult: (value) => value },
+      { name: "brain_put", description: "Upload a local Markdown file as a brain topic. Retry with the same request_id and content if the outcome is unknown.", inputSchema: schema({ request_id: requestId, topic: string3(200, 1), path: absolutePath, if_version: { type: "integer", minimum: 0 } }, ["request_id", "topic", "path"]), mapResult: (value) => value }
     ];
     MCP_TOOLS = MCP_TOOL_TABLE.map(({ mapResult: _mapResult, ...tool }) => tool);
   }
@@ -51647,16 +53780,17 @@ function mapMcpError(error2) {
   const readHttp = followHttpDetails(error2);
   const readCode = followErrorEnvelope(error2).error;
   const readFailure = classifySignalReadFailure(error2);
-  const code = error2 instanceof AgentSetupError ? error2.code : error2 instanceof AgentCredentialInputError ? error2.code : error2 instanceof CommandHttpError ? error2.code ?? `http_${error2.status}` : error2 instanceof SignalRecipientError ? error2.code : readHttp ? readCode && AGENT_SESSION_PROOF_REFUSAL_CODES.includes(readCode) ? readCode : [401, 403, 426].includes(readHttp.status) ? "read_refused" : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed" : error2 instanceof RenewalReauthorisationRequired ? error2.reason : error2 instanceof RenewalRevoked && error2.code === "forbidden" ? "renewal_forbidden" : error2 instanceof RenewalRefused || error2 instanceof RenewalRetryError || error2 instanceof RenewalRevoked || error2 instanceof RenewalSuspended ? error2.code : error2 instanceof RenewalUnsupported ? "renewal_unsupported" : error2 instanceof RenewalSuperseded ? "renewal_superseded" : error2 instanceof RenewalOutcomeUnknown ? "renewal_outcome_unknown" : error2 instanceof RenewalCredentialCheckError ? "renewal_credential_check" : readFailure.code === "malformed_response" ? "read_malformed" : readFailure.code === "body_timeout" ? "read_timeout" : ["no_response", "host_ports_exhausted", "aborted"].includes(readFailure.code) ? "read_transport" : error2 instanceof SessionContextError ? "session_context_invalid" : error2 instanceof FileLockTimeoutError ? "file_lock_timeout" : error2 instanceof StoredRecordOversizedError ? "stored_record_oversized" : error2 instanceof LocalCredentialSecretAbsentError ? "local_credential_absent" : "mcp_call_failed";
+  const code = error2 instanceof AgentSetupError ? error2.code : error2 instanceof AgentCredentialInputError ? error2.code : error2 instanceof CommandHttpError ? error2.code ?? `http_${error2.status}` : error2 instanceof FileCommandRefused ? error2.code : error2 instanceof RequestIdConflict ? error2.code : error2 instanceof FilePutPreflightError ? error2.code : error2 instanceof FileTransportError ? "file_transport" : error2 instanceof SignalRecipientError ? error2.code : readHttp ? readCode && AGENT_SESSION_PROOF_REFUSAL_CODES.includes(readCode) ? readCode : [401, 403, 426].includes(readHttp.status) ? "read_refused" : readCode && Object.hasOwn(MCP_ERROR_SENTENCES, readCode) ? readCode : "read_failed" : error2 instanceof RenewalReauthorisationRequired ? error2.reason : error2 instanceof RenewalRevoked && error2.code === "forbidden" ? "renewal_forbidden" : error2 instanceof RenewalRefused || error2 instanceof RenewalRetryError || error2 instanceof RenewalRevoked || error2 instanceof RenewalSuspended ? error2.code : error2 instanceof RenewalUnsupported ? "renewal_unsupported" : error2 instanceof RenewalSuperseded ? "renewal_superseded" : error2 instanceof RenewalOutcomeUnknown ? "renewal_outcome_unknown" : error2 instanceof RenewalCredentialCheckError ? "renewal_credential_check" : readFailure.code === "malformed_response" ? "read_malformed" : readFailure.code === "body_timeout" ? "read_timeout" : ["no_response", "host_ports_exhausted", "aborted"].includes(readFailure.code) ? "read_transport" : error2 instanceof SessionContextError ? "session_context_invalid" : error2 instanceof FileLockTimeoutError ? "file_lock_timeout" : error2 instanceof StoredRecordOversizedError ? "stored_record_oversized" : error2 instanceof LocalCredentialSecretAbsentError ? "local_credential_absent" : "mcp_call_failed";
   const safeCode = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(code) && !code.includes("--") ? code : "mcp_call_failed";
-  const sentence = Object.hasOwn(MCP_ERROR_SENTENCES, safeCode) ? MCP_ERROR_SENTENCES[safeCode] : entry(
+  const fileStatus = error2 instanceof FileCommandRefused ? error2.status : null;
+  const sentence = fileStatus !== null && (fileStatus >= 500 || fileStatus === 429) ? entry(`The file service returned ${safeCode}.`, FILE_RETRY) : fileStatus === 401 || fileStatus === 403 ? entry("The file service refused this agent's access.", PERSON) : fileStatus !== null && safeCode === "command_id_conflict" ? entry("This request id was used with different file arguments.", "use a new request_id for new content") : Object.hasOwn(MCP_ERROR_SENTENCES, safeCode) ? safeCode === "profile_path_invalid" ? entry(profilePathRemedy(), PERSON) : MCP_ERROR_SENTENCES[safeCode] : entry(
     `The service returned ${safeCode}${error2 instanceof CommandHttpError ? ` with status ${error2.status}` : ""}.`,
-    error2 instanceof CommandHttpError && error2.status >= 500 ? RETRY : error2 instanceof CommandHttpError && error2.status >= 400 && error2.status < 500 ? CHECK_ARGUMENTS : PERSON
+    fileStatus !== null ? fileStatus === 401 || fileStatus === 403 ? PERSON : FIX : error2 instanceof CommandHttpError && error2.status >= 500 ? RETRY : error2 instanceof CommandHttpError && error2.status >= 400 && error2.status < 500 ? CHECK_ARGUMENTS : PERSON
   );
-  const status = error2 instanceof CommandHttpError ? error2.status : readHttp?.status ?? (error2 instanceof RenewalRefused || error2 instanceof RenewalCredentialCheckError ? error2.status : void 0);
+  const status = error2 instanceof CommandHttpError || error2 instanceof FileCommandRefused ? error2.status : readHttp?.status ?? (error2 instanceof RenewalRefused || error2 instanceof RenewalCredentialCheckError ? error2.status : void 0);
   return { code: safeCode, ...sentence, ...status !== void 0 && status >= 400 ? { status } : {} };
 }
-var RETRY, FIX, PERSON, STOP_OPERATOR, STOP, CHECK_ACCESS, CHECK_ARGUMENTS, RESTART_SESSION, WAIT_AND_RETRY, entry, MCP_ERROR_SENTENCES;
+var RETRY, FIX, PERSON, STOP_OPERATOR, STOP, CHECK_ACCESS, CHECK_ARGUMENTS, RESTART_SESSION, WAIT_AND_RETRY, FILE_RETRY, entry, MCP_ERROR_SENTENCES;
 var init_errors3 = __esm({
   "src/mcp/errors.ts"() {
     "use strict";
@@ -51668,6 +53802,8 @@ var init_errors3 = __esm({
     init_session_context();
     init_session_wire();
     init_storage();
+    init_files();
+    init_exact_file_put();
     RETRY = "retry the same call";
     FIX = "fix the named argument";
     PERSON = "a person must restore this agent's access outside this session";
@@ -51677,9 +53813,11 @@ var init_errors3 = __esm({
     CHECK_ARGUMENTS = "check the arguments; if the problem stays, ask a person";
     RESTART_SESSION = "restart this MCP server with the current host session";
     WAIT_AND_RETRY = "wait, then retry the same call with the same request_id";
+    FILE_RETRY = "retry this call with the same request_id";
     entry = (message, next_step) => ({ message, next_step });
     MCP_ERROR_SENTENCES = {
-      profile_path_invalid: entry("The profile location is invalid.", PERSON),
+      profile_path_invalid: entry("The profile path is invalid.", PERSON),
+      profile_registry_invalid: entry("The saved profile inventory is damaged.", PERSON),
       agent_credential_invalid_json: entry("The saved agent credential is damaged.", PERSON),
       agent_credential_not_object: entry("The saved agent credential is damaged.", PERSON),
       agent_credential_missing_agent_token: entry("The saved agent credential is incomplete.", PERSON),
@@ -51695,6 +53833,7 @@ var init_errors3 = __esm({
       profile_other_session: entry("This profile belongs to another session. Stop and tell the operator.", STOP_OPERATOR),
       profile_conflict: entry("The profile belongs to another agent or workspace.", PERSON),
       profile_exists: entry("The profile path already holds a connection.", PERSON),
+      setup_connect_pending: entry("This profile directory has a connect in progress.", PERSON),
       connection_invalid: entry("The connection is invalid.", PERSON),
       connection_target_invalid: entry("The connection target is invalid.", PERSON),
       connection_identity_mismatch: entry("The connection names another agent.", PERSON),
@@ -51714,6 +53853,26 @@ var init_errors3 = __esm({
       recipient_ambiguous: entry("The to argument names more than one recipient; use a unique identifier.", FIX),
       recipient_invalid: entry("The to argument is invalid.", FIX),
       command_id_conflict: entry("This request id was used for different arguments.", STOP),
+      request_id_conflict: entry("This request id was used for different file content or arguments.", "use a new request_id for new content"),
+      request_id_invalid: entry("The request id is invalid.", FIX),
+      file_too_large: entry("The file exceeds the upload limit or is empty.", FIX),
+      file_type_refused: entry("The file name has an unsupported extension.", FIX),
+      if_version_invalid: entry("The if_version argument is invalid.", FIX),
+      file_version_precondition_failed: entry("The brain topic changed since the named version.", "read the topic again and use a NEW request_id for new content"),
+      file_path_invalid: entry("The path must name a readable regular file of at most 25 MiB.", FIX),
+      file_path_protected: entry("The path is inside CommonSwarm's private credential or state location.", FIX),
+      file_transport: entry("The file request did not complete.", FILE_RETRY),
+      file_bytes_missing: entry("The uploaded bytes are not yet present for this version.", FILE_RETRY),
+      file_commit_conflict: entry("This upload version can no longer be committed.", "use a new request_id for new content"),
+      file_size_exceeds_declaration: entry("The uploaded file is larger than its declared size.", FIX),
+      file_id_unavailable: entry("The selected file id is unavailable.", FIX),
+      version_id_unavailable: entry("The selected version id is unavailable.", FIX),
+      file_tombstoned: entry("The target file was removed.", FIX),
+      file_version_cap: entry("The file has reached its version limit.", FIX),
+      brain_version_in_flight_cap: entry("The brain topic has too many pending versions.", FIX),
+      workspace_file_count: entry("The workspace has reached its file count limit.", FIX),
+      workspace_quota_exceeded: entry("The workspace has reached its storage quota.", FIX),
+      file_not_found: entry("The target file or pending version is unavailable.", FIX),
       signal_refused: entry("The service refused this signal.", PERSON),
       // The post_signal edge uses this same bare code for an ineligible reply,
       // an expired reference, an inactive recipient, and the scope gate.
@@ -51782,9 +53941,37 @@ var init_errors3 = __esm({
 var server_exports = {};
 __export(server_exports, {
   mapMcpError: () => mapMcpError,
+  readMcpPutFile: () => readMcpPutFile,
   sendWithDeferredCommit: () => sendWithDeferredCommit,
   serveMcp: () => serveMcp
 });
+function inside(path, root) {
+  const offset = (0, import_node_path28.relative)(root, path);
+  return offset === "" || offset !== ".." && !offset.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !(0, import_node_path28.isAbsolute)(offset);
+}
+async function readMcpPutFile(path, profilePath, credentialFile) {
+  try {
+    const initial = await (0, import_promises17.lstat)(path);
+    if (!initial.isFile() && !initial.isSymbolicLink()) throw new FilePutPreflightError("file_path_invalid", "The path is not a regular file.");
+    const resolved = await (0, import_promises17.realpath)(path);
+    const protectedRoots = await Promise.all([(0, import_node_path28.join)((0, import_node_os10.homedir)(), ".cswarm"), (0, import_node_path28.join)((0, import_node_os10.homedir)(), ".config", "cswarm"), (0, import_node_path28.dirname)(profilePath)].map((root) => (0, import_promises17.realpath)(root).catch(() => (0, import_node_path28.resolve)(root))));
+    if (protectedRoots.some((root) => inside(resolved, root)) || credentialFile !== void 0 && resolved === await (0, import_promises17.realpath)(credentialFile).catch(() => (0, import_node_path28.resolve)(credentialFile))) {
+      throw new FilePutPreflightError("file_path_protected", "The path is inside CommonSwarm's private state.");
+    }
+    const file = await (0, import_promises17.open)(resolved, import_node_fs8.constants.O_RDONLY | import_node_fs8.constants.O_NONBLOCK);
+    try {
+      const info = await file.stat();
+      if (!info.isFile()) throw new FilePutPreflightError("file_path_invalid", "The path is not a regular file.");
+      if (info.size > FILE_MAX_VERSION_BYTES) throw new FilePutPreflightError("file_too_large", "The file exceeds 25 MiB.");
+      return await file.readFile();
+    } finally {
+      await file.close();
+    }
+  } catch (error2) {
+    if (error2 instanceof FilePutPreflightError) throw error2;
+    throw new FilePutPreflightError("file_path_invalid", "The path cannot be read as a regular file.");
+  }
+}
 async function sendWithDeferredCommit(message, rawSend, commits) {
   const id = "id" in message && (typeof message.id === "string" || typeof message.id === "number") ? message.id : void 0;
   try {
@@ -51863,12 +54050,51 @@ async function serveMcp(options) {
             });
             const capped = capFreshCheck(result);
             output2 = capped.output;
-            if (deferredCommit && capped.lastVisibleId && !extra.signal.aborted) {
+            if (deferredCommit && (capped.lastVisibleId || result.messages.length === 0) && !extra.signal.aborted) {
               const commit = deferredCommit;
               const lastVisibleId = capped.lastVisibleId;
-              commitAfterWrite.set(extra.requestId, () => commit(lastVisibleId));
+              commitAfterWrite.set(extra.requestId, () => commit(lastVisibleId ?? void 0));
               extra.signal.addEventListener("abort", () => commitAfterWrite.delete(extra.requestId), { once: true });
             }
+          }
+          break;
+        }
+        case "file_put":
+        case "brain_put": {
+          const topic = tool.name === "brain_put" ? canonicalBrainTopic(args.topic) : null;
+          const name = topic === null ? args.name ?? (0, import_node_path28.basename)(args.path) : brainFileName(topic);
+          const bytes = await readMcpPutFile(args.path, profilePath, profile.credential_file);
+          if (topic !== null) new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+          const prepared = await prepareExactPut({
+            target: profileTarget(profile),
+            workspaceId: profile.workspace_id,
+            principalId: profile.principal_id,
+            stateDir: exactPutStateDir(profilePath),
+            requestId: args.request_id,
+            name,
+            bytes,
+            ...args.if_version === void 0 ? {} : { ifVersion: Number(args.if_version) },
+            credential: ""
+          });
+          try {
+            const { fetcher, token } = await authenticated();
+            const done = await executeExactPut({ ...prepared, input: { ...prepared.input, credential: token, fetcher } });
+            output2 = {
+              ...topic === null ? {} : { topic },
+              ...done.result,
+              outcome: done.outcome,
+              conflict_check: done.conflict_check
+            };
+          } catch (error2) {
+            if (error2 instanceof FileCommandRefused && error2.status >= 400 && error2.status < 500) throw error2;
+            if (error2 instanceof FileTransportError || error2 instanceof FileCommandRefused) {
+              output2 = {
+                outcome: "unknown",
+                retry_with_same_request_id: true,
+                next_step: mapMcpError(error2).next_step,
+                conflict_check: prepared.conflict_check
+              };
+            } else throw error2;
           }
           break;
         }
@@ -51916,10 +54142,15 @@ async function serveMcp(options) {
   });
   await server.connect(transport);
 }
+var import_promises17, import_node_fs8, import_node_os10, import_node_path28;
 var init_server3 = __esm({
   "src/mcp/server.ts"() {
     "use strict";
     init_server2();
+    import_promises17 = require("node:fs/promises");
+    import_node_fs8 = require("node:fs");
+    import_node_os10 = require("node:os");
+    import_node_path28 = require("node:path");
     init_stdio2();
     init_types();
     init_agent_profile();
@@ -51931,6 +54162,9 @@ var init_server3 = __esm({
     init_signal_duration();
     init_tools();
     init_errors3();
+    init_brain();
+    init_exact_file_put();
+    init_files();
     init_errors3();
   }
 });
@@ -51938,6 +54172,7 @@ var init_server3 = __esm({
 // src/cli.ts
 var cli_exports = {};
 __export(cli_exports, {
+  ACCEPT_LINK_REFUSED_FLAGS: () => ACCEPT_LINK_REFUSED_FLAGS,
   AGENT_COMMANDS: () => AGENT_COMMANDS,
   AGENT_PROFILE_COMMANDS: () => AGENT_PROFILE_COMMANDS,
   Arguments: () => Arguments,
@@ -51945,6 +54180,8 @@ __export(cli_exports, {
   BODY_FLAGS: () => BODY_FLAGS,
   BODY_SOURCES: () => BODY_SOURCES,
   BOOLEAN_FLAGS: () => BOOLEAN_FLAGS,
+  BRAIN_GET_ACCEPTED_FLAGS: () => BRAIN_GET_ACCEPTED_FLAGS,
+  BRAIN_PUT_ACCEPTED_FLAGS: () => BRAIN_PUT_ACCEPTED_FLAGS,
   BodyEmptyError: () => BodyEmptyError,
   BodyEncodingError: () => BodyEncodingError,
   BodyFileError: () => BodyFileError,
@@ -51957,24 +54194,106 @@ __export(cli_exports, {
   BodyStdinError: () => BodyStdinError,
   BodyUtf8Error: () => BodyUtf8Error,
   CHANNEL_SUBCOMMAND_NAMES: () => CHANNEL_SUBCOMMAND_NAMES,
-  CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER: () => CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER,
+  CHECK_MESSAGES_SELECTOR_FLAGS: () => CHECK_MESSAGES_SELECTOR_FLAGS,
   EXIT_RESTARTABLE: () => EXIT_RESTARTABLE,
+  FEEDBACK_ACCEPTED_FLAGS: () => FEEDBACK_ACCEPTED_FLAGS,
+  FEEDBACK_KINDS: () => FEEDBACK_KINDS,
+  FILE_CONTEXT_BASE_ACCEPTED_FLAGS: () => FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  FILE_GET_ACCEPTED_FLAGS: () => FILE_GET_ACCEPTED_FLAGS,
+  FILE_LS_ACCEPTED_FLAGS: () => FILE_LS_ACCEPTED_FLAGS,
+  FILE_PUT_ACCEPTED_FLAGS: () => FILE_PUT_ACCEPTED_FLAGS,
   FORMAT_ADVISORY_FIELD: () => FORMAT_ADVISORY_FIELD,
   FORMAT_ADVISORY_MESSAGE: () => FORMAT_ADVISORY_MESSAGE,
+  HANDLER_HELP_FLAGS: () => HANDLER_HELP_FLAGS,
+  HOOK_INSTALL_ACCEPTED_FLAGS: () => HOOK_INSTALL_ACCEPTED_FLAGS,
+  HOOK_UNINSTALL_ACCEPTED_FLAGS: () => HOOK_UNINSTALL_ACCEPTED_FLAGS,
+  INBOX_FOLLOW_REFUSED_FLAGS: () => INBOX_FOLLOW_REFUSED_FLAGS,
+  INBOX_FOLLOW_STEP_DROP_FLAGS: () => INBOX_FOLLOW_STEP_DROP_FLAGS,
+  INBOX_LIMIT_NOTICE: () => INBOX_LIMIT_NOTICE,
+  INBOX_READ_SELECTOR_FLAGS: () => INBOX_READ_SELECTOR_FLAGS,
+  INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS: () => INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
+  INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS: () => INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS,
   KNOWN_FLAGS: () => KNOWN_FLAGS,
+  LISTENER_PERMISSION_MODES: () => LISTENER_PERMISSION_MODES,
+  LISTEN_CANARY_ACCEPTED_FLAGS: () => LISTEN_CANARY_ACCEPTED_FLAGS,
+  LISTEN_START_ACCEPTED_FLAGS: () => LISTEN_START_ACCEPTED_FLAGS,
+  LISTEN_START_REFUSED_FLAGS: () => LISTEN_START_REFUSED_FLAGS,
+  LISTEN_STATUS_ACCEPTED_FLAGS: () => LISTEN_STATUS_ACCEPTED_FLAGS,
+  LISTEN_STOP_ACCEPTED_FLAGS: () => LISTEN_STOP_ACCEPTED_FLAGS,
+  LOGOUT_REFUSED_FLAGS: () => LOGOUT_REFUSED_FLAGS,
   ListenerUnattendedRefusedError: () => ListenerUnattendedRefusedError,
+  MAIN_1_ACCEPTED_FLAGS: () => MAIN_1_ACCEPTED_FLAGS,
+  MCP_SERVE_ACCEPTED_FLAGS: () => MCP_SERVE_ACCEPTED_FLAGS,
+  NOTIFY_ACCEPTED_FLAGS: () => NOTIFY_ACCEPTED_FLAGS,
+  POST_SIGNAL_ASK_ACCEPTED_FLAGS: () => POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  POST_SIGNAL_NOTE_ACCEPTED_FLAGS: () => POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
+  POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS: () => POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
+  REPLY_ACCEPTED_FLAGS: () => REPLY_ACCEPTED_FLAGS,
+  RUN_ACCEPT_1_ACCEPTED_FLAGS: () => RUN_ACCEPT_1_ACCEPTED_FLAGS,
+  RUN_ACCEPT_2_ACCEPTED_FLAGS: () => RUN_ACCEPT_2_ACCEPTED_FLAGS,
+  RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS: () => RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS: () => RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_LS_1_ACCEPTED_FLAGS: () => RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS: () => RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
+  RUN_DOGFOOD_1_ACCEPTED_FLAGS: () => RUN_DOGFOOD_1_ACCEPTED_FLAGS,
+  RUN_GRANT_1_ACCEPTED_FLAGS: () => RUN_GRANT_1_ACCEPTED_FLAGS,
+  RUN_HOOK_1_ACCEPTED_FLAGS: () => RUN_HOOK_1_ACCEPTED_FLAGS,
+  RUN_INVITE_1_ACCEPTED_FLAGS: () => RUN_INVITE_1_ACCEPTED_FLAGS,
+  RUN_INVITE_2_ACCEPTED_FLAGS: () => RUN_INVITE_2_ACCEPTED_FLAGS,
+  RUN_LINK_NEW_1_ACCEPTED_FLAGS: () => RUN_LINK_NEW_1_ACCEPTED_FLAGS,
+  RUN_LINK_REVOKE_1_ACCEPTED_FLAGS: () => RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
+  RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS: () => RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
+  RUN_LOGIN_1_ACCEPTED_FLAGS: () => RUN_LOGIN_1_ACCEPTED_FLAGS,
+  RUN_LOGOUT_1_ACCEPTED_FLAGS: () => RUN_LOGOUT_1_ACCEPTED_FLAGS,
+  RUN_MCP_CODE_1_ACCEPTED_FLAGS: () => RUN_MCP_CODE_1_ACCEPTED_FLAGS,
+  RUN_MCP_CONNECT_1_ACCEPTED_FLAGS: () => RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
+  RUN_MEMBERS_1_ACCEPTED_FLAGS: () => RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  RUN_MEMBER_1_ACCEPTED_FLAGS: () => RUN_MEMBER_1_ACCEPTED_FLAGS,
+  RUN_NEW_1_ACCEPTED_FLAGS: () => RUN_NEW_1_ACCEPTED_FLAGS,
+  RUN_PRINCIPAL_1_ACCEPTED_FLAGS: () => RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
+  RUN_PRINCIPAL_2_ACCEPTED_FLAGS: () => RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
+  RUN_PROFILE_LS_1_ACCEPTED_FLAGS: () => RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
+  RUN_RECEIPT_1_ACCEPTED_FLAGS: () => RUN_RECEIPT_1_ACCEPTED_FLAGS,
+  RUN_RESUME_1_ACCEPTED_FLAGS: () => RUN_RESUME_1_ACCEPTED_FLAGS,
+  RUN_SEED_1_ACCEPTED_FLAGS: () => RUN_SEED_1_ACCEPTED_FLAGS,
+  RUN_STATUS_1_ACCEPTED_FLAGS: () => RUN_STATUS_1_ACCEPTED_FLAGS,
+  RUN_TARGET_1_ACCEPTED_FLAGS: () => RUN_TARGET_1_ACCEPTED_FLAGS,
+  RUN_TARGET_2_ACCEPTED_FLAGS: () => RUN_TARGET_2_ACCEPTED_FLAGS,
+  RUN_TARGET_3_ACCEPTED_FLAGS: () => RUN_TARGET_3_ACCEPTED_FLAGS,
+  RUN_TASK_COMMAND_1_ACCEPTED_FLAGS: () => RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_1_ACCEPTED_FLAGS: () => RUN_TOKEN_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS: () => RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS: () => RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS,
+  RUN_USE_1_ACCEPTED_FLAGS: () => RUN_USE_1_ACCEPTED_FLAGS,
+  RUN_WHOAMI_1_ACCEPTED_FLAGS: () => RUN_WHOAMI_1_ACCEPTED_FLAGS,
+  RUN_WORKSPACES_1_ACCEPTED_FLAGS: () => RUN_WORKSPACES_1_ACCEPTED_FLAGS,
+  RUN_WORKSPACE_1_ACCEPTED_FLAGS: () => RUN_WORKSPACE_1_ACCEPTED_FLAGS,
+  SESSION_HUMAN_ACCEPTED_FLAGS: () => SESSION_HUMAN_ACCEPTED_FLAGS,
+  SESSION_PROFILE_STATUS_ACCEPTED_FLAGS: () => SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  SESSION_START_ACCEPTED_FLAGS: () => SESSION_START_ACCEPTED_FLAGS,
+  SESSION_START_REFUSED_FLAGS: () => SESSION_START_REFUSED_FLAGS,
+  SESSION_STATUS_ACCEPTED_FLAGS: () => SESSION_STATUS_ACCEPTED_FLAGS,
   SIGNAL_BODY_MAX: () => SIGNAL_BODY_MAX,
+  SIGNAL_READ_FEED_ACCEPTED_FLAGS: () => SIGNAL_READ_FEED_ACCEPTED_FLAGS,
+  SIGNAL_READ_INBOX_ACCEPTED_FLAGS: () => SIGNAL_READ_INBOX_ACCEPTED_FLAGS,
   STREAM_CHUNK_BYTE_LIMIT: () => STREAM_CHUNK_BYTE_LIMIT,
   TURN_BUDGET_CREDENTIAL_MARGIN_MS: () => TURN_BUDGET_CREDENTIAL_MARGIN_MS,
+  VARIANT_HELP_FLAGS: () => VARIANT_HELP_FLAGS,
   agentToolsForTransport: () => agentToolsForTransport,
+  assertInboxWorkspace: () => assertInboxWorkspace,
   clampTurnBudgetToCredential: () => clampTurnBudgetToCredential,
   claudeUserPromptHookSnippet: () => claudeUserPromptHookSnippet,
   collectListenerAttendanceEvidence: () => collectListenerAttendanceEvidence,
+  commandHelpLines: () => commandHelpLines,
   describeAudience: () => describeAudience,
   formatBodySourceConflict: () => formatBodySourceConflict,
   formatBodySourceMissing: () => formatBodySourceMissing,
   formatBodyUsage: () => formatBodyUsage,
   formatOrList: () => formatOrList,
+  helpDescription: () => helpDescription,
+  inboxFollowRefusal: () => inboxFollowRefusal,
+  inboxFollowStep: () => inboxFollowStep,
+  inboxMoreNotice: () => inboxMoreNotice,
   isCliMain: () => isCliMain,
   isFollowRenewalCredentialFailure: () => isFollowRenewalCredentialFailure,
   listenerAttendanceProjectDirectory: () => listenerAttendanceProjectDirectory,
@@ -51989,7 +54308,10 @@ __export(cli_exports, {
   listenerStartPendingMessage: () => listenerStartPendingMessage,
   listenerStatusJson: () => listenerStatusJson,
   mcpFailureCode: () => mcpFailureCode,
+  mcpFailureMessage: () => mcpFailureMessage,
   messageFormatAdvisory: () => messageFormatAdvisory,
+  notifyRestartOptions: () => notifyRestartOptions,
+  parseProfileListUrl: () => parseProfileListUrl,
   postSignalAllowedFlags: () => postSignalAllowedFlags,
   readBoundedUtf8Stream: () => readBoundedUtf8Stream,
   renderListenerStatus: () => renderListenerStatus,
@@ -52004,16 +54326,264 @@ __export(cli_exports, {
   stripSingleTrailingNewline: () => stripSingleTrailingNewline,
   threadReplyMessage: () => threadReplyMessage,
   usage: () => usage,
+  visibleUsageHint: () => visibleUsageHint,
+  waitForListenerStop: () => waitForListenerStop,
   workspaceLabel: () => workspaceLabel
 });
 module.exports = __toCommonJS(cli_exports);
-var import_node_crypto24 = require("node:crypto");
+var import_node_crypto28 = require("node:crypto");
+
+// src/listener/main-routing.ts
+var import_node_path2 = require("node:path");
+init_storage();
+var UUID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var MAX_QUEUE_BYTES = 1024 * 1024;
+var QUEUE_FILE = "pending-for-main.json";
+var QUEUE_LOCK = "pending-for-main";
+var QUEUE_KEYS = /* @__PURE__ */ new Set(["version", "entries", "droppedCount"]);
+var ENTRY_KEYS = /* @__PURE__ */ new Set([
+  "signalId",
+  "workspaceId",
+  "principalId",
+  "fromId",
+  "fromKind",
+  "kind",
+  "senderName",
+  "body",
+  "attachmentCount",
+  "createdAt",
+  "queuedAt",
+  "observationPending"
+]);
+var LISTENER_MAIN_QUEUE_MAX = 200;
+var LISTENER_ROUTE_MODES = ["main"];
+var LISTENER_STORED_ROUTE_MODES = ["worker", "main", "split"];
+var LISTENER_STORED_ROUTE_DECISIONS = ["worker", "main"];
+var LISTENER_MAIN_HOST_LIMIT_CLAUSES = {
+  host_configuration: "This listener never starts a model.",
+  deny_canary_scope: "No provider worker is started, so no deny canary runs.",
+  steady_allow_unproven: "Provider permission flags name the attendance surface kind only.",
+  cross_owner_context: "Directed messages wait in pending-for-main.json for the seat's own session.",
+  local_state_lifecycle: "No provider home is created or removed by this listener."
+};
+var LISTENER_ROUTE_RULING = "a listener never answers for a session; the seat's own session reads the queue";
+var LISTENER_ATTENDANCE_SURFACES = ["hook", "watcher"];
+var NO_LISTENER_STATUS = "no_listener";
+var NO_LISTENER_STATUS_SENTENCE = "No listener is running for this agent in {stateDirectory}. Attended seats are reached through their session check.";
+var LISTENER_ALLOW_UNATTENDED_CLAUSE = "Use --allow-unattended only when you accept a queue that may not wake a session.";
+var LISTENER_NONE_ATTENDING_SENTENCE = "Signals queue and nothing wakes the session.";
+function orList(values2) {
+  return values2.length <= 1 ? values2.join("") : `${values2.slice(0, -1).join(", ")}, or ${values2[values2.length - 1]}`;
+}
+function listenerAcceptedRoutesSentence() {
+  return orList(LISTENER_ROUTE_MODES);
+}
+function listenerRouteUsage() {
+  return LISTENER_ROUTE_MODES.join("|");
+}
+function isLiveListenerRouteMode(value) {
+  return LISTENER_ROUTE_MODES.includes(value);
+}
+function isStoredListenerRouteMode(value) {
+  return LISTENER_STORED_ROUTE_MODES.includes(value);
+}
+function isStoredListenerRouteDecision(value) {
+  return LISTENER_STORED_ROUTE_DECISIONS.includes(value);
+}
+function listenerRouteRefusedSentence(requested) {
+  return `--route ${requested} is refused: accepted --route values are ${listenerAcceptedRoutesSentence()}; ${LISTENER_ROUTE_RULING}.`;
+}
+function listenerDeferOverRefusedSentence() {
+  return `--defer-over is refused: it only applied to split, and accepted --route values are ${listenerAcceptedRoutesSentence()}; ${LISTENER_ROUTE_RULING}.`;
+}
+function listenerLegacyRouteSentence(routeMode) {
+  if (isLiveListenerRouteMode(routeMode)) {
+    return "Ask route: main; directed asks wait for this interactive session.";
+  }
+  return `LEGACY: this status file has routeMode ${routeMode}. That route cannot be started again; ${LISTENER_ROUTE_RULING}.`;
+}
+function listenerAttendanceSurfaceRemedy(surface, principalId) {
+  if (surface === "hook") {
+    return `cswarm hook install claude --principal-id ${principalId} --write, then start a fresh session`;
+  }
+  return `cswarm inbox --notify for agent ${principalId} on this host`;
+}
+function listenerAttendanceRemediesSentence(principalId) {
+  return LISTENER_ATTENDANCE_SURFACES.map((surface) => listenerAttendanceSurfaceRemedy(surface, principalId)).join("; or ");
+}
+function listenerUnattendedRefusedMessage(principalId) {
+  return `listen_unattended_refused: listen start needs an attendance surface for agent ${principalId}. Next: ${listenerAttendanceRemediesSentence(principalId)}. ${LISTENER_ALLOW_UNATTENDED_CLAUSE}`;
+}
+function listenerAttendingSurfaces(hook, watcher) {
+  return LISTENER_ATTENDANCE_SURFACES.filter(
+    (surface) => surface === "hook" ? hook : watcher
+  );
+}
+function listenerAttendingSentence(surfaces) {
+  if (surfaces.length === 0) {
+    return `ATTENDING: none. ${LISTENER_NONE_ATTENDING_SENTENCE}`;
+  }
+  return `ATTENDING: ${orList(surfaces)}.`;
+}
+function decideListenerRoute(route, threshold, bodyLength) {
+  if (!Number.isSafeInteger(bodyLength) || bodyLength < 0) {
+    throw new Error("listener route body length must be a non-negative integer");
+  }
+  if (!isLiveListenerRouteMode(route)) {
+    throw new Error("listener route mode is invalid");
+  }
+  if (threshold !== null) {
+    throw new Error("main route cannot have a split threshold");
+  }
+  return "main";
+}
+function checkedTimestamp(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+function parseEntry(value, rejectUnknownKeys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("stored pending-for-main entry is malformed");
+  }
+  const row = value;
+  if (rejectUnknownKeys && Object.keys(row).some((key2) => !ENTRY_KEYS.has(key2))) {
+    throw new Error("stored pending-for-main entry is malformed");
+  }
+  if (typeof row.signalId !== "string" || !UUID_RE2.test(row.signalId) || typeof row.workspaceId !== "string" || !UUID_RE2.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE2.test(row.principalId) || typeof row.fromId !== "string" || !UUID_RE2.test(row.fromId) || row.fromKind !== "user" && row.fromKind !== "agent" || !(row.kind === void 0 || row.kind === "ask" || row.kind === "note") || !(row.senderName === null || typeof row.senderName === "string" && row.senderName.length <= 200) || typeof row.body !== "string" || row.body.length < 1 || !(row.attachmentCount === void 0 || typeof row.attachmentCount === "number" && Number.isSafeInteger(row.attachmentCount) && row.attachmentCount >= 1 && row.attachmentCount <= 8) || !checkedTimestamp(row.createdAt) || !checkedTimestamp(row.queuedAt) || !(row.observationPending === void 0 || row.observationPending === true)) {
+    throw new Error("stored pending-for-main entry is malformed");
+  }
+  return {
+    signalId: row.signalId.toLowerCase(),
+    workspaceId: row.workspaceId.toLowerCase(),
+    principalId: row.principalId.toLowerCase(),
+    fromId: row.fromId.toLowerCase(),
+    fromKind: row.fromKind,
+    ...row.kind === "ask" || row.kind === "note" ? { kind: row.kind } : {},
+    senderName: row.senderName,
+    body: row.body,
+    ...typeof row.attachmentCount === "number" ? { attachmentCount: row.attachmentCount } : {},
+    createdAt: row.createdAt,
+    queuedAt: row.queuedAt,
+    ...row.observationPending === true ? { observationPending: true } : {}
+  };
+}
+function parseFile(raw, rejectUnknownKeys = false) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error("stored pending-for-main queue is malformed");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("stored pending-for-main queue is malformed");
+  }
+  const row = value;
+  if (rejectUnknownKeys && Object.keys(row).some((key2) => !QUEUE_KEYS.has(key2)) || row.version !== 1 || !Array.isArray(row.entries) || row.entries.length > LISTENER_MAIN_QUEUE_MAX || !(row.droppedCount === void 0 || typeof row.droppedCount === "number" && Number.isSafeInteger(row.droppedCount) && row.droppedCount >= 0)) {
+    throw new Error("stored pending-for-main queue is malformed");
+  }
+  const entries = row.entries.map((entry2) => parseEntry(entry2, rejectUnknownKeys));
+  if (new Set(entries.map((entry2) => entry2.signalId)).size !== entries.length) {
+    throw new Error("stored pending-for-main queue repeats a signal");
+  }
+  return { version: 1, entries, droppedCount: row.droppedCount ?? 0 };
+}
+var FilePendingMainQueue = class {
+  path;
+  directory;
+  constructor(instanceDirectory) {
+    if (!(0, import_node_path2.isAbsolute)(instanceDirectory)) {
+      throw new Error("pending-for-main directory must be absolute");
+    }
+    this.directory = instanceDirectory;
+    this.path = (0, import_node_path2.join)(instanceDirectory, QUEUE_FILE);
+  }
+  async readUnlocked() {
+    const raw = await readSecureJsonFile(this.path, MAX_QUEUE_BYTES);
+    return raw === null ? { version: 1, entries: [], droppedCount: 0 } : parseFile(raw);
+  }
+  async writeUnlocked(file) {
+    const canonical = parseFile(JSON.stringify(file), true);
+    await writeSecureJsonFile(this.path, JSON.stringify(canonical));
+  }
+  async read() {
+    return [...(await this.readUnlocked()).entries];
+  }
+  async count() {
+    return (await this.readUnlocked()).entries.length;
+  }
+  async stats() {
+    const file = await this.readUnlocked();
+    return { count: file.entries.length, droppedCount: file.droppedCount };
+  }
+  async enqueue(entry2) {
+    const checked = parseEntry(entry2, true);
+    return await withFileLock(this.directory, QUEUE_LOCK, async () => {
+      const file = await this.readUnlocked();
+      if (file.entries.some((item) => item.signalId === checked.signalId)) {
+        return {
+          count: file.entries.length,
+          added: false,
+          droppedOldest: false,
+          droppedCount: file.droppedCount
+        };
+      }
+      file.entries.push(checked);
+      const droppedOldest = file.entries.length > LISTENER_MAIN_QUEUE_MAX;
+      if (droppedOldest) {
+        file.entries.shift();
+        file.droppedCount += 1;
+      }
+      await this.writeUnlocked(file);
+      return {
+        count: file.entries.length,
+        added: true,
+        droppedOldest,
+        droppedCount: file.droppedCount
+      };
+    });
+  }
+  async remove(signalIds, lockTimeoutMs) {
+    if (signalIds.size === 0) return await this.count();
+    return await withFileLock(this.directory, QUEUE_LOCK, async () => {
+      const file = await this.readUnlocked();
+      const entries = file.entries.filter((entry2) => !signalIds.has(entry2.signalId));
+      if (entries.length !== file.entries.length) {
+        await this.writeUnlocked({
+          version: 1,
+          entries,
+          droppedCount: file.droppedCount
+        });
+      }
+      return entries.length;
+    }, lockTimeoutMs === void 0 ? {} : { timeoutMs: lockTimeoutMs });
+  }
+};
+function pendingMainEntry(signal, principalId, provenance, now, options = {}) {
+  if (signal.kind !== "ask" && signal.kind !== "note") {
+    throw new Error("only directed asks and notes can enter the pending-for-main queue");
+  }
+  return parseEntry({
+    signalId: signal.id,
+    workspaceId: signal.workspace_id,
+    principalId,
+    fromId: signal.from,
+    fromKind: signal.from_kind,
+    kind: signal.kind,
+    senderName: provenance.senderName,
+    body: signal.body,
+    ...(signal.attachments?.length ?? 0) > 0 ? { attachmentCount: signal.attachments.length } : {},
+    createdAt: signal.created_at,
+    queuedAt: new Date(now).toISOString(),
+    ...options.observationPending ? { observationPending: true } : {}
+  }, true);
+}
+
+// src/cli.ts
 init_signal_duration();
 
 // src/cloud/pending-access.ts
 init_config();
-var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var uuid = (value) => typeof value === "string" && UUID_RE.test(value);
+var UUID_RE3 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var uuid = (value) => typeof value === "string" && UUID_RE3.test(value);
 function parsePendingAccess(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("pending access read returned malformed data");
   const rows3 = value.pending;
@@ -52023,8 +54593,8 @@ function parsePendingAccess(value) {
     const row = value2;
     const common2 = uuid(row.owner_user_id) && typeof row.issuer_display === "string" && typeof row.issued_at === "string" && Number.isFinite(Date.parse(row.issued_at)) && (row.expires_at === null || typeof row.expires_at === "string" && Number.isFinite(Date.parse(row.expires_at)));
     const classic = row.kind === "classic" && uuid(row.principal_id) && typeof row.principal_name === "string" && row.join_credential_id === null && row.seats_used === null && row.seat_cap === null;
-    const join23 = row.kind === "join" && row.principal_id === null && row.principal_name === null && uuid(row.join_credential_id) && Number.isSafeInteger(row.seats_used) && Number.isSafeInteger(row.seat_cap) && Number(row.seats_used) >= 0 && Number(row.seat_cap) > Number(row.seats_used);
-    if (!common2 || !classic && !join23) throw new Error("pending access read returned malformed row");
+    const join25 = row.kind === "join" && row.principal_id === null && row.principal_name === null && uuid(row.join_credential_id) && Number.isSafeInteger(row.seats_used) && Number.isSafeInteger(row.seat_cap) && Number(row.seats_used) >= 0 && Number(row.seat_cap) > Number(row.seats_used);
+    if (!common2 || !classic && !join25) throw new Error("pending access read returned malformed row");
     return {
       kind: row.kind,
       principal_id: row.principal_id,
@@ -52084,12 +54654,73 @@ function recordDispatch(handler) {
 init_agent_onboarding_contract();
 init_agent_profile();
 
+// src/cloud/live-session-context.ts
+init_session_client();
+init_session_context();
+async function verifiedLiveSessionContexts(input) {
+  const contexts = (await listSessionContextFiles(input.workspaceId, input.principalId)).filter(({ context }) => {
+    if (sessionProofOf(context) === null) return false;
+    try {
+      assertLocalSessionBinding(context, {
+        target: input.target,
+        flagWorkspaceId: input.workspaceId,
+        tokenPrincipalId: input.principalId,
+        ...input.tokenFile === void 0 ? {} : { tokenFile: input.tokenFile },
+        ...input.hostSessionId === void 0 ? {} : { hostSessionId: input.hostSessionId }
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (contexts.length === 0 && (input.serverStatus !== void 0 || !input.checkManagementWithoutFiles)) {
+    return {
+      paths: [],
+      verificationUnavailable: false,
+      managed: input.serverStatus === void 0 ? null : input.serverStatus.managed_at !== null,
+      verificationRefused: false,
+      verificationServiceError: false
+    };
+  }
+  try {
+    const server = input.serverStatus ?? await new AgentSessionClient({ target: input.target, timeoutMs: 5e3 }).readStatus({
+      credential: input.credential,
+      workspaceId: input.workspaceId,
+      principalId: input.principalId
+    });
+    const paths = [];
+    for (const { path, context } of contexts) {
+      if (!server.is_live || server.session_id !== context.session_id || server.generation !== context.generation) continue;
+      try {
+        const current = await readSessionContext(path);
+        if (current.session_id === context.session_id && current.generation === context.generation && current.session_key === context.session_key && sessionProofOf(current) !== null) paths.push(path);
+      } catch {
+      }
+    }
+    return {
+      paths,
+      verificationUnavailable: false,
+      managed: server.managed_at !== null,
+      verificationRefused: false,
+      verificationServiceError: false
+    };
+  } catch (error2) {
+    return {
+      paths: [],
+      verificationUnavailable: true,
+      managed: null,
+      verificationRefused: error2 instanceof SessionStatusHttpError && (error2.status === 401 || error2.status === 403),
+      verificationServiceError: error2 instanceof SessionStatusHttpError && error2.status !== 401 && error2.status !== 403
+    };
+  }
+}
+
 // src/onboarding-cli.ts
-var import_node_path10 = require("node:path");
+var import_node_path11 = require("node:path");
 init_agent_onboarding_contract();
 
 // src/cloud/agent-setup.ts
-var import_node_path8 = require("node:path");
+var import_node_path9 = require("node:path");
 init_agent_credential_input();
 init_agent_credential();
 init_renewal();
@@ -52103,10 +54734,10 @@ init_agent_receive();
 // src/cloud/agent-host.ts
 var import_node_fs2 = require("node:fs");
 init_agent_grok_bot_gateway();
-var import_node_child_process3 = require("node:child_process");
-var import_node_path7 = require("node:path");
+var import_node_child_process4 = require("node:child_process");
+var import_node_path8 = require("node:path");
 var import_node_util2 = require("node:util");
-var exec2 = (0, import_node_util2.promisify)(import_node_child_process3.execFile);
+var exec2 = (0, import_node_util2.promisify)(import_node_child_process4.execFile);
 async function parentProcess(pid) {
   try {
     const { stdout } = await exec2("ps", ["-p", String(pid), "-o", "ppid=,comm="], { timeout: 250, maxBuffer: 4096 });
@@ -52126,7 +54757,7 @@ async function detectAgentHost(read = parentProcess, start = process.ppid, env =
     seen.add(pid);
     const row = await read(pid);
     if (row === null) return "unknown";
-    const executable = (0, import_node_path7.basename)(row.executable);
+    const executable = (0, import_node_path8.basename)(row.executable);
     if (executable === "claude") return "claude";
     if (executable === "codex") return "codex";
     if (executable === "Codex" && row.executable.includes("/Codex.app/")) return "codex-desktop";
@@ -52151,6 +54782,7 @@ async function setupAgent(options) {
   if (raw === null) throw new AgentSetupError("connection_missing", "Save the connection file outside repositories in a private 0700 directory, with file mode 0600, then run setup again.");
   const connection2 = parseAgentConnection(raw);
   const profilePath = await assertPrivateLocation(options.profilePath ?? defaultAgentProfilePath(connection2));
+  await refusePendingConnectProfile(profilePath);
   if (await readSecureJsonFileIfPresent(profilePath, ONBOARDING_MAX_FILE_BYTES) !== null) {
     await readAgentProfile(profilePath, options.hostSessionId);
   }
@@ -52160,7 +54792,7 @@ async function setupAgent(options) {
     anon_key: connection2.anon_key,
     workspace_id: connection2.workspace_id,
     principal_id: connection2.principal_id,
-    credential_file: (0, import_node_path8.join)((0, import_node_path8.dirname)(profilePath), "credential.json")
+    credential_file: (0, import_node_path9.join)((0, import_node_path9.dirname)(profilePath), "credential.json")
   };
   const hostPromise = detectAgentHost();
   const identity = await withAgentDeadline(AGENT_SETUP_TIMEOUT_MS, async (fetcher, signal) => {
@@ -52215,26 +54847,14 @@ init_agent_credential_input();
 init_agent_check();
 init_agent_check_budget();
 init_agent_profile();
+init_config();
+init_agent_credential();
 init_agent_receive();
 init_storage();
 var ONBOARDING_VALUE_FLAGS = ["connection-file", "profile", "message-id", "grok-bot-agent-id", "signal-id", "receipt"];
 var ONBOARDING_BOOLEAN_FLAGS = ["check-version", "hook", "full", "preview-channel"];
 function onboardingUsage() {
-  return `  cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]
-  cswarm setup --check-version
-  cswarm setup guide
-  cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]
-  cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]
-  cswarm check --profile <absolute-path> --host-session-id <id> --hook
-  cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]
-  cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]
-  cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]
-  cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]
-  cswarm receive serve --profile <absolute-path> --host-session-id <id>
-
-setup imports a private connection file and checks the authenticated identity. It starts no listener.
+  return `setup imports a private connection file and checks the authenticated identity. It starts no listener.
 check reads new directed messages without a listener; --force also performs a fresh read (there is no cooldown).
 --message-id reads the full body from the bounded local preview cache. Fetching does not ACK a delivery.
 receive configure records the user's choice. Host hooks require the current session ID; inherited host variables are not trusted.
@@ -52244,13 +54864,13 @@ Agent commands also accept --profile instead of repeated credential and connecti
 }
 async function writeOnboardingOutput(value) {
   if (!value) return;
-  await new Promise((resolve7, reject) => {
+  await new Promise((resolve8, reject) => {
     const onError = (error2) => reject(error2);
     process.stdout.once("error", onError);
     process.stdout.write(value, (error2) => {
       process.stdout.off("error", onError);
       if (error2) reject(error2);
-      else resolve7();
+      else resolve8();
     });
   });
 }
@@ -52292,7 +54912,7 @@ async function hookInput() {
 async function runTurnHook(args) {
   const profile = privatePath(args.required("profile"));
   const host = checkedHostSessionId(args.required("host-session-id"));
-  const diagnostic = (0, import_node_path10.join)((0, import_node_path10.dirname)(profile), `check-error-${profileScopeKey(host)}.json`);
+  const diagnostic = (0, import_node_path11.join)((0, import_node_path11.dirname)(profile), `check-error-${profileScopeKey(host)}.json`);
   let hardExitStarted = false;
   let failureText;
   let boundHostSessionId;
@@ -52333,9 +54953,10 @@ function withSetupOperatorStep(message) {
   const trimmed = message.trimEnd();
   return `${/[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`} ${SETUP_OPERATOR_STEP}`;
 }
+var RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS = ["connection-file", "profile", "host-session-id", "json"];
 async function runSetupImport(args) {
   recordDispatch("runOnboardingCommand:setup-import");
-  args.assertShape(["connection-file", "profile", "host-session-id", "json"], 1);
+  args.assertShape(RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, 1);
   const connectionFile = args.required("connection-file");
   const hostSessionId = args.optional("host-session-id");
   if (hostSessionId !== void 0) checkedHostSessionId(hostSessionId);
@@ -52356,28 +54977,32 @@ async function runSetupImport(args) {
     throw new Error(withSetupOperatorStep("Setup failed."), { cause: error2 });
   }
 }
+var RUN_SETUP_VERSION_1_ACCEPTED_FLAGS = ["check-version"];
 async function runSetupVersion(args) {
   recordDispatch("runOnboardingCommand:setup-version");
-  args.assertShape(["check-version"], 1);
+  args.assertShape(RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, 1);
   await output({ setup_version: AGENT_CONNECTION_VERSION });
 }
+var RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS = [];
 async function runSetupGuide(args) {
   recordDispatch("runOnboardingCommand:setup-guide");
-  args.assertShape([], 2);
+  args.assertShape(RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS, 2);
   await writeOnboardingOutput(`${AGENT_QUICK_GUIDE}
 `);
 }
 var CHECK_FLAGS = ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"];
+var CHECK_HOOK_REFUSED_FLAGS = ["full", "message-id", "json"];
+var CHECK_MESSAGE_REFUSED_FLAGS = ["full"];
 async function runCheckHook(args) {
   recordDispatch("runOnboardingCommand:check-hook");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full") || args.has("message-id") || args.has("json")) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
+  if (CHECK_HOOK_REFUSED_FLAGS.some((flag) => args.has(flag))) throw new AgentSetupError("hook_options_invalid", "A host hook cannot also request full text or JSON output.");
   await runTurnHook(args);
 }
 async function runCheckMessage(args) {
   recordDispatch("runOnboardingCommand:check-message");
   args.assertShape(CHECK_FLAGS, 1);
-  if (args.has("full")) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
+  if (CHECK_MESSAGE_REFUSED_FLAGS.some((flag) => args.has(flag))) throw new AgentSetupError("check_options_invalid", "Use either --full or --message-id.");
   const message = await cachedAgentMessage(args.required("profile"), args.required("message-id"), args.optional("host-session-id"));
   await output({ source: "local_preview_cache", message });
 }
@@ -52393,9 +55018,10 @@ async function runCheckMessages(args) {
   });
 }
 var RECEIVE_COMMON_FLAGS = ["profile", "host-session-id", "json"];
+var RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"];
 async function runReceiveConfigure(args) {
   recordDispatch("runOnboardingCommand:receive-configure");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS, 2);
   await output(await configureAgentReceive({
     profilePath: args.required("profile"),
     mode: args.required("mode"),
@@ -52404,7 +55030,7 @@ async function runReceiveConfigure(args) {
     cwd: args.optional("cwd"),
     previewChannel: args.has("preview-channel"),
     grokBotAgentId: args.optional("grok-bot-agent-id"),
-    execution: { command: process.execPath, args: [...process.execArgv, (0, import_node_path10.resolve)(process.argv[1])] }
+    execution: { command: process.execPath, args: [...process.execArgv, (0, import_node_path11.resolve)(process.argv[1])] }
   }));
 }
 async function runReceiveStatus(args) {
@@ -52419,9 +55045,10 @@ async function runReceiveTest(args) {
   args.assertShape(RECEIVE_COMMON_FLAGS, 2);
   await output(await requestReceiveCanary(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
+var RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS = [...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"];
 async function runReceiveConfirm(args) {
   recordDispatch("runOnboardingCommand:receive-confirm");
-  args.assertShape([...RECEIVE_COMMON_FLAGS, "signal-id", "receipt"], 2);
+  args.assertShape(RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS, 2);
   const { confirmAgentChannel: confirmAgentChannel2 } = await Promise.resolve().then(() => (init_agent_channel(), agent_channel_exports));
   await output(await confirmAgentChannel2({ profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")), signalId: args.required("signal-id"), receipt: args.required("receipt") }));
 }
@@ -52431,9 +55058,10 @@ async function runReceiveIdle(args) {
   const { markGrokBotIdle: markGrokBotIdle2 } = await Promise.resolve().then(() => (init_agent_channel_grok_bot(), agent_channel_grok_bot_exports));
   await output(await markGrokBotIdle2(args.required("profile"), checkedHostSessionId(args.required("host-session-id"))));
 }
+var RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS = ["profile", "host-session-id"];
 async function runReceiveServe(args) {
   recordDispatch("runOnboardingCommand:receive-serve");
-  args.assertShape(["profile", "host-session-id"], 2);
+  args.assertShape(RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS, 2);
   const { serveAgentChannel: serveAgentChannel2 } = await Promise.resolve().then(() => (init_agent_channel(), agent_channel_exports));
   const options = { profilePath: args.required("profile"), hostSessionId: checkedHostSessionId(args.required("host-session-id")) };
   const binding = await readReceiveBinding(options.profilePath, options.hostSessionId);
@@ -52442,35 +55070,69 @@ async function runReceiveServe(args) {
     await serveGrokBotChannel2(options);
   } else await serveAgentChannel2(options);
 }
+var RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS = ["profile", "host-session-id", "url", "json"];
 async function runResumeSnapshot(args) {
   recordDispatch("runOnboardingCommand:resume-profile");
-  args.assertShape(["profile", "host-session-id", "json"], 1);
+  args.assertShape(RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS, 1);
   const path = privatePath(args.required("profile"));
   const profile = await readAgentProfile(path, args.optional("host-session-id"));
+  if (args.optional("url") !== void 0 && args.optional("url") !== profile.url) {
+    throw new AgentSetupError("profile_target_mismatch", "The supplied URL differs from this profile's URL.");
+  }
   const binding = await readReceiveBinding(path, args.optional("host-session-id"));
+  let credentialReason = null;
+  const credential = await readProfileCredential(profile).catch((error2) => {
+    credentialReason = error2 instanceof AgentSetupError && error2.code === "profile_credential_missing" ? `the credential file is missing: ${profile.credential_file}. Run setup again.` : error2 instanceof AgentSetupError && error2.code === "profile_identity_mismatch" ? `the credential file belongs to another agent: ${profile.credential_file}. Run setup again.` : error2 instanceof AgentCredentialInputError ? `the credential file cannot be parsed: ${profile.credential_file}. Run setup again.` : `the credential file could not be read: ${profile.credential_file}. Check its permissions, then resume.`;
+    return null;
+  });
+  let renewalStoreReason = null;
+  const renewed = credential === null ? null : await (async () => {
+    const store2 = await agentCredentialStore({
+      target: cloudTarget(profile.url, profile.anon_key),
+      lineageKey: credentialLineageKey(credential.token),
+      readOnly: true
+    });
+    return await store2.read().catch(() => {
+      renewalStoreReason = "the saved renewal record could not be read; using the profile credential file";
+      return null;
+    });
+  })();
+  const contexts = credential === null ? null : await verifiedLiveSessionContexts({
+    target: cloudTarget(profile.url, profile.anon_key),
+    workspaceId: profile.workspace_id,
+    principalId: profile.principal_id,
+    credential: renewed?.token && renewed.principalId === profile.principal_id ? renewed.token : credential.token,
+    tokenFile: profile.credential_file,
+    ...args.optional("host-session-id") === void 0 ? {} : { hostSessionId: args.optional("host-session-id") }
+  });
+  const liveContextLines = contexts === null ? [`Live session context on this host: could not verify because ${credentialReason}`] : contexts.verificationRefused ? ["Live session context on this host: the service refused the saved credential (expired or revoked). Run the profile's turn check; if it cannot renew, run setup again, then resume."] : contexts.verificationServiceError ? ["Live session context on this host: the read service returned an error; try again after it recovers."] : contexts.verificationUnavailable ? ["Live session context on this host: could not verify with the read service; check again when it is reachable."] : contexts.paths.length === 0 ? ["Live session context on this host: no live session on this host was verified for this seat."] : contexts.paths.map((contextPath) => `Live session context on this host: ${contextPath}`);
+  if (renewalStoreReason) liveContextLines.unshift(`Credential renewal: ${renewalStoreReason}.`);
   await output({
     profile: path,
     principal_id: profile.principal_id,
     workspace_id: profile.workspace_id,
     authenticated_now: false,
     ...receiveStatus(binding, Date.now(), profile.host_session_id, path),
+    live_session_context_lines: liveContextLines,
+    live_session_context_paths: contexts?.paths ?? [],
+    live_session_context_verification_unavailable: contexts?.verificationUnavailable ?? true,
     instruction: turnCheckInstruction(path, profile.host_session_id ?? binding?.host_session_id)
   });
 }
 
 // src/cli.ts
-var import_node_child_process11 = require("node:child_process");
-var import_node_fs8 = require("node:fs");
-var import_promises15 = require("node:fs/promises");
+var import_node_child_process14 = require("node:child_process");
+var import_node_fs9 = require("node:fs");
+var import_promises18 = require("node:fs/promises");
 var import_node_os11 = require("node:os");
-var import_node_path25 = require("node:path");
-var import_promises16 = require("node:readline/promises");
+var import_node_path29 = require("node:path");
+var import_promises19 = require("node:readline/promises");
 init_protocol();
 
 // src/cloud/auth.ts
-var import_node_crypto12 = require("node:crypto");
+var import_node_crypto13 = require("node:crypto");
 var import_node_http = require("node:http");
-var import_node_child_process4 = require("node:child_process");
+var import_node_child_process5 = require("node:child_process");
 init_dist4();
 init_config();
 var CALLBACK_PATH = "/callback";
@@ -52505,7 +55167,7 @@ function base64Url(bytes) {
 function equalSecret(actual, expected) {
   const left = Buffer.from(actual, "utf8");
   const right = Buffer.from(expected, "utf8");
-  return left.length === right.length && (0, import_node_crypto12.timingSafeEqual)(left, right);
+  return left.length === right.length && (0, import_node_crypto13.timingSafeEqual)(left, right);
 }
 function validateCallbackUrl(raw, expectedOrigin, expectedState) {
   let callback;
@@ -52530,14 +55192,14 @@ function validateCallbackUrl(raw, expectedOrigin, expectedState) {
   return code;
 }
 function listen(server, port) {
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     const onError = (error2) => {
       server.off("listening", onListening);
       reject(error2);
     };
     const onListening = () => {
       server.off("error", onError);
-      resolve7();
+      resolve8();
     };
     server.once("error", onError);
     server.once("listening", onListening);
@@ -52546,8 +55208,8 @@ function listen(server, port) {
 }
 function closeServer(server) {
   if (!server.listening) return Promise.resolve();
-  const closed = new Promise((resolve7, reject) => {
-    server.close((error2) => error2 ? reject(error2) : resolve7());
+  const closed = new Promise((resolve8, reject) => {
+    server.close((error2) => error2 ? reject(error2) : resolve8());
   });
   server.closeAllConnections();
   return closed;
@@ -52555,8 +55217,8 @@ function closeServer(server) {
 async function callbackReceiver(expectedState) {
   let resolveCode;
   let rejectCode;
-  const result = new Promise((resolve7, reject) => {
-    resolveCode = resolve7;
+  const result = new Promise((resolve8, reject) => {
+    resolveCode = resolve8;
     rejectCode = reject;
   });
   let origin = "";
@@ -52585,7 +55247,7 @@ async function callbackReceiver(expectedState) {
     }
   });
   for (let attempt = 0; attempt < CALLBACK_ATTEMPTS; attempt += 1) {
-    const port = (0, import_node_crypto12.randomInt)(HIGH_PORT_MIN, HIGH_PORT_MAX_EXCLUSIVE);
+    const port = (0, import_node_crypto13.randomInt)(HIGH_PORT_MIN, HIGH_PORT_MAX_EXCLUSIVE);
     try {
       await listen(server, port);
       server.unref();
@@ -52613,10 +55275,10 @@ async function callbackReceiver(expectedState) {
   throw new Error("unable to bind a random high loopback callback port");
 }
 function pkceVerifier() {
-  return base64Url((0, import_node_crypto12.randomBytes)(64));
+  return base64Url((0, import_node_crypto13.randomBytes)(64));
 }
 function pkceChallenge(verifier) {
-  return (0, import_node_crypto12.createHash)("sha256").update(verifier).digest("base64url");
+  return (0, import_node_crypto13.createHash)("sha256").update(verifier).digest("base64url");
 }
 function oauthUrl(target2, redirectUrl, challenge) {
   const url = new URL("/auth/v1/authorize", target2.url);
@@ -52641,23 +55303,23 @@ function authClient(target2, storage) {
 async function openExternalBrowser(url) {
   const command2 = process.platform === "darwin" ? { executable: "open", args: [url] } : process.platform === "linux" ? { executable: "xdg-open", args: [url] } : null;
   if (!command2) return false;
-  return await new Promise((resolve7) => {
-    const child = (0, import_node_child_process4.spawn)(command2.executable, command2.args, {
+  return await new Promise((resolve8) => {
+    const child = (0, import_node_child_process5.spawn)(command2.executable, command2.args, {
       detached: true,
       stdio: "ignore"
     });
-    child.once("error", () => resolve7(false));
+    child.once("error", () => resolve8(false));
     child.once("spawn", () => {
       child.unref();
-      resolve7(true);
+      resolve8(true);
     });
   });
 }
 function pastedCallback(input, output2, origin, state) {
   if (!input) return null;
   let resolveCode;
-  const promise = new Promise((resolve7) => {
-    resolveCode = resolve7;
+  const promise = new Promise((resolve8) => {
+    resolveCode = resolve8;
   });
   let pending = "";
   const onData = (chunk) => {
@@ -52688,14 +55350,14 @@ function pastedCallback(input, output2, origin, state) {
 async function waitForCode(receiver, state, input, output2, timeoutMs, pasteFallbackDelayMs) {
   const activePastes = [];
   let pasteTimer = null;
-  const paste = input ? new Promise((resolve7) => {
+  const paste = input ? new Promise((resolve8) => {
     pasteTimer = setTimeout(() => {
       output2.write(
         "If the browser cannot reach the loopback callback, paste the complete callback URL here:\n"
       );
       const pasted = pastedCallback(input, output2, receiver.origin, state);
       if (pasted) activePastes.push(pasted);
-      pasted?.promise.then(resolve7);
+      pasted?.promise.then(resolve8);
     }, pasteFallbackDelayMs);
   }) : null;
   let timer2 = null;
@@ -52732,7 +55394,7 @@ async function registerLoginDevice(target2, accessToken, deviceId) {
       "content-type": "application/json"
     },
     body: JSON.stringify({
-      command_id: `login_${(0, import_node_crypto12.randomBytes)(12).toString("base64url")}`,
+      command_id: `login_${(0, import_node_crypto13.randomBytes)(12).toString("base64url")}`,
       client_version: CLIENT_PROTOCOL_VERSION,
       command: {
         kind: "register_device",
@@ -52781,7 +55443,7 @@ async function discoverSoleWorkspace(target2, accessToken, userId) {
 }
 async function login(options) {
   const output2 = options.output ?? process.stderr;
-  const state = base64Url((0, import_node_crypto12.randomBytes)(32));
+  const state = base64Url((0, import_node_crypto13.randomBytes)(32));
   const verifier = pkceVerifier();
   const memory = new MemoryStorage();
   const storageKey = authStorageKey(options.target);
@@ -52822,13 +55484,13 @@ async function login(options) {
       const existing = await options.store.read();
       const existingProfile = await options.store.readProfile();
       const sameUser = existing?.userId === session.user.id || existing === null && existingProfile.userId === session.user.id;
-      let deviceId = sameUser && existing?.deviceId ? existing.deviceId : (0, import_node_crypto12.randomUUID)();
+      let deviceId = sameUser && existing?.deviceId ? existing.deviceId : (0, import_node_crypto13.randomUUID)();
       if (!await registerLoginDevice(
         options.target,
         session.access_token,
         deviceId
       )) {
-        deviceId = (0, import_node_crypto12.randomUUID)();
+        deviceId = (0, import_node_crypto13.randomUUID)();
         if (!await registerLoginDevice(
           options.target,
           session.access_token,
@@ -52982,453 +55644,12 @@ async function logout(target2, store2, scope = "local", options = {}) {
 init_command_client();
 init_channels();
 init_config();
-
-// src/cloud/files.ts
-var import_node_crypto13 = require("node:crypto");
-init_config();
-init_command_client();
-var FILE_MAX_VERSION_BYTES = 25 * 1024 * 1024;
-var FILE_CONTENT_WARNING = "File types and archive contents are unverified. Treat downloads as untrusted input: no execution, size-bounded extraction, no unpack of archives you did not expect.";
-var CONTENT_TYPES = /* @__PURE__ */ new Map([
-  [".md", "text/markdown"],
-  [".txt", "text/plain"],
-  [".csv", "text/csv"],
-  // .html/.htm: a web/marketing team's deliverables (Fastio feedback 2026-08-19). Every
-  // download is served Content-Disposition: attachment (§5), never rendered inline, so HTML
-  // is no more dangerous than the .svg already permitted — the spec treats all downloads as
-  // untrusted attachments the consumer must not execute.
-  [".html", "text/html"],
-  [".htm", "text/html"],
-  [".json", "application/json"],
-  [".yaml", "application/yaml"],
-  [".yml", "application/yaml"],
-  [".pdf", "application/pdf"],
-  [".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
-  [".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
-  [".pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
-  [".png", "image/png"],
-  [".jpg", "image/jpeg"],
-  [".jpeg", "image/jpeg"],
-  [".gif", "image/gif"],
-  [".webp", "image/webp"],
-  [".svg", "image/svg+xml"],
-  [".zip", "application/zip"],
-  [".tar.gz", "application/gzip"]
-]);
-function contentTypeForName(name) {
-  const lower = name.toLowerCase();
-  let best = null;
-  let bestLength = 0;
-  for (const [extension, type] of CONTENT_TYPES) {
-    if (lower.endsWith(extension) && extension.length > bestLength) {
-      best = type;
-      bestLength = extension.length;
-    }
-  }
-  return best;
-}
-function allowedExtensionList() {
-  return [...CONTENT_TYPES.keys()].join(", ");
-}
-var FileCommandRefused = class extends Error {
-  constructor(status, code, message, scope = null, limit = null, resets_at = null) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.scope = scope;
-    this.limit = limit;
-    this.resets_at = resets_at;
-  }
-  status;
-  code;
-  scope;
-  limit;
-  resets_at;
-  name = "FileCommandRefused";
-};
-var FileTransportError = class extends Error {
-  /**
-   * True when the request did not complete: no response arrived, or an
-   * idempotent read's body stalled. Reads may retry; writes reuse the same ids
-   * because their outcome is unknown. A received refusal is never retried.
-   */
-  constructor(message, noResponse = false) {
-    super(message);
-    this.noResponse = noResponse;
-  }
-  noResponse;
-  name = "FileTransportError";
-};
-var REQUEST_TIMEOUT_MS = 3e4;
-var READ_RETRY_FLOOR_MS = 2e3;
-async function sendFileCommand(options, command2) {
-  const fetcher = options.fetcher ?? fetch;
-  const controller = new AbortController();
-  const timer2 = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  let response;
-  try {
-    response = await fetcher(commandEndpoint(options.target), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${options.credential}`,
-        apikey: options.target.anonKey,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        command_id: options.commandId ?? newCommandId(),
-        client_version: "0.1.0",
-        workspace_id: options.workspaceId,
-        stream: { kind: "workspace" },
-        command: command2
-      }),
-      signal: controller.signal
-    });
-  } catch (error2) {
-    if (error2.name === "AbortError") {
-      throw new FileTransportError("file command timed out", true);
-    }
-    throw new FileTransportError("file command failed before a response", true);
-  } finally {
-    clearTimeout(timer2);
-  }
-  const body2 = await response.json().catch(() => null);
-  if (!response.ok) {
-    const code = typeof body2?.error === "string" ? body2.error : "http_error";
-    const message = typeof body2?.message === "string" ? body2.message : `file command failed (HTTP ${response.status}) DEBUGBODY=${JSON.stringify(body2).slice(0, 300)}`;
-    const scope = typeof body2?.scope === "string" ? body2.scope : null;
-    const limit = typeof body2?.limit === "number" ? body2.limit : null;
-    const resets_at = typeof body2?.resets_at === "string" ? body2.resets_at : null;
-    throw new FileCommandRefused(response.status, code, message, scope, limit, resets_at);
-  }
-  if (!body2 || typeof body2 !== "object") {
-    throw new FileTransportError("file command returned a malformed response");
-  }
-  return body2;
-}
-function fileVersionCreate(options, input) {
-  const ifVersion = input.ifVersion ?? null;
-  return sendFileCommand(options, {
-    kind: "file_version_create",
-    file_id: input.fileId,
-    version_id: input.versionId,
-    name: input.name,
-    declared_size_bytes: input.declaredSizeBytes,
-    content_type: input.contentType,
-    /* The server validates an exact key set, so the key is sent only when a
-     * precondition was asked for. An unconditional write is byte-identical to
-     * what every earlier client sent. */
-    ...ifVersion === null ? {} : { if_version: ifVersion }
-  });
-}
-function fileVersionCommit(options, input) {
-  return sendFileCommand(options, {
-    kind: "file_version_commit",
-    file_id: input.fileId,
-    version_id: input.versionId,
-    sha256: input.sha256
-  });
-}
-function fileDownloadUrl(options, input) {
-  return sendFileCommand(options, {
-    kind: "file_download_url",
-    file_id: input.fileId,
-    version_n: input.versionN
-  });
-}
-function fileTombstone(options, input) {
-  return sendFileCommand(options, {
-    kind: "file_tombstone",
-    file_id: input.fileId
-  });
-}
-function fileRestore(options, input) {
-  return sendFileCommand(options, {
-    kind: "file_restore",
-    file_id: input.fileId
-  });
-}
-function absoluteStorageUrl(target2, path) {
-  if (!path.startsWith("/")) {
-    throw new FileTransportError(
-      "the server returned a storage path that is not relative; refusing to compose a URL from it"
-    );
-  }
-  return `${target2.url}${path}`;
-}
-async function putObject(target2, uploadPath, bytes, contentType, fetcher = fetch) {
-  let response;
-  try {
-    response = await fetcher(absoluteStorageUrl(target2, uploadPath), {
-      method: "PUT",
-      headers: { "content-type": contentType },
-      /* Node's Buffer types as Uint8Array<ArrayBufferLike>, which the DOM-lib
-       * BodyInit rejects since TS 5.7; the runtime accepts it. */
-      body: bytes
-    });
-  } catch {
-    throw new FileTransportError("the upload PUT failed before a response", true);
-  }
-  if (!response.ok) {
-    throw new FileTransportError(
-      `the upload PUT was refused (HTTP ${response.status}). Nothing went live, and this attempt's pending slot expires on its own within three hours. Check cswarm file ls, then re-run cswarm file put \u2014 a re-run is a new upload attempt with fresh ids`
-    );
-  }
-}
-async function onceRetried(step, budget) {
-  const now = budget?.now ?? Date.now;
-  const deadlineMs = budget === void 0 ? void 0 : Math.min(
-    budget.deadlineMs ?? Number.POSITIVE_INFINITY,
-    now() + (budget.timeoutMs ?? REQUEST_TIMEOUT_MS)
-  );
-  const attempt = deadlineMs === void 0 ? {} : { deadlineMs, now };
-  const run2 = budget === void 0 ? step : () => step(attempt);
-  try {
-    return await run2();
-  } catch (error2) {
-    if (error2 instanceof FileTransportError && error2.noResponse) {
-      if (deadlineMs !== void 0 && deadlineMs - now() < (budget?.retryFloorMs ?? READ_RETRY_FLOOR_MS)) {
-        throw error2;
-      }
-      return await run2();
-    }
-    throw error2;
-  }
-}
-async function getObject(target2, downloadPath, fetcher = fetch, options = {}) {
-  let response;
-  let body2;
-  try {
-    ({ response, body: body2 } = await fetchWithDeadline(
-      fetcher,
-      absoluteStorageUrl(target2, downloadPath),
-      {},
-      async (received) => received.ok ? await received.arrayBuffer() : null,
-      options
-    ));
-  } catch {
-    throw new FileTransportError("the download did not complete", true);
-  }
-  if (!response.ok || body2 === null) {
-    throw new FileTransportError(
-      `the download was refused (HTTP ${response.status}); the signed URL lasts five minutes \u2014 request a fresh one with cswarm file get`
-    );
-  }
-  return new Uint8Array(body2);
-}
-var LocalFileExists = class extends Error {
-  name = "LocalFileExists";
-};
-function writeDestination(destination, bytes, force, writer) {
-  try {
-    writer(destination, bytes, { flag: force ? "w" : "wx" });
-  } catch (error2) {
-    if (error2.code === "EEXIST") {
-      throw new LocalFileExists(
-        `${destination} already exists locally; nothing was written. Pass --force to overwrite it, or --out <path> to write elsewhere`
-      );
-    }
-    throw error2;
-  }
-}
-function sha256Hex(bytes) {
-  return (0, import_node_crypto13.createHash)("sha256").update(bytes).digest("hex");
-}
-async function fetchWithDeadline(fetcher, input, init, consume, options = {}) {
-  const now = options.now ?? Date.now;
-  const remainingMs = options.deadlineMs === void 0 ? REQUEST_TIMEOUT_MS : Math.max(0, Math.min(REQUEST_TIMEOUT_MS, options.deadlineMs - now()));
-  const controller = new AbortController();
-  const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs));
-  const cancel = options.cancel ?? ((timer3) => clearTimeout(timer3));
-  const signal = options.signal === void 0 ? controller.signal : AbortSignal.any([options.signal, controller.signal]);
-  let rejectAbort;
-  const aborted2 = new Promise((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const onAbort = () => {
-    rejectAbort?.(
-      signal.reason instanceof Error ? signal.reason : new DOMException("The read was aborted", "AbortError")
-    );
-  };
-  if (signal.aborted) onAbort();
-  else signal.addEventListener("abort", onAbort, { once: true });
-  const timer2 = schedule(
-    () => controller.abort(new DOMException("The read timed out", "AbortError")),
-    remainingMs
-  );
-  try {
-    const response = await Promise.race([
-      fetcher(input, { ...init, signal }),
-      aborted2
-    ]);
-    const body2 = await Promise.race([consume(response), aborted2]);
-    return { response, body: body2 };
-  } finally {
-    cancel(timer2);
-    signal.removeEventListener("abort", onAbort);
-  }
-}
-async function listFilesAsAgent(target2, credential, workspaceId2, fetcher = fetch, options = {}) {
-  let response;
-  let rawBody;
-  try {
-    ({ response, body: rawBody } = await fetchWithDeadline(
-      fetcher,
-      readEndpoint(target2),
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${credential}`,
-          apikey: target2.anonKey,
-          "content-type": "application/json"
-        },
-        body: JSON.stringify({ resource: "files", workspace_id: workspaceId2 })
-      },
-      async (received) => received.ok ? await received.text() : null,
-      options
-    ));
-  } catch {
-    throw new FileTransportError("the file list did not complete", true);
-  }
-  if (!response.ok) {
-    throw new FileCommandRefused(
-      response.status,
-      "http_error",
-      `file list failed (HTTP ${response.status})`
-    );
-  }
-  let body2 = null;
-  try {
-    body2 = rawBody === null ? null : JSON.parse(rawBody);
-  } catch {
-    body2 = null;
-  }
-  if (!body2 || !Array.isArray(body2.files)) {
-    throw new FileTransportError("file list returned a malformed response");
-  }
-  return body2.files;
-}
-async function listFilesAsHuman(target2, accessToken, workspaceId2, fetcher = fetch, options = {}) {
-  const url = new URL("/rest/v1/files", target2.url);
-  url.searchParams.set("workspace_id", `eq.${workspaceId2}`);
-  url.searchParams.set(
-    "select",
-    "file_id,name,current_version,size_bytes,content_type,sha256,created_by_kind,created_by,uploaded_by_kind,uploaded_by,created_at,committed_at,tombstoned_at,live_version_count,retired_version_count"
-  );
-  url.searchParams.set("order", "name.asc");
-  let response;
-  let rawBody;
-  try {
-    ({ response, body: rawBody } = await fetchWithDeadline(
-      fetcher,
-      url.toString(),
-      {
-        headers: {
-          authorization: `Bearer ${accessToken}`,
-          apikey: target2.anonKey,
-          "accept-profile": "swarm_read"
-        }
-      },
-      async (received) => received.ok ? await received.text() : null,
-      options
-    ));
-  } catch {
-    throw new FileTransportError("the file list did not complete", true);
-  }
-  if (!response.ok) {
-    throw new FileCommandRefused(
-      response.status,
-      "http_error",
-      `file list failed (HTTP ${response.status})`
-    );
-  }
-  let body2 = null;
-  try {
-    body2 = rawBody === null ? null : JSON.parse(rawBody);
-  } catch {
-    body2 = null;
-  }
-  if (!Array.isArray(body2)) {
-    throw new FileTransportError("file list returned a malformed response");
-  }
-  return body2;
-}
-
-// src/cloud/brain.ts
-init_brain_version_window();
-var BRAIN_END_OF_TASK_NUDGE = "Durable finding? cswarm brain put <topic> \u2014 see brain get brain-how-to";
-var BRAIN_TOPIC_RE = /^[a-z0-9][a-z0-9._-]*$/;
-var BrainTopicError = class extends Error {
-  name = "BrainTopicError";
-};
-function canonicalBrainTopic(value) {
-  const topic = value.trim().toLowerCase();
-  if (topic.length < 1 || topic.length > BRAIN_TOPIC_MAX_LENGTH || !BRAIN_TOPIC_RE.test(topic)) {
-    throw new BrainTopicError(
-      `brain topics use ${BRAIN_TOPIC_MAX_LENGTH} or fewer lowercase letters, numbers, dots, dashes, or underscores; start with a letter or number`
-    );
-  }
-  return topic;
-}
-function parseBrainTopicSelector(value) {
-  const at = value.lastIndexOf("@");
-  if (at < 0) return { topic: canonicalBrainTopic(value), version: null };
-  const rawVersion = value.slice(at + 1);
-  if (!/^[1-9][0-9]*$/.test(rawVersion)) {
-    throw new BrainTopicError("brain topic history uses <topic>@<positive-version>");
-  }
-  const version4 = Number(rawVersion);
-  if (!Number.isSafeInteger(version4)) {
-    throw new BrainTopicError("brain topic version is too large");
-  }
-  return {
-    topic: canonicalBrainTopic(value.slice(0, at)),
-    version: version4
-  };
-}
-function brainFileName(value) {
-  return `${BRAIN_FILE_PREFIX}${canonicalBrainTopic(value)}${BRAIN_FILE_SUFFIX}`;
-}
-function brainTopicFromFileName(name) {
-  const lower = name.toLowerCase();
-  if (!lower.startsWith(BRAIN_FILE_PREFIX) || !lower.endsWith(BRAIN_FILE_SUFFIX)) {
-    return null;
-  }
-  const topic = lower.slice(BRAIN_FILE_PREFIX.length, -BRAIN_FILE_SUFFIX.length);
-  try {
-    return canonicalBrainTopic(topic);
-  } catch (error2) {
-    if (error2 instanceof BrainTopicError) return null;
-    throw error2;
-  }
-}
-function nonNegativeCount(value) {
-  const count2 = Number(value);
-  return Number.isSafeInteger(count2) && count2 >= 0 ? count2 : null;
-}
-function brainVersionCounts(file) {
-  return {
-    live: nonNegativeCount(file.live_version_count) ?? file.current_version,
-    retired: nonNegativeCount(file.retired_version_count) ?? 0
-  };
-}
-function brainRowsFromFiles(rows3) {
-  return rows3.filter((row) => row.tombstoned_at === null).flatMap((file) => {
-    const topic = brainTopicFromFileName(file.name);
-    return topic === null ? [] : [{ topic, file }];
-  }).sort((left, right) => left.topic.localeCompare(right.topic));
-}
-function brainTopicSnapshots(rows3) {
-  return rows3.map(({ topic, file }) => ({
-    topic,
-    version: file.current_version,
-    updatedAt: file.committed_at ?? file.created_at
-  }));
-}
-function brainEndOfTaskNudge(outcomes) {
-  return outcomes.some((outcome) => outcome === "replied") ? BRAIN_END_OF_TASK_NUDGE : null;
-}
+init_files();
+init_brain();
 
 // src/cloud/brain-agent.ts
+init_brain();
+init_files();
 async function listBrainRowsAsAgent(target2, credential, workspaceId2, options = {}) {
   const rows3 = await onceRetried(
     (attempt) => listFilesAsAgent(
@@ -53515,9 +55736,9 @@ async function submitFeedback(options, request) {
 }
 
 // src/cloud/current-target.ts
-var import_node_crypto14 = require("node:crypto");
+var import_node_crypto15 = require("node:crypto");
 var import_promises8 = require("node:fs/promises");
-var import_node_path11 = require("node:path");
+var import_node_path12 = require("node:path");
 init_config();
 init_storage();
 var CURRENT_TARGET_FILE = "current-target.json";
@@ -53526,7 +55747,7 @@ function stateDirectory(options) {
   return options.stateDirectory ?? defaultCredentialStateDirectory();
 }
 function currentTargetPath(options = {}) {
-  return (0, import_node_path11.join)(stateDirectory(options), CURRENT_TARGET_FILE);
+  return (0, import_node_path12.join)(stateDirectory(options), CURRENT_TARGET_FILE);
 }
 function mode2(statMode) {
   return statMode & 511;
@@ -53605,7 +55826,7 @@ function parseStoredCurrentTarget(raw) {
 }
 async function readCurrentTarget(options = {}) {
   const path = currentTargetPath(options);
-  if (!await existingDirectory((0, import_node_path11.dirname)(path))) return null;
+  if (!await existingDirectory((0, import_node_path12.dirname)(path))) return null;
   try {
     await assertCurrentTargetFile(path);
     const raw = await (0, import_promises8.readFile)(path, "utf8");
@@ -53621,7 +55842,7 @@ async function readCurrentTarget(options = {}) {
 async function writeCurrentTarget(target2, options = {}) {
   const validated = cloudTarget(target2.url, target2.anonKey);
   const path = currentTargetPath(options);
-  await ensureDirectory((0, import_node_path11.dirname)(path));
+  await ensureDirectory((0, import_node_path12.dirname)(path));
   try {
     await assertCurrentTargetFile(path);
   } catch (error2) {
@@ -53633,7 +55854,7 @@ async function writeCurrentTarget(target2, options = {}) {
     anonKey: validated.anonKey
   };
   const serialized = JSON.stringify(record3);
-  const temporary = `${path}.${process.pid}.${(0, import_node_crypto14.randomBytes)(6).toString("hex")}.tmp`;
+  const temporary = `${path}.${process.pid}.${(0, import_node_crypto15.randomBytes)(6).toString("hex")}.tmp`;
   const handle = await (0, import_promises8.open)(temporary, "wx", 384);
   try {
     await handle.writeFile(serialized, "utf8");
@@ -53650,7 +55871,7 @@ async function writeCurrentTarget(target2, options = {}) {
 }
 async function clearCurrentTarget(options = {}) {
   const path = currentTargetPath(options);
-  if (!await existingDirectory((0, import_node_path11.dirname)(path))) return false;
+  if (!await existingDirectory((0, import_node_path12.dirname)(path))) return false;
   try {
     await assertCurrentTargetFile(path);
     await (0, import_promises8.unlink)(path);
@@ -53661,7 +55882,7 @@ async function clearCurrentTarget(options = {}) {
   }
 }
 function targetFingerprint(target2) {
-  return (0, import_node_crypto14.createHash)("sha256").update(target2.anonKey).digest("hex").slice(0, 12);
+  return (0, import_node_crypto15.createHash)("sha256").update(target2.anonKey).digest("hex").slice(0, 12);
 }
 function currentTargetSummary(target2, reveal = false) {
   return {
@@ -53756,22 +55977,22 @@ async function resolveCloudTarget(options) {
 }
 
 // src/cloud/seed.ts
-var import_node_crypto15 = require("node:crypto");
+var import_node_crypto16 = require("node:crypto");
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/index.js
+// node_modules/postgres/src/index.js
 var import_os = __toESM(require("os"), 1);
 var import_fs = __toESM(require("fs"), 1);
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/query.js
+// node_modules/postgres/src/query.js
 var originCache = /* @__PURE__ */ new Map();
 var originStackCache = /* @__PURE__ */ new Map();
 var originError = /* @__PURE__ */ Symbol("OriginError");
 var CLOSE = {};
 var Query = class extends Promise {
   constructor(strings, args, handler, canceller, options = {}) {
-    let resolve7, reject;
+    let resolve8, reject;
     super((a, b2) => {
-      resolve7 = a;
+      resolve8 = a;
       reject = b2;
     });
     this.tagged = Array.isArray(strings.raw);
@@ -53782,7 +56003,7 @@ var Query = class extends Promise {
     this.options = options;
     this.state = null;
     this.statement = null;
-    this.resolve = (x) => (this.active = false, resolve7(x));
+    this.resolve = (x) => (this.active = false, resolve8(x));
     this.reject = (x) => (this.active = false, reject(x));
     this.active = false;
     this.cancelled = null;
@@ -53830,12 +56051,12 @@ var Query = class extends Promise {
           if (this.executed && !this.active)
             return { done: true };
           prev && prev();
-          const promise = new Promise((resolve7, reject) => {
+          const promise = new Promise((resolve8, reject) => {
             this.cursorFn = (value) => {
-              resolve7({ value, done: false });
+              resolve8({ value, done: false });
               return new Promise((r) => prev = r);
             };
-            this.resolve = () => (this.active = false, resolve7({ done: true }));
+            this.resolve = () => (this.active = false, resolve8({ done: true }));
             this.reject = (x) => (this.active = false, reject(x));
           });
           this.execute();
@@ -53899,7 +56120,7 @@ function cachedError(xs) {
   return originCache.get(xs);
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/errors.js
+// node_modules/postgres/src/errors.js
 var PostgresError = class extends Error {
   constructor(x) {
     super(x.message);
@@ -53949,7 +56170,7 @@ function notSupported(x) {
   return error2;
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/types.js
+// node_modules/postgres/src/types.js
 var types = {
   string: {
     to: 25,
@@ -54235,14 +56456,14 @@ fromKebab.column = { to: fromKebab };
 var kebab = { ...toKebab };
 kebab.column.to = fromKebab;
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/connection.js
+// node_modules/postgres/src/connection.js
 var import_net = __toESM(require("net"), 1);
 var import_tls = __toESM(require("tls"), 1);
 var import_crypto = __toESM(require("crypto"), 1);
 var import_stream = __toESM(require("stream"), 1);
 var import_perf_hooks = require("perf_hooks");
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/result.js
+// node_modules/postgres/src/result.js
 var Result = class extends Array {
   constructor() {
     super();
@@ -54259,7 +56480,7 @@ var Result = class extends Array {
   }
 };
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/queue.js
+// node_modules/postgres/src/queue.js
 var queue_default = Queue;
 function Queue(initial = []) {
   let xs = initial.slice();
@@ -54286,7 +56507,7 @@ function Queue(initial = []) {
   };
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/bytes.js
+// node_modules/postgres/src/bytes.js
 var size = 256;
 var buffer = Buffer.allocUnsafe(size);
 var messages = "BCcDdEFfHPpQSX".split("").reduce((acc, x) => {
@@ -54359,7 +56580,7 @@ function reset() {
   return b;
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/connection.js
+// node_modules/postgres/src/connection.js
 var connection_default = Connection;
 var uid = 1;
 var Sync = bytes_default().S().end();
@@ -54432,7 +56653,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     target_session_attrs
   } = options;
   const sent = queue_default(), id = uid++, backend = { pid: null, secret: null }, idleTimer = timer(end, options.idle_timeout), lifeTimer = timer(end, options.max_lifetime), connectTimer = timer(connectTimedOut, options.connect_timeout);
-  let socket = null, cancelMessage, errorResponse = null, result = new Result(), incoming = Buffer.alloc(0), needsTypes = options.fetch_types, backendParameters = {}, statements = {}, statementId = Math.random().toString(36).slice(2), statementCount = 1, closedTime = 0, remaining = 0, hostIndex = 0, retries = 0, length = 0, delay3 = 0, rows3 = 0, serverSignature = null, nextWriteTimer = null, terminated = false, incomings = null, results = null, initial = null, ending = null, stream2 = null, chunk = null, ended = null, nonce = null, query = null, final = null;
+  let socket = null, cancelMessage, errorResponse = null, result = new Result(), incoming = Buffer.alloc(0), needsTypes = options.fetch_types, backendParameters = {}, statements = {}, statementId = Math.random().toString(36).slice(2), statementCount = 1, closedTime = 0, remaining = 0, hostIndex = 0, retries = 0, length = 0, delay4 = 0, rows3 = 0, serverSignature = null, nextWriteTimer = null, terminated = false, incomings = null, results = null, initial = null, ending = null, stream2 = null, chunk = null, ended = null, nonce = null, query = null, final = null;
   const connection2 = {
     queue: queues.closed,
     idleTimer,
@@ -54462,12 +56683,12 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     x.on("drain", drain);
     return x;
   }
-  async function cancel({ pid, secret }, resolve7, reject) {
+  async function cancel({ pid, secret }, resolve8, reject) {
     try {
       cancelMessage = bytes_default().i32(16).i32(80877102).i32(pid).i32(secret).end(16);
       await connect();
       socket.once("error", reject);
-      socket.once("close", resolve7);
+      socket.once("close", resolve8);
     } catch (error3) {
       reject(error3);
     }
@@ -54617,7 +56838,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     hostIndex = (hostIndex + 1) % port.length;
   }
   function reconnect() {
-    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay3 - import_perf_hooks.performance.now()) : 0);
+    setTimeout(connect, closedTime ? Math.max(0, closedTime + delay4 - import_perf_hooks.performance.now()) : 0);
   }
   function connected() {
     try {
@@ -54692,7 +56913,7 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
     !hadError && (query || sent.length) && error2(Errors.connection("CONNECTION_CLOSED", options, socket));
     closedTime = import_perf_hooks.performance.now();
     hadError && options.shared.retries++;
-    delay3 = (typeof backoff2 === "function" ? backoff2(options.shared.retries) : backoff2) * 1e3;
+    delay4 = (typeof backoff2 === "function" ? backoff2(options.shared.retries) : backoff2) * 1e3;
     onclose(connection2, Errors.connection("CONNECTION_CLOSED", options, socket));
   }
   function handle(xs, x = xs[0]) {
@@ -55199,7 +57420,7 @@ function timer(fn, seconds) {
   }
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/subscribe.js
+// node_modules/postgres/src/subscribe.js
 var noop2 = () => {
 };
 function Subscribe(postgres2, options) {
@@ -55411,10 +57632,10 @@ function parseEvent(x) {
   return (command2 || "*") + (path ? ":" + (path.indexOf(".") === -1 ? "public." + path : path) : "") + (key2 ? "=" + key2 : "");
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/large.js
+// node_modules/postgres/src/large.js
 var import_stream2 = __toESM(require("stream"), 1);
 function largeObject(sql, oid, mode3 = 131072 | 262144) {
-  return new Promise(async (resolve7, reject) => {
+  return new Promise(async (resolve8, reject) => {
     await sql.begin(async (sql2) => {
       let finish;
       !oid && ([{ oid }] = await sql2`select lo_creat(-1) as oid`);
@@ -55440,7 +57661,7 @@ function largeObject(sql, oid, mode3 = 131072 | 262144) {
           ) seek
         `
       };
-      resolve7(lo);
+      resolve8(lo);
       return new Promise(async (r) => finish = r);
       async function readable({
         highWaterMark = 2048 * 8,
@@ -55477,7 +57698,7 @@ function largeObject(sql, oid, mode3 = 131072 | 262144) {
   });
 }
 
-// ../../../../../../../Users/yulanbot/Developer/Ridge.io/cloud-swarm/node_modules/postgres/src/index.js
+// node_modules/postgres/src/index.js
 Object.assign(Postgres, {
   PostgresError,
   toPascal,
@@ -55501,7 +57722,7 @@ var src_default = Postgres;
 function Postgres(a, b2) {
   const options = parseOptions(a, b2), subscribe = options.no_subscribe || Subscribe(Postgres, { ...options });
   let ending = false;
-  const queries = queue_default(), connecting = queue_default(), reserved = queue_default(), closed = queue_default(), ended = queue_default(), open9 = queue_default(), busy = queue_default(), full = queue_default(), queues = { connecting, reserved, closed, ended, open: open9, busy, full };
+  const queries = queue_default(), connecting = queue_default(), reserved = queue_default(), closed = queue_default(), ended = queue_default(), open10 = queue_default(), busy = queue_default(), full = queue_default(), queues = { connecting, reserved, closed, ended, open: open10, busy, full };
   const connections = [...Array(options.max)].map(() => connection_default(options, queues, { onopen, onend, onclose }));
   const sql = Sql(handler);
   Object.assign(sql, {
@@ -55614,8 +57835,8 @@ function Postgres(a, b2) {
   }
   async function reserve() {
     const queue = queue_default();
-    const c = open9.length ? open9.shift() : await new Promise((resolve7, reject) => {
-      const query = { reserve: resolve7, reject };
+    const c = open10.length ? open10.shift() : await new Promise((resolve8, reject) => {
+      const query = { reserve: resolve8, reject };
       queries.push(query);
       closed.length && connect(closed.shift(), query);
     });
@@ -55652,9 +57873,9 @@ function Postgres(a, b2) {
       let uncaughtError, result;
       name && await sql2`savepoint ${sql2(name)}`;
       try {
-        result = await new Promise((resolve7, reject) => {
+        result = await new Promise((resolve8, reject) => {
           const x = fn2(sql2);
-          Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve7, reject);
+          Promise.resolve(Array.isArray(x) ? Promise.all(x) : x).then(resolve8, reject);
         });
         if (uncaughtError)
           throw uncaughtError;
@@ -55687,7 +57908,7 @@ function Postgres(a, b2) {
     c.queue.remove(c);
     queue.push(c);
     c.queue = queue;
-    queue === open9 ? c.idleTimer.start() : c.idleTimer.cancel();
+    queue === open10 ? c.idleTimer.start() : c.idleTimer.cancel();
     return c;
   }
   function json(x) {
@@ -55701,8 +57922,8 @@ function Postgres(a, b2) {
   function handler(query) {
     if (ending)
       return query.reject(Errors.connection("CONNECTION_ENDED", options, options));
-    if (open9.length)
-      return go(open9.shift(), query);
+    if (open10.length)
+      return go(open10.shift(), query);
     if (closed.length)
       return connect(closed.shift(), query);
     busy.length ? go(busy.shift(), query) : queries.push(query);
@@ -55711,8 +57932,8 @@ function Postgres(a, b2) {
     return c.execute(query) ? move(c, busy) : move(c, full);
   }
   function cancel(query) {
-    return new Promise((resolve7, reject) => {
-      query.state ? query.active ? connection_default(options).cancel(query.state, resolve7, reject) : query.cancelled = { resolve: resolve7, reject } : (queries.remove(query), query.cancelled = true, query.reject(Errors.generic("57014", "canceling statement due to user request")), resolve7());
+    return new Promise((resolve8, reject) => {
+      query.state ? query.active ? connection_default(options).cancel(query.state, resolve8, reject) : query.cancelled = { resolve: resolve8, reject } : (queries.remove(query), query.cancelled = true, query.reject(Errors.generic("57014", "canceling statement due to user request")), resolve8());
     });
   }
   async function end({ timeout = null } = {}) {
@@ -55731,11 +57952,11 @@ function Postgres(a, b2) {
   async function close() {
     await Promise.all(connections.map((c) => c.end()));
   }
-  async function destroy(resolve7) {
+  async function destroy(resolve8) {
     await Promise.all(connections.map((c) => c.terminate()));
     while (queries.length)
       queries.shift().reject(Errors.connection("CONNECTION_DESTROYED", options));
-    resolve7();
+    resolve8();
   }
   function connect(c, query) {
     move(c, connecting);
@@ -55747,7 +57968,7 @@ function Postgres(a, b2) {
   }
   function onopen(c) {
     if (queries.length === 0)
-      return move(c, open9);
+      return move(c, open10);
     let max = Math.ceil(queries.length / (connecting.length + 1)), ready = true;
     while (ready && queries.length && max-- > 0) {
       const query = queries.shift();
@@ -55881,7 +58102,7 @@ function osUsername() {
 }
 
 // src/cloud/seed.ts
-var UUID_RE13 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_RE14 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 var P0_SCOPES = [
   "create",
   "acquire",
@@ -55894,7 +58115,7 @@ var P0_SCOPES = [
   "post_signal"
 ];
 function deterministicUuid(label) {
-  const bytes = (0, import_node_crypto15.createHash)("sha256").update(label).digest().subarray(0, 16);
+  const bytes = (0, import_node_crypto16.createHash)("sha256").update(label).digest().subarray(0, 16);
   bytes[6] = bytes[6] & 15 | 80;
   bytes[8] = bytes[8] & 63 | 128;
   const hex = bytes.toString("hex");
@@ -55907,7 +58128,7 @@ function deterministicUuid(label) {
   ].join("-");
 }
 function uuid4(value, label) {
-  if (!UUID_RE13.test(value)) throw new Error(`${label} must be a UUID`);
+  if (!UUID_RE14.test(value)) throw new Error(`${label} must be a UUID`);
   return value;
 }
 async function seedDogfood(options) {
@@ -56067,10 +58288,10 @@ async function seedDogfood(options) {
           tokenExpiresAt: existing[0].expires_at.toISOString()
         };
       }
-      const agentToken = `swm_agt_${(0, import_node_crypto15.randomBytes)(32).toString("base64url")}`;
-      const tokenHash = (0, import_node_crypto15.createHash)("sha256").update(agentToken).digest();
-      const tokenId = (0, import_node_crypto15.randomUUID)();
-      const lineageId = (0, import_node_crypto15.randomUUID)();
+      const agentToken = `swm_agt_${(0, import_node_crypto16.randomBytes)(32).toString("base64url")}`;
+      const tokenHash = (0, import_node_crypto16.createHash)("sha256").update(agentToken).digest();
+      const tokenId = (0, import_node_crypto16.randomUUID)();
+      const lineageId = (0, import_node_crypto16.randomUUID)();
       const inserted = await tx`
         INSERT INTO swarm.agent_tokens (
           token_id, principal_id, run_id, task_id, epoch,
@@ -56116,13 +58337,13 @@ init_renewal();
 init_storage();
 
 // src/cloud/pending-command.ts
-var import_node_crypto16 = require("node:crypto");
+var import_node_crypto17 = require("node:crypto");
 init_protocol();
 init_command_client();
 var MAX_PENDING_COMMANDS2 = 32;
 var SIGNAL_PENDING_RECOVERY_MS = 60 * 60 * 1e3;
 function intentHash(workspace, command2) {
-  return (0, import_node_crypto16.createHash)("sha256").update(canonicalJson({ workspace_id: workspace ?? null, command: command2 })).digest("hex");
+  return (0, import_node_crypto17.createHash)("sha256").update(canonicalJson({ workspace_id: workspace ?? null, command: command2 })).digest("hex");
 }
 async function pendingCommandId(credentials, userId, workspace, command2) {
   const intent = intentHash(workspace, command2);
@@ -56222,7 +58443,7 @@ async function sendCapabilityWithPending(client, session, workspace, command2) {
   }
 }
 function signalIntentHash(workspace, command2, credentialIdentity) {
-  return (0, import_node_crypto16.createHash)("sha256").update(canonicalJson({
+  return (0, import_node_crypto17.createHash)("sha256").update(canonicalJson({
     workspace_id: workspace,
     command: command2,
     credential_identity: credentialIdentity
@@ -56876,19 +59097,108 @@ init_attachments();
 
 // src/cloud/arrival-watch.ts
 var import_node_os7 = require("node:os");
-var import_node_path12 = require("node:path");
-var import_promises9 = require("node:fs/promises");
+var import_node_crypto18 = require("node:crypto");
+var import_node_child_process6 = require("node:child_process");
+var import_node_util3 = require("node:util");
+var import_promises9 = require("node:timers/promises");
+var import_node_path13 = require("node:path");
+var import_promises10 = require("node:fs/promises");
+
+// src/cloud/wake-lease-constants.ts
+function printedCommand(prose, command2) {
+  return `${prose}
+${command2}`;
+}
+var WAKE_LEASE_RENEW_MS = 6e4;
+var WAKE_LEASE_STALE_MS = 3 * WAKE_LEASE_RENEW_MS;
+var WAKE_LEASE_STALE_LABEL = `${WAKE_LEASE_STALE_MS / 6e4} minutes`;
+var NOTIFY_NO_RESTART_CLAUSE = "this watcher must not be restarted by a supervisor";
+var proofRemedy = (sessionContextPath, remedyCommand, contextSource, fallback) => `${sessionContextPath ? `${contextSource === "profile" ? "the profile's host session context" : "the operator's --session-context path"} ${sessionContextPath} was refused; ` : ""}` + (remedyCommand ? printedCommand("run this watcher with the verified context.", remedyCommand) : fallback ?? "inspect this seat's resume output for a verified live context on this host, then retry from that host session");
+function sanitizeWakeHostLabel(host) {
+  return host.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 120);
+}
+var holder = (surface, host) => surface === "h0_poll" ? "an H0 poll" : `a watcher on ${host === null ? "another host" : sanitizeWakeHostLabel(host)}`;
+var supersessionStep = "stop this watcher and use the surface that holds the lease";
+var NOTIFY_LEASE_RULES = {
+  notify_held_elsewhere: { exit: 76, sentence: (surface, host, command2) => `${holder(surface, host)} holds this seat's wake surface; ${surface === "h0_poll" ? command2 === null ? "finish the poll there before starting it again" : printedCommand("finish the poll there before starting it again.", command2) : command2 === null ? "stop it there or start the watcher again the same way it was started, with the agent token on stdin, adding --take-over" : printedCommand("stop it there or run the watcher with --take-over.", command2.includes("--take-over") ? command2 : `${command2} --take-over`)}` },
+  wake_lease_superseded: { exit: 76, sentence: (surface, host, command2) => `${holder(surface, host)} took over this seat's wake surface; ${supersessionStep}` },
+  session_conflict: { exit: 76, sentence: () => "Another live session owns this seat and its session moved elsewhere; stop this watcher" },
+  session_expired: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's host session ended; ${proofRemedy(path, remedy, source, fallback)}` },
+  session_retired: { exit: 76, sentence: () => "This seat's host session was retired; start a new live session before starting its watcher" },
+  session_proof_missing: {
+    start: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `A managed seat's watcher needs a live session proof (or the profile's host session); ${proofRemedy(path, remedy, source, fallback)}` },
+    renew: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's session proof became missing during renewal; ${proofRemedy(path, remedy, source, fallback)}` }
+  },
+  session_proof_invalid: {
+    start: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `A managed seat's watcher needs a valid session proof (or the profile's host session); ${proofRemedy(path, remedy, source, fallback)}` },
+    renew: { exit: 76, sentence: (_surface, _host, _command, path, remedy, source, fallback) => `This watcher's session proof became invalid during renewal; ${proofRemedy(path, remedy, source, fallback)}` }
+  }
+};
+function wakeLeaseRule(code, phase2) {
+  const rule = NOTIFY_LEASE_RULES[code];
+  return "exit" in rule ? rule : rule[phase2];
+}
+var NOTIFY_LEASE_EXITS = Object.fromEntries(
+  Object.keys(NOTIFY_LEASE_RULES).map((code) => [code, wakeLeaseRule(code, "renew").exit])
+);
+var EXIT_NOTIFY_LEASE_LOST = NOTIFY_LEASE_EXITS.notify_held_elsewhere;
+function wakeLeaseExitSentence(code, surface, host, restartCommand2, phase2 = "renew", sessionContextPath, remedyCommand, contextSource, fallback) {
+  const rule = wakeLeaseRule(code, phase2);
+  const stop = rule.exit === 76 ? `${NOTIFY_NO_RESTART_CLAUSE}; ` : "";
+  const sentence = rule.sentence(surface, host, restartCommand2, sessionContextPath, remedyCommand, contextSource, fallback);
+  const stdinReminder = restartCommand2 === null && !sentence.includes("agent token on stdin") && !sentence.includes(supersessionStep) ? "; start another watcher the same way it was started, with the agent token on stdin" : "";
+  const boundary = sentence.lastIndexOf("\n");
+  const prose = boundary < 0 ? sentence : sentence.slice(0, boundary);
+  const command2 = boundary < 0 ? "" : sentence.slice(boundary);
+  return `[${code}] ${stop}${(stop ? prose.replace(/^[A-Z]/, (letter) => letter.toLowerCase()) : prose).replace(/\.$/, "")}${stdinReminder}; exit ${rule.exit}.${command2}`;
+}
+
+// src/cloud/arrival-watch.ts
 init_signals();
 init_storage();
 init_idle_poll();
 init_wake2();
-var UUID_RE14 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_RE15 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 var CURSOR_MAX_BYTES = 4 * 1024;
 var ARRIVAL_SNIPPET_MAX = 180;
 var WATCH_LOCK_MAX_BYTES = 512;
 var ARRIVAL_WATCH_POLL_MS2 = ARRIVAL_WATCH_POLL_MS;
 var ARRIVAL_RETRY_NOTICE_THRESHOLD_MS = 6e4;
 var EXIT_NOTIFY_ORPHANED = 74;
+var NOTIFY_FLAG = "notify";
+var NOTIFY_RESTART_COMMAND = `cswarm inbox --${NOTIFY_FLAG}`;
+var NOTIFY_SIGNAL_EXIT_CODES = { SIGINT: 130, SIGTERM: 143 };
+function shellArg(value) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value) ? value : `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+function notifyRestartCommand(options) {
+  const parts = [NOTIFY_RESTART_COMMAND];
+  if (options.arguments !== void 0) return [...parts, ...options.arguments.map(shellArg)].join(" ");
+  if (options.agentTokenFile !== void 0) parts.push("--agent-token-file", shellArg(options.agentTokenFile));
+  if (options.agentTokenStdin) parts.push("--agent-token-stdin");
+  if (options.workspaceId !== void 0) parts.push("--workspace-id", shellArg(options.workspaceId));
+  if (options.url !== void 0) parts.push("--url", shellArg(options.url));
+  if (options.anonKey !== void 0) parts.push("--anon-key", shellArg(options.anonKey));
+  return parts.join(" ");
+}
+function notifyRefusalRestartCommand(options) {
+  return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin") ? null : notifyRestartCommand(options);
+}
+function notifySignalStopSentence(signal, options, holder2 = "unclaimed", sessionRefusal) {
+  if (holder2 === "session-refused") {
+    return `inbox --notify stopped because of ${signal} after a session refusal: ${sessionRefusal ?? "inspect this seat's resume output for a verified live context on this host"}`;
+  }
+  const state = {
+    released: "this watcher's lease was released; nothing is watching this inbox now",
+    "last-known": "this watcher held the lease at its last renewal; another surface may have taken over since",
+    watcher: "another watcher holds this inbox now",
+    h0_poll: "H0 poll holds this inbox now",
+    unclaimed: "this watcher had not claimed the inbox lease",
+    "claim-unknown": "this watcher's claim result is unknown; check this seat's wake lease before starting another watcher; any lease it took expires within 3 minutes"
+  }[holder2];
+  const prose = `inbox --notify stopped because of ${signal} and ${state}; restart it under the session's Monitor`;
+  return options.agentTokenStdin || options.arguments?.includes("--agent-token-stdin") ? `${prose} the same way it was started, with the agent token on stdin.` : printedCommand(`${prose}.`, notifyRestartCommand(options));
+}
 var NotifyStdoutClosedError = class extends Error {
   name = "NotifyStdoutClosedError";
   code = "notify_stdout_closed";
@@ -56931,19 +59241,114 @@ function formatArrivalRetryNotice(notice) {
   return `[arrival_read_recovered] Arrival reads recovered after ${seconds}s. This monitor is current again; durable delivery was unaffected.`;
 }
 function stateRoot() {
-  return process.env.XDG_STATE_HOME ? (0, import_node_path12.join)(process.env.XDG_STATE_HOME, "cswarm", "arrival-cursors") : (0, import_node_path12.join)((0, import_node_os7.homedir)(), ".cswarm", "arrival-cursors");
+  return process.env.XDG_STATE_HOME ? (0, import_node_path13.join)(process.env.XDG_STATE_HOME, "cswarm", "arrival-cursors") : (0, import_node_path13.join)((0, import_node_os7.homedir)(), ".cswarm", "arrival-cursors");
 }
 function arrivalCursorPath(target2, workspaceId2, principalId, root = stateRoot()) {
-  return (0, import_node_path12.join)(
+  return (0, import_node_path13.join)(
     root,
     `${target2.profileId}-${workspaceId2.toLowerCase()}-${principalId.toLowerCase()}.json`
   );
 }
 function arrivalWatchLockPath(target2, workspaceId2, principalId, root = stateRoot()) {
-  return arrivalCursorPath(target2, workspaceId2, principalId, root).replace(
-    /\.json$/u,
-    ".lock"
-  );
+  void target2;
+  return (0, import_node_path13.join)(root, `${workspaceId2.toLowerCase()}-${principalId.toLowerCase()}.lock`);
+}
+function legacyArrivalWatchLockPath(target2, workspaceId2, principalId, root = stateRoot()) {
+  return arrivalCursorPath(target2, workspaceId2, principalId, root).replace(/\.json$/u, ".lock");
+}
+var runFile = (0, import_node_util3.promisify)(import_node_child_process6.execFile);
+async function arrivalMachineHash() {
+  try {
+    let machineId = null;
+    if ((0, import_node_os7.platform)() === "linux") machineId = (await (0, import_promises10.readFile)("/etc/machine-id", "utf8")).trim();
+    if ((0, import_node_os7.platform)() === "darwin") {
+      const { stdout } = await runFile("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], { timeout: 2e3 });
+      machineId = /"IOPlatformUUID"\s*=\s*"([0-9a-f-]+)"/i.exec(stdout)?.[1] ?? null;
+    }
+    return machineId ? (0, import_node_crypto18.createHash)("sha256").update(machineId).digest("hex") : null;
+  } catch {
+    return null;
+  }
+}
+async function arrivalHostIdFileState(lockPath) {
+  try {
+    await (0, import_promises10.readFile)((0, import_node_path13.join)((0, import_node_path13.dirname)(lockPath), "host-id"), "utf8");
+    return "present";
+  } catch (error2) {
+    return error2.code === "ENOENT" ? "missing" : "unreadable";
+  }
+}
+async function arrivalHostId(lockPath, machineHash) {
+  machineHash = machineHash === void 0 ? await arrivalMachineHash() : machineHash;
+  const path = (0, import_node_path13.join)((0, import_node_path13.dirname)(lockPath), "host-id");
+  await ensureSecureStateDirectory((0, import_node_path13.dirname)(path));
+  return await withFileLock((0, import_node_path13.dirname)(path), "host-id-rotation", async () => {
+    let noticed = false;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      let exists = false;
+      let valid = null;
+      try {
+        const info = await (0, import_promises10.lstat)(path);
+        exists = true;
+        if (info.isFile() && (info.mode & 63) === 0 && info.size <= 256) {
+          const data = JSON.parse(await (0, import_promises10.readFile)(path, "utf8"));
+          if (data && typeof data === "object" && !Array.isArray(data)) {
+            const row = data;
+            if (typeof row.host_id === "string" && UUID_RE15.test(row.host_id) && (row.machine_hash === null || typeof row.machine_hash === "string" && /^[0-9a-f]{64}$/.test(row.machine_hash))) {
+              valid = { host_id: row.host_id.toLowerCase(), machine_hash: row.machine_hash };
+            }
+          }
+        }
+      } catch (error2) {
+        if (error2.code !== "ENOENT" && !(error2 instanceof SyntaxError)) throw error2;
+      }
+      if (valid && (machineHash === null || valid.machine_hash === machineHash)) return valid.host_id;
+      if (valid && valid.machine_hash === null && machineHash !== null) {
+        const temporary2 = (0, import_node_path13.join)((0, import_node_path13.dirname)(path), `.host-id-${(0, import_node_crypto18.randomUUID)()}.tmp`);
+        const handle2 = await (0, import_promises10.open)(temporary2, "wx", 384);
+        try {
+          await handle2.writeFile(`${JSON.stringify({ host_id: valid.host_id, machine_hash: machineHash })}
+`, "utf8");
+        } finally {
+          await handle2.close();
+        }
+        try {
+          await (0, import_promises10.rename)(temporary2, path);
+        } finally {
+          await (0, import_promises10.unlink)(temporary2).catch(() => void 0);
+        }
+        return valid.host_id;
+      }
+      if (exists) {
+        if (!noticed) {
+          process.stderr.write(`cswarm: replacing invalid or copied host id at ${path}.
+`);
+          noticed = true;
+        }
+        await (0, import_promises10.unlink)(path).catch((error2) => {
+          if (error2.code !== "ENOENT") throw error2;
+        });
+      }
+      const temporary = (0, import_node_path13.join)((0, import_node_path13.dirname)(path), `.host-id-${(0, import_node_crypto18.randomUUID)()}.tmp`);
+      const handle = await (0, import_promises10.open)(temporary, "wx", 384);
+      const hostId = (0, import_node_crypto18.randomUUID)();
+      try {
+        await handle.writeFile(`${JSON.stringify({ host_id: hostId, machine_hash: machineHash })}
+`, "utf8");
+      } finally {
+        await handle.close();
+      }
+      try {
+        await (0, import_promises10.link)(temporary, path);
+        return hostId;
+      } catch (error2) {
+        if (error2.code !== "EEXIST") throw error2;
+      } finally {
+        await (0, import_promises10.unlink)(temporary);
+      }
+    }
+    throw new Error(`could not create host id at ${path}`);
+  }, { stalePolicy: "host-id" });
 }
 function arrivalWatchAlreadyRunningSentence(pid) {
   return `inbox --notify is already running for this agent as pid ${pid}.`;
@@ -56978,50 +59383,101 @@ function parseWatchLock(raw) {
   if (row.version !== 1 || !Number.isSafeInteger(row.pid) || row.pid <= 0) {
     return null;
   }
-  return { pid: row.pid };
+  return {
+    pid: row.pid,
+    watcherId: typeof row.watcher_id === "string" && UUID_RE15.test(row.watcher_id) ? row.watcher_id.toLowerCase() : null
+  };
 }
-async function acquireArrivalWatchLock(path, pid = process.pid) {
+async function acquireArrivalWatchLock(path, pid = process.pid, watcherId, options = {}) {
   if (!Number.isSafeInteger(pid) || pid <= 0) {
     throw new Error("arrival watch lock pid must be a positive integer");
   }
-  await ensureSecureStateDirectory((0, import_node_path12.dirname)(path));
-  const payload = `${JSON.stringify({ version: 1, pid })}
+  await ensureSecureStateDirectory((0, import_node_path13.dirname)(path));
+  const deadline = Date.now() + 5e3;
+  const payload = `${JSON.stringify({
+    version: 1,
+    pid,
+    owner_id: (0, import_node_crypto18.randomUUID)(),
+    ...watcherId ? { watcher_id: watcherId } : {}
+  })}
 `;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await (0, import_promises9.open)(path, "wx", 384);
+  const gateName = `watch-takeover-${(0, import_node_crypto18.createHash)("sha256").update(path).digest("hex").slice(0, 24)}`;
+  return await withFileLock((0, import_node_path13.dirname)(path), gateName, async () => {
+    await cleanupDeadOwnerTemps((0, import_node_path13.dirname)(path), (0, import_node_path13.basename)(path));
+    let replacedDeadPredecessor = false;
+    while (Date.now() < deadline) {
       try {
-        await handle.writeFile(payload, "utf8");
-      } finally {
-        await handle.close();
+        await publishCompleteOwnerFile(path, payload, options);
+        return replacedDeadPredecessor;
+      } catch (error2) {
+        if (error2.code !== "EEXIST") throw error2;
       }
-      return;
-    } catch (error2) {
-      if (error2.code !== "EEXIST") throw error2;
-    }
-    let existing = null;
-    try {
-      const raw = await (0, import_promises9.readFile)(path, "utf8");
-      if (Buffer.byteLength(raw, "utf8") <= WATCH_LOCK_MAX_BYTES) {
-        existing = parseWatchLock(raw);
+      let existing = null;
+      let observedRaw = null;
+      try {
+        const raw = await (0, import_promises10.readFile)(path, "utf8");
+        observedRaw = raw;
+        if (Buffer.byteLength(raw, "utf8") <= WATCH_LOCK_MAX_BYTES) {
+          existing = parseWatchLock(raw);
+        }
+      } catch (error2) {
+        if (error2.code !== "ENOENT") throw error2;
+        if (!await (0, import_promises10.lstat)(path).catch(() => null)) {
+          await (0, import_promises9.setTimeout)(25);
+          continue;
+        }
       }
-    } catch (error2) {
-      if (error2.code !== "ENOENT") throw error2;
-      continue;
+      if (existing !== null && pidIsAlive2(existing.pid)) {
+        throw new ArrivalWatchAlreadyRunningError(existing.pid);
+      }
+      if (existing === null) {
+        const info = await (0, import_promises10.lstat)(path).catch(() => null);
+        if (info === null) continue;
+        if (Date.now() - info.mtimeMs < HOST_ID_LOCK_INCOMPLETE_GRACE_MS) {
+          await (0, import_promises9.setTimeout)(Math.min(25, Math.max(0, deadline - Date.now())));
+          continue;
+        }
+      }
+      await options.onBeforeStaleMove?.();
+      if (!await removeObservedOwnerFile(path, observedRaw)) continue;
+      await cleanupDeadOwnerTemps((0, import_node_path13.dirname)(path), (0, import_node_path13.basename)(path));
+      if (existing !== null) replacedDeadPredecessor = true;
     }
-    if (existing !== null && pidIsAlive2(existing.pid)) {
-      throw new ArrivalWatchAlreadyRunningError(existing.pid);
-    }
-    await (0, import_promises9.unlink)(path).catch(() => void 0);
+    throw new Error(fileLockTimeoutSentence((0, import_node_path13.basename)(path, ".lock"), path));
+  }, { stalePolicy: "host-id", timeoutMs: Math.max(0, deadline - Date.now()) });
+}
+async function acquireArrivalWatchSeatLocks(target2, workspaceId2, principalId, pid = process.pid, watcherId, root = stateRoot()) {
+  const lockPath = arrivalWatchLockPath(target2, workspaceId2, principalId, root);
+  const legacyLockPath = legacyArrivalWatchLockPath(target2, workspaceId2, principalId, root);
+  await acquireArrivalWatchLock(legacyLockPath, pid, watcherId);
+  try {
+    await acquireArrivalWatchLock(lockPath, pid, watcherId);
+  } catch (error2) {
+    await releaseArrivalWatchLock(legacyLockPath, pid);
+    throw error2;
   }
-  throw new Error("arrival watch lock could not be acquired");
+  return { lockPath, legacyLockPath };
+}
+async function releaseArrivalWatchSeatLocks(paths, pid = process.pid) {
+  await releaseArrivalWatchLock(paths.lockPath, pid);
+  await releaseArrivalWatchLock(paths.legacyLockPath, pid);
+}
+async function arrivalWatchLockIdentity(path) {
+  try {
+    const raw = await (0, import_promises10.readFile)(path, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > WATCH_LOCK_MAX_BYTES) return null;
+    const lock = parseWatchLock(raw);
+    return lock !== null && pidIsAlive2(lock.pid) ? lock.watcherId : null;
+  } catch {
+    return null;
+  }
 }
 async function releaseArrivalWatchLock(path, pid = process.pid) {
   try {
-    const raw = await (0, import_promises9.readFile)(path, "utf8");
+    const raw = await (0, import_promises10.readFile)(path, "utf8");
     const existing = parseWatchLock(raw);
     if (existing === null || existing.pid !== pid) return;
-    await (0, import_promises9.unlink)(path);
+    await removeObservedOwnerFile(path, raw);
   } catch (error2) {
     if (error2.code === "ENOENT") return;
     throw error2;
@@ -57029,7 +59485,7 @@ async function releaseArrivalWatchLock(path, pid = process.pid) {
 }
 async function arrivalWatchLockHeld(path) {
   try {
-    const raw = await (0, import_promises9.readFile)(path, "utf8");
+    const raw = await (0, import_promises10.readFile)(path, "utf8");
     if (Buffer.byteLength(raw, "utf8") > WATCH_LOCK_MAX_BYTES) return false;
     const existing = parseWatchLock(raw);
     return existing !== null && pidIsAlive2(existing.pid);
@@ -57050,7 +59506,7 @@ function parseCursor(raw, workspaceId2, principalId) {
   }
   const row = value;
   const cursor = row.cursor;
-  if (row.version !== 1 || row.workspace_id !== workspaceId2.toLowerCase() || row.principal_id !== principalId.toLowerCase() || !(cursor === null || typeof cursor === "object" && !Array.isArray(cursor) && typeof cursor.created_at === "string" && Number.isFinite(Date.parse(cursor.created_at)) && typeof cursor.id === "string" && UUID_RE14.test(cursor.id))) {
+  if (row.version !== 1 || row.workspace_id !== workspaceId2.toLowerCase() || row.principal_id !== principalId.toLowerCase() || !(cursor === null || typeof cursor === "object" && !Array.isArray(cursor) && typeof cursor.created_at === "string" && Number.isFinite(Date.parse(cursor.created_at)) && typeof cursor.id === "string" && UUID_RE15.test(cursor.id))) {
     throw new Error("stored arrival cursor is malformed");
   }
   if (cursor === null) return null;
@@ -57062,7 +59518,7 @@ function parseCursor(raw, workspaceId2, principalId) {
 function fileArrivalCursorStore(options) {
   const workspaceId2 = options.workspaceId.toLowerCase();
   const principalId = options.principalId.toLowerCase();
-  if (!UUID_RE14.test(workspaceId2) || !UUID_RE14.test(principalId)) {
+  if (!UUID_RE15.test(workspaceId2) || !UUID_RE15.test(principalId)) {
     throw new Error("arrival cursor identity must use workspace and principal UUIDs");
   }
   const location2 = arrivalCursorPath(
@@ -57134,7 +59590,7 @@ function notifyWriteError(error2) {
   return error2.code === "EPIPE" ? new NotifyStdoutClosedError() : error2;
 }
 async function writeArrivalMonitorLine(line, stream2 = process.stdout) {
-  await new Promise((resolve7, reject) => {
+  await new Promise((resolve8, reject) => {
     let settled = false;
     const finish = (error2) => {
       if (settled) return;
@@ -57144,7 +59600,7 @@ async function writeArrivalMonitorLine(line, stream2 = process.stdout) {
         reject(notifyWriteError(error2));
       } else {
         stream2.off("error", onError);
-        resolve7();
+        resolve8();
       }
     };
     const onError = (error2) => finish(error2);
@@ -57179,32 +59635,61 @@ async function runArrivalWatch(options) {
   let attempt = 0;
   let reconcileDueAt = now();
   let pendingKind = "other";
+  const checkIntervalMs = options.stdoutCheckIntervalMs ?? IDLE_POLL_MAX_MS;
+  if (!Number.isFinite(checkIntervalMs) || checkIntervalMs <= 0 || checkIntervalMs > IDLE_POLL_MAX_MS) {
+    throw new RangeError("stdout check interval must be within the idle poll cap");
+  }
+  let nextStdoutCheckAt = now();
   const cancelled = () => options.signal?.aborted === true;
+  const inspectStdout = async () => {
+    if (!options.stdoutConsumer || cancelled() || now() < nextStdoutCheckAt) return;
+    nextStdoutCheckAt = now() + checkIntervalMs;
+    let state;
+    try {
+      state = await options.stdoutConsumer.inspect(process.pid, options.signal);
+    } catch {
+      state = "cannot_determine";
+    }
+    if (!cancelled() && state === "orphaned") throw new NotifyStdoutClosedError();
+  };
   const wait = async (ms) => {
     if (options.sleep) {
       await options.sleep(ms);
       return;
     }
-    await new Promise((resolve7) => {
+    await new Promise((resolve8) => {
       let timer2;
       const finish = () => {
         if (timer2 !== void 0) clearTimeout(timer2);
         options.signal?.removeEventListener("abort", finish);
-        resolve7();
+        resolve8();
       };
       if (cancelled() || ms <= 0) {
-        resolve7();
+        resolve8();
         return;
       }
       options.signal?.addEventListener("abort", finish, { once: true });
       timer2 = setTimeout(finish, ms);
     });
   };
+  const waitWithStdoutChecks = async (intervalMs) => {
+    if (!options.stdoutConsumer) {
+      await wait(intervalMs);
+      return;
+    }
+    const until = now() + intervalMs;
+    while (!cancelled()) {
+      await inspectStdout();
+      const remaining = until - now();
+      if (remaining <= 0) return;
+      await wait(Math.min(remaining, Math.max(1, nextStdoutCheckAt - now())));
+    }
+  };
   const idleWait = async (hadDelivery) => {
     if (hadDelivery) emptyIdleStreak = 0;
     const intervalMs = nextIdlePollMs(pollMs, emptyIdleStreak, IDLE_POLL_MAX_MS);
     if (!hadDelivery) emptyIdleStreak += 1;
-    await wait(intervalMs);
+    await waitWithStdoutChecks(intervalMs);
   };
   const pushMode = () => wake !== void 0 && wake.hasTopic && wake.snapshot(now()).mode === LISTENER_WAKE_MODE_PUSH;
   const waitCapMs = () => {
@@ -57228,10 +59713,21 @@ async function runArrivalWatch(options) {
     }
     const cap = waitCapMs();
     const until = Math.min(reconcileDueAt, now() + cap);
-    const reason = await wake.next({
-      until,
-      ...options.signal ? { signal: options.signal } : {}
-    });
+    let reason;
+    if (!options.stdoutConsumer) {
+      reason = await wake.next({ until, ...options.signal ? { signal: options.signal } : {} });
+    } else {
+      while (true) {
+        await inspectStdout();
+        if (cancelled()) return;
+        reason = await wake.next({
+          until: Math.min(until, nextStdoutCheckAt),
+          ...options.signal ? { signal: options.signal } : {}
+        });
+        if (cancelled() || reason !== "deadline" || now() >= until) break;
+        await new Promise((resolve8) => setImmediate(resolve8));
+      }
+    }
     if (cancelled()) return;
     if (reason === "wake" && pushMode()) {
       const coalesceMs = wake.coalescingRemainingMs(now());
@@ -57319,10 +59815,226 @@ async function runArrivalWatch(options) {
       );
       const typed = error2 instanceof Error ? error2 : new Error(String(error2));
       options.onRetry?.(typed, delayMs);
-      await wait(delayMs);
+      await waitWithStdoutChecks(delayMs);
     }
   }
   return { reason: "cancelled" };
+}
+
+// src/stdout-consumer.ts
+var import_node_child_process7 = require("node:child_process");
+function parseLsofStdout(output2) {
+  const lines = output2.split("\n");
+  const type = lines.find((line) => line.startsWith("t"))?.slice(1) ?? "";
+  const names = lines.filter((line) => line.startsWith("n")).map((line) => line.slice(1));
+  if (type === "unix") {
+    if (names.some((name) => name.startsWith("->") && name !== "->(none)")) return "live_reader";
+    if (names.some((name) => name === "->(none)")) return "orphaned";
+    return "cannot_determine";
+  }
+  if (type === "PIPE" || type === "FIFO") return "cannot_determine";
+  return type.length === 0 ? "cannot_determine" : "not_pipe";
+}
+function lsofStdoutConsumer(timeoutMs = 5e3, executable = process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof") {
+  return {
+    async inspect(pid, signal) {
+      let output2;
+      try {
+        output2 = await new Promise((resolve8, reject) => {
+          (0, import_node_child_process7.execFile)(
+            executable,
+            ["-nP", "-a", "-p", String(pid), "-d", "1", "-F", "pftan"],
+            { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, timeout: timeoutMs, signal },
+            (error2, stdout) => error2 ? reject(error2) : resolve8(stdout)
+          );
+        });
+      } catch {
+        return "cannot_determine";
+      }
+      return parseLsofStdout(output2);
+    }
+  };
+}
+
+// src/cloud/wake-lease.ts
+var import_node_crypto19 = require("node:crypto");
+init_config();
+init_config();
+init_session_contract();
+var WakeLeaseLostError = class extends Error {
+  constructor(code, surface, host, restartCommand2, phase2 = "renew", sessionContextPath, remedyCommand, contextSource, fallback) {
+    super(wakeLeaseExitSentence(
+      code,
+      surface === "session" ? "watcher" : surface,
+      host,
+      restartCommand2,
+      phase2,
+      sessionContextPath,
+      remedyCommand,
+      contextSource,
+      fallback
+    ));
+    this.code = code;
+    this.surface = surface;
+    this.host = host;
+    this.name = "WakeLeaseLostError";
+    this.exitCode = wakeLeaseRule(code, phase2).exit;
+  }
+  code;
+  surface;
+  host;
+  exitCode;
+};
+var WakeLeaseTransientError = class extends Error {
+  constructor(status, cause) {
+    super(status === null ? "wake lease transport failed" : `wake lease command failed (HTTP ${status})`, { cause });
+    this.status = status;
+    this.name = "WakeLeaseTransientError";
+  }
+  status;
+};
+function asObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+async function sendWakeLeaseCommand(options) {
+  const controller = new AbortController();
+  const timer2 = setTimeout(() => controller.abort(), options.timeoutMs ?? 15e3);
+  const cancel = () => controller.abort();
+  options.signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    let response;
+    try {
+      response = await (options.fetcher ?? fetch)(commandEndpoint(options.target), {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${options.token}`,
+          apikey: options.target.anonKey,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          command_id: (0, import_node_crypto19.randomUUID)(),
+          client_version: CLIENT_PROTOCOL_VERSION,
+          workspace_id: options.workspaceId,
+          stream: { kind: "workspace" },
+          command: options.command
+        }),
+        signal: controller.signal
+      });
+    } catch (error2) {
+      throw new WakeLeaseTransientError(null, error2);
+    }
+    let body2;
+    try {
+      body2 = asObject(await response.json());
+    } catch (error2) {
+      if (response.status === 429 || response.status >= 500) {
+        throw new WakeLeaseTransientError(response.status, error2);
+      }
+      throw error2;
+    }
+    if (response.status === 409 && body2 && (body2.error === "notify_held_elsewhere" || body2.error === "wake_lease_superseded")) {
+      throw new WakeLeaseLostError(
+        body2.error,
+        body2.surface === "h0_poll" ? "h0_poll" : "watcher",
+        typeof body2.host_label === "string" ? body2.host_label : null,
+        options.restartCommand,
+        options.command.kind === "claim_wake_lease" ? "start" : "renew",
+        options.sessionContextPath,
+        options.remedyCommand,
+        options.contextSource,
+        options.fallback
+      );
+    }
+    if (body2 && typeof body2.error === "string" && isAgentSessionErrorCode(body2.error) && body2.error in NOTIFY_LEASE_EXITS) {
+      throw new WakeLeaseLostError(
+        body2.error,
+        "session",
+        null,
+        options.restartCommand,
+        options.command.kind === "claim_wake_lease" ? "start" : "renew",
+        options.sessionContextPath,
+        options.remedyCommand,
+        options.contextSource,
+        options.fallback
+      );
+    }
+    if (!response.ok || !body2 || body2.ok !== true) {
+      if (response.status === 429 || response.status >= 500) {
+        throw new WakeLeaseTransientError(response.status);
+      }
+      throw new Error(`wake lease command failed (HTTP ${response.status})`);
+    }
+    return body2;
+  } finally {
+    clearTimeout(timer2);
+    options.signal?.removeEventListener("abort", cancel);
+  }
+}
+async function readAgentWakeLease(target2, workspaceId2, token, fetcher = fetch) {
+  const controller = new AbortController();
+  const timer2 = setTimeout(() => controller.abort(), 15e3);
+  try {
+    const response = await fetcher(readEndpoint(target2), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        apikey: target2.anonKey,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ resource: "agent_wake_lease", workspace_id: workspaceId2 }),
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error(`wake lease read failed (HTTP ${response.status})`);
+    const payload = asObject(await response.json());
+    if (!payload || payload.lease === null) return null;
+    const row = asObject(payload.lease);
+    const generation = typeof row?.generation === "string" ? Number(row.generation) : row?.generation;
+    const renewedAge = typeof row?.renewed_age_ms === "string" ? Number(row.renewed_age_ms) : row?.renewed_age_ms;
+    if (!row || typeof row.watcher_id !== "string" || typeof row.host_label !== "string" || !Number.isSafeInteger(generation) || !Number.isSafeInteger(renewedAge)) {
+      throw new Error("wake lease read returned malformed data");
+    }
+    return {
+      watcher_id: row.watcher_id,
+      host_label: row.host_label,
+      generation,
+      renewed_age_ms: renewedAge
+    };
+  } finally {
+    clearTimeout(timer2);
+  }
+}
+function startWakeLeaseRenewal(options) {
+  const interval = options.intervalMs ?? WAKE_LEASE_RENEW_MS;
+  const arm = options.setTimer ?? setTimeout;
+  const clear = options.clearTimer ?? clearTimeout;
+  let timer2 = null;
+  let stopped = false;
+  let failures = 0;
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      await options.renew();
+      failures = 0;
+    } catch (error2) {
+      if (error2 instanceof WakeLeaseLostError) {
+        stopped = true;
+        options.lost(error2);
+        return;
+      }
+      if (!(error2 instanceof WakeLeaseTransientError)) {
+        stopped = true;
+        options.failed?.(error2);
+        return;
+      }
+      failures += 1;
+    }
+    if (!stopped) timer2 = arm(tick, failures === 0 ? interval : Math.min(interval, 1e3 * 2 ** Math.min(failures, 6)));
+  };
+  timer2 = arm(tick, interval);
+  return () => {
+    stopped = true;
+    if (timer2 !== null) clear(timer2);
+  };
 }
 
 // src/cli.ts
@@ -57331,7 +60043,7 @@ init_idle_poll();
 // src/cloud/delivery-receipts.ts
 init_config();
 init_signals();
-var UUID_RE15 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_RE16 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 var DeliveryReceiptReadError = class extends Error {
   constructor(code, message, status = null) {
     super(message);
@@ -57350,7 +60062,7 @@ var ACK_OUTCOMES = /* @__PURE__ */ new Set([
   "failed_terminal"
 ]);
 function uuid6(value, field) {
-  if (typeof value !== "string" || !UUID_RE15.test(value)) {
+  if (typeof value !== "string" || !UUID_RE16.test(value)) {
     throw new DeliveryReceiptReadError(
       "protocol",
       `delivery receipt returned a malformed ${field}`
@@ -57446,7 +60158,10 @@ function parseDeliveryReceipt(value) {
     pending_for_main_count: Object.hasOwn(row, "pending_for_main_count") ? row.pending_for_main_count === null ? null : nonNegativeInteger(
       row.pending_for_main_count,
       "pending_for_main_count"
-    ) : null
+    ) : null,
+    ...Object.hasOwn(row, "wake_path_observing") ? { wake_path_observing: typeof row.wake_path_observing === "boolean" ? row.wake_path_observing : (() => {
+      throw new DeliveryReceiptReadError("protocol", "delivery receipt returned a malformed wake_path_observing");
+    })() } : {}
   };
 }
 function parseBroadcastAgent(value) {
@@ -57721,6 +60436,7 @@ async function readAgentDeliveryReceipts(target2, token, workspaceId2, signalId,
 
 // src/cloud/receipts.ts
 init_workspaces();
+init_idle_poll();
 function humanReceipt(receipt) {
   return "recipient_user_id" in receipt;
 }
@@ -57823,6 +60539,13 @@ function renderSignalReceiptReport(report, nowMs = Date.now()) {
   const sections = agentReceipts.map((receipt) => {
     const state = deliveryReceiptState(receipt, nowMs);
     if (state === "enqueued") {
+      if (receipt.wake_path_observing === true && nowMs - Date.parse(receipt.enqueued_at) >= WAKE_STALE_MS) {
+        return [
+          `Accepted ${relativeAge(receipt.enqueued_at, nowMs)}. The recipient's session has not checked this in ${WAKE_STALE_LABEL}.`,
+          `Next: ask the recipient's operator to run ${listenerStatusCommand(report, receipt)} and check the attended session.`,
+          `Then check again with: ${receiptCheckCommand(report)}`
+        ].join("\n");
+      }
       return [
         `Not yet delivered to agent ${receipt.recipient_agent_principal_id}. CommonSwarm accepted it ${relativeAge(receipt.enqueued_at, nowMs)}.`,
         `Ask the agent's operator to check its listener with: ${listenerStatusCommand(report, receipt)}`,
@@ -57851,7 +60574,7 @@ function renderSignalReceiptReport(report, nowMs = Date.now()) {
     }
     if (state === "observed") {
       return [
-        `Agent ${receipt.recipient_agent_principal_id} reported outcome observed ${relativeAge(receipt.acked_at, nowMs)}.`,
+        `Agent ${receipt.recipient_agent_principal_id} saw this at ${receipt.acked_at} (${relativeAge(receipt.acked_at, nowMs)}).`,
         "The signal was surfaced to the agent's session or handled by its listener.",
         "If it was an ask, an answer may still be posted.",
         `If you need an answer, send a new ask with: ${newAskCommand(report, receipt)}`
@@ -58047,9 +60770,9 @@ init_command_client();
 init_signals();
 init_attachments();
 init_types2();
-var UUID_RE16 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_RE17 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function listenerReplyCommandId(signalId, effectOrdinal = 0) {
-  if (!UUID_RE16.test(signalId)) {
+  if (!UUID_RE17.test(signalId)) {
     throw new Error("listener signal id must be a UUID");
   }
   if (!Number.isSafeInteger(effectOrdinal) || effectOrdinal < 0) {
@@ -58105,12 +60828,12 @@ function newReceivedAskRecord(signal, now) {
 }
 
 // src/listener/file-store.ts
-var import_node_crypto17 = require("node:crypto");
+var import_node_crypto20 = require("node:crypto");
 var import_node_os8 = require("node:os");
-var import_node_path13 = require("node:path");
-var import_node_util3 = require("node:util");
+var import_node_path14 = require("node:path");
+var import_node_util4 = require("node:util");
 init_storage();
-var UUID_RE17 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+var UUID_RE18 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 var COMMAND_ID_RE2 = /^[A-Za-z0-9_-]{8,72}$/;
 var MAX_EFFECT_BYTES = 1024 * 1024;
 var STATES = /* @__PURE__ */ new Set([
@@ -58157,16 +60880,16 @@ var EFFECT_SENSITIVE_KEYS = /* @__PURE__ */ new Set([
   "claim_command_id"
 ]);
 function defaultListenerStateDirectory() {
-  return process.env.XDG_STATE_HOME ? (0, import_node_path13.join)(process.env.XDG_STATE_HOME, "cswarm", "listeners") : (0, import_node_path13.join)((0, import_node_os8.homedir)(), ".cswarm", "listeners");
+  return process.env.XDG_STATE_HOME ? (0, import_node_path14.join)(process.env.XDG_STATE_HOME, "cswarm", "listeners") : (0, import_node_path14.join)((0, import_node_os8.homedir)(), ".cswarm", "listeners");
 }
 function listenerInstanceKey(input) {
-  if (!UUID_RE17.test(input.workspaceId) || !UUID_RE17.test(input.principalId)) {
+  if (!UUID_RE18.test(input.workspaceId) || !UUID_RE18.test(input.principalId)) {
     throw new Error("listener workspace and principal ids must be UUIDs");
   }
   if (!input.profileId || input.profileId.includes("\0")) {
     throw new Error("listener profile id is invalid");
   }
-  return (0, import_node_crypto17.createHash)("sha256").update(input.profileId).update("\0").update(input.workspaceId.toLowerCase()).update("\0").update(input.principalId.toLowerCase()).digest("hex");
+  return (0, import_node_crypto20.createHash)("sha256").update(input.profileId).update("\0").update(input.workspaceId.toLowerCase()).update("\0").update(input.principalId.toLowerCase()).digest("hex");
 }
 function integer2(value) {
   return Number.isSafeInteger(value) && value >= 0;
@@ -58193,7 +60916,7 @@ function parseListenerEffectRecord(raw, expectedId) {
   }
   const row = value;
   rejectSensitiveKeys(row);
-  if (typeof row.version !== "number" || row.version !== 1 && row.version !== 2 || typeof row.signalId !== "string" || row.signalId.toLowerCase() !== expectedId || !UUID_RE17.test(row.signalId)) {
+  if (typeof row.version !== "number" || row.version !== 1 && row.version !== 2 || typeof row.signalId !== "string" || row.signalId.toLowerCase() !== expectedId || !UUID_RE18.test(row.signalId)) {
     throw new Error("stored listener effect is malformed");
   }
   if (row.version === 1) {
@@ -58208,7 +60931,7 @@ function upcastV1Ask(row) {
   if (row.effectOrdinal !== 0 || typeof row.commandId !== "string" || !COMMAND_ID_RE2.test(row.commandId) || typeof row.askBody !== "string" || row.askBody.length < 1 || typeof row.askUntil !== "string" || !Number.isFinite(Date.parse(row.askUntil)) || typeof row.senderOwnerRelation !== "string" || !RELATIONS.has(row.senderOwnerRelation) || typeof row.state !== "string" || !STATES.has(row.state) || !integer2(row.promptAttempts) || !integer2(row.postAttempts) || !nullableString2(row.replyBody, 2e3) || typeof row.replyTruncated !== "boolean" || !nullableString2(row.replySignalId, 64) || !nullableString2(row.failureCode, 96) || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt))) {
     throw new Error("stored listener effect is malformed");
   }
-  if (row.replySignalId !== null && !UUID_RE17.test(row.replySignalId)) {
+  if (row.replySignalId !== null && !UUID_RE18.test(row.replySignalId)) {
     throw new Error("stored listener effect is malformed");
   }
   return {
@@ -58247,7 +60970,7 @@ function parseV2Record(row) {
     if (typeof row.commandId !== "string" || !COMMAND_ID_RE2.test(row.commandId) || row.state === "observed") {
       throw new Error("stored listener effect is malformed");
     }
-    if (row.replySignalId !== null && !UUID_RE17.test(row.replySignalId)) {
+    if (row.replySignalId !== null && !UUID_RE18.test(row.replySignalId)) {
       throw new Error("stored listener effect is malformed");
     }
   }
@@ -58271,7 +60994,7 @@ function parseV2Record(row) {
   };
 }
 function newObservedNoteRecord(input) {
-  if (!UUID_RE17.test(input.signalId)) {
+  if (!UUID_RE18.test(input.signalId)) {
     throw new Error("listener note signal id must be a UUID");
   }
   if (input.body.length < 1) {
@@ -58320,7 +61043,7 @@ function serializeEffectRecord(record3) {
   if (!record3 || typeof record3 !== "object") {
     rejectWrite();
   }
-  if (import_node_util3.types.isProxy(record3)) {
+  if (import_node_util4.types.isProxy(record3)) {
     rejectWrite();
   }
   if (Array.isArray(record3)) {
@@ -58378,16 +61101,16 @@ var FileListenerEffectStore = class {
   effectsDirectory;
   constructor(options) {
     const root = options.stateDirectory ?? defaultListenerStateDirectory();
-    if (!(0, import_node_path13.isAbsolute)(root)) {
+    if (!(0, import_node_path14.isAbsolute)(root)) {
       throw new Error("listener state directory must be absolute");
     }
-    this.instanceDirectory = (0, import_node_path13.join)(root, listenerInstanceKey(options));
-    this.effectsDirectory = (0, import_node_path13.join)(this.instanceDirectory, "effects");
+    this.instanceDirectory = (0, import_node_path14.join)(root, listenerInstanceKey(options));
+    this.effectsDirectory = (0, import_node_path14.join)(this.instanceDirectory, "effects");
   }
   async read(signalId) {
     const id = this.checkedId(signalId);
     const raw = await readSecureJsonFile(
-      (0, import_node_path13.join)(this.effectsDirectory, `${id}.json`),
+      (0, import_node_path14.join)(this.effectsDirectory, `${id}.json`),
       MAX_EFFECT_BYTES
     );
     return raw === null ? null : parseListenerEffectRecord(raw, id);
@@ -58400,12 +61123,12 @@ var FileListenerEffectStore = class {
       throw new Error("listener effect is too large");
     }
     await writeSecureJsonFile(
-      (0, import_node_path13.join)(this.effectsDirectory, `${id}.json`),
+      (0, import_node_path14.join)(this.effectsDirectory, `${id}.json`),
       serialized
     );
   }
   checkedId(signalId) {
-    if (!UUID_RE17.test(signalId)) {
+    if (!UUID_RE18.test(signalId)) {
       throw new Error("listener signal id must be a UUID");
     }
     return signalId.toLowerCase();
@@ -58413,257 +61136,13 @@ var FileListenerEffectStore = class {
 };
 
 // src/listener/runtime.ts
-var import_node_crypto18 = require("node:crypto");
+var import_node_crypto21 = require("node:crypto");
 init_command_client();
 init_delivery();
 init_signals();
 init_renewal();
 init_bounds();
 init_types2();
-
-// src/listener/main-routing.ts
-var import_node_path14 = require("node:path");
-init_storage();
-var UUID_RE18 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-var MAX_QUEUE_BYTES = 1024 * 1024;
-var QUEUE_FILE = "pending-for-main.json";
-var QUEUE_LOCK = "pending-for-main";
-var QUEUE_KEYS = /* @__PURE__ */ new Set(["version", "entries", "droppedCount"]);
-var ENTRY_KEYS = /* @__PURE__ */ new Set([
-  "signalId",
-  "workspaceId",
-  "principalId",
-  "fromId",
-  "fromKind",
-  "kind",
-  "senderName",
-  "body",
-  "attachmentCount",
-  "createdAt",
-  "queuedAt",
-  "observationPending"
-]);
-var LISTENER_MAIN_QUEUE_MAX = 200;
-var LISTENER_ROUTE_MODES = ["main"];
-var LISTENER_STORED_ROUTE_MODES = ["worker", "main", "split"];
-var LISTENER_STORED_ROUTE_DECISIONS = ["worker", "main"];
-var LISTENER_MAIN_HOST_LIMIT_CLAUSES = {
-  host_configuration: "This listener never starts a model.",
-  deny_canary_scope: "No provider worker is started, so no deny canary runs.",
-  steady_allow_unproven: "Provider permission flags name the attendance surface kind only.",
-  cross_owner_context: "Directed messages wait in pending-for-main.json for the seat's own session.",
-  local_state_lifecycle: "No provider home is created or removed by this listener."
-};
-var LISTENER_ROUTE_RULING = "a listener never answers for a session; the seat's own session reads the queue";
-var LISTENER_ATTENDANCE_SURFACES = ["hook", "watcher"];
-var LISTENER_ALLOW_UNATTENDED_CLAUSE = "Use --allow-unattended only when you accept a queue that may not wake a session.";
-var LISTENER_NONE_ATTENDING_SENTENCE = "Signals queue and nothing wakes the session.";
-function orList3(values2) {
-  return values2.length <= 1 ? values2.join("") : `${values2.slice(0, -1).join(", ")}, or ${values2[values2.length - 1]}`;
-}
-function listenerAcceptedRoutesSentence() {
-  return orList3(LISTENER_ROUTE_MODES);
-}
-function listenerRouteUsage() {
-  return LISTENER_ROUTE_MODES.join("|");
-}
-function isLiveListenerRouteMode(value) {
-  return LISTENER_ROUTE_MODES.includes(value);
-}
-function isStoredListenerRouteMode(value) {
-  return LISTENER_STORED_ROUTE_MODES.includes(value);
-}
-function isStoredListenerRouteDecision(value) {
-  return LISTENER_STORED_ROUTE_DECISIONS.includes(value);
-}
-function listenerRouteRefusedSentence(requested) {
-  return `--route ${requested} is refused: accepted --route values are ${listenerAcceptedRoutesSentence()}; ${LISTENER_ROUTE_RULING}.`;
-}
-function listenerDeferOverRefusedSentence() {
-  return `--defer-over is refused: it only applied to split, and accepted --route values are ${listenerAcceptedRoutesSentence()}; ${LISTENER_ROUTE_RULING}.`;
-}
-function listenerLegacyRouteSentence(routeMode) {
-  if (isLiveListenerRouteMode(routeMode)) {
-    return "Ask route: main; directed asks wait for this interactive session.";
-  }
-  return `LEGACY: this status file has routeMode ${routeMode}. That route cannot be started again; ${LISTENER_ROUTE_RULING}.`;
-}
-function listenerAttendanceSurfaceRemedy(surface, principalId) {
-  if (surface === "hook") {
-    return `cswarm hook install claude --principal-id ${principalId} --write, then start a fresh session`;
-  }
-  return `cswarm inbox --notify for agent ${principalId} on this host`;
-}
-function listenerAttendanceRemediesSentence(principalId) {
-  return LISTENER_ATTENDANCE_SURFACES.map((surface) => listenerAttendanceSurfaceRemedy(surface, principalId)).join("; or ");
-}
-function listenerUnattendedRefusedMessage(principalId) {
-  return `listen_unattended_refused: listen start needs an attendance surface for agent ${principalId}. Next: ${listenerAttendanceRemediesSentence(principalId)}. ${LISTENER_ALLOW_UNATTENDED_CLAUSE}`;
-}
-function listenerAttendingSurfaces(hook, watcher) {
-  return LISTENER_ATTENDANCE_SURFACES.filter(
-    (surface) => surface === "hook" ? hook : watcher
-  );
-}
-function listenerAttendingSentence(surfaces) {
-  if (surfaces.length === 0) {
-    return `ATTENDING: none. ${LISTENER_NONE_ATTENDING_SENTENCE}`;
-  }
-  return `ATTENDING: ${orList3(surfaces)}.`;
-}
-function decideListenerRoute(route, threshold, bodyLength) {
-  if (!Number.isSafeInteger(bodyLength) || bodyLength < 0) {
-    throw new Error("listener route body length must be a non-negative integer");
-  }
-  if (!isLiveListenerRouteMode(route)) {
-    throw new Error("listener route mode is invalid");
-  }
-  if (threshold !== null) {
-    throw new Error("main route cannot have a split threshold");
-  }
-  return "main";
-}
-function checkedTimestamp2(value) {
-  return typeof value === "string" && Number.isFinite(Date.parse(value));
-}
-function parseEntry(value, rejectUnknownKeys) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("stored pending-for-main entry is malformed");
-  }
-  const row = value;
-  if (rejectUnknownKeys && Object.keys(row).some((key2) => !ENTRY_KEYS.has(key2))) {
-    throw new Error("stored pending-for-main entry is malformed");
-  }
-  if (typeof row.signalId !== "string" || !UUID_RE18.test(row.signalId) || typeof row.workspaceId !== "string" || !UUID_RE18.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE18.test(row.principalId) || typeof row.fromId !== "string" || !UUID_RE18.test(row.fromId) || row.fromKind !== "user" && row.fromKind !== "agent" || !(row.kind === void 0 || row.kind === "ask" || row.kind === "note") || !(row.senderName === null || typeof row.senderName === "string" && row.senderName.length <= 200) || typeof row.body !== "string" || row.body.length < 1 || !(row.attachmentCount === void 0 || typeof row.attachmentCount === "number" && Number.isSafeInteger(row.attachmentCount) && row.attachmentCount >= 1 && row.attachmentCount <= 8) || !checkedTimestamp2(row.createdAt) || !checkedTimestamp2(row.queuedAt) || !(row.observationPending === void 0 || row.observationPending === true)) {
-    throw new Error("stored pending-for-main entry is malformed");
-  }
-  return {
-    signalId: row.signalId.toLowerCase(),
-    workspaceId: row.workspaceId.toLowerCase(),
-    principalId: row.principalId.toLowerCase(),
-    fromId: row.fromId.toLowerCase(),
-    fromKind: row.fromKind,
-    ...row.kind === "ask" || row.kind === "note" ? { kind: row.kind } : {},
-    senderName: row.senderName,
-    body: row.body,
-    ...typeof row.attachmentCount === "number" ? { attachmentCount: row.attachmentCount } : {},
-    createdAt: row.createdAt,
-    queuedAt: row.queuedAt,
-    ...row.observationPending === true ? { observationPending: true } : {}
-  };
-}
-function parseFile(raw, rejectUnknownKeys = false) {
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new Error("stored pending-for-main queue is malformed");
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("stored pending-for-main queue is malformed");
-  }
-  const row = value;
-  if (rejectUnknownKeys && Object.keys(row).some((key2) => !QUEUE_KEYS.has(key2)) || row.version !== 1 || !Array.isArray(row.entries) || row.entries.length > LISTENER_MAIN_QUEUE_MAX || !(row.droppedCount === void 0 || typeof row.droppedCount === "number" && Number.isSafeInteger(row.droppedCount) && row.droppedCount >= 0)) {
-    throw new Error("stored pending-for-main queue is malformed");
-  }
-  const entries = row.entries.map((entry2) => parseEntry(entry2, rejectUnknownKeys));
-  if (new Set(entries.map((entry2) => entry2.signalId)).size !== entries.length) {
-    throw new Error("stored pending-for-main queue repeats a signal");
-  }
-  return { version: 1, entries, droppedCount: row.droppedCount ?? 0 };
-}
-var FilePendingMainQueue = class {
-  path;
-  directory;
-  constructor(instanceDirectory) {
-    if (!(0, import_node_path14.isAbsolute)(instanceDirectory)) {
-      throw new Error("pending-for-main directory must be absolute");
-    }
-    this.directory = instanceDirectory;
-    this.path = (0, import_node_path14.join)(instanceDirectory, QUEUE_FILE);
-  }
-  async readUnlocked() {
-    const raw = await readSecureJsonFile(this.path, MAX_QUEUE_BYTES);
-    return raw === null ? { version: 1, entries: [], droppedCount: 0 } : parseFile(raw);
-  }
-  async writeUnlocked(file) {
-    const canonical = parseFile(JSON.stringify(file), true);
-    await writeSecureJsonFile(this.path, JSON.stringify(canonical));
-  }
-  async read() {
-    return [...(await this.readUnlocked()).entries];
-  }
-  async count() {
-    return (await this.readUnlocked()).entries.length;
-  }
-  async stats() {
-    const file = await this.readUnlocked();
-    return { count: file.entries.length, droppedCount: file.droppedCount };
-  }
-  async enqueue(entry2) {
-    const checked = parseEntry(entry2, true);
-    return await withFileLock(this.directory, QUEUE_LOCK, async () => {
-      const file = await this.readUnlocked();
-      if (file.entries.some((item) => item.signalId === checked.signalId)) {
-        return {
-          count: file.entries.length,
-          added: false,
-          droppedOldest: false,
-          droppedCount: file.droppedCount
-        };
-      }
-      file.entries.push(checked);
-      const droppedOldest = file.entries.length > LISTENER_MAIN_QUEUE_MAX;
-      if (droppedOldest) {
-        file.entries.shift();
-        file.droppedCount += 1;
-      }
-      await this.writeUnlocked(file);
-      return {
-        count: file.entries.length,
-        added: true,
-        droppedOldest,
-        droppedCount: file.droppedCount
-      };
-    });
-  }
-  async remove(signalIds, lockTimeoutMs) {
-    if (signalIds.size === 0) return await this.count();
-    return await withFileLock(this.directory, QUEUE_LOCK, async () => {
-      const file = await this.readUnlocked();
-      const entries = file.entries.filter((entry2) => !signalIds.has(entry2.signalId));
-      if (entries.length !== file.entries.length) {
-        await this.writeUnlocked({
-          version: 1,
-          entries,
-          droppedCount: file.droppedCount
-        });
-      }
-      return entries.length;
-    }, lockTimeoutMs === void 0 ? {} : { timeoutMs: lockTimeoutMs });
-  }
-};
-function pendingMainEntry(signal, principalId, provenance, now, options = {}) {
-  if (signal.kind !== "ask" && signal.kind !== "note") {
-    throw new Error("only directed asks and notes can enter the pending-for-main queue");
-  }
-  return parseEntry({
-    signalId: signal.id,
-    workspaceId: signal.workspace_id,
-    principalId,
-    fromId: signal.from,
-    fromKind: signal.from_kind,
-    kind: signal.kind,
-    senderName: provenance.senderName,
-    body: signal.body,
-    ...(signal.attachments?.length ?? 0) > 0 ? { attachmentCount: signal.attachments.length } : {},
-    createdAt: signal.created_at,
-    queuedAt: new Date(now).toISOString(),
-    ...options.observationPending ? { observationPending: true } : {}
-  }, true);
-}
-
-// src/listener/runtime.ts
 init_idle_poll();
 init_wake2();
 var LISTENER_PAGE_LIMIT = 100;
@@ -58935,12 +61414,12 @@ function eventTime(now) {
 }
 async function defaultSleep(ms, signal) {
   if (signal?.aborted) return;
-  await new Promise((resolve7) => {
+  await new Promise((resolve8) => {
     let timer2;
     const finish = () => {
       if (timer2 !== void 0) clearTimeout(timer2);
       signal?.removeEventListener("abort", finish);
-      resolve7();
+      resolve8();
     };
     signal?.addEventListener("abort", finish, { once: true });
     timer2 = setTimeout(finish, ms);
@@ -58980,7 +61459,7 @@ function sameEffectSignal(record3, signal) {
   return record3.signalId === signal.id.toLowerCase() && record3.signalKind === signal.kind && record3.askBody === signal.body && record3.askUntil === signal.until && record3.senderOwnerRelation === (signal.sender_owner_relation ?? "unknown");
 }
 function immutableSignalFingerprint(signalId, signalKind2, body2, until, senderOwnerRelation) {
-  return (0, import_node_crypto18.createHash)("sha256").update(JSON.stringify([
+  return (0, import_node_crypto21.createHash)("sha256").update(JSON.stringify([
     signalId,
     signalKind2,
     body2,
@@ -59087,8 +61566,8 @@ async function runListenerRuntime(options) {
   const paceRequest = async () => {
     const preceding = requestGate;
     let release;
-    requestGate = new Promise((resolve7) => {
-      release = resolve7;
+    requestGate = new Promise((resolve8) => {
+      release = resolve8;
     });
     await preceding;
     try {
@@ -60527,9 +63006,9 @@ function summarizeListenerReadHealth(health, readyAt, nowMs) {
 }
 
 // src/listener/control.ts
-var import_node_crypto19 = require("node:crypto");
+var import_node_crypto22 = require("node:crypto");
 var import_node_net = require("node:net");
-var import_promises10 = require("node:fs/promises");
+var import_promises11 = require("node:fs/promises");
 var import_node_path15 = require("node:path");
 init_storage();
 init_wake2();
@@ -60555,6 +63034,10 @@ var LISTENER_STATUS_STATES = [
   "stopped",
   "failed"
 ];
+var LISTENER_PROVIDERS = ["grok", "opencode", "claude", "codex"];
+function isListenerProvider(value) {
+  return LISTENER_PROVIDERS.some((provider) => provider === value);
+}
 var LISTENER_DELIVERY_FAILING_THRESHOLD = 3;
 var ListenerAlreadyRunningError = class extends Error {
   constructor() {
@@ -60571,11 +63054,11 @@ function listenerPaths(options) {
   const key2 = listenerInstanceKey(options);
   const instanceDirectory = (0, import_node_path15.join)(root, key2);
   const uid2 = typeof process.getuid === "function" ? process.getuid() : process.pid;
-  const stateNamespace = (0, import_node_path15.resolve)(root) === (0, import_node_path15.resolve)(defaultRoot) ? "" : `-${(0, import_node_crypto19.createHash)("sha256").update((0, import_node_path15.resolve)(root)).digest("hex").slice(0, 16)}`;
-  const platform = options.platform ?? process.platform;
-  const socketKey = stateNamespace.length === 0 ? platform === "win32" ? key2 : key2.slice(0, 32) : `${key2.slice(0, 32)}${stateNamespace}`;
-  const controlDirectory = platform === "win32" ? "" : (0, import_node_path15.join)("/tmp", `cswarm-control-${uid2}`);
-  const socketPath = platform === "win32" ? `\\\\.\\pipe\\cswarm-${socketKey}` : (0, import_node_path15.join)(controlDirectory, `${socketKey}.sock`);
+  const stateNamespace = (0, import_node_path15.resolve)(root) === (0, import_node_path15.resolve)(defaultRoot) ? "" : `-${(0, import_node_crypto22.createHash)("sha256").update((0, import_node_path15.resolve)(root)).digest("hex").slice(0, 16)}`;
+  const platform2 = options.platform ?? process.platform;
+  const socketKey = stateNamespace.length === 0 ? platform2 === "win32" ? key2 : key2.slice(0, 32) : `${key2.slice(0, 32)}${stateNamespace}`;
+  const controlDirectory = platform2 === "win32" ? "" : (0, import_node_path15.join)("/tmp", `cswarm-control-${uid2}`);
+  const socketPath = platform2 === "win32" ? `\\\\.\\pipe\\cswarm-${socketKey}` : (0, import_node_path15.join)(controlDirectory, `${socketKey}.sock`);
   return {
     key: key2,
     instanceDirectory,
@@ -60596,6 +63079,7 @@ var STATUS_ALLOWED_KEYS = /* @__PURE__ */ new Set([
   "pid",
   "state",
   "startedAt",
+  "processStartedAt",
   "readyAt",
   "updatedAt",
   "stoppedAt",
@@ -60763,7 +63247,7 @@ function parseStatus(raw, rejectUnknownKeys = false) {
   const readHealth = row.readHealth === void 0 ? void 0 : parseListenerReadHealth(row.readHealth, rejectUnknownKeys);
   const heldBackDeliveries = row.heldBackDeliveries === void 0 ? void 0 : parseHeldBackDeliveries(row.heldBackDeliveries);
   const wake = row.wake === void 0 ? void 0 : parseListenerWake(row.wake, rejectUnknownKeys);
-  if (row.version !== 1 || typeof row.instanceId !== "string" || !UUID_RE20.test(row.instanceId) || row.provider !== "grok" && row.provider !== "opencode" && row.provider !== "claude" && row.provider !== "codex" || typeof row.profileId !== "string" || typeof row.workspaceId !== "string" || !UUID_RE20.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE20.test(row.principalId) || !Number.isSafeInteger(row.pid) || row.pid < 1 || typeof row.state !== "string" || !LISTENER_STATUS_STATES.includes(row.state) || typeof row.startedAt !== "string" || !Number.isFinite(Date.parse(row.startedAt)) || !(row.readyAt === null || typeof row.readyAt === "string" && Number.isFinite(Date.parse(row.readyAt))) || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) || !(row.stoppedAt === null || typeof row.stoppedAt === "string" && Number.isFinite(Date.parse(row.stoppedAt))) || !nullableUuid3(row.lastSignalId) || !(row.lastErrorCode === null || typeof row.lastErrorCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorCode)) || !(row.lastErrorDetail === void 0 || row.lastErrorDetail === null || typeof row.lastErrorDetail === "string" && row.lastErrorDetail.length > 0 && row.lastErrorDetail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastErrorDetail)) || !(row.lastErrorReasonCode === void 0 || row.lastErrorReasonCode === null || typeof row.lastErrorReasonCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorReasonCode)) || !(row.providerExecutable === void 0 || row.providerExecutable === null || typeof row.providerExecutable === "string" && (0, import_node_path15.isAbsolute)(row.providerExecutable)) || !(row.providerVersion === void 0 || row.providerVersion === null || typeof row.providerVersion === "string" && SEMVER_RE2.test(row.providerVersion)) || !(row.providerLastMeasuredVersion === void 0 || row.providerLastMeasuredVersion === null || typeof row.providerLastMeasuredVersion === "string" && SEMVER_RE2.test(row.providerLastMeasuredVersion)) || !(row.providerBundledAgentSdkVersion === void 0 || row.providerBundledAgentSdkVersion === null || typeof row.providerBundledAgentSdkVersion === "string" && SEMVER_RE2.test(row.providerBundledAgentSdkVersion)) || !(row.providerBundledClaudeCodeVersion === void 0 || row.providerBundledClaudeCodeVersion === null || typeof row.providerBundledClaudeCodeVersion === "string" && SEMVER_RE2.test(row.providerBundledClaudeCodeVersion)) || !(row.providerMinimumRequiredVersion === void 0 || row.providerMinimumRequiredVersion === null || typeof row.providerMinimumRequiredVersion === "string" && SEMVER_RE2.test(row.providerMinimumRequiredVersion)) || !(row.cswarmVersion === void 0 || row.cswarmVersion === null || typeof row.cswarmVersion === "string" && SEMVER_RE2.test(row.cswarmVersion)) || (row.providerVersion === null || row.providerVersion === void 0) !== (row.providerLastMeasuredVersion === null || row.providerLastMeasuredVersion === void 0) || !(row.lastWorkerStderrTail === void 0 || row.lastWorkerStderrTail === null || typeof row.lastWorkerStderrTail === "string" && row.lastWorkerStderrTail.length > 0 && row.lastWorkerStderrTail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastWorkerStderrTail)) || typeof row.logPath !== "string" || !(0, import_node_path15.isAbsolute)(row.logPath) || !(row.deliveryMode === void 0 || row.deliveryMode === null || typeof row.deliveryMode === "string" && STATUS_DELIVERY_MODES.has(row.deliveryMode)) || !(row.pendingDeliveryCount === void 0 || nullableCount(row.pendingDeliveryCount)) || !(row.lastTerminalDeliveryFailureCount === void 0 || nullableCount(row.lastTerminalDeliveryFailureCount)) || !(row.lastTerminalDeliveryFailureAt === void 0 || nullableTimestamp3(row.lastTerminalDeliveryFailureAt)) || !(row.lastClaimAt === void 0 || nullableTimestamp3(row.lastClaimAt)) || !(row.lastAckAt === void 0 || nullableTimestamp3(row.lastAckAt)) || !(row.lastAckOutcome === void 0 || row.lastAckOutcome === null || typeof row.lastAckOutcome === "string" && deliveryOutcomes.has(row.lastAckOutcome)) || !(row.consecutiveAckFailureCount === void 0 || nullableCount(row.consecutiveAckFailureCount)) || !(row.lastAckSignalId === void 0 || row.lastAckSignalId === null || typeof row.lastAckSignalId === "string" && UUID_RE20.test(row.lastAckSignalId)) || !(row.currentDeliverySignalId === void 0 || row.currentDeliverySignalId === null || typeof row.currentDeliverySignalId === "string" && UUID_RE20.test(row.currentDeliverySignalId)) || !(row.currentDeliverySince === void 0 || nullableTimestamp3(row.currentDeliverySince)) || heldBackDeliveries === null || !(row.pendingDeliveryCountAt === void 0 || nullableTimestamp3(row.pendingDeliveryCountAt)) || !(row.routeMode === void 0 || typeof row.routeMode === "string" && isStoredListenerRouteMode(row.routeMode)) || !(row.deferOverChars === void 0 || row.deferOverChars === null || typeof row.deferOverChars === "number" && Number.isSafeInteger(row.deferOverChars) && row.deferOverChars >= 1 && row.deferOverChars <= 1e4) || !(row.pendingForMainCount === void 0 || typeof row.pendingForMainCount === "number" && Number.isSafeInteger(row.pendingForMainCount) && row.pendingForMainCount >= 0) || !(row.droppedForMainCount === void 0 || typeof row.droppedForMainCount === "number" && Number.isSafeInteger(row.droppedForMainCount) && row.droppedForMainCount >= 0) || readHealth === null || wake === null || !(row.connectionsOpened === void 0 || typeof row.connectionsOpened === "number" && Number.isSafeInteger(row.connectionsOpened) && row.connectionsOpened >= 0) || !(row.connectionReuseRatio === void 0 || typeof row.connectionReuseRatio === "number" && Number.isFinite(row.connectionReuseRatio) && row.connectionReuseRatio >= 0) || !(row.activityPublishFailures === void 0 || typeof row.activityPublishFailures === "number" && Number.isSafeInteger(row.activityPublishFailures) && row.activityPublishFailures >= 0) || !(row.activityLastErrorCode === void 0 || row.activityLastErrorCode === null || typeof row.activityLastErrorCode === "string" && STATUS_ACTIVITY_ERROR_CODES.has(
+  if (row.version !== 1 || typeof row.instanceId !== "string" || !UUID_RE20.test(row.instanceId) || row.provider !== "grok" && row.provider !== "opencode" && row.provider !== "claude" && row.provider !== "codex" || typeof row.profileId !== "string" || typeof row.workspaceId !== "string" || !UUID_RE20.test(row.workspaceId) || typeof row.principalId !== "string" || !UUID_RE20.test(row.principalId) || !Number.isSafeInteger(row.pid) || row.pid < 1 || typeof row.state !== "string" || !LISTENER_STATUS_STATES.includes(row.state) || typeof row.startedAt !== "string" || !Number.isFinite(Date.parse(row.startedAt)) || !(row.processStartedAt === void 0 || typeof row.processStartedAt === "number" && Number.isFinite(row.processStartedAt) && row.processStartedAt > 0) || !(row.readyAt === null || typeof row.readyAt === "string" && Number.isFinite(Date.parse(row.readyAt))) || typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) || !(row.stoppedAt === null || typeof row.stoppedAt === "string" && Number.isFinite(Date.parse(row.stoppedAt))) || !nullableUuid3(row.lastSignalId) || !(row.lastErrorCode === null || typeof row.lastErrorCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorCode)) || !(row.lastErrorDetail === void 0 || row.lastErrorDetail === null || typeof row.lastErrorDetail === "string" && row.lastErrorDetail.length > 0 && row.lastErrorDetail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastErrorDetail)) || !(row.lastErrorReasonCode === void 0 || row.lastErrorReasonCode === null || typeof row.lastErrorReasonCode === "string" && /^[a-z0-9_-]{1,96}$/.test(row.lastErrorReasonCode)) || !(row.providerExecutable === void 0 || row.providerExecutable === null || typeof row.providerExecutable === "string" && (0, import_node_path15.isAbsolute)(row.providerExecutable)) || !(row.providerVersion === void 0 || row.providerVersion === null || typeof row.providerVersion === "string" && SEMVER_RE2.test(row.providerVersion)) || !(row.providerLastMeasuredVersion === void 0 || row.providerLastMeasuredVersion === null || typeof row.providerLastMeasuredVersion === "string" && SEMVER_RE2.test(row.providerLastMeasuredVersion)) || !(row.providerBundledAgentSdkVersion === void 0 || row.providerBundledAgentSdkVersion === null || typeof row.providerBundledAgentSdkVersion === "string" && SEMVER_RE2.test(row.providerBundledAgentSdkVersion)) || !(row.providerBundledClaudeCodeVersion === void 0 || row.providerBundledClaudeCodeVersion === null || typeof row.providerBundledClaudeCodeVersion === "string" && SEMVER_RE2.test(row.providerBundledClaudeCodeVersion)) || !(row.providerMinimumRequiredVersion === void 0 || row.providerMinimumRequiredVersion === null || typeof row.providerMinimumRequiredVersion === "string" && SEMVER_RE2.test(row.providerMinimumRequiredVersion)) || !(row.cswarmVersion === void 0 || row.cswarmVersion === null || typeof row.cswarmVersion === "string" && SEMVER_RE2.test(row.cswarmVersion)) || (row.providerVersion === null || row.providerVersion === void 0) !== (row.providerLastMeasuredVersion === null || row.providerLastMeasuredVersion === void 0) || !(row.lastWorkerStderrTail === void 0 || row.lastWorkerStderrTail === null || typeof row.lastWorkerStderrTail === "string" && row.lastWorkerStderrTail.length > 0 && row.lastWorkerStderrTail.length <= 2048 && !SECRET_SHAPE_RE.test(row.lastWorkerStderrTail)) || typeof row.logPath !== "string" || !(0, import_node_path15.isAbsolute)(row.logPath) || !(row.deliveryMode === void 0 || row.deliveryMode === null || typeof row.deliveryMode === "string" && STATUS_DELIVERY_MODES.has(row.deliveryMode)) || !(row.pendingDeliveryCount === void 0 || nullableCount(row.pendingDeliveryCount)) || !(row.lastTerminalDeliveryFailureCount === void 0 || nullableCount(row.lastTerminalDeliveryFailureCount)) || !(row.lastTerminalDeliveryFailureAt === void 0 || nullableTimestamp3(row.lastTerminalDeliveryFailureAt)) || !(row.lastClaimAt === void 0 || nullableTimestamp3(row.lastClaimAt)) || !(row.lastAckAt === void 0 || nullableTimestamp3(row.lastAckAt)) || !(row.lastAckOutcome === void 0 || row.lastAckOutcome === null || typeof row.lastAckOutcome === "string" && deliveryOutcomes.has(row.lastAckOutcome)) || !(row.consecutiveAckFailureCount === void 0 || nullableCount(row.consecutiveAckFailureCount)) || !(row.lastAckSignalId === void 0 || row.lastAckSignalId === null || typeof row.lastAckSignalId === "string" && UUID_RE20.test(row.lastAckSignalId)) || !(row.currentDeliverySignalId === void 0 || row.currentDeliverySignalId === null || typeof row.currentDeliverySignalId === "string" && UUID_RE20.test(row.currentDeliverySignalId)) || !(row.currentDeliverySince === void 0 || nullableTimestamp3(row.currentDeliverySince)) || heldBackDeliveries === null || !(row.pendingDeliveryCountAt === void 0 || nullableTimestamp3(row.pendingDeliveryCountAt)) || !(row.routeMode === void 0 || typeof row.routeMode === "string" && isStoredListenerRouteMode(row.routeMode)) || !(row.deferOverChars === void 0 || row.deferOverChars === null || typeof row.deferOverChars === "number" && Number.isSafeInteger(row.deferOverChars) && row.deferOverChars >= 1 && row.deferOverChars <= 1e4) || !(row.pendingForMainCount === void 0 || typeof row.pendingForMainCount === "number" && Number.isSafeInteger(row.pendingForMainCount) && row.pendingForMainCount >= 0) || !(row.droppedForMainCount === void 0 || typeof row.droppedForMainCount === "number" && Number.isSafeInteger(row.droppedForMainCount) && row.droppedForMainCount >= 0) || readHealth === null || wake === null || !(row.connectionsOpened === void 0 || typeof row.connectionsOpened === "number" && Number.isSafeInteger(row.connectionsOpened) && row.connectionsOpened >= 0) || !(row.connectionReuseRatio === void 0 || typeof row.connectionReuseRatio === "number" && Number.isFinite(row.connectionReuseRatio) && row.connectionReuseRatio >= 0) || !(row.activityPublishFailures === void 0 || typeof row.activityPublishFailures === "number" && Number.isSafeInteger(row.activityPublishFailures) && row.activityPublishFailures >= 0) || !(row.activityLastErrorCode === void 0 || row.activityLastErrorCode === null || typeof row.activityLastErrorCode === "string" && STATUS_ACTIVITY_ERROR_CODES.has(
     row.activityLastErrorCode
   )) || !(row.idlePollMs === void 0 || row.idlePollMs === null || typeof row.idlePollMs === "number" && Number.isSafeInteger(row.idlePollMs) && row.idlePollMs >= 0) || !(row.pushReconcileWaitMs === void 0 || row.pushReconcileWaitMs === null || typeof row.pushReconcileWaitMs === "number" && Number.isSafeInteger(row.pushReconcileWaitMs) && row.pushReconcileWaitMs >= 0) || !(row.nextAttemptAt === void 0 || nullableTimestamp3(row.nextAttemptAt)) || !(row.credentialStopAt === void 0 || nullableTimestamp3(row.credentialStopAt)) || !(row.renewalExpiresAt === void 0 || nullableTimestamp3(row.renewalExpiresAt)) || !(row.credentialCheckEdge === void 0 || row.credentialCheckEdge === null || row.credentialCheckEdge === "read" || row.credentialCheckEdge === "command") || !(row.claimRetryCount === void 0 || typeof row.claimRetryCount === "number" && Number.isSafeInteger(row.claimRetryCount) && row.claimRetryCount >= 0) || !(row.projectDirectory === void 0 || typeof row.projectDirectory === "string" && (0, import_node_path15.isAbsolute)(row.projectDirectory)) || !(row.targetUrl === void 0 || typeof row.targetUrl === "string" && (() => {
     try {
@@ -61008,7 +63492,7 @@ async function appendListenerEvent(paths, event) {
     throw new Error("listener event is too large");
   }
   try {
-    const info = await (0, import_promises10.lstat)(paths.logPath);
+    const info = await (0, import_promises11.lstat)(paths.logPath);
     if (!info.isFile() || info.isSymbolicLink() || (info.mode & 511) !== 384) {
       throw new Error("listener event log is not a secure regular file");
     }
@@ -61018,14 +63502,14 @@ async function appendListenerEvent(paths, event) {
   } catch (error2) {
     if (error2.code !== "ENOENT") throw error2;
   }
-  const handle = await (0, import_promises10.open)(paths.logPath, "a", 384);
+  const handle = await (0, import_promises11.open)(paths.logPath, "a", 384);
   try {
     await handle.writeFile(serialized, "utf8");
     await handle.sync();
   } finally {
     await handle.close();
   }
-  await (0, import_promises10.chmod)(paths.logPath, 384);
+  await (0, import_promises11.chmod)(paths.logPath, 384);
 }
 function parseControlRequest(raw) {
   let value;
@@ -61060,7 +63544,7 @@ async function startupLock(paths) {
   while (Date.now() < deadline) {
     let handle;
     try {
-      handle = await (0, import_promises10.open)(lockPath, "wx", 384);
+      handle = await (0, import_promises11.open)(lockPath, "wx", 384);
     } catch (error2) {
       if (error2.code !== "EEXIST") throw error2;
       try {
@@ -61069,12 +63553,12 @@ async function startupLock(paths) {
       } catch (queryError) {
         if (queryError instanceof ListenerAlreadyRunningError) throw queryError;
       }
-      const info = await (0, import_promises10.lstat)(lockPath).catch(() => null);
+      const info = await (0, import_promises11.lstat)(lockPath).catch(() => null);
       if (info && Date.now() - info.mtimeMs >= START_LOCK_STALE_MS) {
-        await (0, import_promises10.unlink)(lockPath).catch(() => void 0);
+        await (0, import_promises11.unlink)(lockPath).catch(() => void 0);
         continue;
       }
-      await new Promise((resolve7) => setTimeout(resolve7, 25));
+      await new Promise((resolve8) => setTimeout(resolve8, 25));
       continue;
     }
     try {
@@ -61083,12 +63567,12 @@ async function startupLock(paths) {
       await handle.sync();
     } catch (error2) {
       await handle.close().catch(() => void 0);
-      await (0, import_promises10.unlink)(lockPath).catch(() => void 0);
+      await (0, import_promises11.unlink)(lockPath).catch(() => void 0);
       throw error2;
     }
     return async () => {
       await handle.close().catch(() => void 0);
-      await (0, import_promises10.unlink)(lockPath).catch(() => void 0);
+      await (0, import_promises11.unlink)(lockPath).catch(() => void 0);
     };
   }
   throw new ListenerAlreadyRunningError();
@@ -61105,7 +63589,7 @@ async function prepareSocket(paths) {
   } catch (error2) {
     if (error2 instanceof ListenerAlreadyRunningError) throw error2;
     if (process.platform !== "win32") {
-      await (0, import_promises10.unlink)(paths.socketPath).catch((unlinkError) => {
+      await (0, import_promises11.unlink)(paths.socketPath).catch((unlinkError) => {
         if (unlinkError.code !== "ENOENT") {
           throw unlinkError;
         }
@@ -61148,27 +63632,27 @@ async function startListenerControlServer(options) {
     if (options.initialize) {
       await options.initialize();
     }
-    await new Promise((resolve7, reject) => {
+    await new Promise((resolve8, reject) => {
       const onError = (error2) => {
         server.off("listening", onListening);
         reject(error2);
       };
       const onListening = () => {
         server.off("error", onError);
-        resolve7();
+        resolve8();
       };
       server.once("error", onError);
       server.once("listening", onListening);
       server.listen(options.paths.socketPath);
     });
     if (process.platform !== "win32") {
-      await (0, import_promises10.chmod)(options.paths.socketPath, 384);
+      await (0, import_promises11.chmod)(options.paths.socketPath, 384);
     }
   } catch (error2) {
     if (server.listening) {
-      await new Promise((resolve7) => server.close(() => resolve7()));
+      await new Promise((resolve8) => server.close(() => resolve8()));
       if (process.platform !== "win32") {
-        await (0, import_promises10.unlink)(options.paths.socketPath).catch(() => void 0);
+        await (0, import_promises11.unlink)(options.paths.socketPath).catch(() => void 0);
       }
     }
     throw error2;
@@ -61177,15 +63661,15 @@ async function startListenerControlServer(options) {
   }
   return {
     close: async () => {
-      await new Promise((resolve7) => server.close(() => resolve7()));
+      await new Promise((resolve8) => server.close(() => resolve8()));
       if (process.platform !== "win32") {
-        await (0, import_promises10.unlink)(options.paths.socketPath).catch(() => void 0);
+        await (0, import_promises11.unlink)(options.paths.socketPath).catch(() => void 0);
       }
     }
   };
 }
 async function queryListenerControl(paths, command2, timeoutMs = CONTROL_TIMEOUT_MS) {
-  return await new Promise((resolve7, reject) => {
+  return await new Promise((resolve8, reject) => {
     const socket = (0, import_node_net.createConnection)(paths.socketPath);
     let input = "";
     let settled = false;
@@ -61199,7 +63683,7 @@ async function queryListenerControl(paths, command2, timeoutMs = CONTROL_TIMEOUT
       clearTimeout(timer2);
       socket.destroy();
       if (error2) reject(error2);
-      else resolve7(status);
+      else resolve8(status);
     };
     socket.setEncoding("utf8");
     socket.once("error", (error2) => finish(error2));
@@ -61230,7 +63714,7 @@ async function queryListenerControl(paths, command2, timeoutMs = CONTROL_TIMEOUT
 }
 
 // src/listener/supervisor.ts
-var import_node_crypto20 = require("node:crypto");
+var import_node_crypto23 = require("node:crypto");
 init_signals();
 init_delivery();
 init_command_client();
@@ -61264,11 +63748,11 @@ function listenerRestartDelayMs(attempt, policy = {}, random = Math.random) {
 }
 async function defaultRestartSleep(ms, signal) {
   if (ms <= 0 || signal.aborted) return;
-  await new Promise((resolve7) => {
+  await new Promise((resolve8) => {
     const finish = () => {
       clearTimeout(timer2);
       signal.removeEventListener("abort", finish);
-      resolve7();
+      resolve8();
     };
     const timer2 = setTimeout(finish, ms);
     signal.addEventListener("abort", finish, { once: true });
@@ -61362,7 +63846,7 @@ async function runListenerSupervisor(options) {
   const now = options.now ?? Date.now;
   const startedAt = iso2(now);
   const controller = new AbortController();
-  const proposedInstanceId = (0, import_node_crypto20.randomUUID)();
+  const proposedInstanceId = (0, import_node_crypto23.randomUUID)();
   const carried = await readListenerStatus(options.paths).catch(() => null);
   let status = {
     version: 1,
@@ -61376,6 +63860,7 @@ async function runListenerSupervisor(options) {
     ...options.projectDirectory ? { projectDirectory: options.projectDirectory } : {},
     ...options.targetUrl ? { targetUrl: options.targetUrl } : {},
     pid: process.pid,
+    processStartedAt: Date.now() - process.uptime() * 1e3,
     state: "starting",
     startedAt,
     readyAt: null,
@@ -62107,46 +64592,46 @@ async function runListenerSupervisor(options) {
   }
   return statusSnapshot();
 }
-async function effectiveListenerStatus(paths) {
+async function effectiveListenerStatus(paths, timeoutMs) {
   try {
-    return await queryListenerControl(paths, "status");
+    return await queryListenerControl(paths, "status", timeoutMs);
   } catch {
     const stored = await readListenerStatus(paths);
     if (stored && LISTENER_RUNNING_STATES.includes(stored.state)) {
-      const failed = {
-        ...stored,
-        state: "failed",
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        stoppedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        lastErrorCode: "unclean_exit",
-        /* The process is gone: it holds nothing and observes nothing, so every
-           field whose sentence is rendered in the present tense against read
-           time is cleared. pendingDeliveryCount stays, because its line already
-           says it is what the service reported. */
-        currentDeliverySignalId: null,
-        currentDeliverySince: null,
-        heldBackDeliveries: [],
-        credentialStopAt: null,
-        nextAttemptAt: null
-      };
+      const failed = uncleanListenerStatus(stored);
       await writeListenerStatus(paths, failed);
       return failed;
     }
     return stored;
   }
 }
-async function stopListener(paths) {
+function uncleanListenerStatus(stored) {
+  const stoppedAt = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    ...stored,
+    state: "failed",
+    updatedAt: stoppedAt,
+    stoppedAt,
+    lastErrorCode: "unclean_exit",
+    currentDeliverySignalId: null,
+    currentDeliverySince: null,
+    heldBackDeliveries: [],
+    credentialStopAt: null,
+    nextAttemptAt: null
+  };
+}
+async function stopListener(paths, timeoutMs) {
   try {
-    return await queryListenerControl(paths, "stop");
+    return await queryListenerControl(paths, "stop", timeoutMs);
   } catch {
-    return await effectiveListenerStatus(paths);
+    return await effectiveListenerStatus(paths, timeoutMs);
   }
 }
 async function waitForListenerReady(paths, options = {}) {
   const timeoutMs = options.timeoutMs ?? 12e4;
   const pollMs = options.pollMs ?? 100;
   const now = options.now ?? Date.now;
-  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve7) => setTimeout(resolve7, ms)));
+  const sleep2 = options.sleep ?? ((ms) => new Promise((resolve8) => setTimeout(resolve8, ms)));
   const deadline = now() + timeoutMs;
   let last = null;
   let processExitObservedAt = null;
@@ -62188,7 +64673,7 @@ async function waitForListenerReady(paths, options = {}) {
 
 // src/listener/delivery-journal.ts
 var import_node_path16 = require("node:path");
-var import_node_util4 = require("node:util");
+var import_node_util5 = require("node:util");
 init_storage();
 var UUID_RE22 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 var COMMAND_ID_RE3 = /^[A-Za-z0-9_-]{8,72}$/;
@@ -62326,7 +64811,7 @@ function assertPlainObject(input, allowedKeys, requiredKeys, errMessage = "deliv
     if (typeof input !== "object" || input === null || Array.isArray(input)) {
       throw new Error(errMessage);
     }
-    if (import_node_util4.types.isProxy(input)) {
+    if (import_node_util5.types.isProxy(input)) {
       throw new Error(errMessage);
     }
     const proto = Object.getPrototypeOf(input);
@@ -62909,11 +65394,11 @@ async function openListenerDeliveryJournal(options) {
 }
 
 // src/listener/detach.ts
-var import_node_child_process5 = require("node:child_process");
+var import_node_child_process8 = require("node:child_process");
 var import_node_path17 = require("node:path");
 init_env();
-function isNativeAbsolutePath(value, platform = process.platform) {
-  return platform === "win32" ? import_node_path17.win32.isAbsolute(value) : import_node_path17.posix.isAbsolute(value);
+function isNativeAbsolutePath(value, platform2 = process.platform) {
+  return platform2 === "win32" ? import_node_path17.win32.isAbsolute(value) : import_node_path17.posix.isAbsolute(value);
 }
 function listenerNodeExecArgv(values2) {
   const safe = [];
@@ -62991,7 +65476,7 @@ async function spawnDetachedListener(options) {
   if (options.credentialArtifact.length < 1 || options.credentialArtifact.length > 4096) {
     throw new Error("listener credential artifact is outside the stdin bound");
   }
-  const spawnImpl = options.spawnImpl ?? import_node_child_process5.spawn;
+  const spawnImpl = options.spawnImpl ?? import_node_child_process8.spawn;
   const child = spawnImpl(
     process.execPath,
     buildListenerChildArgs(options.spec),
@@ -63005,12 +65490,12 @@ async function spawnDetachedListener(options) {
     child.kill();
     throw new Error("detached listener child has no credential pipe");
   }
-  await new Promise((resolve7, reject) => {
+  await new Promise((resolve8, reject) => {
     const onError = (error2) => reject(error2);
     child.once("error", onError);
     child.stdin.end(options.credentialArtifact, "utf8", () => {
       child.off("error", onError);
-      resolve7();
+      resolve8();
     });
   });
   child.unref();
@@ -63018,8 +65503,9 @@ async function spawnDetachedListener(options) {
 }
 
 // src/listener/hook.ts
-var import_promises11 = require("node:fs/promises");
+var import_promises12 = require("node:fs/promises");
 var import_node_path19 = require("node:path");
+init_brain();
 init_config();
 init_delivery();
 init_session_ack();
@@ -63438,7 +65924,7 @@ async function listenerIsLive(context) {
 async function discoverStoredStatusContexts(stateDirectory2) {
   let entries;
   try {
-    entries = await (0, import_promises11.readdir)(stateDirectory2, { withFileTypes: true });
+    entries = await (0, import_promises12.readdir)(stateDirectory2, { withFileTypes: true });
   } catch (error2) {
     if (error2.code === "ENOENT") return [];
     throw error2;
@@ -63890,10 +66376,10 @@ async function runListenerHookCheck(options = {}) {
       signal: controller.signal,
       deadlineMs
     });
-    const timedOut = new Promise((resolve7) => {
+    const timedOut = new Promise((resolve8) => {
       timer2 = setTimeout(() => {
         controller.abort();
-        resolve7("");
+        resolve8("");
       }, HOOK_CHECK_TIMEOUT_MS);
     });
     return await Promise.race([checking, timedOut]);
@@ -63905,7 +66391,7 @@ async function runListenerHookCheck(options = {}) {
 }
 
 // src/listener/attendance-canary.ts
-var import_promises12 = require("node:fs/promises");
+var import_promises13 = require("node:fs/promises");
 init_command_client();
 init_signals();
 var LOG_TAIL_BYTES = 256 * 1024;
@@ -63920,7 +66406,7 @@ function agentReceipt(receipts, principalId) {
 async function readLogTail(path) {
   let handle;
   try {
-    handle = await (0, import_promises12.open)(path, "r");
+    handle = await (0, import_promises13.open)(path, "r");
   } catch (error2) {
     if (error2.code === "ENOENT") return "";
     throw error2;
@@ -63965,7 +66451,7 @@ async function logEvidence(path, signalId) {
 }
 async function runListenerAttendanceCanary(options) {
   const now = options.now ?? Date.now;
-  const sleep2 = options.sleep ?? ((milliseconds) => new Promise((resolve7) => setTimeout(resolve7, milliseconds)));
+  const sleep2 = options.sleep ?? ((milliseconds) => new Promise((resolve8) => setTimeout(resolve8, milliseconds)));
   const startedAt = now();
   const deadlineMs = startedAt + options.waitMs;
   const client = new ThinCommandClient(options.target, options.fetcher, {
@@ -64079,7 +66565,7 @@ function renderListenerAttendanceCanary(result, workspaceId2, principalId) {
 }
 
 // src/listener/activity.ts
-var import_node_crypto21 = require("node:crypto");
+var import_node_crypto24 = require("node:crypto");
 init_sanitize();
 var ACTIVITY_FRAME_INTERVAL_MS = 750;
 var ACTIVITY_HEARTBEAT_MS = 15e3;
@@ -64167,7 +66653,7 @@ var ListenerActivityController = class {
   constructor(options) {
     this.options = options;
     this.clock = options.clock ?? SYSTEM_CLOCK;
-    this.streamId = options.streamId ?? (0, import_node_crypto21.randomUUID)();
+    this.streamId = options.streamId ?? (0, import_node_crypto24.randomUUID)();
     this.events = { update: (update) => this.onSessionUpdate(update) };
   }
   options;
@@ -64258,8 +66744,8 @@ var ListenerActivityController = class {
     this.latestToolId = null;
     this.setPhase("idle");
   }
-  setPhase(phase) {
-    this.phase = phase;
+  setPhase(phase2) {
+    this.phase = phase2;
     if (this.heartbeatTimer !== null) {
       this.clock.clearTimer(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -64277,18 +66763,18 @@ var ListenerActivityController = class {
   }
   schedule() {
     if (this.closed || this.timer !== null || this.sending) return;
-    const delay3 = Math.max(
+    const delay4 = Math.max(
       0,
       this.lastSentAt + ACTIVITY_FRAME_INTERVAL_MS - this.clock.now()
     );
-    if (delay3 === 0) {
+    if (delay4 === 0) {
       void this.flush();
       return;
     }
     this.timer = this.clock.setTimer(() => {
       this.timer = null;
       void this.flush();
-    }, delay3);
+    }, delay4);
   }
   async flush() {
     if (this.closed || this.sending || !this.dirty) return;
@@ -64499,7 +66985,7 @@ var ListenerHttpClient = class {
       finished = true;
       this.finishRequest();
     };
-    return await new Promise((resolve7, reject) => {
+    return await new Promise((resolve8, reject) => {
       const send = options.url.protocol === "https:" ? import_node_https.request : import_node_http2.request;
       const agent = options.url.protocol === "https:" ? this.httpsAgent : this.httpAgent;
       let request;
@@ -64554,7 +67040,7 @@ var ListenerHttpClient = class {
               redirected: { value: options.redirected },
               url: { value: options.url.href }
             });
-            resolve7(response);
+            resolve8(response);
           } catch (error2) {
             reject(error2);
           }
@@ -64575,7 +67061,8 @@ var ListenerHttpClient = class {
 };
 
 // src/resume.ts
-var import_node_child_process6 = require("node:child_process");
+var import_node_child_process9 = require("node:child_process");
+var import_node_path20 = require("node:path");
 var DEFAULT_PROCESS_TABLE_COMMAND = {
   file: "ps",
   args: ["-axo", "pid=,command="]
@@ -64594,13 +67081,13 @@ var ProcessTableError = class extends Error {
   code = "process_table_unavailable";
 };
 function execFileText(file, args) {
-  return new Promise((resolve7, reject) => {
-    (0, import_node_child_process6.execFile)(file, [...args], {
+  return new Promise((resolve8, reject) => {
+    (0, import_node_child_process9.execFile)(file, [...args], {
       encoding: "utf8",
       maxBuffer: 4 * 1024 * 1024
     }, (error2, stdout) => {
       if (error2) reject(error2);
-      else resolve7(stdout);
+      else resolve8(stdout);
     });
   });
 }
@@ -64617,8 +67104,8 @@ function systemProcessTable(options = {}) {
   const retain = options.retain ?? (() => true);
   return {
     list() {
-      return new Promise((resolve7, reject) => {
-        const child = (0, import_node_child_process6.spawn)(command2.file, [...command2.args], {
+      return new Promise((resolve8, reject) => {
+        const child = (0, import_node_child_process9.spawn)(command2.file, [...command2.args], {
           stdio: ["ignore", "pipe", "pipe"]
         });
         const rows3 = [];
@@ -64672,36 +67159,36 @@ function systemProcessTable(options = {}) {
             return;
           }
           settled = true;
-          resolve7(rows3);
+          resolve8(rows3);
         });
       });
     }
   };
 }
-function lsofStdoutConsumer() {
+function parseParentProcessOutput(output2, checkAlive = (pid) => process.kill(pid, 0)) {
+  const parent = Number(output2.trim());
+  if (!Number.isSafeInteger(parent) || parent <= 0) return "cannot_determine";
+  if (parent === 1) return "parent_is_init";
+  try {
+    checkAlive(parent);
+    return "parent_alive";
+  } catch (error2) {
+    const code = error2.code;
+    if (code === "ESRCH") return "parent_missing";
+    if (code === "EPERM") return "parent_alive";
+    return "cannot_determine";
+  }
+}
+function systemParentProcess(adapters = {}) {
   return {
     async inspect(pid) {
       let output2;
       try {
-        output2 = await execFileText(
-          process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
-          ["-nP", "-a", "-p", String(pid), "-d", "1", "-F", "pftan"]
-        );
+        output2 = adapters.ps ? await adapters.ps(pid) : await execFileText("ps", ["-o", "ppid=", "-p", String(pid)]);
       } catch {
         return "cannot_determine";
       }
-      const lines = output2.split("\n");
-      const type = lines.find((line) => line.startsWith("t"))?.slice(1) ?? "";
-      const names = lines.filter((line) => line.startsWith("n")).map((line) => line.slice(1));
-      if (type === "unix") {
-        if (names.some((name) => name === "->(none)")) return "orphaned";
-        if (names.some((name) => name.startsWith("->") && name !== "->(none)")) {
-          return "live_reader";
-        }
-        return "cannot_determine";
-      }
-      if (type === "PIPE" || type === "FIFO") return "cannot_determine";
-      return type.length === 0 ? "cannot_determine" : "not_pipe";
+      return parseParentProcessOutput(output2, adapters.checkAlive);
     }
   };
 }
@@ -64728,6 +67215,7 @@ async function findNotifyWatchers(options) {
     ...options.processTableCommand ? { command: options.processTableCommand } : {}
   });
   const stdoutConsumer = options.stdoutConsumer ?? lsofStdoutConsumer();
+  const parentProcess2 = options.parentProcess ?? systemParentProcess();
   const rows3 = await processTable.list();
   const matches = rows3.flatMap((row) => {
     if (!isNotifyCommand(row.command)) return [];
@@ -64743,7 +67231,8 @@ async function findNotifyWatchers(options) {
   const unique = [...new Map(matches.map((row) => [row.pid, row])).values()].sort((left, right) => left.pid - right.pid);
   return await Promise.all(unique.map(async (row) => ({
     ...row,
-    stdout: await stdoutConsumer.inspect(row.pid)
+    stdout: await stdoutConsumer.inspect(row.pid),
+    parent: await parentProcess2.inspect(row.pid)
   })));
 }
 async function readOnlyListenerInspection(paths, adapters = {}) {
@@ -64778,75 +67267,130 @@ async function inspectResume(options, adapters) {
     credentialPaths: options.credentialPathAliases ?? [options.credentialFile],
     principalId,
     ...adapters.processTable ? { processTable: adapters.processTable } : {},
-    ...adapters.stdoutConsumer ? { stdoutConsumer: adapters.stdoutConsumer } : {}
+    ...adapters.stdoutConsumer ? { stdoutConsumer: adapters.stdoutConsumer } : {},
+    ...adapters.parentProcess ? { parentProcess: adapters.parentProcess } : {}
   });
   const topics = await adapters.readBrainTopics();
   const digestStore = new FileBrainDigestStore(paths.instanceDirectory, principalId);
   const digest = await digestStore.preview(topics);
   const inbox = await adapters.readInboxCount(principalId, paths.instanceDirectory);
+  const sessionContexts = options.sessionCredential === void 0 ? void 0 : await verifiedLiveSessionContexts({
+    target: options.target,
+    workspaceId: options.workspaceId,
+    principalId,
+    credential: options.sessionCredential,
+    ...identity.sessionStatus === void 0 ? {} : { serverStatus: identity.sessionStatus },
+    checkManagementWithoutFiles: true,
+    ...options.sessionTokenFile === void 0 ? {} : { tokenFile: options.sessionTokenFile }
+  });
+  let leaseUnavailable = false;
+  const lease = adapters.readWakeLease ? await adapters.readWakeLease().catch(() => {
+    leaseUnavailable = true;
+    return null;
+  }) : null;
+  const wakeLease = adapters.readWakeLease ? {
+    lease,
+    unavailable: leaseUnavailable,
+    machineIdUnavailable: await arrivalMachineHash() === null,
+    hostIdDirectory: (0, import_node_path20.dirname)(arrivalWatchLockPath(options.target, options.workspaceId, principalId)),
+    hostIdFileState: await arrivalHostIdFileState(arrivalWatchLockPath(
+      options.target,
+      options.workspaceId,
+      principalId
+    )),
+    localWatcherId: await arrivalWatchLockIdentity(arrivalWatchLockPath(
+      options.target,
+      options.workspaceId,
+      principalId
+    ))
+  } : void 0;
   return {
     identity: { ...identity, principalId },
     listener,
     watchers,
     brain: { digest, highWaterFile: digestStore.location },
     inbox,
+    ...sessionContexts ? { sessionContexts } : {},
+    ...wakeLease ? { wakeLease } : {},
     target: options.target,
     workspaceId: options.workspaceId,
     credentialFile: options.credentialFile,
-    installedVersion: options.installedVersion
+    installedVersion: options.installedVersion,
+    ...options.stateDirectory ? { stateDirectory: options.stateDirectory } : {}
   };
 }
 function safeText(value) {
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ").slice(0, 2e3);
 }
-function shellArg(value) {
+function shellArg2(value) {
   if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value;
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 function commonCommandArgs(report) {
   return [
     "--agent-token-file",
-    shellArg(report.credentialFile),
+    shellArg2(report.credentialFile),
     "--url",
-    shellArg(report.target.url),
+    shellArg2(report.target.url),
     "--anon-key",
-    shellArg(report.target.anonKey),
+    shellArg2(report.target.anonKey),
     "--workspace-id",
     report.workspaceId
   ].join(" ");
 }
+function watcherNextStep(report) {
+  if (report.sessionContexts?.managed === false) {
+    return printedCommand(
+      "start one watcher under a live Monitor.",
+      `cswarm inbox --notify ${commonCommandArgs(report)}`
+    );
+  }
+  return report.sessionContexts?.paths.length ? "start one watcher under the live host session with its verified context path listed above." : "start one watcher from this seat's live host session after its context is verified.";
+}
 function restartCommand(report, status) {
   const common2 = commonCommandArgs(report);
+  const stateDir = report.stateDirectory ? ` --state-dir ${shellArg2(report.stateDirectory)}` : "";
   const start = [
     "cswarm listen start",
     common2,
-    `--provider ${status.provider}`,
-    `--permissions ${status.permissionMode ?? "allow"}`,
+    `--provider ${shellArg2(status.provider)}`,
+    `--permissions ${shellArg2(status.permissionMode ?? "allow")}`,
     "--route main"
   ].join(" ");
-  return `cswarm listen stop ${common2} && ${start}`;
+  return `cswarm listen stop ${common2}${stateDir} --wait && ${start}${stateDir}`;
+}
+function watcherState(watcher) {
+  if (watcher.stdout === "live_reader" || watcher.stdout === "orphaned") return watcher.stdout;
+  if (watcher.parent === "parent_is_init" || watcher.parent === "parent_missing") return "orphaned";
+  if (watcher.stdout === "cannot_determine" || watcher.parent === "cannot_determine") return "cannot_determine";
+  return watcher.stdout;
 }
 function watcherStateLine(watcher) {
   const matched = watcher.matchedBy.map(
     (value) => value === "agent_token_file" ? "credential path" : "principal id"
   ).join(" and ");
   const state = watcher.stdout === "live_reader" ? "stdout has a live pipe reader" : watcher.stdout === "orphaned" ? "ORPHAN: stdout pipe has no reader" : watcher.stdout === "not_pipe" ? "stdout is not a pipe; the dead-reader check does not apply" : "stdout reader cannot be determined on this host";
-  return `- PID ${watcher.pid}: ${state}; matched ${matched}.`;
+  const orphanPrefix = watcher.stdout === "live_reader" ? "" : "ORPHAN: ";
+  const parent = watcher.parent === "parent_is_init" ? `${orphanPrefix}parent PID is 1` : watcher.parent === "parent_missing" ? `${orphanPrefix}parent process no longer exists` : watcher.parent === "parent_alive" ? "parent process is live" : "parent process cannot be determined";
+  return `- PID ${watcher.pid}: ${state}; ${parent}; matched ${matched}.`;
 }
 function renderResume(report) {
   const lines = [
     "Identity",
     `You are ${safeText(report.identity.displayName)} (${report.identity.principalId}).`,
     "Next: use this principal for every listener, watcher, brain, and inbox check below.",
-    "",
-    "Listener"
+    ""
   ];
+  if (report.sessionContexts) {
+    lines.push(...report.sessionContexts.verificationRefused ? ["Live session context on this host: the service refused this credential (expired or revoked). Renew the agent credential, then resume."] : report.sessionContexts.verificationServiceError ? ["Live session context on this host: the read service returned an error; try again after it recovers."] : report.sessionContexts.verificationUnavailable ? ["Live session context on this host: could not verify with the read service; check again when it is reachable."] : report.sessionContexts.paths.length === 0 ? ["Live session context on this host: no live session on this host was verified for this seat."] : report.sessionContexts.paths.map((path) => `Live session context on this host: ${safeText(path)}`), "");
+  }
+  lines.push("Listener");
   const listener = report.listener;
   const status = listener.status;
   if (status === null) {
     lines.push(
       `No listener found under ${safeText(listener.checkedDirectory)} for profile ${report.target.profileId}.`,
-      `Next: start one with the original provider: cswarm listen start ${commonCommandArgs(report)} --provider <provider>`
+      "Next: start one with the original provider used for this seat."
     );
   } else {
     if (listener.source === "live_process") {
@@ -64862,16 +67406,16 @@ function renderResume(report) {
     if (listener.source !== "live_process") {
       lines.push(
         `Running listener cswarm version: cannot determine because the process did not answer; status file recorded ${runningVersion ?? "no version"}; installed CLI: ${report.installedVersion}.`,
-        `Next: restart the listener because its process did not answer: ${restartCommand(report, status)}`
+        printedCommand("Next: restart the listener because its process did not answer.", restartCommand(report, status))
       );
     } else if (runningVersion === null) {
       lines.push(
         `Listener cswarm version: cannot determine from this listener; installed CLI: ${report.installedVersion}.`,
-        `Next: restart it to make the running version reportable: ${restartCommand(report, status)}`
+        printedCommand("Next: restart it to make the running version reportable.", restartCommand(report, status))
       );
     } else if (runningVersion !== report.installedVersion) {
       lines.push(
-        `VERSION MISMATCH: listener runs ${runningVersion}; installed ${report.installedVersion} \u2014 restart it: ${restartCommand(report, status)}`
+        printedCommand(`VERSION MISMATCH: listener runs ${runningVersion}; installed ${report.installedVersion}. Restart it.`, restartCommand(report, status))
       );
     } else {
       lines.push(
@@ -64888,23 +67432,42 @@ function renderResume(report) {
   if (report.watchers.length === 0) {
     lines.push(
       "Found: 0.",
-      `Next: start one watcher under a live Monitor: cswarm inbox --notify ${commonCommandArgs(report)}`
+      `Next: ${watcherNextStep(report)}`
     );
   } else {
     lines.push(`Found: ${report.watchers.length}.`);
     lines.push(...report.watchers.map(watcherStateLine));
-    const orphans = report.watchers.filter((watcher) => watcher.stdout === "orphaned");
+    const orphans = report.watchers.filter((watcher) => watcherState(watcher) === "orphaned");
     if (orphans.length > 0) {
       lines.push(
-        `Next: stop only the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything: kill ${orphans.map((watcher) => watcher.pid).join(" ")}`
+        printedCommand(
+          `Next: stop the orphan watcher${orphans.length === 1 ? "" : "s"}; CommonSwarm did not kill anything.`,
+          `kill ${orphans.map((watcher) => watcher.pid).join(" ")}`
+        ),
+        `Then ${watcherNextStep(report)}`
       );
-    } else if (report.watchers.some((watcher) => watcher.stdout === "cannot_determine")) {
+    } else if (report.watchers.some((watcher) => watcherState(watcher) === "cannot_determine")) {
+      const unknown2 = report.watchers.filter((watcher) => watcherState(watcher) === "cannot_determine");
+      const evidence = [
+        ...unknown2.some((watcher) => watcher.stdout === "cannot_determine") ? ["stdout reader"] : [],
+        ...unknown2.some((watcher) => watcher.parent === "cannot_determine") ? ["parent process"] : []
+      ].join(" and ");
       lines.push(
-        "Next: verify each unknown stdout reader in the host Monitor before you start another watcher."
+        `Next: verify each unknown ${evidence} in the host Monitor before you start another watcher.`
       );
     } else {
       lines.push("Next: keep one watcher with a live output surface; do not start a duplicate.");
     }
+  }
+  if (report.wakeLease) {
+    if (report.wakeLease.machineIdUnavailable) {
+      lines.push(report.wakeLease.hostIdFileState === "present" ? "This command could not read the machine id; a host-id file exists but cannot be verified against this machine." : report.wakeLease.hostIdFileState === "missing" ? "This command could not read the machine id; no host-id file exists yet." : "This command could not read the machine id or verify the host-id file.");
+      if (report.wakeLease.hostIdDirectory) lines.push(
+        `Keep the host-id state in ${safeText(report.wakeLease.hostIdDirectory)} separate on each machine; sharing that directory across machines is unsupported.`
+      );
+    }
+    const lease = report.wakeLease.lease;
+    lines.push(report.wakeLease.unavailable ? "Server wake lease: unavailable; check again when the read service is reachable." : lease === null ? "Server wake lease: none." : `Server wake lease: ${sanitizeWakeHostLabel(lease.host_label)}, generation ${lease.generation}, renewed ${Math.floor(lease.renewed_age_ms / 1e3)}s ago; this host holds it: ${report.wakeLease.localWatcherId === lease.watcher_id ? "yes" : "no"}. A renewal does not prove this session reads its mail; observed ACK does. The lease goes stale after ${WAKE_LEASE_STALE_LABEL}.`);
   }
   lines.push(
     "",
@@ -64917,14 +67480,17 @@ function renderResume(report) {
       "Next: no brain read is needed now."
     );
   } else {
-    lines.push(report.brain.digest, "Next: read any needed topic with the command above.");
+    lines.push(
+      report.brain.digest.replace(/ Read: cswarm brain get <topic>$/, ""),
+      "Next: read any needed topic by name."
+    );
   }
   const inboxCount = report.inbox.exact ? String(report.inbox.count) : `at least ${report.inbox.count}`;
   lines.push(
     "",
     "Unread inbox",
     `Unread directed asks and notes from the same read used by the hook: ${inboxCount}.`,
-    report.inbox.count === 0 ? "Next: no inbox action is needed now." : `Next: read them without acknowledging them first: cswarm inbox ${commonCommandArgs(report)}`,
+    report.inbox.count === 0 ? "Next: no inbox action is needed now." : printedCommand("Next: read them without acknowledging them first.", `cswarm inbox ${commonCommandArgs(report)}`),
     "",
     "Read-only check complete. No cursor, brain high-water, listener status, receipt, acknowledgement, or process was changed."
   );
@@ -64936,6 +67502,10 @@ function resumeJson(report) {
       display_name: report.identity.displayName,
       principal_id: report.identity.principalId
     },
+    ...report.sessionContexts ? {
+      live_session_context_paths: report.sessionContexts.paths,
+      live_session_context_verification_unavailable: report.sessionContexts.verificationUnavailable
+    } : {},
     listener: {
       found: report.listener.status !== null,
       checked_directory: report.listener.checkedDirectory,
@@ -64949,8 +67519,22 @@ function resumeJson(report) {
     notify_watchers: report.watchers.map((watcher) => ({
       pid: watcher.pid,
       matched_by: watcher.matchedBy,
-      stdout: watcher.stdout
+      stdout: watcher.stdout,
+      parent: watcher.parent,
+      state: watcherState(watcher)
     })),
+    ...report.wakeLease ? {
+      ...report.wakeLease.unavailable ? { wake_lease_error: "unavailable" } : {},
+      ...report.wakeLease.machineIdUnavailable ? { host_machine_id_unavailable: true } : {},
+      host_id_file_state: report.wakeLease.hostIdFileState ?? null,
+      wake_lease: report.wakeLease.lease === null ? null : {
+        host_label: sanitizeWakeHostLabel(report.wakeLease.lease.host_label),
+        generation: report.wakeLease.lease.generation,
+        renewed_age_ms: report.wakeLease.lease.renewed_age_ms,
+        held_by_this_host: report.wakeLease.localWatcherId === report.wakeLease.lease.watcher_id,
+        renewal_is_mail_observation: false
+      }
+    } : {},
     brain: {
       high_water_file: report.brain.highWaterFile,
       high_water_advanced: false,
@@ -64985,14 +67569,14 @@ function currentHostInjection() {
   return registeredHostInjection;
 }
 function sleepMs(ms, signal) {
-  return new Promise((resolve7, reject) => {
+  return new Promise((resolve8, reject) => {
     if (signal?.aborted) {
       const error2 = new Error("interactive receiver aborted");
       error2.name = "AbortError";
       reject(error2);
       return;
     }
-    const timer2 = setTimeout(resolve7, ms);
+    const timer2 = setTimeout(resolve8, ms);
     const onAbort = () => {
       clearTimeout(timer2);
       const error2 = new Error("interactive receiver aborted");
@@ -65488,7 +68072,9 @@ function classifyClaudeCanaryFailure(detail, typedReasonCode, peerError) {
 
 // src/cli.ts
 var import_node_url = require("node:url");
+init_exact_file_put();
 var import_meta = {};
+var LISTENER_STOP_WAIT_TIMEOUT_MS = 3e4;
 function loadHostClaude() {
   return Promise.resolve().then(() => (init_claude(), claude_exports));
 }
@@ -65504,7 +68090,7 @@ async function readPositionalBody(args, positionalIndex) {
 async function readFileBody(args) {
   const fromFile = args.optional("body-file");
   try {
-    const stream2 = (0, import_node_fs8.createReadStream)(fromFile, { highWaterMark: 4096 });
+    const stream2 = (0, import_node_fs9.createReadStream)(fromFile, { highWaterMark: 4096 });
     return await readBoundedUtf8Stream(stream2, SIGNAL_BODY_MAX, {
       source: "file",
       filePath: fromFile,
@@ -65625,6 +68211,7 @@ var KNOWN_FLAGS = /* @__PURE__ */ new Set([
   "codex-executable",
   "confirm",
   "confirm-standing",
+  "clear-pending",
   "cooldown",
   "cwd",
   "defer-over",
@@ -65658,6 +68245,7 @@ var KNOWN_FLAGS = /* @__PURE__ */ new Set([
   "ndjson",
   "no-browser",
   "notify",
+  "take-over",
   "opencode-executable",
   "out",
   "permissions",
@@ -65676,6 +68264,7 @@ var KNOWN_FLAGS = /* @__PURE__ */ new Set([
   "thread",
   "poll-interval",
   "renewal-horizon-days",
+  "request-id",
   "standing",
   "task-id",
   "to",
@@ -65707,6 +68296,7 @@ var BOOLEAN_FLAGS = /* @__PURE__ */ new Set([
   "allow-unattended",
   "broadcast-to-channel",
   "confirm-standing",
+  "clear-pending",
   "force-file-store",
   "follow",
   "force",
@@ -65721,6 +68311,7 @@ var BOOLEAN_FLAGS = /* @__PURE__ */ new Set([
   "local",
   "ndjson",
   "notify",
+  "take-over",
   "no-browser",
   "reveal-anon-key",
   "repo",
@@ -65732,12 +68323,12 @@ var BOOLEAN_FLAGS = /* @__PURE__ */ new Set([
 ]);
 var UUID_RE25 = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function packageVersion() {
-  if ("0.1.77".length > 0) {
-    return "0.1.77";
+  if ("0.1.78".length > 0) {
+    return "0.1.78";
   }
   try {
     const value = JSON.parse(
-      (0, import_node_fs8.readFileSync)(new URL("../package.json", import_meta.url), "utf8")
+      (0, import_node_fs9.readFileSync)(new URL("../package.json", import_meta.url), "utf8")
     );
     const version4 = value.version;
     if (typeof version4 !== "string") return "unknown";
@@ -65751,7 +68342,9 @@ var Arguments = class {
   positionals = [];
   leadingPositionals = [];
   flags = /* @__PURE__ */ new Map();
+  originalOptions = [];
   hadProfileOption;
+  expandedProfilePath;
   constructor(values2) {
     let positionalOnly = false;
     let sawOption = false;
@@ -65772,8 +68365,9 @@ var Arguments = class {
       if (!name || name.includes("=")) {
         throw new Error(`invalid option: --${name.split("=", 1)[0]}`);
       }
-      if (BOOLEAN_FLAGS.has(name)) {
+      if (BOOLEAN_FLAGS.has(name) || name === "wait" && this.positionals[0] === "listen" && this.positionals[1] === "stop") {
         this.push(name, "true");
+        this.originalOptions.push({ name });
         continue;
       }
       const next = values2[index + 1];
@@ -65786,6 +68380,7 @@ var Arguments = class {
         throw new Error(`--${name} requires a value`);
       }
       this.push(name, next);
+      this.originalOptions.push({ name, value: next });
       index += 1;
     }
     this.hadProfileOption = this.flags.has("profile");
@@ -65810,6 +68405,16 @@ var Arguments = class {
   all(name) {
     return [...this.flags.get(name) ?? []];
   }
+  /** Preserve the user's parsed option order before a profile adds derived flags. */
+  originalOptionTokens(exclude) {
+    return this.originalOptions.flatMap(({ name, value }) => {
+      if (name === exclude) return [];
+      return [`--${name}`, ...value === void 0 ? [] : [NOTIFY_PATH_FLAGS.has(name) ? (0, import_node_path29.resolve)(value) : value]];
+    });
+  }
+  originalOptionEntries() {
+    return this.originalOptions;
+  }
   // Main swallowed hook-check errors only when `hook check` preceded every
   // option. Parsed `positionals` alone loses that order, so the parser records
   // this subset and error handling can use the selected entry plus parsed data.
@@ -65827,11 +68432,12 @@ var Arguments = class {
     if (conflicts.length > 0) throw new AgentSetupError("profile_flags_conflict", `Do not combine --profile with ${conflicts.map((flag) => `--${flag}`).join(", ")}.`);
     const profile = await readAgentProfile(path, this.optional("host-session-id"));
     await readProfileCredential(profile);
+    this.expandedProfilePath = path;
     if (this.has("host-session-id") && hostSessionId === "drop") {
       const selected = await profileSessionContext(profile, this.required("host-session-id"));
       if (selected) {
         const explicit = this.optional("session-context");
-        if (explicit !== void 0 && (0, import_node_path25.resolve)(explicit) !== (0, import_node_path25.resolve)(selected.path)) throw new AgentSetupError("profile_session_conflict", "The supplied session context does not belong to this profile's host session.");
+        if (explicit !== void 0 && (0, import_node_path29.resolve)(explicit) !== (0, import_node_path29.resolve)(selected.path)) throw new AgentSetupError("profile_session_conflict", "The supplied session context does not belong to this profile's host session.");
         if (explicit === void 0) this.push("session-context", selected.path);
       }
       this.flags.delete("host-session-id");
@@ -65850,6 +68456,9 @@ var Arguments = class {
         `too many positional arguments: expected ${positionals}, received ${this.positionals.length}`
       );
     }
+    this.assertAcceptedFlags(allowedFlags);
+  }
+  assertAcceptedFlags(allowedFlags) {
     const allowed = new Set(allowedFlags);
     for (const name of this.flags.keys()) {
       if (!allowed.has(name)) throw new Error(`unknown option: --${name}`);
@@ -65865,6 +68474,22 @@ function requireProfileWithHostSessionId(args) {
   }
 }
 var SESSION_CONTEXT_FLAGS = ["session-context"];
+var NOTIFY_PATH_FLAGS = /* @__PURE__ */ new Set(["agent-token-file", "profile", "session-context"]);
+var NOTIFY_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  NOTIFY_FLAG,
+  "take-over",
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
+function notifyRestartOptions(args) {
+  return {
+    arguments: args.originalOptionTokens(NOTIFY_FLAG),
+    agentTokenStdin: args.has("agent-token-stdin")
+  };
+}
 var TASK_FLAGS = [
   "task-id",
   "slug",
@@ -65879,84 +68504,29 @@ var TASK_FLAGS = [
 ];
 var UsageError = class extends Error {
 };
-function usage() {
-  const agentCredential2 = "[--agent-token-file <path> | --agent-token-stdin]";
-  const requiredAgentCredential = "(--agent-token-file <path> | --agent-token-stdin)";
-  const signalBody = formatBodyUsage("<text>");
-  const workingOnBody = formatBodyUsage("<what>");
-  return `cswarm ${CLI_BUILD_VERSION} (protocol ${CLIENT_PROTOCOL_VERSION})
-
-Usage:
-  cswarm login [--url <project-url> --anon-key <key>] [--no-browser]
-  cswarm logout [--url <project-url> --anon-key <key>] [--all-devices] [--local]
-  cswarm target [show] [--json] [--reveal-anon-key]
-  cswarm target set --url <project-url> --anon-key <key> [--json]
-  cswarm target clear [--json]
-  cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm whoami ${requiredAgentCredential} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio
-  cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]
-  cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]
-  cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--about <ref>] [--channel <name>] [--until <dur>] [--json]
-  cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..8000 characters
-  cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..8000 characters
-  cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]
-  cswarm receipt <signal-id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]
-  cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]
-  cswarm inbox --notify ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]
-  cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]
-  cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters
-  cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm file put <local-path> [--name <name>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm file ls [--include-tombstoned] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm file get <name|file-id> [--version <n>] [--out <local-path>] [--force] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm file rm <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm file restore <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm brain ls [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm brain get <topic>[@<version>] [--version <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm brain put <topic> [<markdown-path>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--if-version <n>] [--json]  # without a path, reads Markdown from stdin; --if-version refuses the write unless the live version is still <n>
-  cswarm feedback "<text>" --kind bug|idea|friction [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [--json]
-  cswarm listen start ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> --provider grok|opencode|claude|codex [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions deny|allow] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--allow-unattended] [--foreground] [--json]
-  cswarm listen canary ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]
-  cswarm listen status ${agentCredential2} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm listen stop ${agentCredential2} [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]
-  cswarm session start --mode ${SESSION_MODES.join("|")} --provider grok|opencode|claude|codex --host-session-id <id> ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--session-context <absolute-path>] [--host-label <text>] [--foreground] [--json]
-  cswarm session status --session-context <absolute-path> ${agentCredential2} [--url <url> --anon-key <key>] [--json]
-  cswarm session stop --session-context <absolute-path> ${agentCredential2} [--url <url> --anon-key <key>] [--json]
-  cswarm session enable --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm session disable --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm session recover --principal-id <uuid> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>]
-  cswarm hook install claude [--principal-id <uuid>] [--write] [--user | --repo]
-  cswarm hook uninstall claude --write [--user | --repo]
-  cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]
-  cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]
-  cswarm workspaces [--url <url> --anon-key <key>] [--json]
-  cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]
-  cswarm invite [--url <url> --anon-key <key>] [--workspace-id <uuid>] --email <email>
-  cswarm invite revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --invitation-id <uuid> [--json]
-  cswarm member remove <full-user-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]
-  cswarm workspace close <full-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--json]
-  cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]
-  cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]  # unsafe: shell history/process list
-  cswarm accept --invitation-token-stdin [--url <url> --anon-key <key>]
-  cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list
-  cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]
-  cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>
-  cswarm token mint [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid> --run-id <uuid> --task-id <uuid> --epoch <n> [--ttl-ms <ms>] [--renewal-horizon-days <1..90> | --standing --confirm-standing]
-  cswarm token revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --token-id <uuid>
-  cswarm token revoke ${requiredAgentCredential} [--url <url> --anon-key <key>] --workspace-id <uuid> [--token-id <uuid>]
-  cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # lifts an idle pause; a REVOKED grant is refused
-  cswarm link new [--url <url> --anon-key <key>] [--workspace-id <uuid>] --task-id <uuid> [--ttl-ms <ms>] [--site <origin>] [--json]
-  cswarm link revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --capability-id <uuid> [--json]
-  cswarm command <kind> [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} [command fields]
-  cswarm dogfood [--url <url> --anon-key <key>] [--workspace-id <uuid>] ${agentCredential2} --slug <slug> --branch <branch> --head-sha <sha> --evidence <ref>
-  cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]
+var INBOX_LIMIT_NOTICE = "--limit may omit older matching inbox messages; remove it to read them all.";
+var shellArgument = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+var INBOX_FOLLOW_STEP_DROP_FLAGS = ["limit", "json", "ndjson"];
+var inboxFollowStep = (since, args) => {
+  const flags = [];
+  for (const { name, value } of args?.originalOptionEntries() ?? []) {
+    if (name === "since" || name === INBOX_READ_SELECTOR_FLAGS[0] || name === INBOX_READ_SELECTOR_FLAGS[2] || INBOX_FOLLOW_STEP_DROP_FLAGS.includes(name)) continue;
+    if (INBOX_FOLLOW_REFUSED_FLAGS.includes(name) || !SIGNAL_READ_INBOX_ACCEPTED_FLAGS.includes(name) && !("flags" in AGENT_COMMANDS.inbox && AGENT_COMMANDS.inbox.flags.includes(name))) {
+      return { command: null, refused: name };
+    }
+    flags.push(`--${name}`);
+    if (value !== void 0) flags.push(shellArgument(value));
+  }
+  return { command: `cswarm inbox --follow --ndjson ${[...flags, "--since", shellArgument(since)].join(" ")}`, refused: null };
+};
+var inboxMoreNotice = (last, since, args) => {
+  const step = inboxFollowStep(since, args);
+  return `More inbox messages may remain. Stopped after ${last.created_at} (id ${last.id}). Rerunning with the same --since re-reads from ${since}, including this timestamp; ` + (step.command === null ? `inbox --follow cannot carry --${step.refused}, so there is no equivalent follow step for this read.` : `to read in order, ${args?.originalOptionEntries().some((option) => option.name === "agent-token-stdin") ? "pipe the same token again and " : ""}run ${step.command}.`);
+};
+var USAGE_GUIDANCE = `Inbox paging:
+  inbox --since pages matching directed signals for an agent unless --limit is set.
+  ${SINCE_OFFSET_GUIDANCE}
+  ${INBOX_LIMIT_NOTICE}
 
 Credential selection for command/dogfood:
   default                 refresh the human login from secure storage
@@ -66014,7 +68584,7 @@ Signals (intention sharing) accept the same credential selection. Agent mode
 never opens a browser or infers a human's saved workspace. Durations use a whole
 number plus m, h, or d (for example 90m, 24h, or 7d) and are capped at 30d.
 Place -- before signal text that itself begins with -- to stop option parsing.
-Signal text is at most 8000 characters and --about at most 500; a longer body is
+Signal text is at most ${SIGNAL_BODY_MAX} characters and --about at most ${SIGNAL_ABOUT_MAX}; a longer body is
 refused locally before any network call, so compose within the limit.
 
 ${idlePollHelpSentence()}
@@ -66092,6 +68662,13 @@ from DATABASE_URL and writes a newly minted agent token only to the absolute
 create-new path in SEED_TOKEN_OUT. --workspace-id selects an explicit fixture
 workspace only for callers who already hold that full-database credential; it
 grants no new authority and is not a governed product workspace-creation path.`;
+function usage() {
+  return `cswarm ${CLI_BUILD_VERSION} (protocol ${CLIENT_PROTOCOL_VERSION})
+
+Usage:
+${commandHelpLines()}
+
+${USAGE_GUIDANCE}`;
 }
 async function target(args) {
   const mode3 = hasAgentCredential(args) ? "agent" : "human";
@@ -66463,9 +69040,11 @@ async function resolveSignalBody(args, positionalIndex, allowedFlags) {
   }
   return signalText(raw, "body");
 }
+var INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS];
+var INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "invitation-token-stdin"];
 async function invitationCredential(args) {
   if (args.has("invitation-token-stdin")) {
-    args.assertShape([...TARGET_FLAGS, "invitation-token-stdin"], 1);
+    args.assertShape(INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS, 1);
     if (process.stdin.isTTY) {
       throw new Error(
         "--invitation-token-stdin requires the capability to be piped on stdin"
@@ -66482,7 +69061,7 @@ async function invitationCredential(args) {
     assertInvitationToken(capability2);
     return capability2;
   }
-  args.assertShape([...TARGET_FLAGS], 2);
+  args.assertShape(INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS, 2);
   process.stderr.write(
     "Warning: positional invitation capabilities may be recorded in shell history and process listings; prefer --invitation-token-stdin.\n"
   );
@@ -66499,12 +69078,12 @@ async function stdinInviteLink() {
     value += chunk.toString();
     if (value.length > 16384) throw new Error("invite link input is too large");
   }
-  const link = value.trim();
-  if (!link) throw new Error("--link-stdin received an empty invite link");
-  return link;
+  const link4 = value.trim();
+  if (!link4) throw new Error("--link-stdin received an empty invite link");
+  return link4;
 }
 async function confirmationLine(prompt) {
-  const reader = (0, import_promises16.createInterface)({
+  const reader = (0, import_promises19.createInterface)({
     input: process.stdin,
     output: process.stderr,
     terminal: Boolean(process.stdin.isTTY)
@@ -66579,8 +69158,9 @@ async function profileIdentity(human) {
     workspaceId: profile.workspaceId
   } : { email: null, workspaceId: null };
 }
+var RUN_WORKSPACES_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json"];
 async function runWorkspaces(args) {
-  args.assertShape([...TARGET_FLAGS, "json"], 1);
+  args.assertShape(RUN_WORKSPACES_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -66606,8 +69186,9 @@ async function runWorkspaces(args) {
 `
   );
 }
+var RUN_USE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "json"];
 async function runUse(args) {
-  args.assertShape([...TARGET_FLAGS, "json"], 2);
+  args.assertShape(RUN_USE_1_ACCEPTED_FLAGS, 2);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -66629,6 +69210,7 @@ async function runUse(args) {
   process.stdout.write(`${message}
 `);
 }
+var RUN_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "name", "json"];
 async function runNew(args) {
   const named = args.has("name");
   if (named && args.positionals.length > 1) {
@@ -66636,12 +69218,12 @@ async function runNew(args) {
       "give the workspace name once: as a positional or as --name, not both"
     );
   }
-  args.assertShape([...TARGET_FLAGS, "name", "json"], named ? 1 : 2);
+  args.assertShape(RUN_NEW_1_ACCEPTED_FLAGS, named ? 1 : 2);
   const name = (named ? args.required("name") : args.positionals[1]).trim();
   assertWorkspaceName(name);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
-  const proposedId = (0, import_node_crypto24.randomUUID)();
+  const proposedId = (0, import_node_crypto28.randomUUID)();
   let result;
   try {
     result = await new ThinCommandClient(cloud).sendConnect({
@@ -66682,11 +69264,14 @@ async function runNew(args) {
 ${next}
 `);
 }
+var RUN_TARGET_3_ACCEPTED_FLAGS = ["json"];
+var RUN_TARGET_2_ACCEPTED_FLAGS = ["url", "anon-key", "json"];
+var RUN_TARGET_1_ACCEPTED_FLAGS = ["json", "reveal-anon-key"];
 async function runTarget(args) {
   const action = args.positionals[1] ?? "show";
   if (action === "show") {
     args.assertShape(
-      ["json", "reveal-anon-key"],
+      RUN_TARGET_1_ACCEPTED_FLAGS,
       args.positionals[1] === void 0 ? 1 : 2
     );
     const reveal = args.has("reveal-anon-key");
@@ -66713,7 +69298,7 @@ Anon key fingerprint: ${summary.anon_key_fingerprint}
     return;
   }
   if (action === "set") {
-    args.assertShape(["url", "anon-key", "json"], 2);
+    args.assertShape(RUN_TARGET_2_ACCEPTED_FLAGS, 2);
     const selected = cloudTarget(
       args.required("url"),
       args.required("anon-key")
@@ -66734,7 +69319,7 @@ Anon key fingerprint: ${summary.anon_key_fingerprint}
     return;
   }
   if (action === "clear") {
-    args.assertShape(["json"], 2);
+    args.assertShape(RUN_TARGET_3_ACCEPTED_FLAGS, 2);
     const removed = await clearCurrentTarget();
     if (args.has("json")) {
       printJson({
@@ -66750,8 +69335,9 @@ Anon key fingerprint: ${summary.anon_key_fingerprint}
   }
   throw new Error(`unknown target command: ${action}`);
 }
+var RUN_STATUS_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "json"];
 async function runStatus(args) {
-  args.assertShape([...TARGET_FLAGS, "workspace-id", "json"], 1);
+  args.assertShape(RUN_STATUS_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const directory = cloudWorkspaceDirectory(cloud);
@@ -66895,10 +69481,12 @@ ${signalStatus.warning}`;
 ${renderedSignalStatus}
 `);
 }
+var RUN_INVITE_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "email", "json"];
+var RUN_INVITE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "invitation-id", "json"];
 async function runInvite(args) {
   if (args.positionals[1] === "revoke") {
     args.assertShape(
-      [...TARGET_FLAGS, "workspace-id", "invitation-id", "json"],
+      RUN_INVITE_1_ACCEPTED_FLAGS,
       2
     );
     const cloud2 = await target(args);
@@ -66927,7 +69515,7 @@ async function runInvite(args) {
 `);
     return;
   }
-  args.assertShape([...TARGET_FLAGS, "workspace-id", "email", "json"], 1);
+  args.assertShape(RUN_INVITE_2_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
@@ -66970,9 +69558,10 @@ async function runInvite(args) {
     invite_link: inviteLink
   });
 }
+var RUN_MEMBER_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "confirm", "json"];
 async function runMember(args) {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "confirm", "json"],
+    RUN_MEMBER_1_ACCEPTED_FLAGS,
     3
   );
   if (args.positionals[1] !== "remove") {
@@ -67018,8 +69607,9 @@ async function runMember(args) {
 `);
   }
 }
+var RUN_WORKSPACE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "confirm", "json"];
 async function runWorkspace(args) {
-  args.assertShape([...TARGET_FLAGS, "confirm", "json"], 3);
+  args.assertShape(RUN_WORKSPACE_1_ACCEPTED_FLAGS, 3);
   if (args.positionals[1] !== "close") {
     throw new UsageError(
       `unknown workspace command: ${args.positionals[1] ?? "(missing)"}`
@@ -67087,6 +69677,7 @@ async function runLegacyAccept(args) {
     workspace_id: acceptedWorkspace
   });
 }
+var ACCEPT_LINK_REFUSED_FLAGS = ["url", "anon-key"];
 function progressWriter(json) {
   return (progress) => writeAcceptProgress(progress, {
     json,
@@ -67095,7 +69686,7 @@ function progressWriter(json) {
   });
 }
 async function runLinkAccept(args, payload) {
-  if (args.has("url") || args.has("anon-key")) {
+  if (ACCEPT_LINK_REFUSED_FLAGS.some((flag) => args.has(flag))) {
     throw new Error(
       "an invite link supplies its complete Cloud target; do not combine it with --url or --anon-key"
     );
@@ -67162,10 +69753,12 @@ async function runLinkAccept(args, payload) {
 `);
   }
 }
+var RUN_ACCEPT_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name"];
+var RUN_ACCEPT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name"];
 async function runAccept(args) {
   if (args.has("link-stdin")) {
     args.assertShape(
-      [...TARGET_FLAGS, "link-stdin", "no-browser", "json", "name", "allow-duplicate-name"],
+      RUN_ACCEPT_1_ACCEPTED_FLAGS,
       1
     );
     const payload = decodeInviteLink(await stdinInviteLink());
@@ -67187,7 +69780,7 @@ async function runAccept(args) {
     return;
   }
   args.assertShape(
-    [...TARGET_FLAGS, "no-browser", "json", "name", "allow-duplicate-name"],
+    RUN_ACCEPT_2_ACCEPTED_FLAGS,
     2
   );
   process.stderr.write(
@@ -67195,16 +69788,18 @@ async function runAccept(args) {
   );
   await runLinkAccept(args, parsed.payload);
 }
+var RUN_PRINCIPAL_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"];
+var RUN_PRINCIPAL_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  "name",
+  "json",
+  "allow-duplicate-name"
+];
 async function runPrincipal(args) {
   const action = args.positionals[1];
   if (action === "create") {
-    args.assertShape([
-      ...TARGET_FLAGS,
-      "workspace-id",
-      "name",
-      "json",
-      "allow-duplicate-name"
-    ], 2);
+    args.assertShape(RUN_PRINCIPAL_1_ACCEPTED_FLAGS, 2);
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
@@ -67236,7 +69831,7 @@ async function runPrincipal(args) {
     return;
   }
   if (action === "revoke") {
-    args.assertShape([...TARGET_FLAGS, "workspace-id", "principal-id", "json"], 2);
+    args.assertShape(RUN_PRINCIPAL_2_ACCEPTED_FLAGS, 2);
     const cloud = await target(args);
     const human = await humanCredential(args, cloud);
     const workspace = await workspaceId(args, cloud, human);
@@ -67268,6 +69863,20 @@ async function runPrincipal(args) {
   }
   throw new Error(`unknown principal command: ${action ?? "(missing)"}`);
 }
+var RUN_TOKEN_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  "principal-id",
+  "run-id",
+  "task-id",
+  "epoch",
+  "ttl-ms",
+  "renewal-horizon-days",
+  "standing",
+  "confirm-standing",
+  /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
+  "json"
+];
 async function runToken(args) {
   const action = args.positionals[1];
   if (action === "revoke") {
@@ -67275,20 +69884,7 @@ async function runToken(args) {
     return;
   }
   args.assertShape(
-    [
-      ...TARGET_FLAGS,
-      "workspace-id",
-      "principal-id",
-      "run-id",
-      "task-id",
-      "epoch",
-      "ttl-ms",
-      "renewal-horizon-days",
-      "standing",
-      "confirm-standing",
-      /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
-      "json"
-    ],
+    RUN_TOKEN_1_ACCEPTED_FLAGS,
     2
   );
   if (action !== "mint") {
@@ -67364,16 +69960,17 @@ async function runToken(args) {
     expiresAt
   }));
 }
+var RUN_GRANT_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  "renewal-grant-id",
+  /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
+  "json"
+];
 async function runGrant(args) {
   const action = args.positionals[1];
   args.assertShape(
-    [
-      ...TARGET_FLAGS,
-      "workspace-id",
-      "renewal-grant-id",
-      /* `--json` accepted, no effect — see the note on `runInvite`. D-064. */
-      "json"
-    ],
+    RUN_GRANT_1_ACCEPTED_FLAGS,
     2
   );
   if (action !== "resume") {
@@ -67401,10 +69998,12 @@ Confirm with: cswarm whoami --agent-token-file <path>
 `
   );
 }
+var RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "token-id", "json"];
+var RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "token-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS];
 async function runTokenRevoke(args) {
   if (hasAgentCredential(args)) {
     args.assertShape(
-      [...TARGET_FLAGS, "workspace-id", "token-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS],
+      RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS,
       2
     );
     const cloud2 = await target(args);
@@ -67454,7 +70053,7 @@ async function runTokenRevoke(args) {
     return;
   }
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "token-id", "json"],
+    RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS,
     2
   );
   const cloud = await target(args);
@@ -67507,9 +70106,10 @@ var CAPABILITY_DISCLOSED_FIELDS = [
   "workspace.age_days",
   "expires_at"
 ];
+var RUN_LINK_NEW_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "task-id", "ttl-ms", "site", "json"];
 async function runLinkNew(args) {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "task-id", "ttl-ms", "site", "json"],
+    RUN_LINK_NEW_1_ACCEPTED_FLAGS,
     2
   );
   const taskId = args.required("task-id");
@@ -67567,9 +70167,10 @@ async function runLinkNew(args) {
 `
   );
 }
+var RUN_LINK_REVOKE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "capability-id", "json"];
 async function runLinkRevoke(args) {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", "capability-id", "json"],
+    RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
     2
   );
   const capabilityId = args.required("capability-id");
@@ -67821,9 +70422,12 @@ function listenerTurnBudgetMs(value) {
 function listenerPollIntervalMs(value) {
   return parseIdlePollIntervalMs(value);
 }
-function listenerRouteConfiguration(routeValue, deferOverValue) {
-  if (deferOverValue !== void 0) {
-    throw new Error(listenerDeferOverRefusedSentence());
+var LISTEN_START_REFUSED_FLAGS = ["defer-over"];
+function listenerRouteConfiguration(routeValue, deferOverValue, args) {
+  const supplied = { route: routeValue, "defer-over": deferOverValue };
+  const refused = LISTEN_START_REFUSED_FLAGS.find((flag) => supplied[flag] !== void 0 || args?.has(flag));
+  if (refused !== void 0) {
+    throw new Error(refused === "defer-over" ? listenerDeferOverRefusedSentence() : `listen start cannot be combined with --${refused}`);
   }
   const routeMode = routeValue ?? LISTENER_ROUTE_MODES[0];
   if (!isLiveListenerRouteMode(routeMode)) {
@@ -68001,13 +70605,13 @@ function prepareSignalAttachments(localPaths) {
   return localPaths.map((localPath) => {
     let bytes;
     try {
-      bytes = (0, import_node_fs8.readFileSync)(localPath);
+      bytes = (0, import_node_fs9.readFileSync)(localPath);
     } catch {
       throw new Error(
         `could not read ${localPath}; check the path and permissions; no upload was started`
       );
     }
-    const name = (0, import_node_path25.basename)(localPath);
+    const name = (0, import_node_path29.basename)(localPath);
     if (bytes.byteLength < 1) {
       throw new Error(`${localPath} is empty; no upload was started`);
     }
@@ -68027,8 +70631,8 @@ function prepareSignalAttachments(localPaths) {
       name,
       bytes,
       contentType,
-      fileId: (0, import_node_crypto24.randomUUID)(),
-      versionId: (0, import_node_crypto24.randomUUID)(),
+      fileId: (0, import_node_crypto28.randomUUID)(),
+      versionId: (0, import_node_crypto28.randomUUID)(),
       createCommandId: newCommandId(),
       commitCommandId: newCommandId()
     };
@@ -68259,23 +70863,21 @@ ${formatAdvisory}
 ` : ""}`
   );
 }
+var POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  ...BODY_FLAGS,
+  "about",
+  "channel",
+  "until",
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
+var POST_SIGNAL_NOTE_ACCEPTED_FLAGS = [...POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS, "to", "attach"];
+var POST_SIGNAL_ASK_ACCEPTED_FLAGS = [...POST_SIGNAL_NOTE_ACCEPTED_FLAGS, "wait"];
 function postSignalAllowedFlags(kind = "note") {
-  const allowTo = kind !== "working-on";
-  const allowWait = kind === "ask";
-  return [
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    ...BODY_FLAGS,
-    ...allowTo ? ["to"] : [],
-    "about",
-    "channel",
-    "until",
-    ...allowWait ? ["wait"] : [],
-    ...allowTo ? ["attach"] : [],
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ];
+  return kind === "working-on" ? POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS : kind === "ask" ? POST_SIGNAL_ASK_ACCEPTED_FLAGS : POST_SIGNAL_NOTE_ACCEPTED_FLAGS;
 }
 function replyRefusalHint(error2) {
   if (!(error2 instanceof CommandHttpError) || error2.status !== 403) return null;
@@ -68374,19 +70976,20 @@ ${formatAdvisory}
 ` : ""}`
   );
 }
+var REPLY_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  ...BODY_FLAGS,
+  "attach",
+  "broadcast-to-channel",
+  "thread",
+  "until",
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
 function replyAllowedFlags() {
-  return [
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    ...BODY_FLAGS,
-    "attach",
-    "broadcast-to-channel",
-    "thread",
-    "until",
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ];
+  return REPLY_ACCEPTED_FLAGS;
 }
 function describeAudience(signal, authors) {
   const recipientId = signal.to_agent ?? signal.to;
@@ -68443,14 +71046,15 @@ function renderRoster(directory, memberNames, workspace, pending = []) {
   return `${lines.join("\n")}
 `;
 }
+var RUN_MEMBERS_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
 async function runMembers(args) {
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ], 1);
+  args.assertShape(RUN_MEMBERS_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const selected = await commandWorkspaceAndCredential(args, cloud, {
     validateHumanWorkspace: true
@@ -68507,14 +71111,15 @@ async function runMembers(args) {
     workspaceName: workspaceLabel(directory)
   }, pending));
 }
+var RUN_WHOAMI_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
 async function runWhoami(args) {
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ], 1);
+  args.assertShape(RUN_WHOAMI_1_ACCEPTED_FLAGS, 1);
   if (!hasAgentCredential(args)) {
     throw new UsageError(
       "cswarm whoami needs --agent-token-file <path> or --agent-token-stdin"
@@ -68593,14 +71198,15 @@ Owner: ${ownerName} (${identity.owner_user_id}).
 `)
   );
 }
+var RUN_RESUME_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  "agent-token-file",
+  "state-dir",
+  "json"
+];
 async function runResume(args) {
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    "agent-token-file",
-    "state-dir",
-    "json"
-  ], 1);
+  args.assertShape(RUN_RESUME_1_ACCEPTED_FLAGS, 1);
   const suppliedCredentialPath = args.optional("agent-token-file");
   if (suppliedCredentialPath === void 0) {
     throw new UsageError("cswarm resume needs --agent-token-file <path>");
@@ -68608,7 +71214,7 @@ async function runResume(args) {
   if (/[\u0000-\u001f\u007f-\u009f]/.test(suppliedCredentialPath)) {
     throw new Error("--agent-token-file must not contain control characters");
   }
-  const credentialFile = (0, import_node_path25.resolve)(suppliedCredentialPath);
+  const credentialFile = (0, import_node_path29.resolve)(suppliedCredentialPath);
   const cloud = await target(args);
   const workspaceId2 = listenerUuid(
     args.optional("workspace-id") ?? process.env.SWARM_CLOUD_WORKSPACE_ID,
@@ -68620,9 +71226,12 @@ async function runResume(args) {
     workspaceId: workspaceId2,
     credentialFile,
     credentialPathAliases: [.../* @__PURE__ */ new Set([suppliedCredentialPath, credentialFile])],
+    sessionCredential: agent.token,
+    sessionTokenFile: credentialFile,
     installedVersion: CLI_BUILD_VERSION,
     ...listenerStateDirectory(args) ? { stateDirectory: listenerStateDirectory(args) } : {}
   }, {
+    readWakeLease: async () => await readAgentWakeLease(cloud, workspaceId2, agent.token),
     readIdentity: async () => {
       const directory = await readAgentSignalDirectory(
         cloud,
@@ -68651,7 +71260,8 @@ async function runResume(args) {
       }
       return {
         displayName: sanitizeDisplayLabel(principal.name, "Unnamed agent"),
-        principalId: identity.principal_id
+        principalId: identity.principal_id,
+        ...directory.sessionStatus === void 0 ? {} : { sessionStatus: directory.sessionStatus }
       };
     },
     readBrainTopics: async () => brainTopicSnapshots(await listBrainRowsAsAgent(
@@ -68687,50 +71297,35 @@ async function runResume(args) {
   else process.stdout.write(`${renderResume(report)}
 `);
 }
+var SIGNAL_READ_FEED_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS];
+var SIGNAL_READ_INBOX_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "about", "channel", "kind", "wait", "follow", "ndjson", "notify", "since", "limit", "include-stale", "json", ...SESSION_CONTEXT_FLAGS];
+var INBOX_FOLLOW_REFUSED_FLAGS = ["channel", "wait", "json"];
+function inboxFollowRefusal(args) {
+  const refused = INBOX_FOLLOW_REFUSED_FLAGS.find((flag) => flag === "wait" ? args.optional(flag) !== void 0 : args.has(flag));
+  if (refused === "channel") return "inbox --follow cannot be combined with --channel";
+  if (refused === "wait") return "inbox --follow cannot be combined with --wait";
+  if (refused === "json") return "inbox --follow --ndjson cannot be combined with --json";
+  return refused === void 0 ? null : `inbox --follow cannot be combined with --${refused}`;
+}
 async function runSignalRead(args, inbox) {
-  const notify = inbox && args.has("notify");
-  args.assertShape(notify ? [
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "notify",
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ] : [
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "about",
-    "channel",
-    "kind",
-    ...inbox ? ["wait", "follow", "ndjson", "notify"] : [],
-    "since",
-    "limit",
-    "include-stale",
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ], 1);
+  const notify = inbox && args.has(NOTIFY_FLAG);
+  args.assertShape(notify ? NOTIFY_ACCEPTED_FLAGS : inbox ? SIGNAL_READ_INBOX_ACCEPTED_FLAGS : SIGNAL_READ_FEED_ACCEPTED_FLAGS, 1);
   if (notify) {
     await runInboxNotifyCommand(args);
     return;
   }
-  if (inbox && args.has("follow")) {
-    if (!args.has("ndjson")) {
+  if (inbox && args.has(INBOX_READ_SELECTOR_FLAGS[0])) {
+    if (!args.has(INBOX_READ_SELECTOR_FLAGS[1])) {
       throw new Error("inbox --follow requires --ndjson");
     }
-    if (args.has("channel")) {
-      throw new Error("inbox --follow cannot be combined with --channel");
-    }
-    if (args.optional("wait") !== void 0) {
-      throw new Error("inbox --follow cannot be combined with --wait");
-    }
-    if (args.has("json")) {
-      throw new Error("inbox --follow --ndjson cannot be combined with --json");
+    const refusal2 = inboxFollowRefusal(args);
+    if (refusal2 !== null) {
+      throw new Error(refusal2);
     }
     await runInboxFollowCommand(args);
     return;
   }
-  if (inbox && args.has("ndjson")) {
+  if (inbox && args.has(INBOX_READ_SELECTOR_FLAGS[1])) {
     throw new Error("inbox --ndjson requires --follow");
   }
   const channelSlug = channelOption(args);
@@ -68763,17 +71358,22 @@ async function runSignalRead(args, inbox) {
     includeStale: args.has("include-stale")
   };
   let rows3;
+  let moreSince;
   let timedOut = false;
   let waited = false;
   try {
     if (waitSeconds === void 0) {
-      rows3 = await readSignals(cloud, credential, queryBase);
+      rows3 = inbox && credential.kind === "agent" && queryBase.since !== void 0 && queryBase.limit === void 0 ? await readDirectedInboxSince(cloud, credential, queryBase, { onTruncated: (last) => {
+        moreSince = last;
+      } }) : await readSignals(cloud, credential, queryBase);
     } else {
       waited = true;
       const deadlineMs = waitDeadlineMs(waitSeconds);
       const waitResult = await pollForSignals({
         deadlineMs,
-        read: () => readSignals(cloud, credential, queryBase, { deadlineMs })
+        read: () => inbox && credential.kind === "agent" && queryBase.since !== void 0 && queryBase.limit === void 0 ? readDirectedInboxSince(cloud, credential, queryBase, { deadlineMs, onTruncated: (last) => {
+          moreSince = last;
+        } }) : readSignals(cloud, credential, queryBase, { deadlineMs })
       });
       rows3 = waitResult.signals;
       timedOut = waitResult.timedOut;
@@ -68783,12 +71383,16 @@ async function runSignalRead(args, inbox) {
     if (named !== null) throw new Error(named);
     throw error2;
   }
+  if (inbox && credential.kind === "agent" && queryBase.since !== void 0) {
+    const directory = await readAgentSignalDirectory(cloud, credential.token, selected.selectedWorkspace);
+    assertInboxWorkspace(directory.identity?.workspace_id, selected.selectedWorkspace);
+  }
   if (args.has("json")) {
     printJson(
-      signalReadJsonPayload(selected.selectedWorkspace, inbox, rows3, {
+      { ...signalReadJsonPayload(selected.selectedWorkspace, inbox, rows3, {
         waited,
         timedOut
-      })
+      }), ...moreSince !== void 0 ? { notice: inboxMoreNotice(moreSince, queryBase.since, args) } : inbox && queryBase.limit !== void 0 && rows3.length >= queryBase.limit ? { notice: INBOX_LIMIT_NOTICE } : {} }
     );
     if (selected.kind === "agent") {
       await reportRenderedBroadcasts(
@@ -68831,6 +71435,12 @@ async function runSignalRead(args, inbox) {
     }
   })}
 `);
+  if (inbox && queryBase.limit !== void 0 && rows3.length >= queryBase.limit) {
+    process.stdout.write(`${INBOX_LIMIT_NOTICE}
+`);
+  }
+  if (moreSince !== void 0) process.stdout.write(`${inboxMoreNotice(moreSince, queryBase.since, args)}
+`);
   if (selected.kind === "agent") {
     await reportRenderedBroadcasts(
       cloud,
@@ -68856,104 +71466,298 @@ async function runInboxNotifyCommand(args) {
       "inbox --notify needs the full JSON agent credential so its durable cursor is tied to one agent"
     );
   }
+  const restartOptions = notifyRestartOptions(args);
+  const suppliedContextPath = args.optional("session-context");
+  const optionTokens = args.originalOptionTokens(NOTIFY_FLAG);
+  const profileStarted = optionTokens.includes("--profile");
+  const explicitContext = optionTokens.includes("--session-context") || optionTokens.some((token) => token.startsWith("--session-context="));
+  const hostIndex = optionTokens.indexOf("--host-session-id");
   const controller = new AbortController();
-  const httpClient = new ListenerHttpClient();
-  const stop = () => controller.abort();
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-  const lockPath = arrivalWatchLockPath(
-    cloud,
-    selected.selectedWorkspace,
-    principalId
-  );
-  await acquireArrivalWatchLock(lockPath);
-  const wake = createWakeSubscriber({ target: cloud });
+  let stopSignal = null;
+  let generation = null;
+  let watchFailure = null;
+  let leaseStopState = "unclaimed";
+  let sessionRefusal;
+  const recordLeaseRefusal = (error2) => {
+    if (error2.code === "notify_held_elsewhere" || error2.code === "wake_lease_superseded") {
+      leaseStopState = error2.surface === "h0_poll" ? "h0_poll" : "watcher";
+    } else {
+      leaseStopState = "session-refused";
+      sessionRefusal = error2.message;
+    }
+  };
+  let stopSentencePrinted = false;
+  const stopInt = () => {
+    stopSignal = "SIGINT";
+    controller.abort();
+  };
+  const stopTerm = () => {
+    stopSignal = "SIGTERM";
+    controller.abort();
+  };
+  const finishSignalStop = () => {
+    if (stopSignal === null || stopSentencePrinted) return;
+    if (generation !== null && !leaseReleaseAttempted) return;
+    stopSentencePrinted = true;
+    process.stderr.write(`cswarm: ${notifySignalStopSentence(stopSignal, restartOptions, leaseStopState, sessionRefusal)}
+`);
+    process.exitCode = NOTIFY_SIGNAL_EXIT_CODES[stopSignal];
+  };
+  let leaseReleaseAttempted = false;
+  process.on("SIGINT", stopInt);
+  process.on("SIGTERM", stopTerm);
   try {
-    const retryNotices = createArrivalRetryNoticePolicy();
-    let renderedBearer = selected.bearer;
-    const cursorStore = fileArrivalCursorStore({
+    const verified = await verifiedLiveSessionContexts({
       target: cloud,
       workspaceId: selected.selectedWorkspace,
-      principalId
-    });
-    const result = await runArrivalWatch({
-      workspaceId: selected.selectedWorkspace,
       principalId,
-      store: cursorStore,
-      signal: controller.signal,
-      wake,
-      readPage: async ({ after, baseline, limit }) => {
-        const token = selected.session ? await selected.session.bearer() : selected.bearer;
-        renderedBearer = token;
-        return await readAgentSignalPage(
-          cloud,
-          { kind: "agent", token },
-          {
-            workspaceId: selected.selectedWorkspace,
-            inbox: true,
-            limit,
-            includeStale: false,
-            ...baseline ? {} : {
-              ascending: true,
-              ...after === null ? {} : { after }
-            }
-          },
-          { signal: controller.signal, fetcher: httpClient.fetch }
-        );
-      },
-      emit: async (signal) => {
-        const notification = arrivalNotification(
-          signal,
-          selected.selectedWorkspace,
-          cloud
-        );
-        await writeArrivalMonitorLine(
-          args.has("json") ? JSON.stringify(notification) : formatArrivalNotification(notification)
-        );
-      },
-      afterEmitBatch: async (signals) => {
-        await reportRenderedBroadcasts(
-          cloud,
-          renderedBearer,
-          selected.selectedWorkspace,
-          renderedBroadcastIds(signals),
-          httpClient.fetch
-        );
-      },
-      onRetry: (_error, delayMs) => {
-        const notice = retryNotices.failure(Date.now(), delayMs);
-        if (notice !== null) {
-          process.stderr.write(`cswarm: ${formatArrivalRetryNotice(notice)}
-`);
-        }
-      },
-      onRecovery: () => {
-        const notice = retryNotices.recovery(Date.now());
-        if (notice !== null) {
-          process.stderr.write(`cswarm: ${formatArrivalRetryNotice(notice)}
-`);
+      credential: selected.bearer,
+      ...args.optional("agent-token-file") === void 0 ? {} : { tokenFile: args.optional("agent-token-file") },
+      ...profileStarted && hostIndex >= 0 ? { hostSessionId: optionTokens[hostIndex + 1] } : {}
+    });
+    if (stopSignal !== null) {
+      finishSignalStop();
+      return;
+    }
+    const liveContextPath = verified.paths.length === 1 ? verified.paths[0] : null;
+    const sameContext = liveContextPath !== null && suppliedContextPath !== void 0 && await Promise.all([(0, import_promises18.realpath)(liveContextPath), (0, import_promises18.realpath)(suppliedContextPath)]).then(
+      ([live, supplied]) => live === supplied,
+      () => false
+    );
+    const withoutContext = [];
+    for (let i = 0; i < optionTokens.length; i++) {
+      if (optionTokens[i] === "--session-context") {
+        i++;
+        continue;
+      }
+      if (optionTokens[i]?.startsWith("--session-context=")) continue;
+      withoutContext.push(optionTokens[i]);
+    }
+    const remedyCommand = liveContextPath !== null && !sameContext && !optionTokens.includes("--agent-token-stdin") ? notifyRefusalRestartCommand({ arguments: [...withoutContext, "--session-context", liveContextPath] }) ?? void 0 : void 0;
+    const refusedContextSource = suppliedContextPath === void 0 ? void 0 : explicitContext ? "operator" : profileStarted ? "profile" : void 0;
+    const fallback = verified.verificationUnavailable ? "the live session context could not be verified; inspect this seat's resume output when the read service is reachable" : verified.paths.length > 1 ? "more than one live session context file for this seat was verified on this host; inspect this seat's resume output and choose the file for the live host session" : liveContextPath === null ? "no live session context for this seat was verified on this host; inspect this seat's resume output and start the watcher from its live host session" : sameContext ? "this context was refused; inspect this seat's resume output and the host session proof before retrying" : `a live session context for this seat was verified at ${liveContextPath}; retry from that host session using this path`;
+    const remedyFallback = fallback;
+    const httpClient = new ListenerHttpClient();
+    const testCheckMs = process.env.NODE_ENV === "test" && new URL(cloud.url).hostname === "127.0.0.1" ? Number(process.env.CSWARM_TEST_NOTIFY_CHECK_MS) : NaN;
+    const stdoutCheckIntervalMs = Number.isInteger(testCheckMs) && testCheckMs >= 100 && testCheckMs <= 6e4 ? testCheckMs : 6e4;
+    const watcherId = (0, import_node_crypto28.randomUUID)();
+    const locks = await acquireArrivalWatchSeatLocks(
+      cloud,
+      selected.selectedWorkspace,
+      principalId,
+      process.pid,
+      watcherId
+    );
+    const { lockPath } = locks;
+    const wake = createWakeSubscriber({ target: cloud });
+    let stopRenewal = null;
+    let cleanStop = false;
+    let leaseBearer = selected.bearer;
+    try {
+      const hostId = await arrivalHostId(lockPath);
+      const hostLabel = selected.sessionContext?.host_label || (0, import_node_os11.hostname)();
+      const restartCommand2 = notifyRefusalRestartCommand(restartOptions);
+      const leaseRequest = async (command2) => {
+        leaseBearer = selected.session ? await selected.session.bearer() : selected.bearer;
+        return await sendWakeLeaseCommand({
+          target: cloud,
+          workspaceId: selected.selectedWorkspace,
+          token: leaseBearer,
+          command: command2,
+          restartCommand: restartCommand2,
+          sessionContextPath: suppliedContextPath,
+          remedyCommand,
+          contextSource: refusedContextSource,
+          fallback: remedyFallback,
+          fetcher: selected.fetcher,
+          signal: controller.signal
+        });
+      };
+      let claimed;
+      let claimFailures = 0;
+      for (; ; ) {
+        try {
+          leaseStopState = "claim-unknown";
+          claimed = await leaseRequest({
+            kind: "claim_wake_lease",
+            watcher_id: watcherId,
+            host_label: hostLabel,
+            host_id: hostId,
+            take_over: args.has("take-over")
+          });
+          break;
+        } catch (error2) {
+          if (error2 instanceof WakeLeaseLostError) recordLeaseRefusal(error2);
+          if (controller.signal.aborted && stopSignal !== null) {
+            finishSignalStop();
+            return;
+          }
+          if (!(error2 instanceof WakeLeaseTransientError)) throw error2;
+          leaseStopState = "claim-unknown";
+          if (claimFailures === 0) process.stderr.write("cswarm: wake lease claim is unavailable; retrying.\n");
+          claimFailures += 1;
+          await new Promise((resolve8) => {
+            const done = () => {
+              clearTimeout(timer2);
+              controller.signal.removeEventListener("abort", done);
+              resolve8();
+            };
+            const timer2 = setTimeout(done, Math.min(6e4, 1e3 * 2 ** Math.min(claimFailures, 6)));
+            controller.signal.addEventListener("abort", done, { once: true });
+          });
+          if (controller.signal.aborted && stopSignal !== null) {
+            finishSignalStop();
+            return;
+          }
         }
       }
-    });
-    if (result.reason === "error") {
-      throw result.error ?? new Error("arrival watch stopped");
+      generation = Number(claimed.generation);
+      leaseStopState = "last-known";
+      if (!Number.isSafeInteger(generation) || generation < 1) {
+        throw new Error("wake lease claim returned no generation");
+      }
+      if (stopSignal !== null) {
+        finishSignalStop();
+        return;
+      }
+      stopRenewal = startWakeLeaseRenewal({
+        intervalMs: process.env.NODE_ENV === "test" && new URL(cloud.url).hostname === "127.0.0.1" && Number.isInteger(Number(process.env.CSWARM_TEST_WAKE_RENEW_MS)) && Number(process.env.CSWARM_TEST_WAKE_RENEW_MS) >= 100 ? Math.min(6e4, Number(process.env.CSWARM_TEST_WAKE_RENEW_MS)) : void 0,
+        renew: async () => {
+          await leaseRequest({
+            kind: "renew_wake_lease",
+            watcher_id: watcherId,
+            generation
+          });
+        },
+        lost: (error2) => {
+          watchFailure = error2;
+          if (error2 instanceof WakeLeaseLostError) recordLeaseRefusal(error2);
+          controller.abort();
+        },
+        failed: (error2) => {
+          watchFailure = error2;
+          controller.abort();
+        }
+      });
+      const retryNotices = createArrivalRetryNoticePolicy();
+      let renderedBearer = selected.bearer;
+      const cursorStore = fileArrivalCursorStore({
+        target: cloud,
+        workspaceId: selected.selectedWorkspace,
+        principalId
+      });
+      const result = await runArrivalWatch({
+        workspaceId: selected.selectedWorkspace,
+        principalId,
+        store: cursorStore,
+        signal: controller.signal,
+        wake,
+        stdoutConsumer: lsofStdoutConsumer(Math.min(5e3, Math.floor(stdoutCheckIntervalMs / 2))),
+        stdoutCheckIntervalMs,
+        readPage: async ({ after, baseline, limit }) => {
+          const token = selected.session ? await selected.session.bearer() : selected.bearer;
+          renderedBearer = token;
+          return await readAgentSignalPage(
+            cloud,
+            { kind: "agent", token },
+            {
+              workspaceId: selected.selectedWorkspace,
+              inbox: true,
+              limit,
+              includeStale: false,
+              ...baseline ? {} : {
+                ascending: true,
+                ...after === null ? {} : { after }
+              }
+            },
+            { signal: controller.signal, fetcher: httpClient.fetch }
+          );
+        },
+        emit: async (signal) => {
+          const notification = arrivalNotification(
+            signal,
+            selected.selectedWorkspace,
+            cloud
+          );
+          await writeArrivalMonitorLine(
+            args.has("json") ? JSON.stringify(notification) : formatArrivalNotification(notification)
+          );
+        },
+        afterEmitBatch: async (signals) => {
+          await reportRenderedBroadcasts(
+            cloud,
+            renderedBearer,
+            selected.selectedWorkspace,
+            renderedBroadcastIds(signals),
+            httpClient.fetch
+          );
+        },
+        onRetry: (_error, delayMs) => {
+          const notice = retryNotices.failure(Date.now(), delayMs);
+          if (notice !== null) {
+            process.stderr.write(`cswarm: ${formatArrivalRetryNotice(notice)}
+`);
+          }
+        },
+        onRecovery: () => {
+          const notice = retryNotices.recovery(Date.now());
+          if (notice !== null) {
+            process.stderr.write(`cswarm: ${formatArrivalRetryNotice(notice)}
+`);
+          }
+        }
+      });
+      if (watchFailure !== null && stopSignal === null) throw watchFailure;
+      if (result.reason === "error") {
+        throw result.error ?? new Error("arrival watch stopped");
+      }
+      cleanStop = true;
+      finishSignalStop();
+    } catch (error2) {
+      if (error2 instanceof NotifyStdoutClosedError) cleanStop = true;
+      throw error2;
+    } finally {
+      stopRenewal?.();
+      httpClient.close();
+      await wake.close();
+      if (generation !== null && (cleanStop || stopSignal !== null)) {
+        try {
+          const released = await sendWakeLeaseCommand({
+            target: cloud,
+            workspaceId: selected.selectedWorkspace,
+            token: leaseBearer,
+            command: { kind: "release_wake_lease", watcher_id: watcherId, generation },
+            restartCommand: notifyRefusalRestartCommand(restartOptions),
+            sessionContextPath: suppliedContextPath,
+            remedyCommand,
+            timeoutMs: 2e3,
+            contextSource: refusedContextSource,
+            fallback: remedyFallback,
+            fetcher: selected.fetcher
+          });
+          if (released.released === true) leaseStopState = "released";
+        } catch (error2) {
+          if (error2 instanceof WakeLeaseLostError) recordLeaseRefusal(error2);
+        }
+      }
+      leaseReleaseAttempted = true;
+      finishSignalStop();
+      await releaseArrivalWatchSeatLocks(locks);
     }
   } finally {
-    process.off("SIGINT", stop);
-    process.off("SIGTERM", stop);
-    httpClient.close();
-    await wake.close();
-    await releaseArrivalWatchLock(lockPath);
+    process.off("SIGINT", stopInt);
+    process.off("SIGTERM", stopTerm);
   }
 }
+var RUN_RECEIPT_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
 async function runReceipt(args) {
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ], 2);
+  args.assertShape(RUN_RECEIPT_1_ACCEPTED_FLAGS, 2);
   const signalId = args.positionals[1];
   if (!UUID_RE25.test(signalId)) {
     throw new Error("signal-id must be a UUID");
@@ -69120,15 +71924,16 @@ function listenerUuid(value, flag) {
   }
   return value.toLowerCase();
 }
+var LISTENER_PERMISSION_MODES = ["deny", "allow"];
 function listenerPermissionMode(value) {
-  if (value === void 0 || value === "allow") return "allow";
-  if (value === "deny") return "deny";
+  if (value === void 0) return "allow";
+  if (LISTENER_PERMISSION_MODES.includes(value)) return value;
   throw new Error("--permissions must be deny or allow");
 }
 function listenerStateDirectory(args) {
   const value = args.optional("state-dir");
   if (value === void 0) return void 0;
-  if (!(0, import_node_path25.isAbsolute)(value)) {
+  if (!(0, import_node_path29.isAbsolute)(value)) {
     throw new Error("--state-dir must be an absolute path");
   }
   return value;
@@ -69151,7 +71956,7 @@ function listenerProvider(args) {
   if (provider === void 0) {
     throw new Error(`--provider is required; ${hints}`);
   }
-  if (provider !== "grok" && provider !== "opencode" && provider !== "claude" && provider !== "codex") {
+  if (!isListenerProvider(provider)) {
     throw new Error(
       `unsupported --provider; ${hints}`
     );
@@ -69910,7 +72715,7 @@ async function resolveDetachedClaudeExecutable(executable = "claude-agent-acp", 
   } catch (error2) {
     const code = error2.code;
     if (typeof code === "string") {
-      if ((0, import_node_path25.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
+      if ((0, import_node_path29.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
         const detail = error2 instanceof Error ? error2.message : code;
         throw new Error(
           `could not use --claude-executable: ${detail}; install the current bridge with npm install -g @agentclientprotocol/claude-agent-acp@latest if this path should be replaced`
@@ -69927,7 +72732,7 @@ async function resolveDetachedCodexExecutable(executable = "codex-acp", pathEnv 
   } catch (error2) {
     const code = error2.code;
     if (typeof code === "string") {
-      if ((0, import_node_path25.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
+      if ((0, import_node_path29.isAbsolute)(executable) || executable.includes("/") || executable.includes("\\")) {
         const detail = error2 instanceof Error ? error2.message : code;
         throw new Error(
           `could not use --codex-executable: ${detail}; install the current bridge with npm install -g @agentclientprotocol/codex-acp@latest if this path should be replaced`
@@ -69973,19 +72778,15 @@ async function runConfiguredListener(options) {
     ...options.stateDirectory ? { stateDirectory: options.stateDirectory } : {}
   });
   const httpClient = new ListenerHttpClient();
-  const managedContexts = (await listSessionContexts(options.workspaceId, options.principalId)).filter((context) => sessionProofOf(context) !== null);
+  const managedContexts = (await listSessionContextFiles(options.workspaceId, options.principalId)).filter(({ context }) => sessionProofOf(context) !== null);
   if (managedContexts.length > 1) {
     httpClient.close();
     throw new Error(
       `listen start found ${managedContexts.length} live session contexts for this agent; stop the stale ones with cswarm session stop --session-context <path> first`
     );
   }
-  const managedContext = managedContexts[0] ?? null;
-  const managedContextPath = managedContext === null ? null : defaultSessionContextPath(
-    options.workspaceId,
-    options.principalId,
-    managedContext.session_id
-  );
+  const managedContext = managedContexts[0]?.context ?? null;
+  const managedContextPath = managedContexts[0]?.path ?? null;
   if (managedContextPath !== null) {
     try {
       await holdSessionReceiverLock(managedContextPath, "listen");
@@ -70006,11 +72807,7 @@ async function runConfiguredListener(options) {
       return await credentialBearer();
     },
     workspaceId: options.workspaceId,
-    contextPath: defaultSessionContextPath(
-      options.workspaceId,
-      options.principalId,
-      managedContext.session_id
-    ),
+    contextPath: managedContextPath,
     context: managedContext,
     onDispatchStop: () => {
       if (!leaseAbort.signal.aborted) leaseAbort.abort();
@@ -70310,38 +73107,55 @@ async function runConfiguredListener(options) {
   }
 }
 async function liveManagedContextPath(workspaceId2, principalId) {
-  const live = (await listSessionContexts(workspaceId2, principalId)).filter((context) => sessionProofOf(context) !== null);
+  const live = (await listSessionContextFiles(workspaceId2, principalId)).filter(({ context }) => sessionProofOf(context) !== null);
   if (live.length !== 1) return null;
-  return defaultSessionContextPath(
-    workspaceId2,
-    principalId,
-    live[0].session_id
-  );
+  return live[0].path;
 }
+var LISTEN_START_ACCEPTED_FLAGS = [
+  "host-session-id",
+  ...TARGET_FLAGS,
+  "workspace-id",
+  ...CREDENTIAL_FLAGS,
+  "provider",
+  "cwd",
+  "model",
+  "effort",
+  "permissions",
+  "grok-executable",
+  "opencode-executable",
+  "claude-executable",
+  "codex-executable",
+  "state-dir",
+  "turn-budget",
+  "poll-interval",
+  "route",
+  "defer-over",
+  "allow-unattended",
+  "foreground",
+  "json"
+];
+var LISTEN_STATUS_ACCEPTED_FLAGS = [
+  "host-session-id",
+  ...TARGET_FLAGS,
+  ...CREDENTIAL_FLAGS,
+  "workspace-id",
+  "principal-id",
+  "state-dir",
+  "json",
+  ...SESSION_CONTEXT_FLAGS
+];
+var LISTEN_STOP_ACCEPTED_FLAGS = [...LISTEN_STATUS_ACCEPTED_FLAGS, "wait"];
+var LISTEN_CANARY_ACCEPTED_FLAGS = [
+  "host-session-id",
+  ...TARGET_FLAGS,
+  ...CREDENTIAL_FLAGS,
+  "workspace-id",
+  "state-dir",
+  "wait",
+  "json"
+];
 async function runListenStart(args) {
-  args.assertShape([
-    "host-session-id",
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "provider",
-    "cwd",
-    "model",
-    "effort",
-    "permissions",
-    "grok-executable",
-    "opencode-executable",
-    "claude-executable",
-    "codex-executable",
-    "state-dir",
-    "turn-budget",
-    "poll-interval",
-    "route",
-    "defer-over",
-    "allow-unattended",
-    "foreground",
-    "json"
-  ], 2);
+  args.assertShape(LISTEN_START_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
@@ -70354,7 +73168,8 @@ async function runListenStart(args) {
   const pollMs = listenerPollIntervalMs(args.optional("poll-interval"));
   const routing = listenerRouteConfiguration(
     args.optional("route"),
-    args.optional("defer-over")
+    args.optional("defer-over"),
+    args
   );
   const cloud = await target(args);
   const workspaceId2 = listenerUuid(
@@ -70365,7 +73180,7 @@ async function runListenStart(args) {
   assertDurableListenerCredential(agent);
   const principalId = agent.principalId;
   const cwd = args.optional("cwd") ?? process.cwd();
-  if (!(0, import_node_path25.isAbsolute)(cwd)) throw new Error("--cwd must be an absolute path");
+  if (!(0, import_node_path29.isAbsolute)(cwd)) throw new Error("--cwd must be an absolute path");
   const permissionMode = listenerPermissionMode(args.optional("permissions"));
   const stateDirectory2 = listenerStateDirectory(args);
   const paths = listenerPaths({
@@ -70412,7 +73227,7 @@ async function runListenStart(args) {
     });
   } else {
     const entrypoint = process.argv[1];
-    if (!entrypoint || !(0, import_node_path25.isAbsolute)(entrypoint)) {
+    if (!entrypoint || !(0, import_node_path29.isAbsolute)(entrypoint)) {
       throw new Error("cannot locate the cswarm executable for detached start");
     }
     const artifact = JSON.stringify(agentCredentialArtifact({
@@ -70545,35 +73360,37 @@ The short credential rotates while this process remains alive and secure local s
 `
   );
 }
+var RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  ...CREDENTIAL_FLAGS,
+  "workspace-id",
+  "principal-id",
+  "cwd",
+  "model",
+  "effort",
+  "permissions",
+  "provider",
+  "grok-executable",
+  "opencode-executable",
+  "claude-executable",
+  "codex-executable",
+  "state-dir",
+  "turn-budget",
+  "poll-interval",
+  "route",
+  "defer-over",
+  ...SESSION_CONTEXT_FLAGS
+];
 async function runListenSupervisor(args) {
-  args.assertShape([
-    ...TARGET_FLAGS,
-    ...CREDENTIAL_FLAGS,
-    "workspace-id",
-    "principal-id",
-    "cwd",
-    "model",
-    "effort",
-    "permissions",
-    "provider",
-    "grok-executable",
-    "opencode-executable",
-    "claude-executable",
-    "codex-executable",
-    "state-dir",
-    "turn-budget",
-    "poll-interval",
-    "route",
-    "defer-over",
-    ...SESSION_CONTEXT_FLAGS
-  ], 1);
+  args.assertShape(RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS, 1);
   const provider = listenerProvider(args);
   validateListenerProviderFlags(args, provider);
   const turnBudgetMs = listenerTurnBudgetMs(args.optional("turn-budget"));
   const pollMs = listenerPollIntervalMs(args.optional("poll-interval"));
   const routing = listenerRouteConfiguration(
     args.optional("route"),
-    args.optional("defer-over")
+    args.optional("defer-over"),
+    args
   );
   const cloud = await target(args);
   const workspaceId2 = listenerUuid(args.optional("workspace-id"), "workspace-id");
@@ -70581,7 +73398,7 @@ async function runListenSupervisor(args) {
   const agent = await agentCredential(args, { implicitStdin: true });
   assertDurableListenerCredential(agent, principalId);
   const cwd = args.required("cwd");
-  if (!(0, import_node_path25.isAbsolute)(cwd)) throw new Error("--cwd must be an absolute path");
+  if (!(0, import_node_path29.isAbsolute)(cwd)) throw new Error("--cwd must be an absolute path");
   const status = await runConfiguredListener({
     cloud,
     workspaceId: workspaceId2,
@@ -70607,23 +73424,57 @@ async function runListenSupervisor(args) {
     );
   }
 }
+async function waitForListenerStop(paths, initial, waitBudgetMs, deadline = Date.now() + waitBudgetMs, processStart = (pid, remainingMs) => pidStartMs(pid, void 0, remainingMs)) {
+  if (initial?.state === "stopped") {
+    try {
+      await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now())));
+    } catch (error2) {
+      if (["ECONNREFUSED", "ENOENT"].includes(error2.code ?? "")) return initial;
+    }
+  }
+  let status = initial;
+  for (; ; ) {
+    if (Date.now() >= deadline) {
+      throw new Error(`listener stop timed out after ${waitBudgetMs / 1e3} seconds; state ${status?.state ?? "absent"}, pid ${status?.pid ?? "absent"} under ${paths.instanceDirectory}. Check the listener status in that state directory before retrying.`);
+    }
+    let socketClosed = false;
+    try {
+      status = await queryListenerControl(paths, "status", Math.min(250, Math.max(1, deadline - Date.now())));
+    } catch (error2) {
+      socketClosed = ["ECONNREFUSED", "ENOENT"].includes(error2.code ?? "");
+      status = await readListenerStatusIfPresent(paths);
+    }
+    let pidGone = status === null || status.pid <= 0;
+    if (!pidGone && status !== null) {
+      try {
+        process.kill(status.pid, 0);
+      } catch (error2) {
+        pidGone = error2.code === "ESRCH";
+      }
+      if (!pidGone && Date.now() < deadline) {
+        const start = processStart(status.pid, deadline - Date.now());
+        pidGone = start !== null && status.processStartedAt !== void 0 && Math.abs(start - status.processStartedAt) > 2e3;
+      }
+    }
+    if (socketClosed && pidGone) return status && LISTENER_RUNNING_STATES.includes(status.state) ? uncleanListenerStatus(status) : status;
+    if (deadline - Date.now() >= 100) await new Promise((resolve8) => setTimeout(resolve8, 100));
+    else await new Promise((resolve8) => setTimeout(resolve8, Math.max(1, deadline - Date.now())));
+  }
+}
 async function runListenStatusOrStop(args, command2) {
-  args.assertShape([
-    "host-session-id",
-    ...TARGET_FLAGS,
-    ...CREDENTIAL_FLAGS,
-    "workspace-id",
-    "principal-id",
-    "state-dir",
-    "json",
-    ...SESSION_CONTEXT_FLAGS
-  ], 2);
+  if (command2 === "status" && args.has("wait")) {
+    args.assertShape(LISTEN_STOP_ACCEPTED_FLAGS, 2);
+    throw new Error("--wait is only valid for listen stop");
+  }
+  args.assertShape(command2 === "status" ? LISTEN_STATUS_ACCEPTED_FLAGS : LISTEN_STOP_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   const cloud = await target(args);
   const workspaceId2 = listenerUuid(args.optional("workspace-id"), "workspace-id");
   let principalId;
+  let statusAgentToken = null;
   if (hasAgentCredential(args)) {
     const agent = await agentCredential(args);
+    statusAgentToken = agent.token;
     if (agent.principalId === null) {
       throw new Error(
         "listen status/stop needs the complete JSON agent credential so it can select the same listener profile as listen start"
@@ -70640,6 +73491,20 @@ async function runListenStatusOrStop(args, command2) {
     principalId = listenerUuid(args.optional("principal-id"), "principal-id");
   }
   const stateDirectory2 = listenerStateDirectory(args);
+  let leaseReadFailed = false;
+  const wakeLease = command2 === "status" && statusAgentToken !== null ? await readAgentWakeLease(cloud, workspaceId2, statusAgentToken).catch(() => {
+    leaseReadFailed = true;
+    return null;
+  }) : null;
+  const localWatcherId = command2 === "status" && wakeLease !== null ? await arrivalWatchLockIdentity(arrivalWatchLockPath(cloud, workspaceId2, principalId)) : null;
+  const leaseStatus = wakeLease === null ? null : {
+    host_label: sanitizeWakeHostLabel(wakeLease.host_label),
+    generation: wakeLease.generation,
+    renewed_age_ms: wakeLease.renewed_age_ms,
+    held_by_this_host: localWatcherId === wakeLease.watcher_id,
+    renewal_is_mail_observation: false
+  };
+  const leaseLine = leaseReadFailed ? "Server wake lease: unavailable; check again when the read service is reachable." : wakeLease === null ? "Server wake lease: none." : `Server wake lease: ${sanitizeWakeHostLabel(wakeLease.host_label)}, generation ${wakeLease.generation}, renewed ${Math.floor(wakeLease.renewed_age_ms / 1e3)}s ago; this host holds it: ${localWatcherId === wakeLease.watcher_id ? "yes" : "no"}. Renewal does not prove this session reads its mail; observed ACK does. Stale after ${WAKE_LEASE_STALE_LABEL}.`;
   const paths = listenerPaths({
     profileId: cloud.profileId,
     workspaceId: workspaceId2,
@@ -70652,19 +73517,29 @@ async function runListenStatusOrStop(args, command2) {
       await releaseSessionReceiverLock(stopContextPath);
     }
   }
-  let status = command2 === "stop" ? await stopListener(paths) : await effectiveListenerStatus(paths);
+  const stopWait = command2 === "stop" && args.has("wait");
+  const stopWaitMs = LISTENER_STOP_WAIT_TIMEOUT_MS;
+  const stopDeadline = stopWait ? Date.now() + stopWaitMs : 0;
+  let status = command2 === "stop" ? stopWait ? await queryListenerControl(paths, "stop", Math.min(1e3, Math.max(1, stopDeadline - Date.now()))).catch(() => readListenerStatusIfPresent(paths)) : await stopListener(paths) : await effectiveListenerStatus(paths);
+  if (stopWait) status = await waitForListenerStop(paths, status, stopWaitMs, stopDeadline);
   if (status === null) {
     if (args.has("json")) {
       printJson({
-        status: "not_found",
+        status: command2 === "status" ? NO_LISTENER_STATUS : "not_found",
         workspace_id: workspaceId2,
         principal_id: principalId,
         profile_id: cloud.profileId,
-        checked_directory: paths.instanceDirectory
+        checked_directory: paths.instanceDirectory,
+        ...command2 === "status" && statusAgentToken !== null ? {
+          wake_lease: leaseStatus,
+          ...leaseReadFailed ? { wake_lease_error: "unavailable" } : {}
+        } : {}
       });
     } else {
       process.stdout.write(
-        `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.
+        command2 === "status" ? `${NO_LISTENER_STATUS_SENTENCE.replace("{stateDirectory}", paths.instanceDirectory)} Checked profile ${cloud.profileId}.
+${statusAgentToken !== null ? `${leaseLine}
+` : ""}` : `No listener found under ${paths.instanceDirectory} for profile ${cloud.profileId}.
 `
       );
     }
@@ -70694,31 +73569,27 @@ async function runListenStatusOrStop(args, command2) {
   const installed = command2 === "status" ? await listenerProviderInstallEvidence(status) : null;
   if (args.has("json")) {
     printJson(
-      listenerStatusJson(
+      { ...listenerStatusJson(
         status,
         void 0,
         attendanceEvidence,
         Date.now(),
         installed
-      )
+      ), ...command2 === "status" && statusAgentToken !== null ? {
+        wake_lease: leaseStatus,
+        ...leaseReadFailed ? { wake_lease_error: "unavailable" } : {}
+      } : {} }
     );
   } else {
     process.stdout.write(
       `${renderListenerStatus(status, attendanceEvidence, Date.now(), installed)}
-`
+${command2 === "status" && statusAgentToken !== null ? `${leaseLine}
+` : ""}`
     );
   }
 }
 async function runListenCanary(args) {
-  args.assertShape([
-    "host-session-id",
-    ...TARGET_FLAGS,
-    ...CREDENTIAL_FLAGS,
-    "workspace-id",
-    "state-dir",
-    "wait",
-    "json"
-  ], 2);
+  args.assertShape(LISTEN_CANARY_ACCEPTED_FLAGS, 2);
   requireProfileWithHostSessionId(args);
   if (!hasAgentCredential(args)) {
     throw new Error(
@@ -70775,15 +73646,15 @@ async function runListenCanary(args) {
 `
   );
 }
+var SESSION_HUMAN_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", "principal-id", "json"];
+var SESSION_STATUS_ACCEPTED_FLAGS = ["host-session-id", ...TARGET_FLAGS, ...CREDENTIAL_FLAGS, "session-context", "json"];
+var SESSION_PROFILE_STATUS_ACCEPTED_FLAGS = [...SESSION_STATUS_ACCEPTED_FLAGS, "workspace-id"];
+var SESSION_START_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "mode", "provider", "host-session-id", "host-label", "session-context", "json", "foreground"];
+var SESSION_START_REFUSED_FLAGS = ["agent-token-stdin"];
 async function runSession(args) {
   const action = args.positionals[1];
   if (action === "enable" || action === "disable" || action === "recover") {
-    args.assertShape([
-      ...TARGET_FLAGS,
-      "workspace-id",
-      "principal-id",
-      "json"
-    ], 2);
+    args.assertShape(SESSION_HUMAN_ACCEPTED_FLAGS, 2);
     const cloud2 = await target(args);
     const human = await humanCredential(args, cloud2);
     const workspace = await workspaceId(args, cloud2, human);
@@ -70812,14 +73683,7 @@ async function runSession(args) {
     return;
   }
   if (action === "status") {
-    args.assertShape([
-      "host-session-id",
-      ...TARGET_FLAGS,
-      ...CREDENTIAL_FLAGS,
-      ...args.hadProfileOption ? ["workspace-id"] : [],
-      "session-context",
-      "json"
-    ], 2);
+    args.assertShape(args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS, 2);
     requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
@@ -70849,14 +73713,7 @@ local ${local.state} server-live ${server.is_live} server-session ${server.sessi
     return;
   }
   if (action === "stop") {
-    args.assertShape([
-      "host-session-id",
-      ...TARGET_FLAGS,
-      ...CREDENTIAL_FLAGS,
-      ...args.hadProfileOption ? ["workspace-id"] : [],
-      "session-context",
-      "json"
-    ], 2);
+    args.assertShape(args.hadProfileOption ? SESSION_PROFILE_STATUS_ACCEPTED_FLAGS : SESSION_STATUS_ACCEPTED_FLAGS, 2);
     requireProfileWithHostSessionId(args);
     if (!hasAgentCredential(args)) {
       throw new UsageError(
@@ -70881,18 +73738,7 @@ local ${local.state} server-live ${server.is_live} server-session ${server.sessi
       "session requires start, status, stop, enable, disable, or recover"
     );
   }
-  args.assertShape([
-    ...TARGET_FLAGS,
-    "workspace-id",
-    ...CREDENTIAL_FLAGS,
-    "mode",
-    "provider",
-    "host-session-id",
-    "host-label",
-    "session-context",
-    "json",
-    "foreground"
-  ], 2);
+  args.assertShape(SESSION_START_ACCEPTED_FLAGS, 2);
   if (!hasAgentCredential(args)) {
     throw new UsageError(
       "cswarm session start needs --agent-token-file or --agent-token-stdin"
@@ -70904,7 +73750,7 @@ local ${local.state} server-live ${server.is_live} server-session ${server.sessi
   const customContextPath = args.optional("session-context");
   if (customContextPath !== void 0) {
     const root = defaultSessionRootDirectory();
-    if (!(0, import_node_path25.resolve)(customContextPath).startsWith(`${root}${import_node_path25.sep}`)) {
+    if (!(0, import_node_path29.resolve)(customContextPath).startsWith(`${root}${import_node_path29.sep}`)) {
       throw new SessionContextError(
         "session_context_outside_default_tree",
         `--session-context must lie under ${root} so listen start and hook check can find it; omit the flag to use the default path`
@@ -70918,7 +73764,7 @@ local ${local.state} server-live ${server.is_live} server-session ${server.sessi
   );
   const agent = await agentCredential(args);
   const tokenFile = args.optional("agent-token-file");
-  if (tokenFile === void 0 || !(0, import_node_path25.isAbsolute)(tokenFile)) {
+  if (SESSION_START_REFUSED_FLAGS.some((flag) => args.has(flag)) || tokenFile === void 0 || !(0, import_node_path29.isAbsolute)(tokenFile)) {
     throw new Error(
       "session start needs --agent-token-file <absolute-path> so the context can reference the sole token file"
     );
@@ -70928,7 +73774,7 @@ local ${local.state} server-live ${server.is_live} server-session ${server.sessi
     target: cloud,
     workspaceId: selectedWorkspace,
     credential: agent.token,
-    tokenFile: (0, import_node_path25.resolve)(tokenFile),
+    tokenFile: (0, import_node_path29.resolve)(tokenFile),
     tokenPrincipalId: agent.principalId,
     mode: mode3,
     provider,
@@ -70996,8 +73842,8 @@ function settingsHaveScopedClaudeHook(settings, principalId) {
 async function listenerSettingsHookInstalled(cwd, principalId) {
   const repositoryRoot = gitRepositoryRoot(cwd) ?? cwd;
   const settingsPaths = [
-    (0, import_node_path25.join)(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
-    (0, import_node_path25.join)(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
+    (0, import_node_path29.join)(repositoryRoot, CLAUDE_PROJECT_SETTINGS_IGNORE_LINE),
+    (0, import_node_path29.join)(repositoryRoot, CLAUDE_REPO_SETTINGS_IGNORE_LINE),
     userClaudeSettingsTarget().path
   ];
   for (const path of settingsPaths) {
@@ -71013,9 +73859,7 @@ async function listenerHookSurfacePresent(instanceDirectory, cwd, principalId) {
   return await listenerSettingsHookInstalled(cwd, principalId);
 }
 async function listenerWatcherSurfacePresent(cloud, workspaceId2, principalId) {
-  return await arrivalWatchLockHeld(
-    arrivalWatchLockPath(cloud, workspaceId2, principalId)
-  );
+  return await arrivalWatchLockHeld(arrivalWatchLockPath(cloud, workspaceId2, principalId)) || await arrivalWatchLockHeld(legacyArrivalWatchLockPath(cloud, workspaceId2, principalId));
 }
 async function listenerHasAttendanceSurface(options) {
   const hook = await listenerHookSurfacePresent(
@@ -71070,19 +73914,19 @@ function claudeUserPromptHookSnippet(principalId) {
 var CLAUDE_PROJECT_SETTINGS_IGNORE_LINE = ".claude/settings.local.json";
 var CLAUDE_REPO_SETTINGS_IGNORE_LINE = ".claude/settings.json";
 function claudeUserScopeWarning(settingsPath) {
-  return `Warning: --user scope writes settings to ${(0, import_node_path25.dirname)(settingsPath)} and applies to every Claude Code session that reads that directory.`;
+  return `Warning: --user scope writes settings to ${(0, import_node_path29.dirname)(settingsPath)} and applies to every Claude Code session that reads that directory.`;
 }
 function userClaudeSettingsTarget() {
   const configured = process.env.CLAUDE_CONFIG_DIR;
-  const directory = configured && configured.length > 0 ? (0, import_node_path25.resolve)(configured) : (0, import_node_path25.join)((0, import_node_os11.homedir)(), ".claude");
+  const directory = configured && configured.length > 0 ? (0, import_node_path29.resolve)(configured) : (0, import_node_path29.join)((0, import_node_os11.homedir)(), ".claude");
   return {
-    path: (0, import_node_path25.join)(directory, "settings.json"),
+    path: (0, import_node_path29.join)(directory, "settings.json"),
     scope: "user",
     projectRoot: null
   };
 }
 function gitRepositoryRoot(cwd) {
-  const result = (0, import_node_child_process11.spawnSync)(
+  const result = (0, import_node_child_process14.spawnSync)(
     "git",
     ["-C", cwd, "rev-parse", "--show-toplevel"],
     { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }
@@ -71092,7 +73936,7 @@ function gitRepositoryRoot(cwd) {
   }
   if (result.status !== 0) return null;
   const root = result.stdout.trim();
-  if (!(0, import_node_path25.isAbsolute)(root)) {
+  if (!(0, import_node_path29.isAbsolute)(root)) {
     throw new Error("hook could not resolve an absolute repository root");
   }
   return root;
@@ -71100,14 +73944,14 @@ function gitRepositoryRoot(cwd) {
 function projectClaudeSettingsTarget(scope, ignoreLine) {
   const root = gitRepositoryRoot(process.cwd());
   const base = root ?? process.cwd();
-  const path = (0, import_node_path25.join)(base, ignoreLine);
+  const path = (0, import_node_path29.join)(base, ignoreLine);
   if (root === null) return { path, scope, projectRoot: base };
-  const tracked = (0, import_node_child_process11.spawnSync)(
+  const tracked = (0, import_node_child_process14.spawnSync)(
     "git",
     ["-C", root, "ls-files", "--error-unmatch", "--", ignoreLine],
     { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] }
   );
-  const ignored = (0, import_node_child_process11.spawnSync)(
+  const ignored = (0, import_node_child_process14.spawnSync)(
     "git",
     ["-C", root, "check-ignore", "--quiet", "--", ignoreLine],
     { encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] }
@@ -71117,7 +73961,7 @@ function projectClaudeSettingsTarget(scope, ignoreLine) {
   }
   if (tracked.status === 0 || ignored.status !== 0) {
     throw new Error(
-      `Refusing to write ${path}: repository Claude settings could be staged and shared with every checkout. ` + (tracked.status === 0 ? "It is already tracked; remove it from Git tracking first. " : "") + `Add this exact line to ${(0, import_node_path25.join)(root, ".gitignore")}: ${ignoreLine}`
+      `Refusing to write ${path}: repository Claude settings could be staged and shared with every checkout. ` + (tracked.status === 0 ? "It is already tracked; remove it from Git tracking first. " : "") + `Add this exact line to ${(0, import_node_path29.join)(root, ".gitignore")}: ${ignoreLine}`
     );
   }
   return { path, scope, projectRoot: root };
@@ -71132,7 +73976,7 @@ function claudeSettingsTarget(args) {
 function readClaudeSettings(path) {
   let raw;
   try {
-    raw = (0, import_node_fs8.readFileSync)(path, "utf8");
+    raw = (0, import_node_fs9.readFileSync)(path, "utf8");
   } catch (error2) {
     if (error2.code === "ENOENT") return {};
     throw error2;
@@ -71226,9 +74070,9 @@ async function hookInstallPrincipalId(args) {
 }
 async function hookHostSessionIdFromStdin() {
   if (process.stdin.isTTY) return null;
-  const raw = await new Promise((resolve7) => {
+  const raw = await new Promise((resolve8) => {
     let text = "";
-    const done = () => resolve7(text);
+    const done = () => resolve8(text);
     const timer2 = setTimeout(done, 250);
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
@@ -71256,10 +74100,13 @@ async function hookHostSessionIdFromStdin() {
     return null;
   }
 }
+var RUN_HOOK_1_ACCEPTED_FLAGS = ["cooldown", "principal-id"];
+var HOOK_INSTALL_ACCEPTED_FLAGS = ["write", "user", "repo", "principal-id"];
+var HOOK_UNINSTALL_ACCEPTED_FLAGS = ["write", "user", "repo"];
 async function runHook(args) {
   const command2 = args.positionals[1];
   if (command2 === "check") {
-    args.assertShape(["cooldown", "principal-id"], 2);
+    args.assertShape(RUN_HOOK_1_ACCEPTED_FLAGS, 2);
     const rawPrincipalIds = args.all("principal-id");
     if (rawPrincipalIds.some((principalId2) => !UUID_RE25.test(principalId2))) return;
     const principalIds = rawPrincipalIds.map((principalId2) => principalId2.toLowerCase());
@@ -71281,11 +74128,11 @@ async function runHook(args) {
         ...hostSessionId === null ? {} : { hostSessionId },
         fetcher: httpClient.fetch,
         write: async (output2) => {
-          await new Promise((resolve7, reject) => {
+          await new Promise((resolve8, reject) => {
             process.stdout.write(`${output2}
 `, (error2) => {
               if (error2) reject(error2);
-              else resolve7();
+              else resolve8();
             });
           });
         }
@@ -71298,10 +74145,7 @@ async function runHook(args) {
   if (command2 !== "install" && command2 !== "uninstall") {
     throw new UsageError("hook requires check, install, or uninstall");
   }
-  args.assertShape(
-    command2 === "install" ? ["write", "user", "repo", "principal-id"] : ["write", "user", "repo"],
-    3
-  );
+  args.assertShape(command2 === "install" ? HOOK_INSTALL_ACCEPTED_FLAGS : HOOK_UNINSTALL_ACCEPTED_FLAGS, 3);
   if (args.positionals[2] !== "claude") {
     throw new Error("hook install/uninstall currently supports claude");
   }
@@ -71332,8 +74176,8 @@ async function runHook(args) {
     process.stdout.write(`${claudeUserScopeWarning(path)}
 `);
   }
-  (0, import_node_fs8.mkdirSync)((0, import_node_path25.dirname)(path), { recursive: true });
-  (0, import_node_fs8.writeFileSync)(path, `${JSON.stringify(updated, null, 2)}
+  (0, import_node_fs9.mkdirSync)((0, import_node_path29.dirname)(path), { recursive: true });
+  (0, import_node_fs9.writeFileSync)(path, `${JSON.stringify(updated, null, 2)}
 `, {
     encoding: "utf8",
     mode: 384
@@ -71352,9 +74196,16 @@ function formatFileSize(value) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
-async function fileContext(args, extraFlags, positionalCount) {
+var FILE_CONTEXT_BASE_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS];
+var FILE_PUT_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "name", "request-id"];
+var FILE_LS_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "include-tombstoned"];
+var FILE_GET_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "version", "out", "force"];
+var BRAIN_GET_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "version"];
+var BRAIN_PUT_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "if-version", "request-id"];
+var FEEDBACK_ACCEPTED_FLAGS = [...FILE_CONTEXT_BASE_ACCEPTED_FLAGS, "kind", "about"];
+async function fileContext(args, acceptedFlags, positionalCount) {
   args.assertShape(
-    [...TARGET_FLAGS, "workspace-id", ...CREDENTIAL_FLAGS, "json", ...SESSION_CONTEXT_FLAGS, ...extraFlags],
+    acceptedFlags,
     positionalCount
   );
   const cloud = await target(args);
@@ -71413,14 +74264,40 @@ async function uploadNamedFile(context, name, bytes, options = {}) {
       `"${sanitizeDisplayLabel(name, "that name")}" has no allowed file extension; the workspace accepts ${allowedExtensionList()}`
     );
   }
+  if (options.requestId !== void 0) {
+    const { exactPutStateDir: exactPutStateDir2, executeExactPut: executeExactPut2, prepareExactPut: prepareExactPut2 } = await Promise.resolve().then(() => (init_exact_file_put(), exact_file_put_exports));
+    const principalId = context.selected.agent?.principalId ?? context.selected.human?.userId;
+    if (!principalId) throw new UsageError("--request-id needs a minted agent credential with a principal id, a saved profile, or a human session");
+    const stateDir = options.profilePath ? exactPutStateDir2(options.profilePath) : (0, import_node_path29.join)(
+      defaultCredentialStateDirectory(),
+      "file-put-resume",
+      context.cloud.profileId,
+      context.selected.selectedWorkspace,
+      principalId
+    );
+    const prepared = await prepareExactPut2({
+      target: context.cloud,
+      workspaceId: context.selected.selectedWorkspace,
+      principalId,
+      credential: context.selected.bearer,
+      stateDir,
+      requestId: options.requestId,
+      name,
+      bytes,
+      ...options.ifVersion === void 0 ? {} : { ifVersion: options.ifVersion },
+      fetcher: context.selected.fetcher
+    });
+    const done = await executeExactPut2(prepared);
+    return { ...done.result, outcome: done.outcome, conflict_check: done.conflict_check };
+  }
   const send = {
     target: context.cloud,
     workspaceId: context.selected.selectedWorkspace,
     credential: context.selected.bearer,
     fetcher: context.selected.fetcher
   };
-  const fileId = (0, import_node_crypto24.randomUUID)();
-  const versionId = (0, import_node_crypto24.randomUUID)();
+  const fileId = (0, import_node_crypto28.randomUUID)();
+  const versionId = (0, import_node_crypto28.randomUUID)();
   const createCommandId = newCommandId();
   const commitCommandId = newCommandId();
   const created = await onceRetried(
@@ -71447,15 +74324,18 @@ async function uploadNamedFile(context, name, bytes, options = {}) {
 async function runFilePut(args) {
   const localPath = args.positionals[2];
   if (!localPath) throw new UsageError("cswarm file put needs a local path");
-  const context = await fileContext(args, ["name"], 3);
+  const context = await fileContext(args, FILE_PUT_ACCEPTED_FLAGS, 3);
   let bytes;
   try {
-    bytes = (0, import_node_fs8.readFileSync)(localPath);
+    bytes = (0, import_node_fs9.readFileSync)(localPath);
   } catch {
     throw new Error(`could not read ${localPath}; check the path and permissions`);
   }
-  const name = args.optional("name") ?? (0, import_node_path25.basename)(localPath);
-  const committed = await uploadNamedFile(context, name, bytes);
+  const name = args.optional("name") ?? (0, import_node_path29.basename)(localPath);
+  const committed = await uploadNamedFile(context, name, bytes, {
+    ...args.optional("request-id") === void 0 ? {} : { requestId: args.required("request-id") },
+    ...args.expandedProfilePath === void 0 ? {} : { profilePath: args.expandedProfilePath }
+  });
   if (args.has("json")) {
     process.stdout.write(`${JSON.stringify(committed, null, 2)}
 `);
@@ -71469,7 +74349,7 @@ The recorded sha256 is an unverified client attestation.
   );
 }
 async function runFileLs(args) {
-  const context = await fileContext(args, ["include-tombstoned"], 2);
+  const context = await fileContext(args, FILE_LS_ACCEPTED_FLAGS, 2);
   const rows3 = await fileRows(context);
   const visible = args.has("include-tombstoned") ? rows3 : rows3.filter((row) => row.tombstoned_at === null);
   if (args.has("json")) {
@@ -71509,7 +74389,7 @@ async function runFileLs(args) {
 async function runFileGet(args) {
   const selector = args.positionals[2];
   if (!selector) throw new UsageError("cswarm file get needs a file name or id");
-  const context = await fileContext(args, ["version", "out", "force"], 3);
+  const context = await fileContext(args, FILE_GET_ACCEPTED_FLAGS, 3);
   const versionN = args.has("version") ? integer3(args, "version", { minimum: 1 }) : null;
   const fileId = await resolveFileSelector(context, selector);
   const send = {
@@ -71519,12 +74399,12 @@ async function runFileGet(args) {
     fetcher: context.selected.fetcher
   };
   const grant = await fileDownloadUrl(send, { fileId, versionN });
-  const destination = args.optional("out") ?? (0, import_node_path25.basename)(grant.name);
+  const destination = args.optional("out") ?? (0, import_node_path29.basename)(grant.name);
   const bytes = await onceRetried(
     (attempt) => getObject(context.cloud, grant.download_path, fetch, attempt),
     {}
   );
-  writeDestination(destination, bytes, args.has("force"), import_node_fs8.writeFileSync);
+  writeDestination(destination, bytes, args.has("force"), import_node_fs9.writeFileSync);
   if (args.has("json")) {
     process.stdout.write(
       `${JSON.stringify(
@@ -71545,7 +74425,7 @@ ${grant.content_warning}
 async function runFileRm(args) {
   const selector = args.positionals[2];
   if (!selector) throw new UsageError("cswarm file rm needs a file name or id");
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 3);
   const fileId = await resolveFileSelector(context, selector);
   const result = await fileTombstone({
     target: context.cloud,
@@ -71568,7 +74448,7 @@ async function runFileRestore(args) {
   if (!selector) {
     throw new UsageError("cswarm file restore needs a file name or id");
   }
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 3);
   const fileId = await resolveFileSelector(context, selector);
   const result = await fileRestore({
     target: context.cloud,
@@ -71628,7 +74508,7 @@ function decodeBrainMarkdown(bytes) {
   }
 }
 async function runBrainLs(args) {
-  const context = await fileContext(args, [], 2);
+  const context = await fileContext(args, FILE_CONTEXT_BASE_ACCEPTED_FLAGS, 2);
   const topics = await brainRows(context);
   if (args.has("json")) {
     process.stdout.write(
@@ -71662,7 +74542,7 @@ async function runBrainGet(args) {
   if (!requestedTopic) throw new UsageError("cswarm brain get needs a topic");
   const selector = parseBrainTopicSelector(requestedTopic);
   const topic = selector.topic;
-  const context = await fileContext(args, ["version"], 3);
+  const context = await fileContext(args, BRAIN_GET_ACCEPTED_FLAGS, 3);
   const row = (await brainRows(context)).find((candidate) => candidate.topic === topic);
   if (!row) {
     throw new Error(
@@ -71726,12 +74606,12 @@ async function runBrainPut(args) {
       "cswarm brain put cannot read both the credential and Markdown from stdin; use --agent-token-file or pass a Markdown path"
     );
   }
-  const context = await fileContext(args, ["if-version"], args.positionals.length);
   const ifVersion = args.optional("if-version") === void 0 ? void 0 : integer3(args, "if-version", { minimum: 0 });
+  const context = await fileContext(args, BRAIN_PUT_ACCEPTED_FLAGS, args.positionals.length);
   let bytes;
   if (localPath) {
     try {
-      bytes = (0, import_node_fs8.readFileSync)(localPath);
+      bytes = (0, import_node_fs9.readFileSync)(localPath);
     } catch {
       throw new Error(`could not read ${localPath}; check the path and permissions`);
     }
@@ -71746,9 +74626,13 @@ async function runBrainPut(args) {
     context,
     brainFileName(topic),
     bytes,
-    ifVersion === void 0 ? {} : { ifVersion }
+    {
+      ...ifVersion === void 0 ? {} : { ifVersion },
+      ...args.optional("request-id") === void 0 ? {} : { requestId: args.required("request-id") },
+      ...args.expandedProfilePath === void 0 ? {} : { profilePath: args.expandedProfilePath }
+    }
   ).catch((error2) => {
-    if (error2 instanceof FileCommandRefused && error2.code === FILE_VERSION_PRECONDITION_FAILED) {
+    if (args.optional("request-id") === void 0 && error2 instanceof FileCommandRefused && error2.code === FILE_VERSION_PRECONDITION_FAILED) {
       throw new Error(
         `${error2.message}. Someone saved a new version after you read this topic. Re-read it, apply your change to that copy, then put it again: cswarm brain get ${topic}`
       );
@@ -71774,19 +74658,20 @@ Read it with: cswarm brain get ${topic}
 `
   );
 }
+var FEEDBACK_KINDS = ["bug", "idea", "friction"];
 async function runFeedback(args) {
   const body2 = args.positionals[1];
   if (!body2) {
     throw new UsageError(
-      'cswarm feedback needs the feedback text: cswarm feedback "<text>" --kind bug|idea|friction'
+      `cswarm feedback needs the feedback text: cswarm feedback "<text>" --kind ${FEEDBACK_KINDS.join("|")}`
     );
   }
   const kind = args.required("kind");
-  if (kind !== "bug" && kind !== "idea" && kind !== "friction") {
-    throw new UsageError("--kind must be bug, idea, or friction");
+  if (!FEEDBACK_KINDS.includes(kind)) {
+    throw new UsageError(`--kind must be ${formatOrList(FEEDBACK_KINDS)}`);
   }
   const about = args.optional("about");
-  const context = await fileContext(args, ["kind", "about"], 2);
+  const context = await fileContext(args, FEEDBACK_ACCEPTED_FLAGS, 2);
   const submitted = await submitFeedback({
     target: context.cloud,
     workspaceId: context.selected.selectedWorkspace,
@@ -71863,12 +74748,13 @@ var CHANNEL_FLAGS = [
   "json",
   ...SESSION_CONTEXT_FLAGS
 ];
+var RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "purpose"];
 async function runChannelCreate(args) {
   const name = args.positionals[2];
   if (name === void 0) {
     throw new UsageError("cswarm channel create needs a channel name");
   }
-  args.assertShape([...CHANNEL_FLAGS, "purpose"], 3);
+  args.assertShape(RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS, 3);
   const problem = channelSlugProblem(name);
   if (problem !== null) throw new Error(problem);
   const purposeInput = args.optional("purpose");
@@ -71878,7 +74764,7 @@ async function runChannelCreate(args) {
       `A channel purpose is at most ${CHANNEL_PURPOSE_MAX} characters.`
     );
   }
-  const context = await fileContext(args, ["purpose"], 3);
+  const context = await fileContext(args, RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS, 3);
   const channel3 = await sendChannelCommand(context, {
     kind: "channel_create",
     slug: normalizeChannelSlug(name),
@@ -71896,9 +74782,10 @@ Its id, which rename and archive take: ${channel3.channel_id}
 `
   );
 }
+var RUN_CHANNEL_LS_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS, "include-archived"];
 async function runChannelLs(args) {
-  args.assertShape([...CHANNEL_FLAGS, "include-archived"], 2);
-  const context = await fileContext(args, ["include-archived"], 2);
+  args.assertShape(RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
+  const context = await fileContext(args, RUN_CHANNEL_LS_1_ACCEPTED_FLAGS, 2);
   const rows3 = await channelRows(context);
   const includeArchived = args.has("include-archived");
   if (args.has("json")) {
@@ -71910,6 +74797,7 @@ async function runChannelLs(args) {
   }
   process.stdout.write(renderChannelList(rows3, { includeArchived }));
 }
+var RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS];
 async function runChannelRename(args) {
   const selector = args.positionals[2];
   const nextName = args.positionals[3];
@@ -71918,11 +74806,11 @@ async function runChannelRename(args) {
       "cswarm channel rename needs the channel and its new name"
     );
   }
-  args.assertShape([...CHANNEL_FLAGS], 4);
+  args.assertShape(RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS, 4);
   const selectorKind = channelSelectorKind(selector);
   const problem = channelSlugProblem(nextName);
   if (problem !== null) throw new Error(problem);
-  const context = await fileContext(args, [], 4);
+  const context = await fileContext(args, RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS, 4);
   const channelId = await resolveChannelSelector(context, selector, selectorKind);
   const channel3 = await sendChannelCommand(context, {
     kind: "channel_rename",
@@ -71940,14 +74828,15 @@ Its id: ${channel3.channel_id}
 `
   );
 }
+var RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS = [...CHANNEL_FLAGS];
 async function runChannelArchive(args) {
   const selector = args.positionals[2];
   if (selector === void 0) {
     throw new UsageError("cswarm channel archive needs the channel");
   }
-  args.assertShape([...CHANNEL_FLAGS], 3);
+  args.assertShape(RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS, 3);
   const selectorKind = channelSelectorKind(selector);
-  const context = await fileContext(args, [], 3);
+  const context = await fileContext(args, RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS, 3);
   const channelId = await resolveChannelSelector(context, selector, selectorKind);
   const channel3 = await sendChannelCommand(context, {
     kind: "channel_archive",
@@ -71964,9 +74853,10 @@ Read what is in it with cswarm feed --channel ${channel3.slug}
 `
   );
 }
+var RUN_TASK_COMMAND_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS];
 async function runTaskCommand(args) {
   args.assertShape(
-    [...TARGET_FLAGS, ...ROUTE_FLAGS, ...CREDENTIAL_FLAGS, ...TASK_FLAGS, ...SESSION_CONTEXT_FLAGS],
+    RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
     2
   );
   const kind = args.positionals[1];
@@ -71982,26 +74872,27 @@ async function runTaskCommand(args) {
   });
   printResult(kind, result);
 }
+var RUN_DOGFOOD_1_ACCEPTED_FLAGS = [
+  ...TARGET_FLAGS,
+  ...ROUTE_FLAGS,
+  ...CREDENTIAL_FLAGS,
+  "task-id",
+  "slug",
+  "ttl-ms",
+  "branch",
+  "head-sha",
+  "evidence"
+];
 async function runDogfood(args) {
   args.assertShape(
-    [
-      ...TARGET_FLAGS,
-      ...ROUTE_FLAGS,
-      ...CREDENTIAL_FLAGS,
-      "task-id",
-      "slug",
-      "ttl-ms",
-      "branch",
-      "head-sha",
-      "evidence"
-    ],
+    RUN_DOGFOOD_1_ACCEPTED_FLAGS,
     1
   );
   const cloud = await target(args);
   const { selectedWorkspace, bearer } = await commandWorkspaceAndCredential(args, cloud);
   const client = new ThinCommandClient(cloud);
   const route = stream(args);
-  const taskId = args.optional("task-id") ?? (0, import_node_crypto24.randomUUID)();
+  const taskId = args.optional("task-id") ?? (0, import_node_crypto28.randomUUID)();
   const ttl = Number(args.optional("ttl-ms") ?? "3600000");
   if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > 144e5) {
     throw new Error("--ttl-ms must be an integer in 1..14400000");
@@ -72047,16 +74938,17 @@ async function runDogfood(args) {
     }
   }));
 }
+var RUN_SEED_1_ACCEPTED_FLAGS = [
+  "uid",
+  "device-id",
+  "workspace-id",
+  "display-name",
+  "workspace-name",
+  "agent-name"
+];
 async function runSeed(args) {
   args.assertShape(
-    [
-      "uid",
-      "device-id",
-      "workspace-id",
-      "display-name",
-      "workspace-name",
-      "agent-name"
-    ],
+    RUN_SEED_1_ACCEPTED_FLAGS,
     1
   );
   const databaseUrl = process.env.DATABASE_URL;
@@ -72064,10 +74956,10 @@ async function runSeed(args) {
     throw new Error("DATABASE_URL is required for the fixture bridge");
   }
   const tokenOut = process.env.SEED_TOKEN_OUT;
-  if (!tokenOut || !(0, import_node_path25.isAbsolute)(tokenOut)) {
+  if (!tokenOut || !(0, import_node_path29.isAbsolute)(tokenOut)) {
     throw new Error("SEED_TOKEN_OUT must be an absolute path");
   }
-  const tokenFile = await (0, import_promises15.open)(tokenOut, "wx", 384).catch((error2) => {
+  const tokenFile = await (0, import_promises18.open)(tokenOut, "wx", 384).catch((error2) => {
     if (error2.code === "EEXIST") {
       throw new Error("SEED_TOKEN_OUT already exists; refusing to overwrite it");
     }
@@ -72106,7 +74998,7 @@ async function runSeed(args) {
       tokenWritten = true;
     }
     await tokenFile.close();
-    if (!tokenWritten) await (0, import_promises15.unlink)(tokenOut);
+    if (!tokenWritten) await (0, import_promises18.unlink)(tokenOut);
     process.stdout.write(`${JSON.stringify({
       userId: result.userId,
       membershipRole: result.membershipRole,
@@ -72119,12 +75011,13 @@ async function runSeed(args) {
 `);
   } catch (error2) {
     await tokenFile.close().catch(() => void 0);
-    if (!tokenWritten) await (0, import_promises15.unlink)(tokenOut).catch(() => void 0);
+    if (!tokenWritten) await (0, import_promises18.unlink)(tokenOut).catch(() => void 0);
     throw error2;
   }
 }
+var RUN_LOGIN_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "no-browser"];
 async function runLogin(args) {
-  args.assertShape([...TARGET_FLAGS, "no-browser"], 1);
+  args.assertShape(RUN_LOGIN_1_ACCEPTED_FLAGS, 1);
   const cloud = await target(args);
   const credentials = await store(args, cloud);
   process.stderr.write(
@@ -72141,9 +75034,11 @@ async function runLogin(args) {
 `
   );
 }
+var RUN_LOGOUT_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "device", "all-devices", "local"];
+var LOGOUT_REFUSED_FLAGS = ["device"];
 async function runLogout(args) {
-  args.assertShape([...TARGET_FLAGS, "device", "all-devices", "local"], 1);
-  if (args.optional("device") !== void 0) {
+  args.assertShape(RUN_LOGOUT_1_ACCEPTED_FLAGS, 1);
+  if (LOGOUT_REFUSED_FLAGS.some((flag) => args.optional(flag) !== void 0)) {
     throw new Error(
       "--device is deferred until the server-side device authority endpoint ships"
     );
@@ -72200,6 +75095,7 @@ function commandEntry(options) {
       select: () => "default",
       argumentSchema: commandArgumentSchema(flags),
       bootstrap: options.bootstrap ?? false,
+      mcp: options.mcp ?? false,
       errorMode: options.errorMode ?? (options.bootstrap ? "onboarding" : "standard"),
       workspaceErrorJson: options.workspaceErrorJson ?? false
     };
@@ -72208,6 +75104,7 @@ function commandEntry(options) {
   return {
     ...common2,
     flags,
+    mcp: options.mcp ?? false,
     variants,
     select: select2,
     argumentSchema: commandArgumentSchema(flags),
@@ -72223,7 +75120,7 @@ function traced(handlerName, handler) {
   };
 }
 function commandVariant(id, handler, help) {
-  return { id, handler, help: help.map(resolveHelpLine) };
+  return { id, handler, help };
 }
 function selectedVariants(variants, choose) {
   return {
@@ -72232,18 +75129,87 @@ function selectedVariants(variants, choose) {
     [selectedVariantsBrand]: true
   };
 }
-function resolveHelpLine(marker) {
-  const lines = `${usage()}
-${onboardingUsage()}`.split("\n").filter((line) => line.startsWith("  cswarm ")).map((line) => line.trim()).filter((line) => line.length > 0);
-  const exact = lines.find((line) => line === marker);
-  if (exact !== void 0) return exact;
-  const matches = lines.filter(
-    (line) => line.startsWith(marker) && (!/[a-z0-9]$/i.test(marker) || /^\s|^$/.test(line.slice(marker.length, marker.length + 1)))
-  );
-  if (matches.length !== 1) {
-    throw new Error(`help marker must identify one whole usage line: ${marker}`);
+var HELP_FLAG_VALUES = {
+  profile: "<absolute-path>",
+  url: "<url>",
+  "anon-key": "<key>",
+  "workspace-id": "<uuid>",
+  "host-session-id": "<id>",
+  since: "<timestamp>",
+  limit: "<n>"
+};
+function helpFlag(key2, flag) {
+  const enumeration = key2 === "receive.configure" ? flag === "mode" ? RECEIVE_MODES : flag === "provider" ? RECEIVE_PROVIDERS : void 0 : key2.startsWith("session.") ? flag === "mode" ? SESSION_MODES : flag === "provider" ? SESSION_PROVIDERS : void 0 : void 0;
+  return BOOLEAN_ARGUMENT_FLAGS.has(flag) ? `--${flag}` : `--${flag} ${enumeration ? `<${enumeration.join("|")}>` : HELP_FLAG_VALUES[flag] ?? "<value>"}`;
+}
+function visibleUsageHint(hint, accepted2) {
+  const filter = (source) => {
+    let result2 = "";
+    for (let index = 0; index < source.length; ) {
+      if (source[index] !== "[") {
+        result2 += source[index++];
+        continue;
+      }
+      let depth = 1;
+      let end = index + 1;
+      while (end < source.length && depth > 0) {
+        if (source[end] === "[") depth++;
+        if (source[end] === "]") depth--;
+        end++;
+      }
+      if (depth !== 0) {
+        result2 += source.slice(index);
+        break;
+      }
+      const inner = filter(source.slice(index + 1, end - 1));
+      const flags = [...inner.matchAll(/--([a-z][a-z-]*)/g)].map((match) => match[1]);
+      if (flags.every((flag) => accepted2.includes(flag))) result2 += `[${inner}]`;
+      index = end;
+    }
+    return result2;
+  };
+  const result = filter(hint);
+  return result === hint ? hint : result.replace(/  +/g, " ");
+}
+function helpDescription(entry2) {
+  return entry2.cliOnlyFlags?.includes("attach") ? `${entry2.description} Use --attach to add files.` : entry2.description;
+}
+function commandHelpLines(verb, action) {
+  const lines = [];
+  for (const [name, root] of Object.entries(AGENT_COMMANDS)) {
+    if (verb !== void 0 && name !== verb) continue;
+    const commands = isCommandGroup(root) ? Object.entries(root.subcommands) : [["", root]];
+    for (const [subaction, entry2] of commands) {
+      if (action !== void 0 && subaction !== action) continue;
+      if (!entry2.visible) continue;
+      const key2 = `${name}${subaction ? `.${subaction}` : ""}`;
+      for (const [variantName, variant] of Object.entries(entry2.variants)) {
+        const handlerFlags = VARIANT_HELP_FLAGS[`${key2}.${variantName}`] ?? HANDLER_HELP_FLAGS[key2];
+        if (!handlerFlags) throw new Error(`missing handler help flags for ${key2}.${variantName}`);
+        const accepted2 = entry2.profile === "expand" ? [...handlerFlags, "profile", "host-session-id"] : handlerFlags;
+        const hints = variant.help.length > 0 ? variant.help : [`cswarm ${name}${subaction ? ` ${subaction}` : ""}`];
+        for (const hint of hints) {
+          const visibleHint = visibleUsageHint(hint, accepted2);
+          lines.push(`  ${visibleHint}`);
+          lines.push(`    ${helpDescription(entry2)}`);
+        }
+        const shown = new Set(hints.flatMap((hint) => [...visibleUsageHint(hint, accepted2).matchAll(/--([a-z][a-z-]*)/g)].map((match) => match[1])));
+        const extra = [...new Set(accepted2)].filter((flag) => !shown.has(flag));
+        if (extra.length > 0) lines.push(`    Additional options: ${extra.map((flag) => helpFlag(key2, flag)).join(", ")}`);
+      }
+    }
   }
-  return matches[0];
+  return lines.join("\n");
+}
+function helpFor(verb, action) {
+  if (!verb || verb === "help") return `${usage()}
+${onboardingUsage()}`;
+  const root = Object.hasOwn(AGENT_COMMANDS, verb) ? AGENT_COMMANDS[verb] : void 0;
+  if (!root) return `${usage()}
+${onboardingUsage()}`;
+  const command2 = commandHelpLines(verb, isCommandGroup(root) && action !== void 0 && Object.hasOwn(root.subcommands, action) ? action : void 0);
+  return verb === "ask" || verb === "note" ? `${command2}
+Signal text is at most ${SIGNAL_BODY_MAX} characters; --about is at most ${SIGNAL_ABOUT_MAX}.` : command2;
 }
 function group(subcommands, choose, refusal2, options) {
   const names = Object.keys(subcommands);
@@ -72298,33 +75264,38 @@ var agentFlags = [
   ...SESSION_CONTEXT_FLAGS
 ];
 var noTool = (reason) => ({ tool: null, reason });
-var CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER = "CLI-only until item L";
+var signalBody = formatBodyUsage("<text>");
+var workingOnBody = formatBodyUsage("<what>");
+var CHECK_MESSAGES_SELECTOR_FLAGS = ["message-id", "hook"];
+var CHECK_MESSAGE_HIDDEN_FLAGS = ["force"];
+var INBOX_READ_SELECTOR_FLAGS = ["follow", "ndjson", NOTIFY_FLAG];
 var setupVariants = {
-  import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file"]),
+  import: commandVariant("import", runSetupImport, ["cswarm setup --connection-file <private-file> [--profile <absolute-path>] --host-session-id <id|manual> [--json]"]),
   version: commandVariant("version", runSetupVersion, ["cswarm setup --check-version"]),
   guide: commandVariant("guide", runSetupGuide, ["cswarm setup guide"])
 };
 var checkVariants = {
   messages: commandVariant("messages", runCheckMessages, ["cswarm check --profile <absolute-path> [--host-session-id <id>] [--force] [--full] [--json]"]),
-  message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id"]),
+  message: commandVariant("message", runCheckMessage, ["cswarm check --profile <absolute-path> [--host-session-id <id>] --message-id <uuid> [--json]"]),
   hook: commandVariant("hook", runCheckHook, ["cswarm check --profile <absolute-path> --host-session-id <id> --hook"])
 };
 var resumeVariants = {
-  inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file"]),
-  profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile"])
+  inspect: commandVariant("inspect", traced("runResume", runResume), ["cswarm resume --agent-token-file <path> [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
+  profile: commandVariant("profile", runResumeSnapshot, ["cswarm resume --profile <absolute-path> [--host-session-id <id>] [--json]"])
 };
 var acceptVariants = {
-  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin"]),
-  legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin"]),
-  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://", "cswarm accept <invitation-token>"])
+  linkStdin: commandVariant("link-stdin", traced("runAccept", runAcceptLinkStdinMode), ["cswarm accept --link-stdin [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]"]),
+  legacyStdin: commandVariant("legacy-stdin", traced("runAccept", runAcceptLegacyStdinMode), ["cswarm accept --invitation-token-stdin [--url <url> --anon-key <key>]"]),
+  positional: commandVariant("positional", traced("runAccept", runAcceptPositionalMode), ["cswarm accept <https://...#invite=...|cswarm://accept/...> [--name <name>] [--allow-duplicate-name] [--no-browser] [--json]  # unsafe: shell history/process list", "cswarm accept <invitation-token> [--url <url> --anon-key <key>]  # unsafe: shell history/process list"])
 };
 var inboxVariants = {
   read: commandVariant("read", traced("runSignalRead:inbox", runInboxReadMode), ["cswarm inbox [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--wait <seconds>] [--json]"]),
-  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify"]),
-  follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow"])
+  notify: commandVariant("notify", traced("runSignalRead:inbox", runInboxNotifyMode), ["cswarm inbox --notify (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"]),
+  follow: commandVariant("follow", traced("runSignalRead:inbox", runInboxFollowMode), ["cswarm inbox --follow --ndjson [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--kind <kind>] [--about <ref>] [--since <timestamp>] [--limit <n>] [--include-stale]"])
 };
+var RUN_MCP_CODE_1_ACCEPTED_FLAGS = [...TARGET_FLAGS, "workspace-id"];
 async function runMcpCode(args) {
-  args.assertShape([...TARGET_FLAGS, "workspace-id"], 2);
+  args.assertShape(RUN_MCP_CODE_1_ACCEPTED_FLAGS, 2);
   const cloud = await target(args);
   const human = await humanCredential(args, cloud);
   const workspace = await workspaceId(args, cloud, human);
@@ -72332,8 +75303,27 @@ async function runMcpCode(args) {
   const result = await mintMcpCode2(cloud, human.accessToken, workspace);
   process.stdout.write(renderMcpCode2(result, cloud));
 }
+var RUN_MCP_CONNECT_1_ACCEPTED_FLAGS = ["url", "anon-key", "profile", "name", "clear-pending"];
 async function runMcpConnect(args) {
-  args.assertShape(["url", "anon-key", "profile", "name"], 2);
+  args.assertShape(RUN_MCP_CONNECT_1_ACCEPTED_FLAGS, 2);
+  if (args.has("clear-pending")) {
+    if (!args.has("profile") || args.has("anon-key") || args.has("name")) {
+      throw new AgentSetupError("connect_clear_options", "Pass --clear-pending and --profile <path> to clear an interrupted connect.");
+    }
+    const { clearMcpConnect: clearMcpConnect2 } = await Promise.resolve().then(() => (init_mcp_connect(), mcp_connect_exports));
+    const profilePath = args.required("profile");
+    const cleared = await clearMcpConnect2(profilePath);
+    const removed = cleared.removed === "nothing" ? "Nothing was removed." : `Removed ${cleared.removed}.`;
+    process.stdout.write(cleared.removed === "nothing" ? `${removed}
+` : cleared.completedProfile ? `${removed} The working profile at ${cleared.completedProfile} and its credential were kept.
+` : cleared.emptyClaimPresent ? cleared.profilePresent ? `${removed} This directory holds an empty claim file at credential.json and a profile at ${privatePath(profilePath)} that could not be validated; both files were kept. Ask the operator to inspect them before another connect.
+` : `${removed} This directory holds an empty claim file at credential.json; the file was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.
+` : cleared.credentialPresent ? cleared.profilePresent ? `${removed} This directory holds a credential and a profile that could not be validated; both were kept. Ask the operator to inspect them before another connect.
+` : `${removed} This directory holds a credential without a profile; the credential was kept. Ask the operator to inspect the earlier attempt. Use a new --profile path for a new agent.
+` : `${removed} No credential was present. Ask the operator to inspect the earlier attempt before starting another connect.
+`);
+    return;
+  }
   if (!args.has("url")) throw new AgentSetupError("connect_url_required", "Pass --url for the deployment that issued the code.");
   const explicitUrl = args.required("url");
   const explicitAnonKey = args.optional("anon-key");
@@ -72348,12 +75338,68 @@ async function runMcpConnect(args) {
   const result = await connectMcp2({ target: cloud, profilePath: args.optional("profile"), name: args.optional("name") });
   process.stdout.write(renderMcpConnect2(result));
 }
+function assertInboxWorkspace(actual, selected) {
+  if (actual !== selected) {
+    throw new AgentSetupError("inbox_workspace_mismatch", "--workspace-id does not match this agent's workspace. Use the workspace ID from its saved profile.");
+  }
+}
+function parseProfileListUrl(url) {
+  if (url !== void 0) {
+    try {
+      new URL(url);
+    } catch {
+      throw new AgentSetupError("profile_url_invalid", "--url must be a valid URL.");
+    }
+  }
+}
+var RUN_PROFILE_LS_1_ACCEPTED_FLAGS = ["json", "url"];
+async function runProfileLs(args) {
+  args.assertShape(RUN_PROFILE_LS_1_ACCEPTED_FLAGS, 2);
+  parseProfileListUrl(args.optional("url"));
+  const all = await listAgentProfiles();
+  const result = all;
+  if (args.has("json")) {
+    printJson(result);
+    return;
+  }
+  process.stdout.write(`Searched: ${result.searched_roots.join(", ")}
+`);
+  for (const profile of result.profiles) {
+    if (profile.error) {
+      process.stdout.write(`${profile.path} \xB7 ${profile.error}
+`);
+    } else {
+      const seat = profile.principal_name ? `${profile.principal_name} (${profile.principal_id})` : profile.principal_id;
+      const workspace = profile.workspace_name ? `${profile.workspace_name} (${profile.workspace_id})` : profile.workspace_id;
+      process.stdout.write(`${seat} \xB7 ${workspace} \xB7 ${profile.url_host} \xB7 ${profile.path}
+`);
+    }
+  }
+  if (result.profiles.length === 0) process.stdout.write("No profiles found.\n");
+}
+var MCP_SERVE_ACCEPTED_FLAGS = ["profile", "host-session-id"];
 var AGENT_COMMANDS = {
+  profile: group({
+    ls: commandEntry({
+      ...noTool("local profile inventory; no network or credential read"),
+      handler: runProfileLs,
+      description: "List saved agent profiles on this host.",
+      mutates: false,
+      flags: ["json", "url"],
+      transports: STDIO_ONLY,
+      ...REFUSE_PROFILE,
+      visible: true,
+      help: ["cswarm profile ls [--json] [--url <url>]"],
+      bootstrap: true
+    })
+  }, (args) => args.positionals[1], () => new UsageError("profile requires ls"), {
+    refusalPolicy: { flags: ["json", "url"], ...REFUSE_PROFILE }
+  }),
   mcp: group({
     serve: commandEntry({
       ...noTool("MCP server bootstrap; its tools have their own allow-listed schemas"),
       handler: async (args) => {
-        args.assertShape(["profile", "host-session-id"], 1);
+        args.assertShape(MCP_SERVE_ACCEPTED_FLAGS, 1);
         const { serveMcp: serveMcp2 } = await Promise.resolve().then(() => (init_server3(), server_exports));
         await serveMcp2({ profilePath: args.required("profile"), hostSessionId: args.optional("host-session-id") });
       },
@@ -72363,7 +75409,7 @@ var AGENT_COMMANDS = {
       transports: STDIO_ONLY,
       ...NATIVE_PROFILE,
       visible: true,
-      help: ["cswarm mcp --profile <path> [--host-session-id <id>]"],
+      help: ["cswarm mcp --profile <path> [--host-session-id <id>]  # MCP server over stdio"],
       bootstrap: true
     }),
     code: commandEntry({
@@ -72375,20 +75421,23 @@ var AGENT_COMMANDS = {
       transports: STDIO_ONLY,
       ...REFUSE_PROFILE,
       visible: true,
-      help: ["cswarm mcp code"],
+      help: ["cswarm mcp code [--url <url> --anon-key <key>] [--workspace-id <uuid>]"],
       bootstrap: true
     }),
     connect: commandEntry({
       ...noTool("operator enters a code in a hidden terminal prompt"),
       handler: runMcpConnect,
-      description: "Redeem a connect code on the agent host.",
+      description: "Redeem a connect code or clear an interrupted connect on the agent host.",
       mutates: true,
-      flags: ["url", "anon-key", "profile", "name"],
+      flags: RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
       transports: STDIO_ONLY,
       profile: "native",
       hostSessionId: "drop",
       visible: true,
-      help: ["cswarm mcp connect"],
+      help: [
+        "cswarm mcp connect --url <url> [--anon-key <key>] [--profile <absolute-path>] [--name <display-name>]",
+        "cswarm mcp connect --clear-pending --profile <absolute-path>"
+      ],
       bootstrap: true
     })
   }, (args) => args.positionals[1] ?? "serve", () => new UsageError("mcp requires code or connect, or --profile to serve tools"), {
@@ -72407,7 +75456,8 @@ var AGENT_COMMANDS = {
   }),
   check: commandEntry({
     tool: "check",
-    ...selectedVariants(checkVariants, (args) => args.has("hook") ? "hook" : args.has("message-id") ? "message" : "messages"),
+    mcp: true,
+    ...selectedVariants(checkVariants, (args) => args.has(CHECK_MESSAGES_SELECTOR_FLAGS[1]) ? "hook" : args.has(CHECK_MESSAGES_SELECTOR_FLAGS[0]) ? "message" : "messages"),
     description: "Read new directed messages for this agent.",
     mutates: true,
     flags: ["profile", "host-session-id", "force", "full", "message-id", "json", "hook"],
@@ -72417,12 +75467,12 @@ var AGENT_COMMANDS = {
     errorMode: "onboarding"
   }),
   receive: group({
-    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive configure"], bootstrap: true }),
-    status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status"], bootstrap: true }),
-    test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test"], bootstrap: true }),
-    confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm"], bootstrap: true }),
-    idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle"], bootstrap: true }),
-    serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve"], bootstrap: true })
+    configure: commandEntry({ ...noTool("bootstrap configures the host receive path outside a model tool call"), handler: runReceiveConfigure, description: "Configure message receiving for this host session.", mutates: true, flags: ["profile", "host-session-id", "json", "mode", "provider", "cwd", "preview-channel", "grok-bot-agent-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: [`cswarm receive configure --profile <absolute-path> --mode ${RECEIVE_MODES.join("|")} [--provider ${RECEIVE_PROVIDERS.join("|")}] [--host-session-id <id>] [--cwd <path>] [--preview-channel] [--grok-bot-agent-id <uuid>] [--json]`], bootstrap: true }),
+    status: commandEntry({ ...noTool("bootstrap inspects host receive configuration outside a model tool call"), handler: runReceiveStatus, description: "Show receive configuration.", mutates: false, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive status --profile <absolute-path> [--host-session-id <id>] [--json]"], bootstrap: true }),
+    test: commandEntry({ ...noTool("bootstrap verifies host wake delivery outside a model tool call"), handler: runReceiveTest, description: "Request a receive canary.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive test --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    confirm: commandEntry({ ...noTool("bootstrap confirms a host wake receipt outside a model tool call"), handler: runReceiveConfirm, description: "Confirm a receive canary.", mutates: true, flags: ["profile", "host-session-id", "signal-id", "receipt", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive confirm --profile <absolute-path> --host-session-id <id> --signal-id <uuid> --receipt <receipt> [--json]"], bootstrap: true }),
+    idle: commandEntry({ ...noTool("internal host gateway state; not a model tool"), handler: runReceiveIdle, description: "Mark the local gateway idle.", mutates: true, flags: ["profile", "host-session-id", "json"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive idle --profile <absolute-path> --host-session-id <id> [--json]"], bootstrap: true }),
+    serve: commandEntry({ ...noTool("long-lived host channel process; not a model tool"), handler: runReceiveServe, description: "Serve the local receive channel.", mutates: true, flags: ["profile", "host-session-id"], transports: STDIO_ONLY, ...NATIVE_PROFILE, visible: true, help: ["cswarm receive serve --profile <absolute-path> --host-session-id <id>"], bootstrap: true })
   }, (args) => args.positionals[1], () => new AgentSetupError("receive_command_invalid", "Run cswarm --help for receive commands."), {
     refusalPolicy: { flags: ["profile", "host-session-id", "json"], ...NATIVE_PROFILE },
     refusalTrace: "runOnboardingCommand:receive-refusal",
@@ -72430,18 +75480,18 @@ var AGENT_COMMANDS = {
   }),
   "__listen-supervisor": commandEntry({ ...noTool("internal listener supervisor; not a user command"), handler: traced("runListenSupervisor", runListenSupervisor), description: "Run the internal listener supervisor.", mutates: true, flags: [...agentFlags, "principal-id", "cwd", "model", "effort", "permissions", "provider", "state-dir", "turn-budget", "poll-interval", "route", "defer-over"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: false, help: [] }),
   hook: group({
-    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check"], errorMode: "hook-check" }),
-    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install"] }),
-    uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall"] })
+    check: commandEntry({ ...noTool("host hook entrypoint; it is invoked by the host, not as a model tool"), handler: traced("runHook", runHook), description: "Run the host message hook.", mutates: true, flags: ["cooldown", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook check [--principal-id <uuid> ...] [--cooldown <seconds>]"], errorMode: "hook-check" }),
+    install: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Install the host hook.", mutates: true, flags: ["write", "user", "repo", "principal-id"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook install claude [--principal-id <uuid>] [--write] [--user | --repo]"] }),
+    uninstall: commandEntry({ ...noTool("writes host configuration and requires operator intent"), handler: traced("runHook", runHook), description: "Remove the host hook.", mutates: true, flags: ["write", "user", "repo"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm hook uninstall claude --write [--user | --repo]"] })
   }, (args) => args.positionals[1], () => new UsageError("hook requires check, install, or uninstall"), {
     refusalPolicy: { flags: ["cooldown", "principal-id", "write", "user", "repo"], ...REFUSE_PROFILE },
     refusalTrace: "runHook"
   }),
   listen: group({
-    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: [...agentFlags, "provider", "cwd", "model", "effort", "permissions", "turn-budget", "poll-interval", "route", "allow-unattended", "foreground"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen start"] }),
-    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status"] }),
-    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: [...agentFlags, "principal-id", "state-dir"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop"] }),
-    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: [...agentFlags, "state-dir", "wait"], transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary"] })
+    start: commandEntry({ ...noTool("starts a long-lived host process; never a model tool"), handler: traced("runListen", runListenStart), description: "Start the local listener.", mutates: true, flags: LISTEN_START_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm listen start (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> --provider ${LISTENER_PROVIDERS.join("|")} [--cwd <absolute-path>] [--model <model>] [--effort <level>] [--permissions ${LISTENER_PERMISSION_MODES.join("|")}] [--grok-executable <path>] [--opencode-executable <path>] [--claude-executable <path>] [--codex-executable <path>] [--turn-budget <duration>] [--poll-interval <duration>] [--route ${listenerRouteUsage()}] [--state-dir <path>] [--allow-unattended] [--foreground] [--json]`] }),
+    status: commandEntry({ ...noTool("local listener administration; not a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "status")), description: "Show listener status.", mutates: false, flags: LISTEN_STATUS_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen status [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--json]"] }),
+    stop: commandEntry({ ...noTool("stops a long-lived host process; never a model tool"), handler: traced("runListen", (args) => runListenStatusOrStop(args, "stop")), description: "Stop the local listener.", mutates: true, flags: LISTEN_STOP_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen stop [--agent-token-file <path> | --agent-token-stdin] [--url <url> --anon-key <key>] --workspace-id <uuid> [--principal-id <uuid>] [--state-dir <path>] [--wait] [--json]"] }),
+    canary: commandEntry({ ...noTool("host attendance canary; not a model tool"), handler: traced("runListen", runListenCanary), description: "Test listener attendance.", mutates: true, flags: LISTEN_CANARY_ACCEPTED_FLAGS, transports: STDIO_ONLY, ...EXPAND_PROFILE_KEEP_HOST, visible: true, help: ["cswarm listen canary (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--state-dir <path>] [--wait <seconds>] [--json]"] })
   }, (args) => args.positionals[1], () => new UsageError("listen requires start, status, stop, or canary"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 13,
@@ -72449,14 +75499,16 @@ var AGENT_COMMANDS = {
   }),
   session: group(Object.fromEntries(["start", "status", "stop", "enable", "disable", "recover"].map((action) => {
     const humanOnly = action === "enable" || action === "disable" || action === "recover";
-    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags: humanOnly ? [...humanFlags, "principal-id"] : [...agentFlags, "mode", "provider", "principal-id", "host-label", "foreground"], transports: STDIO_ONLY, ...humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST, visible: true, help: [`cswarm session ${action}`] })];
+    const synopsis = action === "start" ? `cswarm session start --mode ${SESSION_MODES.join("|")} --provider ${SESSION_PROVIDERS.join("|")} --host-session-id <id> --workspace-id <uuid> --agent-token-file <absolute-path> [--host-label <label>] [--session-context <path>] [--foreground] [--json]` : action === "status" || action === "stop" ? `cswarm session ${action} --session-context <path> (--agent-token-file <path> | --agent-token-stdin) [--profile <absolute-path> [--workspace-id <uuid>]] [--json]` : `cswarm session ${action} --principal-id <uuid> [--workspace-id <uuid>]`;
+    const flags = humanOnly ? SESSION_HUMAN_ACCEPTED_FLAGS : action === "start" ? SESSION_START_ACCEPTED_FLAGS : SESSION_PROFILE_STATUS_ACCEPTED_FLAGS;
+    return [action, commandEntry({ ...noTool("execution-session administration; never a model tool"), handler: traced("runSession", runSession), description: `${action} an execution session.`, mutates: action !== "status", flags, transports: STDIO_ONLY, ...humanOnly ? REFUSE_PROFILE : EXPAND_PROFILE_KEEP_HOST, visible: true, help: [synopsis] })];
   })), (args) => args.positionals[1], () => new UsageError("session requires start, status, stop, enable, disable, or recover"), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE_KEEP_HOST },
     profileListOrder: 14,
     refusalTrace: "runSession"
   }),
-  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login"] }),
-  logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout"] }),
+  login: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.login", runLogin), description: "Sign a person in.", mutates: true, flags: [...TARGET_FLAGS, "no-browser"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm login [--url <project-url> --anon-key <key>] [--no-browser]"] }),
+  logout: commandEntry({ ...noTool("human authentication; never a model tool"), handler: traced("main.logout", runLogout), description: "Sign a person out.", mutates: true, flags: [...TARGET_FLAGS, "device", "all-devices", "local"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm logout [--url <project-url> --anon-key <key>] [--all-devices] [--local]"] }),
   /*
    * These selectors deliberately preserve the old handlers' order. Invite sent
    * every action except "revoke" to its create path. Member, workspace, and
@@ -72466,96 +75518,208 @@ var AGENT_COMMANDS = {
    */
   invite: group({
     create: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Create an invitation.", mutates: true, flags: [...humanFlags, "email"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite [--url <url> --anon-key <key>] [--workspace-id <uuid>] --email <email>"] }),
-    revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke"] })
+    revoke: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runInvite", runInvite), description: "Revoke an invitation.", mutates: true, flags: [...humanFlags, "invitation-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm invite revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --invitation-id <uuid> [--json]"] })
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "create", () => new UsageError("unknown invite command"), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE }
   }),
-  member: group({ remove: commandEntry({ ...noTool("human membership administration; never a model tool"), handler: traced("runMember", runMember), description: "Remove a workspace member.", mutates: true, flags: [...humanFlags, "confirm"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm member remove"] }) }, () => "remove", (args) => new UsageError(`unknown member command: ${args.positionals[1] ?? "(missing)"}`), {
+  member: group({ remove: commandEntry({ ...noTool("human membership administration; never a model tool"), handler: traced("runMember", runMember), description: "Remove a workspace member.", mutates: true, flags: [...humanFlags, "confirm"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm member remove <full-user-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }) }, () => "remove", (args) => new UsageError(`unknown member command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE }
   }),
-  workspace: group({ close: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runWorkspace", runWorkspace), description: "Close a workspace.", mutates: true, flags: [...TARGET_FLAGS, "confirm", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspace close"] }) }, () => "close", (args) => new UsageError(`unknown workspace command: ${args.positionals[1] ?? "(missing)"}`), {
+  workspace: group({ close: commandEntry({ ...noTool("human workspace administration; never a model tool"), handler: traced("runWorkspace", runWorkspace), description: "Close a workspace.", mutates: true, flags: [...TARGET_FLAGS, "confirm", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspace close <full-id|exact-name> --confirm <same-selector> [--url <url> --anon-key <key>] [--json]"] }) }, () => "close", (args) => new UsageError(`unknown workspace command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: [...TARGET_FLAGS, "confirm", "json"], ...REFUSE_PROFILE }
   }),
   target: group({
-    show: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Show the saved Cloud target.", mutates: false, flags: ["json", "reveal-anon-key"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target [show]"] }),
-    set: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Save a Cloud target.", mutates: true, flags: ["url", "anon-key", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target set"] }),
-    clear: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Clear the saved Cloud target.", mutates: true, flags: ["json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target clear"] })
+    show: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Show the saved Cloud target.", mutates: false, flags: ["json", "reveal-anon-key"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target [show] [--json] [--reveal-anon-key]"] }),
+    set: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Save a Cloud target.", mutates: true, flags: ["url", "anon-key", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target set --url <project-url> --anon-key <key> [--json]"] }),
+    clear: commandEntry({ ...noTool("local deployment configuration; never a model tool"), handler: traced("runTarget", runTarget), description: "Clear the saved Cloud target.", mutates: true, flags: ["json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm target clear [--json]"] })
   }, (args) => args.positionals[1] ?? "show", (args) => new Error(`unknown target command: ${args.positionals[1]}`), {
     refusalPolicy: { flags: [...TARGET_FLAGS, "json"], ...REFUSE_PROFILE },
     refusalTrace: "runTarget"
   }),
-  status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status"], workspaceErrorJson: true }),
-  whoami: commandEntry({ tool: "whoami", handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami"] }),
+  status: commandEntry({ ...noTool("human workspace dashboard; agent identity uses whoami and members"), handler: traced("runStatus", runStatus), description: "Show human workspace status.", mutates: false, flags: humanFlags, transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm status [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"], workspaceErrorJson: true }),
+  whoami: commandEntry({ tool: "whoami", mcp: true, handler: traced("runWhoami", runWhoami), description: "Show the authenticated agent and workspace.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 0, visible: true, help: ["cswarm whoami (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
   resume: commandEntry({ tool: "resume", ...selectedVariants(resumeVariants, (args) => args.has("profile") ? "profile" : "inspect"), description: "Inspect an agent credential or resume a saved profile.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...NATIVE_PROFILE, profileListOrder: 1, visible: true }),
-  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: ["cswarm feedback"] }),
+  feedback: commandEntry({ ...noTool("operator feedback submission is not part of agent coordination tools"), handler: traced("runFeedback", runFeedback), description: "Send product feedback.", mutates: true, flags: [...agentFlags, "kind", "about"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 12, visible: true, help: [`cswarm feedback "<text>" --kind ${FEEDBACK_KINDS.join("|")} [--about <ref>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]`] }),
   channel: group({
-    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel create"] }),
-    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls"] }),
-    rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename"] }),
-    archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive"] })
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    create: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelCreate), description: "Create a channel.", mutates: true, flags: [...agentFlags, "purpose"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: [`cswarm channel create <name> [--purpose <text>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]  # purpose: at most ${CHANNEL_PURPOSE_MAX} characters`] }),
+    ls: commandEntry({ tool: "channel_ls", handler: traced("runChannel", runChannelLs), description: "List channels.", mutates: false, flags: [...agentFlags, "include-archived"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel ls [--include-archived] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--json]"] }),
+    rename: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelRename), description: "Rename a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel rename <name|channel-id> <new-name> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+    archive: commandEntry({ ...noTool("channel administration is outside the first MCP tool set"), handler: traced("runChannel", runChannelArchive), description: "Archive a channel.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm channel archive <name|channel-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] })
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm channel takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 15,
     refusalTrace: "runChannel"
   }),
   file: group({
-    put: commandEntry({ ...noTool("multi-phase upload retries need item L's durable resume record"), handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put"], workspaceErrorJson: true }),
-    ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls"], workspaceErrorJson: true }),
-    get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get"], workspaceErrorJson: true }),
-    rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm"], workspaceErrorJson: true }),
-    restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore"], workspaceErrorJson: true })
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    put: commandEntry({ tool: "file_put", mcp: true, handler: traced("runFile", runFilePut), description: "Upload a file.", mutates: true, flags: [...agentFlags, "name", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file put <local-path> [--name <name>] [--request-id <id>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    ls: commandEntry({ tool: "file_ls", handler: traced("runFile", runFileLs), description: "List workspace files.", mutates: false, flags: [...agentFlags, "include-tombstoned"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file ls [--include-tombstoned] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "file_get", handler: traced("runFile", runFileGet), description: "Download a workspace file to this host.", mutates: true, flags: [...agentFlags, "version", "out", "force"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm file get <name|file-id> [--version <n>] [--out <local-path>] [--force] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    rm: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRm), description: "Tombstone a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file rm <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    restore: commandEntry({ ...noTool("file administration is outside the first MCP tool set"), handler: traced("runFile", runFileRestore), description: "Restore a file.", mutates: true, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm file restore <name|file-id> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true })
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm file takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 10,
     refusalTrace: "runFile"
   }),
   brain: group({
-    ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls"], workspaceErrorJson: true }),
-    get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get"], workspaceErrorJson: true }),
-    put: commandEntry({ ...noTool(`${CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER}: multi-phase upload retries need item L's durable resume record`), handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put"], workspaceErrorJson: true })
-  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${names.slice(0, -1).join(", ")}, or ${names[names.length - 1]}`), {
+    ls: commandEntry({ tool: "brain_ls", handler: traced("runBrain", runBrainLs), description: "List workspace brain topics.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain ls [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    get: commandEntry({ tool: "brain_get", handler: traced("runBrain", runBrainGet), description: "Read a workspace brain topic.", mutates: false, flags: [...agentFlags, "version"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain get <topic>[@<version>] [--version <n>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"], workspaceErrorJson: true }),
+    put: commandEntry({ tool: "brain_put", mcp: true, handler: traced("runBrain", runBrainPut), description: "Write a workspace brain topic.", mutates: true, flags: [...agentFlags, "if-version", "request-id"], transports: STDIO_ONLY, ...EXPAND_PROFILE, visible: true, help: ["cswarm brain put <topic> [<markdown-path>] [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--if-version <n>] [--request-id <id>] [--json]  # without a path, reads Markdown from stdin; --if-version refuses the write unless the live version is still <n>"], workspaceErrorJson: true })
+  }, (args) => args.positionals[1], (_args, names) => new UsageError(`cswarm brain takes ${formatOrList(names)}`), {
     refusalPolicy: { flags: agentFlags, ...EXPAND_PROFILE },
     profileListOrder: 9,
     refusalTrace: "runBrain"
   }),
-  members: commandEntry({ tool: "members", handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members"] }),
-  "working-on": commandEntry({ tool: "working_on", handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: ["cswarm working-on"], workspaceErrorJson: true }),
-  note: commandEntry({ tool: "note", handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: ["cswarm note"], workspaceErrorJson: true }),
-  ask: commandEntry({ tool: "ask", handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: ["cswarm ask"], workspaceErrorJson: true }),
-  reply: commandEntry({ tool: "reply", handler: traced("runReply", runReply), description: "Reply to a signal without attachments.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: ["cswarm reply"], workspaceErrorJson: true }),
-  receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt"], workspaceErrorJson: true }),
-  feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed"], workspaceErrorJson: true }),
-  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has("notify") ? "notify" : args.has("follow") ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", "notify"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
-  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces"], workspaceErrorJson: true }),
-  use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use"], workspaceErrorJson: true }),
-  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ['cswarm new "<workspace name>"', "cswarm new --name"] }),
+  members: commandEntry({ tool: "members", mcp: true, handler: traced("runMembers", runMembers), description: "List workspace members and agents.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 11, visible: true, help: ["cswarm members [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--json]"] }),
+  "working-on": commandEntry({ tool: "working_on", mcp: true, handler: traced("runPostSignal:working-on", (args) => runPostSignal(args, "working-on")), description: "Post current work.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "about", "channel", "until"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 2, visible: true, help: [`cswarm working-on ${workingOnBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--channel <name>] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  note: commandEntry({ tool: "note", mcp: true, handler: traced("runPostSignal:note", (args) => runPostSignal(args, "note")), description: "Post a note.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 3, visible: true, help: [`cswarm note ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  ask: commandEntry({ tool: "ask", mcp: true, handler: traced("runPostSignal:ask", (args) => runPostSignal(args, "ask")), description: "Post an ask.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "to", "about", "channel", "until", "wait"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 4, visible: true, help: [`cswarm ask ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--to <member|agent>] [--about <ref>] [--channel <name>] [--attach <path> ...] [--until <dur>] [--wait <seconds>] [--json]  # text: 1..${SIGNAL_BODY_MAX} characters`], workspaceErrorJson: true }),
+  reply: commandEntry({ tool: "reply", mcp: true, handler: traced("runReply", runReply), description: "Reply to a signal.", mutates: true, flags: [...agentFlags, "body-file", "body-stdin", "thread", "broadcast-to-channel", "until"], cliOnlyFlags: ["attach"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 5, visible: true, help: [`cswarm reply <signal-id> ${signalBody} [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--thread [--broadcast-to-channel]] [--attach <path> ...] [--until <dur>] [--json]`], workspaceErrorJson: true }),
+  receipt: commandEntry({ tool: "receipt", handler: traced("runReceipt", runReceipt), description: "Read delivery receipts for a signal.", mutates: false, flags: agentFlags, transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 6, visible: true, help: ["cswarm receipt <signal-id> (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--json]"], workspaceErrorJson: true }),
+  feed: commandEntry({ tool: "feed", handler: traced("runSignalRead:feed", (args) => runSignalRead(args, false)), description: "Read the workspace signal feed.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale"], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 7, visible: true, help: ["cswarm feed [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [--about <ref>] [--kind <kind>] [--channel <name>] [--since <timestamp>] [--limit <n>] [--include-stale] [--json]"], workspaceErrorJson: true }),
+  inbox: commandEntry({ tool: "inbox", ...selectedVariants(inboxVariants, (args) => args.has(INBOX_READ_SELECTOR_FLAGS[2]) ? "notify" : args.has(INBOX_READ_SELECTOR_FLAGS[0]) ? "follow" : "read"), description: "Read or follow this agent's inbox.", mutates: true, flags: [...agentFlags, "about", "channel", "kind", "since", "limit", "include-stale", "wait", "follow", "ndjson", NOTIFY_FLAG], transports: ALL_TRANSPORTS, ...EXPAND_PROFILE, profileListOrder: 8, visible: true, workspaceErrorJson: true }),
+  workspaces: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runWorkspaces", runWorkspaces), description: "List human workspaces.", mutates: false, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm workspaces [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
+  use: commandEntry({ ...noTool("human workspace selection; never a model tool"), handler: traced("runUse", runUse), description: "Select a human workspace.", mutates: true, flags: [...TARGET_FLAGS, "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm use <full-id|exact-name> [--url <url> --anon-key <key>] [--json]"], workspaceErrorJson: true }),
+  new: commandEntry({ ...noTool("human workspace creation; never a model tool"), handler: traced("runNew", runNew), description: "Create a workspace.", mutates: true, flags: [...TARGET_FLAGS, "name", "json"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: [`cswarm new "<workspace name>" [--url <url> --anon-key <key>] [--json]`, `cswarm new --name "<workspace name>" [--url <url> --anon-key <key>] [--json]`] }),
   accept: commandEntry({ ...noTool("bootstrap accepts a human invitation before an MCP tool session exists"), ...selectedVariants(acceptVariants, (args) => args.has("link-stdin") ? "linkStdin" : args.has("invitation-token-stdin") ? "legacyStdin" : "positional"), description: "Accept an invitation.", mutates: true, flags: [...TARGET_FLAGS, "link-stdin", "invitation-token-stdin", "name", "allow-duplicate-name", "no-browser", "json"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true }),
   principal: group({
-    create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create"] }),
-    revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke"] })
+    create: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Create an agent identity.", mutates: true, flags: [...humanFlags, "name", "allow-duplicate-name"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal create [--url <url> --anon-key <key>] [--workspace-id <uuid>] --name <name> [--allow-duplicate-name]"] }),
+    revoke: commandEntry({ ...noTool("human identity administration; never a model tool"), handler: traced("runPrincipal", runPrincipal), description: "Revoke an agent identity.", mutates: true, flags: [...humanFlags, "principal-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm principal revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid>"] })
   }, (args) => args.positionals[1], (args) => new Error(`unknown principal command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
     refusalTrace: "runPrincipal"
   }),
   token: group({
-    mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint"] }),
-    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke [--url", "cswarm token revoke (--agent-token-file"] })
+    mint: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Mint an agent credential.", mutates: true, flags: [...humanFlags, "principal-id", "run-id", "task-id", "epoch", "ttl-ms", "renewal-horizon-days", "standing", "confirm-standing"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token mint [--url <url> --anon-key <key>] [--workspace-id <uuid>] --principal-id <uuid> --run-id <uuid> --task-id <uuid> --epoch <n> [--ttl-ms <ms>] [--renewal-horizon-days <1..90> | --standing --confirm-standing]"] }),
+    revoke: commandEntry({ ...noTool("credential administration; tokens never enter a model tool call"), handler: traced("runToken", runToken), description: "Revoke or surrender an agent credential.", mutates: true, flags: [...humanFlags, ...CREDENTIAL_FLAGS, "token-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm token revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --token-id <uuid>", "cswarm token revoke (--agent-token-file <path> | --agent-token-stdin) [--url <url> --anon-key <key>] --workspace-id <uuid> [--token-id <uuid>]"] })
   }, (args) => args.positionals[1] === "revoke" ? "revoke" : "mint", (args) => new Error(`unknown token command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE }
   }),
-  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
+  grant: group({ resume: commandEntry({ ...noTool("human credential administration; never a model tool"), handler: traced("runGrant", runGrant), description: "Resume a paused renewal grant.", mutates: true, flags: [...humanFlags, "renewal-grant-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm grant resume [--url <url> --anon-key <key>] [--workspace-id <uuid>] --renewal-grant-id <uuid> [--json]  # lifts an idle pause; a REVOKED grant is refused"] }) }, () => "resume", (args) => new UsageError(`unknown grant command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE }
   }),
   link: group({
-    new: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkNew), description: "Create a capability link.", mutates: true, flags: [...humanFlags, "task-id", "ttl-ms", "site"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link new"] }),
-    revoke: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkRevoke), description: "Revoke a capability link.", mutates: true, flags: [...humanFlags, "capability-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link revoke"] })
+    new: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkNew), description: "Create a capability link.", mutates: true, flags: [...humanFlags, "task-id", "ttl-ms", "site"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link new [--url <url> --anon-key <key>] [--workspace-id <uuid>] --task-id <uuid> [--ttl-ms <ms>] [--site <origin>] [--json]"] }),
+    revoke: commandEntry({ ...noTool("human capability administration; never a model tool"), handler: traced("runLink", runLinkRevoke), description: "Revoke a capability link.", mutates: true, flags: [...humanFlags, "capability-id"], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm link revoke [--url <url> --anon-key <key>] [--workspace-id <uuid>] --capability-id <uuid> [--json]"] })
   }, (args) => args.positionals[1], (args) => new UsageError(`unknown link command: ${args.positionals[1] ?? "(missing)"}`), {
     refusalPolicy: { flags: humanFlags, ...REFUSE_PROFILE },
     refusalTrace: "runLink"
   }),
-  command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind>"] }),
-  dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood"] }),
-  "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture"] })
+  command: commandEntry({ ...noTool("open protocol command surface; not a bounded MCP tool"), handler: traced("runTaskCommand", runTaskCommand), description: "Send an open protocol task command.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: ALL_TRANSPORTS, ...REFUSE_PROFILE, visible: true, help: ["cswarm command <kind> [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] [command fields]"] }),
+  dogfood: commandEntry({ ...noTool("internal development workflow; not a model coordination tool"), handler: traced("runDogfood", runDogfood), description: "Submit dogfood evidence.", mutates: true, flags: [...agentFlags, ...TASK_FLAGS], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm dogfood [--url <url> --anon-key <key>] [--workspace-id <uuid>] [--agent-token-file <path> | --agent-token-stdin] --slug <slug> --branch <branch> --head-sha <sha> --evidence <ref>"] }),
+  "seed-fixture": commandEntry({ ...noTool("test fixture bridge; never a model tool"), handler: traced("runSeed", runSeed), description: "Seed a local test fixture.", mutates: true, flags: ["uid", "device-id", "workspace-id", "display-name", "workspace-name", "agent-name"], transports: STDIO_ONLY, ...REFUSE_PROFILE, visible: true, help: ["cswarm seed-fixture --uid <auth-user-uuid> [--device-id <uuid>] [--workspace-id <uuid>]"] })
+};
+function mergeHelpFlags(...lists) {
+  return [...new Set(lists.flat())];
+}
+var HANDLER_HELP_FLAGS = {
+  "profile.ls": RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
+  "mcp.serve": MCP_SERVE_ACCEPTED_FLAGS,
+  "mcp.code": RUN_MCP_CODE_1_ACCEPTED_FLAGS,
+  "mcp.connect": RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
+  setup: mergeHelpFlags(RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS, RUN_SETUP_VERSION_1_ACCEPTED_FLAGS, RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS),
+  check: CHECK_FLAGS,
+  "receive.configure": RUN_RECEIVE_CONFIGURE_1_ACCEPTED_FLAGS,
+  "receive.status": RECEIVE_COMMON_FLAGS,
+  "receive.test": RECEIVE_COMMON_FLAGS,
+  "receive.confirm": RUN_RECEIVE_CONFIRM_1_ACCEPTED_FLAGS,
+  "receive.idle": RECEIVE_COMMON_FLAGS,
+  "receive.serve": RUN_RECEIVE_SERVE_1_ACCEPTED_FLAGS,
+  "__listen-supervisor": RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
+  "hook.check": RUN_HOOK_1_ACCEPTED_FLAGS,
+  "hook.install": HOOK_INSTALL_ACCEPTED_FLAGS,
+  "hook.uninstall": HOOK_UNINSTALL_ACCEPTED_FLAGS,
+  get "listen.start"() {
+    return LISTEN_START_ACCEPTED_FLAGS.filter((flag) => !LISTEN_START_REFUSED_FLAGS.includes(flag));
+  },
+  "listen.status": LISTEN_STATUS_ACCEPTED_FLAGS,
+  "listen.stop": LISTEN_STOP_ACCEPTED_FLAGS,
+  "listen.canary": LISTEN_CANARY_ACCEPTED_FLAGS,
+  get "session.start"() {
+    return SESSION_START_ACCEPTED_FLAGS.filter((flag) => !SESSION_START_REFUSED_FLAGS.includes(flag));
+  },
+  "session.status": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  "session.stop": SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  "session.enable": SESSION_HUMAN_ACCEPTED_FLAGS,
+  "session.disable": SESSION_HUMAN_ACCEPTED_FLAGS,
+  "session.recover": SESSION_HUMAN_ACCEPTED_FLAGS,
+  login: RUN_LOGIN_1_ACCEPTED_FLAGS,
+  get logout() {
+    return RUN_LOGOUT_1_ACCEPTED_FLAGS.filter((flag) => !LOGOUT_REFUSED_FLAGS.includes(flag));
+  },
+  "invite.create": RUN_INVITE_2_ACCEPTED_FLAGS,
+  "invite.revoke": RUN_INVITE_1_ACCEPTED_FLAGS,
+  "member.remove": RUN_MEMBER_1_ACCEPTED_FLAGS,
+  "workspace.close": RUN_WORKSPACE_1_ACCEPTED_FLAGS,
+  "target.show": RUN_TARGET_1_ACCEPTED_FLAGS,
+  "target.set": RUN_TARGET_2_ACCEPTED_FLAGS,
+  "target.clear": RUN_TARGET_3_ACCEPTED_FLAGS,
+  status: RUN_STATUS_1_ACCEPTED_FLAGS,
+  whoami: RUN_WHOAMI_1_ACCEPTED_FLAGS,
+  resume: mergeHelpFlags(RUN_RESUME_1_ACCEPTED_FLAGS, RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS),
+  feedback: FEEDBACK_ACCEPTED_FLAGS,
+  "channel.create": RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
+  "channel.ls": RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
+  "channel.rename": RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
+  "channel.archive": RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
+  "file.put": FILE_PUT_ACCEPTED_FLAGS,
+  "file.ls": FILE_LS_ACCEPTED_FLAGS,
+  "file.get": FILE_GET_ACCEPTED_FLAGS,
+  "file.rm": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "file.restore": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "brain.ls": FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  "brain.get": BRAIN_GET_ACCEPTED_FLAGS,
+  "brain.put": BRAIN_PUT_ACCEPTED_FLAGS,
+  members: RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  "working-on": POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
+  note: POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
+  ask: POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  reply: REPLY_ACCEPTED_FLAGS,
+  receipt: RUN_RECEIPT_1_ACCEPTED_FLAGS,
+  feed: SIGNAL_READ_FEED_ACCEPTED_FLAGS,
+  inbox: mergeHelpFlags(SIGNAL_READ_INBOX_ACCEPTED_FLAGS, NOTIFY_ACCEPTED_FLAGS),
+  workspaces: RUN_WORKSPACES_1_ACCEPTED_FLAGS,
+  use: RUN_USE_1_ACCEPTED_FLAGS,
+  new: RUN_NEW_1_ACCEPTED_FLAGS,
+  accept: mergeHelpFlags(RUN_ACCEPT_1_ACCEPTED_FLAGS, RUN_ACCEPT_2_ACCEPTED_FLAGS, INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS),
+  "principal.create": RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
+  "principal.revoke": RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
+  "token.mint": RUN_TOKEN_1_ACCEPTED_FLAGS,
+  "token.revoke": mergeHelpFlags(RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS, RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS),
+  "grant.resume": RUN_GRANT_1_ACCEPTED_FLAGS,
+  "link.new": RUN_LINK_NEW_1_ACCEPTED_FLAGS,
+  "link.revoke": RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
+  command: RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
+  dogfood: RUN_DOGFOOD_1_ACCEPTED_FLAGS,
+  "seed-fixture": RUN_SEED_1_ACCEPTED_FLAGS
+};
+var VARIANT_HELP_FLAGS = {
+  "setup.import": RUN_SETUP_IMPORT_1_ACCEPTED_FLAGS,
+  "setup.version": RUN_SETUP_VERSION_1_ACCEPTED_FLAGS,
+  "setup.guide": RUN_SETUP_GUIDE_1_ACCEPTED_FLAGS,
+  get "check.messages"() {
+    return CHECK_FLAGS.filter((flag) => !CHECK_MESSAGES_SELECTOR_FLAGS.includes(flag));
+  },
+  get "check.message"() {
+    return CHECK_FLAGS.filter((flag) => flag !== CHECK_MESSAGES_SELECTOR_FLAGS[1] && !CHECK_MESSAGE_HIDDEN_FLAGS.includes(flag) && !CHECK_MESSAGE_REFUSED_FLAGS.includes(flag));
+  },
+  get "check.hook"() {
+    return CHECK_FLAGS.filter((flag) => !CHECK_HOOK_REFUSED_FLAGS.includes(flag));
+  },
+  "resume.inspect": RUN_RESUME_1_ACCEPTED_FLAGS,
+  "resume.profile": RUN_RESUME_SNAPSHOT_1_ACCEPTED_FLAGS,
+  get "inbox.read"() {
+    return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter((flag) => !INBOX_READ_SELECTOR_FLAGS.includes(flag));
+  },
+  "inbox.notify": NOTIFY_ACCEPTED_FLAGS,
+  get "inbox.follow"() {
+    return SIGNAL_READ_INBOX_ACCEPTED_FLAGS.filter((flag) => flag !== INBOX_READ_SELECTOR_FLAGS[2] && !INBOX_FOLLOW_REFUSED_FLAGS.includes(flag));
+  },
+  get "accept.linkStdin"() {
+    return RUN_ACCEPT_1_ACCEPTED_FLAGS.filter((flag) => !ACCEPT_LINK_REFUSED_FLAGS.includes(flag));
+  },
+  "accept.legacyStdin": INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
+  "accept.positional": RUN_ACCEPT_2_ACCEPTED_FLAGS
 };
 function isCommandGroup(root) {
   return "subcommands" in root;
@@ -72606,6 +75770,7 @@ function selectCommandVariant(entry2, args) {
   return variant;
 }
 var selectedCommandContext = null;
+var MAIN_1_ACCEPTED_FLAGS = [];
 async function main() {
   selectedCommandContext = null;
   const firstArg = process.argv[2];
@@ -72619,9 +75784,8 @@ async function main() {
   const args = new Arguments(process.argv.slice(2));
   const verb = args.positionals[0];
   if (!verb || verb === "help" || args.has("help")) {
-    if (verb === "help") args.assertShape([], 1);
-    process.stdout.write(`${usage()}
-${onboardingUsage()}
+    if (verb === "help") args.assertShape(MAIN_1_ACCEPTED_FLAGS, 1);
+    process.stdout.write(`${helpFor(verb, args.positionals[1])}
 `);
     return;
   }
@@ -72641,7 +75805,8 @@ function sanitizeForTerminal(value) {
 }
 function safeError(error2) {
   const message = error2 instanceof Error ? error2.message : "unknown error";
-  return sanitizeForTerminal(message).slice(0, 1e3);
+  const safe = error2 instanceof WakeLeaseLostError ? message.split("\n").map(sanitizeForTerminal).join("\n") : sanitizeForTerminal(message);
+  return error2 instanceof WakeLeaseLostError ? safe : safe.slice(0, 1e3);
 }
 var EXIT_RESTARTABLE = 75;
 var restartableExit = /* @__PURE__ */ new WeakMap();
@@ -72651,6 +75816,7 @@ function markRestartable(error2) {
 }
 function exitCodeFor(error2) {
   if (error2 instanceof NotifyStdoutClosedError) return EXIT_NOTIFY_ORPHANED;
+  if (error2 instanceof WakeLeaseLostError) return error2.exitCode;
   return error2 instanceof Error ? restartableExit.get(error2) ?? 1 : 1;
 }
 function safeParagraph(message) {
@@ -72662,8 +75828,8 @@ function isCliMain() {
   }
   if (!process.argv[1]) return false;
   try {
-    const script = (0, import_node_fs8.realpathSync)(process.argv[1]);
-    const modulePath = (0, import_node_fs8.realpathSync)((0, import_node_url.fileURLToPath)(import_meta.url));
+    const script = (0, import_node_fs9.realpathSync)(process.argv[1]);
+    const modulePath = (0, import_node_fs9.realpathSync)((0, import_node_url.fileURLToPath)(import_meta.url));
     return script === modulePath;
   } catch {
     return false;
@@ -72671,13 +75837,20 @@ function isCliMain() {
 }
 function mcpFailureCode(error2, subcommand) {
   if (error2 instanceof AgentSetupError) return error2.code;
+  if (subcommand === "connect" && ["EACCES", "EPERM"].includes(error2?.code ?? "")) return "connect_state_unavailable";
   return subcommand === "code" ? "mcp_code_failed" : subcommand === "connect" ? "mcp_connect_failed" : "mcp_start_failed";
+}
+function mcpFailureMessage(error2, subcommand) {
+  if (subcommand === "connect" && !(error2 instanceof AgentSetupError) && ["EACCES", "EPERM"].includes(error2?.code ?? "")) {
+    return "The connect state cannot be used safely. Inspect its access and rerun the same command.";
+  }
+  return safeError(error2);
 }
 if (isCliMain()) {
   main().catch((error2) => {
     const selected = selectedCommandContext;
     if (selected?.args.positionals[0] === "mcp") {
-      process.stderr.write(`cswarm: [${mcpFailureCode(error2, selected.args.positionals[1])}] ${safeError(error2)}
+      process.stderr.write(`cswarm: [${mcpFailureCode(error2, selected.args.positionals[1])}] ${mcpFailureMessage(error2, selected.args.positionals[1])}
 `);
       process.exitCode = 1;
       return;
@@ -72693,6 +75866,12 @@ if (isCliMain()) {
     }
     if (selected?.entry.errorMode === "hook-check" && selected.args.startsWithLeadingPositionals("hook", "check")) {
       process.exitCode = 0;
+      return;
+    }
+    if (error2 instanceof RequestIdConflict && selected?.args.has("json") && selected.args.has("request-id")) {
+      process.stdout.write(`${JSON.stringify({ error: error2.code, code: error2.code, message: safeError(error2) })}
+`);
+      process.exitCode = 1;
       return;
     }
     if (error2 instanceof RenewalReauthorisationRequired || error2 instanceof RenewalRevoked || error2 instanceof RenewalSuspended) {
@@ -72774,6 +75953,7 @@ function isFollowRenewalCredentialFailure(error2) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ACCEPT_LINK_REFUSED_FLAGS,
   AGENT_COMMANDS,
   AGENT_PROFILE_COMMANDS,
   Arguments,
@@ -72781,6 +75961,8 @@ function isFollowRenewalCredentialFailure(error2) {
   BODY_FLAGS,
   BODY_SOURCES,
   BOOLEAN_FLAGS,
+  BRAIN_GET_ACCEPTED_FLAGS,
+  BRAIN_PUT_ACCEPTED_FLAGS,
   BodyEmptyError,
   BodyEncodingError,
   BodyFileError,
@@ -72793,24 +75975,106 @@ function isFollowRenewalCredentialFailure(error2) {
   BodyStdinError,
   BodyUtf8Error,
   CHANNEL_SUBCOMMAND_NAMES,
-  CLI_ONLY_UNTIL_ITEM_L_REASON_MARKER,
+  CHECK_MESSAGES_SELECTOR_FLAGS,
   EXIT_RESTARTABLE,
+  FEEDBACK_ACCEPTED_FLAGS,
+  FEEDBACK_KINDS,
+  FILE_CONTEXT_BASE_ACCEPTED_FLAGS,
+  FILE_GET_ACCEPTED_FLAGS,
+  FILE_LS_ACCEPTED_FLAGS,
+  FILE_PUT_ACCEPTED_FLAGS,
   FORMAT_ADVISORY_FIELD,
   FORMAT_ADVISORY_MESSAGE,
+  HANDLER_HELP_FLAGS,
+  HOOK_INSTALL_ACCEPTED_FLAGS,
+  HOOK_UNINSTALL_ACCEPTED_FLAGS,
+  INBOX_FOLLOW_REFUSED_FLAGS,
+  INBOX_FOLLOW_STEP_DROP_FLAGS,
+  INBOX_LIMIT_NOTICE,
+  INBOX_READ_SELECTOR_FLAGS,
+  INVITATION_CREDENTIAL_1_ACCEPTED_FLAGS,
+  INVITATION_CREDENTIAL_2_ACCEPTED_FLAGS,
   KNOWN_FLAGS,
+  LISTENER_PERMISSION_MODES,
+  LISTEN_CANARY_ACCEPTED_FLAGS,
+  LISTEN_START_ACCEPTED_FLAGS,
+  LISTEN_START_REFUSED_FLAGS,
+  LISTEN_STATUS_ACCEPTED_FLAGS,
+  LISTEN_STOP_ACCEPTED_FLAGS,
+  LOGOUT_REFUSED_FLAGS,
   ListenerUnattendedRefusedError,
+  MAIN_1_ACCEPTED_FLAGS,
+  MCP_SERVE_ACCEPTED_FLAGS,
+  NOTIFY_ACCEPTED_FLAGS,
+  POST_SIGNAL_ASK_ACCEPTED_FLAGS,
+  POST_SIGNAL_NOTE_ACCEPTED_FLAGS,
+  POST_SIGNAL_WORKING_ON_ACCEPTED_FLAGS,
+  REPLY_ACCEPTED_FLAGS,
+  RUN_ACCEPT_1_ACCEPTED_FLAGS,
+  RUN_ACCEPT_2_ACCEPTED_FLAGS,
+  RUN_CHANNEL_ARCHIVE_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_CREATE_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_LS_1_ACCEPTED_FLAGS,
+  RUN_CHANNEL_RENAME_1_ACCEPTED_FLAGS,
+  RUN_DOGFOOD_1_ACCEPTED_FLAGS,
+  RUN_GRANT_1_ACCEPTED_FLAGS,
+  RUN_HOOK_1_ACCEPTED_FLAGS,
+  RUN_INVITE_1_ACCEPTED_FLAGS,
+  RUN_INVITE_2_ACCEPTED_FLAGS,
+  RUN_LINK_NEW_1_ACCEPTED_FLAGS,
+  RUN_LINK_REVOKE_1_ACCEPTED_FLAGS,
+  RUN_LISTEN_SUPERVISOR_1_ACCEPTED_FLAGS,
+  RUN_LOGIN_1_ACCEPTED_FLAGS,
+  RUN_LOGOUT_1_ACCEPTED_FLAGS,
+  RUN_MCP_CODE_1_ACCEPTED_FLAGS,
+  RUN_MCP_CONNECT_1_ACCEPTED_FLAGS,
+  RUN_MEMBERS_1_ACCEPTED_FLAGS,
+  RUN_MEMBER_1_ACCEPTED_FLAGS,
+  RUN_NEW_1_ACCEPTED_FLAGS,
+  RUN_PRINCIPAL_1_ACCEPTED_FLAGS,
+  RUN_PRINCIPAL_2_ACCEPTED_FLAGS,
+  RUN_PROFILE_LS_1_ACCEPTED_FLAGS,
+  RUN_RECEIPT_1_ACCEPTED_FLAGS,
+  RUN_RESUME_1_ACCEPTED_FLAGS,
+  RUN_SEED_1_ACCEPTED_FLAGS,
+  RUN_STATUS_1_ACCEPTED_FLAGS,
+  RUN_TARGET_1_ACCEPTED_FLAGS,
+  RUN_TARGET_2_ACCEPTED_FLAGS,
+  RUN_TARGET_3_ACCEPTED_FLAGS,
+  RUN_TASK_COMMAND_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_REVOKE_1_ACCEPTED_FLAGS,
+  RUN_TOKEN_REVOKE_2_ACCEPTED_FLAGS,
+  RUN_USE_1_ACCEPTED_FLAGS,
+  RUN_WHOAMI_1_ACCEPTED_FLAGS,
+  RUN_WORKSPACES_1_ACCEPTED_FLAGS,
+  RUN_WORKSPACE_1_ACCEPTED_FLAGS,
+  SESSION_HUMAN_ACCEPTED_FLAGS,
+  SESSION_PROFILE_STATUS_ACCEPTED_FLAGS,
+  SESSION_START_ACCEPTED_FLAGS,
+  SESSION_START_REFUSED_FLAGS,
+  SESSION_STATUS_ACCEPTED_FLAGS,
   SIGNAL_BODY_MAX,
+  SIGNAL_READ_FEED_ACCEPTED_FLAGS,
+  SIGNAL_READ_INBOX_ACCEPTED_FLAGS,
   STREAM_CHUNK_BYTE_LIMIT,
   TURN_BUDGET_CREDENTIAL_MARGIN_MS,
+  VARIANT_HELP_FLAGS,
   agentToolsForTransport,
+  assertInboxWorkspace,
   clampTurnBudgetToCredential,
   claudeUserPromptHookSnippet,
   collectListenerAttendanceEvidence,
+  commandHelpLines,
   describeAudience,
   formatBodySourceConflict,
   formatBodySourceMissing,
   formatBodyUsage,
   formatOrList,
+  helpDescription,
+  inboxFollowRefusal,
+  inboxFollowStep,
+  inboxMoreNotice,
   isCliMain,
   isFollowRenewalCredentialFailure,
   listenerAttendanceProjectDirectory,
@@ -72825,7 +76089,10 @@ function isFollowRenewalCredentialFailure(error2) {
   listenerStartPendingMessage,
   listenerStatusJson,
   mcpFailureCode,
+  mcpFailureMessage,
   messageFormatAdvisory,
+  notifyRestartOptions,
+  parseProfileListUrl,
   postSignalAllowedFlags,
   readBoundedUtf8Stream,
   renderListenerStatus,
@@ -72840,5 +76107,7 @@ function isFollowRenewalCredentialFailure(error2) {
   stripSingleTrailingNewline,
   threadReplyMessage,
   usage,
+  visibleUsageHint,
+  waitForListenerStop,
   workspaceLabel
 });
