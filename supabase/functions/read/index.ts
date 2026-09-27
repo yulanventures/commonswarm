@@ -985,7 +985,7 @@ const allowedReadOrigins = commandAllowedOrigins(
 );
 const readEnvironment = Deno.env.get("SWARM_ENV");
 
-Deno.serve(async (request) => {
+export async function handleRequest(request: Request): Promise<Response> {
   if (request.method === "OPTIONS") {
     return commandPreflight(request, allowedReadOrigins, readEnvironment);
   }
@@ -995,4 +995,6 @@ Deno.serve(async (request) => {
     phase = next;
   }).catch((error) => readFailureResponse(error, phase, requestId));
   return withCommandCors(request, response, allowedReadOrigins, readEnvironment);
-});
+}
+
+if (import.meta.main) Deno.serve(handleRequest);
