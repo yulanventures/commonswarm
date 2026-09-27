@@ -9,7 +9,10 @@ import {
   RUNTIME_METRICS_EVENT,
 } from "../../deploy/edge-runtime/main/observability.js";
 import {
+  DISABLED_FUNCTION_NAMES,
   FUNCTION_ENV_NAMES,
+  FUNCTION_DISABLED_BODY,
+  FUNCTION_DISABLED_STATUS,
   H0_COMMAND_ENV_EXCLUSIONS,
   FUNCTION_NAMES,
   functionNotFoundResponse,
@@ -118,12 +121,13 @@ test("Caddy scopes edge proxy and removed metric path uses normal function 404",
   assert.equal(response?.status, 404);
   assert.equal(await response?.text(), KONG_FUNCTION_NOT_FOUND_BODY);
   assert.equal(response?.headers.get("access-control-allow-origin"), "*");
-  for (const name of FUNCTION_NAMES) {
+  for (const name of FUNCTION_NAMES.filter((name) => name !== "mcp")) {
     assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
       functionName: name,
       pathname: `/${name}`,
     });
   }
+  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
 });
 
 async function filesBelow(directory: string): Promise<string[]> {
@@ -148,7 +152,7 @@ async function denoEnvironmentNames(directory: string): Promise<Set<string>> {
   return used;
 }
 
-test("edge runtime env example lists every function environment name", async () => {
+test("edge runtime env example lists every forwarded environment name", async () => {
   const used = await denoEnvironmentNames(
     resolve(repoRoot, "supabase/functions"),
   );
@@ -162,7 +166,9 @@ test("edge runtime env example lists every function environment name", async () 
       match[1]!
     ),
   );
-  assert.deepEqual([...listed].sort(), [...used].sort());
+  const forwarded = new Set(Object.values(FUNCTION_ENV_NAMES).flat());
+  assert.deepEqual([...listed].sort(), [...forwarded].sort());
+  assert.deepEqual([...used].filter((name) => !forwarded.has(name)), []);
 });
 
 test("H0 source reads only environment names passed to its worker", async () => {
@@ -185,7 +191,7 @@ test("H0 receives command environment without file-only service credentials", { 
 });
 
 test("every database worker receives the optional private CA", () => {
-  for (const functionName of ["command", "read", "capability", "activity", "h0"] as const) {
+  for (const functionName of ["command", "read", "capability", "activity", "h0", "mcp"] as const) {
     assert.ok(
       FUNCTION_ENV_NAMES[functionName].includes("SWARM_DATABASE_TLS_CA_B64"),
       `${functionName} does not receive SWARM_DATABASE_TLS_CA_B64`,
@@ -193,15 +199,16 @@ test("every database worker receives the optional private CA", () => {
   }
 });
 
-test("edge runtime router strips only /functions/v1 and maps all five functions", () => {
+test("edge runtime router maps runnable functions and keeps MCP reserved", () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
     "read",
     "capability",
     "activity",
     "h0",
+    "mcp",
   ]);
-  for (const functionName of FUNCTION_NAMES) {
+  for (const functionName of FUNCTION_NAMES.filter((name) => name !== "mcp")) {
     assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}`), {
       functionName,
       pathname: `/${functionName}`,
@@ -218,6 +225,8 @@ test("edge runtime router strips only /functions/v1 and maps all five functions"
       pathname: `/${functionName}/`,
     });
   }
+  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
+  assert.equal(resolveFunctionRoute("/functions/v1/mcp/deep/path"), null);
   assert.equal(resolveFunctionRoute("/functions/v1/unknown"), null);
   assert.equal(resolveFunctionRoute("/functions/v1/command-extra"), null);
   assert.equal(resolveFunctionRoute("/command"), null);
@@ -231,6 +240,22 @@ test("edge runtime router strips only /functions/v1 and maps all five functions"
   assert.deepEqual(KONG_NO_ROUTE_BODY, {
     message: "no Route matched with those values",
   });
+});
+
+test("prepared MCP paths stay dark before a worker module exists", async () => {
+  assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
+  for (const [method, suffix] of [
+    ["POST", ""],
+    ["OPTIONS", ""],
+    ["GET", "/.well-known/oauth-protected-resource/mcp"],
+  ] as const) {
+    const resolution = resolveGatewayRequest(
+      new Request(`https://edge.test/functions/v1/mcp${suffix}`, { method }),
+    );
+    assert.equal(resolution.route, null);
+    assert.equal(resolution.response?.status, FUNCTION_DISABLED_STATUS);
+    assert.deepEqual(await resolution.response?.json(), FUNCTION_DISABLED_BODY);
+  }
 });
 
 test("edge runtime request rewrite preserves query, method, headers, and body", async () => {

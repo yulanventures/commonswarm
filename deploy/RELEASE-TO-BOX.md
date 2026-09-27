@@ -255,7 +255,8 @@ key) and database alias rule are the base; the lead
 reviews strict checks in each changed function at that SHA and adds any further
 required name. Forwarded names without a strict requirement are optional. This
 inventory records only names, never values. Set `CHANGED_FUNCTIONS` from the
-reviewed diff; a router change checks all five functions:
+reviewed diff; a router change checks all six prepared function names, including
+the dark `mcp` name:
 
 ```sh
 (
@@ -270,7 +271,7 @@ reviewed diff; a router change checks all five functions:
   CHANGED_FUNCTIONS='<space-separated changed function names>'
   ROUTER_CHANGED=<yes-or-no>
   ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
-  if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0'; fi
+  if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0 mcp'; fi
   case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
   cat >"$ROUTER_DIR/inventory.ts" <<'TS'
 const { FUNCTION_ENV_NAMES, REQUIRED_MAIN_ENV, COMMAND_TEST_HOOKS } =
@@ -1659,6 +1660,8 @@ section 5 and apply the statement only through the write helper:
 
 Do not run this step for an unpublished package. A server or site release alone
 does not change `current_client_build`.
+
+OAuth service release: written with HM lane 6's box plan, when the service exists.
 
 ## 7. Stack or edge image pin bump
 
