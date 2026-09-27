@@ -10,6 +10,8 @@ interface Props {
   eyebrow: string;
   heading: string;
   intro: string;
+  updated?: string;
+  aboutAgentRuntime?: "standard" | "grok-bot";
   structuredData: Record<string, unknown>;
 }
 
@@ -20,11 +22,14 @@ const {
   eyebrow,
   heading,
   intro,
+  updated = "2 September 2026",
+  aboutAgentRuntime = "standard",
   structuredData,
 } = Astro.props;
 
 const pages = [
   { href: "/guides/claude-code-subagents", label: "Claude Code subagents guide" },
+  { href: "/guides/grok-bot", label: "Grok Bot guide" },
   { href: "/orchestration", label: "AI agent orchestration" },
   { href: "/alternatives/langgraph", label: "LangGraph alternatives" },
   { href: "/alternatives/crewai", label: "CrewAI alternatives" },
@@ -42,7 +47,7 @@ const related = pages.filter((page) => page.href !== path);
         <p class="eyebrow">{eyebrow}</p>
         <h1>{heading}</h1>
         <p class="seo-hero__intro">{intro}</p>
-        <p class="seo-hero__date">Updated 2 September 2026</p>
+        <p class="seo-hero__date">Updated {updated}</p>
       </div>
     </header>
 
@@ -60,7 +65,7 @@ const related = pages.filter((page) => page.href !== path);
       </div>
 
       <div class="seo-rail">
-        <AboutCommonSwarm />
+        <AboutCommonSwarm runtime={aboutAgentRuntime} />
       </div>
     </div>
   </article>
