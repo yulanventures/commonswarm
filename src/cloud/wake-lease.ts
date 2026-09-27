@@ -15,6 +15,13 @@ export interface AgentWakeLease {
   renewed_age_ms: number;
 }
 
+export class WakeLeaseReadError extends Error {
+  constructor(readonly status: number | null, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "WakeLeaseReadError";
+  }
+}
+
 export class WakeLeaseLostError extends Error {
   readonly exitCode: number;
   constructor(
@@ -125,19 +132,35 @@ export async function sendWakeLeaseCommand(options: {
 export async function readAgentWakeLease(
   target: CloudTarget, workspaceId: string, token: string,
   fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
 ): Promise<AgentWakeLease | null> {
   const controller = new AbortController();
+  const combinedSignal = signal === undefined
+    ? controller.signal
+    : AbortSignal.any([signal, controller.signal]);
   const timer = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await fetcher(readEndpoint(target), {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, apikey: target.anonKey,
-        "content-type": "application/json" },
-      body: JSON.stringify({ resource: "agent_wake_lease", workspace_id: workspaceId }),
-      signal: controller.signal,
-    });
-    if (!response.ok) throw new Error(`wake lease read failed (HTTP ${response.status})`);
-    const payload = asObject(await response.json());
+    let response: Response;
+    try {
+      response = await fetcher(readEndpoint(target), {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, apikey: target.anonKey,
+          "content-type": "application/json" },
+        body: JSON.stringify({ resource: "agent_wake_lease", workspace_id: workspaceId }),
+        signal: combinedSignal,
+      });
+    } catch (error) {
+      throw new WakeLeaseReadError(null, "wake lease read could not reach the cloud service", { cause: error });
+    }
+    if (!response.ok) {
+      throw new WakeLeaseReadError(response.status, `wake lease read failed (HTTP ${response.status})`);
+    }
+    let payload: Record<string, unknown> | null;
+    try {
+      payload = asObject(await response.json());
+    } catch (error) {
+      throw new WakeLeaseReadError(response.status, "wake lease read returned malformed JSON", { cause: error });
+    }
     if (!payload || payload.lease === null) return null;
     const row = asObject(payload.lease);
     const generation = typeof row?.generation === "string" ? Number(row.generation) : row?.generation;
@@ -145,7 +168,7 @@ export async function readAgentWakeLease(
       ? Number(row.renewed_age_ms) : row?.renewed_age_ms;
     if (!row || typeof row.watcher_id !== "string" || typeof row.host_label !== "string" ||
         !Number.isSafeInteger(generation) || !Number.isSafeInteger(renewedAge)) {
-      throw new Error("wake lease read returned malformed data");
+      throw new WakeLeaseReadError(response.status, "wake lease read returned malformed data");
     }
     return { watcher_id: row.watcher_id, host_label: row.host_label,
       generation: generation as number, renewed_age_ms: renewedAge as number };

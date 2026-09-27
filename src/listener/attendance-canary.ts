@@ -11,6 +11,15 @@ import {
   type DeliveryReceiptRow,
 } from "../cloud/delivery-receipts.js";
 import { SignalReadTimeoutError } from "../cloud/signals.js";
+import {
+  readAgentWakeLease,
+  type AgentWakeLease,
+  WakeLeaseReadError,
+} from "../cloud/wake-lease.js";
+import {
+  ATTENDED_CANARY_HOPS,
+  ATTENDED_CANARY_WATCHER_WAIT_MS,
+} from "../cloud/wake-lease-constants.js";
 import type { ListenerPaths } from "./control.js";
 import { FileHookSurfaceStore } from "./hook.js";
 import {
@@ -20,6 +29,42 @@ import {
 } from "./main-routing.js";
 
 const LOG_TAIL_BYTES = 256 * 1024;
+
+export { ATTENDED_CANARY_HOPS };
+
+export type AttendedCanaryStalledHop = "watcher_polled" | "observed";
+export type AttendedCanaryWatcherPollState = "proved" | "unproved" | "not_observed";
+
+export interface AttendedAttendanceCanaryResult {
+  signalId: string;
+  acceptedAt: string;
+  watcherPolledAt: string | null;
+  watcherPollState: AttendedCanaryWatcherPollState;
+  observedAt: string | null;
+  wakeLeaseReadError: { status: number | null } | null;
+  receiptReadErrorCode: "transport" | "http" | "protocol" | "not_author" | "timeout" | null;
+  stalledAt: AttendedCanaryStalledHop | null;
+}
+
+export interface AttendedAttendanceCanaryOptions {
+  target: CloudTarget;
+  workspaceId: string;
+  principalId: string;
+  watcherId: string;
+  generation: number | null;
+  credential: () => Promise<string>;
+  checkWaitMs: number;
+  fetcher?: typeof fetch;
+  signal?: AbortSignal;
+  now?: () => number;
+  sleep?: (milliseconds: number) => Promise<void>;
+  pollMs?: number;
+  /** Test seam. Production derives this from WAKE_LEASE_RENEW_MS. */
+  watcherWaitMs?: number;
+  readWakeLease?: () => Promise<AgentWakeLease | null>;
+  /** Notify waits here until its Monitor has emitted the accepted self-note. */
+  afterAccepted?: (signalId: string) => Promise<void> | void;
+}
 
 export type ListenerCanaryStalledHop =
   | "claimed"
@@ -72,6 +117,247 @@ function agentReceipt(
     }
   }
   return null;
+}
+
+function attendedSleep(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    if (milliseconds <= 0 || signal?.aborted) {
+      resolve();
+      return;
+    }
+    signal?.addEventListener("abort", finish, { once: true });
+    timer = setTimeout(finish, milliseconds);
+  });
+}
+
+/** Post one self-note and prove the attended watcher and in-session check hops. */
+export async function runAttendedAttendanceCanary(
+  options: AttendedAttendanceCanaryOptions,
+): Promise<AttendedAttendanceCanaryResult> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((milliseconds) =>
+    attendedSleep(milliseconds, options.signal));
+  const client = new ThinCommandClient(options.target, options.fetcher, {
+    signalRequestTimeoutMs: Math.max(1, options.checkWaitMs),
+  });
+  const posted = await client.sendSignal({
+    workspaceId: options.workspaceId,
+    credential: await options.credential(),
+    signal: options.signal,
+    command: {
+      kind: "post_signal",
+      signal_kind: "note",
+      body: "CommonSwarm attended-seat canary. Run cswarm check in this session; no reply is needed.",
+      to_user_id: null,
+      to_agent_principal_id: options.principalId,
+      in_reply_to: null,
+      about: null,
+      until_ms: 10 * 60_000,
+    },
+  });
+  const signal = posted.response.signal!;
+  const signalId = signal.id;
+  const acceptedMs = Date.parse(signal.created_at);
+  const acceptedAt = Number.isFinite(acceptedMs)
+    ? signal.created_at
+    : new Date(now()).toISOString();
+  await options.afterAccepted?.(signalId);
+  const watcherDeadline = now() +
+    (options.watcherWaitMs ?? ATTENDED_CANARY_WATCHER_WAIT_MS);
+  let observedDeadline: number | null = null;
+  let expectedGeneration = options.generation;
+  let leaseBaseline: { receivedAt: number; renewedAgeMs: number } | null = null;
+  let watcherPolledAt: string | null = null;
+  let watcherPollState: AttendedCanaryWatcherPollState = "not_observed";
+  let observedAt: string | null = null;
+  let wakeLeaseReadError: AttendedAttendanceCanaryResult["wakeLeaseReadError"] = null;
+  let receiptReadErrorCode: AttendedAttendanceCanaryResult["receiptReadErrorCode"] = null;
+
+  while (!options.signal?.aborted) {
+    if (
+      watcherPollState === "not_observed" &&
+      now() >= watcherDeadline
+    ) break;
+    const sampledAt = now();
+    if (watcherPollState === "not_observed") {
+      try {
+        const lease = options.readWakeLease
+          ? await options.readWakeLease()
+          : await readAgentWakeLease(
+            options.target,
+            options.workspaceId,
+            await options.credential(),
+            options.fetcher,
+            options.signal,
+          );
+        const receivedAt = now();
+        wakeLeaseReadError = null;
+        if (
+          lease !== null &&
+          lease.watcher_id === options.watcherId &&
+          (expectedGeneration === null || lease.generation === expectedGeneration)
+        ) {
+          expectedGeneration ??= lease.generation;
+          const expectedAge = leaseBaseline === null
+            ? null
+            // The baseline age was measured before its response arrived. Using
+            // that arrival as the lower bound prevents response latency from
+            // looking like a lease-age reset.
+            : leaseBaseline.renewedAgeMs + Math.max(0, sampledAt - leaseBaseline.receivedAt);
+          if (expectedAge !== null && lease.renewed_age_ms + 1 < expectedAge) {
+            // The baseline and this sample were both requested after the
+            // note was accepted. Their age reset proves an intervening
+            // renewal without pretending the request-start clock is the
+            // server's query time. Record when that proof arrived locally.
+            watcherPolledAt = new Date(receivedAt).toISOString();
+            watcherPollState = "proved";
+            observedDeadline = receivedAt + options.checkWaitMs;
+          } else if (leaseBaseline === null) {
+            // Both samples are after acceptance. A later age reset therefore
+            // proves a renewal after the canary note, without comparing clocks.
+            leaseBaseline = { receivedAt, renewedAgeMs: lease.renewed_age_ms };
+          }
+        }
+      } catch (error) {
+        if (error instanceof WakeLeaseReadError &&
+            (error.status === 400 || error.status === 404)) {
+          wakeLeaseReadError = null;
+          watcherPollState = "unproved";
+          observedDeadline = now() + options.checkWaitMs;
+        } else {
+          wakeLeaseReadError = {
+            status: error instanceof WakeLeaseReadError ? error.status : null,
+          };
+          receiptReadErrorCode = null;
+        }
+      }
+    }
+
+    // A missing legacy view is unproved, but an unavailable current view is a
+    // service-read failure. It says nothing about whether the watcher polled.
+    if (wakeLeaseReadError !== null) break;
+
+    // The hops are ordered. Receipt reads cannot prove `observed` until the
+    // watcher hop is proved (or is unprovable on a pre-2b deployment). This
+    // also preserves the entire watcher deadline for lease reads instead of
+    // starting a receipt request with only a few milliseconds left.
+    if (watcherPollState === "not_observed") {
+      if (now() >= watcherDeadline) break;
+      await sleep(Math.min(options.pollMs ?? 250, watcherDeadline - now()));
+      continue;
+    }
+
+    const finalDeadline = observedDeadline!;
+    if (now() >= finalDeadline) break;
+    try {
+      const report = await readAgentDeliveryReceipts(
+        options.target,
+        await options.credential(),
+        options.workspaceId,
+        signalId,
+        {
+          ...(options.fetcher ? { fetcher: options.fetcher } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+          deadlineMs: finalDeadline,
+          now,
+        },
+      );
+      receiptReadErrorCode = null;
+      const receipt = agentReceipt(report.receipts, options.principalId);
+      if (receipt !== null) {
+        const state = deliveryReceiptState(receipt, now());
+        if (state === "observed" || state === "replied") observedAt = receipt.acked_at;
+      }
+    } catch (error) {
+      // An observed ACK is immutable. A later read failure cannot undo it or
+      // turn a completed hop into a contradictory pass-with-error result.
+      if (observedAt === null) {
+        receiptReadErrorCode = error instanceof DeliveryReceiptReadError
+          ? error.code
+          : error instanceof SignalReadTimeoutError
+          ? "timeout"
+          : "transport";
+      }
+    }
+
+    if (observedAt !== null) break;
+    if (now() >= finalDeadline) break;
+    await sleep(Math.min(options.pollMs ?? 250, finalDeadline - now()));
+  }
+
+  const stalledAt = wakeLeaseReadError !== null ||
+      (receiptReadErrorCode !== null && observedAt === null)
+    ? null
+    : watcherPollState === "not_observed"
+    ? "watcher_polled"
+    : observedAt === null
+    ? "observed"
+    : null;
+  return {
+    signalId,
+    acceptedAt,
+    watcherPolledAt,
+    watcherPollState,
+    observedAt,
+    wakeLeaseReadError,
+    receiptReadErrorCode,
+    stalledAt,
+  };
+}
+
+/** Render the attended hops and the exact recovery action for the first stall. */
+export function renderAttendedAttendanceCanary(
+  result: AttendedAttendanceCanaryResult,
+): string {
+  if (result.wakeLeaseReadError !== null) {
+    const credentialRefused = result.wakeLeaseReadError.status === 401 ||
+      result.wakeLeaseReadError.status === 403;
+    return [
+      `Canary note: ${result.signalId}.`,
+      `ACCEPTED: yes at ${result.acceptedAt}.`,
+      `WAKE LEASE READ: failed (${result.wakeLeaseReadError.status === null
+        ? "transport"
+        : `HTTP ${result.wakeLeaseReadError.status}`}).`,
+      credentialRefused
+        ? "Canary incomplete: watcher polling is unknown because the wake-lease service refused this credential. Next: re-establish this seat's credential, then retry `cswarm listen canary`."
+        : "Canary incomplete: watcher polling is unknown because the wake-lease service read failed. Next: retry `cswarm listen canary` when the read works.",
+    ].join("\n");
+  }
+  const watcher = result.watcherPollState === "proved"
+    ? `yes at ${result.watcherPolledAt}`
+    : result.watcherPollState === "unproved"
+    ? "unproved because this deployment does not expose the wake-lease view"
+    : "no";
+  const lines = [
+    `Canary note: ${result.signalId}.`,
+    `ACCEPTED: yes at ${result.acceptedAt}.`,
+    `WATCHER_POLLED: ${watcher}.`,
+    `OBSERVED: ${result.observedAt === null ? "no" : `yes at ${result.observedAt}`}.`,
+  ];
+  if (result.receiptReadErrorCode !== null) {
+    lines.push(`RECEIPT READ: failed (${result.receiptReadErrorCode}).`);
+    lines.push("Canary incomplete: observation is unknown because the receipt read failed. Next: retry `cswarm listen canary` when the read works.");
+    return lines.join("\n");
+  }
+  if (result.stalledAt === "watcher_polled") {
+    lines.push("STALLED: watcher_polled. Next: restart `cswarm inbox --notify` under the same session Monitor.");
+  } else if (result.stalledAt === "observed") {
+    lines.push("STALLED: observed. Next: run `cswarm check` in the session.");
+  } else if (result.watcherPollState === "unproved") {
+    lines.push("Canary completed: the note was observed, but watcher_polled remains unproved until the deployment exposes the wake-lease view. Next: update the read service before treating watcher polling as proved.");
+  } else {
+    lines.push("Canary passed: every required attended hop was measured. Next: no action is needed.");
+  }
+  return lines.join("\n");
 }
 
 async function readLogTail(path: string): Promise<string> {

@@ -784,3 +784,56 @@ test("listen canary CLI posts one self-note and renders the stalled hop", async 
     await rm(home, { recursive: true, force: true });
   }
 });
+
+test("listener canary JSON keeps its existing shape", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-attendance-canary-json-"));
+  const home = await mkdtemp(join(tmpdir(), "cswarm-attendance-canary-json-home-"));
+  const credentialPath = join(root, "agent.json");
+  const server = createServer((request, response) => {
+    let raw = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    request.on("end", () => {
+      const body = JSON.parse(raw) as Record<string, unknown>;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(
+        Object.hasOwn(body, "command") ? acceptedSignal() : receipt(),
+      ));
+    });
+  });
+  try {
+    await writeFile(credentialPath, artifact(), { mode: 0o600 });
+    await chmod(credentialPath, 0o600);
+    await new Promise<void>((resolvePromise, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolvePromise);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const result = await runCliAsync([
+      "listen",
+      "canary",
+      "--agent-token-file",
+      credentialPath,
+      "--url",
+      `http://127.0.0.1:${address.port}`,
+      "--anon-key",
+      "anon",
+      "--workspace-id",
+      WORKSPACE_ID,
+      "--state-dir",
+      join(root, "state"),
+      "--wait",
+      "1",
+      "--json",
+    ], { cwd: root, home });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(Object.hasOwn(JSON.parse(result.stdout), "variant"), false);
+  } finally {
+    await new Promise<void>((resolvePromise) => server.close(() => resolvePromise()));
+    await rm(root, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});

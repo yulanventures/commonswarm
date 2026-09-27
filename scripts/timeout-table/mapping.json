@@ -1578,7 +1578,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cloud/wake-lease.ts:42-108; supabase/functions/command/index.ts:1521,9514-9582",
+          "citation": "src/cloud/wake-lease.ts:57-130; supabase/functions/command/index.ts:1521,9514-9582",
           "detail": "Claim and 60-second timer renewal; 15-second client abort covers response body. Command-edge lock_timeout is 5 seconds. Staging renewal p50/p95 must be recorded before the box release; this lane may not contact staging.",
           "operation": {
             "name": "wake-lease-command",
@@ -1592,7 +1592,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/read"],
-          "citation": "src/cloud/wake-lease.ts:110-140",
+          "citation": "src/cloud/wake-lease.ts:132-178",
           "detail": "Agent lease status read; 15-second client abort covers response body.",
           "operation": {
             "name": "wake-lease-read",
@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7713",
+          "citation": "src/cli.ts:7776",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8464",
+          "citation": "src/cli.ts:8566",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5218-5222; src/cloud/wake-lease.ts:62,65",
+          "citation": "src/cli.ts:5281-5286; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1773,7 +1773,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:3408",
+          "citation": "src/cli.ts:3410",
           "detail": "Margin reserved for credential work around an external model turn.",
           "operation": {
             "name": "listener-turn-margin",
@@ -1859,7 +1859,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8515; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8617; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7065",
+          "citation": "src/cli.ts:7128",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7266",
+          "citation": "src/cli.ts:7329",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",

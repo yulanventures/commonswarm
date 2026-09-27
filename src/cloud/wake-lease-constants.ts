@@ -6,6 +6,8 @@ export function printedCommand(prose: string, command: string): string {
 /** One renewal per watching seat per minute. Three missed renewals make it stale. */
 export const WAKE_LEASE_RENEW_MS = 60_000;
 export const WAKE_LEASE_STALE_MS = 3 * WAKE_LEASE_RENEW_MS;
+export const ATTENDED_CANARY_WATCHER_WAIT_MS = WAKE_LEASE_RENEW_MS + 30_000;
+export const ATTENDED_CANARY_HOPS = ["accepted", "watcher_polled", "observed"] as const;
 export const WAKE_LEASE_STALE_LABEL = `${WAKE_LEASE_STALE_MS / 60_000} minutes`;
 
 export type WakeLeasePhase = "start" | "renew";
