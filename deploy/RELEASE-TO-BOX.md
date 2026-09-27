@@ -30,6 +30,28 @@ run the "Abort cleanup" block at the end of section 1 before closing the
 window; it restarts the edge recycle and backup/restore timers when `window.env`
 says this window stopped them.
 
+## Site release
+
+A release may cover the stack, edge runtime, site, CLI, and/or migrations. For a
+site release, read [`deploy/site/RUNBOOK.md`](site/RUNBOOK.md) and use
+[`deploy/site/deploy.sh`](site/deploy.sh) as the site procedure; do not duplicate
+their steps here. Before running it, confirm that the deploy runs as the
+`commonswarm` user on `yulan-vps-1` by invoking
+`deploy/site/deploy.sh commonswarm@yulan-vps-1` (the `ops` user cannot write
+`/srv/commonswarm/site`). For that short hostname, compare the fingerprint from
+`ssh-keyscan -t ed25519 yulan-vps-1 | ssh-keygen -lf -` with the fingerprint
+recorded by HezLead before adding it to `known_hosts`.
+
+Every site release must build from the exact release commit and preserve the
+build settings used by the previous site release, including
+`PUBLIC_H0_LINK_JOIN=1` in the `site/.env` read by the build (as used for the
+0.1.77 and 0.1.78 site releases). For a CLI release, use the
+`release/<version>` commit so `/download` shows the new version. That commit is
+not a later `main` snapshot, so the handoff must list what it includes and what
+later changes on `main` it leaves out. A site built from a SHA on `main` carries
+every change on `main` up to that SHA, so that handoff must list what it carries.
+A site release that depends on a server change follows that server's window.
+
 ## 1. Common release preparation
 
 ### Preflight — CSwarmDevLead, HezLead, then Anvil
