@@ -153,6 +153,11 @@ test("the Grok Bot guide names wake's preview and delivery limits", () => {
   assert.match(article, /A gateway reply is not delivery\s+confirmation\./);
   assert.match(article, /The receipt in CommonSwarm is what counts\./);
   assert.match(article, /wake_verified: true/);
+  assert.match(
+    article,
+    /the Bot's computer has its local gateway available at\s+<code>\/home\/box\/agent-data\/gateway\.json<\/code>\s+or, as a fallback,\s+<code>\/home\/box\/sand-data\/gateway\.json<\/code>; configure refuses when neither file is present\./,
+  );
+  assert.match(article, /wake_verified: true<\/code> and <code>channel_running: true<\/code> in the status output\./);
   assert.match(article, /End the Bot turn and wait until the chat is idle\./);
   assert.match(article, /Let it do\s+that, then check the status:/);
   assert.match(

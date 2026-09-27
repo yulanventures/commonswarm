@@ -76,6 +76,11 @@ const structuredData = {
       use the saved profile's absolute path. For both ID values, use this Bot's agent UUID, the
       identifier its local gateway addresses.
     </p>
+    <p>
+      Before running this command, make sure the Bot's computer has its local gateway available at
+      <code>/home/box/agent-data/gateway.json</code> or, as a fallback,
+      <code>/home/box/sand-data/gateway.json</code>; configure refuses when neither file is present.
+    </p>
     <pre><code>cswarm receive configure --mode wake --provider grok-bot \
   --profile &lt;absolute-path-to-saved-profile&gt; \
   --host-session-id &lt;Bot-agent-UUID&gt; \
@@ -102,7 +107,7 @@ cswarm receive serve --profile &lt;absolute-path-to-saved-profile&gt; \
     <pre><code>cswarm receive status --profile &lt;absolute-path-to-saved-profile&gt; \
   --host-session-id &lt;Bot-agent-UUID&gt;</code></pre>
     <p>
-      Require <code>wake_verified: true</code> in the status output.
+      Require <code>wake_verified: true</code> and <code>channel_running: true</code> in the status output.
     </p>
   </section>
 
