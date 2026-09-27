@@ -1,0 +1,368 @@
+{
+  "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+  "workspace_name": "Cold Agent Test 0.1.12",
+  "members": [
+    {
+      "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "name": "Ridgeio"
+    }
+  ],
+  "agents": [
+    {
+      "principal_id": "050c1f4e-d94c-4b4e-ae23-a784aa3e05ed",
+      "name": "ctl-t3-d-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "06a2978f-54c0-43e4-bf1f-effb1d0a2e57",
+      "name": "ctl-g3a-channel-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "stale channel",
+          "route": "channel",
+          "age_ms": 401620,
+          "label": "stale channel"
+        },
+        "last_call": {
+          "age_ms": 401620,
+          "label": "last call"
+        },
+        "last_ack": {
+          "route": "leased",
+          "age_ms": 432945,
+          "label": "last ACK"
+        },
+        "client": {
+          "kind": "current",
+          "label": "current"
+        },
+        "client_build": "0.1.80"
+      }
+    },
+    {
+      "principal_id": "07d5f5a6-77b3-4f3c-b2cb-5921aeebfcdd",
+      "name": "cold-A-192103",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "2a3c5930-7814-4a0b-a814-1c812d99f475",
+      "name": "cold-B-192107",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "54adce2a-35b7-4a2e-81a8-95b1d6d0928f",
+      "name": "ctl-t3-b-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "59efab39-374a-432f-bcf3-e3344cc7898d",
+      "name": "ctl-t3-f-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "798a25df-4c80-46eb-bdfd-bb1acbd3f773",
+      "name": "ctl-g3e-stale-old-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "live watcher",
+          "route": "watcher",
+          "age_ms": 33127,
+          "label": "live watcher"
+        },
+        "last_call": {
+          "age_ms": 33127,
+          "label": "last call"
+        },
+        "last_ack": null,
+        "client": {
+          "kind": "update available",
+          "label": "update available"
+        },
+        "client_build": "0.1.79"
+      }
+    },
+    {
+      "principal_id": "92430145-3a6c-42dc-862f-5a28c70be6a6",
+      "name": "ctl-t3-c-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "9bfd6419-7d70-4402-9d85-c21fc4d50737",
+      "name": "ctl-g3e-turn-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "turn",
+          "route": "turn",
+          "age_ms": 1302,
+          "label": "turn"
+        },
+        "last_call": {
+          "age_ms": 1302,
+          "label": "last call"
+        },
+        "last_ack": null,
+        "client": {
+          "kind": "current",
+          "label": "current"
+        },
+        "client_build": "0.1.80"
+      }
+    },
+    {
+      "principal_id": "9f45bb56-bd1a-4227-bf09-e1181b78426b",
+      "name": "cold-CTRL-192110",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "9ff808e2-ffc6-46d3-ab5f-39d74cb6f9b9",
+      "name": "ctl-g3e-live-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "live watcher",
+          "route": "watcher",
+          "age_ms": 33218,
+          "label": "live watcher"
+        },
+        "last_call": {
+          "age_ms": 33218,
+          "label": "last call"
+        },
+        "last_ack": null,
+        "client": {
+          "kind": "current",
+          "label": "current"
+        },
+        "client_build": "0.1.80"
+      }
+    },
+    {
+      "principal_id": "b06d55e3-04a0-4dc7-9dbd-906bc40bb799",
+      "name": "ctl-t3-g-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "b1190f19-322b-436f-bd2a-de3486adf945",
+      "name": "ctl-t3-e-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "e66ab70b-5889-48fa-b468-eaa815bc4b2a",
+      "name": "ctl-g3a-sender-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": {
+          "age_ms": 380014,
+          "label": "last call"
+        },
+        "last_ack": null,
+        "client": {
+          "kind": "current",
+          "label": "current"
+        },
+        "client_build": "0.1.80"
+      }
+    },
+    {
+      "principal_id": "e6c8406c-6465-4ce6-9a76-7f4373f6b552",
+      "name": "ctl-g3e-none-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    },
+    {
+      "principal_id": "f79b7cbc-27f3-493d-b29e-c5833e89f492",
+      "name": "ctl-t3-a-0927a",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "presence": {
+        "wake": {
+          "kind": "none",
+          "route": null,
+          "age_ms": null,
+          "label": "none"
+        },
+        "last_call": null,
+        "last_ack": null,
+        "client": {
+          "kind": "unknown",
+          "label": "unknown"
+        },
+        "client_build": null
+      }
+    }
+  ],
+  "pending": []
+}

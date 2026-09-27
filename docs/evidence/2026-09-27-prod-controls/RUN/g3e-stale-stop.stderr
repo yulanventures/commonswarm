@@ -1,0 +1,1 @@
+cswarm: inbox --notify stopped because of SIGINT and this watcher's lease was released; nothing is watching this inbox now; restart it under the session's Monitor.

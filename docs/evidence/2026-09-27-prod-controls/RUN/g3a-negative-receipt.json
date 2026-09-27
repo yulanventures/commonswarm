@@ -1,0 +1,21 @@
+{
+  "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+  "signal_id": "430a272f-d105-49bd-b255-5def904b053e",
+  "broadcast": false,
+  "replies": [],
+  "receipts": [
+    {
+      "recipient_agent_principal_id": "06a2978f-54c0-43e4-bf1f-effb1d0a2e57",
+      "state": "not_delivered",
+      "outcome": null,
+      "enqueued_at": "2026-09-27T15:19:55.502912+00:00",
+      "delivered_at": null,
+      "leased_until": null,
+      "acked_at": null,
+      "attempt_count": 0,
+      "lease_expiry_count": 0,
+      "last_error_code": null,
+      "pending_for_main_count": null
+    }
+  ]
+}

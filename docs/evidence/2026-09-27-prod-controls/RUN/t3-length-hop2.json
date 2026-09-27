@@ -1,0 +1,32 @@
+{
+  "status": "accepted",
+  "message": "Signal shared. It is immutable, tenancy-scoped, and will quietly expire at its horizon.",
+  "signal": {
+    "id": "530e8bc5-c316-4ce9-971f-20e39d066f4e",
+    "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+    "from": "92430145-3a6c-42dc-862f-5a28c70be6a6",
+    "from_kind": "agent",
+    "to": null,
+    "to_agent": "050c1f4e-d94c-4b4e-ae23-a784aa3e05ed",
+    "in_reply_to": null,
+    "chain_hop": 2,
+    "reply_status": null,
+    "about": null,
+    "kind": "ask",
+    "body": "T3 length hop 2.",
+    "attachments": [],
+    "until": "2026-10-04T15:34:30.806Z",
+    "created_at": "2026-09-27T15:34:30.806Z",
+    "channel_id": null,
+    "thread_root_id": null,
+    "broadcast_to_channel": false,
+    "recipients": [
+      {
+        "kind": "agent",
+        "id": "050c1f4e-d94c-4b4e-ae23-a784aa3e05ed"
+      }
+    ]
+  },
+  "retried": false,
+  "attempts": 1
+}

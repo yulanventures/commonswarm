@@ -1,0 +1,365 @@
+{
+  "identity": {
+    "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+    "email": "tom@ridge.io",
+    "device_id": "0660c11d-b293-4068-bc3b-7c74184da059"
+  },
+  "project_count": 6,
+  "selected_project": {
+    "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+    "name": "Cold Agent Test 0.1.12",
+    "role": "owner",
+    "archived": false
+  },
+  "members": [
+    {
+      "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "name": "Ridgeio",
+      "role": "owner",
+      "you": true
+    }
+  ],
+  "agents": [
+    {
+      "principal_id": "07d5f5a6-77b3-4f3c-b2cb-5921aeebfcdd",
+      "name": "cold-A-192103",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": false,
+      "this_machine": false,
+      "renewal_grant": {
+        "renewal_grant_id": "c808bf80-c732-41ca-b14e-7d5d91db3e34",
+        "principal_id": "07d5f5a6-77b3-4f3c-b2cb-5921aeebfcdd",
+        "kind": "timeboxed",
+        "horizon_expires_at": "2026-09-10T00:21:06.761Z",
+        "bound_device_id": null,
+        "last_used_at": null,
+        "last_used_device_id": null,
+        "last_used_from": null,
+        "new_host_at": null,
+        "suspended_at": null,
+        "revoked_at": null,
+        "token_id": "5e8b52b4-e19b-45c8-9927-161b01f0f4d6",
+        "issued_at": "2026-08-11T00:21:06.761Z",
+        "token_expires_at": "2026-08-11T01:51:06.761Z",
+        "token_revoked_at": null
+      }
+    },
+    {
+      "principal_id": "0e1e2dcc-9d43-4da3-ae27-f17a53cfdb5a",
+      "name": "t2-channel-0926",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": false
+    },
+    {
+      "principal_id": "2a3c5930-7814-4a0b-a814-1c812d99f475",
+      "name": "cold-B-192107",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": false,
+      "this_machine": false,
+      "renewal_grant": {
+        "renewal_grant_id": "afd70e99-839d-43c4-b99b-89b19ee1a4c3",
+        "principal_id": "2a3c5930-7814-4a0b-a814-1c812d99f475",
+        "kind": "timeboxed",
+        "horizon_expires_at": "2026-09-10T00:21:09.947Z",
+        "bound_device_id": null,
+        "last_used_at": null,
+        "last_used_device_id": null,
+        "last_used_from": null,
+        "new_host_at": null,
+        "suspended_at": null,
+        "revoked_at": null,
+        "token_id": "1996c269-ed7b-4041-9bc3-6b7d6b9ba8d2",
+        "issued_at": "2026-08-11T00:21:09.947Z",
+        "token_expires_at": "2026-08-11T01:51:09.947Z",
+        "token_revoked_at": null
+      }
+    },
+    {
+      "principal_id": "2bcb3aad-79d8-43c7-a899-8a53461ee4c7",
+      "name": "box-t3-a-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "2d509eb1-04c1-401b-bc9b-c8b4a9d64666",
+      "name": "box-g3c-b-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "63cff933-1eb5-4469-9676-c00fb93c637a",
+      "name": "g2b-gate-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "6cfcb4cf-1787-4987-bec4-1141290f8b44",
+      "name": "box-t3-c-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "74d481b8-5359-4183-82eb-cc7b338a2e6b",
+      "name": "uat-connect-0927c",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": false
+    },
+    {
+      "principal_id": "92af083f-abaa-49cc-9096-dacadd48726f",
+      "name": "box-t3-b-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "9f45bb56-bd1a-4227-bf09-e1181b78426b",
+      "name": "cold-CTRL-192110",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": false,
+      "this_machine": false,
+      "renewal_grant": {
+        "renewal_grant_id": "f6a64044-dde4-4004-8dae-9ee78780cdd4",
+        "principal_id": "9f45bb56-bd1a-4227-bf09-e1181b78426b",
+        "kind": "timeboxed",
+        "horizon_expires_at": "2026-09-10T00:21:13.052Z",
+        "bound_device_id": null,
+        "last_used_at": null,
+        "last_used_device_id": null,
+        "last_used_from": null,
+        "new_host_at": null,
+        "suspended_at": null,
+        "revoked_at": null,
+        "token_id": "24da5971-0da5-4ae8-8b5c-7a6f795954f2",
+        "issued_at": "2026-08-11T00:21:13.052Z",
+        "token_expires_at": "2026-08-11T01:51:13.052Z",
+        "token_revoked_at": null
+      }
+    },
+    {
+      "principal_id": "a0445659-e41d-44b1-9280-61f8e50a9d05",
+      "name": "t2-sender-0926",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": false
+    },
+    {
+      "principal_id": "a1b38483-a40a-4e32-921d-fee4685b1a24",
+      "name": "box-g3c-a-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "b750e42c-ba6c-49a4-bedf-0a13c88ac52d",
+      "name": "g-seed-recipient-0925",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "b817513b-b554-472a-8d65-73a85411f012",
+      "name": "box-g3d-turn-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "cd4181a8-0636-4444-81e0-98709e2d01e9",
+      "name": "g-seed-sender-0925",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "cee27f94-4231-4a02-934d-5bf08d73ed75",
+      "name": "uat-connect-0927b",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": false
+    },
+    {
+      "principal_id": "d2a77e0c-16de-4957-9d69-8a07e11416f4",
+      "name": "box-t3-d-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": true
+    },
+    {
+      "principal_id": "e5b941f3-e1d7-4079-a4f7-62ba7a15b29d",
+      "name": "uat-connect-0927",
+      "owner_user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      "owner_name": "Ridgeio",
+      "revoked": true,
+      "this_machine": false
+    }
+  ],
+  "renewal_grants": [
+    {
+      "renewal_grant_id": "c808bf80-c732-41ca-b14e-7d5d91db3e34",
+      "principal_id": "07d5f5a6-77b3-4f3c-b2cb-5921aeebfcdd",
+      "kind": "timeboxed",
+      "horizon_expires_at": "2026-09-10T00:21:06.761Z",
+      "bound_device_id": null,
+      "last_used_at": null,
+      "last_used_device_id": null,
+      "last_used_from": null,
+      "new_host_at": null,
+      "suspended_at": null,
+      "revoked_at": null,
+      "token_id": "5e8b52b4-e19b-45c8-9927-161b01f0f4d6",
+      "issued_at": "2026-08-11T00:21:06.761Z",
+      "token_expires_at": "2026-08-11T01:51:06.761Z",
+      "token_revoked_at": null
+    },
+    {
+      "renewal_grant_id": "afd70e99-839d-43c4-b99b-89b19ee1a4c3",
+      "principal_id": "2a3c5930-7814-4a0b-a814-1c812d99f475",
+      "kind": "timeboxed",
+      "horizon_expires_at": "2026-09-10T00:21:09.947Z",
+      "bound_device_id": null,
+      "last_used_at": null,
+      "last_used_device_id": null,
+      "last_used_from": null,
+      "new_host_at": null,
+      "suspended_at": null,
+      "revoked_at": null,
+      "token_id": "1996c269-ed7b-4041-9bc3-6b7d6b9ba8d2",
+      "issued_at": "2026-08-11T00:21:09.947Z",
+      "token_expires_at": "2026-08-11T01:51:09.947Z",
+      "token_revoked_at": null
+    },
+    {
+      "renewal_grant_id": "f6a64044-dde4-4004-8dae-9ee78780cdd4",
+      "principal_id": "9f45bb56-bd1a-4227-bf09-e1181b78426b",
+      "kind": "timeboxed",
+      "horizon_expires_at": "2026-09-10T00:21:13.052Z",
+      "bound_device_id": null,
+      "last_used_at": null,
+      "last_used_device_id": null,
+      "last_used_from": null,
+      "new_host_at": null,
+      "suspended_at": null,
+      "revoked_at": null,
+      "token_id": "24da5971-0da5-4ae8-8b5c-7a6f795954f2",
+      "issued_at": "2026-08-11T00:21:13.052Z",
+      "token_expires_at": "2026-08-11T01:51:13.052Z",
+      "token_revoked_at": null
+    }
+  ],
+  "tasks": [],
+  "recent_signals": [
+    {
+      "id": "bfc57e4c-5f67-4fe6-aa65-ed2cd2e003e3",
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "from": "6cfcb4cf-1787-4987-bec4-1141290f8b44",
+      "from_kind": "agent",
+      "to": null,
+      "to_agent": "d2a77e0c-16de-4957-9d69-8a07e11416f4",
+      "in_reply_to": null,
+      "reply_status": null,
+      "about": null,
+      "kind": "ask",
+      "body": "T3 production proof hop 2.",
+      "attachments": [],
+      "until": "2026-10-04T06:32:57.316261+00:00",
+      "created_at": "2026-09-27T06:32:57.316261+00:00",
+      "chain_hop": 2,
+      "sender_owner_relation": "unknown"
+    },
+    {
+      "id": "82c72536-21df-42d2-8e63-a8671f5a9ef0",
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "from": "92af083f-abaa-49cc-9096-dacadd48726f",
+      "from_kind": "agent",
+      "to": null,
+      "to_agent": "6cfcb4cf-1787-4987-bec4-1141290f8b44",
+      "in_reply_to": null,
+      "reply_status": null,
+      "about": null,
+      "kind": "ask",
+      "body": "T3 production proof hop 1.",
+      "attachments": [],
+      "until": "2026-10-04T06:32:56.524482+00:00",
+      "created_at": "2026-09-27T06:32:56.524482+00:00",
+      "chain_hop": 1,
+      "sender_owner_relation": "unknown"
+    },
+    {
+      "id": "311d714e-5647-4e00-8244-dcb425dcd32f",
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "from": "2bcb3aad-79d8-43c7-a899-8a53461ee4c7",
+      "from_kind": "agent",
+      "to": null,
+      "to_agent": "92af083f-abaa-49cc-9096-dacadd48726f",
+      "in_reply_to": null,
+      "reply_status": null,
+      "about": null,
+      "kind": "ask",
+      "body": "T3 production proof root.",
+      "attachments": [],
+      "until": "2026-10-04T06:32:55.344924+00:00",
+      "created_at": "2026-09-27T06:32:55.344924+00:00",
+      "sender_owner_relation": "unknown"
+    },
+    {
+      "id": "6b6afb3b-50b6-4b7e-aed8-73021966bdf3",
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "from": "2d509eb1-04c1-401b-bc9b-c8b4a9d64666",
+      "from_kind": "agent",
+      "to": null,
+      "to_agent": "a1b38483-a40a-4e32-921d-fee4685b1a24",
+      "in_reply_to": "ebbf34b7-c8fe-477a-ad4d-e97ed7f4bdca",
+      "reply_status": "declined",
+      "about": null,
+      "kind": "note",
+      "body": "Declined for the G3c production proof.",
+      "attachments": [],
+      "until": "2026-10-27T06:32:12.168312+00:00",
+      "created_at": "2026-09-27T06:32:12.168312+00:00",
+      "sender_owner_relation": "unknown"
+    },
+    {
+      "id": "ebbf34b7-c8fe-477a-ad4d-e97ed7f4bdca",
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "from": "a1b38483-a40a-4e32-921d-fee4685b1a24",
+      "from_kind": "agent",
+      "to": null,
+      "to_agent": "2d509eb1-04c1-401b-bc9b-c8b4a9d64666",
+      "in_reply_to": null,
+      "reply_status": null,
+      "about": null,
+      "kind": "ask",
+      "body": "G3c production proof: please decline this test ask.",
+      "attachments": [],
+      "until": "2026-10-04T06:32:11.575346+00:00",
+      "created_at": "2026-09-27T06:32:11.575346+00:00",
+      "sender_owner_relation": "unknown"
+    }
+  ],
+  "inbox_asks_waiting": 0,
+  "warnings": [],
+  "known_gaps": []
+}

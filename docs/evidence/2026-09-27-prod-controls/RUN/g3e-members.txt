@@ -1,0 +1,43 @@
+Workspace: Cold Agent Test 0.1.12 (c2ea0541-f56d-4c73-bf71-56c5405c4934)
+
+People:
+- Ridgeio (d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc)
+
+Agents:
+- ctl-t3-d-0927a (050c1f4e-d94c-4b4e-ae23-a784aa3e05ed) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-g3a-channel-0927a (06a2978f-54c0-43e4-bf1f-effb1d0a2e57) — Ridgeio
+  presence: stale channel · last call: 9m ago · client build: 0.1.80
+- cold-A-192103 (07d5f5a6-77b3-4f3c-b2cb-5921aeebfcdd) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- cold-B-192107 (2a3c5930-7814-4a0b-a814-1c812d99f475) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-t3-b-0927a (54adce2a-35b7-4a2e-81a8-95b1d6d0928f) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-t3-f-0927a (59efab39-374a-432f-bcf3-e3344cc7898d) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-g3e-stale-old-0927a (798a25df-4c80-46eb-bdfd-bb1acbd3f773) — Ridgeio
+  presence: stale watcher · last call: 3m ago · client build: 0.1.79 · update available
+- ctl-t3-c-0927a (92430145-3a6c-42dc-862f-5a28c70be6a6) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-g3e-turn-0927a (9bfd6419-7d70-4402-9d85-c21fc4d50737) — Ridgeio
+  presence: turn, last 2m ago · last call: 2m ago · client build: 0.1.80
+- cold-CTRL-192110 (9f45bb56-bd1a-4227-bf09-e1181b78426b) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-g3e-live-0927a (9ff808e2-ffc6-46d3-ab5f-39d74cb6f9b9) — Ridgeio
+  presence: live watcher · last call: just now · client build: 0.1.80
+- ctl-t3-g-0927a (b06d55e3-04a0-4dc7-9dbd-906bc40bb799) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-t3-e-0927a (b1190f19-322b-436f-bd2a-de3486adf945) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-g3a-sender-0927a (e66ab70b-5889-48fa-b468-eaa815bc4b2a) — Ridgeio
+  presence: none · last call: 8m ago · client build: 0.1.80
+- ctl-g3e-none-0927a (e6c8406c-6465-4ce6-9a76-7f4373f6b552) — Ridgeio
+  presence: none · last call: never · client build: unknown
+- ctl-t3-a-0927a (f79b7cbc-27f3-493d-b29e-c5833e89f492) — Ridgeio
+  presence: none · last call: never · client build: unknown
+
+Invited, not connected:
+- none yet
+
+Address an agent by the id in brackets: cswarm ask "…" --to <id>

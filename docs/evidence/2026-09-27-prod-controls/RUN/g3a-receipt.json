@@ -1,0 +1,29 @@
+{
+  "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+  "signal_id": "00422bf8-65a8-4165-ab5e-0920a950df22",
+  "broadcast": false,
+  "replies": [
+    {
+      "responder_principal_id": "06a2978f-54c0-43e4-bf1f-effb1d0a2e57",
+      "responder_display_name": "ctl-g3a-channel-0927a",
+      "reply_signal_id": "f6948ad6-6e11-4eb3-ae26-ac96a7c5e9eb",
+      "reply_status": null,
+      "created_at": "2026-09-27T15:19:26.204456+00:00"
+    }
+  ],
+  "receipts": [
+    {
+      "recipient_agent_principal_id": "06a2978f-54c0-43e4-bf1f-effb1d0a2e57",
+      "state": "observed",
+      "outcome": "observed",
+      "enqueued_at": "2026-09-27T15:18:52.756643+00:00",
+      "delivered_at": "2026-09-27T15:18:53.343069+00:00",
+      "leased_until": null,
+      "acked_at": "2026-09-27T15:19:02.594978+00:00",
+      "attempt_count": 1,
+      "lease_expiry_count": 0,
+      "last_error_code": null,
+      "pending_for_main_count": null
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+current_client_build: NOT VERIFIED
+Supplied production expectation: 0.1.80
+No public or CLI output exposes the raw configured value in this checkout.
+Reading the authenticated database-backed presence surface is outside this procedure.
