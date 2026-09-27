@@ -247,6 +247,14 @@ async function authenticate(tx: Tx, tokenHash: Uint8Array): Promise<Authed> {
       message: "Send the seat token in Authorization: Bearer.",
     };
   }
+  if (agent.transport !== "local") {
+    return {
+      ok: false,
+      status: 403,
+      error: "transport_unavailable",
+      message: "This seat cannot poll or ack through the local transport.",
+    };
+  }
   const memberships = await tx<{
     membership_revoked_at: Date | null;
     workspace_archived_at: Date | null;

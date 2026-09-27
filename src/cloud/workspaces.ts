@@ -80,6 +80,8 @@ export interface WorkspaceAgent {
   name: string;
   owner_user_id: string;
   owner_name: string | null;
+  transport: "local" | "hosted_mcp";
+  turn_only: boolean;
   revoked: boolean;
   this_machine: boolean;
   renewal_grant?: RenewalGrantStatus;
@@ -544,7 +546,7 @@ export function cloudWorkspaceDirectory(
           "agent_principals",
           {
             select:
-              "workspace_id,principal_id,owner_user_id,name,revoked_at",
+              "workspace_id,principal_id,owner_user_id,name,revoked_at,transport,turn_only",
             workspace_id: `eq.${selected}`,
             order: "principal_id.asc",
           },
@@ -584,26 +586,36 @@ export function cloudWorkspaceDirectory(
       const memberNames = new Map(
         members.map((member) => [member.user_id, member.name]),
       );
-      const principals = principalRows.map((row) => {
-        if (checkedUuid(row.workspace_id, "workspace_id") !== selected) {
-          throw new Error("workspace read returned a cross-workspace agent");
-        }
-        const revokedAt = checkedNullableTimestamp(
-          row.revoked_at,
-          "revoked_at",
-        );
-        const ownerUserId = checkedUuid(row.owner_user_id, "owner_user_id");
-        return {
-          principal_id: checkedUuid(row.principal_id, "principal_id"),
-          name: sanitizeDisplayLabel(
-            checkedString(row.name, "agent name"),
-            "Unnamed agent",
-          ),
-          owner_user_id: ownerUserId,
-          owner_name: memberNames.get(ownerUserId) ?? null,
-          revoked: revokedAt !== null,
-        };
-      });
+      const principals = principalRows.map(
+        (row): Omit<WorkspaceAgent, "this_machine" | "renewal_grant"> => {
+          if (checkedUuid(row.workspace_id, "workspace_id") !== selected) {
+            throw new Error("workspace read returned a cross-workspace agent");
+          }
+          const revokedAt = checkedNullableTimestamp(
+            row.revoked_at,
+            "revoked_at",
+          );
+          const ownerUserId = checkedUuid(row.owner_user_id, "owner_user_id");
+          if (row.transport !== "local" && row.transport !== "hosted_mcp") {
+            throw new Error("workspace read returned a malformed agent transport");
+          }
+          if (typeof row.turn_only !== "boolean") {
+            throw new Error("workspace read returned a malformed agent turn_only flag");
+          }
+          return {
+            principal_id: checkedUuid(row.principal_id, "principal_id"),
+            name: sanitizeDisplayLabel(
+              checkedString(row.name, "agent name"),
+              "Unnamed agent",
+            ),
+            owner_user_id: ownerUserId,
+            owner_name: memberNames.get(ownerUserId) ?? null,
+            transport: row.transport,
+            turn_only: row.turn_only,
+            revoked: revokedAt !== null,
+          };
+        },
+      );
       const principalIds = new Set(
         principals.map((principal) => principal.principal_id),
       );

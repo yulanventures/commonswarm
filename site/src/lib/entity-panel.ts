@@ -2,6 +2,7 @@ interface EntityAgent {
   principalId: string;
   name: string;
   model: string | null;
+  transport?: "local" | "hosted_mcp";
   ownerUserId: string;
 }
 
@@ -16,6 +17,7 @@ interface EntityAccessStatus {
 export interface AgentEntityView {
   name: string;
   model: string;
+  transport: "Local" | "Hosted MCP";
   ownerUserId: string;
   ownerName: string;
   principalId: string;
@@ -36,6 +38,7 @@ export const agentEntityView = (
 ): AgentEntityView => ({
   name: agent.name,
   model: agent.model ?? "Model not specified",
+  transport: agent.transport === "hosted_mcp" ? "Hosted MCP" : "Local",
   ownerUserId: agent.ownerUserId,
   ownerName,
   principalId: agent.principalId,

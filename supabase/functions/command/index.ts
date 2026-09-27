@@ -378,6 +378,8 @@ interface WorkspaceState {
     owner_user_id: string;
     name: string;
     model: string | null;
+    transport: "local" | "hosted_mcp";
+    turn_only: boolean;
     created_at: number;
     revoked_at: number | null;
   }>;
@@ -973,6 +975,21 @@ const CHANNEL_COMMAND_KINDS = [
   "channel_archive",
 ] as const;
 const TOUCH_PRESENCE_KIND = "touch_presence";
+
+/** Hosted seats are turn-only and never enter local session/listener machinery. */
+const LOCAL_TRANSPORT_ONLY_KINDS = new Set([
+  "enable_agent_management",
+  "disable_agent_management",
+  "recover_agent_session",
+  "acquire_agent_session",
+  "renew_agent_session",
+  "release_agent_session",
+  CLAIM_AGENT_INBOX_KIND,
+  ACK_AGENT_DELIVERY_KIND,
+  "claim_wake_lease",
+  "renew_wake_lease",
+  "release_wake_lease",
+]);
 
 const COMMAND_KINDS = [
   "create",
@@ -3296,7 +3313,8 @@ async function loadWorkspaceState(
         WHERE workspace_id = ${route.workspaceId}::uuid
       `,
       tx<Record<string, unknown>[]>`
-        SELECT principal_id, owner_user_id, name, model, created_at, revoked_at
+        SELECT principal_id, owner_user_id, name, model, transport, turn_only,
+               created_at, revoked_at
         FROM swarm.agent_principals
         WHERE workspace_id = ${route.workspaceId}::uuid
       `,
@@ -3348,6 +3366,8 @@ async function loadWorkspaceState(
       owner_user_id: String(row.owner_user_id),
       name: String(row.name),
       model: row.model === null ? null : String(row.model),
+      transport: row.transport as "local" | "hosted_mcp",
+      turn_only: row.turn_only === true,
       created_at: millis(row.created_at) ?? 0,
       revoked_at: millis(row.revoked_at),
     };
@@ -4440,13 +4460,16 @@ async function updateWorkspaceProjection(
       if (!principal) throw new Error("folded principal projection missing");
       await tx`
         INSERT INTO swarm.agent_principals (
-          principal_id, workspace_id, owner_user_id, name, model, created_at, revoked_at
+          principal_id, workspace_id, owner_user_id, name, model,
+          transport, turn_only, created_at, revoked_at
         ) VALUES (
           ${principal.principal_id}::uuid,
           ${route.workspaceId}::uuid,
           ${principal.owner_user_id}::uuid,
           ${principal.name},
           ${principal.model},
+          ${principal.transport},
+          ${principal.turn_only},
           ${new Date(principal.created_at)},
           NULL
         )
@@ -9361,6 +9384,13 @@ async function handleTransaction(
     authenticatedAgent = auth.agent;
 
     if (
+      auth.agent?.transport === "hosted_mcp" &&
+      LOCAL_TRANSPORT_ONLY_KINDS.has(kind)
+    ) {
+      return { status: 403, body: { error: "transport_unavailable" } };
+    }
+
+    if (
       auth.credentialKind === "agent" &&
       !isAgentSessionProofExempt(kind)
     ) {
@@ -12155,6 +12185,7 @@ async function lockHumanManagedPrincipal(
     ok: true;
     workspaceId: string;
     managedAt: Date | null;
+    transport: "local" | "hosted_mcp";
   }
   | { ok: false; result: HttpResult }
 > {
@@ -12165,12 +12196,14 @@ async function lockHumanManagedPrincipal(
     workspace_id: string;
     owner_user_id: string;
     managed_at: Date | null;
+    transport: "local" | "hosted_mcp";
     role: string;
   }[]>`
     SELECT
       p.workspace_id,
       p.owner_user_id,
       p.managed_at,
+      p.transport,
       m.role
     FROM swarm.agent_principals AS p
     JOIN swarm.memberships AS m
@@ -12188,10 +12221,17 @@ async function lockHumanManagedPrincipal(
   if (row.role !== "owner" && row.role !== "admin") {
     return { ok: false, result: { status: 403, body: { error: "forbidden" } } };
   }
+  if (row.transport !== "local") {
+    return {
+      ok: false,
+      result: { status: 403, body: { error: "transport_unavailable" } },
+    };
+  }
   return {
     ok: true,
     workspaceId: row.workspace_id,
     managedAt: row.managed_at,
+    transport: row.transport,
   };
 }
 

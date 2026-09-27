@@ -3,6 +3,7 @@
 import { SCHEMA_VERSION } from './events.js';
 import { StreamIntegrityError, UnknownEventTypeError } from './reducer.js';
 import {
+  AGENT_TRANSPORTS,
   AgentModelDeclared,
   FeedbackSubmitted,
   AgentPrincipalCreated,
@@ -292,6 +293,23 @@ export function reduceWorkspace(
       if (s.principals[p.principal_id]) {
         throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env.seq}`);
       }
+      const transport = p.transport ?? 'local';
+      const turnOnly = p.turn_only ?? false;
+      if (!(AGENT_TRANSPORTS as readonly unknown[]).includes(transport)) {
+        throw new StreamIntegrityError(
+          `event "${env.type}" at seq ${env.seq} has invalid transport "${String(transport)}"`,
+        );
+      }
+      if (typeof turnOnly !== 'boolean') {
+        throw new StreamIntegrityError(
+          `event "${env.type}" at seq ${env.seq} has non-boolean turn_only`,
+        );
+      }
+      if (transport === 'hosted_mcp' && !turnOnly) {
+        throw new StreamIntegrityError(
+          `event "${env.type}" at seq ${env.seq} gives hosted_mcp a non-turn-only transport`,
+        );
+      }
       next = {
         ...s,
         principals: {
@@ -299,6 +317,8 @@ export function reduceWorkspace(
           [p.principal_id]: {
             ...p,
             model: p.model ?? null,
+            transport,
+            turn_only: turnOnly,
             revoked_at: null,
           },
         },

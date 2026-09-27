@@ -833,6 +833,88 @@ test("wake mark ignores expired mail, then ages and clears live mail", { timeout
   }
 });
 
+test("turn-only transport is excluded while an otherwise eligible local seat remains wake-eligible", { timeout: 30_000 }, async () => {
+  const [cutoff] = await sql<{ applied_at: Date }[]>`
+    SELECT applied_at FROM swarm.wake_path_release WHERE singleton`;
+  assert.ok(cutoff);
+  await sql`UPDATE swarm.wake_path_release
+    SET applied_at = statement_timestamp() - interval '1 hour'
+    WHERE singleton`;
+  try {
+    const localSeat = await seedAgent("transport-local");
+    const hostedSeat = await seedAgent("transport-hosted");
+    for (const seat of [localSeat, hostedSeat]) {
+      const observed = await postAsk(seat.principalId);
+      const ack = await runCmd(seat.token, {
+        kind: "ack_agent_delivery",
+        signal_id: observed,
+        lease_id: null,
+        listener_instance_id: null,
+        outcome: "observed",
+        last_error_code: null,
+        surfaced: true,
+        unclaimed: true,
+      });
+      assert.equal(ack.status, 200, JSON.stringify(ack.body));
+    }
+    const localPending = await postAsk(localSeat.principalId);
+    const hostedPending = await postAsk(hostedSeat.principalId);
+    await sql`UPDATE swarm.agent_principals
+      SET transport = 'hosted_mcp', turn_only = true
+      WHERE principal_id = ${hostedSeat.principalId}::uuid`;
+
+    assert.deepEqual(
+      await eligibleWakePathSignalIds(localSeat.principalId),
+      [localPending],
+      "the new predicate must not suppress an eligible local seat",
+    );
+    assert.deepEqual(
+      await eligibleWakePathSignalIds(hostedSeat.principalId),
+      [],
+      "a turn-only seat must not advertise a listener wake path",
+    );
+    assert.equal(await receiptWakePath(localPending, localSeat.principalId), true);
+    assert.equal(await receiptWakePath(hostedPending, hostedSeat.principalId), false);
+
+    const listener = await runCmd(hostedSeat.token, {
+      kind: "claim_agent_inbox",
+      listener_instance_id: randomUUID(),
+    });
+    assert.equal(listener.status, 403, JSON.stringify(listener.body));
+    assert.equal(listener.body.error, "transport_unavailable");
+    const read = await fetch(`${local.API_URL}/functions/v1/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${hostedSeat.token}`,
+        apikey: local.ANON_KEY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        resource: "signals",
+        workspace_id: shared.workspace,
+        inbox: true,
+        about: null,
+        kind: null,
+        since: null,
+        limit: 1,
+        include_stale: true,
+      }),
+    });
+    const readBody = await read.json() as Record<string, unknown>;
+    assert.equal(read.status, 403, JSON.stringify(readBody));
+    assert.equal(readBody.error, "transport_unavailable");
+    const managed = await runCmd(shared.ownerJwt, {
+      kind: "enable_agent_management",
+      principal_id: hostedSeat.principalId,
+    });
+    assert.equal(managed.status, 403, JSON.stringify(managed.body));
+    assert.equal(managed.body.error, "transport_unavailable");
+  } finally {
+    await sql`UPDATE swarm.wake_path_release
+      SET applied_at = ${cutoff.applied_at} WHERE singleton`;
+  }
+});
+
 test("agent and owner senders see stale receipts while a nonmember sees none", { timeout: 30_000 }, async () => {
   const [cutoff] = await sql<{ applied_at: Date }[]>`SELECT applied_at FROM swarm.wake_path_release WHERE singleton`;
   assert.ok(cutoff);
@@ -1131,9 +1213,17 @@ test("wake catalog validates the lease-free observed shape and hides private rec
 });
 
 const WAKE_MIGRATION = fileURLToPath(new URL("../../supabase/migrations/20260925000001_unclaimed_observed_ack.sql", import.meta.url));
+const HM_MIGRATION = fileURLToPath(new URL("../../supabase/migrations/20260928000001_hm_agent_transport.sql", import.meta.url));
+const HM_PROOF_DIR = new URL("../../deploy/release-proofs/item-hm/", import.meta.url);
 function eligibleViewBody(): string {
   const migration = readFileSync(WAKE_MIGRATION, "utf8");
   return migration.split("CREATE VIEW swarm.wake_path_eligible_deliveries", 2)[1]!
+    .split("ALTER VIEW swarm.wake_path_eligible_deliveries", 1)[0]!;
+}
+
+function hmEligibleViewBody(): string {
+  const migration = readFileSync(HM_MIGRATION, "utf8");
+  return migration.split("CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries", 2)[1]!
     .split("ALTER VIEW swarm.wake_path_eligible_deliveries", 1)[0]!;
 }
 const CHECK_ORDER_HEAL = "AND (date_trunc('milliseconds', later_signal.created_at), later_signal.id)\n" +
@@ -1180,6 +1270,53 @@ test("section 5 catalog proof accepts the installed view and refuses an old heal
       if (!(error instanceof Error) || error.message !== "ROLLBACK_CATALOG_CASE") throw error;
     });
   }
+});
+
+test("HM catalog proof rejects a wake view without the turn-only fence", { timeout: 30_000 }, async () => {
+  const proof = readFileSync(new URL("20260928000001-catalog.sql", HM_PROOF_DIR), "utf8")
+    .replace(/\\gset\s*$/, "");
+  const [installed] = await sql.unsafe<{ catalog_ok: boolean }[]>(proof);
+  assert.equal(installed?.catalog_ok, true);
+
+  await sql.begin(async (tx) => {
+    const withoutFence = replaceOnce(
+      hmEligibleViewBody(),
+      "  AND p.turn_only = false\n",
+      "",
+    );
+    await tx.unsafe(`CREATE OR REPLACE VIEW swarm.wake_path_eligible_deliveries${withoutFence}`);
+    const [mutated] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
+    assert.equal(mutated?.catalog_ok, false);
+    throw new Error("ROLLBACK_HM_CATALOG_MUTATION");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_HM_CATALOG_MUTATION") throw error;
+  });
+});
+
+test("HM reviewed rollback and rollback catalog execute together transactionally", { timeout: 30_000 }, async () => {
+  const rollback = readFileSync(new URL("20260928000001-rollback.sql", HM_PROOF_DIR), "utf8");
+  const rollbackCatalog = readFileSync(
+    new URL("20260928000001-rollback-catalog.sql", HM_PROOF_DIR),
+    "utf8",
+  ).replace(/\\gset\s*$/, "");
+  const sqlStart = rollback.indexOf("-- Exact pre-HM roster definition");
+  const sqlEnd = rollback.indexOf("\\ir 20260928000001-rollback-catalog.sql");
+  assert.notEqual(sqlStart, -1);
+  assert.notEqual(sqlEnd, -1);
+  const inverseSql = rollback.slice(sqlStart, sqlEnd);
+
+  await sql.begin(async (tx) => {
+    await tx.unsafe(inverseSql);
+    const [proved] = await tx.unsafe<{ rollback_ok: boolean }[]>(rollbackCatalog);
+    assert.equal(proved?.rollback_ok, true);
+    throw new Error("ROLLBACK_HM_INVERSE_PROBE");
+  }).catch(error => {
+    if (!(error instanceof Error) || error.message !== "ROLLBACK_HM_INVERSE_PROBE") throw error;
+  });
+
+  const [restored] = await sql<{ transport: string }[]>`
+    SELECT transport FROM swarm.agent_principals LIMIT 1`;
+  assert.ok(restored === undefined || restored.transport === "local" || restored.transport === "hosted_mcp");
 });
 
 test("the release cutoff alone keeps pre-release backlog out after an old ACK", { timeout: 30_000 }, async () => {

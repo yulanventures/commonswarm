@@ -10,6 +10,9 @@ import { EventEnvelope } from './events.js';
 export type WorkspaceRole = 'owner' | 'admin' | 'member';
 export const WORKSPACE_ROLES: readonly WorkspaceRole[] = ['owner', 'admin', 'member'] as const;
 
+export type AgentTransport = 'local' | 'hosted_mcp';
+export const AGENT_TRANSPORTS: readonly AgentTransport[] = ['local', 'hosted_mcp'] as const;
+
 export type WorkspaceEventType =
   | 'WorkspaceCreated'
   | 'WorkspaceArchived'
@@ -82,6 +85,8 @@ export interface WorkspacePrincipal {
   owner_user_id: string;
   name: string;
   model: string | null;
+  transport: AgentTransport;
+  turn_only: boolean;
   created_at: number;
   revoked_at: number | null;
 }
@@ -167,6 +172,10 @@ export interface AgentPrincipalCreated {
   name: string;
   /** Descriptive identity only. Older events legitimately omit this field. */
   model?: string | null;
+  /** Older events predate transport identity and fold to the local default. */
+  transport?: AgentTransport;
+  /** Older events predate turn-only delivery and fold to false. */
+  turn_only?: boolean;
   created_at: number;
 }
 

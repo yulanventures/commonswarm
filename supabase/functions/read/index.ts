@@ -511,6 +511,19 @@ async function handle(
       return json(403, { error: "forbidden" });
     }
 
+    const transportRows = await tx<{ transport: string | null }[]>`
+      SELECT swarm.agent_principal_transport(
+        ${agent.principal_id}::uuid
+      ) AS transport
+    `;
+    const transport = transportRows[0]?.transport;
+    if (transport === undefined || transport === null) {
+      return json(403, { error: "forbidden" });
+    }
+    if (transport !== "local") {
+      return json(403, { error: "transport_unavailable" });
+    }
+
     if (body.workspace_id !== agent.principal_workspace_id) {
       if (body.resource === "members") {
         return json(200, { members: [], agents: [] });
@@ -699,6 +712,8 @@ async function handle(
           p.principal_id,
           p.name,
           p.model,
+          p.transport,
+          p.turn_only,
           p.owner_user_id,
           p.managed_at,
           presence.last_command_at,

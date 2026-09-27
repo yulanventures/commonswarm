@@ -345,6 +345,7 @@ registerUpcaster("TaskCreated", 0, (p) => ({ task_id: p.id, slug: p.name }));
 
 // src/protocol/workspace-events.ts
 var WORKSPACE_ROLES = ["owner", "admin", "member"];
+var AGENT_TRANSPORTS = ["local", "hosted_mcp"];
 var WORKSPACE_EVENT_TYPES = [
   "WorkspaceCreated",
   "WorkspaceArchived",
@@ -616,6 +617,23 @@ function reduceWorkspace(prev, env3) {
       if (s.principals[p.principal_id]) {
         throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
       }
+      const transport = p.transport ?? "local";
+      const turnOnly = p.turn_only ?? false;
+      if (!AGENT_TRANSPORTS.includes(transport)) {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} has invalid transport "${String(transport)}"`
+        );
+      }
+      if (typeof turnOnly !== "boolean") {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} has non-boolean turn_only`
+        );
+      }
+      if (transport === "hosted_mcp" && !turnOnly) {
+        throw new StreamIntegrityError(
+          `event "${env3.type}" at seq ${env3.seq} gives hosted_mcp a non-turn-only transport`
+        );
+      }
       next = {
         ...s,
         principals: {
@@ -623,6 +641,8 @@ function reduceWorkspace(prev, env3) {
           [p.principal_id]: {
             ...p,
             model: p.model ?? null,
+            transport,
+            turn_only: turnOnly,
             revoked_at: null
           }
         }
@@ -1017,6 +1037,8 @@ function decideWorkspace(state, cmd, ctx) {
         owner_user_id: user_id,
         name: cmd.name,
         model: null,
+        transport: "local",
+        turn_only: false,
         created_at: ctx.now
       }),
       env2(ctx, "AgentTokenMinted", {
@@ -1211,6 +1233,8 @@ function decideWorkspace(state, cmd, ctx) {
           owner_user_id: user_id,
           name: cmd.name,
           model: cmd.model ?? null,
+          transport: "local",
+          turn_only: false,
           created_at: ctx.now
         })
       ]);
@@ -1669,6 +1693,7 @@ function planFileVersionWindow(name, liveCount, inFlightCount) {
 export {
   AGENT_TOKEN_DEFAULT_TTL_MS,
   AGENT_TOKEN_MAX_TTL_MS,
+  AGENT_TRANSPORTS,
   BRAIN_FILE_PREFIX,
   BRAIN_FILE_SUFFIX,
   BRAIN_LIVE_VERSION_LIMIT,
