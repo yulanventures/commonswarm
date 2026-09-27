@@ -4,6 +4,7 @@ export const FUNCTION_NAMES = [
   "capability",
   "activity",
   "h0",
+  "mcp",
 ] as const;
 
 export type FunctionName = (typeof FUNCTION_NAMES)[number];
@@ -31,6 +32,13 @@ export const WORKER_LIMIT_BODY = {
     "Worker failed to respond due to a resource limit (please check logs)",
 } as const;
 export const WORKER_LIMIT_STATUS = 504;
+export const DISABLED_FUNCTION_NAMES = ["mcp"] as const satisfies readonly FunctionName[];
+export const FUNCTION_DISABLED_BODY = {
+  error: "feature_disabled",
+  feature: "hosted_mcp",
+  message: "Hosted MCP is not available yet.",
+} as const;
+export const FUNCTION_DISABLED_STATUS = 503;
 export const REQUIRED_MAIN_ENV = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
@@ -40,6 +48,7 @@ export const REQUIRED_MAIN_ENV = [
 export const SELF_SERVE_ENV_REASON =
   "SWARM_SELF_SERVE must equal 1 because production workspace creation requires self-serve mode";
 const FUNCTION_NAME_SET = new Set<string>(FUNCTION_NAMES);
+const DISABLED_FUNCTION_NAME_SET = new Set<string>(DISABLED_FUNCTION_NAMES);
 const WORKER_LIMIT_ERROR_NAMES = new Set([
   "InvalidWorkerCreation",
   "WorkerRequestIdleTimeout",
@@ -94,6 +103,10 @@ export function functionNotFoundResponse(): Response {
   });
 }
 
+export function functionDisabledResponse(): Response {
+  return mainJsonResponse(FUNCTION_DISABLED_STATUS, FUNCTION_DISABLED_BODY);
+}
+
 export function kongNoRouteResponse(): Response {
   return mainJsonResponse(404, KONG_NO_ROUTE_BODY);
 }
@@ -119,9 +132,14 @@ export function resolveGatewayRequest(request: Request): GatewayResolution {
   if (isFunctionsBasePath(pathname)) {
     return { route: null, response: kongNoRouteResponse() };
   }
-  const route = resolveFunctionRoute(pathname);
+  const route = resolvePreparedFunctionRoute(pathname);
   if (route === null) {
     return { route: null, response: functionNotFoundResponse() };
+  }
+  // A prepared name is not a runnable worker. Keep the response here, before
+  // preflight or worker creation, until the corresponding module is present.
+  if (DISABLED_FUNCTION_NAME_SET.has(route.functionName)) {
+    return { route: null, response: functionDisabledResponse() };
   }
   if (request.method === "OPTIONS") {
     return { route: null, response: gatewayPreflight(request) };
@@ -163,7 +181,7 @@ export async function withWorkerRetiredRetry<T>(
  * a hosted function. Only the fixed prefix is removed. The function name and
  * the rest of the path stay intact.
  */
-export function resolveFunctionRoute(pathname: string): FunctionRoute | null {
+function resolvePreparedFunctionRoute(pathname: string): FunctionRoute | null {
   if (!pathname.startsWith(FUNCTION_PREFIX)) return null;
 
   const publicPath = pathname.slice(FUNCTION_PREFIX.length);
@@ -176,6 +194,15 @@ export function resolveFunctionRoute(pathname: string): FunctionRoute | null {
     functionName: functionName as FunctionName,
     pathname: `/${functionName}${suffix}`,
   };
+}
+
+/** Return only routes whose worker module is available to the main service. */
+export function resolveFunctionRoute(pathname: string): FunctionRoute | null {
+  const route = resolvePreparedFunctionRoute(pathname);
+  if (route === null || DISABLED_FUNCTION_NAME_SET.has(route.functionName)) {
+    return null;
+  }
+  return route;
 }
 
 const DATABASE_ENV = [
@@ -203,6 +230,26 @@ const H0_COMMAND_ENV = COMMAND_ENV.filter(
   (name) => !H0_COMMAND_ENV_EXCLUSIONS.some((excluded) => excluded === name),
 );
 
+// This is the complete environment boundary for the future hosted MCP resource
+// worker. It intentionally contains public Supabase configuration and the
+// worker's own database connection, but no OAuth-service credential material.
+export const MCP_ENV_NAMES = [
+  ...DATABASE_ENV,
+  "SUPABASE_URL",
+  "SUPABASE_ANON_KEY",
+  "SWARM_ENV",
+  "SWARM_MCP_ISSUER",
+  "SWARM_MCP_RESOURCE",
+  "SWARM_MCP_JWKS_URL",
+  "SWARM_MCP_ALLOWED_ORIGINS",
+  "SWARM_MCP_MAX_BODY_BYTES",
+  "SWARM_MCP_MAX_RESPONSE_BYTES",
+  "SWARM_MCP_REQUEST_TIMEOUT_MS",
+  "SWARM_MCP_MAX_CONCURRENT_REQUESTS",
+  "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
+  "SWARM_MCP_CLOCK_SKEW_SECONDS",
+] as const;
+
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   command: COMMAND_ENV,
   read: [
@@ -221,6 +268,7 @@ export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
   activity: DATABASE_ENV,
   // Forwarded verbs call command's handler in the H0 worker.
   h0: H0_COMMAND_ENV,
+  mcp: MCP_ENV_NAMES,
 };
 
 export const COMMAND_TEST_HOOKS = new Set([

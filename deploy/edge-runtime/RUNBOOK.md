@@ -126,6 +126,9 @@ repository. The examples below call that file `/run/commonswarm-smoke.curl`.
   `/functions/v1/capability/smoke`. Expect 405 when capability URLs are enabled,
   or the configured feature-off response when they are disabled. Confirm the
   container log names no boot or module error.
+- [ ] **NOT RUN** — MCP dark control: request `/functions/v1/mcp` with POST and
+  OPTIONS. Both must return HTTP 503 with the stable `feature_disabled` JSON,
+  and the container log must not show an attempt to load an MCP worker module.
 - [ ] **NOT RUN** — request `/functions/v1/not-a-function`. Expect the main
   service's 404 text body `Function not found` and
   `Access-Control-Allow-Origin: *`.
@@ -146,8 +149,9 @@ Remove `/run/commonswarm-smoke.curl` after the checks.
 
 - [ ] **NOT RUN** — reload Caddy, then confirm
   `edge-staging.commonswarm.com` reaches the box through Cloudflare.
-- [ ] **NOT RUN** — through `edge-staging.commonswarm.com`, repeat all five
-  function smokes and the bare `/functions/v1` 404 control.
+- [ ] **NOT RUN** — through `edge-staging.commonswarm.com`, repeat the five
+  runnable function smokes, the dark MCP control, and the bare `/functions/v1`
+  404 control.
 - [ ] Check Auth, REST, Storage, and Realtime on the server containers. Do not rewrite Host to the deleted supabase.co name. The live routes are in `deploy/supabase-stack/commonswarm-api.caddy`.
 ## 6. After the cutover
 
@@ -158,7 +162,8 @@ Future edge-function releases use `deploy/RELEASE-TO-BOX.md`.
 ## Worker observation after a reviewed edge release
 
 The main service emits one-line JSON records with events `edge_worker_started`
-and `edge_worker_ended`. `functionName` names one of the five functions;
+and `edge_worker_ended`. `functionName` names one of the five runnable
+functions; the disabled MCP name never creates a worker;
 `workerKey` is the isolate UUID printed by the runtime's wall-clock and
 early-termination messages. `ageMs` measures from the first create result seen
 by the main service to the five-second inventory poll that noticed the key was

@@ -97,9 +97,11 @@ async function handle(request: Request): Promise<Response> {
   if (url.pathname === "/health") {
     return mainJsonResponse(200, { status: "ok" });
   }
-  // This keeps bare-path, unknown-function, and preflight behavior in one pure
-  // resolver. Kong answers a known function's preflight before the worker;
-  // unknown names keep its normal 404. Non-OPTIONS preserve function CORS.
+  // This keeps bare-path, unknown-function, disabled-function, and preflight
+  // behavior in one pure resolver. A prepared-but-disabled function returns
+  // before this service can construct a path to a module that does not exist.
+  // Kong answers a runnable function's preflight before the worker; unknown
+  // names keep its normal 404. Non-OPTIONS preserve function CORS.
   const gateway = resolveGatewayRequest(request);
   if (gateway.response !== null) return gateway.response;
   const route = gateway.route;

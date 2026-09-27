@@ -1,0 +1,74 @@
+name: commonswarm-oauth
+
+services:
+  oauth:
+    # Lane 6 supplies the reviewed service image. Anvil must set an immutable
+    # digest reference; this preparation does not build or start an absent app.
+    image: ${MCP_OAUTH_IMAGE:?set a reviewed image reference pinned by sha256 digest}
+    user: "${MCP_OAUTH_UID:?set the unprivileged service uid}:${MCP_OAUTH_GID:?set the service gid}"
+    read_only: true
+    init: true
+    ports:
+      - "127.0.0.1:${MCP_OAUTH_HOST_PORT:?select an unused port from 3490-3499}:3490"
+    env_file:
+      - path: ${MCP_OAUTH_ENV_FILE:-/etc/commonswarm-oauth/service.env}
+        required: true
+    environment:
+      PORT: "3490"
+      MCP_OAUTH_SIGNING_KEYS_FILE: /run/commonswarm-oauth/signing-keys.pem
+      MCP_OAUTH_COOKIE_KEYS_FILE: /run/commonswarm-oauth/cookie-keys
+      MCP_OAUTH_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/database-credentials
+      MCP_OAUTH_DATABASE_TLS_CA_FILE: /run/commonswarm-oauth/yulan-internal-ca.pem
+    volumes:
+      - type: bind
+        source: /etc/commonswarm-oauth/signing-keys.pem
+        target: /run/commonswarm-oauth/signing-keys.pem
+        read_only: true
+      - type: bind
+        source: /etc/commonswarm-oauth/cookie-keys
+        target: /run/commonswarm-oauth/cookie-keys
+        read_only: true
+      - type: bind
+        source: /etc/commonswarm-oauth/database-credentials
+        target: /run/commonswarm-oauth/database-credentials
+        read_only: true
+      - type: bind
+        source: /etc/commonswarm-oauth/yulan-internal-ca.pem
+        target: /run/commonswarm-oauth/yulan-internal-ca.pem
+        read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+    networks:
+      - commonswarm-net
+    mem_limit: 512m
+    cpus: 1.0
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3490/health',
+          {headers: {Connection: 'close'}, signal: AbortSignal.timeout(2000)})
+          .then(async (response) => {
+          await response.body?.cancel(); process.exit(response.ok ? 0 : 1); })
+          .catch(() => process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  commonswarm-net:
+    name: commonswarm-net
+    external: true

@@ -1,0 +1,154 @@
+# Hosted MCP site. Lane 5 is deliberately dark: resource and OAuth paths are
+# answered here without contacting an absent service. Lane 8 may replace the
+# disabled handlers with the two active imports only after both reviewed
+# services are live.
+
+(mcp_oauth_active) {
+	@oauth_metadata {
+		method GET HEAD
+		path /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks
+	}
+	handle @oauth_metadata {
+		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_authorize {
+		method GET HEAD
+		path /authorize
+	}
+	handle @oauth_authorize {
+		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_post {
+		method POST
+		path /token /interaction /interaction/* /connections/revoke-grant /connections/revoke-seat
+	}
+	handle @oauth_post {
+		request_body {
+			max_size 128KB
+		}
+		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_browser_get {
+		method GET HEAD
+		path /interaction /interaction/* /oauth/callback/gotrue /connections
+	}
+	handle @oauth_browser_get {
+		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+}
+
+# Lane 8 imports this snippet only after the resource server is ready. During
+# lane 5 the site block below handles both paths before any method dispatch.
+(mcp_resource_active) {
+	@mcp_resource {
+		method POST
+		path /mcp
+	}
+	handle @mcp_resource {
+		request_body {
+			max_size 128KB
+		}
+		rewrite * /functions/v1/mcp
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 165s
+			}
+		}
+	}
+
+	@mcp_metadata {
+		method GET HEAD
+		path /.well-known/oauth-protected-resource/mcp
+	}
+	handle @mcp_metadata {
+		rewrite * /functions/v1/mcp/.well-known/oauth-protected-resource/mcp
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@known_wrong_method path /mcp /.well-known/oauth-protected-resource/mcp
+	handle @known_wrong_method {
+		header Content-Type "application/json; charset=utf-8"
+		respond "{\"error\":\"method_not_allowed\"}" 405
+	}
+}
+mcp.commonswarm.com {
+	# Anvil verifies this certificate's SANs before installing the site file.
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+
+	# OAuth requests can contain codes and cookies. Disable access logging for
+	# this hostname rather than risk recording credential-bearing URLs.
+	log {
+		output discard
+	}
+
+	route {
+		header {
+			Cache-Control "no-store"
+			Strict-Transport-Security "max-age=63072000"
+		}
+
+		@mcp_unavailable path /mcp /.well-known/oauth-protected-resource/mcp
+		handle @mcp_unavailable {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp\",\"message\":\"Hosted MCP is not available yet.\"}" 503
+		}
+
+		@oauth_unavailable path /.well-known/* /authorize /token /jwks /interaction /interaction/* /oauth/callback/gotrue /connections /connections/revoke-grant /connections/revoke-seat
+		handle @oauth_unavailable {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp_oauth\",\"message\":\"Hosted MCP authorization is not available yet.\"}" 503
+		}
+
+		handle {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"not_found\"}" 404
+		}
+	}
+}
