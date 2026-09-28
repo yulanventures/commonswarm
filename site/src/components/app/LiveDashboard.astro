@@ -443,6 +443,7 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
                 </svg>
                 <span data-theme-toggle-label>System</span>
               </button>
+              <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-connected-apps-open>Connected apps</button>
               <button class="dashboard__text-button dashboard__user-menu-item" type="button" role="menuitem" data-signout>Sign out</button>
               <a class="dashboard__wordmark dashboard__user-menu-brand" href="/" aria-label="CommonSwarm home">CommonSwarm</a>
             </div>
@@ -1014,6 +1015,26 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     </form>
   </dialog>
 
+  <dialog
+    class="dashboard__connected-apps-dialog"
+    data-connected-apps-dialog
+    aria-labelledby="dashboard-connected-apps-title"
+  >
+    <header class="dashboard__workspace-details-dialog-head">
+      <div>
+        <p class="dashboard__eyebrow">Account</p>
+        <h2 id="dashboard-connected-apps-title">Connected apps</h2>
+      </div>
+      <button class="dashboard__icon-button" type="button" data-connected-apps-close aria-label="Close Connected apps" title="Close Connected apps">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+      </button>
+    </header>
+    <p class="dashboard__connected-apps-intro">Connections can create hosted seats in the workspaces you approved. Revoking a connection stops all of its seats; revoking one seat leaves the others available.</p>
+    <p class="dashboard__connected-apps-status" data-connected-apps-status role="status" aria-live="polite"></p>
+    <div data-connected-apps-list></div>
+    <button class="dashboard__button dashboard__button--secondary" type="button" data-connected-apps-retry hidden>Try again</button>
+  </dialog>
+
   {/* The agent management dialog. A native <dialog>: Escape, modal focus containment,
       and focus restore to the stack button are the platform's, not ours. It lives outside
       every panel so a panel switch can never display:none it out from under an open
@@ -1330,6 +1351,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   import { SIGNAL_BODY_MAX } from "../../../../supabase/functions/_shared/signal-text";
   import { HumanSeenReporter } from "../../lib/human-seen-reporter";
   import { FeedPushController } from "../../lib/feed-push";
+  import {
+    loadConnectedApps,
+    revokeConnectedAppGrant,
+    revokeConnectedAppSeat,
+    type ConnectedApp,
+  } from "../../lib/connected-apps";
 
   interface Workspace extends CloseableWorkspace {}
 
@@ -1414,6 +1441,8 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       Array.from(app.querySelectorAll<T>(selector));
 
     let session: Session | null = null;
+    let connectedApps: ConnectedApp[] = [];
+    let connectedAppsGeneration = 0;
     let workspaces: Workspace[] = [];
     let agents: Agent[] = [];
     let members: Member[] = [];
@@ -5883,6 +5912,12 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       closeWorkspaceMenu();
       closeRosterDialog();
       closeWorkspaceDetailsDialog();
+      const connectedDialog = one<HTMLDialogElement>("[data-connected-apps-dialog]");
+      if (connectedDialog?.open) connectedDialog.close();
+      connectedAppsGeneration += 1;
+      connectedApps = [];
+      one<HTMLElement>("[data-connected-apps-list]")?.replaceChildren();
+      connectedAppsStatus("");
       /* The channel dialog is the third modal this app opens with showModal, and it lives
          outside every panel for the same reason the other two do: a panel switch must not
          display:none it out from under an open session. That is exactly why it has to be
@@ -6111,6 +6146,159 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     });
 
     window.addEventListener("focus", () => humanSeenReporter.focus());
+
+    const connectedAppsStatus = (message: string, failed = false): void => {
+      const target = one<HTMLElement>("[data-connected-apps-status]");
+      if (!target) return;
+      target.textContent = message;
+      target.classList.toggle("dashboard__form-error", failed);
+    };
+
+    const renderConnectedApps = (receipt = ""): void => {
+      const root = one<HTMLElement>("[data-connected-apps-list]");
+      if (!root) return;
+      root.replaceChildren();
+      connectedAppsStatus(receipt);
+      if (connectedApps.length === 0) {
+        const empty = document.createElement("p");
+        empty.textContent = "No apps are connected to this account.";
+        root.append(empty);
+        return;
+      }
+      for (const connection of connectedApps) {
+        const card = document.createElement("section");
+        card.className = "dashboard__connected-app";
+        const head = document.createElement("div");
+        head.className = "dashboard__connected-app-head";
+        const title = document.createElement("h3");
+        title.textContent = connection.clientHost;
+        const badge = document.createElement("span");
+        badge.className = `dashboard__connected-app-state dashboard__connected-app-state--${connection.status}`;
+        badge.textContent = connection.status;
+        head.append(title, badge);
+        const workspacesTitle = document.createElement("p");
+        workspacesTitle.className = "dashboard__connected-app-label";
+        workspacesTitle.textContent = "Consented workspaces";
+        const workspaceList = document.createElement("ul");
+        for (const workspace of connection.workspaces) {
+          const row = document.createElement("li");
+          row.textContent = workspace.name;
+          workspaceList.append(row);
+        }
+        const seatsTitle = document.createElement("p");
+        seatsTitle.className = "dashboard__connected-app-label";
+        seatsTitle.textContent = `Hosted seats (${connection.seats.length}/10)`;
+        const seatList = document.createElement("ul");
+        seatList.className = "dashboard__connected-app-seats";
+        if (connection.seats.length === 0) {
+          const empty = document.createElement("li");
+          empty.textContent = "No hosted seats yet.";
+          seatList.append(empty);
+        }
+        for (const seat of connection.seats) {
+          const row = document.createElement("li");
+          const label = document.createElement("span");
+          label.textContent = `${seat.name} · ${seat.workspaceName}${seat.effectiveRevoked ? " · revoked" : ""}`;
+          row.append(label);
+          if (!seat.effectiveRevoked && connection.status !== "revoked") {
+            const revoke = document.createElement("button");
+            revoke.type = "button";
+            revoke.className = "dashboard__text-button";
+            revoke.textContent = "Revoke seat";
+            revoke.addEventListener("click", async () => {
+              if (!session || revoke.disabled) return;
+              const ownerSession = session;
+              const generation = connectedAppsGeneration;
+              revoke.disabled = true;
+              connectedAppsStatus(`Revoking ${seat.name}…`);
+              try {
+                await revokeConnectedAppSeat(ownerSession, {
+                  grantId: connection.grantId,
+                  seatId: seat.seatId,
+                  workspaceId: seat.workspaceId,
+                });
+                if (generation !== connectedAppsGeneration) return;
+                const loaded = await loadConnectedApps(
+                  new Map(workspaces.map((workspace) => [workspace.id, workspace.name])),
+                );
+                if (generation !== connectedAppsGeneration) return;
+                connectedApps = loaded;
+                const durable = connectedApps
+                  .find((entry) => entry.grantId === connection.grantId)?.seats
+                  .find((entry) => entry.seatId === seat.seatId);
+                if (!durable?.revoked) throw new Error("The durable seat revocation is not visible yet. Reload before trying again.");
+                renderConnectedApps(`${seat.name} is revoked. Other seats are unchanged.`);
+              } catch (error) {
+                connectedAppsStatus(readableError(error), true);
+                revoke.disabled = false;
+              }
+            });
+            row.append(revoke);
+          }
+          seatList.append(row);
+        }
+        card.append(head, workspacesTitle, workspaceList, seatsTitle, seatList);
+        if (connection.status !== "revoked") {
+          const revoke = document.createElement("button");
+          revoke.type = "button";
+          revoke.className = "dashboard__button dashboard__button--secondary";
+          revoke.textContent = "Revoke connection";
+          revoke.addEventListener("click", async () => {
+            if (!session || revoke.disabled) return;
+            const ownerSession = session;
+            const generation = connectedAppsGeneration;
+            revoke.disabled = true;
+            connectedAppsStatus(`Revoking ${connection.clientHost}…`);
+            try {
+              await revokeConnectedAppGrant(ownerSession, connection);
+              if (generation !== connectedAppsGeneration) return;
+              const loaded = await loadConnectedApps(
+                new Map(workspaces.map((workspace) => [workspace.id, workspace.name])),
+              );
+              if (generation !== connectedAppsGeneration) return;
+              connectedApps = loaded;
+              if (connectedApps.find((entry) => entry.grantId === connection.grantId)?.status !== "revoked") {
+                throw new Error("The durable connection revocation is not visible yet. Reload before trying again.");
+              }
+              renderConnectedApps(`${connection.clientHost} is revoked. All of its hosted seats are stopped.`);
+            } catch (error) {
+              connectedAppsStatus(readableError(error), true);
+              revoke.disabled = false;
+            }
+          });
+          card.append(revoke);
+        }
+        root.append(card);
+      }
+    };
+
+    const loadConnectedAppsDialog = async (): Promise<void> => {
+      const generation = ++connectedAppsGeneration;
+      const retry = one<HTMLButtonElement>("[data-connected-apps-retry]");
+      if (retry) retry.hidden = true;
+      connectedAppsStatus("Loading connected apps…");
+      try {
+        const loaded = await loadConnectedApps(
+          new Map(workspaces.map((workspace) => [workspace.id, workspace.name])),
+        );
+        if (generation !== connectedAppsGeneration) return;
+        connectedApps = loaded;
+        renderConnectedApps();
+      } catch (error) {
+        if (generation !== connectedAppsGeneration) return;
+        connectedAppsStatus(`${readableError(error)} Nothing was changed.`, true);
+        if (retry) retry.hidden = false;
+      }
+    };
+
+    const openConnectedApps = (): void => {
+      if (!session || sampleMode) return;
+      const menu = one<HTMLElement>("[data-user-menu]");
+      if (menu) menu.hidden = true;
+      one<HTMLButtonElement>("[data-user-menu-trigger]")?.setAttribute("aria-expanded", "false");
+      one<HTMLDialogElement>("[data-connected-apps-dialog]")?.showModal();
+      void loadConnectedAppsDialog();
+    };
 
     const renderWorkspaceSettingsPanel = (workspace: Workspace): void => {
       const root = one<HTMLElement>("[data-workspace-details-content]");
@@ -7937,6 +8125,19 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       document.addEventListener("focusin", dismiss);
     };
     wirePopover("[data-user-menu-trigger]", "[data-user-menu]");
+    one<HTMLButtonElement>("[data-connected-apps-open]")?.addEventListener("click", openConnectedApps);
+    one<HTMLButtonElement>("[data-connected-apps-close]")?.addEventListener("click", () => {
+      one<HTMLDialogElement>("[data-connected-apps-dialog]")?.close();
+    });
+    one<HTMLButtonElement>("[data-connected-apps-retry]")?.addEventListener("click", () => {
+      void loadConnectedAppsDialog();
+    });
+    {
+      const dialog = one<HTMLDialogElement>("[data-connected-apps-dialog]");
+      dialog?.addEventListener("click", (event) => {
+        if (event.target === dialog) dialog.close();
+      });
+    }
 
     one<HTMLButtonElement>("[data-new-workspace]")?.addEventListener(
       "click",
@@ -14394,4 +14595,67 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
     border-color: color-mix(in oklab, var(--border) 40%, transparent);
   }
 
+  .dashboard__connected-apps-dialog {
+    inline-size: min(42rem, calc(100% - 2rem));
+    max-block-size: min(48rem, calc(100dvh - 2rem));
+    overflow: auto;
+    padding: 0;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .dashboard__connected-apps-dialog::backdrop {
+    background: color-mix(in oklab, var(--ink) 52%, transparent);
+  }
+
+  .dashboard__connected-apps-intro,
+  .dashboard__connected-apps-status,
+  .dashboard__connected-apps-dialog > [data-connected-apps-list],
+  .dashboard__connected-apps-dialog > [data-connected-apps-retry] {
+    margin-inline: var(--s-5);
+  }
+
+  .dashboard__connected-app {
+    display: grid;
+    gap: var(--s-3);
+    margin-block: var(--s-4);
+    padding: var(--s-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+  }
+
+  .dashboard__connected-app-head,
+  .dashboard__connected-app-seats > li {
+    display: flex;
+    gap: var(--s-3);
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .dashboard__connected-app-head h3,
+  .dashboard__connected-app-label {
+    margin: 0;
+  }
+
+  .dashboard__connected-app-label {
+    color: var(--text-muted);
+    font-size: var(--t-xs);
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+
+  .dashboard__connected-app-state {
+    padding: .2rem .55rem;
+    border-radius: 999px;
+    background: var(--surface-subtle);
+    font-size: var(--t-xs);
+    text-transform: capitalize;
+  }
+
+  .dashboard__connected-app-state--active { color: var(--success-text); }
+  .dashboard__connected-app-state--revoked { color: var(--text-muted); }
 </style>

@@ -36,8 +36,34 @@ function stepFor(body) {
   };
 }
 
+function publicStep(step) {
+  return {
+    kind: step.kind,
+    workspaceId: step.workspaceId,
+    commandId: step.commandId,
+  };
+}
+
 export function createPostgresConsentProgress(pool) {
   return {
+    async list(interactionUid) {
+      const result = await pool.query(
+        `SELECT step_kind, workspace_id, command_id, completed_at, last_error_code
+           FROM commonswarm_oauth.consent_orchestration
+          WHERE interaction_uid = $1
+          ORDER BY CASE step_kind
+            WHEN 'begin' THEN 0 WHEN 'consent' THEN 1 WHEN 'activate' THEN 2
+            WHEN 'revoke_grant' THEN 3 ELSE 4 END, workspace_id`,
+        [interactionUid],
+      );
+      return result.rows.map((row) => ({
+        kind: row.step_kind,
+        workspaceId: row.workspace_id,
+        commandId: row.command_id,
+        complete: row.completed_at !== null,
+        errorCode: row.last_error_code,
+      }));
+    },
     async isComplete(interactionUid, step) {
       const result = await pool.query(
         `SELECT completed_at IS NOT NULL AS complete
@@ -87,7 +113,7 @@ export function createConsentOrchestrator({ command, progress }) {
   if (typeof command !== "function") throw new TypeError("command callback is required");
   async function execute(interactionRef, body, identity) {
     const step = stepFor(body);
-    if (await progress?.isComplete(interactionRef, step)) return;
+    if (await progress?.isComplete(interactionRef, step)) return publicStep(step);
     await progress?.start(interactionRef, step);
     try {
       // This callback is the lane-2 handleHostedManagementCommand binding. It
@@ -101,6 +127,7 @@ export function createConsentOrchestrator({ command, progress }) {
         throw error;
       }
       await progress?.complete(interactionRef, step);
+      return publicStep(step);
     } catch (error) {
       await progress?.fail(interactionRef, step, error?.code ?? "command_failed");
       throw error;
@@ -140,10 +167,24 @@ export function createConsentOrchestrator({ command, progress }) {
         grant_id: grantId,
       }));
 
+      const succeeded = [];
       for (const body of commands) {
-        await execute(interactionRef, body, identity);
+        try {
+          succeeded.push(await execute(interactionRef, body, identity));
+        } catch (error) {
+          error.consentProgress = {
+            succeeded,
+            failed: publicStep(stepFor(body)),
+            active: false,
+          };
+          throw error;
+        }
       }
       return { grantId, manifestDigest, selectedWorkspaceIds };
+    },
+
+    async status(interactionRef) {
+      return typeof progress?.list === "function" ? await progress.list(interactionRef) : [];
     },
 
     async revoke({ interactionRef, grantId, homeWorkspaceId, identity }) {
@@ -155,6 +196,18 @@ export function createConsentOrchestrator({ command, progress }) {
         grant_id: grantId,
       }), identity);
       return { grantId };
+    },
+
+    async revokeSeat({ interactionRef, grantId, workspaceId, seatId, identity }) {
+      if (!identity?.identityVerified || typeof identity.userId !== "string") {
+        throw new Error("verified human identity required");
+      }
+      await execute(interactionRef, input(workspaceId, stableUuid(grantId, "revoke-seat", seatId), {
+        kind: "revoke_hosted_mcp_seat",
+        grant_id: grantId,
+        seat_id: seatId,
+      }), identity);
+      return { grantId, seatId };
     },
   };
 }
