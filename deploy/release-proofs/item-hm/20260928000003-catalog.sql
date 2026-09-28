@@ -77,15 +77,17 @@ SELECT COALESCE((SELECT
       object_state.orchestration_oid)
   ), false)
   AND COALESCE((
-    SELECT array_agg(column_name::text ORDER BY ordinal_position) = ARRAY[
+    SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum) = ARRAY[
       'model', 'artifact_id_hash', 'payload', 'grant_id', 'uid', 'user_code_hash',
       'expires_at', 'consumed_at', 'created_at', 'updated_at'
     ]::text[]
-    FROM information_schema.columns
-    WHERE table_schema = 'commonswarm_oauth' AND table_name = 'provider_artifacts'
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = object_state.artifacts_oid
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
   ), false)
   AND COALESCE((
-    SELECT array_agg(column_name::text ORDER BY ordinal_position) = ARRAY[
+    SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum) = ARRAY[
       'interaction_uid', 'session_hash', 'client_id', 'redirect_uri', 'resource',
       'requested_scopes', 'pkce_challenge', 'oauth_state', 'signin_state_hash',
       'signin_pkce_verifier', 'signin_state_consumed_at', 'user_id',
@@ -93,8 +95,10 @@ SELECT COALESCE((SELECT
       'provider_grant_id', 'commonswarm_grant_id', 'consent_token_hash',
       'consent_token_consumed_at', 'expires_at', 'completed_at', 'created_at', 'updated_at'
     ]::text[]
-    FROM information_schema.columns
-    WHERE table_schema = 'commonswarm_oauth' AND table_name = 'interactions'
+    FROM pg_catalog.pg_attribute AS attribute
+    WHERE attribute.attrelid = object_state.interactions_oid
+      AND attribute.attnum > 0
+      AND NOT attribute.attisdropped
   ), false)
   AND CASE WHEN role_state.present
     THEN COALESCE((
@@ -146,29 +150,50 @@ SELECT COALESCE((SELECT
     THEN has_function_privilege('commonswarm_oauth_runtime', object_state.status_oid, 'EXECUTE')
       AND NOT has_function_privilege('authenticated', object_state.status_oid, 'EXECUTE')
       AND NOT has_function_privilege('anon', object_state.status_oid, 'EXECUTE')
-      AND pg_get_functiondef(object_state.status_oid) LIKE '%SECURITY DEFINER%'
-      AND pg_get_functiondef(object_state.status_oid) LIKE '%SET search_path TO pg_catalog%'
-      AND COALESCE((SELECT pg_get_userbyid(proowner) = 'swarm_admin'
-        FROM pg_proc WHERE oid = object_state.status_oid), false)
+      AND COALESCE((
+        SELECT p.prosecdef
+          AND p.provolatile = 's'::"char"
+          AND p.proconfig = ARRAY['search_path=pg_catalog']::text[]
+          AND l.lanname = 'plpgsql'
+          AND p.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'swarm_admin')
+        FROM pg_proc AS p
+        JOIN pg_language AS l ON l.oid = p.prolang
+        WHERE p.oid = object_state.status_oid
+      ), false)
     ELSE false END
   AND CASE WHEN role_state.present AND object_state.active_oid IS NOT NULL
     THEN NOT has_function_privilege('commonswarm_oauth_runtime', object_state.active_oid, 'EXECUTE')
       AND NOT has_function_privilege('authenticated', object_state.active_oid, 'EXECUTE')
       AND NOT has_function_privilege('anon', object_state.active_oid, 'EXECUTE')
-      AND pg_get_functiondef(object_state.active_oid) LIKE '%p_person_exists%'
-      AND pg_get_functiondef(object_state.active_oid) LIKE '%NOT p_tombstoned%'
-      AND COALESCE((SELECT pg_get_userbyid(proowner) = 'swarm_admin'
-        FROM pg_proc WHERE oid = object_state.active_oid), false)
+      AND COALESCE((
+        SELECT NOT p.prosecdef
+          AND p.provolatile = 'i'::"char"
+          AND p.proconfig = ARRAY['search_path=pg_catalog']::text[]
+          AND p.proargnames = ARRAY[
+            'p_state', 'p_revoked_at', 'p_person_exists', 'p_tombstoned'
+          ]::text[]
+          AND l.lanname = 'sql'
+          AND p.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'swarm_admin')
+        FROM pg_proc AS p
+        JOIN pg_language AS l ON l.oid = p.prolang
+        WHERE p.oid = object_state.active_oid
+      ), false)
     ELSE false END
   AND CASE WHEN role_state.present AND object_state.family_oid IS NOT NULL
     THEN has_function_privilege('swarm_read', object_state.family_oid, 'EXECUTE')
       AND NOT has_function_privilege('commonswarm_oauth_runtime', object_state.family_oid, 'EXECUTE')
       AND NOT has_function_privilege('authenticated', object_state.family_oid, 'EXECUTE')
       AND NOT has_function_privilege('anon', object_state.family_oid, 'EXECUTE')
-      AND pg_get_functiondef(object_state.family_oid) LIKE '%SECURITY DEFINER%'
-      AND pg_get_functiondef(object_state.family_oid) LIKE '%SET search_path TO pg_catalog%'
-      AND COALESCE((SELECT pg_get_userbyid(proowner) = 'swarm_admin'
-        FROM pg_proc WHERE oid = object_state.family_oid), false)
+      AND COALESCE((
+        SELECT p.prosecdef
+          AND p.provolatile = 's'::"char"
+          AND p.proconfig = ARRAY['search_path=pg_catalog']::text[]
+          AND l.lanname = 'sql'
+          AND p.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'swarm_admin')
+        FROM pg_proc AS p
+        JOIN pg_language AS l ON l.oid = p.prolang
+        WHERE p.oid = object_state.family_oid
+      ), false)
     ELSE false END
   AND NOT EXISTS (
     SELECT 1 FROM pg_auth_members AS membership

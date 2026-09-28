@@ -6,6 +6,10 @@
 DO $role$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'commonswarm_oauth_runtime') THEN
+    -- NOSUPERUSER, NOREPLICATION and NOBYPASSRLS are CREATE ROLE defaults.
+    -- Keep them implicit: a non-superuser CREATEROLE migration principal
+    -- cannot grant or clear those elevated attributes. The assertion below
+    -- proves the defaults instead of trying to repair them.
     CREATE ROLE commonswarm_oauth_runtime
       LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
   END IF;
@@ -38,6 +42,43 @@ END
 $role_attributes$;
 
 ALTER ROLE commonswarm_oauth_runtime SET search_path = commonswarm_oauth, pg_catalog;
+
+-- PostgreSQL 16+ automatically gives a non-superuser CREATEROLE principal an
+-- admin-only membership in each role it creates. Superusers do not receive
+-- that row. Normalize both execution paths to the same safe membership shape:
+-- the migration principal can administer the runtime role but cannot inherit
+-- its privileges or SET ROLE into it.
+DO $role_administrator$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND member.rolname = current_user
+  ) THEN
+    EXECUTE format(
+      'GRANT commonswarm_oauth_runtime TO %I WITH ADMIN TRUE, SET FALSE, INHERIT FALSE',
+      current_user
+    );
+  END IF;
+  IF (
+    SELECT count(*) <> 1 OR NOT COALESCE(bool_and(
+      membership.admin_option
+      AND NOT membership.inherit_option
+      AND NOT membership.set_option
+    ), false)
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND member.rolname = current_user
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_oauth_runtime creator membership is unsafe';
+  END IF;
+END
+$role_administrator$;
 
 DO $database_privilege$
 BEGIN

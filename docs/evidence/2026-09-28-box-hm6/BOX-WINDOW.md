@@ -601,7 +601,7 @@ Require:
 
 The archived HM6 catalog checks six tables, ownership/RLS, the `provider_artifacts` and `interactions` column inventories, 15 named indexes, six primary keys, two foreign keys, one unique constraint, 29 checks, seven policies, role attributes and selected privileges/default ACLs. It does **not** check every table’s complete column inventory.
 
-It contains some function-definition text checks. Preserve the reviewed file, but supplement those checks using `pg_proc` as below. Never add schema-qualified relation-name text matching. The status function uses dynamic SQL; a complete dependency graph for that body is not established by `pg_depend`. Behavioral acceptance therefore also requires the reviewed functional and PostgreSQL integration proofs.
+The corrected catalog checks columns through `pg_attribute` and function properties through `pg_proc`; it does not text-match deparsed definitions. Never replace those structural checks with schema-qualified relation-name text matching. The status function uses dynamic SQL, so a complete dependency graph for that body is not established by `pg_depend`. Behavioral acceptance therefore also requires the reviewed functional and PostgreSQL integration proofs.
 
 ```sh
 # step: hm6-check-runtime-privileges

@@ -66,8 +66,9 @@ BEGIN
     RAISE EXCEPTION 'OAuth rollback refuses role removal: unexpected ownership remains';
   END IF;
   -- DROP ROLE removes memberships itself. Refusing every membership here would
-  -- reject the automatic ADMIN membership an ordinary CREATEROLE creator gets
-  -- on a role it creates, which is also what authorizes this rollback.
+  -- reject the normalized admin-only creator membership installed by the
+  -- forward migration, which is also what authorizes a non-superuser creator
+  -- to perform this rollback.
   IF EXISTS (
     SELECT 1 FROM pg_shdepend
     WHERE refclassid = 'pg_authid'::regclass AND refobjid = runtime_oid
