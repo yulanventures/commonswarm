@@ -1,0 +1,9 @@
+SHA=9fa4217da9f6447e55fb8c6d577b8fd3997f926b
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+OAuth unit/security: PASS (24/24, GitHub Actions run 36389804388, MCP auth suite)
+OAuth PostgreSQL adapter/refresh: PASS (6/6, GitHub Actions run 36389804388, MCP auth suite)
+OAuth Docker acceptance: PASS (test 744, GitHub Actions run 36392008896, p1-cli log)
+Backup/restore coverage: PASS (33/33, exact-SHA detached worktree)
+Antigravity security review: PASS (no KEEP)
+Antigravity operations review: PASS (no KEEP)

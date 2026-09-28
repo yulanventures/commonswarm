@@ -1,0 +1,11 @@
+copy-back.list
+gate-evidence.txt
+box-archive.sha256
+window-principal-suffix.txt
+stack.SHA256SUMS
+stack.release-dir-state.txt
+20260928000003-diagnostic.sql
+20260928000003-diagnostic-output.txt
+20260928000003-after-state.txt
+verification-sql.sha256
+diagnostic-window-state.txt

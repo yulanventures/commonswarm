@@ -1,0 +1,109 @@
+column_count=107
+physical_row_lines=6
+runtime_role_present=t
+runtime_role_can_login=t
+runtime_role_no_inherit=t
+runtime_role_no_super=t
+runtime_role_no_createdb=t
+runtime_role_no_createrole=t
+runtime_role_no_replication=t
+runtime_role_no_bypassrls=t
+oauth_schema_exists=t
+provider_artifacts_exists=t
+refresh_family_tombstones_exists=t
+browser_sessions_exists=t
+interactions_exists=t
+cimd_cache_exists=t
+consent_orchestration_exists=t
+hosted_grant_is_active_exists=t
+resolve_hosted_grant_status_exists=t
+provider_family_active_exists=t
+oauth_schema_owner_is_swarm_admin=t
+runtime_database_connect=t
+runtime_schema_privileges_ok=t
+provider_artifacts_privileges_ok=t
+oauth_tables_rls_and_owner_ok=t
+provider_artifacts_columns_ok=t
+interactions_columns_ok=t
+runtime_required_table_privileges_ok=t
+oauth_indexes_ok=t
+oauth_constraints_ok=t
+oauth_policies_ok=t
+tombstones_privileges_ok=t
+resolve_hosted_grant_status_ok=f
+hosted_grant_is_active_ok=t
+provider_family_active_ok=f
+runtime_forbidden_memberships_absent=t
+public_function_execute_default_revoked=t
+lane_2_authority_present=t
+runtime_oauth_schema_usage=t
+runtime_oauth_schema_create_denied=t
+runtime_swarm_schema_usage_denied=t
+runtime_artifacts_select=t
+runtime_artifacts_insert=t
+runtime_artifacts_update=t
+runtime_artifacts_delete=t
+authenticated_artifacts_select_denied=t
+anon_artifacts_select_denied=t
+swarm_read_artifacts_select_denied=t
+oauth_tables_rls_enabled=t
+oauth_table_owners_are_swarm_admin=t
+runtime_required_tables_select=t
+runtime_required_tables_insert=t
+runtime_required_tables_update=t
+runtime_required_tables_delete=t
+oauth_index_count_is_15=t
+oauth_index_names_expected=t
+oauth_primary_key_count_is_6=t
+oauth_foreign_key_count_is_2=t
+oauth_unique_constraint_count_is_1=t
+oauth_check_constraint_count_is_29=t
+oauth_policy_count_is_7=t
+oauth_policy_roles_are_runtime=t
+runtime_tombstones_select=t
+runtime_tombstones_insert=t
+runtime_tombstones_update_denied=t
+runtime_tombstones_delete_denied=t
+runtime_status_execute=t
+authenticated_status_execute_denied=t
+anon_status_execute_denied=t
+status_is_security_definer=t
+status_search_path_is_fixed=f
+status_owner_is_swarm_admin=t
+runtime_active_execute_denied=t
+authenticated_active_execute_denied=t
+anon_active_execute_denied=t
+active_definition_has_person_exists=t
+active_definition_has_not_tombstoned=t
+active_owner_is_swarm_admin=t
+swarm_read_family_execute=t
+runtime_family_execute_denied=t
+authenticated_family_execute_denied=t
+anon_family_execute_denied=t
+family_is_security_definer=t
+family_search_path_is_fixed=f
+family_owner_is_swarm_admin=t
+current_user_actual=supabase_admin
+session_user_actual=supabase_admin
+search_path_actual="\$user", public, auth, extensions
+runtime_role_attributes_actual=oid=23503 rolsuper=f rolcreaterole=f rolcanlogin=t rolinherit=f rolbypassrls=f rolcreatedb=f rolreplication=f
+runtime_role_memberships_actual=<none>
+oauth_schema_owner_acl_actual=owner=swarm_admin acl={swarm_admin=UC/swarm_admin,commonswarm_oauth_runtime=U/swarm_admin,swarm_read=U/swarm_admin}
+oauth_table_owners_acls_actual=commonswarm_oauth.browser_sessions owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncommonswarm_oauth.cimd_cache owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncommonswarm_oauth.consent_orchestration owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncommonswarm_oauth.interactions owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncommonswarm_oauth.provider_artifacts owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncommonswarm_oauth.refresh_family_tombstones owner=swarm_admin rls=t acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=ar/swarm_admin}
+runtime_database_privileges_actual=connect=t
+runtime_schema_privileges_actual=runtime_usage=true runtime_create=false runtime_swarm_usage=false schema_acl={swarm_admin=UC/swarm_admin,commonswarm_oauth_runtime=U/swarm_admin,swarm_read=U/swarm_admin}
+provider_artifacts_privileges_actual=runtime_select=true runtime_insert=true runtime_update=true runtime_delete=true authenticated_select=false anon_select=false swarm_read_select=false acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}
+runtime_required_table_privileges_actual=browser_sessions select=true insert=true update=true delete=true acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ncimd_cache select=true insert=true update=true delete=true acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\nconsent_orchestration select=true insert=true update=true delete=true acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\ninteractions select=true insert=true update=true delete=true acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}\nprovider_artifacts select=true insert=true update=true delete=true acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=arwd/swarm_admin}
+tombstones_privileges_actual=select=true insert=true update=false delete=false acl={swarm_admin=arwdDxtm/swarm_admin,commonswarm_oauth_runtime=ar/swarm_admin}
+function_owners_acls_definition_hashes_actual=hosted_grant_is_active owner=swarm_admin acl={swarm_admin=X/swarm_admin} hash=6502b0a6cb44a196caacc9f6157d9a96\nprovider_family_active owner=swarm_admin acl={swarm_admin=X/swarm_admin,swarm_read=X/swarm_admin} hash=a0e5aeb53c112e936152e9e4f133e718\nresolve_hosted_grant_status owner=swarm_admin acl={swarm_admin=X/swarm_admin,commonswarm_oauth_runtime=X/swarm_admin} hash=bd4ec53edcf419be1571ac972fa99caa
+resolve_hosted_grant_status_actual=runtime=true authenticated=false anon=false owner=swarm_admin security_definer=true fixed_search_path=false hash=bd4ec53edcf419be1571ac972fa99caa acl={swarm_admin=X/swarm_admin,commonswarm_oauth_runtime=X/swarm_admin}
+hosted_grant_is_active_actual=runtime=false authenticated=false anon=false owner=swarm_admin has_person=true has_not_tombstoned=true hash=6502b0a6cb44a196caacc9f6157d9a96 acl={swarm_admin=X/swarm_admin}
+provider_family_active_actual=swarm_read=true runtime=false authenticated=false anon=false owner=swarm_admin security_definer=true fixed_search_path=false hash=a0e5aeb53c112e936152e9e4f133e718 acl={swarm_admin=X/swarm_admin,swarm_read=X/swarm_admin}
+provider_artifacts_columns_actual={model,artifact_id_hash,payload,grant_id,uid,user_code_hash,expires_at,consumed_at,created_at,updated_at}
+interactions_columns_actual={interaction_uid,session_hash,client_id,redirect_uri,resource,requested_scopes,pkce_challenge,oauth_state,signin_state_hash,signin_pkce_verifier,signin_state_consumed_at,user_id,selected_workspace_ids,selection_version,manifest_digest,provider_grant_id,commonswarm_grant_id,consent_token_hash,consent_token_consumed_at,expires_at,completed_at,created_at,updated_at}
+oauth_indexes_actual=count=15 names={browser_sessions_expiry_idx,browser_sessions_pkey,cimd_cache_expiry_idx,cimd_cache_pkey,consent_orchestration_command_id_key,consent_orchestration_pkey,interactions_expiry_idx,interactions_pkey,interactions_session_idx,provider_artifacts_expiry_idx,provider_artifacts_grant_idx,provider_artifacts_pkey,provider_artifacts_uid_idx,provider_artifacts_user_code_idx,refresh_family_tombstones_pkey}
+oauth_constraints_actual=primary=6 foreign=2 unique=1 check=29
+oauth_policies_actual=count=7 policies=oauth_runtime_artifacts roles={commonswarm_oauth_runtime}, oauth_runtime_cimd roles={commonswarm_oauth_runtime}, oauth_runtime_interactions roles={commonswarm_oauth_runtime}, oauth_runtime_orchestration roles={commonswarm_oauth_runtime}, oauth_runtime_sessions roles={commonswarm_oauth_runtime}, oauth_runtime_tombstones_insert roles={commonswarm_oauth_runtime}, oauth_runtime_tombstones_read roles={commonswarm_oauth_runtime}
+swarm_admin_default_acls_actual=owner=swarm_admin namespace=0 type=f acl={swarm_admin=X/swarm_admin}
+lane_2_authority_actual=oid=swarm.hosted_mcp_grants
+catalog_ok=f
