@@ -1,0 +1,17 @@
+2026-09-28T03:37:46Z plan-sha256=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb expected=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb result=PASS
+2026-09-28T03:37:46Z approval release_sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 reviewed=codex-plan+antigravity-PASS-no-KEEP backup_max_age=22h
+2026-09-28T03:37:46Z surfaces KIND_LIST=edge+stack CHANGED_FUNCTIONS=command+read ROUTER_CHANGED=yes ADDITIONAL_REQUIRED_ENV_NAMES=empty migration=20260928000002 no-npm-publish no-site no-mcp-auth no-stack-switch
+2026-09-28T03:37:46Z window start=2026-09-28T03:37:46Z end=2026-09-28T07:37:46Z
+2026-09-28T03:37:46Z gates command-core=PASS check-edge=PASS exact-sha-clean=PASS
+2026-09-28T03:38:05Z env-inventory PASS router-changed=yes selected=command,read,capability,activity,h0,mcp values=not-shown
+2026-09-28T03:41:39Z section1 PASS immutable-dirs=yes archive-match=yes stack-runtime-unchanged=yes
+2026-09-28T03:42:45Z section2-verify PASS section3-session PASS
+2026-09-28T03:43:33Z local-control principals-created-before-migration PASS client=0.1.80 target=production human=tom@ridge.io
+2026-09-28T03:44:12Z local-control pre-migration-seat-baseline PASS
+2026-09-28T03:53:02Z backup gate STOP max_age=79200 service_result=success status_ok=false database_bytes_verified=null object_bytes_verified=null verified_at=null official_check_exit=1
+2026-09-28T03:53:02Z release transition NOT-RUN migration-decision=no migration-apply=no migration-verify=no functional=no cron-after=no edge-apply=no edge-probes=no post-release-controls=no
+2026-09-28T03:53:02Z abort cleanup PASS timers=edge-recycle:active,backup:active,restore:active
+2026-09-28T03:53:02Z temporary-principals revocation=accepted count=2 database-readback-revoked=2 credentials-minted=0
+2026-09-28T03:53:02Z abort-state ledger-20260928000002=0 edge-current=9b085c82352390cf8f0fe515c02b3ccff423476a stack-current=e38b499fc29a01935333e38f66c4e68ac7e1f81e
+2026-09-28T03:53:02Z transient-database-and-smoke-cleanup PASS copy-back=NOT-RUN-incomplete-manifest-artifacts box-proof-dir=preserved
+2026-09-28T03:53:02Z operator-notes initial-combined-interactive-runbook-block upload-succeeded-but-local-sudo-step-refused; remote-subshell-reran-separately; section3-overstrict-local-verifier-corrected-for-empty-apply-placeholder; no-production-effect

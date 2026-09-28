@@ -1,0 +1,5 @@
+SHA=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+clean detached checkout at exact SHA: PASS
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+review: Codex plan reviewed; diff-attached Antigravity PASS with no KEEP

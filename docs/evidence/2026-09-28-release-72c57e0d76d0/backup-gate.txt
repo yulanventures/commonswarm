@@ -1,0 +1,9 @@
+checked_at=2026-09-28T03:49:22Z
+backup_max_age_seconds=79200
+service_result=success
+status_ok=false
+database_bytes_verified=null
+object_bytes_verified=null
+verified_at=null
+official_freshness_check_exit=1
+result=STOP
