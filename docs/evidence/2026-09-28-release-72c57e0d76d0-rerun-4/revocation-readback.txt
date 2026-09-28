@@ -1,0 +1,1 @@
+{"principals_revoked" : true, "active_unexpired_tokens" : 0}

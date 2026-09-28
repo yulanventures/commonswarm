@@ -1,0 +1,29 @@
+{
+  "release_sha": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+  "window_principal_suffix": "062517",
+  "client": "released cswarm 0.1.80",
+  "seat_before": true,
+  "wake_after": true,
+  "first_ack": {
+    "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+    "principal_id": "2ac92f23-a38e-44b2-9b65-f9fb08d689d4",
+    "signal_id": "e3b2b206-54a7-426b-8cce-e127390f3b3b",
+    "acked_at": "2026-09-28T06:47:05.87071+00:00",
+    "ack_outcome": "observed",
+    "last_lease_id": null,
+    "last_leased_by": null
+  },
+  "seed_signal_id": "559e4c43-e96c-4aa6-b2b6-be4fa129e22b",
+  "seats": {
+    "local": {
+      "principal_id": "2ac92f23-a38e-44b2-9b65-f9fb08d689d4",
+      "mint": "accepted",
+      "revocation": "accepted"
+    },
+    "sender": {
+      "principal_id": "32d933da-e25a-492d-95a5-93bf7a290648",
+      "mint": "accepted",
+      "revocation": "accepted"
+    }
+  }
+}

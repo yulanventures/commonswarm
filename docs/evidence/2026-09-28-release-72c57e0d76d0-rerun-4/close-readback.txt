@@ -1,0 +1,9 @@
+edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+stack_current=/home/commonswarm/stack/releases/e38b499fc29a01935333e38f66c4e68ac7e1f81e
+edge_health=healthy
+memory=2147483648
+network=commonswarm-net
+recycle_timer=active
+backup_timer=active
+restore_timer=active
+transient_files=absent

@@ -1,0 +1,1 @@
+{"workspace_id" : "c2ea0541-f56d-4c73-bf71-56c5405c4934", "principal_id" : "2ac92f23-a38e-44b2-9b65-f9fb08d689d4", "signal_id" : "e3b2b206-54a7-426b-8cce-e127390f3b3b", "acked_at" : "2026-09-28T06:47:05.87071+00:00", "ack_outcome" : "observed", "last_lease_id" : null, "last_leased_by" : null}

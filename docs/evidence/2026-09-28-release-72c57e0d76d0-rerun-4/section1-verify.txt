@@ -1,0 +1,6 @@
+edge release=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20 mode=750 checksum=PASS
+stack release=/home/commonswarm/stack/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20 mode=755 checksum=PASS
+stack runtime unchanged: compose.yaml
+stack runtime unchanged: postgres
+stack runtime unchanged: backup
+stack-current-unchanged=PASS edge-current-pre-switch=PASS

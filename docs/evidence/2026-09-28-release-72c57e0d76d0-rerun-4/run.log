@@ -1,0 +1,22 @@
+2026-09-28T06:25:17Z plan-sha256=fc7c70dd402d80d85893f28ccaba9d9089126a3548ffb36e13516d082eb69c8b result=PASS
+2026-09-28T06:25:17Z approval release_sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 reviewed=Codex-maker+Antigravity-checker-PASS-FULL backup_max_age=22h ship-as-soon-ready
+2026-09-28T06:25:17Z surfaces KIND_LIST=edge+stack CHANGED_FUNCTIONS=command+read ROUTER_CHANGED=yes ADDITIONAL_REQUIRED_ENV_NAMES=empty migration=20260928000002 no-npm no-site no-mcp-auth no-stack-switch
+2026-09-28T06:25:49Z env-inventory selected=command read capability activity h0 mcp result=PASS
+2026-09-28T06:29:53Z proof-transfer count=7 sql-hashes=PASS appledouble=absent
+2026-09-28T06:30:23Z section1 archive=b914b937f90fb822247b4c4c81b32a7285dd29fa8688754acb6e8c088fce3fd6 immutable-releases=PASS stack-runtime-unchanged=PASS stack-current-unchanged=PASS
+2026-09-28T06:31:36Z section2 target-env-shape=PASS identity=PASS section3 database-session=PASS
+2026-09-28T06:35:44Z control-prepare=PASS suffix-from-box=062517 compatibility=mac-bash-3.2-command-substitution-workaround
+2026-09-28T06:35:59Z existing-seat-baseline=PASS ledger-20260928000002=absent
+2026-09-28T06:36:25Z backup=PASS verified_at=2026-09-28T03:55:22.215479+00:00 age_seconds=9663 max_age_seconds=79200 database_bytes_verified=true object_bytes_verified=true
+2026-09-28T06:38:58Z section5 decision=ledger:0/catalog:f apply=PASS verify=ledger:1/catalog:t functional=t cron_added=none cron_removed=none
+2026-09-28T06:45:03Z public-boundaries=PASS loopback+staging+api hosted-command=403 ordinary-mint-noauth=401 mcp-post-options=503 urllib-user-agent=release-probe verifier-count-corrected=7+14
+2026-09-28T06:46:46Z local-mint-setup=PASS client=cswarm-0.1.80 target=https://api.commonswarm.com credentials=protected-local-only
+2026-09-28T06:47:08Z local-primer-check=PASS observed-ack=PASS
+2026-09-28T06:47:26Z local-second-delivery-wake-eligible=PASS consumer-not-run-before-proof=yes
+2026-09-28T06:47:48Z temporary-principals revocation=accepted count=2 sanitized-control-evidence=PASS
+2026-09-28T06:48:37Z revocation-readback principals-revoked=true active-unexpired-tokens=0
+2026-09-28T06:49:51Z copy-back=PASS approved-files=32
+2026-09-28T06:51:45Z close edge=72c57e0d76d0aa86fe4f811a2cf51499919fed20 migration=20260928000002 timers=active copy-back=PASS remote-transient-cleanup=PASS no-npm no-site no-mcp-auth no-stack-current-switch
+2026-09-28T06:51:45Z operator-note macOS-bash-3.2 could-not-parse-plan-suffix-heredoc-in-command-substitution; suffix-read-from-box-window-principal-suffix-file then unchanged-name-template/control-body executed; no manual rename
+2026-09-28T06:52:49Z recorded-section6 new-edge=PASS health=healthy memory=2147483648 network=commonswarm-net working-dir=exact loopback-a-h+j1-j3=PASS staging-a-h+j1-j3=PASS h0-note-unauth=401 metrics-lines=1 log-check=PASS boot-module-errors=0 dark-mcp-post-options=503 mcp-worker-starts=0
+2026-09-28T06:52:49Z mac-cleanup credential-root=removed window-env=removed scratch=left-at-/Users/yulanbot/.hermes/profiles/anvil/cache/scratch/hm2-rerun4 because-safe-rm-refused-protected-subtree; guard-not-bypassed

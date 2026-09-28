@@ -1,0 +1,6 @@
+SHA=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+Gate checkout: /Users/yulanbot/anvil-work/commonswarm-hm2-gates-r4 (clean detached exact SHA)
+Actions run 36381060544: test 208 “catalog proof is search-path independent and false without error before migration” PASS; suite overall 314/315 with the unrelated item-L file-artifact failure recorded by HezLead.
+Proof correction source: 202be65661f9c3084bb2ebf6cbba0b977e6aa71b; Codex Maker; Antigravity Checker PASS with FULL evidence; HezLead approved proof-only substitution.
