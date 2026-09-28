@@ -32,7 +32,7 @@ export const WORKER_LIMIT_BODY = {
     "Worker failed to respond due to a resource limit (please check logs)",
 } as const;
 export const WORKER_LIMIT_STATUS = 504;
-export const DISABLED_FUNCTION_NAMES = ["mcp"] as const satisfies readonly FunctionName[];
+export const DISABLED_FUNCTION_NAMES = [] as const satisfies readonly FunctionName[];
 export const FUNCTION_DISABLED_BODY = {
   error: "feature_disabled",
   feature: "hosted_mcp",
@@ -248,6 +248,7 @@ export const MCP_ENV_NAMES = [
   "SWARM_MCP_MAX_CONCURRENT_REQUESTS",
   "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
   "SWARM_MCP_CLOCK_SKEW_SECONDS",
+  "SWARM_MCP_PUBLIC_ENABLED",
 ] as const;
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
