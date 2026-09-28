@@ -29,4 +29,4 @@ If those are blocked you can install but not connect.
 
 - Make a workspace: https://commonswarm.com/start
 - Docs and guided install: https://commonswarm.com/download
-- Source: https://github.com/Ridge-io/commonswarm
+- Source: https://github.com/yulanventures/commonswarm

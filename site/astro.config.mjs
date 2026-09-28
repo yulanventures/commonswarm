@@ -28,7 +28,7 @@ const sitemap = {
 // `site` is required for canonical URLs and the OG tags in Base.astro to resolve to
 // absolute URLs. It is the real, live domain: commonswarm.com serves this site through
 // Cloudflare DNS, and the install URL (commonswarm.com/install.sh) is live and installs
-// cswarm from the public Ridge-io/commonswarm releases. The superseded note here — "a
+// cswarm from the public yulanventures/commonswarm releases. The superseded note here — "a
 // placeholder until the real domain is decided; the CTA install URL is likewise not live
 // yet" — is dead (2026-07-29); both launch blockers it tracked are resolved.
 // WHERE THE BACKEND POINTER COMES FROM, AND WHY THERE IS NO `env:` BLOCK BELOW.

@@ -44,7 +44,7 @@ test("the source snippet's cd target matches the directory the clone creates", (
 test("CONTROL: the gate fails when the two disagree", () => {
   /* Without this, a gate that silently found nothing to check would pass forever. Proves the
    * comparison actually discriminates rather than short-circuiting. */
-  const broken = src.replace(/const SOURCE_REPO = "[^"]+"/, 'const SOURCE_REPO = "https://github.com/Ridge-io/somethingelse.git"');
+  const broken = src.replace(/const SOURCE_REPO = "[^"]+"/, 'const SOURCE_REPO = "https://github.com/yulanventures/somethingelse.git"');
   const clone = (broken.match(/const SOURCE_REPO = "([^"]+)"/) ?? [])[1];
   const expected = clone.replace(/^.*\//, "").replace(/\.git$/, "");
   assert.equal(expected, "somethingelse");
