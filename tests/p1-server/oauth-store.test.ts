@@ -143,6 +143,122 @@ async function rollbackAsMigrationOwner(
   await tx.unsafe(inverse);
 }
 
+async function assertMigrationDatabaseGrant(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+  expectedGrantor: string | undefined,
+  message: string,
+): Promise<void> {
+  const grants = await tx<{
+    grantor: string;
+    privilege_type: string;
+    is_grantable: boolean;
+  }[]>`
+    SELECT
+      grantor.rolname::text AS grantor,
+      privilege.privilege_type,
+      privilege.is_grantable
+    FROM pg_database AS db
+    CROSS JOIN LATERAL aclexplode(
+      COALESCE(db.datacl, acldefault('d', db.datdba))
+    ) AS privilege
+    JOIN pg_roles AS runtime ON runtime.oid = privilege.grantee
+    JOIN pg_roles AS grantor ON grantor.oid = privilege.grantor
+    WHERE db.datname = current_database()
+      AND runtime.rolname = 'commonswarm_oauth_runtime'
+    ORDER BY grantor.rolname, privilege.privilege_type
+  `;
+  assert.equal(grants.length, 1, `${message}: direct database grant count`);
+  assert.equal(grants[0]?.privilege_type, "CONNECT", `${message}: privilege`);
+  assert.equal(grants[0]?.is_grantable, false, `${message}: grant option`);
+  if (expectedGrantor !== undefined) {
+    assert.equal(grants[0]?.grantor, expectedGrantor, `${message}: grantor`);
+  }
+
+  const [dependency] = await tx<{ count: number; exact: boolean }[]>`
+    SELECT
+      count(*)::int AS count,
+      COALESCE(bool_and(
+        dependency.deptype = 'a'
+        AND dependency.dbid = 0
+        AND db.datname = current_database()
+      ), false) AS exact
+    FROM pg_shdepend AS dependency
+    JOIN pg_database AS db
+      ON dependency.classid = 'pg_database'::regclass
+      AND db.oid = dependency.objid
+    JOIN pg_roles AS runtime ON runtime.oid = dependency.refobjid
+    WHERE dependency.refclassid = 'pg_authid'::regclass
+      AND runtime.rolname = 'commonswarm_oauth_runtime'
+  `;
+  assert.deepEqual(
+    dependency,
+    { count: 1, exact: true },
+    `${message}: database ACL has one pg_shdepend deptype=a row`,
+  );
+}
+
+async function rollbackAndAssertRemoved(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+  inverse: string,
+  message: string,
+): Promise<void> {
+  const [runtime] = await tx<{ oid: number }[]>`
+    SELECT oid FROM pg_roles WHERE rolname = 'commonswarm_oauth_runtime'
+  `;
+  assert.ok(runtime, `${message}: runtime role must exist before rollback`);
+
+  await rollbackAsMigrationOwner(tx, inverse);
+
+  const [state] = await tx<{
+    role_absent: boolean;
+    shared_dependencies_absent: boolean;
+    memberships_absent: boolean;
+    settings_absent: boolean;
+    default_acls_absent: boolean;
+    ledger_absent: boolean;
+  }[]>`
+    SELECT
+      NOT EXISTS (
+        SELECT 1 FROM pg_roles
+        WHERE oid = ${runtime.oid} OR rolname = 'commonswarm_oauth_runtime'
+      ) AS role_absent,
+      NOT EXISTS (
+        SELECT 1 FROM pg_shdepend
+        WHERE (refclassid = 'pg_authid'::regclass AND refobjid = ${runtime.oid})
+          OR (classid = 'pg_authid'::regclass AND objid = ${runtime.oid})
+      ) AS shared_dependencies_absent,
+      NOT EXISTS (
+        SELECT 1 FROM pg_auth_members
+        WHERE roleid = ${runtime.oid}
+          OR member = ${runtime.oid}
+          OR grantor = ${runtime.oid}
+      ) AS memberships_absent,
+      NOT EXISTS (
+        SELECT 1 FROM pg_db_role_setting WHERE setrole = ${runtime.oid}
+      ) AS settings_absent,
+      NOT EXISTS (
+        SELECT 1
+        FROM pg_default_acl AS defaults
+        LEFT JOIN LATERAL aclexplode(defaults.defaclacl) AS privilege ON true
+        WHERE defaults.defaclrole = ${runtime.oid}
+          OR privilege.grantee = ${runtime.oid}
+          OR privilege.grantor = ${runtime.oid}
+      ) AS default_acls_absent,
+      NOT EXISTS (
+        SELECT 1 FROM supabase_migrations.schema_migrations
+        WHERE version = ${migrationVersion}
+      ) AS ledger_absent
+  `;
+  assert.deepEqual(state, {
+    role_absent: true,
+    shared_dependencies_absent: true,
+    memberships_absent: true,
+    settings_absent: true,
+    default_acls_absent: true,
+    ledger_absent: true,
+  }, message);
+}
+
 test("OAuth catalog is structural and all creator apply paths are safe", async () => {
   const [migration, catalog, rollback] = await Promise.all([
     readFile(migrationUrl, "utf8"),
@@ -175,7 +291,16 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
   await superuserSql.begin(async (tx) => {
     await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
 
-    await rollbackAsMigrationOwner(tx, inverse);
+    await assertMigrationDatabaseGrant(
+      tx,
+      undefined,
+      "reset-applied migration",
+    );
+    await rollbackAndAssertRemoved(
+      tx,
+      inverse,
+      "reset-applied migration rollback removes the role and every dependency",
+    );
     await tx.unsafe("RESET ROLE");
     const [roleCollision] = await tx<{ present: boolean }[]>`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${migrationRole}) AS present
@@ -246,7 +371,16 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       { count: 1, safe: true },
       "default non-superuser creator membership stays admin-only",
     );
-    await rollbackAsMigrationOwner(tx, inverse);
+    await assertMigrationDatabaseGrant(
+      tx,
+      migrationRole,
+      "default non-superuser migration",
+    );
+    await rollbackAndAssertRemoved(
+      tx,
+      inverse,
+      "default non-superuser rollback removes the role and every dependency",
+    );
 
     await tx.unsafe(`SET LOCAL ROLE ${migrationRole}`);
 
@@ -301,7 +435,16 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       { count: 1, safe: true },
       "configured non-superuser creator membership is still admin-only",
     );
-    await rollbackAsMigrationOwner(tx, inverse);
+    await assertMigrationDatabaseGrant(
+      tx,
+      migrationRole,
+      "configured non-superuser migration",
+    );
+    await rollbackAndAssertRemoved(
+      tx,
+      inverse,
+      "configured non-superuser rollback removes the role and every dependency",
+    );
 
     await tx.unsafe("RESET ROLE");
     const [{ current_role: superuser }] = await tx<{ current_role: string }[]>`
@@ -317,6 +460,33 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       "superuser apply does not add an unnecessary creator membership",
     );
     await assertCatalogPasses(tx, proof, "superuser control still satisfies catalog");
+    await assertMigrationDatabaseGrant(
+      tx,
+      undefined,
+      "superuser migration",
+    );
+
+    await tx.unsafe(
+      "GRANT SELECT ON TABLE swarm.users TO commonswarm_oauth_runtime",
+    );
+    await assert.rejects(
+      tx.savepoint(async (sp) => await rollbackAsMigrationOwner(sp, inverse)),
+      /OAuth rollback refuses role removal: grants or dependencies remain/u,
+      "an unexpected external table grant keeps the rollback fail-closed",
+    );
+    await assertCatalogPasses(
+      tx,
+      proof,
+      "the refused rollback leaves the applied migration intact",
+    );
+    await tx.unsafe(
+      "REVOKE SELECT ON TABLE swarm.users FROM commonswarm_oauth_runtime",
+    );
+    await rollbackAndAssertRemoved(
+      tx,
+      inverse,
+      "superuser rollback removes the role and every dependency",
+    );
 
     throw new Error(rollbackSentinel);
   }).catch((error) => {
