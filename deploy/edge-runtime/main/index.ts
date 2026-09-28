@@ -1,11 +1,13 @@
 import {
   COMMAND_TEST_HOOKS,
   FUNCTION_ENV_NAMES,
+  handleGatewayRequest,
   type FunctionName,
+  isMcpPublicEnabled,
   isWorkerLimitError,
   mainEnvironmentProblems,
   mainJsonResponse,
-  resolveGatewayRequest,
+  MCP_PUBLIC_ENABLED_ENV,
   rewriteFunctionRequest,
   WORKER_LIMIT_BODY,
   WORKER_LIMIT_STATUS,
@@ -38,6 +40,8 @@ const USER_WORKER_MEMORY_MB = 96;
 // the planned 50-second H0 poll while still ending stuck work.
 const USER_WORKER_TIMEOUT_MS = 150_000;
 const workerObserver = createWorkerObserver(EdgeRuntime.userWorkers, console.log);
+const mcpPublicEnvironmentValue = Deno.env.get(MCP_PUBLIC_ENABLED_ENV);
+const mcpPublicEnabled = isMcpPublicEnabled(mcpPublicEnvironmentValue);
 
 // The runtime has no user-worker retirement callback. Its worker inventory lets
 // us observe ended isolate keys without changing user workers or their limits.
@@ -86,7 +90,9 @@ function environmentFor(functionName: FunctionName): Array<[string, string]> {
     // These hooks can change command transaction timing or force rollback.
     // Keep them out of a non-test worker even if a stale host file has them.
     if (!isTest && COMMAND_TEST_HOOKS.has(name)) continue;
-    const value = Deno.env.get(name);
+    const value = name === MCP_PUBLIC_ENABLED_ENV
+      ? mcpPublicEnvironmentValue
+      : Deno.env.get(name);
     if (value !== undefined) entries.push([name, value]);
   }
   return entries;
@@ -97,34 +103,35 @@ async function handle(request: Request): Promise<Response> {
   if (url.pathname === "/health") {
     return mainJsonResponse(200, { status: "ok" });
   }
-  // This keeps bare-path, unknown-function, disabled-function, and preflight
-  // behavior in one pure resolver. A prepared-but-disabled function returns
-  // before this service can construct a path to its module.
+  // This keeps bare-path, unknown-function, feature-gated-function, and
+  // preflight behavior in one pure resolver. A dark function returns before
+  // this service can construct a path to its module.
   // Kong answers a runnable function's preflight before the worker; unknown
   // names keep its normal 404. Non-OPTIONS preserve function CORS.
-  const gateway = resolveGatewayRequest(request);
-  if (gateway.response !== null) return gateway.response;
-  const route = gateway.route;
-
-  // Supabase's Kong removes only /functions/v1. Preserve the function name,
-  // the remaining path, the query, method, headers, body, and signal.
-  // Clone before the first fetch so a retired worker can be replaced even if
-  // fetch disturbed the first request body. The bounded retry covers both
-  // userWorkers.create and worker.fetch, matching the upstream main service.
-  const attemptRequests = [request, request.clone()] as const;
-  return await withWorkerRetiredRetry(async (attemptNumber) => {
-    const original = attemptRequests[attemptNumber];
-    const worker = await workerObserver.create(route.functionName, {
-      servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
-      memoryLimitMb: USER_WORKER_MEMORY_MB,
-      workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
-      noModuleCache: false,
-      envVars: environmentFor(route.functionName),
+  return await handleGatewayRequest(
+    request,
+    mcpPublicEnabled,
+    async (route, routedRequest) => {
+      // Supabase's Kong removes only /functions/v1. Preserve the function name,
+      // the remaining path, the query, method, headers, body, and signal.
+      // Clone before the first fetch so a retired worker can be replaced even if
+      // fetch disturbed the first request body. The bounded retry covers both
+      // userWorkers.create and worker.fetch, matching the upstream main service.
+      const attemptRequests = [routedRequest, routedRequest.clone()] as const;
+      return await withWorkerRetiredRetry(async (attemptNumber) => {
+        const original = attemptRequests[attemptNumber];
+        const worker = await workerObserver.create(route.functionName, {
+          servicePath: `${FUNCTIONS_ROOT}/${route.functionName}`,
+          memoryLimitMb: USER_WORKER_MEMORY_MB,
+          workerTimeoutMs: USER_WORKER_TIMEOUT_MS,
+          noModuleCache: false,
+          envVars: environmentFor(route.functionName),
+        });
+        const forwarded = rewriteFunctionRequest(original, route.pathname);
+        EdgeRuntime.applySupabaseTag(original, forwarded);
+        return await worker.fetch(forwarded);
+      });
     });
-    const forwarded = rewriteFunctionRequest(original, route.pathname);
-    EdgeRuntime.applySupabaseTag(original, forwarded);
-    return await worker.fetch(forwarded);
-  });
 }
 
 Deno.serve((request) =>

@@ -32,13 +32,17 @@ export const WORKER_LIMIT_BODY = {
     "Worker failed to respond due to a resource limit (please check logs)",
 } as const;
 export const WORKER_LIMIT_STATUS = 504;
-export const DISABLED_FUNCTION_NAMES = [] as const satisfies readonly FunctionName[];
+// These functions are dark unless their main-runtime gate explicitly enables
+// them. Keep the gate in this router so no preflight or user worker can start
+// while a function is dark.
+export const DISABLED_FUNCTION_NAMES = ["mcp"] as const satisfies readonly FunctionName[];
 export const FUNCTION_DISABLED_BODY = {
   error: "feature_disabled",
   feature: "hosted_mcp",
   message: "Hosted MCP is not available yet.",
 } as const;
 export const FUNCTION_DISABLED_STATUS = 503;
+export const MCP_PUBLIC_ENABLED_ENV = "SWARM_MCP_PUBLIC_ENABLED";
 export const REQUIRED_MAIN_ENV = [
   "SUPABASE_URL",
   "SUPABASE_ANON_KEY",
@@ -107,6 +111,18 @@ export function functionDisabledResponse(): Response {
   return mainJsonResponse(FUNCTION_DISABLED_STATUS, FUNCTION_DISABLED_BODY);
 }
 
+export function isMcpPublicEnabled(value: string | undefined): boolean {
+  return value === "1";
+}
+
+function isFunctionDisabled(
+  functionName: FunctionName,
+  mcpPublicEnabled: boolean,
+): boolean {
+  if (!DISABLED_FUNCTION_NAME_SET.has(functionName)) return false;
+  return functionName !== "mcp" || !mcpPublicEnabled;
+}
+
 export function kongNoRouteResponse(): Response {
   return mainJsonResponse(404, KONG_NO_ROUTE_BODY);
 }
@@ -127,7 +143,10 @@ export function mainEnvironmentProblems(
   return problems;
 }
 
-export function resolveGatewayRequest(request: Request): GatewayResolution {
+export function resolveGatewayRequest(
+  request: Request,
+  mcpPublicEnabled = false,
+): GatewayResolution {
   const pathname = new URL(request.url).pathname;
   if (isFunctionsBasePath(pathname)) {
     return { route: null, response: kongNoRouteResponse() };
@@ -136,15 +155,25 @@ export function resolveGatewayRequest(request: Request): GatewayResolution {
   if (route === null) {
     return { route: null, response: functionNotFoundResponse() };
   }
-  // A prepared name is not a runnable worker. Keep the response here, before
-  // preflight or worker creation, until the corresponding module is present.
-  if (DISABLED_FUNCTION_NAME_SET.has(route.functionName)) {
+  // A dark function is not runnable. Keep the response here, before preflight
+  // or worker creation, until its main-runtime gate is explicitly enabled.
+  if (isFunctionDisabled(route.functionName, mcpPublicEnabled)) {
     return { route: null, response: functionDisabledResponse() };
   }
   if (request.method === "OPTIONS") {
     return { route: null, response: gatewayPreflight(request) };
   }
   return { route, response: null };
+}
+
+export async function handleGatewayRequest(
+  request: Request,
+  mcpPublicEnabled: boolean,
+  invokeWorker: (route: FunctionRoute, request: Request) => Promise<Response>,
+): Promise<Response> {
+  const gateway = resolveGatewayRequest(request, mcpPublicEnabled);
+  if (gateway.response !== null) return gateway.response;
+  return await invokeWorker(gateway.route, request);
 }
 
 export function rewriteFunctionRequest(
@@ -196,10 +225,13 @@ function resolvePreparedFunctionRoute(pathname: string): FunctionRoute | null {
   };
 }
 
-/** Return only routes whose worker module is available to the main service. */
-export function resolveFunctionRoute(pathname: string): FunctionRoute | null {
+/** Return only routes whose worker is available and enabled in the main service. */
+export function resolveFunctionRoute(
+  pathname: string,
+  mcpPublicEnabled = false,
+): FunctionRoute | null {
   const route = resolvePreparedFunctionRoute(pathname);
-  if (route === null || DISABLED_FUNCTION_NAME_SET.has(route.functionName)) {
+  if (route === null || isFunctionDisabled(route.functionName, mcpPublicEnabled)) {
     return null;
   }
   return route;
@@ -248,7 +280,7 @@ export const MCP_ENV_NAMES = [
   "SWARM_MCP_MAX_CONCURRENT_REQUESTS",
   "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
   "SWARM_MCP_CLOCK_SKEW_SECONDS",
-  "SWARM_MCP_PUBLIC_ENABLED",
+  MCP_PUBLIC_ENABLED_ENV,
 ] as const;
 
 export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {
