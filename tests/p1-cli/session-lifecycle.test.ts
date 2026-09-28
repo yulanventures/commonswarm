@@ -611,8 +611,12 @@ test("claims every 10s for 130s still produce a renew by 40s", async () => {
     });
     manager.start();
 
-    const flush = async (): Promise<void> => {
-      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    const settleRenewal = async (): Promise<void> => {
+      for (let i = 0; i < 100; i += 1) {
+        if (timers.size > 0 || manager.dispatchState() === "stopped") return;
+        await new Promise<void>(resolveImmediate => setImmediate(resolveImmediate));
+      }
+      assert.fail("renewal did not settle and re-arm its timer");
     };
     const advanceTo = async (target: number): Promise<void> => {
       while (true) {
@@ -629,7 +633,7 @@ test("claims every 10s for 130s still produce a renew by 40s", async () => {
         now = next.due;
         timers.delete(next.id);
         next.callback();
-        await flush();
+        await settleRenewal();
       }
     };
 

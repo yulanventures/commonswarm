@@ -129,7 +129,7 @@ async function fixture(mode: FixtureMode, anonKey = "public-test-key") {
           return;
         }
         response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({
-          ok: true, status: "accepted", generation: 1,
+          ok: true, status: "accepted", event_ids: [], generation: 1,
         }));
         return;
       }
@@ -271,7 +271,7 @@ test("the non-stdin holder command runs exactly as printed through the shell", {
     const bin = join(f.root, "bin");
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    child = spawn("/bin/sh", ["-c", command], {
+    child = spawn("/bin/sh", ["-c", `exec ${command}`], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
         XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` },
       stdio: ["ignore", "pipe", "pipe"],
@@ -306,7 +306,7 @@ test("the H0 poll holder command runs exactly as printed through the shell", { t
     const bin = join(f.root, "bin");
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    child = spawn("/bin/sh", ["-c", command], { env: { ...process.env, HOME: f.root,
+    child = spawn("/bin/sh", ["-c", `exec ${command}`], { env: { ...process.env, HOME: f.root,
       XDG_CONFIG_HOME: join(f.root, "config"), XDG_STATE_HOME: join(f.root, "state"),
       NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"] });
     const running = child;
@@ -639,7 +639,7 @@ test("start refusal uses the non-default context file it read in a runnable reme
     const bin = join(f.root, "bin");
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    child = spawn("/bin/sh", ["-c", printed!], {
+    child = spawn("/bin/sh", ["-c", `exec ${printed!}`], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
         XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"],
     });
@@ -680,7 +680,7 @@ test("a long exit-76 remedy prints a complete command that the real CLI accepts"
     const bin = join(f.root, "bin");
     await mkdir(bin);
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    child = spawn("/bin/sh", ["-c", printed!], {
+    child = spawn("/bin/sh", ["-c", `exec ${printed!}`], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
         XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["ignore", "pipe", "pipe"],
     });
@@ -868,7 +868,7 @@ test("unmanaged resume gives a runnable watcher command without context guidance
     const bin = join(f.root, "bin");
     await mkdir(bin, { recursive: true });
     await writeFile(join(bin, "cswarm"), `#!/bin/sh\nexec '${process.execPath}' --import tsx '${resolve("src/cli.ts")}' "$@"\n`, { mode: 0o755 });
-    child = spawn("/bin/sh", ["-c", command], {
+    child = spawn("/bin/sh", ["-c", `exec ${command}`], {
       env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: join(f.root, "config"),
         XDG_STATE_HOME: join(f.root, "state"), NODE_ENV: "test", PATH: `${bin}:${process.env.PATH ?? ""}` },
       stdio: ["ignore", "pipe", "pipe"],

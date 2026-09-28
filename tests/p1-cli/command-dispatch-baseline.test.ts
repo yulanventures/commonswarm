@@ -56,6 +56,16 @@ const AGENT_TOKEN = `swm_agt_${"A".repeat(43)}`;
 const INVITATION_TOKEN = `swm_inv_${"B".repeat(43)}`;
 const HUMAN_USER = "88888888-8888-4888-8888-888888888888";
 const HUMAN_DEVICE = "99999999-9999-4999-8999-999999999999";
+const DISPATCH_BASELINE_SHARD_COUNT = 8;
+
+function dispatchBaselineShard(): number | null {
+  if (process.env.UPDATE_DISPATCH_BASELINE === "1") return null;
+  const raw = process.env.CSWARM_DISPATCH_BASELINE_SHARD ?? "0";
+  const shard = Number(raw);
+  assert.ok(Number.isInteger(shard) && shard >= 0 && shard < DISPATCH_BASELINE_SHARD_COUNT,
+    `CSWARM_DISPATCH_BASELINE_SHARD must be an integer from 0 to ${DISPATCH_BASELINE_SHARD_COUNT - 1}`);
+  return shard;
+}
 
 /**
  * This is the mechanically enumerated shape of the old dispatcher. Commit 1
@@ -948,8 +958,13 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   try {
+    const shard = dispatchBaselineShard();
+    const allFixtures = await fixtures();
+    const selectedFixtures = shard === null
+      ? allFixtures
+      : allFixtures.filter((_fixture, index) => index % DISPATCH_BASELINE_SHARD_COUNT === shard);
     const rows: BaselineRow[] = [];
-    for (const fixture of await fixtures()) rows.push(await runFixture(root, origin, fixture));
+    for (const fixture of selectedFixtures) rows.push(await runFixture(root, origin, fixture));
     const counts = {
       total: rows.length,
       exitCodeZero: rows.filter(row => row.exitCode === 0).length,
@@ -959,13 +974,26 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
       await writeFile(baselinePath, `${JSON.stringify(rows, null, 2)}\n`);
       await writeFile(baselineCountsPath, `${JSON.stringify(counts, null, 2)}\n`);
     }
-    const expected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    const allExpected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     const expectedCounts = JSON.parse(await readFile(baselineCountsPath, "utf8")) as typeof counts;
+    assert.equal(allFixtures.length, allExpected.length, "fixture and recorded baseline totals differ");
+    assert.deepEqual({
+      total: allExpected.length,
+      exitCodeZero: allExpected.filter(row => row.exitCode === 0).length,
+      exitCodeNonzero: allExpected.filter(row => row.exitCode !== 0).length,
+    }, expectedCounts);
+    const expected = shard === null
+      ? allExpected
+      : allExpected.filter((_row, index) => index % DISPATCH_BASELINE_SHARD_COUNT === shard);
     assert.deepEqual(
       rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
       expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
     );
-    assert.deepEqual(counts, expectedCounts);
+    assert.deepEqual(counts, {
+      total: expected.length,
+      exitCodeZero: expected.filter(row => row.exitCode === 0).length,
+      exitCodeNonzero: expected.filter(row => row.exitCode !== 0).length,
+    });
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
     removeLaneTempHome(root);

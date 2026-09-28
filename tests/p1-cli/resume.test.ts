@@ -954,7 +954,7 @@ test("a closed notify reader exits with its stable code and does not advance the
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
     request.resume();
@@ -1024,7 +1024,7 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
     request.resume();
@@ -1073,7 +1073,7 @@ test("a failed read still checks the stdout reader during retry backoff", { time
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
     request.resume();
@@ -1159,7 +1159,7 @@ test("the printed restart command starts a watcher against the same loopback rea
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
     request.resume();
@@ -1204,7 +1204,7 @@ test("the printed restart command starts a watcher against the same loopback rea
     assert.ok(printed.includes(`--url ${url}`));
     assert.ok(printed.includes("--anon-key anon-restart"));
     assert.equal(stderr.includes(TOKEN), false, "the command must not print credential contents");
-    restarted = spawn("/bin/sh", ["-c", printed], {
+    restarted = spawn("/bin/sh", ["-c", `exec ${printed}`], {
       cwd: process.cwd(),
       env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ""}` },
       stdio: ["ignore", "pipe", "pipe"],
@@ -1241,7 +1241,7 @@ for (const startMode of ["stdin", "profile"] as const) {
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
       request.resume();
@@ -1299,7 +1299,7 @@ for (const startMode of ["stdin", "profile"] as const) {
       assert.ok(printed, stderr);
       assert.ok(printed.includes(`--profile ${profile}`));
       assert.equal(printed.includes("--agent-token-file"), false);
-      restarted = spawn("/bin/sh", ["-c", printed], {
+      restarted = spawn("/bin/sh", ["-c", `exec ${printed}`], {
         cwd: process.cwd(),
         env: { ...process.env, HOME: root, XDG_STATE_HOME: xdg, PATH: `${bin}:${process.env.PATH ?? ""}` },
         stdio: ["pipe", "pipe", "pipe"],
@@ -1333,7 +1333,7 @@ test("a watcher started with session context prints that accepted flag", { timeo
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
     let raw = "";
@@ -1398,7 +1398,7 @@ for (const [signalName, expectedCode] of Object.entries(NOTIFY_SIGNAL_EXIT_CODES
     if (request.url === "/functions/v1/command") {
       request.resume();
       request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", generation: 1 })));
+        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
       return;
     }
       request.resume();
