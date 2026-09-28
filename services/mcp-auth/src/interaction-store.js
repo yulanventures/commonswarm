@@ -244,6 +244,41 @@ export class InteractionStore {
     return result.rows[0];
   }
 
+  async selectAndConsumeConsent({
+    interactionUid,
+    sessionId,
+    userId,
+    token,
+    selectionVersion,
+    workspaceIds,
+  }) {
+    const selected = [...new Set(workspaceIds)].sort();
+    if (selected.length < 1 || selected.length > 100) {
+      throw conflict("workspace selection is invalid");
+    }
+    const manifestDigest = createHash("sha256").update(JSON.stringify(selected)).digest();
+    const result = await this.pool.query(
+      `UPDATE commonswarm_oauth.interactions
+          SET selected_workspace_ids = $1::uuid[], manifest_digest = $2,
+              selection_version = selection_version + 1,
+              consent_token_consumed_at = statement_timestamp(),
+              updated_at = statement_timestamp()
+        WHERE interaction_uid = $3 AND session_hash = $4 AND user_id = $5::uuid
+          AND selection_version = $6 AND consent_token_hash = $7
+          AND consent_token_consumed_at IS NULL
+          AND (
+            commonswarm_grant_id IS NULL OR
+            (selected_workspace_ids = $1::uuid[] AND manifest_digest = $2)
+          )
+          AND completed_at IS NULL AND expires_at > statement_timestamp()
+        RETURNING *`,
+      [selected, manifestDigest, interactionUid, hashOpaque(sessionId), userId,
+        selectionVersion, hashOpaque(token)],
+    );
+    if (result.rowCount !== 1) throw conflict("consent token is stale, swapped, or already used");
+    return result.rows[0];
+  }
+
   async complete(interactionUid) {
     await this.pool.query(
       `UPDATE commonswarm_oauth.interactions SET completed_at = statement_timestamp(),

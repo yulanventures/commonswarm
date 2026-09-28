@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { pathToFileURL } from "node:url";
 
 import { createPool, loadConfig } from "./config.js";
+import { ClientError } from "./client-error.js";
 import { createConsentOrchestrator, createPostgresConsentProgress } from "./consent.js";
 import { createGoTrueClient } from "./gotrue.js";
 import { InteractionStore } from "./interaction-store.js";
@@ -24,6 +25,26 @@ function json(response, status, body, headers = {}) {
   response.end(JSON.stringify(body));
 }
 
+function rejectOversizedRequest(request, response) {
+  if (response.headersSent) {
+    request.destroy();
+    return;
+  }
+  request.pause();
+  response.shouldKeepAlive = false;
+  if (typeof response.once === "function") response.once("finish", () => request.destroy());
+  json(response, 413, { error: "request_too_large" }, { connection: "close" });
+  if (typeof response.once !== "function") request.destroy();
+}
+
+function clientErrorResponse(error) {
+  if (!(error instanceof ClientError)) return null;
+  return {
+    status: error.status,
+    body: { error: error.code },
+  };
+}
+
 export function createHandler({ provider, pool, publicAuthorizationEnabled, maxBodyBytes, logger,
   interactionHandler }) {
   const oidc = provider.callback();
@@ -34,6 +55,20 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
     response.setHeader("x-request-id", requestId);
     response.setHeader("cache-control", "no-store");
     try {
+      const contentLength = Number(request.headers["content-length"] ?? 0);
+      if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxBodyBytes) {
+        rejectOversizedRequest(request, response);
+        return;
+      }
+      const interactionReadsBody = request.method === "POST" &&
+        /^\/interaction\/[^/]+\/(?:selection|consent)$/u.test(path);
+      if (!interactionReadsBody) {
+        let streamedBytes = 0;
+        request.on("data", (chunk) => {
+          streamedBytes += chunk.length;
+          if (streamedBytes > maxBodyBytes) rejectOversizedRequest(request, response);
+        });
+      }
       if (path === "/health") {
         const check = await pool.query(
           "SELECT to_regclass('commonswarm_oauth.provider_artifacts') IS NOT NULL AS healthy",
@@ -43,16 +78,6 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         });
         return;
       }
-      const contentLength = Number(request.headers["content-length"] ?? 0);
-      if (!Number.isFinite(contentLength) || contentLength < 0 || contentLength > maxBodyBytes) {
-        json(response, 413, { error: "request_too_large" });
-        return;
-      }
-      let streamedBytes = 0;
-      request.on("data", (chunk) => {
-        streamedBytes += chunk.length;
-        if (streamedBytes > maxBodyBytes) request.destroy();
-      });
       if (!publicAuthorizationEnabled && !ALWAYS_AVAILABLE.has(path)) {
         json(response, 503, { error: "authorization_service_disabled" });
         return;
@@ -61,9 +86,13 @@ export function createHandler({ provider, pool, publicAuthorizationEnabled, maxB
         new URL(request.url, "https://mcp.commonswarm.com"))) return;
       await oidc(request, response);
     } catch (error) {
+      const clientResponse = clientErrorResponse(error);
+      const status = clientResponse?.status ?? 500;
       logger.info({ event: "request_failed", request_id: requestId, method: request.method,
-        path, status: 500, error_code: error?.code ?? "internal_error" });
-      if (!response.headersSent) json(response, 500, { error: "internal_error", request_id: requestId });
+        path, status, error_code: clientResponse?.body.error ?? error?.code ?? "internal_error" });
+      if (!response.headersSent) {
+        json(response, status, clientResponse?.body ?? { error: "internal_error", request_id: requestId });
+      }
       else response.end();
     } finally {
       logger.info({ event: "request_complete", request_id: requestId, method: request.method,
@@ -103,10 +132,16 @@ export function createProductionFindAccount(pool) {
   };
 }
 
-export async function startServer({ env = process.env, writeLog, managementCommand } = {}) {
+export async function startServer({
+  env = process.env,
+  writeLog,
+  managementCommand,
+  managementWorkspaceReader,
+} = {}) {
   const config = await loadConfig(env);
-  if (config.publicAuthorizationEnabled && typeof managementCommand !== "function") {
-    throw new Error("public authorization requires the lane-2 management command binding");
+  if (config.publicAuthorizationEnabled &&
+      (typeof managementCommand !== "function" || typeof managementWorkspaceReader !== "function")) {
+    throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
   }
   const pool = createPool(config);
   const metadataFetch = createPostgresCimdFetch(pool, createPinnedMetadataFetch());
@@ -161,9 +196,11 @@ export async function startServer({ env = process.env, writeLog, managementComma
           command: managementCommand,
           progress: createPostgresConsentProgress(pool),
         }),
+        workspaceReader: managementWorkspaceReader,
         allowedOrigins: config.allowedOrigins,
         callbackUrl: `${config.issuer}/oauth/callback/gotrue`,
         maxBodyBytes: config.maxBodyBytes,
+        bodyReadTimeoutMs: config.requestTimeoutMs,
       })
     : undefined;
   const server = createServer(createHandler({ provider, pool, logger, interactionHandler, ...config }));

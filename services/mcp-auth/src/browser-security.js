@@ -42,7 +42,7 @@ export function assertAllowedOrigin(origin, allowedOrigins) {
 
 export const INTERACTION_SECURITY_HEADERS = Object.freeze({
   "cache-control": "no-store",
-  "content-security-policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
 });
