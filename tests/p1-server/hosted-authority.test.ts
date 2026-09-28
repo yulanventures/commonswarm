@@ -12,16 +12,31 @@ import postgres from "postgres";
 
 const commandUrl = new URL("../../supabase/functions/command/index.ts", import.meta.url);
 const readUrl = new URL("../../supabase/functions/read/index.ts", import.meta.url);
-const migrationUrl = new URL(
-  "../../supabase/migrations/20260928000002_hm_hosted_authority.sql",
-  import.meta.url,
-);
+const hmMigrationSequence = [
+  {
+    migrationUrl: new URL(
+      "../../supabase/migrations/20260928000002_hm_hosted_authority.sql",
+      import.meta.url,
+    ),
+    rollbackUrl: new URL(
+      "../../deploy/release-proofs/item-hm/20260928000002-rollback.sql",
+      import.meta.url,
+    ),
+  },
+  {
+    migrationUrl: new URL(
+      "../../supabase/migrations/20260928000004_hm_hosted_check.sql",
+      import.meta.url,
+    ),
+    rollbackUrl: new URL(
+      "../../deploy/release-proofs/item-hm/20260928000004-rollback.sql",
+      import.meta.url,
+    ),
+  },
+] as const;
+const migrationUrl = hmMigrationSequence[0].migrationUrl;
 const catalogUrl = new URL(
   "../../deploy/release-proofs/item-hm/20260928000002-catalog.sql",
-  import.meta.url,
-);
-const rollbackUrl = new URL(
-  "../../deploy/release-proofs/item-hm/20260928000002-rollback.sql",
   import.meta.url,
 );
 
@@ -524,19 +539,25 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
 });
 
 test("catalog proof is search-path independent and false without error before migration", async () => {
-  const [catalog, rollback, migration] = await Promise.all([
+  const [catalog, migrations] = await Promise.all([
     readFile(catalogUrl, "utf8"),
-    readFile(rollbackUrl, "utf8"),
-    readFile(migrationUrl, "utf8"),
+    Promise.all(hmMigrationSequence.map(async (entry) => ({
+      migration: await readFile(entry.migrationUrl, "utf8"),
+      rollback: await readFile(entry.rollbackUrl, "utf8"),
+    }))),
   ]);
   const catalogQuery = catalog.replace(/\\gset\s*$/u, "");
   await sql.begin(async (tx) => {
     const [positive] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(positive?.catalog_ok, true, "positive control: applied catalog");
-    await tx.unsafe(rollback);
+    for (const { rollback } of [...migrations].reverse()) {
+      await tx.unsafe(rollback);
+    }
     const [before] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(before?.catalog_ok, false, "missing objects return false without throwing");
-    await tx.unsafe(migration);
+    for (const { migration } of migrations) {
+      await tx.unsafe(migration);
+    }
     const [after] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(after?.catalog_ok, true, "reapplied migration restores catalog");
     await tx.unsafe('SET LOCAL search_path = "$user", public, auth, extensions');

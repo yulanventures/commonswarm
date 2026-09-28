@@ -154,8 +154,8 @@ import {
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
   requestHash,
   SCHEMA_VERSION,
-  decideHostedAuthority,
-  hostedSeatNameValid,
+  decideHostedAuthority, decideHostedCheck,
+  HOSTED_CHECK_BATCH_LIMIT, hostedCheckMillisecondTimestamp, hostedSeatNameValid,
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
   PRINCIPAL_NAME_TAKEN,
@@ -9523,12 +9523,12 @@ export interface HostedHumanManagementIdentity {
 
 function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
   const command = record(body.command);
-  if (!command || command.kind !== "post_signal") return false;
+  if (!command || (command.kind !== "post_signal" && tool !== "check")) return false;
   if (tool === "ask") return command.signal_kind === "ask";
   if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
   if (tool === "reply") return command.signal_kind === "note" &&
     typeof command.in_reply_to === "string";
-  return tool === "working_on" && command.signal_kind === "working-on";
+  return (tool === "working_on" && command.signal_kind === "working-on") || (tool === "check" && (command.kind === "open_hosted_mcp_check_batch" || command.kind === "ack_hosted_mcp_check_batch"));
 }
 
 function hostedClaimInput(value: RequestBody): HostedSeatClaimInput | null {
@@ -13150,6 +13150,349 @@ export async function handleRequest(request: Request): Promise<Response> {
   );
 }
 
+/** Closed internal wire shape for the durable hosted `check` command path. */
+interface HostedCheckCommandInput extends RequestBody {
+  command_id: string;
+  workspace_id: string;
+  stream: { kind: "workspace" };
+  command:
+    | { kind: "open_hosted_mcp_check_batch"; seat: string }
+    | { kind: "ack_hosted_mcp_check_batch"; seat: string; ack: string };
+}
+
+function hostedCheckInput(value: RequestBody): HostedCheckCommandInput | null {
+  const stream = record(value.stream);
+  const command = record(value.command);
+  if (
+    typeof value.command_id !== "string" || !COMMAND_ID_RE.test(value.command_id) ||
+    typeof value.workspace_id !== "string" || !UUID_RE.test(value.workspace_id) ||
+    !stream || !exactKeys(stream, ["kind"]) || stream.kind !== "workspace" ||
+    !command || typeof command.seat !== "string" ||
+    !/^seat_[A-Za-z0-9_-]{22,64}$/u.test(command.seat)
+  ) return null;
+  if (command.kind === "open_hosted_mcp_check_batch") {
+    return exactKeys(command, ["kind", "seat"])
+      ? value as HostedCheckCommandInput
+      : null;
+  }
+  if (command.kind === "ack_hosted_mcp_check_batch") {
+    return exactKeys(command, ["kind", "seat", "ack"]) &&
+        typeof command.ack === "string" && UUID_RE.test(command.ack)
+      ? value as HostedCheckCommandInput
+      : null;
+  }
+  return null;
+}
+
+interface HostedCheckCursorRow {
+  cursor_created_at: Date | null;
+  cursor_signal_id: string | null;
+}
+
+interface HostedCheckBatchRow {
+  batch_id: string;
+  seat_id: string;
+  grant_id: string;
+  workspace_id: string;
+  signal_ids: string[];
+  terminal_created_at: Date;
+  terminal_signal_id: string;
+  acknowledged_at: Date | null;
+}
+
+class HostedCheckRefusal extends Error {
+  constructor(readonly reason: "hosted_check_batch_forbidden") {
+    super(reason);
+    this.name = "HostedCheckRefusal";
+  }
+}
+
+function hostedCheckBatchFact(row: HostedCheckBatchRow | undefined) {
+  return row === undefined ? null : {
+    batch_id: row.batch_id,
+    seat_id: row.seat_id,
+    grant_id: row.grant_id,
+    workspace_id: row.workspace_id,
+    signal_ids: row.signal_ids,
+    terminal_cursor: {
+      created_at: hostedCheckMillisecondTimestamp(row.terminal_created_at),
+      signal_id: row.terminal_signal_id,
+    },
+    acknowledged: row.acknowledged_at !== null,
+  };
+}
+
+async function handleHostedCheck(
+  body: RequestBody,
+  capability: HostedSeatCapability,
+): Promise<HttpResult> {
+  const input = hostedCheckInput(body);
+  if (input === null || hostedCapabilityTool(capability) !== "check") {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  return await db.begin("isolation level read committed", async (tx) => {
+    await setTransaction(tx);
+    const seat = await revalidateHostedSeatCommand(tx, capability);
+    if (seat === null || seat.workspace_id !== input.workspace_id ||
+        seat.handle !== input.command.seat) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+
+    // Serialize every open and ACK for this seat before reading either batch
+    // or cursor state. Two initial opens must not depend on concurrent creation
+    // of the lazily initialized cursor row to establish their first boundary.
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        1936142699,
+        hashtext(${seat.seat_id}::text)
+      )
+    `;
+
+    const ackBatchId = input.command.kind === "ack_hosted_mcp_check_batch"
+      ? input.command.ack.toLowerCase()
+      : null;
+    if (ackBatchId !== null) {
+      const authorizedRequested = await tx<{ batch_id: string }[]>`
+        SELECT batch_id
+        FROM swarm.hosted_mcp_check_batches
+        WHERE batch_id = ${ackBatchId}::uuid
+          AND seat_id = ${seat.seat_id}::uuid
+          AND grant_id = ${seat.grant_id}::uuid
+          AND workspace_id = ${seat.workspace_id}::uuid
+          AND principal_id = ${seat.principal_id}::uuid
+        LIMIT 1
+      `;
+      if (authorizedRequested[0] === undefined) {
+        return {
+          status: 403,
+          body: { error: "hosted_check_batch_forbidden" },
+        };
+      }
+    }
+
+    await tx`
+      INSERT INTO swarm.hosted_mcp_check_cursors (
+        seat_id, grant_id, workspace_id, principal_id,
+        cursor_created_at, cursor_signal_id
+      ) VALUES (
+        ${seat.seat_id}::uuid, ${seat.grant_id}::uuid,
+        ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+        NULL, NULL
+      )
+      ON CONFLICT (seat_id) DO NOTHING
+    `;
+    const cursorRows = await tx<HostedCheckCursorRow[]>`
+      SELECT cursor_created_at, cursor_signal_id
+      FROM swarm.hosted_mcp_check_cursors
+      WHERE seat_id = ${seat.seat_id}::uuid
+        AND grant_id = ${seat.grant_id}::uuid
+        AND workspace_id = ${seat.workspace_id}::uuid
+        AND principal_id = ${seat.principal_id}::uuid
+      FOR UPDATE
+    `;
+    const cursorRow = cursorRows[0];
+    if (cursorRow === undefined) {
+      throw new HostedCheckRefusal("hosted_check_batch_forbidden");
+    }
+
+    // Install the same claims used by hosted reads before touching the shared
+    // security-barrier signal visibility surface.
+    await tx`
+      SELECT set_config(
+        'request.jwt.claims',
+        ${JSON.stringify({
+          sub: seat.owner_user_id,
+          role: "authenticated",
+          agent_principal_id: seat.principal_id,
+        })},
+        true
+      )
+    `;
+
+    const activeRows = await tx<HostedCheckBatchRow[]>`
+      SELECT batch_id, seat_id, grant_id, workspace_id, signal_ids,
+             terminal_created_at, terminal_signal_id, acknowledged_at
+      FROM swarm.hosted_mcp_check_batches
+      WHERE seat_id = ${seat.seat_id}::uuid
+        AND grant_id = ${seat.grant_id}::uuid
+        AND workspace_id = ${seat.workspace_id}::uuid
+        AND principal_id = ${seat.principal_id}::uuid
+        AND acknowledged_at IS NULL
+      LIMIT 1
+      FOR UPDATE
+    `;
+    const requestedRows = ackBatchId !== null
+      ? await tx<HostedCheckBatchRow[]>`
+        SELECT batch_id, seat_id, grant_id, workspace_id, signal_ids,
+               terminal_created_at, terminal_signal_id, acknowledged_at
+        FROM swarm.hosted_mcp_check_batches
+        WHERE batch_id = ${ackBatchId}::uuid
+          AND seat_id = ${seat.seat_id}::uuid
+          AND grant_id = ${seat.grant_id}::uuid
+          AND workspace_id = ${seat.workspace_id}::uuid
+          AND principal_id = ${seat.principal_id}::uuid
+        LIMIT 1
+        FOR UPDATE
+      `
+      : [];
+
+    const command = ackBatchId !== null
+      ? {
+        kind: "ack_hosted_mcp_check_batch" as const,
+        seat_id: seat.seat_id,
+        grant_id: seat.grant_id,
+        workspace_id: seat.workspace_id,
+        batch_id: ackBatchId,
+      }
+      : {
+        kind: "open_hosted_mcp_check_batch" as const,
+        seat_id: seat.seat_id,
+        grant_id: seat.grant_id,
+        workspace_id: seat.workspace_id,
+      };
+    const committedCursor = cursorRow.cursor_created_at === null ||
+        cursorRow.cursor_signal_id === null
+      ? null
+      : {
+        created_at: hostedCheckMillisecondTimestamp(cursorRow.cursor_created_at),
+        signal_id: cursorRow.cursor_signal_id,
+      };
+    const nextBatchId = crypto.randomUUID();
+    const baseFacts = {
+      credential_kind: "hosted_seat" as const,
+      seat_id: seat.seat_id,
+      grant_id: seat.grant_id,
+      workspace_id: seat.workspace_id,
+      committed_cursor: committedCursor,
+      active_batch: hostedCheckBatchFact(activeRows[0]),
+      requested_batch: hostedCheckBatchFact(requestedRows[0]),
+      candidates: [] as Array<{ created_at: string; signal_id: string }>,
+      next_batch_id: nextBatchId,
+    };
+    let decision = decideHostedCheck(command, baseFacts);
+    if (!decision.ok) {
+      throw new HostedCheckRefusal("hosted_check_batch_forbidden");
+    }
+
+    if (decision.return_batch === null) {
+      const effectiveCursor = decision.advance_cursor ?? committedCursor;
+      const candidates = await tx<{ created_at: Date; signal_id: string }[]>`
+        SELECT date_trunc('milliseconds', s.created_at) AS created_at,
+               s.id AS signal_id
+        FROM swarm.hosted_mcp_check_visible_signals(
+          ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid, NULL
+        ) AS s
+        WHERE s.until > statement_timestamp()
+          AND (
+            ${effectiveCursor?.created_at ?? null}::timestamptz IS NULL
+            OR (date_trunc('milliseconds', s.created_at), s.id) >
+               (date_trunc('milliseconds',
+                  ${effectiveCursor?.created_at ?? null}::timestamptz),
+                ${effectiveCursor?.signal_id ?? null}::uuid)
+          )
+        ORDER BY date_trunc('milliseconds', s.created_at), s.id
+        LIMIT ${HOSTED_CHECK_BATCH_LIMIT}
+      `;
+      decision = decideHostedCheck(command, {
+        ...baseFacts,
+        candidates: candidates.map((candidate) => ({
+          created_at: hostedCheckMillisecondTimestamp(candidate.created_at),
+          signal_id: candidate.signal_id,
+        })),
+      });
+      if (!decision.ok) throw new Error("hosted check decision changed after selection");
+    }
+
+    // Test-only rollback hook shared with the command transaction harness.
+    // It fires after the complete decision but before ACK/open persistence.
+    await beforeStep(15);
+
+    const acknowledgeBatchId = decision.acknowledge_batch_id ?? null;
+    const advanceCursor = decision.advance_cursor ?? null;
+    if (acknowledgeBatchId !== null && advanceCursor !== null) {
+      const closed = await tx<{ batch_id: string }[]>`
+        UPDATE swarm.hosted_mcp_check_batches
+        SET acknowledged_at = date_trunc('milliseconds', statement_timestamp())
+        WHERE batch_id = ${acknowledgeBatchId}::uuid
+          AND seat_id = ${seat.seat_id}::uuid
+          AND grant_id = ${seat.grant_id}::uuid
+          AND workspace_id = ${seat.workspace_id}::uuid
+          AND acknowledged_at IS NULL
+        RETURNING batch_id
+      `;
+      if (closed.length !== 1) throw new Error("hosted check ACK lost its locked batch");
+      await tx`
+        UPDATE swarm.hosted_mcp_check_cursors
+        SET cursor_created_at = ${advanceCursor.created_at}::timestamptz,
+            cursor_signal_id = ${advanceCursor.signal_id}::uuid,
+            updated_at = date_trunc('milliseconds', statement_timestamp())
+        WHERE seat_id = ${seat.seat_id}::uuid
+          AND grant_id = ${seat.grant_id}::uuid
+          AND workspace_id = ${seat.workspace_id}::uuid
+          AND principal_id = ${seat.principal_id}::uuid
+      `;
+    }
+
+    const createBatch = decision.create_batch ?? null;
+    if (createBatch !== null) {
+      await tx`
+        INSERT INTO swarm.hosted_mcp_check_batches (
+          batch_id, seat_id, grant_id, workspace_id, principal_id,
+          signal_ids, terminal_created_at, terminal_signal_id
+        ) VALUES (
+          ${createBatch.batch_id}::uuid,
+          ${seat.seat_id}::uuid, ${seat.grant_id}::uuid,
+          ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+          ${createBatch.signal_ids}::uuid[],
+          ${createBatch.terminal_cursor.created_at}::timestamptz,
+          ${createBatch.terminal_cursor.signal_id}::uuid
+        )
+      `;
+    }
+
+    const batch = decision.return_batch;
+    if (batch === null) {
+      return { status: 200, body: {
+        batch_id: null,
+        signals: [],
+        cursor: advanceCursor ?? committedCursor,
+        acknowledged_batch_id: acknowledgeBatchId,
+      } };
+    }
+    const signals = await tx<Record<string, unknown>[]>`
+      SELECT
+        s.id, s.workspace_id, s."from", s.from_kind, s."to",
+        s.about, s.kind, s.body, s.until,
+        date_trunc('milliseconds', s.created_at) AS created_at,
+        s.to_agent, s.in_reply_to, s.reply_status, s.chain_hop,
+        s.attachments, s.channel_id, s.thread_root_id,
+        s.broadcast_to_channel, s.recipients
+      FROM swarm.hosted_mcp_check_visible_signals(
+        ${seat.workspace_id}::uuid, ${seat.principal_id}::uuid,
+        ${batch.signal_ids}::uuid[]
+      ) AS s
+      ORDER BY array_position(${batch.signal_ids}::uuid[], s.id)
+    `;
+    if (signals.length !== batch.signal_ids.length) {
+      throw new Error("hosted check replay visibility changed for recorded ids");
+    }
+    return { status: 200, body: {
+      batch_id: batch.batch_id,
+      signals,
+      cursor: batch.terminal_cursor,
+      acknowledged_batch_id: acknowledgeBatchId,
+    } };
+  }).then(
+    (result) => result,
+    (error: unknown) => {
+      if (error instanceof HostedCheckRefusal) {
+        return { status: 403, body: { error: error.reason } };
+      }
+      throw error;
+    },
+  );
+}
+
 /**
  * Internal hosted entry point. It accepts parsed input and an opaque capability,
  * never a Request, header, cookie, bearer, or GoTrue session.
@@ -13164,6 +13507,9 @@ export async function handleHostedCommand(
   const tool = hostedCapabilityTool(capability);
   if (!hostedToolAllowsCommand(tool, input)) {
     return { status: 403, body: { error: "forbidden" } };
+  }
+  if (tool === "check") {
+    return await handleHostedCheck(input, capability);
   }
   return await handleTransaction(
     input,
