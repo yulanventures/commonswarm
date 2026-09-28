@@ -218,6 +218,38 @@ test("every release runbook shell block is labelled and parses with macOS Bash 3
   assert.match(releaseRunbook(), /RELEASE_DIR_STATE=%s\\n.*RELEASE_DIR_RESULT/s);
 });
 
+test("every edge and stack recreate saves a bounded outgoing container log for copy-back", () => {
+  const runbook = releaseRunbook();
+  const cases = [
+    ["runbook-32", 'save_outgoing_container_logs commonswarm-edge-edge-runtime-1 "$PREVIOUS_EDGE"'],
+    ["runbook-42", 'save_outgoing_container_logs commonswarm-edge-edge-runtime-1 "$OUTGOING_EDGE"'],
+    ["runbook-49", 'save_outgoing_container_logs "$STACK_CONTAINER" "$PREVIOUS_STACK"'],
+    ["runbook-53", 'save_outgoing_container_logs "$STACK_CONTAINER" "$NEW_STACK"'],
+  ] as const;
+
+  for (const [step, expectedCall] of cases) {
+    const block = runbookShellBlock(runbook, step);
+    const captureAt = block.indexOf("docker logs --timestamps");
+    const recreateAt = block.indexOf("docker compose");
+    assert.ok(captureAt >= 0, `${step} has no outgoing log capture`);
+    assert.ok(recreateAt > captureAt, `${step} captures logs after recreate`);
+    assert.match(block, /LOG_MAX_BYTES=10485760/);
+    assert.match(block, /\{ docker logs --timestamps "\$CONTAINER_NAME" 2>&1 \|\| true; \}/);
+    assert.match(block, /tail -c "\$LOG_MAX_BYTES" >"\$LOG_PATH"/);
+    assert.match(block, /install -m 0600 -o root -g root \/dev\/null "\$LOG_PATH"/);
+    assert.match(block, /LOG_NAME="\$\{CONTAINER_NAME\}\.\$\{OUTGOING_SHA\}\.docker\.log"/);
+    assert.match(block, /printf '%s\\n' "\$LOG_NAME" >>"\$PROOF_DIR\/copy-back\.list"/);
+    assert.ok(block.includes(expectedCall), `${step} uses the wrong outgoing release`);
+  }
+
+  const copyBack = runbookShellBlock(runbook, "runbook-11");
+  assert.match(copyBack, /commonswarm-edge-edge-runtime-1\|commonswarm-postgres/);
+  assert.match(copyBack, /case "\$LOG_SHA" in \(\*\[!0-9a-f\]\*\|'\'\) false/);
+  assert.match(copyBack, /test "\$\{#LOG_SHA\}" -eq 40/);
+  assert.match(copyBack, /wc -c .* -le 10485760/);
+  assert.match(copyBack, /\*\.log\) false/);
+});
+
 const repoFile = (relative: string): string =>
   readFileSync(new URL(`../${relative}`, import.meta.url), "utf8");
 

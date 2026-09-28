@@ -60,6 +60,31 @@
 api.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 
+	log {
+		output file /var/log/caddy/api.commonswarm.com.access.log {
+			mode 0600
+			roll_size 10MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			request>uri regexp "\?.*$" ""
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			request>headers>Set-Cookie delete
+			request>headers>Proxy-Authorization delete
+			request>headers>Apikey delete
+			request>headers>apikey delete
+			resp_headers>Authorization delete
+			resp_headers>Cookie delete
+			resp_headers>Set-Cookie delete
+			resp_headers>Proxy-Authorization delete
+			resp_headers>Apikey delete
+			resp_headers>apikey delete
+			wrap json
+		}
+	}
+
 	@maintenance_preflight method OPTIONS
 	handle @maintenance_preflight {
 		header Access-Control-Allow-Origin "*"

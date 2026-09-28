@@ -14,6 +14,7 @@ const [
   migrationEnvExample,
   caddy,
   maintenanceCaddy,
+  mcpCaddy,
   runtimeRoles,
   prepareTarget,
   dumpSource,
@@ -35,6 +36,7 @@ const [
   readFile(join(stackDir, "migration.env.example"), "utf8"),
   readFile(join(stackDir, "commonswarm-api.caddy"), "utf8"),
   readFile(join(stackDir, "commonswarm-api-maintenance.caddy"), "utf8"),
+  readFile(join(stackDir, "commonswarm-mcp.caddy"), "utf8"),
   readFile(join(stackDir, "postgres", "10-runtime-roles.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "prepare-target.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "dump-source.sh"), "utf8"),
@@ -509,6 +511,67 @@ test("live and maintenance Caddy files keep the box route frame", () => {
   assert.match(
     maintenanceProblems(maintenanceCaddy.replace('header Retry-After "300"\n', "")).join("\n"),
     /maintenance retry/,
+  );
+});
+
+const ACCESS_LOG_HEADERS = [
+  "Authorization",
+  "Cookie",
+  "Set-Cookie",
+  "Proxy-Authorization",
+  "Apikey",
+] as const;
+
+function accessLogProblems(source: string, fileName: string): string[] {
+  const errors: string[] = [];
+  if (!source.includes(`output file /var/log/caddy/${fileName}.access.log {`)) {
+    errors.push("access log file");
+  }
+  if (!source.includes("mode 0600")) errors.push("access log mode");
+  if (!source.includes("roll_size 10MiB")) errors.push("access log roll size");
+  if (!source.includes("roll_keep 10")) errors.push("access log roll count");
+  if (!source.includes("roll_keep_for 720h")) errors.push("access log roll age");
+  if (!source.includes('request>uri regexp "\\?.*$" ""')) errors.push("access log query removal");
+  if (!source.includes("wrap json")) errors.push("access log JSON");
+  if (source.includes("output discard")) errors.push("access log discarded");
+  for (const location of ["request>headers", "resp_headers"]) {
+    for (const header of ACCESS_LOG_HEADERS) {
+      if (!source.includes(`${location}>${header} delete`)) {
+        errors.push(`access log exposes ${location}>${header}`);
+      }
+    }
+    if (!source.includes(`${location}>apikey delete`)) {
+      errors.push(`access log exposes lowercase ${location}>apikey`);
+    }
+  }
+  for (const required of ["request>method", "status", "duration", "size", "ts"]) {
+    if (source.includes(`${required} delete`)) errors.push(`access log deletes ${required}`);
+  }
+  return errors;
+}
+
+test("API, maintenance, and MCP access logs are bounded JSON without credentials or queries", () => {
+  const { publicSite } = maintenanceSites(maintenanceCaddy);
+  const sites = [
+    ["live API", caddy, "api.commonswarm.com"],
+    ["maintenance API", publicSite, "api.commonswarm.com"],
+    ["MCP", mcpCaddy, "mcp.commonswarm.com"],
+  ] as const;
+  for (const [name, source, fileName] of sites) {
+    assert.deepEqual(accessLogProblems(source, fileName), [], name);
+  }
+
+  assert.match(
+    accessLogProblems(caddy.replace('request>uri regexp "\\?.*$" ""', ""), "api.commonswarm.com").join("\n"),
+    /query removal/,
+  );
+  assert.match(
+    accessLogProblems(caddy.replace("request>headers>Authorization delete", ""), "api.commonswarm.com").join("\n"),
+    /Authorization/,
+  );
+  assert.match(
+    accessLogProblems(caddy.replace("roll_size 10MiB", ""), "api.commonswarm.com").join("\n"),
+    /roll size/,
   );
 });
 

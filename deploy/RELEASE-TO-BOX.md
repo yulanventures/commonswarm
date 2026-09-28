@@ -156,8 +156,10 @@ switch, or the section 8 backup-status proof. Add exact relative paths from the
 item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
-under `database/logs/`. The manifest is built only from the explicit arrays
-below, never from `find`:
+under `database/logs/`. The edge and stack recreate steps append only their
+bounded `<container>.<release-sha>.docker.log` files after capturing them. The
+initial manifest is built only from the explicit arrays below, never from
+`find`:
 
 ```sh
 # step: runbook-03
@@ -777,8 +779,10 @@ commits that evidence afterwards; the evidence must contain no secrets and no
 complete environment file. Use only the root-owned `copy-back.list` created by
 the section 1 preflight block. It includes itself and the applicable standard
 evidence plus the exact item-specific paths from the box plan. Logs are never
-copied because they may contain request data. If the list is missing at
-copy-back time, stop and ask HezLead; do not reconstruct it from the directory.
+copied because they may contain request data, except for the bounded outgoing
+container logs that the edge and stack recreate steps append by exact name. If
+the list is missing at copy-back time, stop and ask HezLead; do not reconstruct
+it from the directory.
 Before copying, remove any EMPTY `*.err` file in `$PROOF_DIR`
 (for example an empty `functional.err`); a non-empty `.err` file is evidence:
 the copy-back block appends its exact basename to the existing manifest and
@@ -816,9 +820,25 @@ reports each one.
     test -n "$path"
     while [[ "$path" == ./* ]]; do path="${path#./}"; done
     case "$path" in
-      ''|/*|../*|*/../*|*.log|database/logs/*|*/database/logs/*|window.env|*/window.env) false ;;
+      ''|/*|../*|*/../*|database/logs/*|*/database/logs/*|window.env|*/window.env) false ;;
+      *.docker.log)
+        LOG_CONTAINER="${path%%.*}"
+        LOG_SHA="${path#*.}"
+        LOG_SHA="${LOG_SHA%.docker.log}"
+        case "$LOG_CONTAINER" in
+          commonswarm-edge-edge-runtime-1|commonswarm-postgres|commonswarm-gotrue|commonswarm-postgrest|commonswarm-realtime|commonswarm-storage-api) ;;
+          *) false ;;
+        esac
+        case "$LOG_SHA" in (*[!0-9a-f]*|'') false ;; esac
+        test "${#LOG_SHA}" -eq 40
+        ;;
+      *.log) false ;;
     esac
     test -f "$PROOF_DIR/$path"
+    if [[ "$path" == *.docker.log ]]; then
+      test "$(stat -c '%U:%G:%a' "$PROOF_DIR/$path")" = root:root:600
+      test "$(wc -c <"$PROOF_DIR/$path")" -le 10485760
+    fi
   done <"$PROOF_DIR/copy-back.list"
   tar -C "$PROOF_DIR" -cf - -T "$PROOF_DIR/copy-back.list"
 )
@@ -1675,7 +1695,30 @@ URL alias satisfies the database requirement. The check never prints a value.
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -n "$PREVIOUS_EDGE"
+
+  save_outgoing_container_logs() {
+    CONTAINER_NAME="$1"
+    RELEASE_DIR="$2"
+    LOG_MAX_BYTES=10485760
+    OUTGOING_SHA="$(cat "$RELEASE_DIR/RELEASE_SHA")"
+    case "$OUTGOING_SHA" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#OUTGOING_SHA}" -eq 40
+    LOG_NAME="${CONTAINER_NAME}.${OUTGOING_SHA}.docker.log"
+    LOG_PATH="$PROOF_DIR/$LOG_NAME"
+    install -m 0600 -o root -g root /dev/null "$LOG_PATH"
+    { docker logs --timestamps "$CONTAINER_NAME" 2>&1 || true; } \
+      | tail -c "$LOG_MAX_BYTES" >"$LOG_PATH"
+    chmod 0600 "$LOG_PATH"
+    test "$(stat -c '%U:%G:%a' "$LOG_PATH")" = root:root:600
+    test "$(wc -c <"$LOG_PATH")" -le "$LOG_MAX_BYTES"
+    if ! grep -qFx "$LOG_NAME" "$PROOF_DIR/copy-back.list"; then
+      printf '%s\n' "$LOG_NAME" >>"$PROOF_DIR/copy-back.list"
+    fi
+  }
+
+  save_outgoing_container_logs commonswarm-edge-edge-runtime-1 "$PREVIOUS_EDGE"
   ln -sfn "$NEW_EDGE" /home/commonswarm/edge/current
   cd "$NEW_EDGE/deploy/edge-runtime"
   sudo -u commonswarm env \
@@ -1919,7 +1962,32 @@ successful release:
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -n "$PREVIOUS_EDGE"
+
+  save_outgoing_container_logs() {
+    CONTAINER_NAME="$1"
+    RELEASE_DIR="$2"
+    LOG_MAX_BYTES=10485760
+    OUTGOING_SHA="$(cat "$RELEASE_DIR/RELEASE_SHA")"
+    case "$OUTGOING_SHA" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#OUTGOING_SHA}" -eq 40
+    LOG_NAME="${CONTAINER_NAME}.${OUTGOING_SHA}.docker.log"
+    LOG_PATH="$PROOF_DIR/$LOG_NAME"
+    install -m 0600 -o root -g root /dev/null "$LOG_PATH"
+    { docker logs --timestamps "$CONTAINER_NAME" 2>&1 || true; } \
+      | tail -c "$LOG_MAX_BYTES" >"$LOG_PATH"
+    chmod 0600 "$LOG_PATH"
+    test "$(stat -c '%U:%G:%a' "$LOG_PATH")" = root:root:600
+    test "$(wc -c <"$LOG_PATH")" -le "$LOG_MAX_BYTES"
+    if ! grep -qFx "$LOG_NAME" "$PROOF_DIR/copy-back.list"; then
+      printf '%s\n' "$LOG_NAME" >>"$PROOF_DIR/copy-back.list"
+    fi
+  }
+
+  OUTGOING_EDGE="$(readlink -f /home/commonswarm/edge/current)"
+  test -n "$OUTGOING_EDGE"
+  save_outgoing_container_logs commonswarm-edge-edge-runtime-1 "$OUTGOING_EDGE"
   ln -sfn "$PREVIOUS_EDGE" /home/commonswarm/edge/current
   cd "$PREVIOUS_EDGE/deploy/edge-runtime"
   sudo -u commonswarm env \
@@ -2183,10 +2251,42 @@ time**. Do not issue a full-stack `up` for an image-only release.
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
+  STACK_SERVICE='<stack-service>'
+  case "$STACK_SERVICE" in
+    postgres) STACK_CONTAINER=commonswarm-postgres ;;
+    gotrue) STACK_CONTAINER=commonswarm-gotrue ;;
+    postgrest) STACK_CONTAINER=commonswarm-postgrest ;;
+    realtime) STACK_CONTAINER=commonswarm-realtime ;;
+    storage-api) STACK_CONTAINER=commonswarm-storage-api ;;
+    *) false ;;
+  esac
   test "$(readlink -f /home/commonswarm/stack/current)" = "$NEW_STACK"
+
+  save_outgoing_container_logs() {
+    CONTAINER_NAME="$1"
+    RELEASE_DIR="$2"
+    LOG_MAX_BYTES=10485760
+    OUTGOING_SHA="$(cat "$RELEASE_DIR/RELEASE_SHA")"
+    case "$OUTGOING_SHA" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#OUTGOING_SHA}" -eq 40
+    LOG_NAME="${CONTAINER_NAME}.${OUTGOING_SHA}.docker.log"
+    LOG_PATH="$PROOF_DIR/$LOG_NAME"
+    install -m 0600 -o root -g root /dev/null "$LOG_PATH"
+    { docker logs --timestamps "$CONTAINER_NAME" 2>&1 || true; } \
+      | tail -c "$LOG_MAX_BYTES" >"$LOG_PATH"
+    chmod 0600 "$LOG_PATH"
+    test "$(stat -c '%U:%G:%a' "$LOG_PATH")" = root:root:600
+    test "$(wc -c <"$LOG_PATH")" -le "$LOG_MAX_BYTES"
+    if ! grep -qFx "$LOG_NAME" "$PROOF_DIR/copy-back.list"; then
+      printf '%s\n' "$LOG_NAME" >>"$PROOF_DIR/copy-back.list"
+    fi
+  }
+
+  save_outgoing_container_logs "$STACK_CONTAINER" "$PREVIOUS_STACK"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" \
-    up -d --no-deps '<stack-service>'
+    up -d --no-deps "$STACK_SERVICE"
 )
 ```
 
@@ -2259,11 +2359,43 @@ the only reverse symlink switch and restores the saved installed units.
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  STACK_SERVICE='<stack-service>'
+  case "$STACK_SERVICE" in
+    postgres) STACK_CONTAINER=commonswarm-postgres ;;
+    gotrue) STACK_CONTAINER=commonswarm-gotrue ;;
+    postgrest) STACK_CONTAINER=commonswarm-postgrest ;;
+    realtime) STACK_CONTAINER=commonswarm-realtime ;;
+    storage-api) STACK_CONTAINER=commonswarm-storage-api ;;
+    *) false ;;
+  esac
   test -n "$PREVIOUS_STACK"
   test "$(readlink -f /home/commonswarm/stack/current)" = "$PREVIOUS_STACK"
+
+  save_outgoing_container_logs() {
+    CONTAINER_NAME="$1"
+    RELEASE_DIR="$2"
+    LOG_MAX_BYTES=10485760
+    OUTGOING_SHA="$(cat "$RELEASE_DIR/RELEASE_SHA")"
+    case "$OUTGOING_SHA" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#OUTGOING_SHA}" -eq 40
+    LOG_NAME="${CONTAINER_NAME}.${OUTGOING_SHA}.docker.log"
+    LOG_PATH="$PROOF_DIR/$LOG_NAME"
+    install -m 0600 -o root -g root /dev/null "$LOG_PATH"
+    { docker logs --timestamps "$CONTAINER_NAME" 2>&1 || true; } \
+      | tail -c "$LOG_MAX_BYTES" >"$LOG_PATH"
+    chmod 0600 "$LOG_PATH"
+    test "$(stat -c '%U:%G:%a' "$LOG_PATH")" = root:root:600
+    test "$(wc -c <"$LOG_PATH")" -le "$LOG_MAX_BYTES"
+    if ! grep -qFx "$LOG_NAME" "$PROOF_DIR/copy-back.list"; then
+      printf '%s\n' "$LOG_NAME" >>"$PROOF_DIR/copy-back.list"
+    fi
+  }
+
+  save_outgoing_container_logs "$STACK_CONTAINER" "$NEW_STACK"
   docker compose -p commonswarm-supabase-stack \
     --project-directory "$PREVIOUS_STACK/deploy/supabase-stack" \
-    up -d --no-deps '<stack-service>'
+    up -d --no-deps "$STACK_SERVICE"
 )
 ```
 
