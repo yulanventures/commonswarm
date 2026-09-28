@@ -1,0 +1,17 @@
+{
+    "format": "commonswarm-backup-v1",
+    "destination": "r2:yulan-vps-1-backups/000-commonswarm-postgres/20260928T132631Z-b430d1c24c364e2290cec1917c677238",
+    "objects": 835,
+    "retention_policy_observed_at": "2026-09-18T00:13:29.059720+00:00",
+    "retention_days": 35,
+    "immutable_bucket_lock": false,
+    "host_snapshot_before": "20260928T031501Z",
+    "source_bucket": "commonswarm-files",
+    "physical_key_format": "commonswarm/{bucket}/{name}/{version}",
+    "host_snapshot_after": "20260928T031501Z",
+    "verified_at": "2026-09-28T13:32:10.878109+00:00",
+    "database_bytes_verified": true,
+    "object_bytes_verified": true,
+    "ok": true,
+    "invocation_id": "2aca04266ec8461fb09d11e358ca5e8f"
+}

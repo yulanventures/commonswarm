@@ -1,0 +1,4 @@
+actual_container_ca_mode=644
+actual_container_ca_readable=true
+config_permission_predicate=false
+result=STOP before secret provisioning, database authentication, or HTTP start

@@ -1,0 +1,5 @@
+NEXT                          LEFT LAST                              PASSED UNIT                               ACTIVATES
+Tue 2026-09-29 03:45:49 UTC    14h Mon 2026-09-28 03:49:10 UTC       9h ago commonswarm-postgres-backup.timer  commonswarm-postgres-backup.service
+Sun 2026-10-04 04:49:04 UTC 5 days Sun 2026-09-27 04:45:35 UTC 1 day 8h ago commonswarm-postgres-restore.timer commonswarm-postgres-restore.service
+
+2 timers listed.

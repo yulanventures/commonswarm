@@ -7,9 +7,9 @@ OAuth unit/security tests: PASS
 PostgreSQL adapter/refresh/consent tests and tests/p1-server/oauth-store.test.ts: PASS
 Docker acceptance and routing checks: PASS
 Backup/restore coverage checks: PASS
-plan sha256 11248b75e510adb732d1e843c3e927b190e70aa347da30ed44ee7fa8cfcf9270: PASS
+plan sha256 06713dd0f00ee209cfd7636825c4169e5b0889fc8df573ce620efbf5409e6fd3: PASS
 plan step inventory 18/18 unique: PASS
 plan redaction-marker refusal check: PASS
-plan Python block compilation 9/9: PASS
+plan Python block compilation 12/12: PASS
 independent security review: PASS, no KEEP
 independent operations review: PASS, no KEEP

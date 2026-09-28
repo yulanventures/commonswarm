@@ -1,0 +1,19 @@
+{
+  "release_sha": "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+  "local_image_id": "sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7",
+  "built_image_id": "sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7",
+  "base_reference": "node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
+  "base_digest": "sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
+  "base_image_id": "sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c",
+  "base_layer_count": 5,
+  "base_layer_prefix_verified": true,
+  "fresh_build_completed": true,
+  "old_image_retained": true,
+  "fresh_build_matches_old_id": false,
+  "dockerfile_sha256": "02c355aafe8b90ffd6e1c7bb636f60d5d5ca7850e15b7b1c5543fb558484a66a",
+  "package_lock_sha256": "08da8a06cb5723641bca72967cbad5e52b0b91d29cf29b459d1bad496a1be1bd",
+  "os": "linux",
+  "architecture": "amd64",
+  "build_secrets": false,
+  "application_registry_used": false
+}

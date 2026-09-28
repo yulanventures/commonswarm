@@ -1,5 +1,4 @@
-pass=true
-verified_at=2026-09-28T08:14:08.086032+00:00
-maximum_age_seconds=21600
-age_seconds_at_gate=16067
-destination=r2:yulan-vps-1-backups/000-commonswarm-postgres/20260928T080836Z-4f7db51b612449228877b1c0ed4eaf40
+pre_migration_backup=PASS
+verified_at=2026-09-28T13:16:50.805929+00:00
+age_seconds=17
+destination_prefix_ok=true

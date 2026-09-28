@@ -1,0 +1,14 @@
+window_result=stopped-on-runtime-ca-permission-precondition
+stack_current=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
+edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+migration_20260928000003_ledger=1
+migration_20260928000003_catalog=t
+migration_20260928000004_ledger=0
+migration_20260928000004_catalog=f
+oauth_service_started=false
+oauth_current_present=false
+gotrue_changed=false
+dns_created=false
+caddy_changed=false
+backup_timers_active=true
+edge_recycle_timer_active=true

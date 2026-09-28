@@ -1,0 +1,10 @@
+ExecStartPre={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py backup start ; ignore_errors=yes ; start_time=[Mon 2026-09-28 13:11:00 UTC] ; stop_time=[Mon 2026-09-28 13:11:00 UTC] ; pid=524881 ; code=exited ; status=0 }
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /home/commonswarm/stack/current/deploy/supabase-stack/backup/run-backup.sh ; ignore_errors=no ; start_time=[Mon 2026-09-28 13:11:00 UTC] ; stop_time=[Mon 2026-09-28 13:16:53 UTC] ; pid=524882 ; code=exited ; status=0 }
+ExecStopPost={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py backup finish ; ignore_errors=no ; start_time=[Mon 2026-09-28 13:16:53 UTC] ; stop_time=[Mon 2026-09-28 13:16:53 UTC] ; pid=531628 ; code=exited ; status=0 }
+FragmentPath=/etc/systemd/system/commonswarm-postgres-backup.service
+DropInPaths=
+ExecStartPre={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py restore start ; ignore_errors=yes ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+ExecStart={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/restore-drill.py ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+ExecStopPost={ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /home/commonswarm/stack/current/deploy/supabase-stack/backup/notify-healthcheck.py restore finish ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }
+FragmentPath=/etc/systemd/system/commonswarm-postgres-restore.service
+DropInPaths=
