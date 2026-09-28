@@ -1,0 +1,7 @@
+./20260928000002-catalog.sql
+./20260928000002-functional.sql
+./20260928000002-rollback-catalog.sql
+./20260928000002-rollback.sql
+gate-evidence.txt
+required-edge-env.json
+edge-env-source-check.txt

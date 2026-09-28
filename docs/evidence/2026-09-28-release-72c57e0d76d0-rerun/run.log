@@ -1,0 +1,15 @@
+2026-09-28T04:09:25Z rerun=2 plan-sha256=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb expected=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb result=PASS
+2026-09-28T04:09:25Z approval release_sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 reviewed=codex-plan+antigravity-PASS-no-KEEP backup_max_age=22h
+2026-09-28T04:09:25Z surfaces KIND_LIST=edge+stack CHANGED_FUNCTIONS=command+read ROUTER_CHANGED=yes ADDITIONAL_REQUIRED_ENV_NAMES=empty migration=20260928000002 no-npm-publish no-site no-mcp-auth no-stack-switch
+2026-09-28T04:09:25Z router-change dark-mcp-entry recognizes mcp and refuses POST+OPTIONS with 503 feature_disabled before worker creation; ten optional SWARM_MCP_* forwarded names; no mcp-auth deploy
+2026-09-28T04:09:25Z window start=2026-09-28T04:09:25Z end=2026-09-28T08:09:25Z
+2026-09-28T04:09:25Z exact-sha gates reused from immediately preceding stopped window command-core=PASS check-edge=PASS; server-suite=314/315 known-item-L-only; GitHub trailer+identity checks=PASS
+2026-09-28T04:09:25Z env-inventory PASS router-changed=yes selected=command,read,capability,activity,h0,mcp values=not-shown
+2026-09-28T04:09:25Z section1 rerun immutable edge+stack directories byte-verified and reused; prior root proof directory preserved; fresh proof directory and window.env created
+2026-09-28T04:13:06Z section1-verify PASS stack-runtime-unchanged=yes proof-transfer=PASS
+2026-09-28T04:13:06Z section2-verify PASS section3-session PASS
+2026-09-28T04:15:14Z local-control STOP principal-create=principal_name_taken name=hm2-local-0928 principals-created=0
+2026-09-28T04:15:14Z stop-reason plan requires stop on duplicate-name refusal and forbids silent principal substitution
+2026-09-28T04:15:14Z release transition NOT-RUN migration-decision=no migration-apply=no migration-verify=no functional=no cron-after=no edge-apply=no edge-probes=no post-release-controls=no revokes=no
+2026-09-28T04:15:14Z abort cleanup PASS timers=edge-recycle:active,backup:active,restore:active edge-current=9b085c82352390cf8f0fe515c02b3ccff423476a stack-current=e38b499fc29a01935333e38f66c4e68ac7e1f81e
+2026-09-28T04:15:14Z transient-database-cleanup PASS copy-back=NOT-RUN-incomplete-artifacts failed-control-root=preserved Mac-window-file=removed
