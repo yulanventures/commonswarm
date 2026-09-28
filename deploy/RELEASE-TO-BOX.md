@@ -62,6 +62,7 @@ every minting step. The box's GNU `date` computes it once from the approved
 `WINDOW_START_UTC` written to `window.env`:
 
 ```sh
+# step: runbook-01
 WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
 ```
 
@@ -88,8 +89,9 @@ used.
    both `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
 ```sh
+# step: runbook-02
 rm -f "$HOME/.commonswarm-release-window.env"
-SHA=<sha>
+SHA='<sha>'
 (
   set -euo pipefail
   check() {
@@ -158,9 +160,10 @@ under `database/logs/`. The manifest is built only from the explicit arrays
 below, never from `find`:
 
 ```sh
+# step: runbook-03
 (
   set -euo pipefail
-  SHA=<sha>
+  SHA='<sha>'
   KIND_LIST='<edge|stack|edge stack>'
   H0_LEDGER_BACKFILL='<yes-or-no>'
   GUARDED_STACK_SWITCH='<yes-or-no>'
@@ -199,6 +202,7 @@ below, never from `find`:
     *' edge '*)
       COPY_BACK_FILES+=(
         edge.SHA256SUMS
+        edge.release-dir-state.txt
         edge-with-override.SHA256SUMS
         required-edge-env.json
         edge-env-source-check.txt
@@ -208,7 +212,7 @@ below, never from `find`:
       ;;
   esac
   case " $KIND_LIST " in
-    *' stack '*) COPY_BACK_FILES+=(stack.SHA256SUMS) ;;
+    *' stack '*) COPY_BACK_FILES+=(stack.SHA256SUMS stack.release-dir-state.txt) ;;
   esac
   if [ "$H0_LEDGER_BACKFILL" = yes ]; then
     COPY_BACK_FILES+=(h0-ledger-before.txt h0-ledger-after.txt)
@@ -276,17 +280,19 @@ reviewed diff; a router change checks all six prepared function names, including
 the dark `mcp` name:
 
 ```sh
+# step: runbook-04
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
-  trap 'status=$?; rm -rf "$ROUTER_DIR"; exit "$status"' EXIT
+  case "$ROUTER_DIR" in /tmp/commonswarm-router-??????) ;; *) false ;; esac
+  trap 'status=$?; find "$ROUTER_DIR" -depth -delete; exit "$status"' EXIT
   ROUTER_SOURCE="$ROUTER_DIR/router.ts"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts >"$ROUTER_SOURCE"
   CHANGED_FUNCTIONS='<space-separated changed function names>'
-  ROUTER_CHANGED=<yes-or-no>
+  ROUTER_CHANGED='<yes-or-no>'
   ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
   if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0 mcp'; fi
   case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
@@ -339,6 +345,7 @@ runs only if stack runtime files changed. After the apply block below builds
 both release directories, compare them on the box before deciding:
 
 ```sh
+# step: runbook-05
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -362,30 +369,64 @@ switch. A missing path or comparison error is a stop. H0 does not switch
 
 On 2026-09-22 HezLead observed that edge release directories are owned by
 `commonswarm:commonswarm` with mode `0750`, while stack release directories use
-mode `0755`. The block records both previous release paths before any switch,
-creates the releases, and writes the durable window state. Set the approved UTC
-window start and end once in this block; every later box block reads them from
-`window.env`.
+mode `0755`. The block records both previous release paths before any switch and
+writes the durable window state. A missing release directory is created exactly
+as before. An existing directory is never extracted over, deleted, repaired, or
+otherwise changed: the block reuses it only after matching its full `RELEASE_SHA`,
+archive file hashes, complete path inventory and count, symlink targets and
+containment, owner, group, and modes. A mismatch is a stop. The same verifier is
+used for both the edge and stack release directories.
+
+`RELEASE_DIR_STATE` in `window.env` is `created` or `reused` when all requested
+surfaces have that state, and `mixed` when one was created and the other reused.
+`EDGE_RELEASE_DIR_STATE` and `STACK_RELEASE_DIR_STATE` preserve each requested
+surface's exact state; an unrequested surface is `not-requested`. The proof
+directory also holds `edge.release-dir-state.txt` or
+`stack.release-dir-state.txt`, each containing the corresponding
+`RELEASE_DIR_STATE=created` or `RELEASE_DIR_STATE=reused` result.
+
+A diagnostic-only window runs section 1's preflight, copy-back manifest, archive
+upload/apply, release verification, proof transfer/copy-back, and abort cleanup,
+then the Mac cleanup, plus only the read-only diagnostic blocks named in its
+approved plan. It skips the mutation and switch steps in sections 2 through 8.
+Its section 1 apply uses the reviewed existing release through the `reused`
+path; a diagnostic-only window never needs a fresh release directory.
+
+Set the approved UTC window start and end once in this block; every later box
+block reads them from `window.env`.
 
 ```sh
+# step: 1-upload-release-archive
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   test -s "$ARCHIVE"
   scp "$ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release.tar
 )
+```
+
+Open a root shell on the box:
+
+```sh
+# step: 1-open-root-shell
 ssh ops@100.115.66.74
 sudo -n -i
+```
 
+Then prepare or verify each requested immutable release directory and write the
+window state:
+
+```sh
+# step: 1-apply-release-directories
 (
   set -euo pipefail
-  SHA=<sha>
+  SHA='<sha>'
   KIND_LIST='<edge|stack|edge stack>'
   WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   ARCHIVE=/tmp/commonswarm-release.tar
-  EXPECTED_ARCHIVE_SHA256=<sha256-from-Mac-evidence>
+  EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   NEW_EDGE="/home/commonswarm/edge/releases/${SHA}"
   NEW_STACK="/home/commonswarm/stack/releases/${SHA}"
@@ -410,6 +451,13 @@ sudo -n -i
   WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
   RECYCLE_TIMER_STOPPED=0
   BACKUP_TIMERS_STOPPED=0
+  RELEASE_DIR_STATE=''
+  EDGE_RELEASE_DIR_STATE=not-requested
+  STACK_RELEASE_DIR_STATE=not-requested
+  RELEASE_OWNER=commonswarm
+  RELEASE_GROUP=commonswarm
+  PROOF_OWNER=root
+  PROOF_GROUP=root
   for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
 
   install -d -m 0700 -o root -g root "$PROOF_DIR"
@@ -417,24 +465,197 @@ sudo -n -i
   BOX_ARCHIVE_LINE="$(cat "$PROOF_DIR/box-archive.sha256")"
   test "${BOX_ARCHIVE_LINE%% *}" = "$EXPECTED_ARCHIVE_SHA256"
 
-  for KIND in $KIND_LIST; do
-    if [ "$KIND" = edge ]; then
-      RELEASE_DIR="$NEW_EDGE"
-      RELEASE_MODE=0750
+  prepare_release_directory() {
+    KIND="$1"
+    RELEASE_DIR="$2"
+    RELEASE_MODE="$3"
+    if [ ! -e "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ]; then
+      RELEASE_DIR_RESULT=created
+      install -d -m "$RELEASE_MODE" -o "$RELEASE_OWNER" -g "$RELEASE_GROUP" "$RELEASE_DIR"
+      tar -xf "$ARCHIVE" -C "$RELEASE_DIR"
+      APPLEDOUBLE="$(find "$RELEASE_DIR" -name '._*' -print -quit)"
+      test -z "$APPLEDOUBLE"
+      printf '%s\n' "$SHA" >"$RELEASE_DIR/RELEASE_SHA"
+      chmod 0644 "$RELEASE_DIR/RELEASE_SHA"
+      chown -R "$RELEASE_OWNER:$RELEASE_GROUP" "$RELEASE_DIR"
+      chmod "$RELEASE_MODE" "$RELEASE_DIR"
     else
-      RELEASE_DIR="$NEW_STACK"
-      RELEASE_MODE=0755
+      RELEASE_DIR_RESULT=reused
     fi
-    test ! -e "$RELEASE_DIR"
-    install -d -m "$RELEASE_MODE" -o commonswarm -g commonswarm "$RELEASE_DIR"
-    tar -xf "$ARCHIVE" -C "$RELEASE_DIR"
-    APPLEDOUBLE="$(find "$RELEASE_DIR" -name '._*' -print -quit)"
-    test -z "$APPLEDOUBLE"
-    printf '%s\n' "$SHA" >"$RELEASE_DIR/RELEASE_SHA"
-    chown -R commonswarm:commonswarm "$RELEASE_DIR"
-    chmod "$RELEASE_MODE" "$RELEASE_DIR"
+
+    export ARCHIVE RELEASE_DIR RELEASE_MODE SHA RELEASE_OWNER RELEASE_GROUP
+    python3 - <<'PY'
+import hashlib
+import os
+import pwd
+import grp
+import stat
+import sys
+import tarfile
+from pathlib import PurePosixPath
+
+archive = os.environ["ARCHIVE"]
+release_dir = os.path.abspath(os.environ["RELEASE_DIR"])
+release_dir_real = os.path.realpath(release_dir)
+release_mode = int(os.environ["RELEASE_MODE"], 8)
+sha = os.environ["SHA"]
+owner_uid = pwd.getpwnam(os.environ["RELEASE_OWNER"]).pw_uid
+group_gid = grp.getgrnam(os.environ["RELEASE_GROUP"]).gr_gid
+
+def stop(message):
+    raise SystemExit(f"release directory verification failed: {message}")
+
+def clean_name(raw):
+    name = raw.rstrip("/")
+    if not name or name == ".":
+        return None
+    path = PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts:
+        stop(f"unsafe archive path: {raw!r}")
+    return path.as_posix()
+
+def contained_symlink(path, target):
+    if os.path.isabs(target):
+        return False
+    resolved = os.path.realpath(os.path.join(os.path.dirname(path), target))
+    try:
+        return os.path.commonpath([release_dir_real, resolved]) == release_dir_real
+    except ValueError:
+        return False
+
+expected = {}
+with tarfile.open(archive, "r:*") as release_archive:
+    for member in release_archive.getmembers():
+        name = clean_name(member.name)
+        if name is None:
+            continue
+        if name in expected:
+            stop(f"duplicate archive path: {name}")
+        if ".git" in PurePosixPath(name).parts and member.isdir():
+            stop(f"archive contains .git directory: {name}")
+        if member.isdir():
+            expected[name] = ("directory", member.mode & 0o7777, None, None)
+        elif member.isfile():
+            source = release_archive.extractfile(member)
+            if source is None:
+                stop(f"cannot read archive file: {name}")
+            digest = hashlib.sha256(source.read()).hexdigest()
+            expected[name] = ("file", member.mode & 0o7777, digest, None)
+        elif member.issym():
+            expected[name] = ("symlink", member.mode & 0o7777, None, member.linkname)
+        else:
+            stop(f"unsupported archive entry type: {name}")
+
+if "RELEASE_SHA" in expected:
+    stop("archive unexpectedly contains RELEASE_SHA")
+expected["RELEASE_SHA"] = (
+    "file",
+    0o644,
+    hashlib.sha256((sha + "\n").encode()).hexdigest(),
+    None,
+)
+
+try:
+    root_stat = os.lstat(release_dir)
+except FileNotFoundError:
+    stop("directory is missing")
+if not stat.S_ISDIR(root_stat.st_mode):
+    stop("path is not a directory")
+if root_stat.st_uid != owner_uid or root_stat.st_gid != group_gid:
+    stop("directory owner or group differs")
+if stat.S_IMODE(root_stat.st_mode) != release_mode:
+    stop(
+        f"directory mode differs: expected {release_mode:o}, "
+        f"found {stat.S_IMODE(root_stat.st_mode):o}"
+    )
+
+actual = {}
+def scan(directory, relative_parent=""):
+    for entry in os.scandir(directory):
+        relative = f"{relative_parent}/{entry.name}" if relative_parent else entry.name
+        item_stat = entry.stat(follow_symlinks=False)
+        if stat.S_ISDIR(item_stat.st_mode):
+            kind = "directory"
+        elif stat.S_ISREG(item_stat.st_mode):
+            kind = "file"
+        elif stat.S_ISLNK(item_stat.st_mode):
+            kind = "symlink"
+        else:
+            stop(f"unsupported filesystem entry type: {relative}")
+        actual[relative] = (kind, item_stat)
+        if kind == "directory":
+            if entry.name == ".git":
+                stop(f".git directory is present: {relative}")
+            scan(entry.path, relative)
+
+scan(release_dir)
+missing = sorted(set(expected) - set(actual), key=os.fsencode)
+extra = sorted(set(actual) - set(expected), key=os.fsencode)
+if len(expected) != len(actual) or missing or extra:
+    stop(
+        f"path inventory differs: expected_count={len(expected)} "
+        f"actual_count={len(actual)} missing={missing!r} extra={extra!r}"
+    )
+
+for relative in sorted(expected, key=os.fsencode):
+    expected_kind, expected_mode, expected_digest, expected_target = expected[relative]
+    actual_kind, item_stat = actual[relative]
+    path = os.path.join(release_dir, *PurePosixPath(relative).parts)
+    if actual_kind != expected_kind:
+        stop(f"entry type differs: {relative}")
+    if item_stat.st_uid != owner_uid or item_stat.st_gid != group_gid:
+        stop(f"owner or group differs: {relative}")
+    if actual_kind == "symlink":
+        target = os.readlink(path)
+        if not contained_symlink(path, target):
+            stop(f"symlink leaves release directory: {relative} -> {target}")
+    actual_mode = stat.S_IMODE(item_stat.st_mode)
+    if actual_mode != expected_mode:
+        stop(
+            f"mode differs: {relative}: expected {expected_mode:o}, "
+            f"found {actual_mode:o}"
+        )
+    if actual_kind == "file":
+        file_hash = hashlib.sha256()
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as current:
+            for chunk in iter(lambda: current.read(1024 * 1024), b""):
+                file_hash.update(chunk)
+        if file_hash.hexdigest() != expected_digest:
+            if relative == "RELEASE_SHA":
+                stop(f"RELEASE_SHA differs from window SHA {sha}")
+            stop(f"file hash differs: {relative}")
+    elif actual_kind == "symlink":
+        if target != expected_target:
+            stop(f"symlink target differs: {relative}")
+
+print(
+    f"release directory verified: entries={len(actual)} "
+    f"files={sum(1 for value in actual.values() if value[0] == 'file')}"
+)
+PY
     (cd "$RELEASE_DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
       >"$PROOF_DIR/${KIND}.SHA256SUMS"
+    (cd "$RELEASE_DIR" && sha256sum --quiet --strict --check "$PROOF_DIR/${KIND}.SHA256SUMS")
+    install -m 0600 -o "$PROOF_OWNER" -g "$PROOF_GROUP" /dev/null "$PROOF_DIR/${KIND}.release-dir-state.txt"
+    printf 'RELEASE_DIR_STATE=%s\n' "$RELEASE_DIR_RESULT" \
+      >"$PROOF_DIR/${KIND}.release-dir-state.txt"
+  }
+
+  for KIND in $KIND_LIST; do
+    if [ "$KIND" = edge ]; then
+      prepare_release_directory edge "$NEW_EDGE" 0750
+      EDGE_RELEASE_DIR_STATE="$RELEASE_DIR_RESULT"
+    else
+      prepare_release_directory stack "$NEW_STACK" 0755
+      STACK_RELEASE_DIR_STATE="$RELEASE_DIR_RESULT"
+    fi
+    if [ -z "$RELEASE_DIR_STATE" ]; then
+      RELEASE_DIR_STATE="$RELEASE_DIR_RESULT"
+    elif [ "$RELEASE_DIR_STATE" != "$RELEASE_DIR_RESULT" ]; then
+      RELEASE_DIR_STATE=mixed
+    fi
   done
 
   WINDOW_ENV="$PROOF_DIR/window.env"
@@ -450,10 +671,13 @@ sudo -n -i
     printf "%s='%s'\n" PREVIOUS_STACK "$PREVIOUS_STACK"
     printf "%s='%s'\n" RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
     printf "%s='%s'\n" BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
+    printf "%s='%s'\n" RELEASE_DIR_STATE "$RELEASE_DIR_STATE"
+    printf "%s='%s'\n" EDGE_RELEASE_DIR_STATE "$EDGE_RELEASE_DIR_STATE"
+    printf "%s='%s'\n" STACK_RELEASE_DIR_STATE "$STACK_RELEASE_DIR_STATE"
   } >"$WINDOW_ENV"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/window-principal-suffix.txt"
   printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
-  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt"
+  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR"/*.release-dir-state.txt "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
   printf 'PREVIOUS_EDGE=%s\nPREVIOUS_STACK=%s\n' "$PREVIOUS_EDGE" "$PREVIOUS_STACK" \
     >>"$PROOF_DIR/box-run.log"
@@ -466,10 +690,11 @@ release, include the SQL files; for an edge release, include the name-only
 inventory. HezLead reviews this exact list for secrets before transfer:
 
 ```sh
+# step: runbook-07
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   test -d "$EVIDENCE_DIR"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
@@ -483,10 +708,11 @@ After HezLead confirms that list, Anvil transfers exactly those files from the
 Mac mini:
 
 ```sh
+# step: runbook-08
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   test -s "$PROOF_LIST"
@@ -499,6 +725,7 @@ Reconnect to the box as root. Unpack the transferred proof files only after
 HezLead confirms their list contains no secret:
 
 ```sh
+# step: runbook-09
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -517,6 +744,7 @@ HezLead confirms their list contains no secret:
 ### Verify — Anvil; HezLead reads
 
 ```sh
+# step: runbook-10
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -558,10 +786,11 @@ copies it back. The window is closed by HezLead; Anvil runs the close steps and
 reports each one.
 
 ```sh
+# step: runbook-11
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   test -d "$EVIDENCE_DIR"
   ssh ops@100.115.66.74 'sudo -n -i bash -s' <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
 (
@@ -603,6 +832,7 @@ distinct.
 ### Mac cleanup — Anvil, when the window closes (success or abort)
 
 ```sh
+# step: runbook-12
 rm -f "$HOME/.commonswarm-release-window.env"
 ```
 
@@ -612,6 +842,7 @@ This is safe after a lost shell because it reads the durable state. It does not
 hide the failing block's evidence.
 
 ```sh
+# step: runbook-13
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -648,6 +879,7 @@ the value, create a target-only file with exactly one assignment,
 `TARGET_DATABASE_URL=...`:
 
 ```sh
+# step: runbook-14
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -671,6 +903,7 @@ PY
 This checks names and shape without printing the URL.
 
 ```sh
+# step: runbook-15
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -689,6 +922,7 @@ PY
 Then use the repository identity gate against the exact stack release:
 
 ```sh
+# step: runbook-16
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -715,6 +949,7 @@ order. `release_psql_ro` forces catalog and functional proof calls into
 read-only transactions with `PGOPTIONS`.
 
 ```sh
+# step: runbook-17
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -797,6 +1032,7 @@ H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 ### Preflight — CSwarmDevLead supplies the check; Anvil runs it; HezLead approves
 
 ```sh
+# step: runbook-18
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -831,6 +1067,7 @@ release checksum manifest before using its verifier.
 ### Apply — Anvil, after HezLead says proceed
 
 ```sh
+# step: runbook-19
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -874,6 +1111,7 @@ column rolls the transaction back.
 ### Verify — Anvil; HezLead reads before and after
 
 ```sh
+# step: runbook-20
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -939,10 +1177,11 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
    remote `COMPLETE.json` marker is verified.
 
 ```sh
+# step: runbook-21
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
-  BACKUP_MAX_AGE_SECONDS=<agreed-seconds>
+  BACKUP_MAX_AGE_SECONDS='<agreed-seconds>'
   BACKUP_STATUS=/var/backups/commonswarm-postgres/status.json
   BACKUP_WAIT_MAX_SECONDS=14400
   BACKUP_WAIT_DEADLINE=$(( $(date +%s) + BACKUP_WAIT_MAX_SECONDS ))
@@ -987,6 +1226,7 @@ the existing backup service, then repeat the same freshness check. Do not
 proceed merely because the service command returned.
 
 ```sh
+# step: runbook-22
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1021,6 +1261,7 @@ proceed merely because the service command returned.
    identity before any database write.
 
 ```sh
+# step: runbook-23
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1040,6 +1281,7 @@ proceed merely because the service command returned.
    stop until CSwarmDevLead explains it (it may need the Ledger backfill).
 
 ```sh
+# step: runbook-24
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1057,6 +1299,7 @@ proceed merely because the service command returned.
    sorts both sides bytewise.
 
 ```sh
+# step: runbook-25
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1072,11 +1315,12 @@ proceed merely because the service command returned.
    the pair for the apply and verify blocks.
 
 ```sh
+# step: runbook-26
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
-  VERSION=<next-approved-version-from-pending-versions.txt>
+  VERSION='<next-approved-version-from-pending-versions.txt>'
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
   grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
@@ -1143,6 +1387,7 @@ rows into a psql error; the wrapper's `\if` and exception branches reject
 missing, false, or malformed values. Any failure rolls the transaction back.
 
 ```sh
+# step: runbook-27
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1207,6 +1452,7 @@ transaction.
 ### Verify — Anvil; HezLead reads each result
 
 ```sh
+# step: runbook-28
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1257,6 +1503,7 @@ bytewise order (one
 name per line; empty when none). The lead supplies both lists with the release; for H0 the new list was `swarm-purge-h0-poll-batches` and the removed list was empty.
 
 ```sh
+# step: runbook-29
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1306,6 +1553,7 @@ the ten minutes on either side of 03:30, 09:30, 15:30, or 21:30 UTC, stop the
 timer and start it after verification.
 
 ```sh
+# step: runbook-30
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1346,6 +1594,7 @@ Run that block for every window; it records a stopped timer only when the
 approved times overlap a protected interval.
 
 ```sh
+# step: runbook-31
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1422,6 +1671,7 @@ URL alias satisfies the database requirement. The check never prints a value.
 ### Apply — Anvil
 
 ```sh
+# step: runbook-32
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1441,6 +1691,7 @@ runtime cannot reach `db.commonswarm.internal`.
 ### Verify — Anvil; HezLead reads
 
 ```sh
+# step: runbook-33
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1478,6 +1729,7 @@ positive controls in the same probe run. Run this H0 note loopback probe on
 the box:
 
 ```sh
+# step: runbook-34
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1499,6 +1751,7 @@ both loopback and staging probes finish, capture the log window that began at
 `h0 command configuration missing`:
 
 ```sh
+# step: runbook-35
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1521,6 +1774,7 @@ HezLead `SEED_NOTE_ID=<uuid>` or the STOP line. HezLead passes the id to Anvil.
 Anvil runs the proof and saves its output as section 5 does:
 
 ```sh
+# step: runbook-36
 (
   set -euo pipefail
   SEED_NOTE_ID='<uuid-from-HezLead>'
@@ -1540,6 +1794,7 @@ edge is healthy. The lead sends HezLead `G2B_PRINCIPAL_ID=<uuid>` and the time
 of the last successful renew. Within three minutes of that renew, Anvil runs:
 
 ```sh
+# step: runbook-37
 (
   set -euo pipefail
   G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
@@ -1559,6 +1814,7 @@ signal and one private reply with a status. Record the workspace, signal,
 reply, and author user ids, then run:
 
 ```sh
+# step: runbook-38
 (
   set -euo pipefail
   ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
@@ -1588,6 +1844,7 @@ the functional proof exactly as follows; it uses session-level settings and no
 outer transaction:
 
 ```sh
+# step: runbook-39
 (
   set -euo pipefail
   ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
@@ -1613,6 +1870,7 @@ Then run the functional proof exactly as follows; it uses session-level
 settings, performs only reads, and has no outer transaction:
 
 ```sh
+# step: runbook-40
 (
   set -euo pipefail
   ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
@@ -1641,6 +1899,7 @@ If the recycle timer was stopped, restart and verify it before closing a
 successful release:
 
 ```sh
+# step: runbook-41
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1656,6 +1915,7 @@ successful release:
 ### Rollback — Anvil at HezLead's direction
 
 ```sh
+# step: runbook-42
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1679,6 +1939,7 @@ Wait for Docker health and repeat the log and function probes above.
 Restart `commonswarm-edge-recycle.timer` if it was stopped:
 
 ```sh
+# step: runbook-43
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1698,10 +1959,11 @@ that publication is recorded in the release evidence, generate the database
 statement from the Git object on the Mac mini. No operator types a version:
 
 ```sh
+# step: runbook-44
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = <sha>
+  test "$SHA" = '<sha>'
   scripts/current-client-build-sql.sh "$SHA" \
     >"$EVIDENCE_DIR/current-client-build.sql"
   chmod 0600 "$EVIDENCE_DIR/current-client-build.sql"
@@ -1713,6 +1975,7 @@ do not copy it around the review. On the box, confirm the target identity as in
 section 5 and apply the statement only through the write helper:
 
 ```sh
+# step: runbook-45
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1738,13 +2001,14 @@ are `postgres`, `gotrue`, `postgrest`, `realtime`, and `storage-api`; edge uses
 section 5 and Tom's explicit approval before pull or recreate.
 
 ```sh
+# step: runbook-46
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
   test -n "$PREVIOUS_STACK"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" config -q
-  docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" pull <stack-service>
+  docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" pull '<stack-service>'
 )
 ```
 
@@ -1752,6 +2016,7 @@ For an edge image bump, first carry and validate the box override as in section
 6, then pull with:
 
 ```sh
+# step: runbook-47
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1792,12 +2057,13 @@ missed schedule can start work immediately. For the forward switch substitute
 the installed unit copies saved before the forward switch.
 
 ```sh
+# step: runbook-48
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   UNITS_BEFORE="$PROOF_DIR/units-before"
-  STACK_SWITCH_DIRECTION=<apply-or-rollback>
+  STACK_SWITCH_DIRECTION='<apply-or-rollback>'
   test -n "$PREVIOUS_STACK"
 
   UTC_HM="$(date -u +%H%M)"
@@ -1913,26 +2179,28 @@ After the guarded forward switch, recreate **one changed stack service at a
 time**. Do not issue a full-stack `up` for an image-only release.
 
 ```sh
+# step: runbook-49
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
   test "$(readlink -f /home/commonswarm/stack/current)" = "$NEW_STACK"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" \
-    up -d --no-deps <stack-service>
+    up -d --no-deps '<stack-service>'
 )
 ```
 
 ### Verify — Anvil; HezLead reads before the next service
 
 ```sh
+# step: runbook-50
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
-  docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" ps <stack-service>
-  test "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' <container-name>)" = healthy
-  docker logs --since 60s <container-name>
+  docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" ps '<stack-service>'
+  test "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' '<container-name>')" = healthy
+  docker logs --since 60s '<container-name>'
 )
 ```
 
@@ -1943,6 +2211,7 @@ probe. Established container names are `commonswarm-postgres`,
 applicable:
 
 ```sh
+# step: runbook-51
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1962,6 +2231,7 @@ probe supplied by the lead. Put authorization only in the root-owned
 `/run/commonswarm-smoke.curl`; the request body contains no credential.
 
 ```sh
+# step: runbook-52
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1985,6 +2255,7 @@ then recreate the affected service from `PREVIOUS_STACK`. The shared block is
 the only reverse symlink switch and restores the saved installed units.
 
 ```sh
+# step: runbook-53
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1992,7 +2263,7 @@ the only reverse symlink switch and restores the saved installed units.
   test "$(readlink -f /home/commonswarm/stack/current)" = "$PREVIOUS_STACK"
   docker compose -p commonswarm-supabase-stack \
     --project-directory "$PREVIOUS_STACK/deploy/supabase-stack" \
-    up -d --no-deps <stack-service>
+    up -d --no-deps '<stack-service>'
 )
 ```
 
@@ -2009,6 +2280,7 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 ### Preflight — Anvil; HezLead approves
 
 ```sh
+# step: runbook-54
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2037,6 +2309,7 @@ run (or a separately approved manual backup), run the section 5 freshness check
 and record:
 
 ```sh
+# step: runbook-55
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2157,6 +2430,7 @@ After either a successful close or an abort, remove the root-only transient
 database files. This does not remove release evidence:
 
 ```sh
+# step: runbook-56
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
