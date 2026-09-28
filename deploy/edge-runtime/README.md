@@ -96,16 +96,29 @@ Supabase client calls in those files.
 | `/realtime/v1`, `/realtime/v1/`, `/realtime/v1/websocket` | supabase-js wake, feed, and activity channels | Realtime on the server, `127.0.0.1:18003`, HTTP/1.1 |
 | every other path | no upstream | `404` JSON from the live API file |
 
-The live routes are in `deploy/supabase-stack/commonswarm-api.caddy`. The pre-cutover site file was removed. It proxied to a deleted host. There is no fallback to another host. A pause uses `deploy/supabase-stack/commonswarm-api-maintenance.caddy`: the public site answers 503 and has no upstream, and staging keeps the box routes. The Caddy global options must include the `servers { ... }` fragment from `caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on 2026-09-16. The functions route replaces `X-Forwarded-For` with Caddy's derived visitor address, so capability rate limiting does not use a Cloudflare edge or spoofed header.
+The live routes are in the `commonswarm-api.caddy` and
+`commonswarm-edge-staging.caddy` pair under `deploy/supabase-stack/`. The
+pre-cutover site file was removed. It proxied to a deleted host. There is no
+fallback to another host. A pause uses the matching `-maintenance.caddy` pair:
+the public site answers 503 and has no upstream, and staging keeps the box
+routes. The Caddy global options must include the `servers { ... }` fragment
+from `caddy-global-servers.caddy`. It trusts only Cloudflare's ranges pinned on
+2026-09-16. The functions route replaces `X-Forwarded-For` with Caddy's derived
+visitor address, so capability rate limiting does not use a Cloudflare edge or
+spoofed header.
 
 ## Caddy validation shape
 
-Validate `deploy/supabase-stack/commonswarm-api.caddy`. Do not install a file that names a supabase.co host. The local validation fixture builds a main Caddyfile around that live file, or around the maintenance file when you pass its path. The site file has no global options block. Build both local fixtures
-with `build-caddy-validation-fixture.mjs`: mode `with-trusted-proxies` pastes the
-server fragment inside that block; mode `without-trusted-proxies` models the
-valid state before the box operator applies it. Validate each generated
-`Caddyfile` with `caddy:2.11` and dummy certificate mounts. The adapted-JSON
-checker takes `live` or `maintenance`, then the same trust mode.
+Validate each live or maintenance pair together. Do not install a file that
+names a supabase.co host. The local validation fixture builds a main Caddyfile
+around every site file passed after the trust mode; by default it uses the live
+API and edge-staging pair. The site files have no global options block. Build
+both local fixtures with `build-caddy-validation-fixture.mjs`: mode
+`with-trusted-proxies` pastes the server fragment inside that block; mode
+`without-trusted-proxies` models the valid state before the box operator
+applies it. Validate each generated `Caddyfile` with `caddy:2.11` and dummy
+certificate mounts. The adapted-JSON checker takes `live` or `maintenance`,
+then the same trust mode, and checks each host's routes separately.
 
 ## Known box state
 

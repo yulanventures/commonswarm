@@ -1,10 +1,10 @@
-# Live API site file. Auth, REST, Storage, Realtime, and functions go to the
-# containers on this server. There is no fallback to another host.
-api.commonswarm.com {
+# Maintenance edge-staging site file. It keeps the box routes while the public
+# API site answers 503 and has no upstream.
+edge-staging.commonswarm.com {
 	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
 
 	log {
-		output file /var/log/caddy/api.commonswarm.com.access.log {
+		output file /var/log/caddy/edge-staging.commonswarm.com.access.log {
 			mode 0600
 			roll_size 10MiB
 			roll_keep 10
@@ -80,7 +80,3 @@ api.commonswarm.com {
 		respond "{\"error\":\"not_found\"}" 404
 	}
 }
-
-# A later pause installs commonswarm-api-maintenance.caddy together with
-# commonswarm-edge-staging-maintenance.caddy. The public site answers 503 and
-# has no upstream.

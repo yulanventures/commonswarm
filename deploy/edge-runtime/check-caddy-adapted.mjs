@@ -70,25 +70,24 @@ const localDials = [
   "127.0.0.1:18004",
   "127.0.0.1:9000",
 ];
+const apiHosts = [
+  "api.commonswarm.com",
+  "edge-staging.commonswarm.com",
+];
 
 if (profile === "live") {
-  const dials = proxyDials(server.routes).sort();
-  assert.deepEqual(dials, localDials, "route dials");
-  assertProxyDetails(proxiesIn(server.routes));
-  assert.equal(originHeaders(server.routes).length, 0, "live route CORS");
-  assertErrorCors(server, [
-    "api.commonswarm.com",
-    "edge-staging.commonswarm.com",
-  ]);
+  for (const host of apiHosts) assertLiveSite(server, host);
 } else {
   const publicSite = siteSubroute(server, "api.commonswarm.com");
   const stagingSite = siteSubroute(server, "edge-staging.commonswarm.com");
   assert.deepEqual(proxyDials(publicSite), [], "public upstream");
-  assert.deepEqual(proxyDials(stagingSite).sort(), localDials, "route dials");
-  assertProxyDetails(proxiesIn(stagingSite));
-  assert.equal(originHeaders(stagingSite).length, 0, "staging route CORS");
   assertMaintenanceResponses(publicSite);
-  assertErrorCors(server, ["edge-staging.commonswarm.com"]);
+  assert.equal(
+    hostRoutes(server.errors?.routes, "api.commonswarm.com").length,
+    0,
+    "public error routes",
+  );
+  assertLiveSite(server, "edge-staging.commonswarm.com", stagingSite);
 }
 
 process.stdout.write(
@@ -109,17 +108,32 @@ function collectStrings(value, out = []) {
 }
 
 function siteSubroute(server, host) {
-  const route = (server.routes ?? []).find((item) =>
-    (item.match ?? []).some((matcher) =>
-      Array.isArray(matcher.host) && matcher.host.includes(host)
-    )
-  );
-  assert.ok(route, `site ${host}`);
+  const routes = hostRoutes(server.routes, host);
+  assert.equal(routes.length, 1, `site ${host} exactly once`);
+  const route = routes[0];
+  assert.deepEqual(routeHosts(route), [host], `site ${host} only`);
   const subroute = (route.handle ?? []).find((handler) =>
     handler.handler === "subroute"
   );
   assert.ok(subroute, `subroute ${host}`);
   return subroute;
+}
+
+function hostRoutes(routes, host) {
+  return (routes ?? []).filter((route) => routeHosts(route).includes(host));
+}
+
+function routeHosts(route) {
+  return (route.match ?? []).flatMap((matcher) =>
+    Array.isArray(matcher.host) ? matcher.host : []
+  );
+}
+
+function assertLiveSite(server, host, site = siteSubroute(server, host)) {
+  assert.deepEqual(proxyDials(site).sort(), localDials, `${host} route dials`);
+  assertProxyDetails(proxiesIn(site));
+  assert.equal(originHeaders(site).length, 0, `${host} route CORS`);
+  assertErrorCors(server, host);
 }
 
 function proxiesIn(value, out = []) {
@@ -172,15 +186,16 @@ function originHeaders(value, out = []) {
   return out;
 }
 
-function assertErrorCors(server, hosts) {
-  const errorHosts = [];
+function assertErrorCors(server, host) {
+  const routes = hostRoutes(server.errors?.routes, host);
+  assert.equal(routes.length, 1, `error site ${host} exactly once`);
+  assert.deepEqual(routeHosts(routes[0]), [host], `error site ${host} only`);
   const functionErrorPaths = [];
   const errorCorsHandlers = [];
   function walk(value) {
     if (!value || typeof value !== "object") return;
     if (Array.isArray(value.match)) {
       for (const matcher of value.match) {
-        if (Array.isArray(matcher.host)) errorHosts.push(...matcher.host);
         if (Array.isArray(matcher.path)) functionErrorPaths.push(...matcher.path);
       }
     }
@@ -192,8 +207,7 @@ function assertErrorCors(server, hosts) {
     }
     for (const child of Object.values(value)) walk(child);
   }
-  walk(server.errors);
-  assert.deepEqual(errorHosts, hosts);
+  walk(routes[0]);
   assert.deepEqual(functionErrorPaths, ["/functions/v1", "/functions/v1/*"]);
   assert.equal(errorCorsHandlers.length, 1);
   assert.deepEqual(

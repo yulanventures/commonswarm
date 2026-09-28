@@ -150,10 +150,10 @@ file, credential, curl authorization file, or secret value.
 Before the apply, Anvil connects to the box as root and creates the copy-back
 manifest. Set `KIND_LIST` to the same approved surfaces used by the apply block,
 list every pending migration version, and list the subset whose functional
-proof produces a `.txt` file during this window. Set the three named switches
+proof produces a `.txt` file during this window. Set the four named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
-switch, or the section 8 backup-status proof. Add exact relative paths from the
-item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
+switch, the section 8 backup-status proof, or the section 9 API Caddy pair.
+Add exact relative paths from the item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
 under `database/logs/`. The edge and stack recreate steps append only their
@@ -170,6 +170,7 @@ initial manifest is built only from the explicit arrays below, never from
   H0_LEDGER_BACKFILL='<yes-or-no>'
   GUARDED_STACK_SWITCH='<yes-or-no>'
   BACKUP_STATUS_PROOF='<yes-or-no>'
+  API_CADDY_PAIR='<yes-or-no>'
   MIGRATION_VERSIONS=(
     # <approved-14-digit-version>
   )
@@ -196,7 +197,7 @@ initial manifest is built only from the explicit arrays below, never from
   for KIND in $KIND_LIST; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
-  for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF"; do
+  for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF" "$API_CADDY_PAIR"; do
     case "$SWITCH" in yes|no) ;; *) false ;; esac
   done
   install -d -m 0700 -o root -g root "$PROOF_DIR"
@@ -225,6 +226,16 @@ initial manifest is built only from the explicit arrays below, never from
   fi
   if [ "$BACKUP_STATUS_PROOF" = yes ]; then
     COPY_BACK_FILES+=(backup-status.json)
+  fi
+  if [ "$API_CADDY_PAIR" = yes ]; then
+    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    COPY_BACK_FILES+=(
+      caddy-before-10-commonswarm-api.caddy
+      caddy-before-11-commonswarm-edge-staging.caddy
+      caddy-after-10-commonswarm-api.caddy
+      caddy-after-11-commonswarm-edge-staging.caddy
+      caddy-drift-check.txt
+    )
   fi
   if [ "${#MIGRATION_VERSIONS[@]}" -gt 0 ]; then
     COPY_BACK_FILES+=(
@@ -2462,7 +2473,177 @@ Run the shared guarded stack switch with `STACK_SWITCH_DIRECTION=rollback`. It
 reads and validates `PREVIOUS_STACK` from `window.env`, uses the same service
 guard in reverse, and restores all four saved files from `units-before/`.
 
-## 9. Multi-part release order and stop conditions
+## 9. API Caddy pair release
+
+The API Caddy surface is always two files. The repository source pair maps to
+the box pair as follows:
+
+| Mode | `/etc/caddy/sites/10-commonswarm-api.caddy` | `/etc/caddy/sites/11-commonswarm-edge-staging.caddy` |
+|---|---|---|
+| live | `commonswarm-api.caddy` | `commonswarm-edge-staging.caddy` |
+| maintenance | `commonswarm-api-maintenance.caddy` | `commonswarm-edge-staging-maintenance.caddy` |
+
+Never install or restore one member without the other. A pair change performs
+one validation after both files are on disk and one reload after validation.
+The access-log directory already exists on the box; these steps do not change
+its owner or mode.
+
+### Preflight — Anvil; HezLead approves
+
+Set `API_CADDY_PAIR=yes` in section 1's copy-back manifest. This release uses a
+stack archive because the source files live under `deploy/supabase-stack/`.
+The preflight saves both installed files and rejects drift in either one. For
+the first release of the split, it derives both expected installed files from
+the previous combined source by changing only its site-label line. Later
+releases compare each installed file to its own previous-release source.
+
+```sh
+# step: runbook-56
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  SITE_DIR=/etc/caddy/sites
+  API_SITE="$SITE_DIR/10-commonswarm-api.caddy"
+  STAGING_SITE="$SITE_DIR/11-commonswarm-edge-staging.caddy"
+  API_BEFORE="$PROOF_DIR/caddy-before-10-commonswarm-api.caddy"
+  STAGING_BEFORE="$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy"
+  DRIFT_PROOF="$PROOF_DIR/caddy-drift-check.txt"
+  test -f "$API_SITE"
+  test -f "$STAGING_SITE"
+  install -m 0600 -o root -g root "$API_SITE" "$API_BEFORE"
+  install -m 0600 -o root -g root "$STAGING_SITE" "$STAGING_BEFORE"
+
+  if [ -f "$PREVIOUS_STACK/deploy/supabase-stack/commonswarm-edge-staging.caddy" ]; then
+    cmp -s "$PREVIOUS_STACK/deploy/supabase-stack/commonswarm-api.caddy" "$API_SITE"
+    cmp -s "$PREVIOUS_STACK/deploy/supabase-stack/commonswarm-edge-staging.caddy" "$STAGING_SITE"
+  else
+    COMBINED="$PREVIOUS_STACK/deploy/supabase-stack/commonswarm-api.caddy"
+    test "$(grep -c '^api\.commonswarm\.com, edge-staging\.commonswarm\.com {$' "$COMBINED")" -eq 1
+    DRIFT_DIR="$(mktemp -d /tmp/commonswarm-caddy-drift.XXXXXX)"
+    case "$DRIFT_DIR" in /tmp/commonswarm-caddy-drift.??????) ;; *) false ;; esac
+    trap 'status=$?; find "$DRIFT_DIR" -depth -delete; exit "$status"' EXIT
+    sed 's/^api\.commonswarm\.com, edge-staging\.commonswarm\.com {$/api.commonswarm.com {/' \
+      "$COMBINED" >"$DRIFT_DIR/10-commonswarm-api.caddy"
+    sed 's/^api\.commonswarm\.com, edge-staging\.commonswarm\.com {$/edge-staging.commonswarm.com {/' \
+      "$COMBINED" >"$DRIFT_DIR/11-commonswarm-edge-staging.caddy"
+    cmp -s "$DRIFT_DIR/10-commonswarm-api.caddy" "$API_SITE"
+    cmp -s "$DRIFT_DIR/11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
+  fi
+  install -m 0600 -o root -g root /dev/null "$DRIFT_PROOF"
+  printf '%s\n' \
+    '10-commonswarm-api.caddy: PASS' \
+    '11-commonswarm-edge-staging.caddy: PASS' >"$DRIFT_PROOF"
+)
+```
+
+Both `cmp` calls are required. A difference is a stop for HezLead to reconcile;
+do not overwrite unexplained box state.
+
+### Apply — Anvil
+
+Set `CADDY_MODE` to the approved `live` or `maintenance` state. The two
+candidate files are copied to non-imported temporary names, moved into place as
+a pair, validated once, and reloaded once. If validation or reload fails, stop
+and run the rollback block; Caddy keeps serving its last successfully loaded
+configuration until that rollback completes.
+
+```sh
+# step: runbook-57
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  CADDY_MODE='<live-or-maintenance>'
+  case "$CADDY_MODE" in
+    live)
+      API_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-api.caddy"
+      STAGING_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-edge-staging.caddy"
+      ;;
+    maintenance)
+      API_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-api-maintenance.caddy"
+      STAGING_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-edge-staging-maintenance.caddy"
+      ;;
+    *) false ;;
+  esac
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  SITE_DIR=/etc/caddy/sites
+  API_SITE="$SITE_DIR/10-commonswarm-api.caddy"
+  STAGING_SITE="$SITE_DIR/11-commonswarm-edge-staging.caddy"
+  API_TEMP="$SITE_DIR/.10-commonswarm-api.${SHA}.candidate"
+  STAGING_TEMP="$SITE_DIR/.11-commonswarm-edge-staging.${SHA}.candidate"
+  cmp -s "$PROOF_DIR/caddy-before-10-commonswarm-api.caddy" "$API_SITE"
+  cmp -s "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
+  test "$(grep -c '^api\.commonswarm\.com {$' "$API_SOURCE")" -eq 1
+  test "$(grep -c '^edge-staging\.commonswarm\.com {$' "$STAGING_SOURCE")" -eq 1
+  test "$(grep -c '^edge-staging\.commonswarm\.com {$' "$API_SOURCE")" -eq 0
+  test "$(grep -c '^api\.commonswarm\.com {$' "$STAGING_SOURCE")" -eq 0
+  install -m 0644 -o root -g root "$API_SOURCE" "$API_TEMP"
+  install -m 0644 -o root -g root "$STAGING_SOURCE" "$STAGING_TEMP"
+  mv -f "$API_TEMP" "$API_SITE"
+  mv -f "$STAGING_TEMP" "$STAGING_SITE"
+  install -m 0600 -o root -g root "$API_SITE" \
+    "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy"
+  install -m 0600 -o root -g root "$STAGING_SITE" \
+    "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy"
+  caddy validate --config /etc/caddy/Caddyfile
+  systemctl reload caddy
+)
+```
+
+### Verify — Anvil; HezLead reads
+
+```sh
+# step: runbook-58
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  cmp -s "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy" \
+    /etc/caddy/sites/10-commonswarm-api.caddy
+  cmp -s "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy" \
+    /etc/caddy/sites/11-commonswarm-edge-staging.caddy
+  systemctl is-active --quiet caddy
+)
+```
+
+Verify both hostnames through their public HTTPS paths and confirm each new
+access-log file is owned by `caddy:caddy` with mode `0600` after it receives a
+request. The Caddy source files and drift proof are the only Caddy artifacts in
+the copy-back list; request logs stay on the box.
+
+### Rollback — Anvil at HezLead's direction
+
+The rollback refuses intervening drift in either installed file, restores both
+preflight backups, validates once, and reloads once.
+
+```sh
+# step: runbook-59
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  SITE_DIR=/etc/caddy/sites
+  API_SITE="$SITE_DIR/10-commonswarm-api.caddy"
+  STAGING_SITE="$SITE_DIR/11-commonswarm-edge-staging.caddy"
+  API_TEMP="$SITE_DIR/.10-commonswarm-api.${SHA}.rollback"
+  STAGING_TEMP="$SITE_DIR/.11-commonswarm-edge-staging.${SHA}.rollback"
+  cmp -s "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy" "$API_SITE"
+  cmp -s "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
+  install -m 0644 -o root -g root \
+    "$PROOF_DIR/caddy-before-10-commonswarm-api.caddy" "$API_TEMP"
+  install -m 0644 -o root -g root \
+    "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_TEMP"
+  mv -f "$API_TEMP" "$API_SITE"
+  mv -f "$STAGING_TEMP" "$STAGING_SITE"
+  caddy validate --config /etc/caddy/Caddyfile
+  systemctl reload caddy
+  cmp -s "$PROOF_DIR/caddy-before-10-commonswarm-api.caddy" "$API_SITE"
+  cmp -s "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
+)
+```
+
+## 10. Multi-part release order and stop conditions
 
 ### Preflight — HezLead sets the order; Anvil reads it back
 
@@ -2479,9 +2660,11 @@ For a release containing several parts, use this order:
    change, whether section 7, section 8, or both need it. A migration-only
    release uses `NEW_STACK` without changing `stack/current`.
 7. Recreate changed stack images, one service at a time.
-8. After an npm package is published, record its exact-SHA client build with
+8. Install and verify the API Caddy pair with section 9 when either source file
+   changed.
+9. After an npm package is published, record its exact-SHA client build with
    section 6's generated-SQL step. Skip this for releases with no npm publish.
-9. Run public and authenticated end-to-end verification; archive evidence.
+10. Run public and authenticated end-to-end verification; archive evidence.
 
 Migration precedes code that needs it. Backfill precedes later migrations. A
 new edge must remain compatible with the verified database state at the moment
@@ -2562,7 +2745,7 @@ After either a successful close or an abort, remove the root-only transient
 database files. This does not remove release evidence:
 
 ```sh
-# step: runbook-56
+# step: runbook-60
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env

@@ -110,7 +110,8 @@ test("Caddy scopes edge proxy, keeps MCP prepared, and removed metric path uses 
   const metricPath = "/_internal/metric";
   const caddyFiles = [
     "deploy/supabase-stack/commonswarm-api.caddy",
-    "deploy/supabase-stack/commonswarm-api-maintenance.caddy",
+    "deploy/supabase-stack/commonswarm-edge-staging.caddy",
+    "deploy/supabase-stack/commonswarm-edge-staging-maintenance.caddy",
   ];
   for (const path of caddyFiles) {
     const caddy = await readFile(resolve(repoRoot, path), "utf8");
@@ -120,6 +121,11 @@ test("Caddy scopes edge proxy, keeps MCP prepared, and removed metric path uses 
     assert.equal(edgeRoute[1]?.includes(metricPath), false);
     assert.equal((caddy.match(/reverse_proxy 127\.0\.0\.1:9000/g) ?? []).length, 1);
   }
+  const maintenanceApi = await readFile(
+    resolve(repoRoot, "deploy/supabase-stack/commonswarm-api-maintenance.caddy"),
+    "utf8",
+  );
+  assert.doesNotMatch(maintenanceApi, /reverse_proxy/);
   assert.equal(resolveFunctionRoute(metricPath), null);
   const response = resolveGatewayRequest(new Request(`http://localhost${metricPath}`)).response;
   assert.equal(response?.status, 404);
@@ -704,28 +710,27 @@ test("main service retries WorkerAlreadyRetired around create and fetch", async 
 });
 
 test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async () => {
-  const live = await readFile(
+  const liveApi = await readFile(
     resolve(repoRoot, "deploy/supabase-stack/commonswarm-api.caddy"),
     "utf8",
   );
-  const maintenance = await readFile(
+  const liveStaging = await readFile(
+    resolve(repoRoot, "deploy/supabase-stack/commonswarm-edge-staging.caddy"),
+    "utf8",
+  );
+  const maintenanceApi = await readFile(
     resolve(repoRoot, "deploy/supabase-stack/commonswarm-api-maintenance.caddy"),
+    "utf8",
+  );
+  const maintenanceStaging = await readFile(
+    resolve(repoRoot, "deploy/supabase-stack/commonswarm-edge-staging-maintenance.caddy"),
     "utf8",
   );
   const globalServers = await readFile(
     resolve(repoRoot, "deploy/edge-runtime/caddy-global-servers.caddy"),
     "utf8",
   );
-  const boxRoutes = maintenance.slice(
-    maintenance.indexOf("(box_routes) {"),
-    maintenance.indexOf("\napi.commonswarm.com {"),
-  );
-  const publicSite = maintenance.slice(
-    maintenance.indexOf("\napi.commonswarm.com {"),
-    maintenance.indexOf("\nedge-staging.commonswarm.com {"),
-  );
-
-  for (const source of [live, boxRoutes]) {
+  for (const source of [liveApi, liveStaging, maintenanceStaging]) {
     assert.match(source, /@edge_functions path \/functions\/v1 \/functions\/v1\/\*/);
     assert.match(source, /response_header_timeout 165s/);
     assert.match(
@@ -743,21 +748,16 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     assert.doesNotMatch(source, /supabase\.co\b/i);
   }
 
-  assert.ok(publicSite.length > 0 && boxRoutes.length > 0);
-  assert.doesNotMatch(publicSite, /reverse_proxy/);
-  assert.doesNotMatch(publicSite, /\bimport\b/);
-  assert.match(publicSite, /@maintenance_preflight method OPTIONS/);
-  assert.match(publicSite, /Access-Control-Allow-Headers "authorization, apikey, content-type, x-client-info"/);
-  assert.match(publicSite, /Access-Control-Allow-Methods "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE"/);
-  assert.match(publicSite, /Access-Control-Max-Age "300"/);
-  assert.match(publicSite, /Retry-After "300"/);
-  assert.match(publicSite, /Access-Control-Allow-Origin "\*"/);
-  assert.match(publicSite, /\\"error\\":\\"maintenance\\"/);
-  assert.match(
-    maintenance.slice(maintenance.indexOf("\nedge-staging.commonswarm.com {")),
-    /import box_routes/,
-  );
-  assert.doesNotMatch(maintenance, /supabase\.co\b/i);
+  assert.doesNotMatch(maintenanceApi, /reverse_proxy/);
+  assert.doesNotMatch(maintenanceApi, /\bimport\b/);
+  assert.match(maintenanceApi, /@maintenance_preflight method OPTIONS/);
+  assert.match(maintenanceApi, /Access-Control-Allow-Headers "authorization, apikey, content-type, x-client-info"/);
+  assert.match(maintenanceApi, /Access-Control-Allow-Methods "GET, HEAD, OPTIONS, POST, PUT, PATCH, DELETE"/);
+  assert.match(maintenanceApi, /Access-Control-Max-Age "300"/);
+  assert.match(maintenanceApi, /Retry-After "300"/);
+  assert.match(maintenanceApi, /Access-Control-Allow-Origin "\*"/);
+  assert.match(maintenanceApi, /\\"error\\":\\"maintenance\\"/);
+  assert.doesNotMatch(`${maintenanceApi}\n${maintenanceStaging}`, /supabase\.co\b/i);
   assert.match(
     globalServers,
     /trusted_proxies static 173\.245\.48\.0\/20[\s\S]*?2c0f:f248::\/32/,
@@ -768,39 +768,36 @@ test("Caddy keeps function parity and uses an HTTP/1.1 realtime upstream", async
     /client_ip_headers CF-Connecting-IP X-Forwarded-For/,
   );
   assert.match(
-    live,
+    liveApi,
     /handle \/auth\/v1\/\* \{\s*uri strip_prefix \/auth\/v1\s*reverse_proxy 127\.0\.0\.1:18001/,
   );
   assert.match(
-    live,
+    liveApi,
     /handle \/rest\/v1\/\* \{\s*uri strip_prefix \/rest\/v1\s*reverse_proxy 127\.0\.0\.1:18002/,
   );
   assert.match(
-    live,
+    liveApi,
     /handle \/storage\/v1\/\* \{\s*uri strip_prefix \/storage\/v1\s*reverse_proxy 127\.0\.0\.1:18004/,
   );
   assert.match(
-    live,
+    liveApi,
     /reverse_proxy 127\.0\.0\.1:18003 \{\s*header_up Host realtime-dev\s*header_up X-Forwarded-Host \{host\}\s*flush_interval -1\s*transport http \{\s*versions 1\.1/,
   );
 });
 
 test("Caddy site import cannot contain a global options block", async () => {
-  const live = await readFile(
-    resolve(repoRoot, "deploy/supabase-stack/commonswarm-api.caddy"),
-    "utf8",
-  );
-  const maintenance = await readFile(
-    resolve(repoRoot, "deploy/supabase-stack/commonswarm-api-maintenance.caddy"),
-    "utf8",
-  );
+  const sites = await Promise.all([
+    "commonswarm-api.caddy",
+    "commonswarm-edge-staging.caddy",
+    "commonswarm-api-maintenance.caddy",
+    "commonswarm-edge-staging-maintenance.caddy",
+  ].map((file) => readFile(resolve(repoRoot, "deploy/supabase-stack", file), "utf8")));
   const globalServers = await readFile(
     resolve(repoRoot, "deploy/edge-runtime/caddy-global-servers.caddy"),
     "utf8",
   );
 
-  assert.doesNotMatch(live, /^\s*\{\s*$/m);
-  assert.doesNotMatch(maintenance, /^\s*\{\s*$/m);
+  for (const site of sites) assert.doesNotMatch(site, /^\s*\{\s*$/m);
   assert.match(
     globalServers,
     /^# Reference for the lines INSIDE the box main Caddyfile's global options/m,

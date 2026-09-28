@@ -12,8 +12,10 @@ const [
   compose,
   envExample,
   migrationEnvExample,
-  caddy,
-  maintenanceCaddy,
+  apiCaddy,
+  edgeStagingCaddy,
+  apiMaintenanceCaddy,
+  edgeStagingMaintenanceCaddy,
   mcpCaddy,
   runtimeRoles,
   prepareTarget,
@@ -35,7 +37,9 @@ const [
   readFile(join(stackDir, "env.example"), "utf8"),
   readFile(join(stackDir, "migration.env.example"), "utf8"),
   readFile(join(stackDir, "commonswarm-api.caddy"), "utf8"),
+  readFile(join(stackDir, "commonswarm-edge-staging.caddy"), "utf8"),
   readFile(join(stackDir, "commonswarm-api-maintenance.caddy"), "utf8"),
+  readFile(join(stackDir, "commonswarm-edge-staging-maintenance.caddy"), "utf8"),
   readFile(join(stackDir, "commonswarm-mcp.caddy"), "utf8"),
   readFile(join(stackDir, "postgres", "10-runtime-roles.sh"), "utf8"),
   readFile(join(stackDir, "migrate", "prepare-target.sh"), "utf8"),
@@ -53,6 +57,8 @@ const [
   readFile(join(stackDir, "postgres", "pg_hba.conf"), "utf8"),
   readFile(join(stackDir, "RUNBOOK.md"), "utf8"),
 ]);
+
+const caddy = apiCaddy;
 
 const memory = {
   postgres: 1536,
@@ -181,7 +187,7 @@ function validateStack(
   if (realtimeTransports.length !== 1) {
     errors.push("realtime no-buffer http1");
   }
-  if (!caddySource.includes("api.commonswarm.com, edge-staging.commonswarm.com")) errors.push("staging host");
+  if (!/^api\.commonswarm\.com \{$/m.test(caddySource)) errors.push("API host");
   if (!caddySource.includes("header_up X-Forwarded-For {http.request.client_ip}")) errors.push("client ip");
   if (!caddySource.includes("response_header_timeout 165s")) errors.push("function timeout");
   if (!caddySource.includes('header Access-Control-Allow-Origin "*"')) errors.push("function error CORS");
@@ -190,6 +196,84 @@ function validateStack(
 
 test("self-hosted stack contract is complete", () => {
   assert.deepEqual(validateStack(compose, envExample, caddy), []);
+});
+
+const API_HOSTS = ["api.commonswarm.com", "edge-staging.commonswarm.com"] as const;
+
+function declaredApiHosts(source: string): string[] {
+  return [...source.matchAll(/^(api\.commonswarm\.com|edge-staging\.commonswarm\.com) \{$/gm)]
+    .map((match) => match[1]!);
+}
+
+function normalizedRoutedSite(source: string): string {
+  return source
+    .split("\n")
+    .filter((line) => !line.startsWith("#"))
+    .join("\n")
+    .replace(/^(?:api\.commonswarm\.com|edge-staging\.commonswarm\.com) \{$/m, "HOST {")
+    .replace(/\/var\/log\/caddy\/(?:api|edge-staging)\.commonswarm\.com\.access\.log/g, "/var/log/caddy/HOST.access.log")
+    .trim();
+}
+
+test("normal and maintenance Caddy pairs cover each API host exactly once", () => {
+  const pairs = [
+    ["normal", [apiCaddy, edgeStagingCaddy]],
+    ["maintenance", [apiMaintenanceCaddy, edgeStagingMaintenanceCaddy]],
+  ] as const;
+  for (const [name, sources] of pairs) {
+    assert.deepEqual(sources.flatMap(declaredApiHosts).sort(), [...API_HOSTS].sort(), name);
+    for (const source of sources) assert.equal(declaredApiHosts(source).length, 1, name);
+  }
+  assert.equal(normalizedRoutedSite(apiCaddy), normalizedRoutedSite(edgeStagingCaddy));
+  assert.equal(normalizedRoutedSite(edgeStagingCaddy), normalizedRoutedSite(edgeStagingMaintenanceCaddy));
+});
+
+function labelledShellBlock(source: string, label: string): string {
+  const marker = `# step: ${label}`;
+  const start = source.indexOf(marker);
+  const end = source.indexOf("\n```", start);
+  assert.ok(start >= 0 && end > start, `missing ${label}`);
+  return source.slice(start, end);
+}
+
+test("release runbook swaps, validates, and rolls back both Caddy files as a pair", async () => {
+  const releaseRunbook = await readFile(join(root, "deploy", "RELEASE-TO-BOX.md"), "utf8");
+  const apply = labelledShellBlock(releaseRunbook, "runbook-57");
+  const rollback = labelledShellBlock(releaseRunbook, "runbook-59");
+  for (const source of [
+    "commonswarm-api.caddy",
+    "commonswarm-edge-staging.caddy",
+    "commonswarm-api-maintenance.caddy",
+    "commonswarm-edge-staging-maintenance.caddy",
+  ]) {
+    assert.match(apply, new RegExp(source.replaceAll(".", "\\.")));
+  }
+  for (const file of ["10-commonswarm-api.caddy", "11-commonswarm-edge-staging.caddy"]) {
+    assert.match(apply, new RegExp(file.replaceAll(".", "\\.")));
+    assert.match(rollback, new RegExp(file.replaceAll(".", "\\.")));
+    assert.match(releaseRunbook, new RegExp(`caddy-before-${file.replaceAll(".", "\\.")}`));
+    assert.match(releaseRunbook, new RegExp(`caddy-after-${file.replaceAll(".", "\\.")}`));
+  }
+  for (const block of [apply, rollback]) {
+    assert.equal((block.match(/caddy validate --config/g) ?? []).length, 1);
+    assert.equal((block.match(/systemctl reload caddy/g) ?? []).length, 1);
+    assert.ok(block.indexOf('mv -f "$STAGING_TEMP" "$STAGING_SITE"') < block.indexOf("caddy validate --config"));
+    assert.ok(block.indexOf("caddy validate --config") < block.indexOf("systemctl reload caddy"));
+  }
+  const applyValidation = apply.indexOf("caddy validate --config");
+  const pairSwapComplete = apply.indexOf('mv -f "$STAGING_TEMP" "$STAGING_SITE"');
+  for (const [site, proof] of [
+    ["$API_SITE", "caddy-after-10-commonswarm-api.caddy"],
+    ["$STAGING_SITE", "caddy-after-11-commonswarm-edge-staging.caddy"],
+  ] as const) {
+    const capture = apply.indexOf(`"$PROOF_DIR/${proof}"`);
+    assert.ok(capture > pairSwapComplete, `${proof} captured after the pair swap completes`);
+    assert.ok(capture < applyValidation, `${proof} captured before validation can fail`);
+    assert.match(apply.slice(0, capture), new RegExp(`install -m 0600 -o root -g root "\\${site}"`));
+  }
+  const preflight = labelledShellBlock(releaseRunbook, "runbook-56");
+  assert.match(preflight, /cmp -s .*commonswarm-api\.caddy.*"\$API_SITE"/);
+  assert.match(preflight, /cmp -s .*commonswarm-edge-staging\.caddy.*"\$STAGING_SITE"/);
 });
 
 // Production enables GitHub, Google and email sign-in (read-only /auth/v1/settings, 2026-09-17). The box GoTrue must
@@ -452,21 +536,9 @@ function routeFrame(source: string): string[] {
   return source.split("\n").map((line) => line.trim()).filter((line) => patterns.has(line));
 }
 
-function maintenanceSites(source: string): { publicSite: string; stagingSite: string; boxRoutes: string } {
-  const publicAt = source.indexOf("\napi.commonswarm.com {");
-  const stagingAt = source.indexOf("\nedge-staging.commonswarm.com {");
-  const routesAt = source.indexOf("(box_routes) {");
-  return {
-    publicSite: publicAt >= 0 && stagingAt > publicAt ? source.slice(publicAt, stagingAt) : "",
-    stagingSite: stagingAt >= 0 ? source.slice(stagingAt) : "",
-    boxRoutes: routesAt >= 0 && publicAt > routesAt ? source.slice(routesAt, publicAt) : "",
-  };
-}
-
-function maintenanceProblems(source: string): string[] {
+function maintenanceProblems(publicSite: string, stagingSite: string): string[] {
   const errors: string[] = [];
-  const { publicSite, stagingSite, boxRoutes } = maintenanceSites(source);
-  if (!publicSite || !stagingSite || !boxRoutes) errors.push("maintenance sites");
+  if (!publicSite || !stagingSite) errors.push("maintenance sites");
   if (/reverse_proxy|\bimport\b/.test(publicSite)) errors.push("public maintenance upstream");
   if (!publicSite.includes("@maintenance_preflight method OPTIONS")) errors.push("maintenance preflight");
   if (!publicSite.includes('Access-Control-Allow-Headers "authorization, apikey, content-type, x-client-info"')) {
@@ -479,37 +551,45 @@ function maintenanceProblems(source: string): string[] {
   if (!publicSite.includes('Access-Control-Allow-Origin "*"')) errors.push("maintenance cors");
   if (!publicSite.includes('Retry-After "300"')) errors.push("maintenance retry");
   if (!publicSite.includes('\\"error\\":\\"maintenance\\"')) errors.push("maintenance body");
-  if (!stagingSite.includes("import box_routes")) errors.push("staging box routes");
-  if (/supabase\.co\b/i.test(source)) errors.push("supabase.co host");
+  if (routePortErrors(stagingSite).length > 0) errors.push("staging box routes");
+  if (/supabase\.co\b/i.test(`${publicSite}\n${stagingSite}`)) errors.push("supabase.co host");
   return errors;
 }
 
 test("live and maintenance Caddy files keep the box route frame", () => {
-  const { boxRoutes } = maintenanceSites(maintenanceCaddy);
-  const liveSite = caddy.slice(caddy.indexOf("api.commonswarm.com, edge-staging.commonswarm.com {"));
-  assert.deepEqual(routeFrame(liveSite), routeFrame(boxRoutes));
-  assert.deepEqual(routePortErrors(liveSite), [], "live site");
-  assert.deepEqual(routePortErrors(boxRoutes), [], "maintenance staging site");
-  for (const source of [liveSite, boxRoutes]) {
+  assert.deepEqual(routeFrame(apiCaddy), routeFrame(edgeStagingCaddy));
+  assert.deepEqual(routeFrame(apiCaddy), routeFrame(edgeStagingMaintenanceCaddy));
+  for (const [name, source] of [
+    ["live API", apiCaddy],
+    ["live staging", edgeStagingCaddy],
+    ["maintenance staging", edgeStagingMaintenanceCaddy],
+  ] as const) {
+    assert.deepEqual(routePortErrors(source), [], name);
     const swapped = swapAuthRestPorts(source);
     assert.notEqual(swapped, source);
     const swappedErrors = routePortErrors(swapped).join("\n");
     assert.match(swappedErrors, /route handle \/auth\/v1\/\*/);
     assert.match(swappedErrors, /route handle \/rest\/v1\/\*/);
   }
-  assert.deepEqual(maintenanceProblems(maintenanceCaddy), []);
-  const withUpstream = maintenanceCaddy.replace(
+  assert.deepEqual(maintenanceProblems(apiMaintenanceCaddy, edgeStagingMaintenanceCaddy), []);
+  const withUpstream = apiMaintenanceCaddy.replace(
     '\theader Retry-After "300"',
     '\treverse_proxy 127.0.0.1:18001\n\t\theader Retry-After "300"',
   );
-  assert.notEqual(withUpstream, maintenanceCaddy);
-  assert.match(maintenanceProblems(withUpstream).join("\n"), /public maintenance upstream/);
+  assert.notEqual(withUpstream, apiMaintenanceCaddy);
   assert.match(
-    maintenanceProblems(maintenanceCaddy.replace("import box_routes", "import missing_routes")).join("\n"),
+    maintenanceProblems(withUpstream, edgeStagingMaintenanceCaddy).join("\n"),
+    /public maintenance upstream/,
+  );
+  assert.match(
+    maintenanceProblems(apiMaintenanceCaddy, edgeStagingMaintenanceCaddy.replace("127.0.0.1:18001", "")).join("\n"),
     /staging box routes/,
   );
   assert.match(
-    maintenanceProblems(maintenanceCaddy.replace('header Retry-After "300"\n', "")).join("\n"),
+    maintenanceProblems(
+      apiMaintenanceCaddy.replace('header Retry-After "300"\n', ""),
+      edgeStagingMaintenanceCaddy,
+    ).join("\n"),
     /maintenance retry/,
   );
 });
@@ -551,10 +631,11 @@ function accessLogProblems(source: string, fileName: string): string[] {
 }
 
 test("API, maintenance, and MCP access logs are bounded JSON without credentials or queries", () => {
-  const { publicSite } = maintenanceSites(maintenanceCaddy);
   const sites = [
-    ["live API", caddy, "api.commonswarm.com"],
-    ["maintenance API", publicSite, "api.commonswarm.com"],
+    ["live API", apiCaddy, "api.commonswarm.com"],
+    ["live staging", edgeStagingCaddy, "edge-staging.commonswarm.com"],
+    ["maintenance API", apiMaintenanceCaddy, "api.commonswarm.com"],
+    ["maintenance staging", edgeStagingMaintenanceCaddy, "edge-staging.commonswarm.com"],
     ["MCP", mcpCaddy, "mcp.commonswarm.com"],
   ] as const;
   for (const [name, source, fileName] of sites) {
@@ -595,7 +676,9 @@ test("no deploy Caddy file names a supabase.co host", async () => {
   const files = await deployCaddyFiles();
   for (const required of [
     "deploy/supabase-stack/commonswarm-api.caddy",
+    "deploy/supabase-stack/commonswarm-edge-staging.caddy",
     "deploy/supabase-stack/commonswarm-api-maintenance.caddy",
+    "deploy/supabase-stack/commonswarm-edge-staging-maintenance.caddy",
     "deploy/edge-runtime/caddy-global-servers.caddy",
     "deploy/site/commonswarm-site.caddy",
   ]) {
@@ -614,6 +697,74 @@ test("no deploy Caddy file names a supabase.co host", async () => {
   assert.match(supabaseHostErrors(dottedCo).join("\n"), new RegExp(`supabase\\.co host ${files[0]!.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
+test("adapted Caddy checker accepts the split pair and rejects host and route gaps", async () => {
+  const checker = join(root, "deploy", "edge-runtime", "check-caddy-adapted.mjs");
+  const directory = await mkdtemp(join(tmpdir(), "caddy-checker-"));
+  try {
+    const pair = syntheticLivePair();
+    const pairPath = join(directory, "pair.json");
+    await writeFile(pairPath, JSON.stringify(pair));
+    const checked = spawnSync(
+      process.execPath,
+      [checker, pairPath, "live", "without-trusted-proxies"],
+      { encoding: "utf8" },
+    );
+    assert.equal(checked.status, 0, checked.stderr);
+
+    const missingHost = structuredClone(pair);
+    const missingHostRoutes = adaptedRoutes(missingHost);
+    const missingHostIndex = missingHostRoutes.findIndex((route) =>
+      testRouteHosts(route).includes("api.commonswarm.com")
+    );
+    assert.ok(missingHostIndex >= 0);
+    missingHostRoutes.splice(missingHostIndex, 1);
+    await assertCheckerRejects(
+      directory,
+      checker,
+      missingHost,
+      "missing-host.json",
+      "live",
+      "without-trusted-proxies",
+      /site api\.commonswarm\.com exactly once/,
+    );
+
+    const duplicateHost = structuredClone(pair);
+    const duplicateHostRoutes = adaptedRoutes(duplicateHost);
+    const duplicateRoute = duplicateHostRoutes.find((route) =>
+      testRouteHosts(route).includes("api.commonswarm.com")
+    );
+    assert.ok(duplicateRoute);
+    duplicateHostRoutes.push(structuredClone(duplicateRoute));
+    await assertCheckerRejects(
+      directory,
+      checker,
+      duplicateHost,
+      "duplicate-host.json",
+      "live",
+      "without-trusted-proxies",
+      /site api\.commonswarm\.com exactly once/,
+    );
+
+    const missingRoute = structuredClone(pair);
+    const apiRoute = adaptedRoutes(missingRoute).find((route) =>
+      testRouteHosts(route).includes("api.commonswarm.com")
+    );
+    assert.ok(apiRoute);
+    assert.equal(removeProxyDial(apiRoute, "127.0.0.1:9000"), true);
+    await assertCheckerRejects(
+      directory,
+      checker,
+      missingRoute,
+      "missing-route.json",
+      "live",
+      "without-trusted-proxies",
+      /api\.commonswarm\.com route dials/,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
   const docker = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
     encoding: "utf8",
@@ -626,29 +777,26 @@ test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
   const checker = join(root, "deploy", "edge-runtime", "check-caddy-adapted.mjs");
   const fixture = join(root, "deploy", "edge-runtime", "build-caddy-validation-fixture.mjs");
   const profiles = [
-    ["live", join(stackDir, "commonswarm-api.caddy")],
-    ["maintenance", join(stackDir, "commonswarm-api-maintenance.caddy")],
-    ["mcp-oauth", join(stackDir, "commonswarm-mcp.caddy")],
+    ["live", [
+      join(stackDir, "commonswarm-api.caddy"),
+      join(stackDir, "commonswarm-edge-staging.caddy"),
+    ]],
+    ["maintenance", [
+      join(stackDir, "commonswarm-api-maintenance.caddy"),
+      join(stackDir, "commonswarm-edge-staging-maintenance.caddy"),
+    ]],
+    ["mcp-oauth", [join(stackDir, "commonswarm-mcp.caddy")]],
   ] as const;
-  for (const [profile, sitePath] of profiles) {
+  for (const [profile, sitePaths] of profiles) {
     for (const trustMode of ["without-trusted-proxies", "with-trusted-proxies"] as const) {
       const directory = await mkdtemp(join(tmpdir(), "caddy-adapt-"));
       try {
-        let configPath = sitePath;
-        if (trustMode === "with-trusted-proxies") {
-          const built = spawnSync(process.execPath, [fixture, directory, trustMode, sitePath], { encoding: "utf8" });
-          assert.equal(built.status, 0, built.stderr);
-          configPath = join(directory, "Caddyfile");
-        }
-        const adapted = trustMode === "with-trusted-proxies"
-          ? spawnSync("docker", [
-            "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${directory}:/srv:ro`, "-w", "/srv",
-            "caddy:2.11", "caddy", "adapt", "--config", "/srv/Caddyfile",
-          ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 })
-          : spawnSync("docker", [
-            "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${configPath}:/etc/caddy/Caddyfile:ro`,
-            "caddy:2.11", "caddy", "adapt", "--config", "/etc/caddy/Caddyfile",
-          ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
+        const built = spawnSync(process.execPath, [fixture, directory, trustMode, ...sitePaths], { encoding: "utf8" });
+        assert.equal(built.status, 0, built.stderr);
+        const adapted = spawnSync("docker", [
+          "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${directory}:/srv:ro`, "-w", "/srv",
+          "caddy:2.11", "caddy", "adapt", "--config", "/srv/Caddyfile",
+        ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
         assert.equal(adapted.status, 0, `${profile} ${trustMode}: ${adapted.stderr.slice(-500)}`);
         if (profile === "mcp-oauth") continue;
         const jsonPath = join(directory, "adapted.json");
@@ -676,6 +824,111 @@ test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
     }
   }
 });
+
+type JsonObject = Record<string, unknown>;
+
+function syntheticLivePair(): JsonObject {
+  const hosts = ["api.commonswarm.com", "edge-staging.commonswarm.com"];
+  const siteRoute = (host: string): JsonObject => ({
+    match: [{ host: [host] }],
+    handle: [{
+      handler: "subroute",
+      routes: [{
+        handle: [
+          { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18001" }] },
+          { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18002" }] },
+          {
+            handler: "reverse_proxy",
+            upstreams: [{ dial: "127.0.0.1:18003" }],
+            transport: { versions: ["1.1"] },
+            flush_interval: -1,
+            headers: { request: { set: { Host: ["realtime-dev"] } } },
+          },
+          { handler: "reverse_proxy", upstreams: [{ dial: "127.0.0.1:18004" }] },
+          {
+            handler: "reverse_proxy",
+            upstreams: [{ dial: "127.0.0.1:9000" }],
+            headers: { request: { set: { "X-Forwarded-For": ["{http.request.client_ip}"] } } },
+            transport: { response_header_timeout: 165_000_000_000 },
+          },
+        ],
+      }],
+    }],
+  });
+  const errorRoute = (host: string): JsonObject => ({
+    match: [{ host: [host] }],
+    handle: [{
+      handler: "subroute",
+      routes: [{
+        match: [{ path: ["/functions/v1", "/functions/v1/*"] }],
+        handle: [{
+          handler: "headers",
+          response: { set: { "Access-Control-Allow-Origin": ["*"] } },
+        }],
+      }],
+    }],
+  });
+  return {
+    apps: {
+      http: {
+        servers: {
+          srv0: {
+            routes: hosts.map(siteRoute),
+            errors: { routes: hosts.map(errorRoute) },
+          },
+        },
+      },
+    },
+  };
+}
+
+function adaptedRoutes(config: unknown): JsonObject[] {
+  const apps = (config as JsonObject).apps as JsonObject;
+  const http = apps.http as JsonObject;
+  const servers = Object.values(http.servers as JsonObject) as JsonObject[];
+  assert.equal(servers.length, 1);
+  return servers[0]!.routes as JsonObject[];
+}
+
+function testRouteHosts(route: JsonObject): string[] {
+  return ((route.match ?? []) as JsonObject[]).flatMap((matcher) =>
+    Array.isArray(matcher.host) ? matcher.host as string[] : []
+  );
+}
+
+function removeProxyDial(value: unknown, dial: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) {
+    const index = value.findIndex((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const record = item as JsonObject;
+      const upstreams = record.upstreams as JsonObject[] | undefined;
+      return record.handler === "reverse_proxy" && upstreams?.[0]?.dial === dial;
+    });
+    if (index >= 0) {
+      value.splice(index, 1);
+      return true;
+    }
+    return value.some((child) => removeProxyDial(child, dial));
+  }
+  return Object.values(value as JsonObject).some((child) => removeProxyDial(child, dial));
+}
+
+async function assertCheckerRejects(
+  directory: string,
+  checker: string,
+  config: unknown,
+  fileName: string,
+  profile: "live" | "maintenance",
+  trustMode: "with-trusted-proxies" | "without-trusted-proxies",
+  expected: RegExp,
+): Promise<void> {
+  const path = join(directory, fileName);
+  await writeFile(path, JSON.stringify(config));
+  const checked = spawnSync(process.execPath, [checker, path, profile, trustMode], { encoding: "utf8" });
+  assert.notEqual(checked.status, 0, fileName);
+  assert.match(`${checked.stderr}\n${checked.stdout}`, expected, fileName);
+}
 
 function stripHeader(value: unknown, name: string): void {
   if (!value || typeof value !== "object") return;
