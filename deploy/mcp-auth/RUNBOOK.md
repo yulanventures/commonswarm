@@ -41,7 +41,9 @@ Runtime files live under `/etc/commonswarm-oauth/`, owned by
 
 The internal database CA is the separately managed host file
 `/etc/ssl/yulan-internal-ca.pem`, mounted read-only at that same container
-path. It is not a runtime file under `/etc/commonswarm-oauth/`.
+path. It is not a runtime file under `/etc/commonswarm-oauth/`. As a public
+certificate, it may be mode `0644`; it must be a root-owned regular file, not
+a symlink, and must not be writable by group or other users.
 
 The container receives only their mounted paths through
 `MCP_OAUTH_SIGNING_KEYS_FILE`, `MCP_OAUTH_COOKIE_KEYS_FILE`,

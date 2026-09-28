@@ -1,17 +1,58 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdtemp, open, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import { exportJWK, generateKeyPair } from "jose";
 
 import { loadConfig } from "../src/config.js";
 
 const root = new URL("../../../", import.meta.url);
+const execFileAsync = promisify(execFile);
 
 async function text(path) {
   return await readFile(new URL(path, root), "utf8");
+}
+
+async function configFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "mcp-auth-config-"));
+  const paths = Object.fromEntries(["signing", "cookies", "database", "ca"].map(
+    (name) => [name, join(directory, name)],
+  ));
+  const keys = [];
+  for (const kid of ["previous", "active"]) {
+    const { privateKey } = await generateKeyPair("ES256", { extractable: true });
+    keys.push({ ...await exportJWK(privateKey), alg: "ES256", kid, use: "sig" });
+  }
+  await writeFile(paths.signing, JSON.stringify({ keys }));
+  await writeFile(paths.cookies, `${"a".repeat(32)}\n${"b".repeat(32)}\n`);
+  await writeFile(paths.database, JSON.stringify({ user: "runtime", password: "not-a-live-secret" }));
+  await writeFile(paths.ca, "test-ca");
+  await Promise.all(Object.values(paths).map((path) => chmod(path, 0o640)));
+  return {
+    directory,
+    paths,
+    env: {
+      MCP_OAUTH_SIGNING_KEYS_FILE: paths.signing,
+      MCP_OAUTH_COOKIE_KEYS_FILE: paths.cookies,
+      MCP_OAUTH_DATABASE_CREDENTIALS_FILE: paths.database,
+      MCP_OAUTH_DATABASE_TLS_CA_FILE: paths.ca,
+      MCP_OAUTH_ACTIVE_SIGNING_KID: "active",
+      MCP_OAUTH_ISSUER: "https://mcp.commonswarm.com",
+      MCP_OAUTH_RESOURCE: "https://mcp.commonswarm.com/mcp",
+      MCP_OAUTH_PUBLIC_ORIGIN: "https://mcp.commonswarm.com",
+      MCP_OAUTH_ALLOWED_ORIGINS: "https://commonswarm.com,https://www.commonswarm.com",
+      MCP_OAUTH_GOTRUE_URL: "https://api.commonswarm.com/auth/v1",
+      MCP_OAUTH_GOTRUE_PROVIDER: "github",
+      SUPABASE_ANON_KEY: "public-test-anon-key",
+      MCP_OAUTH_DATABASE_HOST: "db.internal",
+      MCP_OAUTH_DATABASE_NAME: "postgres",
+    },
+  };
 }
 
 test("container is pinned, unprivileged, and starts the production server", async () => {
@@ -85,40 +126,110 @@ test("migration has no transaction control and proofs have the required safe sha
 });
 
 test("protected-file configuration defaults dark and orders the active signing kid first", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "mcp-auth-config-"));
-  const paths = Object.fromEntries(["signing", "cookies", "database", "ca"].map(
-    (name) => [name, join(directory, name)],
-  ));
-  const keys = [];
-  for (const kid of ["previous", "active"]) {
-    const { privateKey } = await generateKeyPair("ES256", { extractable: true });
-    keys.push({ ...await exportJWK(privateKey), alg: "ES256", kid, use: "sig" });
-  }
-  await writeFile(paths.signing, JSON.stringify({ keys }));
-  await writeFile(paths.cookies, `${"a".repeat(32)}\n${"b".repeat(32)}\n`);
-  await writeFile(paths.database, JSON.stringify({ user: "runtime", password: "not-a-live-secret" }));
-  await writeFile(paths.ca, "test-ca");
-  await Promise.all(Object.values(paths).map((path) => chmod(path, 0o640)));
-  const config = await loadConfig({
-    MCP_OAUTH_SIGNING_KEYS_FILE: paths.signing,
-    MCP_OAUTH_COOKIE_KEYS_FILE: paths.cookies,
-    MCP_OAUTH_DATABASE_CREDENTIALS_FILE: paths.database,
-    MCP_OAUTH_DATABASE_TLS_CA_FILE: paths.ca,
-    MCP_OAUTH_ACTIVE_SIGNING_KID: "active",
-    MCP_OAUTH_ISSUER: "https://mcp.commonswarm.com",
-    MCP_OAUTH_RESOURCE: "https://mcp.commonswarm.com/mcp",
-    MCP_OAUTH_PUBLIC_ORIGIN: "https://mcp.commonswarm.com",
-    MCP_OAUTH_ALLOWED_ORIGINS: "https://commonswarm.com,https://www.commonswarm.com",
-    MCP_OAUTH_GOTRUE_URL: "https://api.commonswarm.com/auth/v1",
-    MCP_OAUTH_GOTRUE_PROVIDER: "github",
-    SUPABASE_ANON_KEY: "public-test-anon-key",
-    MCP_OAUTH_DATABASE_HOST: "db.internal",
-    MCP_OAUTH_DATABASE_NAME: "postgres",
-  });
+  const { env } = await configFixture();
+  const config = await loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts" });
   assert.equal(config.publicAuthorizationEnabled, false);
   assert.equal(config.nativeLoopbackEnabled, false);
   assert.equal(config.allowedOrigins.has("https://mcp.commonswarm.com"), true);
   assert.deepEqual(config.jwks.keys.map(({ kid }) => kid), ["active", "previous"]);
   assert.equal(config.database.password, "not-a-live-secret");
   assert.equal(config.database.ssl.rejectUnauthorized, true);
+});
+
+test("public database CA policy accepts root-owned 0644 and rejects unsafe paths", async (t) => {
+  const { directory, env, paths } = await configFixture();
+  const publicCa = "/etc/hosts";
+  const publicCaMetadata = await lstat(publicCa);
+  assert.equal(publicCaMetadata.isFile(), true);
+  assert.equal(publicCaMetadata.uid, 0);
+  assert.equal(publicCaMetadata.mode & 0o777, 0o644);
+  await assert.doesNotReject(loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: publicCa }));
+
+  await t.test("group-writable CA", async () => {
+    await chmod(paths.ca, 0o660);
+    await assert.rejects(loadConfig(env), /database TLS CA path must not be writable by group or other users/u);
+  });
+
+  await t.test("other-writable CA", async () => {
+    await chmod(paths.ca, 0o602);
+    await assert.rejects(loadConfig(env), /database TLS CA path must not be writable by group or other users/u);
+  });
+
+  await t.test("symlinked CA", async () => {
+    const link = join(directory, "ca-link");
+    await symlink(publicCa, link);
+    await assert.rejects(
+      loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: link }),
+      /database TLS CA path must be a regular file, not a symlink/u,
+    );
+  });
+
+  await t.test("non-root-owned CA", async () => {
+    await chmod(paths.ca, 0o644);
+    await assert.rejects(loadConfig(env), /database TLS CA path must be owned by root \(uid 0\)/u);
+  });
+
+  await t.test("missing CA", async () => {
+    await assert.rejects(
+      loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: join(directory, "missing-ca") }),
+      /database TLS CA path must exist and be inspectable/u,
+    );
+  });
+});
+
+test("secret file policies still reject 0644", async (t) => {
+  const secretSettings = [
+    ["signing key", "MCP_OAUTH_SIGNING_KEYS_FILE", "signing"],
+    ["cookie key", "MCP_OAUTH_COOKIE_KEYS_FILE", "cookies"],
+    ["database credential", "MCP_OAUTH_DATABASE_CREDENTIALS_FILE", "database"],
+  ];
+  for (const [name, envName, pathName] of secretSettings) {
+    await t.test(name, async () => {
+      const { env, paths } = await configFixture();
+      await chmod(paths[pathName], 0o644);
+      await assert.rejects(
+        loadConfig({ ...env, [envName]: paths[pathName], MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts" }),
+        new RegExp(`${name} path must be a file with no permissions for other users`, "u"),
+      );
+    });
+  }
+});
+
+test("file content is read from the descriptor whose metadata was checked", async () => {
+  const { env, paths } = await configFixture();
+  const checkedPath = `${paths.cookies}-checked`;
+  const probe = await open(paths.cookies, constants.O_RDONLY);
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  await probe.close();
+  const originalStat = fileHandlePrototype.stat;
+  let statCalls = 0;
+  fileHandlePrototype.stat = async function (...args) {
+    const metadata = await originalStat.apply(this, args);
+    statCalls += 1;
+    if (statCalls === 2) {
+      await rename(paths.cookies, checkedPath);
+      await writeFile(paths.cookies, `${"c".repeat(32)}\n${"d".repeat(32)}\n`, { mode: 0o640 });
+    }
+    return metadata;
+  };
+  let config;
+  try {
+    config = await loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: "/etc/hosts" });
+  } finally {
+    fileHandlePrototype.stat = originalStat;
+  }
+  assert.equal(statCalls, 4);
+  assert.deepEqual(config.cookieKeys, ["a".repeat(32), "b".repeat(32)]);
+});
+
+test("a FIFO file setting fails without waiting for a writer", async () => {
+  const { directory, env } = await configFixture();
+  const fifo = join(directory, "ca-fifo");
+  await execFileAsync("mkfifo", [fifo]);
+  const startedAt = performance.now();
+  await assert.rejects(
+    loadConfig({ ...env, MCP_OAUTH_DATABASE_TLS_CA_FILE: fifo }),
+    /database TLS CA path must be a regular file/u,
+  );
+  assert.ok(performance.now() - startedAt < 1_000, "FIFO policy check did not fail fast");
 });
