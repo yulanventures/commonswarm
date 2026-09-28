@@ -13,6 +13,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 const SUFFIX_RE = /^[0-9]{6}$/u;
 const RESOURCE = "https://mcp.commonswarm.com/mcp";
 const CLIENT_VERSION = "0.1.80";
+const ACCESS_TOKEN_TTL_SECONDS = 5 * 60;
+const PROVIDER_CLIENT_ID = "https://client.example/hm37-window-control.json";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Result = { status: number; body: Record<string, unknown> };
@@ -118,6 +120,8 @@ interface ErrorFacts {
   class: string;
   status?: number;
   response_code?: string;
+  constraint?: string;
+  table?: string;
 }
 
 class HarnessFailure extends Error {
@@ -162,11 +166,23 @@ function errorFacts(step: string, error: unknown): ErrorFacts {
   const className = record?.constructor && typeof record.constructor === "function"
     ? stableExternalCode(record.constructor.name)
     : undefined;
+  const constraint = stableExternalCode(record?.constraint_name);
+  const table = stableExternalCode(record?.table_name);
   return {
     step,
     code: stableExternalCode(record?.code) ?? "unexpected_exception",
     class: className ?? "UnknownError",
+    ...(constraint === undefined ? {} : { constraint }),
+    ...(table === undefined ? {} : { table }),
   };
+}
+
+function randomBase64Url32(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
 }
 
 function parseArgs(values: string[]): Args {
@@ -463,22 +479,26 @@ async function providerActive(statusDb: Sql, providerGrantId: string): Promise<{
 }
 
 async function grantCapability(runtime: Runtime, journal: Journal, statusDb: Sql): Promise<unknown | null> {
-  return await runtime.command.db.begin(async (tx) =>
-    await runtime.auth.authenticateHostedGrantCapability(tx, {
+  return await runtime.command.db.begin("isolation level read committed", async (tx) => {
+    await setRole(tx, "swarm_command");
+    return await runtime.auth.authenticateHostedGrantCapability(tx, {
       grantId: journal.grantId, ownerUserId: journal.ownerUserId,
       providerGrantId: journal.providerGrantId, workspaceId: journal.workspaceId,
       tool: "claim_hosted_seat", providerStatus: () => providerActive(statusDb, journal.providerGrantId),
-    })) as unknown;
+    });
+  }) as unknown;
 }
 
 async function seatCapability(runtime: Runtime, journal: Journal, statusDb: Sql): Promise<unknown | null> {
   if (journal.seatHandle === null) return null;
-  return await runtime.command.db.begin(async (tx) =>
-    await runtime.auth.authenticateHostedSeatCapability(tx, {
+  return await runtime.command.db.begin("isolation level read committed", async (tx) => {
+    await setRole(tx, "swarm_command");
+    return await runtime.auth.authenticateHostedSeatCapability(tx, {
       grantId: journal.grantId, providerGrantId: journal.providerGrantId,
       handle: journal.seatHandle, tool: "check",
       providerStatus: () => providerActive(statusDb, journal.providerGrantId),
-    }, "command")) as unknown;
+    }, "command");
+  }) as unknown;
 }
 
 async function checkCall(runtime: Runtime, journal: Journal, statusDb: Sql, ack?: string): Promise<Result> {
@@ -717,7 +737,7 @@ async function execute(): Promise<Record<string, Json>> {
       journal = {
         version: 1, workspaceId: args.workspaceId!, ownerUserId: identity.userId,
         suffix, seatName: `hm37-hosted-${suffix}`,
-        grantId: crypto.randomUUID(), providerGrantId: `hm37-provider-${crypto.randomUUID()}`,
+        grantId: crypto.randomUUID(), providerGrantId: randomBase64Url32(),
         interactionRef: `hm37-${crypto.randomUUID()}`, commandIds,
         plannedMutations: [],
         grantPlanned: false, grantCreated: false,
@@ -756,7 +776,7 @@ async function execute(): Promise<Record<string, Json>> {
         journal.workspaceId, journal.commandIds.begin, {
           kind: "begin_hosted_mcp_grant", grant_id: journal.grantId,
           provider_grant_id: journal.providerGrantId, owner_user_id: journal.ownerUserId,
-          home_workspace_id: journal.workspaceId, client_id: "hm37-window-control",
+          home_workspace_id: journal.workspaceId, client_id: PROVIDER_CLIENT_ID,
           resource: RESOURCE, selected_workspace_ids: [journal.workspaceId],
           manifest_digest: manifest, interaction_ref: journal.interactionRef,
         }), identity), 200, "grant begin");
@@ -777,12 +797,12 @@ async function execute(): Promise<Record<string, Json>> {
 
       journal.providerFamilyPlanned = true;
       await journalBefore(journalPath, journal, "oauth_access_token_artifact");
-      const providerArtifactId = `hm37_${crypto.randomUUID()}_${crypto.randomUUID()}`;
+      const providerArtifactId = randomBase64Url32();
       step = "provider-artifact-create";
       await runtime.createPostgresAdapter(adapterPool(oauthDb))("AccessToken").upsert(providerArtifactId, {
         grantId: journal.providerGrantId, accountId: journal.ownerUserId,
-        clientId: "hm37-window-control", kind: "AccessToken",
-      }, 900);
+        clientId: PROVIDER_CLIENT_ID, kind: "AccessToken",
+      }, ACCESS_TOKEN_TTL_SECONDS);
       journal.providerFamilyCreated = true;
       await writeJournal(journalPath, journal);
       step = "provider-family-check";

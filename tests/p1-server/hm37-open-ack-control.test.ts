@@ -45,6 +45,8 @@ interface HarnessOutput {
     class: string;
     status?: number;
     response_code?: string;
+    constraint?: string;
+    table?: string;
   };
 }
 
