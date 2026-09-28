@@ -19,6 +19,8 @@ const rollbackUrl = new URL(
 );
 
 const migrationRole = "hm6_oauth_migration_test";
+const migrationVersion = "20260928000003";
+const migrationOwner = "supabase_admin";
 const rollbackSentinel = "ROLLBACK_HM6_OAUTH_PROOF_DRILL";
 
 interface LocalEnvironment {
@@ -102,6 +104,41 @@ async function assertCatalogPasses(
   assert.equal(result?.catalog_ok, true, message);
 }
 
+async function setMigrationOwner(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+): Promise<void> {
+  await tx.unsafe(`
+    RESET ROLE;
+    SET LOCAL ROLE ${migrationOwner};
+  `);
+  const [{ current_role }] = await tx<{ current_role: string }[]>`
+    SELECT current_user::text AS current_role
+  `;
+  assert.equal(
+    current_role,
+    migrationOwner,
+    "ledger bookkeeping must run as the stack migration owner",
+  );
+}
+
+async function recordMigrationLedger(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+): Promise<void> {
+  await setMigrationOwner(tx);
+  await tx`
+    INSERT INTO supabase_migrations.schema_migrations (version)
+    VALUES (${migrationVersion})
+  `;
+}
+
+async function rollbackAsMigrationOwner(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+  inverse: string,
+): Promise<void> {
+  await setMigrationOwner(tx);
+  await tx.unsafe(inverse);
+}
+
 test("OAuth catalog is structural and all creator apply paths are safe", async () => {
   const [migration, catalog, rollback] = await Promise.all([
     readFile(migrationUrl, "utf8"),
@@ -123,13 +160,19 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
     /SET LOCAL createrole_self_grant = '';\s+CREATE ROLE commonswarm_oauth_runtime/u,
     "the migration pins creator membership options immediately before CREATE ROLE",
   );
+  assert.doesNotMatch(
+    migration,
+    /\bsupabase_migrations\b/u,
+    "the migration runner, not the migration file, owns ledger bookkeeping",
+  );
   const proof = catalogQuery(catalog);
   const inverse = rollbackBody(rollback);
 
   await sql.begin(async (tx) => {
     await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
 
-    await tx.unsafe(inverse);
+    await rollbackAsMigrationOwner(tx, inverse);
+    await tx.unsafe("RESET ROLE");
     const [roleCollision] = await tx<{ present: boolean }[]>`
       SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${migrationRole}) AS present
     `;
@@ -187,6 +230,8 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
     );
 
     await tx.unsafe(migration);
+    await recordMigrationLedger(tx);
+    await tx.unsafe(`SET LOCAL ROLE ${migrationRole}`);
     await assertCatalogPasses(
       tx,
       proof,
@@ -197,7 +242,9 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       { count: 1, safe: true },
       "default non-superuser creator membership stays admin-only",
     );
-    await tx.unsafe(inverse);
+    await rollbackAsMigrationOwner(tx, inverse);
+
+    await tx.unsafe(`SET LOCAL ROLE ${migrationRole}`);
 
     await tx.unsafe(`
       SET LOCAL createrole_self_grant = 'set,inherit';
@@ -233,6 +280,8 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       "configured non-superuser path starts with self-grants enabled",
     );
     await tx.unsafe(migration);
+    await recordMigrationLedger(tx);
+    await tx.unsafe(`SET LOCAL ROLE ${migrationRole}`);
     assert.equal(
       await creatorSelfGrant(tx),
       "",
@@ -248,7 +297,7 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       { count: 1, safe: true },
       "configured non-superuser creator membership is still admin-only",
     );
-    await tx.unsafe(inverse);
+    await rollbackAsMigrationOwner(tx, inverse);
 
     await tx.unsafe("RESET ROLE");
     const [{ current_role: superuser }] = await tx<{ current_role: string }[]>`
@@ -256,6 +305,8 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
     `;
     await tx.unsafe("SET LOCAL createrole_self_grant = 'set,inherit'");
     await tx.unsafe(migration);
+    await recordMigrationLedger(tx);
+    await tx.unsafe("RESET ROLE");
     assert.deepEqual(
       await creatorMembership(tx, superuser),
       { count: 0, safe: false },
