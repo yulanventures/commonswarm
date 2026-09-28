@@ -1,0 +1,14 @@
+{
+  "pass": true,
+  "old_release_sha": "9fa4217da9f6447e55fb8c6d577b8fd3997f926b",
+  "service_account": "cs-oauth-080406",
+  "uid": 996,
+  "gid": 986,
+  "configuration_directory_empty": true,
+  "old_image_id": "sha256:c298ced5404dbdeddbbf4225456387455f74a6211fdf0afa44bb75cda7fb9267",
+  "new_window_suffix": "124000",
+  "old_release_disposition": "retain; verify against old archive",
+  "old_image_disposition": "retain; rebuild from retry archive",
+  "service_account_disposition": "reuse after verification",
+  "configuration_directory_disposition": "reuse after verification"
+}

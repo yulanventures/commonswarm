@@ -1,0 +1,2 @@
+20260928000003=approved-but-not-applied; window stopped before helper switch and migration
+20260928000004=deferred; not applied

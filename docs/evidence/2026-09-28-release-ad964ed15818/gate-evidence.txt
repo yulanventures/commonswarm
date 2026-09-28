@@ -1,0 +1,15 @@
+SHA=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+source=isolated exact-SHA worktree /Users/yulanbot/.hermes/profiles/anvil/cache/scratch/hm6-exact-gates
+scripts/run-gates.sh: PASS
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+OAuth unit/security tests: PASS
+PostgreSQL adapter/refresh/consent tests and tests/p1-server/oauth-store.test.ts: PASS
+Docker acceptance and routing checks: PASS
+Backup/restore coverage checks: PASS
+plan sha256 11248b75e510adb732d1e843c3e927b190e70aa347da30ed44ee7fa8cfcf9270: PASS
+plan step inventory 18/18 unique: PASS
+plan redaction-marker refusal check: PASS
+plan Python block compilation 9/9: PASS
+independent security review: PASS, no KEEP
+independent operations review: PASS, no KEEP

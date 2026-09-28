@@ -1,0 +1,15 @@
+window_result=aborted-before-runtime-mutation
+failure_step=hm6-build-retry-image
+failure_reason=pinned base reference unavailable to docker image inspect after successful fresh build
+fresh_image_id=sha256:078ffc6accf9c97712183b5fc78bc01d6911d84368847cf1ce996247aa2b3a43
+pinned_base_digest=sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+stack_current=/home/commonswarm/stack/releases/e38b499fc29a01935333e38f66c4e68ac7e1f81e
+edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+migration_20260928000003_ledger=0
+migration_20260928000003_catalog=f
+backup_timers_stopped=0
+edge_recycle_timer_stopped=0
+service_not_started=true
+gotrue_unchanged=true
+dns_not_created=true
+caddy_unchanged=true
