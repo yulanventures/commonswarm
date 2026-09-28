@@ -6,10 +6,9 @@
 DO $role$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'commonswarm_oauth_runtime') THEN
-    -- NOSUPERUSER, NOREPLICATION and NOBYPASSRLS are CREATE ROLE defaults.
-    -- Keep them implicit: a non-superuser CREATEROLE migration principal
-    -- cannot grant or clear those elevated attributes. The assertion below
-    -- proves the defaults instead of trying to repair them.
+    -- Elevated cluster attributes use safe CREATE ROLE defaults. Keep them
+    -- implicit: a CREATEROLE migration principal cannot grant or clear them.
+    -- The assertion below proves the defaults instead of repairing them.
     CREATE ROLE commonswarm_oauth_runtime
       LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
   END IF;
@@ -43,14 +42,41 @@ $role_attributes$;
 
 ALTER ROLE commonswarm_oauth_runtime SET search_path = commonswarm_oauth, pg_catalog;
 
--- PostgreSQL 16+ automatically gives a non-superuser CREATEROLE principal an
--- admin-only membership in each role it creates. Superusers do not receive
--- that row. Normalize both execution paths to the same safe membership shape:
--- the migration principal can administer the runtime role but cannot inherit
--- its privileges or SET ROLE into it.
+-- PostgreSQL 16+ gives a CREATEROLE principal an admin-only membership in each
+-- role it creates. A configured creator self-grant can add another membership.
+-- Normalize that extra grant, remove it, and retain only the required
+-- admin-only membership. A cluster administrator needs no membership.
 DO $role_administrator$
+DECLARE
+  creator_is_cluster_administrator boolean;
 BEGIN
-  IF NOT EXISTS (
+  SELECT rolsuper INTO creator_is_cluster_administrator
+  FROM pg_catalog.pg_roles
+  WHERE rolname = current_user;
+
+  IF NOT creator_is_cluster_administrator THEN
+    EXECUTE format(
+      'GRANT commonswarm_oauth_runtime TO %I WITH ADMIN TRUE, SET FALSE, INHERIT FALSE',
+      current_user
+    );
+    EXECUTE format(
+      'REVOKE commonswarm_oauth_runtime FROM %I GRANTED BY %I',
+      current_user,
+      current_user
+    );
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND (membership.inherit_option OR membership.set_option)
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_oauth_runtime has unsafe membership options';
+  END IF;
+
+  IF creator_is_cluster_administrator AND EXISTS (
     SELECT 1
     FROM pg_catalog.pg_auth_members AS membership
     JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
@@ -58,12 +84,8 @@ BEGIN
     WHERE parent.rolname = 'commonswarm_oauth_runtime'
       AND member.rolname = current_user
   ) THEN
-    EXECUTE format(
-      'GRANT commonswarm_oauth_runtime TO %I WITH ADMIN TRUE, SET FALSE, INHERIT FALSE',
-      current_user
-    );
-  END IF;
-  IF (
+    RAISE EXCEPTION 'commonswarm_oauth_runtime administrator membership is unnecessary';
+  ELSIF NOT creator_is_cluster_administrator AND (
     SELECT count(*) <> 1 OR NOT COALESCE(bool_and(
       membership.admin_option
       AND NOT membership.inherit_option

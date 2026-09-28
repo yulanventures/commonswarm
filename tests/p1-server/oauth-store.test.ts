@@ -112,6 +112,7 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
         LOGIN NOSUPERUSER CREATEDB CREATEROLE INHERIT REPLICATION BYPASSRLS;
       GRANT swarm_admin TO ${migrationRole} WITH INHERIT TRUE, SET TRUE;
       GRANT swarm_read TO ${migrationRole} WITH INHERIT TRUE, SET TRUE;
+      GRANT ${migrationRole} TO SESSION_USER WITH SET TRUE, INHERIT FALSE;
       DO $database_grants$
       BEGIN
         EXECUTE format(
@@ -122,6 +123,7 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
       $database_grants$;
       SET LOCAL ROLE ${migrationRole};
       SET LOCAL search_path = "$user", public, auth, extensions;
+      SET LOCAL createrole_self_grant = 'set,inherit';
     `);
     const [identity] = await tx<{
       current_role: string;
@@ -169,8 +171,8 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
     await tx.unsafe(migration);
     assert.deepEqual(
       await creatorMembership(tx, superuser),
-      { count: 1, safe: true },
-      "superuser and non-superuser applies produce the same creator membership shape",
+      { count: 0, safe: false },
+      "superuser apply does not add an unnecessary creator membership",
     );
     const [superuserProof] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
     assert.equal(superuserProof?.catalog_ok, true, "superuser control still satisfies catalog");

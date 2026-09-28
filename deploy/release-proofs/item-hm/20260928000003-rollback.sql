@@ -67,7 +67,7 @@ BEGIN
   END IF;
   -- DROP ROLE removes memberships itself. Refusing every membership here would
   -- reject the normalized admin-only creator membership installed by the
-  -- forward migration, which is also what authorizes a non-superuser creator
+  -- forward migration, which is also what authorizes an ordinary creator
   -- to perform this rollback.
   IF EXISTS (
     SELECT 1 FROM pg_shdepend

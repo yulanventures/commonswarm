@@ -202,6 +202,12 @@ SELECT COALESCE((SELECT
     WHERE member.rolname = 'commonswarm_oauth_runtime'
       AND parent.rolname IN ('swarm_admin', 'swarm_command', 'swarm_read')
   )
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_auth_members AS membership
+    JOIN pg_roles AS parent ON parent.oid = membership.roleid
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND (membership.inherit_option OR membership.set_option)
+  )
   AND EXISTS (
     SELECT 1
     FROM pg_default_acl AS defaults
