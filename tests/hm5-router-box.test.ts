@@ -17,7 +17,7 @@ async function source(path: string): Promise<string> {
   return await readFile(resolve(repoRoot, path), "utf8");
 }
 
-test("HM7 routes the now-present MCP worker module", async () => {
+test("HM7 keeps MCP dark in the main router until explicitly enabled", async () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
     "read",
@@ -26,8 +26,9 @@ test("HM7 routes the now-present MCP worker module", async () => {
     "h0",
     "mcp",
   ]);
-  assert.deepEqual(DISABLED_FUNCTION_NAMES, []);
-  assert.deepEqual(resolveFunctionRoute("/functions/v1/mcp"), {
+  assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
+  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
+  assert.deepEqual(resolveFunctionRoute("/functions/v1/mcp", true), {
     functionName: "mcp",
     pathname: "/mcp",
   });
@@ -37,15 +38,38 @@ test("HM7 routes the now-present MCP worker module", async () => {
     "/functions/v1/mcp/",
     "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
   ]) {
-    const resolution = resolveGatewayRequest(
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"]) {
+      const dark = resolveGatewayRequest(
+        new Request(`https://edge.test${path}`, { method }),
+        false,
+      );
+      assert.equal(dark.route, null);
+      assert.equal(dark.response?.status, 503);
+      assert.deepEqual(await dark.response?.json(), {
+        error: "feature_disabled",
+        feature: "hosted_mcp",
+        message: "Hosted MCP is not available yet.",
+      });
+    }
+
+    const enabled = resolveGatewayRequest(
       new Request(`https://edge.test${path}`, { method: "POST" }),
+      true,
     );
-    assert.equal(resolution.route?.functionName, "mcp");
-    assert.equal(resolution.response, null);
+    assert.equal(enabled.route?.functionName, "mcp");
+    assert.equal(enabled.response, null);
   }
 
   const main = await source("deploy/edge-runtime/main/index.ts");
-  assert.match(main, /prepared-but-disabled function returns/);
+  assert.match(
+    main,
+    /const mcpPublicEnvironmentValue = Deno\.env\.get\(MCP_PUBLIC_ENABLED_ENV\);/,
+  );
+  assert.equal(
+    (main.match(/Deno\.env\.get\(MCP_PUBLIC_ENABLED_ENV\)/g) ?? []).length,
+    1,
+  );
+  assert.match(main, /return await handleGatewayRequest\(/);
   assert.equal(
     await readFile(resolve(repoRoot, "supabase/functions/mcp/index.ts"), "utf8")
       .then(() => true, () => false),

@@ -7,9 +7,10 @@ HezLead.
 
 ## Repository state
 
-- `mcp` is a prepared router name, while every
-  `/functions/v1/mcp` request returns stable `503 feature_disabled` JSON
-  before worker creation.
+- `mcp` is a prepared router name. While `SWARM_MCP_PUBLIC_ENABLED` is not
+  exactly `1`, every `/functions/v1/mcp` request returns stable
+  `503 feature_disabled` JSON from the main router before worker creation.
+  With the flag set to `1`, MCP resource requests route to the worker.
 - The MCP worker environment allowlist contains database configuration, public
   Supabase configuration, issuer/resource/JWKS settings, origins, and bounded
   limits. OAuth signing, cookie, refresh, database-credential, private-key,

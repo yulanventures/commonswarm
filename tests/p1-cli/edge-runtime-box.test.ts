@@ -13,6 +13,7 @@ import {
   FUNCTION_ENV_NAMES,
   FUNCTION_DISABLED_BODY,
   FUNCTION_DISABLED_STATUS,
+  handleGatewayRequest,
   H0_COMMAND_ENV_EXCLUSIONS,
   FUNCTION_NAMES,
   functionNotFoundResponse,
@@ -20,6 +21,7 @@ import {
   gatewayPreflight,
   isFunctionsBasePath,
   isFunctionsGatewayPath,
+  isMcpPublicEnabled,
   isWorkerLimitError,
   KONG_FUNCTION_NOT_FOUND_BODY,
   KONG_NO_ROUTE_BODY,
@@ -104,7 +106,7 @@ test("runtime metrics are logged as one JSON record per sample", { timeout: 5_00
   assert.equal(lines.length, 1);
 });
 
-test("Caddy scopes edge proxy, keeps MCP runnable, and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
+test("Caddy scopes edge proxy, keeps MCP prepared, and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
   const metricPath = "/_internal/metric";
   const caddyFiles = [
     "deploy/supabase-stack/commonswarm-api.caddy",
@@ -124,7 +126,7 @@ test("Caddy scopes edge proxy, keeps MCP runnable, and removed metric path uses 
   assert.equal(await response?.text(), KONG_FUNCTION_NOT_FOUND_BODY);
   assert.equal(response?.headers.get("access-control-allow-origin"), "*");
   for (const name of FUNCTION_NAMES) {
-    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
+    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`, name === "mcp"), {
       functionName: name,
       pathname: `/${name}`,
     });
@@ -200,7 +202,31 @@ test("every database worker receives the optional private CA", () => {
   }
 });
 
-test("edge runtime router maps every runnable function, including MCP", () => {
+test("dark MCP POST stops before the worker factory", async () => {
+  let workerFactoryCalls = 0;
+  const response = await handleGatewayRequest(
+    new Request("https://edge.test/functions/v1/mcp", { method: "POST" }),
+    false,
+    async () => {
+      workerFactoryCalls += 1;
+      return new Response("worker response");
+    },
+  );
+  assert.equal(response.status, FUNCTION_DISABLED_STATUS);
+  assert.deepEqual(await response.json(), FUNCTION_DISABLED_BODY);
+  assert.equal(workerFactoryCalls, 0);
+});
+
+test("dark MCP OPTIONS is refused before the normal gateway preflight", async () => {
+  const resolution = resolveGatewayRequest(
+    new Request("https://edge.test/functions/v1/mcp", { method: "OPTIONS" }),
+    false,
+  );
+  assert.equal(resolution.response?.status, FUNCTION_DISABLED_STATUS);
+  assert.deepEqual(await resolution.response?.json(), FUNCTION_DISABLED_BODY);
+});
+
+test("edge runtime router maps every runnable function and defaults MCP dark", () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
     "read",
@@ -210,18 +236,19 @@ test("edge runtime router maps every runnable function, including MCP", () => {
     "mcp",
   ]);
   for (const functionName of FUNCTION_NAMES) {
-    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}`), {
+    const mcpEnabled = functionName === "mcp";
+    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}`, mcpEnabled), {
       functionName,
       pathname: `/${functionName}`,
     });
     assert.deepEqual(
-      resolveFunctionRoute(`/functions/v1/${functionName}/deep/path`),
+      resolveFunctionRoute(`/functions/v1/${functionName}/deep/path`, mcpEnabled),
       {
         functionName,
         pathname: `/${functionName}/deep/path`,
       },
     );
-    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}/`), {
+    assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}/`, mcpEnabled), {
       functionName,
       pathname: `/${functionName}/`,
     });
@@ -229,12 +256,14 @@ test("edge runtime router maps every runnable function, including MCP", () => {
   assert.deepEqual(
     resolveFunctionRoute(
       "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      true,
     ),
     {
       functionName: "mcp",
       pathname: "/mcp/.well-known/oauth-protected-resource/mcp",
     },
   );
+  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
   assert.equal(resolveFunctionRoute("/functions/v1/unknown"), null);
   assert.equal(resolveFunctionRoute("/functions/v1/command-extra"), null);
   assert.equal(resolveFunctionRoute("/command"), null);
@@ -250,18 +279,53 @@ test("edge runtime router maps every runnable function, including MCP", () => {
   });
 });
 
-test("MCP routes to its worker and public tool access defaults dark", async () => {
-  assert.deepEqual(DISABLED_FUNCTION_NAMES, []);
+test("MCP dark gate refuses every method before worker creation and routes when enabled", async () => {
+  assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
+  let workerFactoryCalls = 0;
+  const dispatch = async (request: Request, publicEnabled: boolean) =>
+    await handleGatewayRequest(request, publicEnabled, async (route) => {
+      workerFactoryCalls += 1;
+      return new Response(route.functionName);
+    });
+
+  for (const suffix of ["", "/.well-known/oauth-protected-resource/mcp"]) {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      const response = await dispatch(
+        new Request(`https://edge.test/functions/v1/mcp${suffix}`, { method }),
+        false,
+      );
+      assert.equal(response.status, FUNCTION_DISABLED_STATUS, `${method} ${suffix || "/mcp"}`);
+      assert.deepEqual(await response.json(), FUNCTION_DISABLED_BODY);
+    }
+  }
+  assert.equal(workerFactoryCalls, 0, "dark MCP must stop before the worker factory");
+
   for (const [method, suffix, pathname] of [
     ["POST", "", "/mcp"],
     ["GET", "/.well-known/oauth-protected-resource/mcp", "/mcp/.well-known/oauth-protected-resource/mcp"],
   ] as const) {
-    const resolution = resolveGatewayRequest(
+    const response = await dispatch(
       new Request(`https://edge.test/functions/v1/mcp${suffix}`, { method }),
+      true,
     );
-    assert.deepEqual(resolution.route, { functionName: "mcp", pathname });
-    assert.equal(resolution.response, null);
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "mcp");
+    assert.deepEqual(
+      resolveGatewayRequest(
+        new Request(`https://edge.test/functions/v1/mcp${suffix}`, { method }),
+        true,
+      ).route,
+      { functionName: "mcp", pathname },
+    );
   }
+  assert.equal(workerFactoryCalls, 2, "enabled MCP reaches the worker factory");
+
+  const enabledPreflight = await dispatch(
+    new Request("https://edge.test/functions/v1/mcp", { method: "OPTIONS" }),
+    true,
+  );
+  assert.equal(enabledPreflight.status, 200);
+  assert.equal(workerFactoryCalls, 2, "enabled preflight stays in the main router");
 
   const request = () => new Request("https://edge.test/mcp", {
     method: "POST",
@@ -304,6 +368,34 @@ test("MCP routes to its worker and public tool access defaults dark", async () =
   const enabledResponse = await handler(true, () => { enabledVerifications += 1; })(request());
   assert.equal(enabledResponse.status, 200, "enabled access reaches the MCP protocol");
   assert.equal(enabledVerifications, 1);
+});
+
+test("MCP public flag uses the exact value and ignores request headers", async () => {
+  for (const [value, expected] of [
+    [undefined, false],
+    ["", false],
+    ["0", false],
+    ["true", false],
+    [" 1", false],
+    ["1", true],
+  ] as const) {
+    assert.equal(isMcpPublicEnabled(value), expected);
+  }
+
+  let workerFactoryCalls = 0;
+  const response = await handleGatewayRequest(
+    new Request("https://edge.test/functions/v1/mcp", {
+      method: "POST",
+      headers: { "SWARM_MCP_PUBLIC_ENABLED": "1" },
+    }),
+    false,
+    async () => {
+      workerFactoryCalls += 1;
+      return new Response("worker response");
+    },
+  );
+  assert.equal(response.status, FUNCTION_DISABLED_STATUS);
+  assert.equal(workerFactoryCalls, 0);
 });
 
 test("edge runtime request rewrite preserves query, method, headers, and body", async () => {
@@ -589,7 +681,7 @@ test("main service retries WorkerAlreadyRetired around create and fetch", async 
     resolve(repoRoot, "deploy/edge-runtime/main/index.ts"),
     "utf8",
   );
-  assert.match(main, /const attemptRequests = \[request, request\.clone\(\)\]/);
+  assert.match(main, /const attemptRequests = \[routedRequest, routedRequest\.clone\(\)\]/);
   const retryStart = main.indexOf(
     "return await withWorkerRetiredRetry(async (attemptNumber) => {",
   );
@@ -606,7 +698,7 @@ test("main service retries WorkerAlreadyRetired around create and fetch", async 
   assert.ok(createInsideRetry < fetchInsideRetry, "create is not before the fetch");
   assert.ok(
     main.slice(fetchInsideRetry).startsWith(
-      "return await worker.fetch(forwarded);\n  });",
+      "return await worker.fetch(forwarded);\n      });",
     ),
   );
 });

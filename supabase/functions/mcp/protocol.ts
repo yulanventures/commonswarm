@@ -189,6 +189,13 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
     const pathname = new URL(request.url).pathname;
     const metadata = pathname === PROTECTED_RESOURCE_METADATA_PATH ||
       pathname === INTERNAL_METADATA_PATH;
+    if ((pathname === "/mcp" || metadata) && !options.publicEnabled) {
+      return json(503, {
+        error: "feature_disabled",
+        feature: "hosted_mcp",
+        message: "Hosted MCP is not available yet.",
+      });
+    }
     if (metadata) {
       if (request.method !== "GET" && request.method !== "HEAD") {
         return json(405, { error: "method_not_allowed" }, { allow: "GET, HEAD" });
@@ -201,13 +208,6 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
     if (pathname !== "/mcp") return json(404, { error: "not_found" });
     if (request.method !== "POST") {
       return json(405, { error: "method_not_allowed" }, { allow: "POST" });
-    }
-    if (!options.publicEnabled) {
-      return json(503, {
-        error: "feature_disabled",
-        feature: "hosted_mcp",
-        message: "Hosted MCP is not available yet.",
-      });
     }
     const origin = request.headers.get("origin");
     if (origin !== null && !options.allowedOrigins.has(origin)) {

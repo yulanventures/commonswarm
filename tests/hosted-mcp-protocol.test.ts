@@ -137,16 +137,35 @@ test("origin and schema denials include authenticated positive controls", async 
   assert.equal((await schemaDenied.json()).error.code, -32602);
 });
 
-test("public tool access defaults dark at the protocol boundary", async () => {
-  const response = await handler({ publicEnabled: false })(post({
-    jsonrpc: "2.0", id: 1, method: "tools/list",
-  }));
+test("worker dark gate refuses protected-resource metadata before serving it", async () => {
+  const response = await handler({ publicEnabled: false })(
+    new Request(`https://mcp.commonswarm.com${PROTECTED_RESOURCE_METADATA_PATH}`),
+  );
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), {
     error: "feature_disabled",
     feature: "hosted_mcp",
     message: "Hosted MCP is not available yet.",
   });
+});
+
+test("public access defaults dark for every MCP and metadata method", async () => {
+  const serve = handler({ publicEnabled: false });
+  for (const path of [
+    "/mcp",
+    PROTECTED_RESOURCE_METADATA_PATH,
+    `/mcp${PROTECTED_RESOURCE_METADATA_PATH}`,
+  ]) {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]) {
+      const response = await serve(new Request(`https://mcp.commonswarm.com${path}`, { method }));
+      assert.equal(response.status, 503, `${method} ${path}`);
+      assert.deepEqual(await response.json(), {
+        error: "feature_disabled",
+        feature: "hosted_mcp",
+        message: "Hosted MCP is not available yet.",
+      });
+    }
+  }
 });
 
 test("body, response, duration, and concurrency limits deny beside a small positive control", async () => {
