@@ -19,12 +19,16 @@ set -eu
 # force-push cannot purge them because GitHub keeps unreachable objects fetchable by SHA. A new
 # repo never receives them.
 #
+# Moved to yulanventures/commonswarm on 2026-09-28, when the GitHub organization changed. The old
+# organization's URLs answer 301 to the new ones (measured that day), so installs that still
+# pass the old value in CSWARM_REPO keep working.
+#
 # ORDERING, because it is not obvious and it 404s every install if you get it wrong: site's
 # `sync:installer` copies THIS FILE into site/public/ on EVERY build, so changing the line below
 # ships on the next site deploy whether or not that deploy was about the installer. It was
 # changed only after commonswarm was public and serving all 14 releases, and after a real
 # install from it was verified with CSWARM_REPO= as an override.
-REPO="${CSWARM_REPO:-Ridge-io/commonswarm}"
+REPO="${CSWARM_REPO:-yulanventures/commonswarm}"
 VERSION="${CSWARM_VERSION:-latest}"
 # Accept both `0.1.12` and `v0.1.12`. The URL below adds its own `v`, so a value copied from the
 # releases page — where all 14 tags are displayed WITH the v — built `.../download/vv0.1.12` and

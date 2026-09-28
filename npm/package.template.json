@@ -15,7 +15,7 @@
   "homepage": "https://commonswarm.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Ridge-io/commonswarm.git"
+    "url": "git+https://github.com/yulanventures/commonswarm.git"
   },
   "keywords": [
     "agents",

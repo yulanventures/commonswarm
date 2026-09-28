@@ -95,7 +95,7 @@ test("every SEO page keeps the category boundary and links the full cluster", ()
     const article = attribute(html, /(<article class="seo-page">[\s\S]+<\/article>)/);
 
     assert.match(article, new RegExp(boundary));
-    assert.match(article, /https:\/\/github\.com\/Ridge-io\/commonswarm/);
+    assert.match(article, /https:\/\/github\.com\/yulanventures\/commonswarm/);
     assert.match(article, /<code>cswarm<\/code>/);
     assert.match(article, /joins by pasting one generated prompt/);
     assert.match(article, /Open free tier/);
