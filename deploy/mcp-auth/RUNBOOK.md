@@ -1,7 +1,7 @@
 # CommonSwarm OAuth service contract
 
-Lane 5 defines the dark infrastructure shape only. The executable release and
-rollback procedure belongs to HM lane 6, when the OAuth service exists. Only
+This directory defines the lane 6 service and its still-dark infrastructure
+shape. Only
 Anvil operates the production service under HezLead's direction from a reviewed
 SHA already landed on `main`.
 
@@ -19,8 +19,8 @@ SHA already landed on `main`.
   capabilities dropped, `no-new-privileges`, `unless-stopped`, a bounded
   healthcheck, and `json-file` logging with `max-size: 10m` and
   `max-file: "3"`.
-- Image identity: an immutable image digest and the exact accepted provider
-  version supplied by lane 6.
+- Image identity: an immutable release image digest built from the Dockerfile's
+  digest-pinned Node 22 base and exact `oidc-provider` 9.12.2 dependency.
 
 The OAuth container is separate from the edge pool. Lane 5's Caddy site remains
 dark: neither active snippet is imported, and unavailable MCP and OAuth routes
@@ -34,7 +34,8 @@ protected item in the 1Password vault **Yulan Ventures Infra**.
 Runtime files live under `/etc/commonswarm-oauth/`, owned by
 `root:<service gid>`, mode `0640`, and mounted read-only:
 
-- `signing-keys.pem`;
+- `signing-keys.pem` (despite the retained lane-5 filename, its content is a
+  JSON private JWK set; every key is ES256/P-256 with a unique `kid`);
 - `cookie-keys`;
 - `database-credentials`;
 - `yulan-internal-ca.pem`.
@@ -46,12 +47,32 @@ The container receives only their mounted paths through
 values, Compose substitutions, logs, release evidence, and the edge worker.
 The OAuth database credential belongs only to the least-privilege
 `commonswarm_oauth_runtime` role and uses verified TLS.
+The migration creates that login role without a password. Anvil provisions and
+rotates its SCRAM password outside migrations, then stores the role name and
+password only in the protected `database-credentials` file. This is an
+operator-owned service fact, not a runnable repository release step.
+
+Directly presented authorization-code and refresh lookup values are stored only
+as SHA-256 keys. Provider models that require a recoverable secondary lookup,
+and the one-use GoTrue PKCE verifier needed after the browser round trip, remain
+recoverable only inside the RLS-protected OAuth schema until expiry or
+consumption. They never enter logs, environment values, evidence, or browser
+responses.
 
 The `kid` rotation contract publishes the next public key before it signs,
 allows the bounded JWKS cache to observe the overlap, retains the previous
 public key for the access-token lifetime plus clock skew and propagation
 allowance, and removes it only after overlap and unknown-`kid` refresh proofs.
 A compromise also revokes affected provider families and CommonSwarm grants.
+`MCP_OAUTH_ACTIVE_SIGNING_KID` selects the signing key; all keys in the mounted
+set remain published by JWKS during overlap. Cookie keys are newline-delimited,
+with the current key first and at least one prior key retained.
+
+`MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED=0` is the release default. Discovery,
+JWKS, and health remain available while authorization, token, interaction, and
+callback requests return `503 authorization_service_disabled`. Enabling the
+flag also requires the reviewed lane-2 management-command binding; startup
+fails closed if that binding is absent.
 
 ## Port rule
 

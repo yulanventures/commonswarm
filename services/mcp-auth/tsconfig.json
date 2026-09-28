@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2023"
+  },
+  "include": ["src/**/*.js", "test/**/*.js", "test-postgres/**/*.js"]
+}

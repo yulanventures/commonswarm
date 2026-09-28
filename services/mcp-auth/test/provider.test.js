@@ -3,15 +3,17 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, test } from "node:test";
 
-import { createLocalJWKSet, jwtVerify } from "jose";
+import { createLocalJWKSet, decodeProtectedHeader, exportJWK, generateKeyPair, jwtVerify } from "jose";
 
 import {
   ACCESS_TOKEN_TTL_SECONDS,
+  CIMD_CACHE_DURATION_SECONDS,
   createMcpProvider,
   ISSUER,
   RESOURCE,
   TEST_ACCOUNT_ID,
 } from "../src/provider.js";
+import { createProductionFindAccount } from "../src/server.js";
 import { createAtomicMemoryAdapter } from "../src/memory-adapter.js";
 import {
   METADATA_BODY_LIMIT_BYTES,
@@ -157,7 +159,7 @@ function authorizationUrl({
   challengeMethod = "S256",
   state = "spike-state",
 } = {}) {
-  const url = new URL("/auth", ISSUER);
+  const url = new URL("/authorize", ISSUER);
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);
   url.searchParams.set("response_type", "code");
@@ -225,7 +227,9 @@ let sharedServer;
 const sharedDocuments = new Map();
 
 before(async () => {
-  sharedServer = await startProvider(metadataFetchFromMap(sharedDocuments));
+  sharedServer = await startProvider(metadataFetchFromMap(sharedDocuments), {
+    nativeLoopbackEnabled: true,
+  });
 });
 
 after(async () => {
@@ -242,7 +246,7 @@ test("1. discovery publishes the required OAuth and OIDC metadata", async () => 
     const metadata = await response.json();
     assert.equal(metadata.issuer, ISSUER);
     assert.deepEqual(metadata.code_challenge_methods_supported, ["S256"]);
-    assert.ok(metadata.token_endpoint_auth_methods_supported.includes("none"));
+    assert.deepEqual(metadata.token_endpoint_auth_methods_supported, ["none"]);
     assert.equal(metadata.client_id_metadata_document_supported, true);
     assert.ok(metadata.scopes_supported.includes("offline_access"));
     assert.equal(metadata.authorization_response_iss_parameter_supported, true);
@@ -337,6 +341,29 @@ test("2. CIMD uses injected fetch and rejects unsafe or invalid metadata", async
     }));
     const slow = await server.request(authorizationUrl({ clientId: slowId }));
     await assertAuthorizationError(slow, "invalid_client");
+  } finally {
+    await server.close();
+  }
+});
+
+test("2b. CIMD cache has bounded duration, expires, and revalidates through the injected fetch", async () => {
+  assert.deepEqual(CIMD_CACHE_DURATION_SECONDS, { min: 30, max: 300 });
+  const clientId = "https://cache-expiry.example/oauth-client.json";
+  let fetches = 0;
+  const server = await startProvider(async () => {
+    fetches += 1;
+    return jsonResponse(clientMetadata(clientId));
+  }, { cimdCacheDuration: { min: 0.02, max: 0.02 } });
+  try {
+    const first = await server.request(authorizationUrl({ clientId, state: "cache-one" }));
+    assert.equal(first.status, 303);
+    const cached = await server.request(authorizationUrl({ clientId, state: "cache-two" }));
+    assert.equal(cached.status, 303);
+    assert.equal(fetches, 1);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    const revalidated = await server.request(authorizationUrl({ clientId, state: "cache-three" }));
+    assert.equal(revalidated.status, 303);
+    assert.equal(fetches, 2);
   } finally {
     await server.close();
   }
@@ -514,6 +541,44 @@ test("7. refresh rotation rejects replay, revokes the family, and has one race w
   }
 });
 
+test("7b. production refresh account lookup outlives the browser session and rejects revoked grants", async () => {
+  const clientId = "https://production-account.example/oauth-client.json";
+  let browserSessionLive = true;
+  let grantActive = true;
+  let personExists = true;
+  const queries = [];
+  const pool = {
+    query: async (sql, parameters) => {
+      queries.push({ sql, parameters });
+      if (sql.includes("resolve_hosted_grant_status")) {
+        return { rowCount: grantActive && personExists ? 1 : 0, rows: [{ active: true }] };
+      }
+      return { rowCount: browserSessionLive ? 1 : 0, rows: [{ present: true }] };
+    },
+  };
+  const server = await startProvider(metadataFetchFromMap(new Map([
+    [clientId, clientMetadata(clientId)],
+  ])), { findAccount: createProductionFindAccount(pool) });
+  try {
+    const { tokens } = await authorizeAndExchange(server, { clientId });
+    browserSessionLive = false;
+    const afterBrowserExpiry = await refresh(server, clientId, tokens.refresh_token);
+    assert.equal(afterBrowserExpiry.response.status, 200, JSON.stringify(afterBrowserExpiry.body));
+    assert.ok(queries.some(({ sql }) => sql.includes("resolve_hosted_grant_status")));
+    grantActive = false;
+    const afterGrantRevocation = await refresh(server, clientId, afterBrowserExpiry.body.refresh_token);
+    assert.equal(afterGrantRevocation.response.status, 400);
+    assert.equal(afterGrantRevocation.body.error, "invalid_grant");
+    grantActive = true;
+    personExists = false;
+    const afterPersonRemoval = await refresh(server, clientId, afterBrowserExpiry.body.refresh_token);
+    assert.equal(afterPersonRemoval.response.status, 400);
+    assert.equal(afterPersonRemoval.body.error, "invalid_grant");
+  } finally {
+    await server.close();
+  }
+});
+
 test("8. registered native loopback redirects match any port but not another host or path", async () => {
   const cases = [
     {
@@ -547,5 +612,47 @@ test("8. registered native loopback redirects match any port but not another hos
       redirectUri: entry.unregistered,
     }));
     await assertAuthorizationError(refused, "invalid_redirect_uri");
+  }
+});
+
+test("9. native loopback behavior is separately gated and disabled by default", async () => {
+  const clientId = "https://loopback-disabled.example/oauth-client.json";
+  const documents = new Map([[clientId, clientMetadata(clientId, {
+    applicationType: "native",
+    redirectUris: ["http://127.0.0.1:41000/callback"],
+  })]]);
+  const server = await startProvider(metadataFetchFromMap(documents));
+  try {
+    const webClientId = "https://web-enabled.example/oauth-client.json";
+    documents.set(webClientId, clientMetadata(webClientId));
+    const web = await server.request(authorizationUrl({ clientId: webClientId }));
+    assert.equal(web.status, 303);
+    const response = await server.request(authorizationUrl({
+      clientId,
+      redirectUri: "http://127.0.0.1:49152/callback",
+    }));
+    await assertAuthorizationError(response, "invalid_client");
+  } finally {
+    await server.close();
+  }
+});
+
+test("10. signing-key overlap publishes both kids and signs with the active first key", async () => {
+  const keys = [];
+  for (const kid of ["next-kid", "previous-kid"]) {
+    const { privateKey } = await generateKeyPair("ES256", { extractable: true });
+    keys.push({ ...await exportJWK(privateKey), alg: "ES256", kid, use: "sig" });
+  }
+  const clientId = "https://key-overlap.example/oauth-client.json";
+  const documents = new Map([[clientId, clientMetadata(clientId)]]);
+  const server = await startProvider(metadataFetchFromMap(documents), { jwks: { keys } });
+  try {
+    const published = await (await server.request(`${ISSUER}/jwks`)).json();
+    assert.deepEqual(published.keys.map(({ kid }) => kid).sort(), ["next-kid", "previous-kid"]);
+    assert.ok(published.keys.every((key) => key.d === undefined));
+    const { tokens } = await authorizeAndExchange(server, { clientId });
+    assert.equal(decodeProtectedHeader(tokens.access_token).kid, "next-kid");
+  } finally {
+    await server.close();
   }
 });
