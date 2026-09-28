@@ -96,7 +96,7 @@ async function creatorMembershipRows(
   inherit: boolean;
   set: boolean;
 }>> {
-  return tx<{
+  const rows = await tx<{
     member: string;
     grantor: string;
     admin: boolean;
@@ -117,6 +117,28 @@ async function creatorMembershipRows(
       AND member.rolname = ${creator}
     ORDER BY membership.grantor
   `;
+  return rows
+    .map(({ member, grantor, admin, inherit, set }) => ({
+      member,
+      grantor,
+      admin,
+      inherit,
+      set,
+    }))
+    .sort((left, right) =>
+      left.grantor.localeCompare(right.grantor)
+      || left.member.localeCompare(right.member),
+    );
+}
+
+async function bootstrapSuperuserName(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+): Promise<string> {
+  const [row] = await tx<{ rolname: string }[]>`
+    SELECT rolname::text FROM pg_catalog.pg_roles WHERE oid = 10
+  `;
+  assert.ok(row, "bootstrap superuser role was not found");
+  return row.rolname;
 }
 
 async function creatorSelfGrant(
@@ -322,6 +344,7 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
   const inverse = rollbackBody(rollback);
 
   await superuserSql.begin(async (tx) => {
+    const bootstrapSuperuser = await bootstrapSuperuserName(tx);
     await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
 
     await assertMigrationDatabaseGrant(
@@ -430,17 +453,17 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
     const unsafeCreatorMemberships = [
       {
         member: migrationRole,
-        grantor: "postgres",
-        admin: true,
-        inherit: false,
-        set: false,
-      },
-      {
-        member: migrationRole,
         grantor: migrationRole,
         admin: false,
         inherit: true,
         set: true,
+      },
+      {
+        member: migrationRole,
+        grantor: bootstrapSuperuser,
+        admin: true,
+        inherit: false,
+        set: false,
       },
     ];
     assert.deepEqual(
