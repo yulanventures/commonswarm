@@ -651,34 +651,70 @@ Preserve the old local image. It is not a retry candidate merely because it exis
     "$NEW_OAUTH/services/mcp-auth/Dockerfile"
   cmp -s "$NEW_STACK/services/mcp-auth/package-lock.json" \
     "$NEW_OAUTH/services/mcp-auth/package-lock.json"
+  BASE_REFERENCE="$(python3 - "$NEW_OAUTH/services/mcp-auth/Dockerfile" <<'PY'
+import pathlib, re, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert lines
+match = re.fullmatch(r'FROM ([^@\s]+@sha256:[0-9a-f]{64})', lines[0])
+assert match
+print(match.group(1))
+PY
+)"
+  docker pull "$BASE_REFERENCE"
+  python3 - "$BASE_REFERENCE" <<'PY'
+import json, re, subprocess, sys
+base = sys.argv[1]
+digest = base.rsplit('@', 1)[1]
+assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
+inspection = json.loads(subprocess.check_output(
+    ['docker', 'image', 'inspect', base], text=True))[0]
+repo_digests = inspection.get('RepoDigests')
+assert isinstance(repo_digests, list)
+assert any(isinstance(value, str) and '@' in value and
+           value.rsplit('@', 1)[1] == digest for value in repo_digests)
+PY
   docker build --pull=false \
     --iidfile "$PROOF_DIR/oauth-image.id" \
     --file "$NEW_OAUTH/services/mcp-auth/Dockerfile" \
     "$NEW_OAUTH/services/mcp-auth"
   MCP_OAUTH_IMAGE="$(cat "$PROOF_DIR/oauth-image.id")"
   [[ "$MCP_OAUTH_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]
-  python3 - "$NEW_OAUTH" "$PROOF_DIR" "$SHA" "$MCP_OAUTH_IMAGE" <<'PY'
-import hashlib, json, pathlib, subprocess, sys
+  python3 - "$NEW_OAUTH" "$PROOF_DIR" "$SHA" "$MCP_OAUTH_IMAGE" \
+    "$BASE_REFERENCE" <<'PY'
+import hashlib, json, pathlib, re, subprocess, sys
 release, proof = map(pathlib.Path, sys.argv[1:3])
-sha, image = sys.argv[3:]
+sha, image, base = sys.argv[3:]
 service = release / 'services/mcp-auth'
-base = (service / 'Dockerfile').read_text().splitlines()[0].removeprefix('FROM ')
-assert base == ('node:22.23.3-bookworm-slim@sha256:'
-                '43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c')
+lines = (service / 'Dockerfile').read_text().splitlines()
+assert lines and lines[0] == 'FROM ' + base
+base_digest = base.rsplit('@', 1)[1]
+assert re.fullmatch(r'sha256:[0-9a-f]{64}', base_digest)
 inspection = json.loads(subprocess.check_output(
     ['docker', 'image', 'inspect', image], text=True))[0]
 assert inspection['Id'] == image
 base_inspection = json.loads(subprocess.check_output(
     ['docker', 'image', 'inspect', base], text=True))[0]
-assert any(value.endswith('@' + base.split('@')[1])
-           for value in base_inspection.get('RepoDigests', []))
+repo_digests = base_inspection.get('RepoDigests')
+assert isinstance(repo_digests, list)
+assert any(isinstance(value, str) and '@' in value and
+           value.rsplit('@', 1)[1] == base_digest for value in repo_digests)
+base_rootfs = base_inspection.get('RootFS')
+image_rootfs = inspection.get('RootFS')
+assert isinstance(base_rootfs, dict) and base_rootfs.get('Type') == 'layers'
+assert isinstance(image_rootfs, dict) and image_rootfs.get('Type') == 'layers'
+base_layers = base_rootfs.get('Layers')
+image_layers = image_rootfs.get('Layers')
+assert isinstance(base_layers, list) and base_layers
+assert isinstance(image_layers, list)
+assert image_layers[:len(base_layers)] == base_layers
 assert json.loads((service / 'package.json').read_text())[
     'dependencies']['oidc-provider'] == '9.12.2'
 old = 'sha256:c298ced5404dbdeddbbf4225456387455f74a6211fdf0afa44bb75cda7fb9267'
 result = {
-    'release_sha': sha, 'local_image_id': image,
-    'base_reference': base, 'base_digest': base.split('@')[1],
+    'release_sha': sha, 'local_image_id': image, 'built_image_id': image,
+    'base_reference': base, 'base_digest': base_digest,
     'base_image_id': base_inspection['Id'],
+    'base_layer_count': len(base_layers), 'base_layer_prefix_verified': True,
     'fresh_build_completed': True,
     'old_image_retained': True, 'fresh_build_matches_old_id': image == old,
     'dockerfile_sha256': hashlib.sha256((service / 'Dockerfile').read_bytes()).hexdigest(),
