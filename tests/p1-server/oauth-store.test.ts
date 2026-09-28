@@ -27,7 +27,7 @@ interface LocalEnvironment {
   DB_URL: string;
 }
 
-let sql: postgres.Sql;
+let superuserSql: postgres.Sql;
 
 before(() => {
   const status = JSON.parse(execFileSync("supabase", ["status", "-o", "json"], {
@@ -37,11 +37,12 @@ before(() => {
   assert.ok(status.DB_URL);
   const target = new URL(status.DB_URL);
   assert.ok(["127.0.0.1", "localhost", "[::1]"].includes(target.hostname));
-  sql = postgres(status.DB_URL, { prepare: false, max: 1 });
+  target.username = migrationOwner;
+  superuserSql = postgres(target.toString(), { prepare: false, max: 1 });
 });
 
 after(async () => {
-  await sql.end();
+  await superuserSql.end();
 });
 
 function catalogQuery(source: string): string {
@@ -104,27 +105,30 @@ async function assertCatalogPasses(
   assert.equal(result?.catalog_ok, true, message);
 }
 
-async function setMigrationOwner(
+async function resetToMigrationOwner(
   tx: postgres.TransactionSql<Record<string, unknown>>,
 ): Promise<void> {
-  await tx.unsafe(`
-    RESET ROLE;
-    SET LOCAL ROLE ${migrationOwner};
-  `);
-  const [{ current_role }] = await tx<{ current_role: string }[]>`
-    SELECT current_user::text AS current_role
+  await tx.unsafe("RESET ROLE");
+  const [{ current_role, superuser }] = await tx<{
+    current_role: string;
+    superuser: boolean;
+  }[]>`
+    SELECT current_user::text AS current_role, rolsuper AS superuser
+    FROM pg_roles
+    WHERE rolname = current_user
   `;
   assert.equal(
     current_role,
     migrationOwner,
     "ledger bookkeeping must run as the stack migration owner",
   );
+  assert.equal(superuser, true, "migration-owner connection must be a superuser");
 }
 
 async function recordMigrationLedger(
   tx: postgres.TransactionSql<Record<string, unknown>>,
 ): Promise<void> {
-  await setMigrationOwner(tx);
+  await resetToMigrationOwner(tx);
   await tx`
     INSERT INTO supabase_migrations.schema_migrations (version)
     VALUES (${migrationVersion})
@@ -135,7 +139,7 @@ async function rollbackAsMigrationOwner(
   tx: postgres.TransactionSql<Record<string, unknown>>,
   inverse: string,
 ): Promise<void> {
-  await setMigrationOwner(tx);
+  await resetToMigrationOwner(tx);
   await tx.unsafe(inverse);
 }
 
@@ -168,7 +172,7 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
   const proof = catalogQuery(catalog);
   const inverse = rollbackBody(rollback);
 
-  await sql.begin(async (tx) => {
+  await superuserSql.begin(async (tx) => {
     await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
 
     await rollbackAsMigrationOwner(tx, inverse);
