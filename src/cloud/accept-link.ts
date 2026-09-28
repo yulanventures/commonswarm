@@ -715,5 +715,10 @@ export function cloudAcceptOperations(
 export function originPin(
   options: OriginPinOptions,
 ): (target: CloudTarget) => Promise<void> {
-  return async (target) => await requirePinnedOrigin(target, options);
+  let pinnedOrigin: string | null = null;
+  return async (target) => {
+    if (target.url === pinnedOrigin) return;
+    await requirePinnedOrigin(target, options);
+    pinnedOrigin = target.url;
+  };
 }

@@ -123,7 +123,7 @@ case "$mode" in
     # workflow (suite site).
     elif case "$f" in "$wt"/site/*|*.observer.*) true ;; *) false ;; esac; then
       echo "refuse: $extra is a site or browser test; dispatch .github/workflows/server-suite.yml (suite site)" | tee -a "$log"; status=3
-    else run "npx tsx --test --test-timeout=600000 \"$f\"" || status=1; fi ;;
+    else run "npx tsx --test --test-reporter=spec --test-timeout=600000 \"$f\"" || status=1; fi ;;
   *) echo "unknown mode $mode" >&2; status=3 ;;
 esac
 grep -E "^ℹ (tests|pass|fail)" "$log" | paste -sd' ' - ; grep "^✖" "$log" | grep -v failing | sed 's/ (.*//' | sort -u | head -12

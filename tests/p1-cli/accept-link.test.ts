@@ -5,6 +5,7 @@ import { test } from "node:test";
 import {
   acceptInviteLink,
   deviceStablePrincipalName,
+  originPin,
   writeAcceptProgress,
   type AcceptLinkRuntime,
   type AcceptProgress,
@@ -377,6 +378,24 @@ test("origin pin refuses non-interactive before login and exact confirmation is 
   await assert.rejects(run(payload(), runtime), /origin refused/);
   assert.equal(runtime.calls.login, 0);
   assert.equal(runtime.calls.current, 0);
+});
+
+test("origin pin reuses a successful confirmation for the same origin", async () => {
+  const unknown = cloudTarget("https://cloud.attacker.example", "anon");
+  let confirmations = 0;
+  let prompts = 0;
+  const pin = originPin({
+    interactive: true,
+    output: { write: () => prompts += 1 },
+    readConfirmation: async () => {
+      confirmations += 1;
+      return unknown.url;
+    },
+  });
+  await pin(unknown);
+  await pin(unknown);
+  assert.equal(confirmations, 1);
+  assert.equal(prompts, 1);
 });
 
 test("labels are sanitized before preview and same identity stops before accept", async () => {
