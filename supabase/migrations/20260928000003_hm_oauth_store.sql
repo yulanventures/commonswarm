@@ -9,6 +9,11 @@ BEGIN
     -- Elevated cluster attributes use safe CREATE ROLE defaults. Keep them
     -- implicit: a CREATEROLE migration principal cannot grant or clear them.
     -- The assertion below proves the defaults instead of repairing them.
+    -- PostgreSQL 16 and 17 document that createrole_self_grant controls the
+    -- SET and INHERIT options on the automatic creator membership:
+    -- https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT
+    -- https://www.postgresql.org/docs/17/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT
+    SET LOCAL createrole_self_grant = '';
     CREATE ROLE commonswarm_oauth_runtime
       LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
   END IF;
@@ -40,12 +45,11 @@ BEGIN
 END
 $role_attributes$;
 
-ALTER ROLE commonswarm_oauth_runtime SET search_path = commonswarm_oauth, pg_catalog;
-
--- PostgreSQL 16+ gives a CREATEROLE principal an admin-only membership in each
--- role it creates. A configured creator self-grant can add another membership.
--- Normalize that extra grant, remove it, and retain only the required
--- admin-only membership. A cluster administrator needs no membership.
+-- PostgreSQL 16 and 17 give a non-administrator CREATEROLE principal an
+-- automatic admin-only membership in each role it creates. Refuse any other
+-- membership shape, including drift on a role that existed before this apply:
+-- https://www.postgresql.org/docs/16/role-attributes.html
+-- https://www.postgresql.org/docs/17/role-attributes.html
 DO $role_administrator$
 DECLARE
   creator_is_cluster_administrator boolean;
@@ -53,18 +57,6 @@ BEGIN
   SELECT rolsuper INTO creator_is_cluster_administrator
   FROM pg_catalog.pg_roles
   WHERE rolname = current_user;
-
-  IF NOT creator_is_cluster_administrator THEN
-    EXECUTE format(
-      'GRANT commonswarm_oauth_runtime TO %I WITH ADMIN TRUE, SET FALSE, INHERIT FALSE',
-      current_user
-    );
-    EXECUTE format(
-      'REVOKE commonswarm_oauth_runtime FROM %I GRANTED BY %I',
-      current_user,
-      current_user
-    );
-  END IF;
 
   IF EXISTS (
     SELECT 1
@@ -101,6 +93,8 @@ BEGIN
   END IF;
 END
 $role_administrator$;
+
+ALTER ROLE commonswarm_oauth_runtime SET search_path = commonswarm_oauth, pg_catalog;
 
 DO $database_privilege$
 BEGIN

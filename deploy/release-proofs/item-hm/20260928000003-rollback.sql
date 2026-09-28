@@ -66,7 +66,7 @@ BEGIN
     RAISE EXCEPTION 'OAuth rollback refuses role removal: unexpected ownership remains';
   END IF;
   -- DROP ROLE removes memberships itself. Refusing every membership here would
-  -- reject the normalized admin-only creator membership installed by the
+  -- reject the automatic admin-only creator membership installed by the
   -- forward migration, which is also what authorizes an ordinary creator
   -- to perform this rollback.
   IF EXISTS (

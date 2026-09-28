@@ -83,7 +83,26 @@ async function creatorMembership(
   return row;
 }
 
-test("OAuth catalog is structural and passes a production-path non-superuser apply", async () => {
+async function creatorSelfGrant(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+): Promise<string> {
+  const [row] = await tx.unsafe<{ createrole_self_grant: string }[]>(
+    "SHOW createrole_self_grant",
+  );
+  assert.ok(row);
+  return row.createrole_self_grant.replaceAll(/\s+/gu, "");
+}
+
+async function assertCatalogPasses(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+  proof: string,
+  message: string,
+): Promise<void> {
+  const [result] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
+  assert.equal(result?.catalog_ok, true, message);
+}
+
+test("OAuth catalog is structural and all creator apply paths are safe", async () => {
   const [migration, catalog, rollback] = await Promise.all([
     readFile(migrationUrl, "utf8"),
     readFile(catalogUrl, "utf8"),
@@ -94,12 +113,21 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
     /pg_get_(?:function|view)def|\bprosrc\b|information_schema\.columns/u,
     "catalog proofs must use role-independent structural catalogs",
   );
+  assert.doesNotMatch(
+    migration,
+    /GRANT\s+commonswarm_oauth_runtime\s+TO\s+(?:current_user|%I)/iu,
+    "the migration must not try to rewrite its automatic creator membership",
+  );
+  assert.match(
+    migration,
+    /SET LOCAL createrole_self_grant = '';\s+CREATE ROLE commonswarm_oauth_runtime/u,
+    "the migration pins creator membership options immediately before CREATE ROLE",
+  );
   const proof = catalogQuery(catalog);
   const inverse = rollbackBody(rollback);
 
   await sql.begin(async (tx) => {
-    const [installed] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
-    assert.equal(installed?.catalog_ok, true, "positive control: reset applied HM6");
+    await assertCatalogPasses(tx, proof, "positive control: reset applied HM6");
 
     await tx.unsafe(inverse);
     const [roleCollision] = await tx<{ present: boolean }[]>`
@@ -121,9 +149,12 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
         );
       END
       $database_grants$;
+    `);
+
+    await tx.unsafe(`
       SET LOCAL ROLE ${migrationRole};
       SET LOCAL search_path = "$user", public, auth, extensions;
-      SET LOCAL createrole_self_grant = 'set,inherit';
+      SET LOCAL createrole_self_grant = '';
     `);
     const [identity] = await tx<{
       current_role: string;
@@ -142,6 +173,11 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
       non_super: true,
       role_shape: true,
     });
+    assert.equal(
+      await creatorSelfGrant(tx),
+      "",
+      "default non-superuser path starts empty",
+    );
 
     const [beforeApply] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
     assert.equal(
@@ -151,31 +187,81 @@ test("OAuth catalog is structural and passes a production-path non-superuser app
     );
 
     await tx.unsafe(migration);
-    const [afterApply] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
-    assert.equal(
-      afterApply?.catalog_ok,
-      true,
-      "non-superuser migration and production search_path satisfy the catalog",
+    await assertCatalogPasses(
+      tx,
+      proof,
+      "default non-superuser migration and production search_path satisfy the catalog",
     );
     assert.deepEqual(
       await creatorMembership(tx, migrationRole),
       { count: 1, safe: true },
-      "PostgreSQL 17 creator membership stays admin-only",
+      "default non-superuser creator membership stays admin-only",
     );
+    await tx.unsafe(inverse);
+
+    await tx.unsafe(`
+      SET LOCAL createrole_self_grant = 'set,inherit';
+      CREATE ROLE commonswarm_oauth_runtime
+        LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
+    `);
+    assert.equal(
+      await creatorSelfGrant(tx),
+      "set,inherit",
+      "negative control creates the role with unsafe self-grant options enabled",
+    );
+    assert.deepEqual(
+      await creatorMembership(tx, migrationRole),
+      { count: 1, safe: false },
+      "negative control reaches the unsafe automatic creator membership",
+    );
+    await assert.rejects(
+      tx.savepoint(async (sp) => await sp.unsafe(migration)),
+      /commonswarm_oauth_runtime has unsafe membership options/u,
+      "an existing unsafe role is refused rather than repaired",
+    );
+    assert.deepEqual(
+      await creatorMembership(tx, migrationRole),
+      { count: 1, safe: false },
+      "the refused migration did not repair the existing membership",
+    );
+    await tx.unsafe("DROP ROLE commonswarm_oauth_runtime");
+
+    await tx.unsafe("SET LOCAL createrole_self_grant = 'set,inherit'");
+    assert.equal(
+      await creatorSelfGrant(tx),
+      "set,inherit",
+      "configured non-superuser path starts with self-grants enabled",
+    );
+    await tx.unsafe(migration);
+    assert.equal(
+      await creatorSelfGrant(tx),
+      "",
+      "migration pins the transaction-local creator self-grant to empty",
+    );
+    await assertCatalogPasses(
+      tx,
+      proof,
+      "configured non-superuser migration satisfies the catalog",
+    );
+    assert.deepEqual(
+      await creatorMembership(tx, migrationRole),
+      { count: 1, safe: true },
+      "configured non-superuser creator membership is still admin-only",
+    );
+    await tx.unsafe(inverse);
 
     await tx.unsafe("RESET ROLE");
-    await tx.unsafe(inverse);
     const [{ current_role: superuser }] = await tx<{ current_role: string }[]>`
       SELECT current_user::text AS current_role
     `;
+    await tx.unsafe("SET LOCAL createrole_self_grant = 'set,inherit'");
     await tx.unsafe(migration);
     assert.deepEqual(
       await creatorMembership(tx, superuser),
       { count: 0, safe: false },
       "superuser apply does not add an unnecessary creator membership",
     );
-    const [superuserProof] = await tx.unsafe<{ catalog_ok: boolean }[]>(proof);
-    assert.equal(superuserProof?.catalog_ok, true, "superuser control still satisfies catalog");
+    await assertCatalogPasses(tx, proof, "superuser control still satisfies catalog");
 
     throw new Error(rollbackSentinel);
   }).catch((error) => {
