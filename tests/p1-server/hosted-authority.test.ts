@@ -523,7 +523,7 @@ test("HM hosted catalogs enforce RLS, least privilege, composite ownership, and 
   });
 });
 
-test("catalog proof is false without error before migration and true after reapply", async () => {
+test("catalog proof is search-path independent and false without error before migration", async () => {
   const [catalog, rollback, migration] = await Promise.all([
     readFile(catalogUrl, "utf8"),
     readFile(rollbackUrl, "utf8"),
@@ -539,6 +539,13 @@ test("catalog proof is false without error before migration and true after reapp
     await tx.unsafe(migration);
     const [after] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
     assert.equal(after?.catalog_ok, true, "reapplied migration restores catalog");
+    await tx.unsafe('SET LOCAL search_path = "$user", public, auth, extensions');
+    const [productionPath] = await tx.unsafe<{ catalog_ok: boolean }[]>(catalogQuery);
+    assert.equal(
+      productionPath?.catalog_ok,
+      true,
+      "production-like search_path does not change the catalog proof",
+    );
     throw new Error("ROLLBACK_HM_PROOF_DRILL");
   }).catch((error) => {
     if (!(error instanceof Error) || error.message !== "ROLLBACK_HM_PROOF_DRILL") throw error;

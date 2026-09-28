@@ -153,7 +153,16 @@ WITH authority_tables(name, oid) AS (
     AND has_table_privilege('authenticated', c.oid, 'SELECT')
     AND has_table_privilege('swarm_read', c.oid, 'SELECT')
     AND NOT has_table_privilege('anon', c.oid, 'SELECT')
-    AND pg_get_viewdef(c.oid) LIKE '%auth.uid()%'
+    AND EXISTS (
+      SELECT 1
+      FROM pg_rewrite AS r
+      JOIN pg_depend AS d
+        ON d.classid = 'pg_rewrite'::regclass
+        AND d.objid = r.oid
+        AND d.refclassid = 'pg_proc'::regclass
+      WHERE r.ev_class = c.oid
+        AND d.refobjid = to_regprocedure('auth.uid()')
+    )
   ) AS ok
   FROM hosted_views AS expected
   LEFT JOIN pg_class AS c ON c.oid = expected.oid
@@ -167,7 +176,16 @@ WITH authority_tables(name, oid) AS (
     bool_and(has_table_privilege('authenticated', c.oid, 'SELECT')) AS authenticated_view_select,
     bool_and(has_table_privilege('swarm_read', c.oid, 'SELECT')) AS swarm_read_view_select,
     bool_and(NOT has_table_privilege('anon', c.oid, 'SELECT')) AS anon_view_select_denied,
-    bool_and(pg_get_viewdef(c.oid) LIKE '%auth.uid()%') AS hosted_view_definitions_use_auth_uid
+    bool_and(EXISTS (
+      SELECT 1
+      FROM pg_rewrite AS r
+      JOIN pg_depend AS d
+        ON d.classid = 'pg_rewrite'::regclass
+        AND d.objid = r.oid
+        AND d.refclassid = 'pg_proc'::regclass
+      WHERE r.ev_class = c.oid
+        AND d.refobjid = to_regprocedure('auth.uid()')
+    )) AS hosted_view_definitions_use_auth_uid
   FROM hosted_views AS expected
   LEFT JOIN pg_class AS c ON c.oid = expected.oid
 ), view_actuals AS (
