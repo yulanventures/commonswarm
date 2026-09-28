@@ -41,11 +41,6 @@ function isGone(error: unknown): boolean {
   return code === "ENOENT" || code === "ESRCH";
 }
 
-function isPermissionDenied(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EACCES" || code === "EPERM";
-}
-
 /**
  * Inspect Linux's descriptor tables directly. A reader is proven only when a
  * matching pipe descriptor has a readable access mode. Any incomplete view of
@@ -115,12 +110,9 @@ export function procStdoutConsumer(
           try {
             descriptors = await opendir(fdDirectory);
           } catch (error) {
-            // Linux commonly denies fd-table access for unrelated users. Such
-            // processes cannot be searched, but treating every one as an
-            // incomplete scan would make an unprivileged scan permanently
-            // unknown. Permission trouble becomes material only after a link
-            // has proved that a descriptor names the pipe under inspection.
-            if (!isGone(error) && !isPermissionDenied(error)) incomplete = true;
+            // A reader owned by another user must never be reported gone; the
+            // cost is that on multi-user hosts this check often cannot decide.
+            if (!isGone(error)) incomplete = true;
             continue;
           }
           try {
@@ -131,7 +123,7 @@ export function procStdoutConsumer(
               try {
                 link = await readlink(fdPath);
               } catch (error) {
-                if (!isGone(error) && !isPermissionDenied(error)) incomplete = true;
+                if (!isGone(error)) incomplete = true;
                 continue;
               }
               if (timedOut()) break;
@@ -143,8 +135,8 @@ export function procStdoutConsumer(
                   encoding: "utf8",
                   signal,
                 });
-              } catch {
-                incomplete = true;
+              } catch (error) {
+                if (!isGone(error)) incomplete = true;
                 continue;
               }
               if (timedOut()) break;
@@ -158,7 +150,7 @@ export function procStdoutConsumer(
               if ((flags & 0o10000000) === 0 && (flags & 0o3) !== 0o1) return "live_reader";
             }
           } catch (error) {
-            if (!isGone(error) && !isPermissionDenied(error)) incomplete = true;
+            if (!isGone(error)) incomplete = true;
           }
         }
       } catch {

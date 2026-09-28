@@ -362,10 +362,11 @@ test("proc stdout inspection proves readers and stays conservative on incomplete
     const foreignFdDirectory = join(root, "1", "fd");
     await mkdir(foreignFdDirectory, { recursive: true });
     await chmod(foreignFdDirectory, 0);
-    assert.equal(await inspect(), "orphaned", "an inaccessible foreign fd table cannot mask a missing reader");
-    await chmod(foreignFdDirectory, 0o700);
+    assert.equal(await inspect(), "cannot_determine", "an inaccessible foreign fd table may hold a reader");
 
     await makeFd(4103, 5, "pipe:[7001]", "00");
+    assert.equal(await inspect(), "live_reader", "a proven reader wins despite an inaccessible foreign fd table");
+    await chmod(foreignFdDirectory, 0o700);
     assert.equal(await inspect(), "live_reader", "a matching read end is the positive control");
     await rm(join(root, "4103"), { recursive: true, force: true });
     assert.equal(await inspect(), "orphaned", "the reader exiting leaves only write ends");
