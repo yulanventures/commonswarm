@@ -150,9 +150,10 @@ file, credential, curl authorization file, or secret value.
 Before the apply, Anvil connects to the box as root and creates the copy-back
 manifest. Set `KIND_LIST` to the same approved surfaces used by the apply block,
 list every pending migration version, and list the subset whose functional
-proof produces a `.txt` file during this window. Set the four named switches
+proof produces a `.txt` file during this window. Set the five named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
-switch, the section 8 backup-status proof, or the section 9 API Caddy pair.
+switch, the section 8 backup-status proof, the section 9 API Caddy pair, or the
+section 9 MCP Caddy site.
 Add exact relative paths from the item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
@@ -171,6 +172,7 @@ initial manifest is built only from the explicit arrays below, never from
   GUARDED_STACK_SWITCH='<yes-or-no>'
   BACKUP_STATUS_PROOF='<yes-or-no>'
   API_CADDY_PAIR='<yes-or-no>'
+  MCP_CADDY_RELEASE='<yes-or-no>'
   MIGRATION_VERSIONS=(
     # <approved-14-digit-version>
   )
@@ -197,7 +199,7 @@ initial manifest is built only from the explicit arrays below, never from
   for KIND in $KIND_LIST; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
-  for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF" "$API_CADDY_PAIR"; do
+  for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF" "$API_CADDY_PAIR" "$MCP_CADDY_RELEASE"; do
     case "$SWITCH" in yes|no) ;; *) false ;; esac
   done
   install -d -m 0700 -o root -g root "$PROOF_DIR"
@@ -235,6 +237,18 @@ initial manifest is built only from the explicit arrays below, never from
       caddy-after-10-commonswarm-api.caddy
       caddy-after-11-commonswarm-edge-staging.caddy
       caddy-drift-check.txt
+      caddy-log-files.txt
+    )
+  fi
+  if [ "$MCP_CADDY_RELEASE" = yes ]; then
+    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    COPY_BACK_FILES+=(
+      mcp-caddy-before.caddy
+      mcp-caddy-before-state.txt
+      mcp-caddy-candidate.caddy
+      mcp-caddy-after.caddy
+      mcp-caddy-drift-check.txt
+      mcp-caddy-log-files.txt
     )
   fi
   if [ "${#MIGRATION_VERSIONS[@]}" -gt 0 ]; then
@@ -2473,7 +2487,9 @@ Run the shared guarded stack switch with `STACK_SWITCH_DIRECTION=rollback`. It
 reads and validates `PREVIOUS_STACK` from `window.env`, uses the same service
 guard in reverse, and restores all four saved files from `units-before/`.
 
-## 9. API Caddy pair release
+## 9. Caddy site releases
+
+### API pair
 
 The API Caddy surface is always two files. The repository source pair maps to
 the box pair as follows:
@@ -2486,7 +2502,10 @@ the box pair as follows:
 Never install or restore one member without the other. A pair change performs
 one validation after both files are on disk and one reload after validation.
 The access-log directory already exists on the box; these steps do not change
-its owner or mode.
+its owner or mode. Before validation, derive log files from the exact installed
+site files, refuse paths outside `/var/log/caddy/`, and create or repair each
+regular log file as `caddy:caddy` mode `0600` without replacing existing
+content.
 
 ### Preflight — Anvil; HezLead approves
 
@@ -2572,6 +2591,66 @@ configuration until that rollback completes.
   STAGING_SITE="$SITE_DIR/11-commonswarm-edge-staging.caddy"
   API_TEMP="$SITE_DIR/.10-commonswarm-api.${SHA}.candidate"
   STAGING_TEMP="$SITE_DIR/.11-commonswarm-edge-staging.${SHA}.candidate"
+  CADDY_LOG_EVIDENCE="$PROOF_DIR/caddy-log-files.txt"
+  check_caddy_access_log_path() {
+    local CADDY_LOG_PATH=$1
+    local CADDY_LOG_REAL
+    case "$CADDY_LOG_PATH" in /var/log/caddy/?*) ;; *) false ;; esac
+    case "$CADDY_LOG_PATH" in
+      *'/../'*|*/..|*'/./'*|*/.|*'//'*) false ;;
+    esac
+    CADDY_LOG_REAL=$(realpath -m -- "$CADDY_LOG_PATH")
+    test "$CADDY_LOG_REAL" = "$CADDY_LOG_PATH"
+  }
+  record_caddy_access_logs() {
+    local CADDY_LOG_STAGE=$1
+    local CADDY_LOG_EVIDENCE=$2
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift 2
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        test ! -L "$CADDY_LOG_PATH"
+        test -f "$CADDY_LOG_PATH"
+        test "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" = caddy:caddy
+        test "$(stat -c '%a' "$CADDY_LOG_PATH")" = 600
+        printf '%s %s owner=%s mode=%s\n' \
+          "$CADDY_LOG_STAGE" "$CADDY_LOG_PATH" \
+          "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" \
+          "$(stat -c '%a' "$CADDY_LOG_PATH")" >>"$CADDY_LOG_EVIDENCE"
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+  }
+  prepare_caddy_access_logs() {
+    local CADDY_LOG_EVIDENCE=$1
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        if [ -L "$CADDY_LOG_PATH" ]; then
+          false
+        elif [ -e "$CADDY_LOG_PATH" ]; then
+          test -f "$CADDY_LOG_PATH"
+          chown caddy:caddy "$CADDY_LOG_PATH"
+          chmod 0600 "$CADDY_LOG_PATH"
+        else
+          install -o caddy -g caddy -m 0600 /dev/null "$CADDY_LOG_PATH"
+        fi
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+    record_caddy_access_logs before-validate "$CADDY_LOG_EVIDENCE" "$@"
+  }
   cmp -s "$PROOF_DIR/caddy-before-10-commonswarm-api.caddy" "$API_SITE"
   cmp -s "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
   test "$(grep -c '^api\.commonswarm\.com {$' "$API_SOURCE")" -eq 1
@@ -2586,7 +2665,15 @@ configuration until that rollback completes.
     "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy"
   install -m 0600 -o root -g root "$STAGING_SITE" \
     "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy"
-  caddy validate --config /etc/caddy/Caddyfile
+  install -m 0600 -o root -g root /dev/null "$CADDY_LOG_EVIDENCE"
+  prepare_caddy_access_logs "$CADDY_LOG_EVIDENCE" \
+    "$API_SITE" "$STAGING_SITE"
+  VALIDATE_STATUS=0
+  sudo -u caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || VALIDATE_STATUS=$?
+  record_caddy_access_logs after-validate "$CADDY_LOG_EVIDENCE" \
+    "$API_SITE" "$STAGING_SITE"
+  test "$VALIDATE_STATUS" -eq 0
   systemctl reload caddy
 )
 ```
@@ -2603,14 +2690,15 @@ configuration until that rollback completes.
     /etc/caddy/sites/10-commonswarm-api.caddy
   cmp -s "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy" \
     /etc/caddy/sites/11-commonswarm-edge-staging.caddy
+  test -s "$PROOF_DIR/caddy-log-files.txt"
   systemctl is-active --quiet caddy
 )
 ```
 
-Verify both hostnames through their public HTTPS paths and confirm each new
-access-log file is owned by `caddy:caddy` with mode `0600` after it receives a
-request. The Caddy source files and drift proof are the only Caddy artifacts in
-the copy-back list; request logs stay on the box.
+Verify both hostnames through their public HTTPS paths. `caddy-log-files.txt`
+records each path and its owner and mode both before and after validation. The
+Caddy source files, drift proof, and this metadata proof are the only Caddy
+artifacts in the copy-back list; request logs stay on the box.
 
 ### Rollback — Anvil at HezLead's direction
 
@@ -2628,6 +2716,66 @@ preflight backups, validates once, and reloads once.
   STAGING_SITE="$SITE_DIR/11-commonswarm-edge-staging.caddy"
   API_TEMP="$SITE_DIR/.10-commonswarm-api.${SHA}.rollback"
   STAGING_TEMP="$SITE_DIR/.11-commonswarm-edge-staging.${SHA}.rollback"
+  CADDY_LOG_EVIDENCE="$PROOF_DIR/caddy-log-files.txt"
+  check_caddy_access_log_path() {
+    local CADDY_LOG_PATH=$1
+    local CADDY_LOG_REAL
+    case "$CADDY_LOG_PATH" in /var/log/caddy/?*) ;; *) false ;; esac
+    case "$CADDY_LOG_PATH" in
+      *'/../'*|*/..|*'/./'*|*/.|*'//'*) false ;;
+    esac
+    CADDY_LOG_REAL=$(realpath -m -- "$CADDY_LOG_PATH")
+    test "$CADDY_LOG_REAL" = "$CADDY_LOG_PATH"
+  }
+  record_caddy_access_logs() {
+    local CADDY_LOG_STAGE=$1
+    local CADDY_LOG_EVIDENCE=$2
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift 2
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        test ! -L "$CADDY_LOG_PATH"
+        test -f "$CADDY_LOG_PATH"
+        test "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" = caddy:caddy
+        test "$(stat -c '%a' "$CADDY_LOG_PATH")" = 600
+        printf '%s %s owner=%s mode=%s\n' \
+          "$CADDY_LOG_STAGE" "$CADDY_LOG_PATH" \
+          "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" \
+          "$(stat -c '%a' "$CADDY_LOG_PATH")" >>"$CADDY_LOG_EVIDENCE"
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+  }
+  prepare_caddy_access_logs() {
+    local CADDY_LOG_EVIDENCE=$1
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        if [ -L "$CADDY_LOG_PATH" ]; then
+          false
+        elif [ -e "$CADDY_LOG_PATH" ]; then
+          test -f "$CADDY_LOG_PATH"
+          chown caddy:caddy "$CADDY_LOG_PATH"
+          chmod 0600 "$CADDY_LOG_PATH"
+        else
+          install -o caddy -g caddy -m 0600 /dev/null "$CADDY_LOG_PATH"
+        fi
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+    record_caddy_access_logs rollback-before-validate "$CADDY_LOG_EVIDENCE" "$@"
+  }
   cmp -s "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy" "$API_SITE"
   cmp -s "$PROOF_DIR/caddy-after-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
   install -m 0644 -o root -g root \
@@ -2636,10 +2784,338 @@ preflight backups, validates once, and reloads once.
     "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_TEMP"
   mv -f "$API_TEMP" "$API_SITE"
   mv -f "$STAGING_TEMP" "$STAGING_SITE"
-  caddy validate --config /etc/caddy/Caddyfile
+  if [ -L "$CADDY_LOG_EVIDENCE" ]; then
+    false
+  elif [ -e "$CADDY_LOG_EVIDENCE" ]; then
+    test -f "$CADDY_LOG_EVIDENCE"
+    chown root:root "$CADDY_LOG_EVIDENCE"
+    chmod 0600 "$CADDY_LOG_EVIDENCE"
+  else
+    install -m 0600 -o root -g root /dev/null "$CADDY_LOG_EVIDENCE"
+  fi
+  prepare_caddy_access_logs "$CADDY_LOG_EVIDENCE" \
+    "$API_SITE" "$STAGING_SITE"
+  VALIDATE_STATUS=0
+  sudo -u caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || VALIDATE_STATUS=$?
+  record_caddy_access_logs rollback-after-validate "$CADDY_LOG_EVIDENCE" \
+    "$API_SITE" "$STAGING_SITE"
+  test "$VALIDATE_STATUS" -eq 0
   systemctl reload caddy
   cmp -s "$PROOF_DIR/caddy-before-10-commonswarm-api.caddy" "$API_SITE"
   cmp -s "$PROOF_DIR/caddy-before-11-commonswarm-edge-staging.caddy" "$STAGING_SITE"
+)
+```
+
+### MCP site
+
+Use these blocks when installing or replacing the rendered
+`commonswarm-mcp.caddy` site. Set `MCP_CADDY_RELEASE=yes` in section 1's
+copy-back manifest. Before preflight, the item plan records the one approved
+installed path as `MCP_CADDY_SITE` and the approved loopback port as
+`MCP_OAUTH_HOST_PORT` in root-owned `window.env`. The path may name only one
+regular file immediately below `/etc/caddy/sites/`. The source is always read
+from the exact `NEW_STACK` release; the item plan must not supply a second copy.
+
+#### Preflight — Anvil; HezLead approves
+
+The preflight saves the installed file or records that it was absent. Apply
+re-checks that exact state before changing the site, so an intervening edit is
+a stop.
+
+```sh
+# step: runbook-mcp-caddy-preflight
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  : "${MCP_CADDY_SITE:?approved MCP Caddy site path missing}"
+  case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) false ;; esac
+  test "$(dirname -- "$MCP_CADDY_SITE")" = /etc/caddy/sites
+  test ! -L "$MCP_CADDY_SITE"
+  MCP_BEFORE="$PROOF_DIR/mcp-caddy-before.caddy"
+  MCP_BEFORE_STATE="$PROOF_DIR/mcp-caddy-before-state.txt"
+  if [ -e "$MCP_CADDY_SITE" ]; then
+    test -f "$MCP_CADDY_SITE"
+    install -m 0600 -o root -g root "$MCP_CADDY_SITE" "$MCP_BEFORE"
+    printf '%s\n' present >"$MCP_BEFORE_STATE"
+  else
+    install -m 0600 -o root -g root /dev/null "$MCP_BEFORE"
+    printf '%s\n' absent >"$MCP_BEFORE_STATE"
+  fi
+  chown root:root "$MCP_BEFORE_STATE"
+  chmod 0600 "$MCP_BEFORE_STATE"
+)
+```
+
+#### Apply — Anvil
+
+The candidate is rendered from the approved release source by replacing only
+its five port placeholders. The installed file is then the exact input used to
+derive and prepare its access-log paths. Validation runs once as `caddy`, its
+post-validation owner/mode check runs even when validation fails, and reload
+runs once only after both checks pass.
+
+```sh
+# step: runbook-mcp-caddy-apply
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  MCP_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-mcp.caddy"
+  MCP_BEFORE="$PROOF_DIR/mcp-caddy-before.caddy"
+  MCP_BEFORE_STATE="$PROOF_DIR/mcp-caddy-before-state.txt"
+  MCP_CANDIDATE="$PROOF_DIR/mcp-caddy-candidate.caddy"
+  MCP_AFTER="$PROOF_DIR/mcp-caddy-after.caddy"
+  MCP_DRIFT_PROOF="$PROOF_DIR/mcp-caddy-drift-check.txt"
+  CADDY_LOG_EVIDENCE="$PROOF_DIR/mcp-caddy-log-files.txt"
+  : "${MCP_CADDY_SITE:?approved MCP Caddy site path missing}"
+  : "${MCP_OAUTH_HOST_PORT:?approved MCP OAuth port missing}"
+  case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) false ;; esac
+  test "$(dirname -- "$MCP_CADDY_SITE")" = /etc/caddy/sites
+  case "$MCP_OAUTH_HOST_PORT" in (*[!0-9]*|'') false ;; esac
+  test "$MCP_OAUTH_HOST_PORT" -ge 3490
+  test "$MCP_OAUTH_HOST_PORT" -le 3499
+  test -f "$MCP_SOURCE"
+  test ! -L "$MCP_CADDY_SITE"
+  case "$(cat "$MCP_BEFORE_STATE")" in
+    present) cmp -s "$MCP_BEFORE" "$MCP_CADDY_SITE" ;;
+    absent) test ! -e "$MCP_CADDY_SITE" ;;
+    *) false ;;
+  esac
+  install -m 0600 -o root -g root /dev/null "$MCP_DRIFT_PROOF"
+  printf '%s\n' 'MCP Caddy site: PASS' >"$MCP_DRIFT_PROOF"
+  python3 - "$MCP_SOURCE" "$MCP_CANDIDATE" "$MCP_OAUTH_HOST_PORT" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+destination = Path(sys.argv[2])
+port = sys.argv[3]
+placeholder = "{$MCP_OAUTH_HOST_PORT}"
+assert source.count(placeholder) == 5
+destination.write_text(source.replace(placeholder, port))
+PY
+  chown root:root "$MCP_CANDIDATE"
+  chmod 0600 "$MCP_CANDIDATE"
+  MCP_TEMP="/etc/caddy/sites/.commonswarm-mcp.${SHA}.candidate"
+  install -m 0644 -o root -g root "$MCP_CANDIDATE" "$MCP_TEMP"
+  mv -f "$MCP_TEMP" "$MCP_CADDY_SITE"
+  install -m 0600 -o root -g root "$MCP_CADDY_SITE" "$MCP_AFTER"
+
+  check_caddy_access_log_path() {
+    local CADDY_LOG_PATH=$1
+    local CADDY_LOG_REAL
+    case "$CADDY_LOG_PATH" in /var/log/caddy/?*) ;; *) false ;; esac
+    case "$CADDY_LOG_PATH" in
+      *'/../'*|*/..|*'/./'*|*/.|*'//'*) false ;;
+    esac
+    CADDY_LOG_REAL=$(realpath -m -- "$CADDY_LOG_PATH")
+    test "$CADDY_LOG_REAL" = "$CADDY_LOG_PATH"
+  }
+  record_caddy_access_logs() {
+    local CADDY_LOG_STAGE=$1
+    local CADDY_LOG_EVIDENCE=$2
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift 2
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        test ! -L "$CADDY_LOG_PATH"
+        test -f "$CADDY_LOG_PATH"
+        test "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" = caddy:caddy
+        test "$(stat -c '%a' "$CADDY_LOG_PATH")" = 600
+        printf '%s %s owner=%s mode=%s\n' \
+          "$CADDY_LOG_STAGE" "$CADDY_LOG_PATH" \
+          "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" \
+          "$(stat -c '%a' "$CADDY_LOG_PATH")" >>"$CADDY_LOG_EVIDENCE"
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+  }
+  prepare_caddy_access_logs() {
+    local CADDY_LOG_EVIDENCE=$1
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        if [ -L "$CADDY_LOG_PATH" ]; then
+          false
+        elif [ -e "$CADDY_LOG_PATH" ]; then
+          test -f "$CADDY_LOG_PATH"
+          chown caddy:caddy "$CADDY_LOG_PATH"
+          chmod 0600 "$CADDY_LOG_PATH"
+        else
+          install -o caddy -g caddy -m 0600 /dev/null "$CADDY_LOG_PATH"
+        fi
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+    record_caddy_access_logs before-validate "$CADDY_LOG_EVIDENCE" "$@"
+  }
+  install -m 0600 -o root -g root /dev/null "$CADDY_LOG_EVIDENCE"
+  prepare_caddy_access_logs "$CADDY_LOG_EVIDENCE" "$MCP_CADDY_SITE"
+  VALIDATE_STATUS=0
+  sudo -u caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || VALIDATE_STATUS=$?
+  record_caddy_access_logs after-validate "$CADDY_LOG_EVIDENCE" "$MCP_CADDY_SITE"
+  test "$VALIDATE_STATUS" -eq 0
+  systemctl reload caddy
+)
+```
+
+#### Verify — Anvil; HezLead reads
+
+```sh
+# step: runbook-mcp-caddy-verify
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  cmp -s "$PROOF_DIR/mcp-caddy-after.caddy" "$MCP_CADDY_SITE"
+  test -s "$PROOF_DIR/mcp-caddy-log-files.txt"
+  systemctl is-active --quiet caddy
+)
+```
+
+Verify the approved public MCP paths from the item plan. The metadata evidence
+records every derived path and its owner and mode before and after validation;
+the access log itself remains on the box.
+
+#### Rollback — Anvil at HezLead's direction
+
+Rollback refuses drift from the applied file. It restores the saved regular
+file, or removes only the approved site path when preflight proved the site was
+initially absent. A restored file receives the same dynamic log guard before
+the one validation and one reload.
+
+```sh
+# step: runbook-mcp-caddy-rollback
+(
+  set -euo pipefail
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  MCP_BEFORE="$PROOF_DIR/mcp-caddy-before.caddy"
+  MCP_BEFORE_STATE="$PROOF_DIR/mcp-caddy-before-state.txt"
+  MCP_AFTER="$PROOF_DIR/mcp-caddy-after.caddy"
+  CADDY_LOG_EVIDENCE="$PROOF_DIR/mcp-caddy-log-files.txt"
+  if [ -L "$CADDY_LOG_EVIDENCE" ]; then
+    false
+  elif [ -e "$CADDY_LOG_EVIDENCE" ]; then
+    test -f "$CADDY_LOG_EVIDENCE"
+    chown root:root "$CADDY_LOG_EVIDENCE"
+    chmod 0600 "$CADDY_LOG_EVIDENCE"
+  else
+    install -m 0600 -o root -g root /dev/null "$CADDY_LOG_EVIDENCE"
+  fi
+  : "${MCP_CADDY_SITE:?approved MCP Caddy site path missing}"
+  case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) false ;; esac
+  test "$(dirname -- "$MCP_CADDY_SITE")" = /etc/caddy/sites
+  test ! -L "$MCP_CADDY_SITE"
+  cmp -s "$MCP_AFTER" "$MCP_CADDY_SITE"
+  MCP_TEMP="/etc/caddy/sites/.commonswarm-mcp.${SHA}.rollback"
+  case "$(cat "$MCP_BEFORE_STATE")" in
+    present)
+      install -m 0644 -o root -g root "$MCP_BEFORE" "$MCP_TEMP"
+      mv -f "$MCP_TEMP" "$MCP_CADDY_SITE"
+      ;;
+    absent)
+      unlink "$MCP_CADDY_SITE"
+      ;;
+    *) false ;;
+  esac
+
+  check_caddy_access_log_path() {
+    local CADDY_LOG_PATH=$1
+    local CADDY_LOG_REAL
+    case "$CADDY_LOG_PATH" in /var/log/caddy/?*) ;; *) false ;; esac
+    case "$CADDY_LOG_PATH" in
+      *'/../'*|*/..|*'/./'*|*/.|*'//'*) false ;;
+    esac
+    CADDY_LOG_REAL=$(realpath -m -- "$CADDY_LOG_PATH")
+    test "$CADDY_LOG_REAL" = "$CADDY_LOG_PATH"
+  }
+  record_caddy_access_logs() {
+    local CADDY_LOG_STAGE=$1
+    local CADDY_LOG_EVIDENCE=$2
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift 2
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        test ! -L "$CADDY_LOG_PATH"
+        test -f "$CADDY_LOG_PATH"
+        test "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" = caddy:caddy
+        test "$(stat -c '%a' "$CADDY_LOG_PATH")" = 600
+        printf '%s %s owner=%s mode=%s\n' \
+          "$CADDY_LOG_STAGE" "$CADDY_LOG_PATH" \
+          "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" \
+          "$(stat -c '%a' "$CADDY_LOG_PATH")" >>"$CADDY_LOG_EVIDENCE"
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+  }
+  prepare_caddy_access_logs() {
+    local CADDY_LOG_EVIDENCE=$1
+    local CADDY_SITE_FILE CADDY_LOG_PATH CADDY_SITE_LOG_COUNT
+    shift
+    test "$#" -gt 0
+    for CADDY_SITE_FILE in "$@"; do
+      test -f "$CADDY_SITE_FILE"
+      CADDY_SITE_LOG_COUNT=0
+      while IFS= read -r CADDY_LOG_PATH; do
+        CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
+        check_caddy_access_log_path "$CADDY_LOG_PATH"
+        if [ -L "$CADDY_LOG_PATH" ]; then
+          false
+        elif [ -e "$CADDY_LOG_PATH" ]; then
+          test -f "$CADDY_LOG_PATH"
+          chown caddy:caddy "$CADDY_LOG_PATH"
+          chmod 0600 "$CADDY_LOG_PATH"
+        else
+          install -o caddy -g caddy -m 0600 /dev/null "$CADDY_LOG_PATH"
+        fi
+      done < <(awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE")
+      test "$CADDY_SITE_LOG_COUNT" -gt 0
+    done
+    record_caddy_access_logs rollback-before-validate "$CADDY_LOG_EVIDENCE" "$@"
+  }
+  if [ "$(cat "$MCP_BEFORE_STATE")" = present ]; then
+    prepare_caddy_access_logs "$CADDY_LOG_EVIDENCE" "$MCP_CADDY_SITE"
+  else
+    printf '%s\n' 'rollback-before-validate site=absent log-paths=none' \
+      >>"$CADDY_LOG_EVIDENCE"
+  fi
+  VALIDATE_STATUS=0
+  sudo -u caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    || VALIDATE_STATUS=$?
+  if [ "$(cat "$MCP_BEFORE_STATE")" = present ]; then
+    record_caddy_access_logs rollback-after-validate "$CADDY_LOG_EVIDENCE" \
+      "$MCP_CADDY_SITE"
+  else
+    printf '%s\n' 'rollback-after-validate site=absent log-paths=none' \
+      >>"$CADDY_LOG_EVIDENCE"
+  fi
+  test "$VALIDATE_STATUS" -eq 0
+  systemctl reload caddy
+  case "$(cat "$MCP_BEFORE_STATE")" in
+    present) cmp -s "$MCP_BEFORE" "$MCP_CADDY_SITE" ;;
+    absent) test ! -e "$MCP_CADDY_SITE" ;;
+    *) false ;;
+  esac
 )
 ```
 
@@ -2660,8 +3136,8 @@ For a release containing several parts, use this order:
    change, whether section 7, section 8, or both need it. A migration-only
    release uses `NEW_STACK` without changing `stack/current`.
 7. Recreate changed stack images, one service at a time.
-8. Install and verify the API Caddy pair with section 9 when either source file
-   changed.
+8. Install and verify the API Caddy pair with section 9 when either pair source
+   changed. Use section 9's MCP blocks when `commonswarm-mcp.caddy` changed.
 9. After an npm package is published, record its exact-SHA client build with
    section 6's generated-SQL step. Skip this for releases with no npm publish.
 10. Run public and authenticated end-to-end verification; archive evidence.

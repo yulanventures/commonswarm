@@ -236,6 +236,85 @@ function labelledShellBlock(source: string, label: string): string {
   return source.slice(start, end);
 }
 
+function caddyOutputFilePaths(source: string): string[] {
+  return [...source.matchAll(/^\s*output file (\S+)/gm)].map((match) => match[1]!);
+}
+
+interface CaddySiteExpectation {
+  sourceMarker?: string;
+  source: string;
+  installedVariable: string;
+  installedMarker: string;
+}
+
+function caddyLogGuardProblems(
+  block: string,
+  sites: CaddySiteExpectation[],
+  beforeStage = "before-validate",
+  afterStage = "after-validate",
+): string[] {
+  const paths = sites.flatMap(({ source }) => caddyOutputFilePaths(source));
+  const problems: string[] = [];
+  if (paths.length === 0) problems.push("no Caddy output-file paths were checked");
+
+  const dynamicExtraction = block.indexOf(
+    `awk '$1 == "output" && $2 == "file" { print $3 }' "$CADDY_SITE_FILE"`,
+  );
+  if (dynamicExtraction < 0) {
+    for (const path of paths) problems.push(`not dynamically pre-created: ${path}`);
+  }
+  if (!block.includes('case "$CADDY_LOG_PATH" in /var/log/caddy/?*)')) {
+    problems.push("log path is not confined to /var/log/caddy/");
+  }
+  if (!block.includes('CADDY_LOG_REAL=$(realpath -m -- "$CADDY_LOG_PATH")') ||
+      !block.includes('test "$CADDY_LOG_REAL" = "$CADDY_LOG_PATH"')) {
+    problems.push("log path does not refuse traversal or symlinked parents");
+  }
+  if (!block.includes('install -o caddy -g caddy -m 0600 /dev/null "$CADDY_LOG_PATH"')) {
+    problems.push("missing caddy:caddy 0600 creation");
+  }
+  if (!block.includes('chown caddy:caddy "$CADDY_LOG_PATH"') ||
+      !block.includes('chmod 0600 "$CADDY_LOG_PATH"')) {
+    problems.push("existing regular files are not repaired without replacement");
+  }
+  if (!block.includes(`test "$(stat -c '%U:%G' "$CADDY_LOG_PATH")" = caddy:caddy`) ||
+      !block.includes(`test "$(stat -c '%a' "$CADDY_LOG_PATH")" = 600`)) {
+    problems.push("owner and mode are not checked");
+  }
+
+  const validate = block.indexOf("caddy validate --config");
+  const normalized = block.replace(/\\\n\s*/g, " ");
+  const normalizedValidate = normalized.indexOf("caddy validate --config");
+  const prepare = normalized.lastIndexOf(
+    `prepare_caddy_access_logs "$CADDY_LOG_EVIDENCE"`,
+    normalizedValidate,
+  );
+  const prepareLine = prepare < 0 ? "" : normalized.slice(prepare, normalized.indexOf("\n", prepare));
+  const recheck = normalized.indexOf(`record_caddy_access_logs ${afterStage}`, normalizedValidate);
+  const recheckLine = recheck < 0 ? "" : normalized.slice(recheck, normalized.indexOf("\n", recheck));
+  for (const site of sites) {
+    const sitePaths = caddyOutputFilePaths(site.source);
+    const sourceSelected = site.sourceMarker === undefined ||
+      (block.indexOf(site.sourceMarker) >= 0 && block.indexOf(site.sourceMarker) < validate);
+    const installed = normalized.indexOf(site.installedMarker);
+    const prepared = prepareLine.includes(`"${site.installedVariable}"`);
+    const rechecked = recheckLine.includes(`"${site.installedVariable}"`);
+    if (!sourceSelected || !(prepare > installed && prepare < normalizedValidate) || !prepared) {
+      for (const path of sitePaths) problems.push(`not dynamically pre-created: ${path}`);
+    }
+    if (!(recheck > normalizedValidate) || !rechecked) {
+      for (const path of sitePaths) problems.push(`not rechecked after validation: ${path}`);
+    }
+  }
+  if (!block.includes(`record_caddy_access_logs ${beforeStage} "$CADDY_LOG_EVIDENCE" "$@"`)) {
+    problems.push(`logs are not recorded as ${beforeStage}`);
+  }
+  if (!block.includes("sudo -u caddy caddy validate --config")) {
+    problems.push("validation does not run as caddy");
+  }
+  return problems;
+}
+
 test("release runbook swaps, validates, and rolls back both Caddy files as a pair", async () => {
   const releaseRunbook = await readFile(join(root, "deploy", "RELEASE-TO-BOX.md"), "utf8");
   const apply = labelledShellBlock(releaseRunbook, "runbook-57");
@@ -274,6 +353,115 @@ test("release runbook swaps, validates, and rolls back both Caddy files as a pai
   const preflight = labelledShellBlock(releaseRunbook, "runbook-56");
   assert.match(preflight, /cmp -s .*commonswarm-api\.caddy.*"\$API_SITE"/);
   assert.match(preflight, /cmp -s .*commonswarm-edge-staging\.caddy.*"\$STAGING_SITE"/);
+});
+
+test("release runbook prepares every stack Caddy log as caddy before validation", async () => {
+  const releaseRunbook = await readFile(join(root, "deploy", "RELEASE-TO-BOX.md"), "utf8");
+  const stackCaddyNames = (await readdir(stackDir))
+    .filter((name) => name.endsWith(".caddy"))
+    .sort();
+  const stackCaddySources = await Promise.all(
+    stackCaddyNames.map((name) => readFile(join(stackDir, name), "utf8")),
+  );
+  assert.deepEqual(stackCaddyNames, [
+    "commonswarm-api-maintenance.caddy",
+    "commonswarm-api.caddy",
+    "commonswarm-edge-staging-maintenance.caddy",
+    "commonswarm-edge-staging.caddy",
+    "commonswarm-mcp.caddy",
+  ]);
+  assert.deepEqual(
+    stackCaddySources.flatMap(caddyOutputFilePaths).sort(),
+    [
+      "/var/log/caddy/api.commonswarm.com.access.log",
+      "/var/log/caddy/api.commonswarm.com.access.log",
+      "/var/log/caddy/edge-staging.commonswarm.com.access.log",
+      "/var/log/caddy/edge-staging.commonswarm.com.access.log",
+      "/var/log/caddy/mcp.commonswarm.com.access.log",
+    ].sort(),
+  );
+
+  const byName = new Map(stackCaddyNames.map((name, index) => [name, stackCaddySources[index]!]));
+  const source = (name: string): string => {
+    const value = byName.get(name);
+    assert.ok(value, `missing ${name}`);
+    return value;
+  };
+  const apiApplySites: CaddySiteExpectation[] = [
+    {
+      sourceMarker: "commonswarm-api.caddy",
+      source: source("commonswarm-api.caddy"),
+      installedVariable: "$API_SITE",
+      installedMarker: 'mv -f "$API_TEMP" "$API_SITE"',
+    },
+    {
+      sourceMarker: "commonswarm-api-maintenance.caddy",
+      source: source("commonswarm-api-maintenance.caddy"),
+      installedVariable: "$API_SITE",
+      installedMarker: 'mv -f "$API_TEMP" "$API_SITE"',
+    },
+    {
+      sourceMarker: "commonswarm-edge-staging.caddy",
+      source: source("commonswarm-edge-staging.caddy"),
+      installedVariable: "$STAGING_SITE",
+      installedMarker: 'mv -f "$STAGING_TEMP" "$STAGING_SITE"',
+    },
+    {
+      sourceMarker: "commonswarm-edge-staging-maintenance.caddy",
+      source: source("commonswarm-edge-staging-maintenance.caddy"),
+      installedVariable: "$STAGING_SITE",
+      installedMarker: 'mv -f "$STAGING_TEMP" "$STAGING_SITE"',
+    },
+  ];
+  const mcpApplySites: CaddySiteExpectation[] = [{
+    sourceMarker: "commonswarm-mcp.caddy",
+    source: source("commonswarm-mcp.caddy"),
+    installedVariable: "$MCP_CADDY_SITE",
+    installedMarker: 'mv -f "$MCP_TEMP" "$MCP_CADDY_SITE"',
+  }];
+  const cases = [
+    ["runbook-57", apiApplySites, "before-validate", "after-validate"],
+    ["runbook-59", [apiApplySites[0]!, apiApplySites[2]!]
+      .map((site) => ({ ...site, sourceMarker: undefined })),
+      "rollback-before-validate", "rollback-after-validate"],
+    ["runbook-mcp-caddy-apply", mcpApplySites, "before-validate", "after-validate"],
+    ["runbook-mcp-caddy-rollback", [{ ...mcpApplySites[0]!, sourceMarker: undefined }],
+      "rollback-before-validate", "rollback-after-validate"],
+  ] as const;
+  for (const [step, sites, beforeStage, afterStage] of cases) {
+    assert.deepEqual(
+      caddyLogGuardProblems(labelledShellBlock(releaseRunbook, step), [...sites], beforeStage, afterStage),
+      [],
+      step,
+    );
+    const block = labelledShellBlock(releaseRunbook, step);
+    assert.equal((block.match(/caddy validate --config/g) ?? []).length, 1, step);
+    assert.equal((block.match(/systemctl reload caddy/g) ?? []).length, 1, step);
+    assert.ok(block.indexOf("caddy validate --config") < block.indexOf("systemctl reload caddy"), step);
+  }
+
+  for (const step of ["runbook-57", "runbook-59"]) {
+    const block = labelledShellBlock(releaseRunbook, step);
+    assert.doesNotMatch(block, /MCP_SITE/, `${step} must not require the independent MCP site`);
+  }
+  const mcpRollback = labelledShellBlock(releaseRunbook, "runbook-mcp-caddy-rollback");
+  assert.match(mcpRollback, /install -m 0600 -o root -g root \/dev\/null "\$CADDY_LOG_EVIDENCE"/);
+  assert.match(mcpRollback, /rollback-before-validate site=absent log-paths=none/);
+  assert.match(mcpRollback, /rollback-after-validate site=absent log-paths=none/);
+
+  const uncoveredSite = "example.invalid {\n\tlog {\n\t\toutput file /var/log/caddy/not-precreated.access.log {\n\t\t}\n\t}\n}\n";
+  assert.match(
+    caddyLogGuardProblems(labelledShellBlock(releaseRunbook, "runbook-57"), [
+      ...apiApplySites,
+      {
+        sourceMarker: "not-precreated.caddy",
+        source: uncoveredSite,
+        installedVariable: "$UNTRACKED_SITE",
+        installedMarker: 'mv -f "$UNTRACKED_TEMP" "$UNTRACKED_SITE"',
+      },
+    ]).join("\n"),
+    /not dynamically pre-created: \/var\/log\/caddy\/not-precreated\.access\.log/,
+  );
 });
 
 // Production enables GitHub, Google and email sign-in (read-only /auth/v1/settings, 2026-09-17). The box GoTrue must
