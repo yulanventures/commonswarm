@@ -2422,22 +2422,22 @@ async function runLinkAccept(
     );
   }
   const cloud = inviteCloudTarget(payload.url, payload.anon_key);
-  const credentials = await store(args, cloud);
   const json = args.has("json");
+  const pinOriginOnce = originPin({
+    interactive: Boolean(process.stdin.isTTY && !json && !args.has("link-stdin")),
+    output: process.stderr,
+    readConfirmation: process.stdin.isTTY
+      ? async () => await confirmationLine("")
+      : undefined,
+    devAllowedOrigins: process.env.CSWARM_DEV_ALLOWED_ORIGINS,
+  });
+  await pinOriginOnce(cloud);
+  const credentials = await store(args, cloud);
   const operations = cloudAcceptOperations(cloud, credentials);
   const emit = progressWriter(json);
   const runtime = {
     ...operations,
-    pinOrigin: originPin({
-      interactive: Boolean(
-        process.stdin.isTTY && !json && !args.has("link-stdin"),
-      ),
-      output: process.stderr,
-      readConfirmation: process.stdin.isTTY
-        ? async () => await confirmationLine("")
-        : undefined,
-      devAllowedOrigins: process.env.CSWARM_DEV_ALLOWED_ORIGINS,
-    }),
+    pinOrigin: pinOriginOnce,
     async currentSession(
       selected: CloudTarget,
       selectedStore: CredentialStore,

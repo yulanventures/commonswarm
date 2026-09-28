@@ -105,15 +105,16 @@ test("item K registry and credential checks use fixture homes and leave their en
   const home = await mkdtemp("/tmp/lane-home.");
   const logs = await mkdtemp("/tmp/lane-home-spy.");
   const log = join(logs, "homedir.log");
+  const { NODE_TEST_CONTEXT: _nodeTestContext, ...childEnv } = process.env;
   try {
     for (const [file, pattern] of [
       ["agent-onboarding.test.ts", "standalone checks drain tied timestamps"],
       ["mcp-connect.test.ts", "connect saves an unbound private profile"],
     ]) {
       const run = spawnSync(process.execPath, ["--require", resolve("tests/p1-cli/item-k-home-spy.cjs"),
-        "--import", "tsx", "--test-isolation=none", "--test", `--test-name-pattern=${pattern}`,
+        "--import", "tsx", "--test", `--test-name-pattern=${pattern}`,
         `tests/p1-cli/${file}`], {
-        cwd: process.cwd(), env: { ...process.env, HOME: home, CSWARM_HOME_SPY_LOG: log },
+        cwd: process.cwd(), env: { ...childEnv, HOME: home, CSWARM_HOME_SPY_LOG: log },
         encoding: "utf8", timeout: 25_000, maxBuffer: 1024 * 1024,
       });
       assert.equal(run.status, 0, `${file}: ${run.error ?? run.stderr.slice(-1000)}\n${run.stdout.slice(-1000)}`);

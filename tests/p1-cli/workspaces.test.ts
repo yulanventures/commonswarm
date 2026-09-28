@@ -539,6 +539,8 @@ test("cloud directory uses live swarm_read workspaces and sanitizes attacker-con
         owner_user_id: memberId,
         name: "\u001b[31mAgent\u001b[0m",
         revoked_at: null,
+        transport: "local",
+        turn_only: false,
       }],
       agent_runs: [{
         principal_id: principalId,
