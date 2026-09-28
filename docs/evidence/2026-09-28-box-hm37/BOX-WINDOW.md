@@ -1,214 +1,378 @@
-# HM lanes 3 and 7 — DARK box window
+# HM lanes 3 and 7 — DARK box window — v3
 
-**Release SHA:** `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`
+**Release SHA:** `e7bb7a46b24e7bc794234416d43605bca52b55d4`
+**Required HM6 release:** `ad964ed158181ba1692dd05895f36fa7a1f87d3f`
 **Expected previous edge:** `72c57e0d76d0aa86fe4f811a2cf51499919fed20`
-**Status:** PLAN. The three source blockers recorded in v1 are resolved. Window approval, current production prerequisites, exact-SHA gate results, and execution are **not established**.
+**Status:** PLAN. Approval, exact-SHA gate results, current production prerequisites, execution and closure are **not established**.
 
-Anvil runs every operation, including controls on the Mac mini. HezLead approves the release identity, backup age, stage transitions, rollback and closure. CSwarmDevLead coordinates, supplies reviewed inputs and reconciles evidence.
+Anvil executes every operation, including Mac mini controls. HezLead approves the release identity, backup age, transitions, rollback and closure. CSwarmDevLead supplies reviewed inputs and reconciles evidence.
 
-This document was prepared through read-only repository inspection. No release, migration, production probe, principal creation or test execution was performed.
+This revision was prepared by read-only inspection of the release tree and local plan-validation tests. No product gate, production probe, migration, deployment or principal creation was performed.
 
 ## 1. Governing procedure and scope
 
-Follow [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md), particularly its Window plan rules, sections 1–3, 5, 6 and 9, backup-service wait, manifest-only copy-back and abort cleanup. Incorporated runbook steps remain mandatory. Host operations also follow the workspace’s `hetzner-handoff/HETZNER-OPERATIONS.md`.
+Follow [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md) **from this release SHA**, particularly section 1’s preparation, verified directory reuse, manifest, copy-back and abort cleanup; sections 2–3’s database identity/session; section 5’s migration procedure; and section 6’s edge release and rollback. Section 9 is the API Caddy-pair procedure and is explicitly skipped by this window.
 
-The release follows:
+Host operations also follow the workspace’s `hetzner-handoff/HETZNER-OPERATIONS.md`. Its contents and hash are outside this repository’s release tree; the applicable operational revision is **not established** here.
 
-- [HM2 window](../2026-09-28-box-hm2/BOX-WINDOW.md) and [HM2 run-4 evidence](../2026-09-28-release-72c57e0d76d0-rerun-4/).
-- [HM6 window](../2026-09-28-box-hm6/BOX-WINDOW.md), which must finish first.
-- [HM lane plan](../../design/2026-09-27-HM-LANE-PLAN.md), §§4.4, 4.8 and 7.
+Dependencies:
 
-This window releases:
+- [HM2 window](../2026-09-28-box-hm2/BOX-WINDOW.md) and its [run-4 evidence](../2026-09-28-release-72c57e0d76d0-rerun-4/).
+- [HM6 window v3](../2026-09-28-box-hm6/BOX-WINDOW.md), which must be live and closed from `ad964ed158181ba1692dd05895f36fa7a1f87d3f` before this window opens. The release tree's committed HM6 evidence records an aborted attempt, not closure.
+- [HM lane plan](../../design/2026-09-27-HM-LANE-PLAN.md), particularly §§4.4, 4.8 and 7.
 
-| Surface | Change |
+| Surface | This window |
 |---|---|
-| Schema | Apply only `20260928000004_hm_hosted_check.sql`. |
-| Hosted check | Durable `swarm.hosted_mcp_check_cursors` and `swarm.hosted_mcp_check_batches`; internal open/ACK commands through `supabase/functions/command/index.ts`. |
-| Edge | Move the complete edge release from `72c57e0d76d0aa86fe4f811a2cf51499919fed20` to the release SHA. |
-| Hosted MCP | Install `supabase/functions/mcp/` and its router changes, DARK. |
+| Schema | Apply **only** `20260928000004_hm_hosted_check.sql`. |
+| Hosted check | Install durable check cursors/batches and internal open/ACK handling. |
+| Edge | Release the complete edge archive at `e7bb7a46b24e7bc794234416d43605bca52b55d4`. |
+| Hosted MCP | Install the worker and router changes, **DARK**. |
+| Stack archive | Prepare or verify the exact-SHA directory for migration inputs; no `stack/current` switch if the required runtime comparison is empty. |
+| Caddy | **No installation, edit, validation-triggered rollout or reload in this window.** |
 
 **Do not set `SWARM_MCP_PUBLIC_ENABLED=1`. Preserve disabled public OAuth authorization.**
 
-Migration 03, the OAuth service, OAuth signing material, Caddy, DNS, GoTrue configuration, the site, installed CLI and npm publication are outside this window. Their presence in the archive does not authorize their deployment.
+Migration 03 must already have been applied from HM6’s corrected file. Do not reapply it, backfill it, or deploy the OAuth service in this window. OAuth signing material, DNS, GoTrue configuration, site, installed CLI and npm publication are outside scope.
 
-Every shell block below has a step identifier and execution location. Mac blocks run under macOS `/bin/bash` 3.2. Do not paste them into zsh. Never assign `HOME`, run Docker on the Mac mini, enable shell tracing, or print complete environments or credentials. No recursive deletion is required.
+The release carries the split API Caddy pair: `commonswarm-api.caddy` serves only `api.commonswarm.com`, and `commonswarm-edge-staging.caddy` serves only `edge-staging.commonswarm.com`; the maintenance pair has the same one-host-per-file split. The release runbook handles those two installed files as one pair. Their presence in the stack archive does not activate them. This window sets `API_CADDY_PAIR=no`, does not execute runbook steps `runbook-56` through `runbook-59`, and performs no Caddy install, edit, validation-triggered rollout or reload. Keep HM6's existing OAuth-only ingress and dark MCP routes.
 
-## 2. Measured release identity and inventory
+The release also carries HM6 plan repairs, site-deletion guards and the server-suite `server-repeat` dispatch mode. They are archive contents and exact-SHA gate inputs only in this window: do not deploy the site, rerun HM6, or treat workflow presence as a passing server result.
 
-The inspected checkout is clean and its `HEAD` is the full release SHA. The merge subject is:
+Every runnable block below begins with a step identifier and states its execution location. Mac mini blocks require macOS `/bin/bash` 3.2. Never paste them into zsh, assign `HOME`, enable tracing, run Docker on the Mac mini, or print complete environments or credentials. No recursive deletion is required. Any 1Password read uses Anvil's service-account method on the Mac mini, writes each value directly to a separate mode-`0600` file in the private window directory, and transfers it through Anvil's established secure file workflow. Anvil's shell is not interactively signed in; do not use an interactive `op` session, expose a value in argv or an environment variable, or print the file.
 
-> Merge lane/hm7-dark-gate: the edge router keeps /mcp dark before any worker starts (item HM, lane 7)
+On failure, stop dependent work, preserve actual state and execute the runbook’s abort cleanup. Do not turn skipped checks into PASS evidence.
 
-Current remote ancestry and independent acceptance of this exact SHA are **not established** by that local measurement. Section 1 of the release procedure must verify the GitHub origin, fetch `main`, prove ancestry, create the exact-SHA archive and reconcile its checksum on both machines.
+## 2. Measured source identity and comparisons
 
-### Exact edge diff
+The release Git object inspected for this refresh is:
 
-The requested comparison contains exactly **13 paths**:
+- Release commit: `e7bb7a46b24e7bc794234416d43605bca52b55d4`.
+- Subject: `ops(caddy): split the API site into one file per host to match production`.
+- Expected previous edge `72c57e0d76d0aa86fe4f811a2cf51499919fed20` and HM6 release `ad964ed158181ba1692dd05895f36fa7a1f87d3f` are local ancestors.
+- The plan worktree is a documentation-only child of the release commit; it is not itself a release input.
 
-| Changed path | This window’s treatment |
-|---|---|
-| `deploy/edge-runtime/env.example` | Inventory input; never replace the live environment with this example. |
-| `deploy/edge-runtime/main/index.ts` | Release. |
-| `deploy/edge-runtime/main/router.ts` | Release. |
-| `supabase/functions/_shared/hosted-seat-auth.ts` | Release. |
-| `supabase/functions/_shared/protocol.js` | Release the generated artifact unchanged. |
-| `supabase/functions/command/index.ts` | Release. |
-| `supabase/functions/mcp/auth.ts` | Release. |
-| `supabase/functions/mcp/deno.json` | Release. |
-| `supabase/functions/mcp/index.ts` | Release. |
-| `supabase/functions/mcp/protocol.ts` | Release. |
-| `supabase/functions/mcp/tools.ts` | Release. |
-| `supabase/migrations/20260928000003_hm_oauth_store.sql` | Archive only; HM6 must already have applied it. |
-| `supabase/migrations/20260928000004_hm_hosted_check.sql` | Apply through section 5. |
+Current GitHub ancestry, independent acceptance of this revision and deployment approval remain **not established**. The runbook must fetch the approved origin, prove ancestry on `origin/main`, create an exact-SHA archive and reconcile its checksum on both machines.
 
-Directly changed function entry points are **`command` and `mcp`**. The router and shared dependencies also change. Set `ROUTER_CHANGED=yes`; section 1’s environment inventory therefore selects **`command read capability activity h0 mcp`**.
+### Edge comparison
 
-The release unit is the entire edge archive, not two copied function directories.
+Against expected live edge `72c57e0d76d0aa86fe4f811a2cf51499919fed20`, the comparison restricted to `supabase/` and `deploy/edge-runtime/` contains exactly these **18 paths**:
+
+| Status | Path | Treatment |
+|---|---|---|
+| Modified | `deploy/edge-runtime/README.md` | Archive support documentation; no runtime input. |
+| Modified | `deploy/edge-runtime/RUNBOOK.md` | Archive support documentation; no runtime input. |
+| Modified | `deploy/edge-runtime/VERIFICATION.md` | Archive support documentation; no runtime input. |
+| Modified | `deploy/edge-runtime/build-caddy-validation-fixture.mjs` | Exact-SHA validation tooling; not executed on the production request path. |
+| Modified | `deploy/edge-runtime/check-caddy-adapted.mjs` | Exact-SHA validation tooling for the split Caddy pair; no Caddy rollout in this window. |
+| Modified | `deploy/edge-runtime/env.example` | Inventory only; never replace the live environment with this example. |
+| Modified | `deploy/edge-runtime/main/index.ts` | Release. |
+| Modified | `deploy/edge-runtime/main/router.ts` | Release. |
+| Modified | `supabase/functions/_shared/hosted-seat-auth.ts` | Release. |
+| Modified | `supabase/functions/_shared/protocol.js` | Release generated bytes unchanged. |
+| Modified | `supabase/functions/command/index.ts` | Release. |
+| Added | `supabase/functions/mcp/auth.ts` | Release. |
+| Added | `supabase/functions/mcp/deno.json` | Release. |
+| Added | `supabase/functions/mcp/index.ts` | Release. |
+| Added | `supabase/functions/mcp/protocol.ts` | Release. |
+| Added | `supabase/functions/mcp/tools.ts` | Release. |
+| Added | `supabase/migrations/20260928000003_hm_oauth_store.sql` | Archive only; corrected file already applied by HM6. |
+| Added | `supabase/migrations/20260928000004_hm_hosted_check.sql` | Apply once through runbook section 5. |
+
+Directly changed function entry points are `command` and `mcp`. Set `ROUTER_CHANGED=yes`; the archived-router inventory therefore includes `command read capability activity h0 mcp`.
+
+The release unit is the entire edge archive. Do not copy individual worker directories into an existing release.
+
+### HM6 consistency
+
+Between `ad964ed158181ba1692dd05895f36fa7a1f87d3f` and this release:
+
+- **No file under `supabase/migrations/` differs. There are no additions, modifications or deletions.**
+- Both migration directories have Git tree ID `201ce7c00828ee566c0effde2fcec74ccefebeb9`.
+- Each contains 63 tracked entries: 62 SQL migrations and one placeholder.
+- The complete `deploy/release-proofs/item-hm/` directory is unchanged.
+- `supabase/` is unchanged. Under `deploy/edge-runtime/`, exactly five documentation/validation paths changed: `README.md`, `RUNBOOK.md`, `VERIFICATION.md`, `build-caddy-validation-fixture.mjs` and `check-caddy-adapted.mjs`.
+- Runtime edge inputs `deploy/edge-runtime/compose.yaml`, `env.example` and `main/` are unchanged from HM6.
+- Stack runtime paths `deploy/supabase-stack/compose.yaml`, `postgres/` and `backup/` are unchanged.
+
+Migration 04 was already present in the HM6 archive but explicitly deferred by its plan. It is the **only permitted pending migration** for this window, subject to live ledger reconciliation.
+
+Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration 03 and its catalog, functional and rollback proofs changed, and its diagnostic proof was added. This release carries the corrected HM6 bytes. Do not use an `e1faa08e` stack archive beside a ledger row applied from `ad964ed1`.
+
+### Reproducible source check
 
 ```sh
 # step: hm37-source-identity
-# Runs on the Mac mini as Anvil, under /bin/bash 3.2.
+# Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
-  SHA=e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d
+  SHA=e7bb7a46b24e7bc794234416d43605bca52b55d4
   BASE=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  HM6=ad964ed158181ba1692dd05895f36fa7a1f87d3f
   test "$(git rev-parse HEAD)" = "$SHA"
   test -z "$(git status --porcelain)"
   test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
   git merge-base --is-ancestor "$BASE" "$SHA"
-  git cat-file -e "${SHA}:docs/evidence/2026-09-28-box-hm6/BOX-WINDOW.md"
-  git diff --name-only "$BASE" "$SHA" -- supabase/ deploy/edge-runtime/
-  test "$(git diff --name-only "$BASE" "$SHA" -- supabase/ deploy/edge-runtime/ | wc -l | tr -d ' ')" = 13
-  git diff "$BASE" "$SHA" -- deploy/edge-runtime/env.example
+  git merge-base --is-ancestor "$HM6" "$SHA"
+
+  python3 - "$BASE" "$HM6" "$SHA" <<'PY'
+import subprocess, sys
+base, hm6, sha = sys.argv[1:]
+def git(*args):
+    return subprocess.check_output(["git", *args], text=True)
+
+expected = """deploy/edge-runtime/README.md
+deploy/edge-runtime/RUNBOOK.md
+deploy/edge-runtime/VERIFICATION.md
+deploy/edge-runtime/build-caddy-validation-fixture.mjs
+deploy/edge-runtime/check-caddy-adapted.mjs
+deploy/edge-runtime/env.example
+deploy/edge-runtime/main/index.ts
+deploy/edge-runtime/main/router.ts
+supabase/functions/_shared/hosted-seat-auth.ts
+supabase/functions/_shared/protocol.js
+supabase/functions/command/index.ts
+supabase/functions/mcp/auth.ts
+supabase/functions/mcp/deno.json
+supabase/functions/mcp/index.ts
+supabase/functions/mcp/protocol.ts
+supabase/functions/mcp/tools.ts
+supabase/migrations/20260928000003_hm_oauth_store.sql
+supabase/migrations/20260928000004_hm_hosted_check.sql""".splitlines()
+actual = git("diff", "--name-only", base, sha, "--",
+             "supabase/", "deploy/edge-runtime/").splitlines()
+assert len(actual) == 18
+assert sorted(actual) == sorted(expected)
+
+for revision in (hm6, sha):
+    paths = git("ls-tree", "-r", "--name-only", revision, "--",
+                "supabase/migrations/").splitlines()
+    assert len(paths) == 63
+    assert sum(path.endswith(".sql") for path in paths) == 62
+    assert git("rev-parse", revision + ":supabase/migrations").strip() == \
+        "201ce7c00828ee566c0effde2fcec74ccefebeb9"
+hm6_expected = {
+    "deploy/edge-runtime/README.md",
+    "deploy/edge-runtime/RUNBOOK.md",
+    "deploy/edge-runtime/VERIFICATION.md",
+    "deploy/edge-runtime/build-caddy-validation-fixture.mjs",
+    "deploy/edge-runtime/check-caddy-adapted.mjs",
+}
+hm6_actual = set(git("diff", "--name-only", hm6, sha, "--",
+                      "supabase/", "deploy/edge-runtime/",
+                      "deploy/release-proofs/item-hm/").splitlines())
+assert hm6_actual == hm6_expected
+print("edge_diff_paths=18; hm6_delta_paths=5; migration_tree_identity=PASS")
+PY
+
+  git diff --exit-code "$HM6" "$SHA" -- \
+    supabase/ deploy/release-proofs/item-hm/
+  git diff --exit-code "$HM6" "$SHA" -- \
+    deploy/supabase-stack/compose.yaml \
+    deploy/supabase-stack/postgres/ deploy/supabase-stack/backup/
   git diff --exit-code "$BASE" "$SHA" -- src/cloud/agent-check.ts src/mcp/
+  git diff "$BASE" "$SHA" -- deploy/edge-runtime/env.example
 )
 ```
 
-### Environment changes
+### Environment
 
-Comparing `deploy/edge-runtime/env.example` between the two edge SHAs adds one assignment name:
-
-| Name | Requirement |
-|---|---|
-| `SWARM_MCP_PUBLIC_ENABLED` | Optional. Only the exact string `1` enables MCP. Leave it absent or disabled. |
+The example adds exactly one assignment name relative to the previous edge: `SWARM_MCP_PUBLIC_ENABLED`. It is optional; only the exact string `1` enables MCP.
 
 **New required edge environment names: none.** Set `ADDITIONAL_REQUIRED_ENV_NAMES=''`.
 
-The router still requires nonempty `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, one of `SWARM_DATABASE_URL` or `SUPABASE_DB_URL`, and `SWARM_SELF_SERVE=1`.
+Generate the required/optional inventory from the archived router using runbook step `runbook-04`. The router requires nonempty Supabase URL/anon/service-role names, either database URL alias, and `SWARM_SELF_SERVE=1`. Do not maintain a second manually typed enforcement list.
 
-Generate the required/optional inventory from the archived router. Do not reconstruct its allowlists manually. `MCP_ENV_NAMES` excludes the service-role key and OAuth-service credential material.
+The MCP worker allowlist excludes the service-role key and OAuth-service credential material. Optional issuer/resource/JWKS settings default when absent; explicitly empty strings fail `exactContract()` if the worker loads. Do not copy blank optional example assignments into production.
 
-Optional MCP configuration is validated when its worker loads. In particular, `exactContract()` in `supabase/functions/mcp/index.ts` defaults absent issuer/resource/JWKS settings, not explicitly empty strings. Do not populate optional names with blank example assignments.
+## 3. Exact-tree file hashes
 
-### Stack comparison
+These SHA-256 values were recomputed from the inspected release tree. They identify repository inputs, not deployed files.
 
-HM6’s plan names release `9fa4217da9f6447e55fb8c6d577b8fd3997f926b` and makes its OAuth-inclusive backup helpers live. Comparing that SHA with this release produces **no differences** in:
+The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, control harness, live configuration and generated evidence is **not established**. Measure those during approved preparation. The HM37 document hash below identifies the v2 document in the `e7bb7a4` release tree, not this replacement.
 
-- `deploy/supabase-stack/compose.yaml`
-- `deploy/supabase-stack/postgres/`
-- `deploy/supabase-stack/backup/`
+### Release and source inputs
 
-This supports a migration-only stack archive with no stack switch. It does not establish the actual live stack.
-
-Anvil must run section 1’s directory comparison against recorded `PREVIOUS_STACK`. Any missing path, comparison error or runtime difference is a STOP for HezLead. Do not silently include a stack/helper rollout.
-
-## 3. Read-only prerequisites — STOP on failure
-
-Run read-only checks before release mutations. Preparing protected connection files and evidence does not authorize a database write, service change or control principal.
-
-HM2 run 4 records:
-
-| Historical evidence | Recorded result |
+| Repository path | SHA-256 |
 |---|---|
-| `migration-state-after.txt` | Migration 02: `ledger=1 catalog=t`. |
-| `close-readback.txt` | Edge `72c57e0d…`, healthy, memory `2147483648`, network `commonswarm-net`; recycle, backup and restore timers active. |
-| `hm2-local-control.json` | Released cswarm `0.1.80`; local-seat control, observed delivery ACK and subsequent wake eligibility. |
-| `revocation-readback.txt` | Principals revoked; zero active unexpired tokens. |
+| `deploy/RELEASE-TO-BOX.md` | `791d57fb02b04682bd887603fca4861e084e947baade8e10926a2ff02af40ad3` |
+| `deploy/edge-runtime/README.md` | `2624370450eb2559863568bce4c7f022352a1f51174f0def3dead51ad5dc1427` |
+| `deploy/edge-runtime/RUNBOOK.md` | `a61f6324e3ae23215d89f0380359388ff876397742d43d0f1a85e4022215e147` |
+| `deploy/edge-runtime/VERIFICATION.md` | `e3cb4797b157dec565124a49cc6216f2d2b5cd9c32ca6a7b5367439311dbf693` |
+| `deploy/edge-runtime/build-caddy-validation-fixture.mjs` | `88cb6bb7e1df1e07ec0350b786e7f4e121aed075b0b07ab235e630a3b23b4406` |
+| `deploy/edge-runtime/check-caddy-adapted.mjs` | `d92e556d2f5375743df71bd994282117d8703e5e65fde6362225956e38da0b35` |
+| `deploy/edge-runtime/compose.yaml` | `2c5d69dc741e81d93f94776bea1baae557f4e36dfe4094b271f530d70b38143b` |
+| `deploy/edge-runtime/env.example` | `06e0d89b2de310c295a26809bf9cf82c47312c09ad8e1e5d6b0511769ce426a9` |
+| `deploy/edge-runtime/main/index.ts` | `a0df6b139984259b3ad4a8d19cbb5869518466c8c69d8ac6c4cd8087e0bf9e0a` |
+| `deploy/edge-runtime/main/router.ts` | `0f4758c4833f019727b04e27d19f8b139adc5f26669552dac7babae236a69848` |
+| `supabase/functions/_shared/hosted-seat-auth.ts` | `43273844c13068e19b9ae6fb2f90e933b3613c4eb284a084a743f429b812ebd6` |
+| `supabase/functions/_shared/protocol.js` | `ed791f2a6e3349cc1b3db91b1a4a50e32b7cd203a6cfe07d981fd4ffa72ad2ea` |
+| `supabase/functions/command/index.ts` | `2ff117b73c30491d29321902f5e61a58ee49fa19371dd3c5631e13661ab9d782` |
+| `supabase/functions/mcp/auth.ts` | `4109b7accdf6d1ba55ee7c7f87139589af31c9c9d2d731decd6aa0044f1e3496` |
+| `supabase/functions/mcp/deno.json` | `3b75b82099c36460d907df5ce2ca81691f5b8acc22204cbfd505feff724fc604` |
+| `supabase/functions/mcp/index.ts` | `cd8a21b0fa47ed6c9601c6d94137100041eb6c22037d07c5cf81d241b4ddc189` |
+| `supabase/functions/mcp/protocol.ts` | `eee45bf5b8dbedc4a190f49edd7436a8879fa3b32ed9b9a4e729b72e42ef14dc` |
+| `supabase/functions/mcp/tools.ts` | `9a204f9b80ccc4b268601750f52b892f4b2e7d89c127c4ebc200ff9e7320d9e0` |
+| `supabase/migrations/20260928000003_hm_oauth_store.sql` | `e6f6944154b01e7f80a366058754639700c81279cfec4eaff6fe601a6ad99638` |
+| `supabase/migrations/20260928000004_hm_hosted_check.sql` | `a056398fba6cfb401532f6e2983786fda1be4cb40c8a5db0e2b55c3b00120719` |
+| `deploy/supabase-stack/compose.yaml` | `f983a24a73cad6a26206fd63a85fa3f1b604cfe22215fb9101079261323d38fb` |
+| `deploy/supabase-stack/migrate/run-db-tool.sh` | `b8cdf34b9e556fc9fea89be807d60fd57aeca8eb1f3eed849456db97e79a6670` |
+| `deploy/supabase-stack/migrate/assert-database-identity.sh` | `ba0c14ab00d75e4cbd156d7c9ae07c57c98d6e89435e35559c1cccc5390888fb` |
+| `deploy/supabase-stack/commonswarm-api.caddy` | `abc0ed5ff54989390c7b210d0a901100b87af9d417629f2478b0a4c288232290` |
+| `deploy/supabase-stack/commonswarm-api-maintenance.caddy` | `bd37f7ecb928c88eabd80b7f8d18b299aff060f3554d5187782c90d4a4101b24` |
+| `deploy/supabase-stack/commonswarm-edge-staging.caddy` | `caa4321ed62c1837776d7f083690ed33b2b0ad8a6c85da160f1fa298bc4a0010` |
+| `deploy/supabase-stack/commonswarm-edge-staging-maintenance.caddy` | `f40447c155601a8b0f93175fdb5f9688cb55ed8d514fcbfaa099868580242356` |
+| `deploy/supabase-stack/commonswarm-mcp.caddy` | `5f48dab0d08171c529f8c00a10822dbf298fb392a862a54f6f361e17565ee5d1` |
+| `deploy/site/deploy.sh` | `29f415213d54435417da4c74e2dfb1be3ea938fab4e51066d525d17059b810b6` |
+| `deploy/site/finalize-release.sh` | `f71301ddb9dc519718179d08e8f2f8e63efa0caa24d1af62fe9daeefe3552ba7` |
+| `.github/workflows/server-suite.yml` | `b9d6e808a23bc119c4d724ea91e46bb9acb07756e4e3f1052a6b82a4ade0eb2d` |
+| `src/protocol/hosted-authority.ts` | `b85b8ebb5b748a2d60c76341e94b42544e99ffdb1837c41c1ce1657e487ab9d2` |
+| `src/cloud/agent-check.ts` | `e24875ce1c37d768b7b38a6afc7bc5a86d03d0af4380cf616b7814f45d6bed35` |
+| `src/mcp/server.ts` | `1233d587300d7c98f2fe597771413cb395b17c100e5d5e4d66b7d0b0e69ab563` |
+| `package.json` | `715c333deb2f623ee37c07712fe94dfc594526d979e88199706ec45e85ec4503` |
 
-These are historical results, not current-state proof.
+### Proof inputs
 
-Before opening, Anvil must establish all of the following:
+All paths in this table are relative to `deploy/release-proofs/item-hm/`.
 
-1. **Previous edge:** resolved symlink, `RELEASE_SHA`, actual Compose working directory and mounted source agree with `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
-2. **HM2 live:** migration `20260928000002` has exactly one ledger row; its exact-tree catalog and functional proofs pass.
-3. **HM6 closed:** HezLead supplies its closure evidence, including migration, service, ingress, backup and recovery disposition.
-4. **HM6 schema:** migration `20260928000003` has exactly one ledger row; its catalog and functional proofs pass.
-5. **OAuth service:** healthy; its actual release, image identity and loopback port match HM6’s closure.
-6. **Public discovery:** `https://mcp.commonswarm.com/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` and `/jwks` return valid JSON without redirects or challenges.
-7. **Discovery identity:** issuer is `https://mcp.commonswarm.com`; authorization, token and JWKS endpoints match HM6’s plan.
-8. **JWKS:** nonempty public EC/P-256 verification keys, ES256 and nonempty `kid`; no private key members. Compare the active signing `kid` with HM6’s recorded public identity.
-9. **Authorization remains off:** GET `/authorize` and POST `/token` return 503 with `error=authorization_service_disabled`; effective `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED` is not exactly `1`.
-10. **MCP remains off:** effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
-11. **Migration 04 absent:** ledger count zero and forward catalog false without error.
-12. **No unexplained changes:** stack comparison, timers and concurrent operator state have an approved disposition.
+| File | SHA-256 |
+|---|---|
+| `20260928000002-catalog.sql` | `83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144` |
+| `20260928000002-functional.sql` | `1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3` |
+| `20260928000003-catalog.sql` | `5d65f11724b31dadceea089c010eea3ee641d4eb1582f9e9cf0ac3e674c88243` |
+| `20260928000003-functional.sql` | `4c23fbd14ad2a04c9a74900b4bff097e42a239bf8847dcdd32b7426a678cac91` |
+| `20260928000004-catalog.sql` | `1e9c147981babe5667282ac1fbddfc64199fd126888c12070af173fd77834fb1` |
+| `20260928000004-functional.sql` | `26e3e6b0280eaa1f4c6b72a6c85d15bd8849940a7af47e42a181e452295d0659` |
+| `20260928000004-rollback.sql` | `69053ccac11d4c5ae13cef447950130fdf2b7bef2c490f62d61c8e043bdf1c29` |
+| `20260928000004-rollback-catalog.sql` | `f8cf2a14ae112a927674150ad5c7d50144c9ff3d37a168cbb94ece8a71102aed` |
 
-Use HM6’s public probe contract, including its Python-style non-browser User-Agent, and equivalent OAuth loopback checks. Inspect effective configuration privately and emit only assertions. Do not copy complete container inspection or environment values into evidence.
+### Supporting plans and test sources
 
-The HM6 plan’s existence is established; HM6’s execution and live state are **not established** by this tree. Failure or missing evidence stops HM37. This window does not repair or finish HM6.
+| Repository path | SHA-256 |
+|---|---|
+| `docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md` — v2 release-tree input | `30a89c0fec93c67c4b08125f277a70908ae5513801dbca96241818b4845370e6` |
+| `docs/evidence/2026-09-28-box-hm6/BOX-WINDOW.md` | `06713dd0f00ee209cfd7636825c4169e5b0889fc8df573ce620efbf5409e6fd3` |
+| `docs/evidence/2026-09-28-box-hm2/BOX-WINDOW.md` | `fc7c70dd402d80d85893f28ccaba9d9089126a3548ffb36e13516d082eb69c8b` |
+| `docs/design/2026-09-27-HM-LANE-PLAN.md` | `77f55010d94e5b2a99cbb315476ac414b57722f63feaca2102049d795272caf8` |
+| `tests/box-window-plans.test.ts` | `112b680a03f2cc495f744e8e5f2e8ba3b2e17f65f2975f692322595de5270dc7` |
+| `tests/hm6-box-window-plan.test.ts` | `17016e9782b0276d92d7a10a1c07ba5aca201dfd8920f473173a569b17ead2df` |
+| `tests/p1-cli/edge-runtime-box.test.ts` | `4ddd651e1afa57e648e2ad23d154b1b21bf167e29d11e66bc9f4031a1badfcde` |
+| `tests/p1-cli/site-deletion-safety.test.ts` | `ed972eb2821da4ae0b485fed899f776031482611ece2617df335497580a6b6e4` |
+| `tests/p1-cli/site-on-box.test.ts` | `1009c3221c63a442cd4239efd3d6161d9399000dd0654fe4f91d26f33d5a0d99` |
+| `tests/p1-cli/supabase-stack.test.ts` | `11b8275724725e25ac018991e772ded81d32b60438854cba357acf887000e513` |
+| `tests/p1-cli/mcp-stdio.test.ts` | `22bab26984806ec20e048c4545a51d269d038dccd3c77e42e860777cc1649295` |
+| `tests/p1-server/hosted-authority.test.ts` | `185b782268b8f8325105e4b9dcc7c6b9d5763a3a1bf481cdd2166f1778a79535` |
+| `tests/p1-server/hosted-check.test.ts` | `820f24f50ff28ec66570b5f98a15f12e9021b93fed20bddc2f511dd551fd795b` |
+| `tests/p1-server/hosted-mcp.test.ts` | `8e07c468e083503ccbda9ab49906fe4eb334de3d91e5a66616c674f7e2efc28d` |
+| `tests/release-proof-format.test.ts` | `4a342ffe886389b32082eea14e0af4766f2173bdeb8d594349681a77149a626e` |
 
-## 4. Opening inputs, gates and handoffs
+Historical HM2 evidence paths below are relative to `docs/evidence/2026-09-28-release-72c57e0d76d0-rerun-4/`.
 
-Use these section 1 inputs:
+| File | SHA-256 |
+|---|---|
+| `migration-state-after.txt` | `3c4eba8bff206527fa1141315cb781ad214407781995d3a450e0867f9b96144f` |
+| `close-readback.txt` | `d2247974c0d43041cb03250aba47f66726b7355e7faa03dda256d6629ccbb49f` |
+| `hm2-local-control.json` | `21fb1c0dcb379635c15ebdcfb73314c965e87c709d96e95f53a9d395736ffed0` |
+| `revocation-readback.txt` | `60dee356902b13842d92fb54ea043a45cd4f3a5572b939a18a83b29862353573` |
+
+The runbook’s archive-derived manifests cover the remaining archive files and directories. Future runtime/evidence filenames below are output requirements; their existence and hashes are **not established**.
+
+## 4. Read-only prerequisites and opening inputs
+
+### Required live baseline
+
+**HM6 must be LIVE and closed at `ad964ed158181ba1692dd05895f36fa7a1f87d3f` before this window opens.** Its v3 plan is present, but it labels execution and closure as not established. The committed `docs/evidence/2026-09-28-release-ad964ed15818/abort-state.txt` is a concrete counterexample to any claim that the repository already proves closure: it records `window_result=aborted-before-runtime-mutation`, edge still at `72c57e0d…`, migration-03 ledger count zero, and unchanged Caddy. A later, accepted production readback is required; a plan or staged archive is not closure evidence.
+
+Anvil must establish:
+
+1. Previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
+2. Migration 02 has exactly one ledger row; its catalog and functional proofs pass.
+3. HM6 closure identifies the corrected release, applied migration-03 file, service/image, ingress, backup and recovery disposition.
+4. Migration 03 has exactly one ledger row; its corrected catalog and functional proofs pass. Compare the applied release input’s file hash with this document. A version-only ledger row alone cannot prove which bytes were applied.
+5. HM6’s active stack/helpers and OAuth service match its accepted `ad964ed1` closure. Verify actual directories and image identity; archive presence is insufficient.
+6. OAuth health, discovery and JWKS work on loopback and publicly. Public discovery paths are `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` and `/jwks` on `https://mcp.commonswarm.com`.
+7. Discovery issuer is `https://mcp.commonswarm.com`; authorization, token and JWKS endpoints are its `/authorize`, `/token` and `/jwks`.
+8. JWKS contains public EC/P-256 ES256 verification keys with nonempty `kid`, no private key members, and the active signing identity accepted in HM6 closure.
+9. GET `/authorize` and POST `/token` return 503 with `error=authorization_service_disabled`; effective `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED` is not exactly `1`.
+10. Effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
+11. Migration 04 has ledger count zero and catalog result false **without SQL error**.
+12. Complete migration reconciliation yields only `20260928000004` pending.
+13. Actual stack runtime comparison, timers, existing window state and concurrent operator activity have an accepted disposition.
+
+Use HM6’s probe contract, including the actual Python urllib default User-Agent and its separate curl checks. Redirects, HTML challenges or changing the User-Agent to make a failed route pass are not acceptable evidence.
+
+Historical HM2 run 4 records migration 02 applied, edge health with memory `2147483648` and network `commonswarm-net`, active maintenance timers, released cswarm `0.1.80`, an observed delivery ACK and subsequent wake eligibility, and revoked temporary principals with zero active unexpired tokens. Recheck current state.
+
+### Runbook inputs
 
 | Input | Value |
 |---|---|
-| `SHA` | `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d` |
+| `SHA` | `e7bb7a46b24e7bc794234416d43605bca52b55d4` |
 | `KIND_LIST` | `edge stack` |
 | `MIGRATION_VERSIONS` | `20260928000004` only |
 | `FUNCTIONAL_VERSIONS` | `20260928000004` |
 | `H0_LEDGER_BACKFILL` | `no` |
-| `GUARDED_STACK_SWITCH` | `no`, contingent on the live comparison |
-| `BACKUP_STATUS_PROOF` | `no`; section 5’s backup gate still applies |
-| `CHANGED_FUNCTIONS` | `command mcp`; router inventory expands to all six |
+| `GUARDED_STACK_SWITCH` | `no`, contingent on actual runtime comparison |
+| `BACKUP_STATUS_PROOF` | `no`; the section 5 backup gate still applies |
+| `API_CADDY_PAIR` | `no`; skip runbook section 9 and its pair artifacts |
+| `CHANGED_FUNCTIONS` | `command mcp` |
 | `ROUTER_CHANGED` | `yes` |
 | `ADDITIONAL_REQUIRED_ENV_NAMES` | Empty |
 | Expected cron additions/removals | Both empty |
 
-HezLead must approve the start/end times and positive integer `BACKUP_MAX_AGE_SECONDS`. Their actual values are **not established**. Persist them in root-only window state.
+Window start/end and positive integer `BACKUP_MAX_AGE_SECONDS` require HezLead’s approval and durable root-only recording. Their values are **not established**.
 
-Require exact-SHA gate evidence for:
+Require exact-SHA evidence for command-core regeneration with a clean generated diff, `npm run check:edge`, hosted authority/check/authentication boundaries, MCP authentication/protocol, router and release-proof coverage, the three named server integration sources, and local check/stdio/release-bundle compatibility. `package.json` includes the MCP and main-router entries in `check:edge`.
 
-- Command-core regeneration and a clean generated-bundle diff.
-- `npm run check:edge`, which includes the MCP entry point at this SHA.
-- Hosted authority, hosted check, authentication-boundary, MCP authentication/protocol, router and release-proof tests.
-- Database integration coverage in `tests/p1-server/hosted-authority.test.ts`, `hosted-check.test.ts` and `hosted-mcp.test.ts`.
-- Applicable local check, stdio MCP and release-bundle compatibility gates.
+Test source presence is not a passing result. Follow repository gate-wrapper and host-placement rules. Do not run Docker or server suites on the Mac mini.
 
-A checked-in test is not a passing result. Observe the repository’s gate-wrapper and host-placement rules; no Docker or server suite runs on the Mac mini.
+### Directory creation and reuse
 
-| Order | Anvil executes | HezLead handoff |
+Use runbook section 1’s `1-apply-release-directories` verifier. It supports a missing directory or an existing **same-SHA** directory.
+
+Reuse requires matching the full release identity, complete path inventory/count, file hashes, entry types, symlink targets/containment, ownership and modes. It does not extract over, delete or repair an existing directory. Any mismatch stops the window.
+
+Record `EDGE_RELEASE_DIR_STATE`, `STACK_RELEASE_DIR_STATE` and aggregate `RELEASE_DIR_STATE` truthfully as created/reused/mixed where applicable. Reconcile existing window journals and timer markers before a rerun; directory reuse is not permission to discard prior cleanup obligations.
+
+An edge directory already containing an added box-only override is not an untouched archive directory. If the verifier rejects it, stop for HezLead; do not remove the extra file to force acceptance.
+
+After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the three runbook runtime paths. The source comparison with `ad964ed1` is empty, but actual live equality is **not established**. Any runtime difference, missing path or comparison error stops this migration-only stack plan.
+
+### Handoffs
+
+| Order | Anvil executes | HezLead accepts |
 |---:|---|---|
-| 1 | Read-only prerequisites | Accept current HM2/HM6 state and previous release paths. |
-| 2 | Remote ancestry, archive, exact-SHA gates | Approve identity and backup age. |
-| 3 | Immutable archives, manifest, window state, inventory | Accept scope and stack comparison. |
-| 4 | Sections 2–3 database identity/session | Accept the production target. |
-| 5 | Backup gate; migration 04 and proofs | Approve edge transition only after schema verification. |
-| 6 | Section 6 edge recreate and controls | Accept health, routing and darkness. |
-| 7 | Hosted and ordinary local controls; revocation | Accept behavior and zero-token cleanup. |
-| 8 | Timers, transient-file cleanup, evidence copy-back | Explicitly close or record abort state. |
+| 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
+| 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
+| 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
+| 4 | Runbook database identity/session | Production target |
+| 5 | Backup gate, migration 04 and proofs | Schema before edge transition |
+| 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
+| 7 | Hosted/local controls and revocation | Behavior and cleanup |
+| 8 | Timer restoration, transient cleanup, copy-back | Explicit closure or abort disposition |
 
-### Names and credential handling
+The reviewed hosted-control artifact in section 9 is an **opening gate**, not work to invent after migration.
 
-Section 1 computes `WINDOW_PRINCIPAL_SUFFIX` **on the box**, once from approved `WINDOW_START_UTC`, and records it in `window.env` and `window-principal-suffix.txt`.
+## 5. Names, credentials and backup gate
 
-Every principal minted by this window must derive its name from that value:
+The box computes `WINDOW_PRINCIPAL_SUFFIX` once from approved `WINDOW_START_UTC` and persists it in `window.env` and `window-principal-suffix.txt`.
 
-- Hosted recipient: `hm37-hosted-${WINDOW_PRINCIPAL_SUFFIX}`
-- Local recipient: `hm37-local-${WINDOW_PRINCIPAL_SUFFIX}`
-- Ordinary sender: `hm37-sender-${WINDOW_PRINCIPAL_SUFFIX}`
+Use:
 
-A rerun uses a new approved start and unused names. A collision is a STOP, not permission to reuse a revoked principal.
+- Hosted recipient: `hm37-hosted-${WINDOW_PRINCIPAL_SUFFIX}`.
+- Local recipient: `hm37-local-${WINDOW_PRINCIPAL_SUFFIX}`.
+- Ordinary sender: `hm37-sender-${WINDOW_PRINCIPAL_SUFFIX}`.
 
-Transfer the suffix outside command substitution:
+A rerun uses a fresh approved start and unused names. Never reuse a revoked principal or resolve a collision by silently changing the suffix.
 
 ```sh
 # step: hm37-read-window-suffix
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
+# The ssh subprocess reads state on the box as root.
 (
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d
+  test "$SHA" = e7bb7a46b24e7bc794234416d43605bca52b55d4
   ssh ops@100.115.66.74 \
     "sudo -n -i bash -s -- $SHA" \
     >"$EVIDENCE_DIR/window-principal-suffix.txt" <<'BOX'
@@ -231,22 +395,22 @@ BOX
 )
 ```
 
-Use protected files and process memory for secrets. No credential value belongs in argv, URLs, output or evidence. Read cswarm 0.1.80 credentials using `agent_token`, `principal_id`, `token_id` and `run_id`; fail closed on every missing, empty or non-string field. Never substitute `token`.
+Secrets belong only in protected files and process memory. No credential value belongs in argv, URLs, shell environment values, output or evidence.
 
-## 5. Backup gate
+Read cswarm credentials using **`agent_token`, `principal_id`, `token_id`, `run_id`**. Connection creation and cleanup readers must reject every missing, empty or non-string field. Never substitute a guessed `token` field.
 
-Run the section 5 existing-service wait **before reading backup status**. An active, activating, deactivating or reloading service is not complete. Maximum wait is 14,400 seconds, with bounded five-second polling.
+### Backup
+
+Wait for the existing backup service **before** reading status. Active, activating, deactivating and reloading states are incomplete. Bound the wait to 14,400 seconds with five-second polling.
 
 ```sh
 # step: hm37-backup-gate
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d/window.env
+  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
   : "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"
-  case "$BACKUP_MAX_AGE_SECONDS" in
-    ''|*[!0-9]*) false ;;
-  esac
+  case "$BACKUP_MAX_AGE_SECONDS" in ''|*[!0-9]*) false ;; esac
   test "$BACKUP_MAX_AGE_SECONDS" -gt 0
   DEADLINE=$(( $(date +%s) + 14400 ))
   while :; do
@@ -283,64 +447,50 @@ PY
 )
 ```
 
-Failure stops the window. HezLead may explicitly authorize starting the existing backup service. Then follow section 5’s start-and-wait procedure, require service `Result=success`, and repeat the freshness gate. Do not kill a running backup or infer completion from the start command returning.
+Failure stops the window. HezLead may authorize starting the existing backup service; then use runbook step `runbook-22`, wait for completion, require `Result=success` and repeat freshness verification. Never kill a running backup or infer completion from the start command returning.
 
-## 6. Migration 04 through section 5
+## 6. Migration 04
 
-Stage these exact-tree files from `deploy/release-proofs/item-hm/`:
+Stage the eight proof inputs listed in section 3 through the runbook’s reviewed proof-transfer manifest. Verify checksums after transfer.
 
-| File | SHA-256 |
+Run complete file enumeration, file checksums, ledger enumeration and reconciliation. Require only `20260928000004` pending. Reject duplicate versions, unexpected ledger entries or unexplained older gaps.
+
+Before apply, require:
+
+| Measurement | Required |
 |---|---|
-| `20260928000004-catalog.sql` | `1e9c147981babe5667282ac1fbddfc64199fd126888c12070af173fd77834fb1` |
-| `20260928000004-functional.sql` | `26e3e6b0280eaa1f4c6b72a6c85d15bd8849940a7af47e42a181e452295d0659` |
-| `20260928000004-rollback.sql` | `69053ccac11d4c5ae13cef447950130fdf2b7bef2c490f62d61c8e043bdf1c29` |
-| `20260928000004-rollback-catalog.sql` | `f8cf2a14ae112a927674150ad5c7d50144c9ff3d37a168cbb94ece8a71102aed` |
+| Migration-04 ledger count | `0` |
+| Forward catalog | `f` |
+| SQL process exit | `0` |
 
-Also stage the exact-tree catalog and functional proofs for migrations 02 and 03 for prerequisite and closing checks.
+Missing, NULL, malformed or error-suppressed output does not pass.
 
-### Before apply
+The catalog uses safe object lookup for absent migration objects. It checks ownership, RLS, policies, column inventories, constraints, uniqueness, function properties, search paths, privileges and triggers.
 
-Run section 5’s complete file enumeration, checksums, ledger enumeration and reconciliation. The only permitted pending version is **`20260928000004`**. Any other pending migration, duplicate version or unexplained ledger entry is a STOP.
+Function identity/return-contract checks use OIDs, `pg_proc`, types and dependencies, including no dependency on the replaceable `swarm_read.signals` row type. Do not replace these with deparsed source matching. The proof still contains expression checks for constraints/indexes; do not describe the entire proof as free of deparsed expressions.
 
-Require exactly:
+Check each privilege individually. A comma-separated privilege argument cannot replace the separate assertions.
 
-- Ledger count: `0`
-- Catalog result: `f`
-- SQL process exit: `0`
+Use runbook section 5, one migration only. In step `runbook-26`, replace the `mapfile` selection with a Bash array populated by a `while IFS= read -r` loop; retain the exact-one-match assertion and all following guards.
 
-Missing output, NULL, an exception, or a false value produced by suppressing an error does not pass.
-
-The supplied catalog uses `to_regclass` and `to_regprocedure` so absent migration objects produce false without error. It checks ownership, RLS, policies, columns, constraints, active-batch uniqueness, function properties, search paths, privileges and triggers.
-
-For function identity and return-contract checks, use catalog OIDs, `pg_proc` columns and dependencies. Do not match schema-qualified names in deparsed function source. The visibility function’s explicit output types/names, set-returning behavior and lack of dependency on the `swarm_read.signals` row type are structurally checked.
-
-The supplied proof does contain expression checks for constraints and indexes; it is not wholly free of deparsed expressions. Do not replace its structural function checks with `pg_get_functiondef`/`prosrc` matching.
-
-Every required privilege is checked individually. A comma-separated privilege argument must not replace separate positive or negative assertions.
-
-### Apply and verify
-
-Use section 5’s wrapper, one migration only:
+The transactional apply must:
 
 1. Reassert database identity.
-2. Begin a transaction.
-3. Set five-second lock and five-minute statement timeouts.
-4. Verify the ledger accepts a version-only row.
-5. Include the uniquely enumerated migration file.
-6. Insert its ledger row.
-7. Include its catalog proof and require `catalog_ok=t`.
-8. Commit only after all checks pass.
+2. Begin a transaction with five-second lock and five-minute statement timeouts.
+3. Verify version-only ledger-row compatibility.
+4. Include the uniquely enumerated migration.
+5. Insert its ledger row.
+6. Include the catalog proof and require exactly `catalog_ok=t`.
+7. Commit only after all checks pass.
 
-The runbook’s migration selection runs on the box. For this plan, select the single matching filename with a Bash array populated by a `while IFS= read -r` loop instead of `mapfile`.
-
-After commit, require `ledger=1 catalog=t`. Migration 04 is not on the runbook’s deferred-functional list: run its functional proof **during section 5**.
+After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the runbook’s functional-proof list: execute its functional proof **during section 5**.
 
 ```sh
 # step: hm37-functional-section5
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d/window.env
+  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro --file /proof/20260928000004-functional.sql \
     >"$PROOF_DIR/20260928000004-functional.txt"
@@ -348,135 +498,116 @@ After commit, require `ledger=1 catalog=t`. Migration 04 is not on the runbook�
 )
 ```
 
-The functional proof executes the visibility function and checks batch uniqueness, seat/cursor bindings, recipient visibility, terminal cursors and acknowledged cursor history. It can pass with no hosted rows; it does not replace the exercised control in section 9.
+The functional proof executes the visibility function and checks active-batch uniqueness, bindings, recipient visibility, terminal cursors and acknowledged cursor history. It can pass with no hosted rows; it does not replace section 9’s exercised control.
 
-Reconcile cron before/after: **zero additions and zero removals**.
+Reconcile cron: **zero additions and zero removals**. HezLead accepts schema results before the edge switch.
 
-HezLead accepts these results before authorizing the edge switch.
+## 7. Edge release and saved outgoing logs
 
-## 7. Edge release and worker boundary
+### Worker boundary
 
-### Resolved v1 findings
+Measured in the router, main entry point and MCP protocol:
 
-At this SHA:
+- `mcp` is in `DISABLED_FUNCTION_NAMES`.
+- Only exact string `1` enables it.
+- The disabled gate runs before OPTIONS/preflight.
+- `handleGatewayRequest()` returns the disabled response before its worker callback.
+- Worker creation and fetch are inside that callback.
+- The worker protocol independently refuses dark MCP and protected-resource metadata before normal method handling.
 
-- `DISABLED_FUNCTION_NAMES` contains `mcp`.
-- `isMcpPublicEnabled()` accepts only the exact string `1`.
-- `resolveGatewayRequest()` checks the disabled function before OPTIONS handling.
-- `handleGatewayRequest()` returns that response before calling its worker callback.
-- `main/index.ts` places worker creation and fetch inside that callback.
-- The worker protocol independently checks darkness before metadata and method handling.
+Thus the gateway refusal is method-independent for both MCP paths. The exact-tree instrumented test in `tests/p1-cli/edge-runtime-box.test.ts`, named **“MCP dark gate refuses every method before worker creation and routes when enabled”**, explicitly covers both suffixes and seven methods: GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS. It requires zero disabled worker calls and enabled positive controls.
 
-These facts are measured in `deploy/edge-runtime/main/router.ts`, `main/index.ts` and `supabase/functions/mcp/protocol.ts`.
+Require a passing result at this SHA. A 503 or absence of a worker log line alone does not prove that no worker was invoked. An enabled isolated test is not permission to enable production MCP.
 
-`tests/p1-cli/edge-runtime-box.test.ts` includes the instrumented test **“MCP dark gate refuses every method before worker creation and routes when enabled”**. It covers both endpoint suffixes, seven methods, zero disabled worker calls and enabled positive controls. Require a passing exact-SHA result. Enabling a Boolean in an isolated test is not permission to enable the production flag.
+### Preflight
 
-HTTP 503 alone, or absence of a worker log line alone, does not prove the worker boundary.
+Execute runbook steps `runbook-30` and `runbook-31`:
 
-### Section 6 preflight and switch
+1. Measure recycle-timer overlap; stop it only when required, recording the marker before stopping.
+2. Verify the archive-derived edge manifest.
+3. Preserve the previous edge’s box-only `compose.override.yaml`.
+4. Generate and verify the manifest including that override.
+5. Validate required names and reject test hooks.
+6. Privately inspect effective Compose/container configuration; assert MCP remains disabled.
+7. Validate Compose with `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`.
+8. Reconcile previous edge identity and actual mounted source.
 
-Run section 6’s timer-overlap calculation. Stop the recycle timer only when the approved window overlaps its protected interval; persist the stopped marker first.
+### Switch
 
-Then:
+Use **this SHA’s complete runbook step `runbook-32`**. Do not use v2’s shortened switch block: it omits outgoing log preservation.
 
-1. Verify the archive-derived edge manifest.
-2. Copy the recorded previous edge’s box-only `compose.override.yaml`.
-3. Generate and verify the manifest including that override.
-4. Validate required environment names and reject test hooks.
-5. Privately inspect effective Compose configuration; assert MCP remains disabled.
-6. Validate Compose with `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`.
-7. Confirm `PREVIOUS_EDGE`, its release identity and actual live container agree.
-8. Switch and recreate from the exact new directory.
+Before changing the symlink or recreating the container, that step captures timestamped stdout/stderr from `commonswarm-edge-edge-runtime-1`, retaining at most **10,485,760 bytes** in the root-owned mode-0600 proof file:
 
-```sh
-# step: hm37-edge-switch
-# Runs on the box over ssh, as Anvil in a root Bash shell.
-(
-  set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d/window.env
-  test "$PREVIOUS_EDGE" = /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
-  test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
-  test "$(cat "$NEW_EDGE/RELEASE_SHA")" = "$SHA"
-  ln -sfn "$NEW_EDGE" /home/commonswarm/edge/current
-  cd "$NEW_EDGE/deploy/edge-runtime"
-  sudo -u commonswarm env \
-    COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
-    COMMONSWARM_EDGE_ENV_FILE=/home/commonswarm/.env \
-    docker compose -p commonswarm-edge up -d edge-runtime
-)
-```
+`commonswarm-edge-edge-runtime-1.72c57e0d76d0aa86fe4f811a2cf51499919fed20.docker.log`
 
-Require, within section 6’s 180-second bound:
+It appends that exact filename to the existing copy-back manifest. The filename is generated from the outgoing release’s measured `RELEASE_SHA`, not the incoming SHA.
 
-- Docker health `healthy` and loopback `/health` success.
-- Memory `2147483648`.
-- Network mode `commonswarm-net`.
-- Compose working directory `$NEW_EDGE/deploy/edge-runtime`.
-- Active release and mounted source matching this SHA.
-- Effective MCP flag still disabled.
+The helper tolerates a Docker-log read error. Privately inspect the result and record any collection failure; file creation alone is not proof of captured container history.
 
-Retain the ordinary command, authenticated read, capability, activity, H0, unknown-function and preflight controls. Unauthenticated H0 note must return 401.
+After capture, the runbook switches to `NEW_EDGE` and recreates from its exact directory with:
 
-If an authenticated read credential is unavailable, record that limitation and obtain HezLead’s runbook disposition. Use the runbook’s syntactically valid, known-nonexistent agent-token lookup if selected to establish database connectivity; do not confuse an early syntax rejection with a database-reaching probe.
+- `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`.
+- The protected production environment-file path.
+- The preserved box-only override.
 
-Capture the full probe interval’s logs privately after loopback and public probes finish. Reject database connection, configuration, boot or module-loading errors. Raw logs stay on the box.
+No stack, OAuth or GoTrue container is recreated by this plan.
 
-## 8. Post-release DARK and public-command controls
+Within the runbook’s 180-second bound, require healthy Docker status, loopback `/health`, memory `2147483648`, network `commonswarm-net`, exact new Compose working directory, matching release/mounted source and disabled effective MCP flag.
 
-### Endpoint matrix
+Retain ordinary command, authenticated read, capability, activity, H0, unknown-function and preflight controls. Unauthenticated H0 note must return 401.
 
-Run these three gateway probes against each base:
+If an authenticated read credential is unavailable, record NOT VERIFIED and obtain HezLead’s runbook disposition. If selected, the runbook’s syntactically valid, known-nonexistent agent-token lookup must reach the database and return 401. An early token-syntax rejection does not establish connectivity.
 
-| Location | Base |
-|---|---|
-| Box loopback, executed over ssh | `http://127.0.0.1:9000` |
-| Mac mini, staging route | `https://edge-staging.commonswarm.com` |
-| Mac mini, production API | `https://api.commonswarm.com` |
+Capture the complete post-switch probe interval’s logs privately **after** loopback and public probes. Reject connection, configuration, boot or module-loading errors. This probe-window log remains box-only.
 
-| Method | Path | Required result |
-|---|---|---|
-| POST | `/functions/v1/mcp` | 503, exact disabled JSON |
-| OPTIONS | `/functions/v1/mcp` | 503, exact disabled JSON |
-| GET | `/functions/v1/mcp/.well-known/oauth-protected-resource/mcp` | 503, exact disabled JSON |
+## 8. DARK routes and public-command refusal
 
-Exact JSON:
+Required disabled JSON:
 
 `{"error":"feature_disabled","feature":"hosted_mcp","message":"Hosted MCP is not available yet."}`
 
-Bare `/mcp` is the public MCP-hostname route, not the direct edge gateway route. Separately recheck POST and OPTIONS `https://mcp.commonswarm.com/mcp`, and GET `https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp`, using HM6’s positive discovery/JWKS controls in the same invocation.
+Probe both gateway paths on box loopback, staging and production API:
 
-Staging reaches production services and the production database. Run its probes from the Mac mini, as the release procedure requires.
+- `/functions/v1/mcp`.
+- `/functions/v1/mcp/.well-known/oauth-protected-resource/mcp`.
 
-### Public command boundary
+The public MCP hostname uses:
 
-Generate the command list from `PUBLIC_HOSTED_ONLY_COMMANDS` in the exact release’s `src/protocol/hosted-authority.ts`. At this SHA it contains six kinds, including open and ACK.
+- `/mcp`.
+- `/.well-known/oauth-protected-resource/mcp`.
 
-Send each without Authorization and require 403 `{"error":"forbidden"}`. Pair this with an ordinary malformed request returning 400 and an ordinary mint request reaching the missing-bearer refusal with 401.
+For GET, POST, PUT, PATCH, DELETE and OPTIONS require 503 and exact disabled JSON. For HEAD require 503 and JSON content type; HTTP HEAD has no response body to parse. Retain the instrumented worker test for the no-worker assertion.
 
-The ordering is established in `handlePostRequest()` in `supabase/functions/command/index.ts`: hosted-only refusal precedes command-ID validation, bearer classification and GoTrue. Exact-SHA boundary tests supplement the HTTP observations.
+The MCP-hostname refusal can be served by HM6’s existing Caddy dark handler. It does not establish edge routing or worker behavior; loopback/API and instrumented controls remain necessary.
 
-The following probe generates its list from source and exercises loopback, staging and API. It does not mint credentials or mutate authority.
+Staging is production-backed. Execute staging probes from the Mac mini.
+
+### Public hosted commands
+
+Derive the list from `PUBLIC_HOSTED_ONLY_COMMANDS` in the release’s `src/protocol/hosted-authority.ts`; it contains six kinds, including open and ACK.
+
+`handlePostRequest()` refuses hosted-only commands and claimed hosted context before command-ID validation, bearer classification or GoTrue. Require unauthenticated 403 `{"error":"forbidden"}`, paired with ordinary malformed-command 400 and missing-bearer mint 401 controls.
 
 ```sh
 # step: hm37-public-boundaries
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
-# Its ssh subprocess runs the loopback probe on the box as Anvil.
+# Its ssh subprocess runs only the gateway loopback probes on the box as root.
 (
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d
+  test "$SHA" = e7bb7a46b24e7bc794234416d43605bca52b55d4
   test "$(git rev-parse HEAD)" = "$SHA"
   git diff --exit-code "$SHA" -- src/protocol/hosted-authority.ts
   PROBE="$(mktemp /tmp/hm37-boundaries.XXXXXX)"
+  case "$PROBE" in /tmp/hm37-boundaries.??????) ;; *) false ;; esac
   trap 'rm -f -- "$PROBE"' EXIT
 
   python3 - src/protocol/hosted-authority.ts >"$PROBE" <<'PY'
 import pathlib, re, sys
 source = pathlib.Path(sys.argv[1]).read_text()
 matches = re.findall(
-    r"const PUBLIC_HOSTED_ONLY_COMMANDS = new Set\(\[([\s\S]*?)\]\);",
-    source)
+    r"const PUBLIC_HOSTED_ONLY_COMMANDS = new Set\(\[([\s\S]*?)\]\);", source)
 assert len(matches) == 1
 kinds = re.findall(r"'([a-z_]+)'", matches[0])
 assert len(kinds) == 6 and len(set(kinds)) == 6
@@ -497,8 +628,9 @@ disabled = {
     "feature": "hosted_mcp",
     "message": "Hosted MCP is not available yet.",
 }
+methods = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
-def probe(base, method, path, body, expected_status, expected_body):
+def probe(base, method, path, body, expected_status, expected_body=None):
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(
         base + path, data=data, method=method,
@@ -514,125 +646,160 @@ def probe(base, method, path, body, expected_status, expected_body):
     assert status == expected_status, (base, method, path, status)
     assert len(raw) <= 131072
     assert "application/json" in content_type
-    parsed = json.loads(raw)
-    if expected_body is not None:
-        assert parsed == expected_body, (base, method, path, "body mismatch")
+    if method == "HEAD":
+        assert raw == b""
+        parsed = None
+    else:
+        parsed = json.loads(raw)
+        if expected_body is not None:
+            assert parsed == expected_body, (base, method, path, "body mismatch")
     results.append({
         "base": base, "method": method, "path": path,
         "status": status, "pass": True,
     })
+    return parsed
 
-for base in sys.argv[1:]:
-    probe(base, "GET", "/functions/v1/h0/agent-doc/smoke", None, 200, None)
-    probe(base, "POST", "/functions/v1/command",
-          {}, 400, {"error": "invalid_request"})
-    for kind in KINDS:
+mode = sys.argv[1]
+assert mode in ("gateway", "mcp")
+for base in sys.argv[2:]:
+    if mode == "gateway":
+        probe(base, "GET", "/functions/v1/h0/agent-doc/smoke", None, 200)
         probe(base, "POST", "/functions/v1/command",
-              {"command_id": str(uuid.uuid4()), "command": {"kind": kind}},
-              403, {"error": "forbidden"})
-    probe(base, "POST", "/functions/v1/command",
-          {"command_id": str(uuid.uuid4()),
-           "command": {"kind": "mint_agent_token"}},
-          401, {"error": "unauthenticated"})
-    for method in ("POST", "OPTIONS"):
-        probe(base, method, "/functions/v1/mcp", {}, 503, disabled)
-    probe(base, "GET",
-          "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
-          None, 503, disabled)
+              {}, 400, {"error": "invalid_request"})
+        for kind in KINDS:
+            probe(base, "POST", "/functions/v1/command",
+                  {"command_id": str(uuid.uuid4()), "command": {"kind": kind}},
+                  403, {"error": "forbidden"})
+        probe(base, "POST", "/functions/v1/command",
+              {"command_id": str(uuid.uuid4()),
+               "command": {"kind": "mint_agent_token"}},
+              401, {"error": "unauthenticated"})
+        paths = (
+            "/functions/v1/mcp",
+            "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+        )
+    else:
+        for path in (
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+        ):
+            document = probe(base, "GET", path, None, 200)
+            assert document["issuer"] == base
+            assert document["authorization_endpoint"] == base + "/authorize"
+            assert document["token_endpoint"] == base + "/token"
+            assert document["jwks_uri"] == base + "/jwks"
+        jwks = probe(base, "GET", "/jwks", None, 200)
+        keys = jwks.get("keys")
+        assert isinstance(keys, list) and keys
+        for key in keys:
+            assert isinstance(key, dict)
+            assert key.get("kty") == "EC" and key.get("crv") == "P-256"
+            assert key.get("alg") == "ES256"
+            assert isinstance(key.get("kid"), str) and key["kid"]
+            assert isinstance(key.get("x"), str) and key["x"]
+            assert isinstance(key.get("y"), str) and key["y"]
+            assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
+        for method, path, body in (
+            ("GET", "/authorize", None), ("POST", "/token", {}),
+        ):
+            result = probe(base, method, path, body, 503)
+            assert result.get("error") == "authorization_service_disabled"
+        paths = ("/mcp", "/.well-known/oauth-protected-resource/mcp")
 
-print(json.dumps({"hosted_command_count": len(KINDS), "results": results}, indent=2))
+    for path in paths:
+        for method in methods:
+            probe(base, method, path, None, 503, disabled)
+
+print(json.dumps({
+    "mode": mode, "hosted_command_count": len(KINDS), "results": results,
+}, indent=2))
 PY
+
   ssh ops@100.115.66.74 \
-    'sudo -n -i python3 - http://127.0.0.1:9000' \
+    'sudo -n -i python3 - gateway http://127.0.0.1:9000' \
     <"$PROBE" >"$EVIDENCE_DIR/hm37-loopback-boundaries.json"
 
-  python3 "$PROBE" \
+  python3 "$PROBE" gateway \
     https://edge-staging.commonswarm.com \
     https://api.commonswarm.com \
     >"$EVIDENCE_DIR/hm37-public-boundaries.json"
+
+  python3 "$PROBE" mcp https://mcp.commonswarm.com \
+    >"$EVIDENCE_DIR/hm37-mcp-hostname-boundaries.json"
 )
 ```
 
-Transport errors, HTML challenges, redirects and generic 503 responses fail. Do not change the User-Agent merely to turn a failed client path green.
+This preserves Python’s actual default User-Agent. Transport errors, redirects, challenges and generic 503s fail. Repeat HM6’s separate curl and OAuth-loopback controls as well.
 
-During the hosted control below, repeat well-shaped unauthenticated open and ACK requests using its temporary seat/batch identifiers. Compare that seat’s cursor and batch rows before and after: neither request may open a batch, acknowledge one or advance the cursor.
+During section 9, send well-shaped unauthenticated public open/ACK requests using the temporary seat/batch identifiers. Read the seat’s durable cursor/batch state before and after: neither request may open, acknowledge or advance anything.
 
 ## 9. Hosted open/ACK control
 
-**A reviewed, production-window executable harness is not established in this tree. This remains an opening gate.** The lead must supply the exact control artifact, checksum, invocation and cleanup procedure for HezLead’s review before any migration or edge mutation.
+**A reviewed production-window executable harness is not established in this tree. This remains an opening gate.**
 
-`tests/p1-server/hosted-check.test.ts` establishes the relevant call shapes, but its fixture setup directly inserts authority rows, creates two hosted seats and supplies a stubbed provider-status callback. Do not run that setup against the box or staging, or present its existing fixture as this window’s live control.
+Before migration or edge mutation, CSwarmDevLead must supply its exact artifact, checksum, invocation, runtime, protected-input procedure and cleanup procedure for HezLead’s acceptance.
 
-The required control is a locally invoked, trusted control using the exact release’s entry points. It creates **one** temporary hosted seat. It must not add an HTTP bypass, enable public authorization or enable public MCP.
+`tests/p1-server/hosted-check.test.ts` supplies useful call shapes, but its setup inserts authority rows directly, creates two hosted seats and uses an always-active provider-status callback. It is not this window’s production fixture.
 
-### Setup and trust boundary
+The trusted locally invoked control must create **one temporary hosted seat**, using the exact release’s entry points. No HTTP bypass, public issuance, public MCP enablement or local agent token for the hosted principal is allowed.
 
-The reviewed control must:
+### Setup
 
-1. Read `WINDOW_PRINCIPAL_SUFFIX` from this window’s state and use the required fresh hosted name.
-2. Use the approved control workspace and a freshly verified owner identity. HM2 used **Cold Agent Test**, `c2ea0541-f56d-4c73-bf71-56c5405c4934`; current access and available capacity must be rechecked.
-3. Create grant/consent/activation through `handleHostedManagementCommand`, using the verified human identity. Do not fabricate `identityVerified`.
-4. Establish a temporary provider grant through the reviewed OAuth-service storage path without opening public issuance.
-5. Check durable provider status using `commonswarm_oauth.provider_family_active`, as `supabase/functions/mcp/index.ts` does. No always-active callback.
-6. Construct the genuine grant capability through `authenticateHostedGrantCapability`; claim the single seat through `handleHostedCommand`.
-7. Construct check capabilities through `authenticateHostedSeatCapability` with tool `check`; invoke `handleHostedCommand` for open and ACK.
-8. Keep provider-status access on a separate connection/pool from capability resolution, matching the production code’s protection against nested-pool deadlock.
-9. Persist a private cleanup journal before each creation so partial setup can be revoked after failure or a lost shell.
+1. Read the saved suffix and use `hm37-hosted-${WINDOW_PRINCIPAL_SUFFIX}`.
+2. Verify a human owner identity and current access/capacity in the approved control workspace. HM2 used Cold Agent Test, `c2ea0541-f56d-4c73-bf71-56c5405c4934`; present access is **not established**.
+3. Create grant/consent/activation through `handleHostedManagementCommand`; never fabricate `identityVerified`.
+4. Establish the temporary provider grant through the reviewed OAuth storage path while public issuance stays off.
+5. Check durable provider status through `commonswarm_oauth.provider_family_active`, matching the MCP entry point.
+6. Construct the genuine grant capability through `authenticateHostedGrantCapability`; claim the seat through `handleHostedCommand`.
+7. Construct check capabilities through `authenticateHostedSeatCapability` with tool `check`; invoke internal open/ACK handling.
+8. Keep provider-status work on a separate connection/pool from capability resolution, matching the production protection against nested-pool deadlock.
+9. Persist a private cleanup journal before each creation, including recovery after partial failure or lost shell.
 
-All CommonSwarm authority writes go through command entry points. SQL outside those entry points is read-only verification. Never mint a local agent token for the hosted principal.
+All CommonSwarm authority writes use transactional command entry points. SQL outside those entry points is read-only verification.
 
-### Required observations
+### Observations
 
 | Step | Action | Required proof |
 |---:|---|---|
-| 1 | Post directed signal A through the normal command path. | Signal exists for the temporary hosted principal. |
-| 2 | Send two concurrent opens, with distinct command IDs. | Both return 200, the same non-null batch A and identical ordered IDs; exactly one active persisted batch. |
-| 3 | Read the durable cursor. | Opening did not advance the committed cursor. Do not mistake the response’s terminal cursor for the committed cursor. |
-| 4 | Open again from a fresh local invocation. | Same persisted batch and ordered IDs. |
-| 5 | Post directed signal B after A opened. | B exists beyond A’s terminal ordering pair. |
-| 6 | Send unauthenticated public open and ACK requests. | Both 403; cursor/batch snapshot unchanged. |
-| 7 | ACK A using its **upper-case UUID spelling**. | 200; A acknowledged; committed cursor equals A’s millisecond timestamp/UUID terminal pair. |
-| 8 | Inspect the ACK result and open again. | Batch B exists and is active. ACK may itself open the next batch; do not require a separate open to create it. |
+| 1 | Send directed signal A normally. | A exists for the temporary hosted principal. |
+| 2 | Run two concurrent opens with distinct command IDs. | Both 200; same non-null batch A and identical ordered IDs; exactly one persisted active batch. |
+| 3 | Read committed cursor. | Open did not advance it. A response terminal cursor is not committed-cursor evidence. |
+| 4 | Open from a fresh local invocation. | Same persisted batch and ordered IDs. |
+| 5 | Send directed signal B after A opened. | B is beyond A’s terminal ordering pair. |
+| 6 | Send unauthenticated public open and ACK. | Both 403; cursor/batch snapshot unchanged. |
+| 7 | ACK A with its **upper-case UUID spelling**. | 200; A acknowledged; committed cursor equals A’s millisecond timestamp/UUID terminal pair. |
+| 8 | Inspect ACK result and open again. | B exists and is active. ACK may itself open B. |
 | 9 | Repeat ACK A with a fresh command ID. | 200; A’s acknowledgment timestamp and committed cursor unchanged; B remains active. |
-| 10 | ACK B, then open again. | Cursor advances to B; empty result has `batch_id=null`; no empty batch persisted. |
-| 11 | Run migration 04’s functional proof again. | Exact `t`, exit zero. |
+| 10 | ACK B, then open. | Cursor advances to B; empty result has `batch_id=null`; no empty batch persisted. |
+| 11 | Rerun migration-04 functional proof. | Exact `t`, SQL exit zero. |
 
-Record safe IDs, counts, ordering pairs, timestamps and assertions only. Do not record tokens, seat handles, credentials or signal bodies.
+Retain only safe IDs, counts, ordering pairs, timestamps and assertions. Never retain tokens, seat handles, credentials or signal bodies in copied evidence.
 
-### Cleanup is part of the control
+### Finally-path cleanup
 
-In a finally path, including partial failure:
+Including partial failures:
 
-1. Revoke the temporary hosted seat through the management command path; verify seat, handle and principal revocation.
+1. Revoke the hosted seat through management commands; verify seat, handle and principal revocation.
 2. Revoke its CommonSwarm grant.
-3. Revoke the temporary OAuth provider grant/family through its reviewed storage path.
-4. Revoke every ordinary sender/local principal created by the window.
-5. Verify all recorded principals are revoked and **zero active unexpired agent tokens** remain for them.
-6. Verify the temporary provider family is inactive and no active temporary provider token family remains.
-7. Retry hosted authorization/open/ACK using the retained private binding; require refusal.
+3. Revoke the temporary provider grant/family through its reviewed storage path.
+4. Revoke every ordinary local/sender principal created by this window.
+5. Verify every recorded principal is revoked and **zero active unexpired agent tokens** remain.
+6. Verify the provider family is inactive and no active temporary provider token family remains.
+7. Retry hosted authorization/open/ACK with the retained private binding; require refusal.
 
-Do not delete durable signals, events, cursor or batch history. The control’s cleanup revokes access; it does not erase history.
+Preserve durable signal, event, cursor and batch history. Cleanup revokes access; it does not erase history.
 
-Missing cleanup proof prevents closure. A missing reviewed control artifact prevents opening; it is not permission to substitute a SQL fixture or weaken the provider check.
+Missing harness acceptance prevents opening. Missing cleanup proof prevents closure.
 
-## 10. Local `check.json` and stdio MCP compatibility
+## 10. Local `check.json` and stdio MCP
 
-The baseline-to-release diff is empty for `src/cloud/agent-check.ts` and `src/mcp/`. Local check still stores `check.json`; stdio MCP still commits through its deferred response-write path in `src/mcp/server.ts`.
+The previous-edge-to-release comparison is empty for `src/cloud/agent-check.ts` and the entire `src/mcp/` directory. Local check still uses `check.json`; stdio MCP retains its deferred response-write commit path.
 
-That source comparison does not establish live compatibility.
+That source comparison does not prove live compatibility.
 
-Repeat HM2 run 4’s ordinary local-recipient/sender pattern with released cswarm `0.1.80`, Tom’s verified production human session and fresh suffix-based names. Use isolated mode-0700 directories and mode-0600 connection/profile files. Verify the installed executable/version and production target before minting.
+Repeat HM2’s ordinary local-recipient/sender control with released cswarm `0.1.80`, Tom’s freshly verified production human session and the suffix-based names. Verify installed executable identity/version and production target before minting.
 
-Adapt HM2’s steps rather than pasting them unchanged:
-
-- Use this SHA and the HM37 names.
-- Transfer the suffix separately, as above.
-- Extract JSON IDs with a helper function containing the heredoc, then call that function in command substitution. Never nest a heredoc directly inside `$(...)`.
-- The baseline now requires migrations 02 and 03 present and migration 04 absent.
-- Require all four real credential fields in both connection creation and cleanup readers.
-- Persist the requested run ID and verify the returned `run_id` matches it.
-
-The required credential validation is:
+Use isolated mode-0700 directories and mode-0600 credential, connection and profile files. Persist the requested run ID and require the returned `run_id` to match. Both connection creation and cleanup readers must validate all four credential fields.
 
 ```sh
 # step: hm37-validate-local-credential
@@ -649,58 +816,76 @@ info = os.lstat(path)
 assert stat.S_ISREG(info.st_mode)
 assert stat.S_IMODE(info.st_mode) == 0o600
 credential = json.load(open(path))
+assert isinstance(credential, dict)
 def required_string(field):
     value = credential.get(field)
     if not isinstance(value, str) or not value:
         raise SystemExit(
-            f'credential is missing required non-empty string field "{field}"')
+            'credential missing required non-empty string field: ' + field)
     return value
 values = {field: required_string(field) for field in
           ("agent_token", "principal_id", "token_id", "run_id")}
-for field in ("principal_id", "token_id", "run_id"):
-    uuid.UUID(values[field])
-assert uuid.UUID(values["principal_id"]) == uuid.UUID(principal)
-assert uuid.UUID(values["run_id"]) == uuid.UUID(run)
+try:
+    parsed = {field: uuid.UUID(values[field])
+              for field in ("principal_id", "token_id", "run_id")}
+    expected_principal = uuid.UUID(principal)
+    expected_run = uuid.UUID(run)
+except (ValueError, AttributeError):
+    raise SystemExit("credential UUID validation failed")
+assert parsed["principal_id"] == expected_principal
+assert parsed["run_id"] == expected_run
 print("credential_shape=PASS")
 PY
 )
 ```
 
-Required live control:
+When adapting HM2’s steps, transfer the suffix separately. Put JSON-reading heredocs inside helper functions before calling those functions in command substitution; never place a heredoc directly inside `$(...)`.
 
-1. Create the ordinary recipient and sender before migration; verify active local, non-turn-only principals and owner membership.
-2. After the edge is healthy, mint and validate their credentials, then create isolated profiles.
+Required control:
+
+1. Before migration, create ordinary recipient/sender through normal commands; verify active local, non-turn-only principals and owner membership.
+2. After edge health, mint/validate credentials and create isolated profiles.
 3. Send a directed primer and run recipient `cswarm check`.
-4. Verify the **exact delivery’s** `ack_outcome=observed` and non-null `acked_at`, as HM2 did. CLI exit zero alone is insufficient.
-5. Send a second signal. Before any recipient consumer runs, prove that exact delivery is wake-eligible.
-6. Use the installed CLI’s stdio MCP with that isolated profile. Initialize, call local `check`, verify the directed signal is returned, then verify local `check.json` advancement and its exact observed delivery.
-7. Require exact-SHA test evidence for failed/cancelled response writes leaving deferred cursor state uncommitted. Relevant tests are in `tests/p1-cli/mcp-stdio.test.ts`, including successful-write-only commit and post-write observation.
+4. Verify that exact delivery has `ack_outcome=observed` and non-null `acked_at`; CLI exit zero is insufficient.
+5. Send a second signal and prove that exact delivery is wake-eligible before any recipient consumer runs.
+6. Initialize the installed CLI’s stdio MCP with the isolated profile; call local `check`, verify the directed signal, local `check.json` advancement and exact observed delivery.
+7. Require exact-SHA stdio test evidence for failed/cancelled response writes leaving deferred cursor state uncommitted, successful-write-only commit and post-write observation.
 8. Revoke both ordinary principals and verify zero active unexpired tokens.
 
-Do not start a listener. Do not use an existing agent’s profile. Retain only sanitized assertions in `hm37-local-control.json`; keep credential-bearing scratch private until cleanup is accepted.
+Do not start a listener or use another agent’s profile. Keep credential-bearing scratch private until cleanup acceptance; copy only sanitized assertions.
 
-## 11. Rollback — edge first, then SQL
+## 11. Rollback — edge first, SQL second
 
 HezLead decides; Anvil executes. Prefer restoring the compatible previous edge while retaining the additive schema.
 
+Use this release’s **complete runbook step `runbook-42`**, including outgoing-container log capture **before** restoring the symlink or recreating.
+
+If rolling back the new edge, the expected captured filename is:
+
+`commonswarm-edge-edge-runtime-1.e7bb7a46b24e7bc794234416d43605bca52b55d4.docker.log`
+
+Resolve the actual outgoing directory and verify its release/mount identity first. Preserve the same bounded, root-owned mode-0600 logging and exact-name manifest handling as the forward switch.
+
+Then:
+
 1. Restore recorded `PREVIOUS_EDGE`.
-2. Recreate from that exact directory with the preserved override and `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`.
+2. Recreate from that exact directory with its override and `COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net`.
 3. Verify health, memory, network, mounted source, ordinary controls and MCP darkness.
-4. Only then consider migration 04’s SQL inverse.
+4. Only then consider the migration-04 inverse.
 
-Do not roll back HM2 or HM6.
+Do not roll back HM2 or HM6. Do not change Caddy.
 
-The SQL reserve below refuses any cursor or batch history. After a successful hosted control, that refusal is expected. Retain the additive schema unless a separate reviewed data-loss decision and verified recovery plan authorize removal. Never delete rows just to pass this guard.
+The SQL reserve refuses any cursor or batch history. After a successful hosted control, this refusal is expected. Retain the schema unless a separately reviewed data-loss decision and recovery plan authorize removal. Never delete rows to satisfy the guard.
 
-The inverse SQL between the guard and rollback catalog is verbatim from the reviewed rollback file.
+The inverse below is verbatim from the hashed rollback file.
 
 ```sh
 # step: hm37-reserve-schema-rollback
 # Runs on the box over ssh, as Anvil in a root Bash shell.
-# RESERVED: requires HezLead's decision and a verified previous-edge rollback.
+# RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d/window.env
+  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   test "$PREVIOUS_EDGE" = /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
   test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
@@ -767,15 +952,15 @@ SQL
 )
 ```
 
-Afterward, prove migration 04’s ledger count zero, rollback catalog true and forward catalog false without error. Recheck HM2/HM6 catalogs and functional proofs and reconcile cron.
+Afterward require migration-04 ledger count zero, rollback catalog true and forward catalog false without SQL error. Recheck HM2/HM6 catalog/functional proofs and reconcile cron.
 
-A failed migration transaction is not an instruction to run destructive rollback: first measure what remains. Never improvise a database restore, delete a release or prune Docker.
+A failed forward transaction does not automatically require destructive rollback. Measure remaining state first. Never improvise a restore, delete a release or prune Docker.
 
 ## 12. Evidence, cleanup and closure
 
-Create section 1’s explicit copy-back manifest before applying anything. Its standard entries cover archives, environment inventory, migration reconciliation, catalog/functional proofs, cron and edge artifacts.
+Create the runbook’s explicit copy-back manifest before apply. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
 
-Add these exact item paths, without duplicating generated entries:
+Add these exact item-relative paths without duplicating standard generated entries:
 
 - `20260928000002-catalog.sql`
 - `20260928000002-functional.sql`
@@ -798,56 +983,63 @@ Add these exact item paths, without duplicating generated entries:
 - `hm37-revocation-readback.json`
 - `hm37-close-readback.txt`
 
-`hm37-hosted-control-inputs.txt` records the reviewed harness identity/checksum, invocation, runtime and review acceptance—not its protected inputs. `hm37-worker-boundary.txt` records the exact-SHA instrumented test result and its positive control.
+`hm37-hosted-control-inputs.txt` records the accepted harness identity/checksum, invocation, runtime and review acceptance, never protected inputs. `hm37-worker-boundary.txt` records the exact-SHA instrumented result and positive control.
 
-These are required outputs, not claims that files or passing results already exist. Transfer reviewed Mac-side results to the box proof directory before manifest-only copy-back.
+These are required outputs, not existing PASS claims. Transfer accepted Mac-side results to the proof directory before manifest-only copy-back.
 
-Use the runbook’s copy-back procedure into `docs/evidence/<UTC-date>-release-e1faa08eb2b0/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
+Use `docs/evidence/<UTC-date>-release-e7bb7a46b24e/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
-Never copy:
+### Log exception and secret review
 
-- `window.env` or private cleanup journals.
-- Credentials, profiles, connection files or complete environments.
-- Database session helpers, password files or dumps.
-- Raw logs or `database/logs/`.
+The updated runbook permits the bounded outgoing-container `*.docker.log` files appended by its recreate steps. Do not add arbitrary logs to the initial item manifest.
 
-Follow the runbook’s empty/nonempty `.err` handling, with secret review before transfer. Missing manifests or required artifacts stop successful copy-back; do not reconstruct a manifest by scanning the directory or fabricate PASS files.
+The copy-back procedure validates allowed container names, full lowercase release SHAs, root ownership, mode 0600 and the 10 MiB bound. Privately review these logs for secrets/request data before transfer. Capturing logs does not authorize exposing sensitive contents; if unsafe, stop copy-back for HezLead’s disposition.
+
+Keep all other raw logs, including the probe-window log and `database/logs/`, on the box.
+
+Never copy window state, private cleanup journals, credentials, profiles, connection files, complete environments, database session helpers, password files or dumps.
+
+Follow the runbook’s empty/nonempty `.err` handling and review nonempty errors before transfer. Missing manifests or required artifacts stop successful copy-back. Do not reconstruct a manifest by scanning the directory or fabricate missing results.
+
+### Every exit path
 
 On success, refusal, failure or abort:
 
-1. Revoke every created temporary principal and provider grant/family; obtain readback.
-2. Run section 1’s abort cleanup whenever durable window state exists. Restore only timers this window stopped.
-3. Remove section 9’s transient database files and protected smoke files once no longer needed.
+1. Revoke every temporary principal and provider grant/family; obtain readback.
+2. Run runbook abort cleanup whenever durable window state exists; restore only timers this window stopped.
+3. Remove transient database-session and protected smoke files when no longer needed.
 4. Preserve immutable releases and private diagnostics.
-5. Copy approved evidence.
-6. Remove the Mac window-state file only when HezLead closes the window.
+5. Copy approved evidence through the manifest.
+6. Remove Mac window state only when HezLead closes the window.
 
-Successful closure must explicitly record:
+Successful closure must explicitly establish:
 
-- Migration 04 applied and catalog/functional proofs passed.
-- Edge at `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`.
-- HM2 and HM6 prerequisites still valid.
-- Public MCP and OAuth authorization disabled.
-- Loopback, staging, API and MCP-hostname boundary controls passed.
-- Worker-boundary evidence accepted.
-- Hosted concurrent open, upper-case ACK, repeated ACK and cursor controls passed.
-- Local check and stdio MCP compatibility passed.
-- Temporary principals revoked and zero active tokens verified.
-- Timers restored, transient files removed and evidence copied.
+- Only migration 04 was applied; catalog and functional proofs passed.
+- Edge is at `e7bb7a46b24e7bc794234416d43605bca52b55d4`.
+- HM2 remains valid.
+- HM6 remains live at its accepted `ad964ed1` release with corrected migration 03, discovery/JWKS and disabled authorization.
+- Stack runtime/helpers remain at the accepted HM6 baseline; no stack switch occurred.
+- No Caddy change occurred in this window.
+- Public MCP remains disabled on loopback, staging, API and MCP-hostname routes.
+- Worker-boundary evidence and public pre-auth refusal controls passed.
+- Hosted concurrent-open, upper-case ACK, repeated ACK, cursor and no-public-mutation controls passed.
+- Local `check.json` and stdio MCP compatibility passed.
+- Temporary principals/grants/families were revoked; zero active unexpired agent tokens remain.
+- Outgoing-container capture disposition is recorded, timers restored, transient files removed and approved evidence copied.
 
-Public activation and real Claude-client interoperability remain outside this window.
+Public activation, Caddy access-log deployment and real Claude-client interoperability remain outside this window.
 
-## Changes from v1
+## Changes from the 79f70b7d draft
 
-1. Updated the release identity from `2c228ee1…` to `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`.
-2. Re-measured the HM6 plan’s presence. It exists at this SHA and names its own earlier OAuth-only release. Removed the missing-file stop; retained the requirement for actual HM6 closure and live verification.
-3. Re-measured the lane 7 fix from `5e0d580e`, merged by this SHA. The main router now refuses every method before preflight or worker invocation unless the flag is exactly `1`. Removed the two obsolete dark-gate stops.
-4. Added the exact-tree instrumented worker-boundary test and its enabled positive controls. Retained HTTP probes as separate deployed-route evidence.
-5. Confirmed the same 13-path diff, only one added optional edge environment name, no new required names, and unchanged migration-proof checksums.
-6. Compared stack runtime paths with HM6’s planned release: no differences. Retained the mandatory actual-directory comparison.
-7. Expanded public refusal checks to the complete source-derived hosted-only command set, including open and ACK.
-8. Preserved section 5’s false-without-error catalog gate, structural function checks, individual privilege checks, functional-proof timing and complete backup wait.
-9. Corrected the hosted-control expectations: ACK can open the next batch; the response cursor is not proof of committed-cursor advancement.
-10. Retained the unresolved production-control harness gate. The existing server test remains unsuitable as a production fixture; no executable harness or review acceptance is invented.
-11. Required all four real cswarm credential fields and removed heredoc-inside-command-substitution patterns from the supplied blocks.
-12. Preserved rollback order—edge first, SQL second—and the verbatim inverse, empty-history guard, revocation requirements and manifest-only evidence handling.
+1. Changed the release from `79f70b7d77b2341e685d796bb918b3a3a7660e8d` to `e7bb7a46b24e7bc794234416d43605bca52b55d4`; the expected previous edge remains `72c57e0d…`.
+2. Re-measured the exact edge/schema diff from `72c57e0d…`: 18 paths rather than 13, adding five edge documentation/validation paths while leaving the runtime edge inputs unchanged from HM6.
+3. Recomputed every listed SHA-256 from the `e7bb7a4` Git tree and added the split Caddy pair, its adapted-config tools, HM6 plan controls, site-deletion guards and server-repeat workflow inputs.
+4. Preserved migration-directory identity with `ad964ed1`: 63 tracked entries, 62 SQL migrations and Git tree ID `201ce7c…`. Migration 04 remains the only permitted pending version after HM6 is genuinely live.
+5. Corrected the unsupported HM6-closure statement. The release-tree evidence records an abort before runtime mutation, so live and closed HM6 at `ad964ed1` remains an independently measured opening precondition.
+6. Reconfirmed no stack runtime differences against HM6, no local-check/stdio source changes and no new required edge environment names; `ADDITIONAL_REQUIRED_ENV_NAMES` remains empty.
+7. Updated the runbook contract to include `API_CADDY_PAIR=no`. Section 9's two-file live/maintenance handling is acknowledged but steps `runbook-56` through `runbook-59`, pair artifacts, installation and reload are all excluded.
+8. Retained the complete forward and rollback edge steps, each saving the outgoing container's bounded mode-0600 log before any symlink change or recreate.
+9. Kept site deployment, server-repeat execution, HM6 retry and all public activation outside this window; source or workflow presence is not passing evidence.
+10. Required Anvil's non-interactive service-account, file-based 1Password method and retained all no-secret-output rules.
+11. Preserved the unresolved reviewed hosted-control harness opening gate, one suffix-named hosted seat, genuine capability/provider checks, cleanup and zero-token requirements.
+12. Preserved DARK probes, false-without-error migration gating, immediate functional proof, local credential validation, local/stdio controls, edge-first rollback and the verbatim guarded SQL inverse.
