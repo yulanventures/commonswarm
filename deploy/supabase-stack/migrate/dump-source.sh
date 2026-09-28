@@ -20,7 +20,7 @@ esac
 start_log "dump-$origin"
 assert_dump_origin "$origin"
 
-schemas=(auth public realtime storage supabase_migrations swarm swarm_read)
+schemas=(auth public realtime storage supabase_migrations swarm swarm_read commonswarm_oauth)
 schema_args=()
 for schema in "${schemas[@]}"; do schema_args+=(--schema "$schema"); done
 
@@ -141,7 +141,7 @@ SET TRANSACTION SNAPSHOT :'snapshot_id';
 SELECT format('SELECT %L, count(*)::bigint FROM %I.%I;',
   schemaname || '.' || tablename, schemaname, tablename)
 FROM pg_tables
-WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read', ','))
+WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth', ','))
   AND NOT (schemaname = 'realtime' AND (tablename = 'messages' OR tablename LIKE 'messages_%'))
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_probe')
   AND NOT (schemaname = 'public' AND tablename = 'commonswarm_cutover_state')

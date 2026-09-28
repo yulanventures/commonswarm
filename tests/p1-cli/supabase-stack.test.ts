@@ -551,7 +551,7 @@ test("no deploy Caddy file names a supabase.co host", async () => {
   assert.match(supabaseHostErrors(dottedCo).join("\n"), new RegExp(`supabase\\.co host ${files[0]!.path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
 });
 
-test("live and maintenance Caddy files adapt with Caddy 2.11", async (context) => {
+test("deployment Caddy files adapt with Caddy 2.11", async (context) => {
   const docker = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
@@ -565,6 +565,7 @@ test("live and maintenance Caddy files adapt with Caddy 2.11", async (context) =
   const profiles = [
     ["live", join(stackDir, "commonswarm-api.caddy")],
     ["maintenance", join(stackDir, "commonswarm-api-maintenance.caddy")],
+    ["mcp-oauth", join(stackDir, "commonswarm-mcp.caddy")],
   ] as const;
   for (const [profile, sitePath] of profiles) {
     for (const trustMode of ["without-trusted-proxies", "with-trusted-proxies"] as const) {
@@ -578,14 +579,15 @@ test("live and maintenance Caddy files adapt with Caddy 2.11", async (context) =
         }
         const adapted = trustMode === "with-trusted-proxies"
           ? spawnSync("docker", [
-            "run", "--rm", "-v", `${directory}:/srv:ro`, "-w", "/srv",
+            "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${directory}:/srv:ro`, "-w", "/srv",
             "caddy:2.11", "caddy", "adapt", "--config", "/srv/Caddyfile",
           ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 })
           : spawnSync("docker", [
-            "run", "--rm", "-v", `${configPath}:/etc/caddy/Caddyfile:ro`,
+            "run", "--rm", "-e", "MCP_OAUTH_HOST_PORT=3490", "-v", `${configPath}:/etc/caddy/Caddyfile:ro`,
             "caddy:2.11", "caddy", "adapt", "--config", "/etc/caddy/Caddyfile",
           ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
         assert.equal(adapted.status, 0, `${profile} ${trustMode}: ${adapted.stderr.slice(-500)}`);
+        if (profile === "mcp-oauth") continue;
         const jsonPath = join(directory, "adapted.json");
         await writeFile(jsonPath, adapted.stdout);
         const checked = spawnSync(process.execPath, [checker, jsonPath, profile, trustMode], { encoding: "utf8" });

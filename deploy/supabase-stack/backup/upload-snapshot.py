@@ -16,6 +16,25 @@ PREFIX = ROOT + '/000-commonswarm-postgres'
 FILES = ['database.dump', 'roles.sql', 'manifest.txt', 'source-counts.tsv',
          'storage-objects.ndjson', 'storage-backend-objects.ndjson',
          'cron-jobs.ndjson', 'globals.sql']
+REQUIRED_DATABASE_SCHEMAS = frozenset({
+    'auth', 'public', 'realtime', 'storage', 'supabase_migrations', 'swarm',
+    'swarm_read', 'commonswarm_oauth',
+})
+
+
+def validate_manifest(text):
+    entries = {}
+    for line in text.splitlines():
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if key in entries:
+            raise ValueError('duplicate database artifact manifest key')
+        entries[key] = value
+    schemas = entries.get('schemas', '').split(',')
+    if (entries.get('format') != 'commonswarm-n-db-v2' or
+            len(schemas) != len(set(schemas)) or set(schemas) != REQUIRED_DATABASE_SCHEMAS):
+        raise ValueError('unsupported database artifact format or schema set')
 
 
 def physical_keys(rows):
@@ -62,8 +81,7 @@ def upload(artifact, retention_file):
         info = (artifact / name).stat()
         if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
             raise ValueError('missing or non-private database artifact')
-    if 'format=commonswarm-n-db-v2\n' not in (artifact / 'manifest.txt').read_text():
-        raise ValueError('unsupported database artifact format')
+    validate_manifest((artifact / 'manifest.txt').read_text())
     evidence = json.loads(retention_file.read_text())
     if (not evidence.get('publicDisabled') or
         not evidence.get('path', '').endswith('/buckets/yulan-vps-1-backups/settings') or
@@ -105,6 +123,8 @@ def upload(artifact, retention_file):
         before = selected_host_snapshot(call(['rclone', 'lsf', ROOT, '--dirs-only', '--max-depth', '1'], True).splitlines())
         rows = [json.loads(line) for line in (artifact / 'storage-backend-objects.ndjson').read_text().splitlines() if line]
         counts = dict(line.split('|', 1) for line in (artifact / 'source-counts.tsv').read_text().splitlines())
+        if 'commonswarm_oauth.provider_artifacts' not in counts:
+            raise ValueError('OAuth table counts are missing from database snapshot')
         if len(rows) != int(counts['storage.objects']):
             raise ValueError('physical object manifest does not match snapshot row count')
         keys = physical_keys(rows)

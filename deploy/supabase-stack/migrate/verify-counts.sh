@@ -41,7 +41,7 @@ SELECT format(
   tablename
 )
 FROM pg_tables
-WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read', ','))
+WHERE schemaname = ANY (string_to_array('auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth', ','))
   AND NOT (schemaname = 'realtime' AND (tablename = 'messages' OR tablename LIKE 'messages_%'))
   AND NOT (schemaname = 'public' AND tablename IN ('commonswarm_cutover_probe', 'commonswarm_cutover_state'))
 ORDER BY schemaname, tablename

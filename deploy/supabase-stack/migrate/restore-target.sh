@@ -24,6 +24,13 @@ for file in roles.sql database.dump manifest.txt source-counts.tsv storage-objec
   fi
 done
 
+manifest_schemas="$(sed -n 's/^schemas=//p' "$MIGRATION_ARTIFACT_DIR/manifest.txt")"
+expected_schemas="$(selected_schema_csv)"
+if [[ "$manifest_schemas" != "$expected_schemas" ]]; then
+  log "artifact schema set is incomplete or unsupported"
+  exit 1
+fi
+
 : "${PGSERVICEFILE:?run through run-db-tool.sh so database credentials stay in protected files}"
 
 raw_list="$(mktemp "${TMPDIR:-/tmp}/commonswarm-restore-list.XXXXXX")"

@@ -1,9 +1,25 @@
-# Hosted MCP site. Lane 5 is deliberately dark: resource and OAuth paths are
-# answered here without contacting an absent service. Lane 8 may replace the
-# disabled handlers with the two active imports only after both reviewed
-# services are live.
+# Hosted MCP site. Lane 6 activates only the reviewed OAuth service. The MCP
+# resource and protected-resource metadata stay dark until the edge function
+# ships in a later lane.
 
 (mcp_oauth_active) {
+	@oauth_health {
+		method GET HEAD
+		path /health
+	}
+	handle @oauth_health {
+		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
 	@oauth_metadata {
 		method GET HEAD
 		path /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks
@@ -40,7 +56,7 @@
 
 	@oauth_post {
 		method POST
-		path /token /interaction /interaction/* /connections/revoke-grant /connections/revoke-seat
+		path /token /interaction/*
 	}
 	handle @oauth_post {
 		request_body {
@@ -60,7 +76,7 @@
 
 	@oauth_browser_get {
 		method GET HEAD
-		path /interaction /interaction/* /oauth/callback/gotrue /connections
+		path /interaction/* /oauth/callback/gotrue
 	}
 	handle @oauth_browser_get {
 		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
@@ -76,8 +92,8 @@
 	}
 }
 
-# Lane 8 imports this snippet only after the resource server is ready. During
-# lane 5 the site block below handles both paths before any method dispatch.
+# A later lane imports this snippet only after the resource server is ready.
+# Until then the site block below handles both paths as unavailable.
 (mcp_resource_active) {
 	@mcp_resource {
 		method POST
@@ -134,16 +150,20 @@ mcp.commonswarm.com {
 			Strict-Transport-Security "max-age=63072000"
 		}
 
+		# OAuth-only activation: this import handles every public route currently
+		# served by services/mcp-auth. The resource snippet remains unimported.
+		import mcp_oauth_active
+
 		@mcp_unavailable path /mcp /.well-known/oauth-protected-resource/mcp
 		handle @mcp_unavailable {
 			header Content-Type "application/json; charset=utf-8"
 			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp\",\"message\":\"Hosted MCP is not available yet.\"}" 503
 		}
 
-		@oauth_unavailable path /.well-known/* /authorize /token /jwks /interaction /interaction/* /oauth/callback/gotrue /connections /connections/revoke-grant /connections/revoke-seat
-		handle @oauth_unavailable {
+		@oauth_wrong_method path /health /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks /authorize /token /interaction/* /oauth/callback/gotrue
+		handle @oauth_wrong_method {
 			header Content-Type "application/json; charset=utf-8"
-			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp_oauth\",\"message\":\"Hosted MCP authorization is not available yet.\"}" 503
+			respond "{\"error\":\"method_not_allowed\"}" 405
 		}
 
 		handle {

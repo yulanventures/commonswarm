@@ -28,6 +28,10 @@ DEADLINE = None
 REQUIRED_FILES = {'database.dump', 'roles.sql', 'manifest.txt', 'source-counts.tsv',
                   'storage-objects.ndjson', 'storage-backend-objects.ndjson', 'cron-jobs.ndjson',
                   'globals.sql', 'physical-object-keys.txt', 'offsite-binding.json', 'retention-evidence.json'}
+REQUIRED_DATABASE_SCHEMAS = frozenset({
+    'auth', 'public', 'realtime', 'storage', 'supabase_migrations', 'swarm',
+    'swarm_read', 'commonswarm_oauth',
+})
 WORKDIR_BASE = '/var/backups/commonswarm-postgres/restore-drill'
 # DRILL_WORKDIR_KEEP = 2 counts the current run: that directory plus one earlier run.
 DRILL_WORKDIR_KEEP = 2
@@ -49,6 +53,21 @@ def run_cmd(args, **kwargs):
             raise TimeoutError('drill budget exceeded')
         limit = min(limit, remaining)
     return subprocess.run(args, timeout=limit, **kwargs)
+
+
+def validate_manifest(text):
+    entries = {}
+    for line in text.splitlines():
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if key in entries:
+            raise ValueError('duplicate database artifact manifest key')
+        entries[key] = value
+    schemas = entries.get('schemas', '').split(',')
+    if (entries.get('format') != 'commonswarm-n-db-v2' or
+            len(schemas) != len(set(schemas)) or set(schemas) != REQUIRED_DATABASE_SCHEMAS):
+        raise ValueError('unsupported database artifact format or schema set')
 
 
 def cleanup(workdir, label):
@@ -191,13 +210,15 @@ def validate_artifact(artifact, marker):
     binding = json.loads((artifact / 'offsite-binding.json').read_text())
     if any(marker.get(k) != v for k, v in binding.items()) or binding.get('destination') != marker['destination']:
         raise ValueError('offsite binding mismatch')
+    validate_manifest((artifact / 'manifest.txt').read_text())
     counts = {}
     for line in (artifact / 'source-counts.tsv').read_text().splitlines():
         table, count = line.split('|')
         if table in counts or not count.isdigit():
             raise ValueError('invalid table counts')
         counts[table] = int(count)
-    if not {'storage.objects', 'auth.users', 'swarm.agent_tokens'} <= counts.keys():
+    if not {'storage.objects', 'auth.users', 'swarm.agent_tokens',
+            'commonswarm_oauth.provider_artifacts'} <= counts.keys():
         raise ValueError('missing core table counts')
     rows = [json.loads(line) for line in (artifact / 'storage-backend-objects.ndjson').read_text().splitlines()]
     keys = []

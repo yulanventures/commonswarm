@@ -105,7 +105,7 @@ def main():
                 passed += 1; print('PASS '+label)
             reset()
             rejected('source argument before database', helper('source'))
-            names = check(sql("SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname IN ('auth','public','realtime','storage','supabase_migrations','swarm','swarm_read') ORDER BY schemaname,tablename", 'h0_fixture'), 'baseline table names').splitlines()
+            names = check(sql("SELECT schemaname||'.'||tablename FROM pg_tables WHERE schemaname IN ('auth','public','realtime','storage','supabase_migrations','swarm','swarm_read','commonswarm_oauth') ORDER BY schemaname,tablename", 'h0_fixture'), 'baseline table names').splitlines()
             baseline = ''.join(table+'|'+check(sql('SELECT count(*) FROM '+table,'h0_fixture'),'baseline count')+'\n' for table in names)
             (work/'artifacts/source-counts.tsv').write_text(baseline)
             (work/'artifacts/cron-jobs.ndjson').write_text('')

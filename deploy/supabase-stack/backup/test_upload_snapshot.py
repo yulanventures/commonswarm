@@ -22,8 +22,13 @@ class UploadFailures(unittest.TestCase):
             for name in module.FILES:
                 (artifact / name).write_text('synthetic\n')
                 (artifact / name).chmod(0o600)
-            (artifact / 'manifest.txt').write_text('format=commonswarm-n-db-v2\n')
-            (artifact / 'source-counts.tsv').write_text('storage.objects|2\n')
+            (artifact / 'manifest.txt').write_text(
+                'format=commonswarm-n-db-v2\n'
+                'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+            )
+            (artifact / 'source-counts.tsv').write_text(
+                'storage.objects|2\ncommonswarm_oauth.provider_artifacts|1\n'
+            )
             rows = [{'bucket': 'swarm-files', 'name': name, 'version': 'version'} for name in ['a', 'b']]
             keys = module.physical_keys(rows)
             (artifact / 'storage-backend-objects.ndjson').write_text(''.join(json.dumps(row) + '\n' for row in rows))
