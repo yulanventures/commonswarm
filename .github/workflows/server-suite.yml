@@ -44,7 +44,7 @@ on:
         description: "--test-name-pattern for the server test to repeat"
         required: false
         type: string
-        default: "§2.3 self-healing renewal keeps exactly one live successor per predecessor under concurrency"
+        default: ""
       repeat_count:
         description: "Number of repeat iterations (1 to 200)"
         required: false
@@ -132,6 +132,7 @@ jobs:
           pass=0
           fail=0
           no_tests=0
+          executed_subtests_total=0
           : > server-repeat.log
           for iteration in $(seq 1 "$REPEAT_COUNT"); do
             iteration_log="$RUNNER_TEMP/server-repeat-${iteration}.log"
@@ -142,13 +143,15 @@ jobs:
             fi
             runner_status=0
             "${node_command[@]}" >"$iteration_log" 2>&1 || runner_status=$?
-            test_count="$(sed -nE 's/^(#|ℹ) tests ([0-9]+)$/\2/p' "$iteration_log" | tail -n 1)"
-            if [ "$runner_status" -eq 0 ] && [ -n "$test_count" ] && [ "$test_count" -gt 0 ]; then
+            executed_subtests="$(bash tests/server-repeat-count.sh <"$iteration_log")"
+            executed_subtests_total=$((executed_subtests_total + executed_subtests))
+            echo "REPEAT iteration=$iteration executed-subtests=$executed_subtests status=$runner_status" | tee -a server-repeat.log
+            if [ "$runner_status" -eq 0 ] && [ "$executed_subtests" -gt 0 ]; then
               pass=$((pass + 1))
             else
               fail=$((fail + 1))
               failure_reason=""
-              if [ -z "$test_count" ] || [ "$test_count" -eq 0 ]; then
+              if [ "$executed_subtests" -eq 0 ]; then
                 no_tests=$((no_tests + 1))
                 failure_reason="REPEAT failure reason=no-tests-run"
               fi
@@ -163,7 +166,7 @@ jobs:
             cat "$iteration_log" >> server-repeat.log
           done
           total=$((pass + fail))
-          echo "REPEAT pass=$pass fail=$fail no-tests=$no_tests total=$total" | tee -a server-repeat.log
+          echo "REPEAT pass=$pass fail=$fail no-tests=$no_tests total=$total executed-subtests-total=$executed_subtests_total" | tee -a server-repeat.log
           if [ "$fail" -ne 0 ]; then
             exit 1
           fi
