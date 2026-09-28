@@ -22,6 +22,11 @@ import {
   unknownChannelMessage,
 } from "../_shared/channels.ts";
 import { optionalWake } from "../_shared/wake.ts";
+import {
+  hostedCapabilityTool,
+  revalidateHostedSeatRead,
+  type HostedSeatCapability,
+} from "../_shared/hosted-seat-auth.ts";
 
 const AGENT_TOKEN_RE = /^swm_agt_[A-Za-z0-9_-]{43}$/;
 const UUID_RE =
@@ -68,6 +73,13 @@ async function setReadTransaction(tx: Sql): Promise<void> {
       set_config('search_path', 'swarm_read, swarm, pg_catalog', true),
       set_config('lock_timeout', '5s', true)
   `;
+}
+
+async function withReadTransaction<T>(
+  operation: (tx: Sql) => Promise<T>,
+): Promise<T> {
+  return await db.begin("isolation level read committed", async (tx) =>
+    await operation(tx)) as unknown as T;
 }
 
 interface SignalReadRequest {
@@ -409,6 +421,10 @@ async function handle(
   if (request.method !== "POST") {
     return json(405, { error: "method_not_allowed" });
   }
+  if (request.headers.has("x-cswarm-hosted-capability") ||
+      request.headers.has("x-commonswarm-hosted-capability")) {
+    return json(403, { error: "forbidden" });
+  }
   const token = bearer(request);
   if (token === null) {
     return json(401, { error: "unauthenticated" });
@@ -416,6 +432,11 @@ async function handle(
 
   setPhase("parse");
   const parsed = await request.json().catch(() => null);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+      ["hosted_capability", "hosted_grant_id", "hosted_seat_handle", "seat_handle"]
+        .some((key) => Object.hasOwn(parsed, key))) {
+    return json(403, { error: "forbidden" });
+  }
   const body = parseBody(parsed);
   if (body === null) {
     /* parseBody returns a bare null, so its refusals carry no sentence. That is
@@ -452,7 +473,7 @@ async function handle(
   }
   const tokenHash = agentCredential ? await sha256(token) : null;
 
-  return await db.begin("isolation level read committed", async (tx) => {
+  return await withReadTransaction(async (tx) => {
     setPhase("session_setup");
     // Spec: the read transaction never assumes swarm_command. Start as
     // swarm_read and authenticate/count through the narrow SECURITY DEFINER.
@@ -988,6 +1009,136 @@ async function handle(
        * returns before grant-use and must not carry the topic. */
       ...(body.inbox ? optionalWake(agent.wake_id) : {}),
     });
+  });
+}
+
+export type HostedReadInput =
+  | { resource: "whoami"; workspace_id: string }
+  | { resource: "members"; workspace_id: string }
+  | {
+      resource: "signals";
+      workspace_id: string;
+      after_created_at?: string | null;
+      after_id?: string | null;
+      limit?: number;
+    };
+
+export interface ReadResult {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+function hostedReadInputValid(input: HostedReadInput): boolean {
+  if (!UUID_RE.test(input.workspace_id)) return false;
+  if (input.resource !== "signals") return true;
+  const limit = input.limit ?? 50;
+  const cursorAbsent = input.after_created_at === undefined && input.after_id === undefined;
+  const cursorNull = input.after_created_at === null && input.after_id === null;
+  const cursorPresent = typeof input.after_created_at === "string" &&
+    !Number.isNaN(Date.parse(input.after_created_at)) &&
+    typeof input.after_id === "string" && UUID_RE.test(input.after_id);
+  return Number.isSafeInteger(limit) && limit >= 1 && limit <= 100 &&
+    (cursorAbsent || cursorNull || cursorPresent);
+}
+
+/** Internal hosted read entry point: parsed input plus an opaque capability. */
+export async function handleHostedRead(
+  input: HostedReadInput,
+  capability: HostedSeatCapability,
+): Promise<ReadResult> {
+  if (!hostedReadInputValid(input)) {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  const tool = hostedCapabilityTool(capability);
+  if ((input.resource === "whoami" && tool !== "whoami") ||
+      (input.resource === "members" && tool !== "members") ||
+      (input.resource === "signals" && tool !== "check")) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  return await withReadTransaction(async (tx) => {
+    await setReadTransaction(tx);
+    const seat = await revalidateHostedSeatRead(tx, capability);
+    if (seat === null || seat.workspace_id !== input.workspace_id) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    // These claims are view visibility context for the seat owner. They are
+    // installed only after the complete hosted authorization function succeeds.
+    await tx`
+      SELECT
+        set_config(
+          'request.jwt.claims',
+          ${JSON.stringify({
+            sub: seat.owner_user_id,
+            role: "authenticated",
+            agent_principal_id: seat.principal_id,
+          })},
+          true
+        ),
+        set_config('search_path', 'swarm_read, auth, pg_catalog', true)
+    `;
+    if (input.resource === "whoami") {
+      return { status: 200, body: {
+        grant_id: seat.grant_id,
+        seat_id: seat.seat_id,
+        handle: seat.handle,
+        workspace_id: seat.workspace_id,
+        principal_id: seat.principal_id,
+        owner_user_id: seat.owner_user_id,
+        name: seat.name,
+        transport: "hosted_mcp",
+        turn_only: true,
+      } };
+    }
+    if (input.resource === "members") {
+      const members = await tx<Record<string, unknown>[]>`
+        SELECT user_id, display_name
+        FROM swarm_read.member_profiles
+        WHERE workspace_id = ${seat.workspace_id}::uuid
+        ORDER BY user_id
+      `;
+      const agents = await tx<Record<string, unknown>[]>`
+        SELECT principal_id, name, model, transport, turn_only, owner_user_id
+        FROM swarm_read.agent_principals
+        WHERE workspace_id = ${seat.workspace_id}::uuid AND revoked_at IS NULL
+        ORDER BY principal_id
+      `;
+      return { status: 200, body: { members, agents } };
+    }
+    const limit = input.limit ?? 50;
+    const afterCreatedAt = typeof input.after_created_at === "string"
+      ? input.after_created_at
+      : null;
+    const afterId = typeof input.after_id === "string" ? input.after_id : null;
+    const rows = await tx<Record<string, unknown>[]>`
+      SELECT
+        s.id, s.workspace_id, s."from", s.from_kind, s."to",
+        s.about, s.kind, s.body, s.until, s.created_at,
+        s.to_agent, s.in_reply_to, s.reply_status, s.chain_hop,
+        s.attachments, s.channel_id, s.thread_root_id,
+        s.broadcast_to_channel, s.recipients
+      FROM swarm_read.signals AS s
+      WHERE s.workspace_id = ${seat.workspace_id}::uuid
+        AND (
+          s.to_agent = ${seat.principal_id}::uuid
+          OR s.recipients @> jsonb_build_array(
+            jsonb_build_object('kind', 'agent', 'id', ${seat.principal_id}::uuid)
+          )
+        )
+        AND s.until > statement_timestamp()
+        AND (
+          ${afterCreatedAt}::timestamptz IS NULL
+          OR date_trunc('milliseconds', s.created_at) >
+             date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+          OR (
+            date_trunc('milliseconds', s.created_at) =
+              date_trunc('milliseconds', ${afterCreatedAt}::timestamptz)
+            AND s.id > ${afterId}::uuid
+          )
+        )
+      ORDER BY date_trunc('milliseconds', s.created_at), s.id
+      LIMIT ${limit}
+    `;
+    return { status: 200, body: { signals: rows, capabilities: SIGNAL_CAPABILITIES } };
   });
 }
 

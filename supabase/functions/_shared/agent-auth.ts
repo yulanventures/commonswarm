@@ -67,6 +67,8 @@ export async function loadAgentCredential(
         ON r.run_id = t.run_id AND r.principal_id = t.principal_id
       JOIN swarm.devices AS d ON d.device_id = r.device_id
       WHERE t.token_hash = ${tokenHash}
+        AND p.transport = 'local'
+        AND p.turn_only = false
       LIMIT 1
     ),
     stamp AS (
@@ -124,6 +126,8 @@ export async function loadAgentCredential(
       ON r.run_id = t.run_id AND r.principal_id = t.principal_id
     JOIN swarm.devices AS d ON d.device_id = r.device_id
     WHERE t.token_id = ${presented.token_id}::uuid
+      AND p.transport = 'local'
+      AND p.turn_only = false
   `;
   const agent = rows[0];
   if (!agent?.unexpired) return null;
@@ -222,14 +226,21 @@ export async function enforceAgentSessionProof(
     managedAt?: Date | string | null;
   },
 ): Promise<AgentSessionFenceResult> {
-  const principals = await tx<{ managed_at: Date | string | null }[]>`
-    SELECT managed_at
+  const principals = await tx<{
+    managed_at: Date | string | null;
+    transport: "local" | "hosted_mcp";
+    turn_only: boolean;
+  }[]>`
+    SELECT managed_at, transport, turn_only
     FROM swarm.agent_principals
     WHERE principal_id = ${args.principalId}::uuid
     FOR SHARE
   `;
   const principal = principals[0];
   if (principal === undefined) {
+    return refuse("session_proof_invalid");
+  }
+  if (principal.transport !== "local" || principal.turn_only) {
     return refuse("session_proof_invalid");
   }
   if (principal.managed_at === null) {

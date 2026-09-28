@@ -1863,7 +1863,7 @@ describe('agent session proof exemption', () => {
     );
     assert.match(
       fenceSrc,
-      /SELECT\s+managed_at\s+FROM swarm\.agent_principals[\s\S]*?FOR SHARE/,
+      /SELECT\s+managed_at,\s+transport,\s+turn_only\s+FROM swarm\.agent_principals[\s\S]*?FOR SHARE/,
     );
     assert.match(
       fenceSrc,
