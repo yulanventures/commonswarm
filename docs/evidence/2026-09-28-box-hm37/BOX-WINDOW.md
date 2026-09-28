@@ -1,7 +1,8 @@
-# HM lanes 3 and 7 — DARK box window — v3
+# HM lanes 3 and 7 — DARK box window — v4
 
-**Release SHA:** `e7bb7a46b24e7bc794234416d43605bca52b55d4`
-**Required HM6 release:** `ad964ed158181ba1692dd05895f36fa7a1f87d3f`
+**Release SHA:** `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`
+**Required HM6 stack release:** `ad964ed158181ba1692dd05895f36fa7a1f87d3f`
+**Required HM6 OAuth release:** `826db6a34f235064a3a03c57377d8e32a35d2f05`
 **Expected previous edge:** `72c57e0d76d0aa86fe4f811a2cf51499919fed20`
 **Status:** PLAN. Approval, exact-SHA gate results, current production prerequisites, execution and closure are **not established**.
 
@@ -11,32 +12,32 @@ This revision was prepared by read-only inspection of the release tree and local
 
 ## 1. Governing procedure and scope
 
-Follow [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md) **from this release SHA**, particularly section 1’s preparation, verified directory reuse, manifest, copy-back and abort cleanup; sections 2–3’s database identity/session; section 5’s migration procedure; and section 6’s edge release and rollback. Section 9 is the API Caddy-pair procedure and is explicitly skipped by this window.
+Follow [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md) **from this release SHA**, particularly section 1’s preparation, verified directory reuse, manifest, copy-back and abort cleanup; sections 2–3’s database identity/session; section 5’s migration procedure; and section 6’s edge release and rollback. Section 9 contains the API Caddy-pair and MCP-site procedures; both are explicitly skipped by this window.
 
 Host operations also follow the workspace’s `hetzner-handoff/HETZNER-OPERATIONS.md`. Its contents and hash are outside this repository’s release tree; the applicable operational revision is **not established** here.
 
 Dependencies:
 
 - [HM2 window](../2026-09-28-box-hm2/BOX-WINDOW.md) and its [run-4 evidence](../2026-09-28-release-72c57e0d76d0-rerun-4/).
-- [HM6 window v3](../2026-09-28-box-hm6/BOX-WINDOW.md), which must be live and closed from `ad964ed158181ba1692dd05895f36fa7a1f87d3f` before this window opens. The release tree's committed HM6 evidence records an aborted attempt, not closure.
+- [HM6 window v4](../2026-09-28-box-hm6/BOX-WINDOW.md), whose two completed production parts must both be live before this window opens: migration 03 and the backup helpers from `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, and the OAuth service/ingress from `826db6a34f235064a3a03c57377d8e32a35d2f05`.
 - [HM lane plan](../../design/2026-09-27-HM-LANE-PLAN.md), particularly §§4.4, 4.8 and 7.
 
 | Surface | This window |
 |---|---|
 | Schema | Apply **only** `20260928000004_hm_hosted_check.sql`. |
 | Hosted check | Install durable check cursors/batches and internal open/ACK handling. |
-| Edge | Release the complete edge archive at `e7bb7a46b24e7bc794234416d43605bca52b55d4`. |
+| Edge | Release the complete edge archive at `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`. |
 | Hosted MCP | Install the worker and router changes, **DARK**. |
 | Stack archive | Prepare or verify the exact-SHA directory for migration inputs; no `stack/current` switch if the required runtime comparison is empty. |
 | Caddy | **No installation, edit, validation-triggered rollout or reload in this window.** |
 
 **Do not set `SWARM_MCP_PUBLIC_ENABLED=1`. Preserve disabled public OAuth authorization.**
 
-Migration 03 must already have been applied from HM6’s corrected file. Do not reapply it, backfill it, or deploy the OAuth service in this window. OAuth signing material, DNS, GoTrue configuration, site, installed CLI and npm publication are outside scope.
+Migration 03 must already have been applied from HM6’s corrected file, and the HM6 OAuth service must already be live from its continuation release. Do not reapply or backfill migration 03, rebuild or redeploy OAuth, or change its signing material, DNS, GoTrue configuration or ingress in this window. Site, installed CLI and npm publication are also outside scope.
 
-The release carries the split API Caddy pair: `commonswarm-api.caddy` serves only `api.commonswarm.com`, and `commonswarm-edge-staging.caddy` serves only `edge-staging.commonswarm.com`; the maintenance pair has the same one-host-per-file split. The release runbook handles those two installed files as one pair. Their presence in the stack archive does not activate them. This window sets `API_CADDY_PAIR=no`, does not execute runbook steps `runbook-56` through `runbook-59`, and performs no Caddy install, edit, validation-triggered rollout or reload. Keep HM6's existing OAuth-only ingress and dark MCP routes.
+The release carries the split API Caddy pair: `commonswarm-api.caddy` serves only `api.commonswarm.com`, and `commonswarm-edge-staging.caddy` serves only `edge-staging.commonswarm.com`; the maintenance pair has the same one-host-per-file split. The release runbook handles those two installed files as one pair. Its current Caddy apply and rollback paths derive each access-log path from the installed site, pre-create or repair each regular log as `caddy:caddy` mode `0600`, validate as `caddy`, and recheck after validation. Those paths do not run here. Their presence in the stack archive does not activate them. This window sets `API_CADDY_PAIR=no` and `MCP_CADDY_RELEASE=no`, does not execute runbook steps `runbook-56` through `runbook-59` or any `runbook-mcp-caddy-*` step, and performs no Caddy install, edit, log-file preparation, validation-triggered rollout or reload. Keep HM6's existing OAuth-only ingress and dark MCP routes.
 
-The release also carries HM6 plan repairs, site-deletion guards and the server-suite `server-repeat` dispatch mode. They are archive contents and exact-SHA gate inputs only in this window: do not deploy the site, rerun HM6, or treat workflow presence as a passing server result.
+The release also carries HM6 continuation plan repairs, OAuth CA-policy changes, site-deletion guards and the server-suite `server-repeat` dispatch mode. They are archive contents and exact-SHA gate inputs only in this window: do not deploy the site, rerun HM6, rebuild OAuth or treat workflow presence as a passing server result.
 
 Every runnable block below begins with a step identifier and states its execution location. Mac mini blocks require macOS `/bin/bash` 3.2. Never paste them into zsh, assign `HOME`, enable tracing, run Docker on the Mac mini, or print complete environments or credentials. No recursive deletion is required. Any 1Password read uses Anvil's service-account method on the Mac mini, writes each value directly to a separate mode-`0600` file in the private window directory, and transfers it through Anvil's established secure file workflow. Anvil's shell is not interactively signed in; do not use an interactive `op` session, expose a value in argv or an environment variable, or print the file.
 
@@ -46,10 +47,10 @@ On failure, stop dependent work, preserve actual state and execute the runbook�
 
 The release Git object inspected for this refresh is:
 
-- Release commit: `e7bb7a46b24e7bc794234416d43605bca52b55d4`.
-- Subject: `ops(caddy): split the API site into one file per host to match production`.
-- Expected previous edge `72c57e0d76d0aa86fe4f811a2cf51499919fed20` and HM6 release `ad964ed158181ba1692dd05895f36fa7a1f87d3f` are local ancestors.
-- The plan worktree is a documentation-only child of the release commit; it is not itself a release input.
+- Release commit: `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`.
+- Subject: `docs(evidence): HM lane 6 box plan v4 for the continuation window at release 826db6a3`.
+- Expected previous edge `72c57e0d76d0aa86fe4f811a2cf51499919fed20`, HM6 stack release `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, HM6 OAuth release `826db6a34f235064a3a03c57377d8e32a35d2f05` and prior HM37 release `e7bb7a46b24e7bc794234416d43605bca52b55d4` are local ancestors.
+- This requested plan edit is not itself a release input.
 
 Current GitHub ancestry, independent acceptance of this revision and deployment approval remain **not established**. The runbook must fetch the approved origin, prove ancestry on `origin/main`, create an exact-SHA archive and reconcile its checksum on both machines.
 
@@ -82,7 +83,7 @@ Directly changed function entry points are `command` and `mcp`. Set `ROUTER_CHAN
 
 The release unit is the entire edge archive. Do not copy individual worker directories into an existing release.
 
-### HM6 consistency
+### HM6 source consistency
 
 Between `ad964ed158181ba1692dd05895f36fa7a1f87d3f` and this release:
 
@@ -93,6 +94,8 @@ Between `ad964ed158181ba1692dd05895f36fa7a1f87d3f` and this release:
 - `supabase/` is unchanged. Under `deploy/edge-runtime/`, exactly five documentation/validation paths changed: `README.md`, `RUNBOOK.md`, `VERIFICATION.md`, `build-caddy-validation-fixture.mjs` and `check-caddy-adapted.mjs`.
 - Runtime edge inputs `deploy/edge-runtime/compose.yaml`, `env.example` and `main/` are unchanged from HM6.
 - Stack runtime paths `deploy/supabase-stack/compose.yaml`, `postgres/` and `backup/` are unchanged.
+
+The OAuth service runtime inputs under `services/mcp-auth/`, `deploy/mcp-auth/` and `deploy/supabase-stack/commonswarm-mcp.caddy` are unchanged between the continuation release `826db6a34f235064a3a03c57377d8e32a35d2f05` and this release. The intervening release-runbook change adds guarded access-log preparation to Caddy apply/rollback paths; HM37 follows the updated non-Caddy steps and sets both Caddy switches to `no`.
 
 Migration 04 was already present in the HM6 archive but explicitly deferred by its plan. It is the **only permitted pending migration** for this window, subject to live ledger reconciliation.
 
@@ -105,16 +108,20 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
-  SHA=e7bb7a46b24e7bc794234416d43605bca52b55d4
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   BASE=72c57e0d76d0aa86fe4f811a2cf51499919fed20
-  HM6=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+  HM6_STACK=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+  HM6_OAUTH=826db6a34f235064a3a03c57377d8e32a35d2f05
+  PRIOR_HM37=e7bb7a46b24e7bc794234416d43605bca52b55d4
   test "$(git rev-parse HEAD)" = "$SHA"
   test -z "$(git status --porcelain)"
   test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
   git merge-base --is-ancestor "$BASE" "$SHA"
-  git merge-base --is-ancestor "$HM6" "$SHA"
+  git merge-base --is-ancestor "$HM6_STACK" "$SHA"
+  git merge-base --is-ancestor "$HM6_OAUTH" "$SHA"
+  git merge-base --is-ancestor "$PRIOR_HM37" "$SHA"
 
-  python3 - "$BASE" "$HM6" "$SHA" <<'PY'
+  python3 - "$BASE" "$HM6_STACK" "$SHA" <<'PY'
 import subprocess, sys
 base, hm6, sha = sys.argv[1:]
 def git(*args):
@@ -161,14 +168,17 @@ hm6_actual = set(git("diff", "--name-only", hm6, sha, "--",
                       "supabase/", "deploy/edge-runtime/",
                       "deploy/release-proofs/item-hm/").splitlines())
 assert hm6_actual == hm6_expected
-print("edge_diff_paths=18; hm6_delta_paths=5; migration_tree_identity=PASS")
+print("edge_diff_paths=18; hm6_stack_delta_paths=5; migration_tree_identity=PASS")
 PY
 
-  git diff --exit-code "$HM6" "$SHA" -- \
+  git diff --exit-code "$HM6_STACK" "$SHA" -- \
     supabase/ deploy/release-proofs/item-hm/
-  git diff --exit-code "$HM6" "$SHA" -- \
+  git diff --exit-code "$HM6_STACK" "$SHA" -- \
     deploy/supabase-stack/compose.yaml \
     deploy/supabase-stack/postgres/ deploy/supabase-stack/backup/
+  git diff --exit-code "$HM6_OAUTH" "$SHA" -- \
+    services/mcp-auth/ deploy/mcp-auth/ \
+    deploy/supabase-stack/commonswarm-mcp.caddy
   git diff --exit-code "$BASE" "$SHA" -- src/cloud/agent-check.ts src/mcp/
   git diff "$BASE" "$SHA" -- deploy/edge-runtime/env.example
 )
@@ -188,13 +198,13 @@ The MCP worker allowlist excludes the service-role key and OAuth-service credent
 
 These SHA-256 values were recomputed from the inspected release tree. They identify repository inputs, not deployed files.
 
-The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, control harness, live configuration and generated evidence is **not established**. Measure those during approved preparation. The HM37 document hash below identifies the v2 document in the `e7bb7a4` release tree, not this replacement.
+The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, control harness, live configuration and generated evidence is **not established**. Measure those during approved preparation. The HM37 document hash below identifies the v3 document in the `eb2a87ac` release tree, not this replacement.
 
 ### Release and source inputs
 
 | Repository path | SHA-256 |
 |---|---|
-| `deploy/RELEASE-TO-BOX.md` | `791d57fb02b04682bd887603fca4861e084e947baade8e10926a2ff02af40ad3` |
+| `deploy/RELEASE-TO-BOX.md` | `e136e2e6353c546846313bb45f523042793c0a8cfdef8a19ef0248910cf14191` |
 | `deploy/edge-runtime/README.md` | `2624370450eb2559863568bce4c7f022352a1f51174f0def3dead51ad5dc1427` |
 | `deploy/edge-runtime/RUNBOOK.md` | `a61f6324e3ae23215d89f0380359388ff876397742d43d0f1a85e4022215e147` |
 | `deploy/edge-runtime/VERIFICATION.md` | `e3cb4797b157dec565124a49cc6216f2d2b5cd9c32ca6a7b5367439311dbf693` |
@@ -249,16 +259,16 @@ All paths in this table are relative to `deploy/release-proofs/item-hm/`.
 
 | Repository path | SHA-256 |
 |---|---|
-| `docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md` — v2 release-tree input | `30a89c0fec93c67c4b08125f277a70908ae5513801dbca96241818b4845370e6` |
-| `docs/evidence/2026-09-28-box-hm6/BOX-WINDOW.md` | `06713dd0f00ee209cfd7636825c4169e5b0889fc8df573ce620efbf5409e6fd3` |
+| `docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md` — v3 release-tree input | `24a900ff04320ba40a0f8dcc8536372bfbd37e56ee5a0a68745b019a1c2d9eab` |
+| `docs/evidence/2026-09-28-box-hm6/BOX-WINDOW.md` | `a24742b15000009560c1265ed98d818ebfd7a6f05be7a01890e015987324c4d5` |
 | `docs/evidence/2026-09-28-box-hm2/BOX-WINDOW.md` | `fc7c70dd402d80d85893f28ccaba9d9089126a3548ffb36e13516d082eb69c8b` |
 | `docs/design/2026-09-27-HM-LANE-PLAN.md` | `77f55010d94e5b2a99cbb315476ac414b57722f63feaca2102049d795272caf8` |
 | `tests/box-window-plans.test.ts` | `112b680a03f2cc495f744e8e5f2e8ba3b2e17f65f2975f692322595de5270dc7` |
-| `tests/hm6-box-window-plan.test.ts` | `17016e9782b0276d92d7a10a1c07ba5aca201dfd8920f473173a569b17ead2df` |
+| `tests/hm6-box-window-plan.test.ts` | `3f20a15604a2d2f922f46b2673f48f0259ca15899f324e713a29342095b4f8a8` |
 | `tests/p1-cli/edge-runtime-box.test.ts` | `4ddd651e1afa57e648e2ad23d154b1b21bf167e29d11e66bc9f4031a1badfcde` |
 | `tests/p1-cli/site-deletion-safety.test.ts` | `ed972eb2821da4ae0b485fed899f776031482611ece2617df335497580a6b6e4` |
 | `tests/p1-cli/site-on-box.test.ts` | `1009c3221c63a442cd4239efd3d6161d9399000dd0654fe4f91d26f33d5a0d99` |
-| `tests/p1-cli/supabase-stack.test.ts` | `11b8275724725e25ac018991e772ded81d32b60438854cba357acf887000e513` |
+| `tests/p1-cli/supabase-stack.test.ts` | `f4a38c9bd86e82d06ede413521d072d3214e9c47daec99a51d1a3058ce78e9e2` |
 | `tests/p1-cli/mcp-stdio.test.ts` | `22bab26984806ec20e048c4545a51d269d038dccd3c77e42e860777cc1649295` |
 | `tests/p1-server/hosted-authority.test.ts` | `185b782268b8f8325105e4b9dcc7c6b9d5763a3a1bf481cdd2166f1778a79535` |
 | `tests/p1-server/hosted-check.test.ts` | `820f24f50ff28ec66570b5f98a15f12e9021b93fed20bddc2f511dd551fd795b` |
@@ -280,25 +290,182 @@ The runbook’s archive-derived manifests cover the remaining archive files and 
 
 ### Required live baseline
 
-**HM6 must be LIVE and closed at `ad964ed158181ba1692dd05895f36fa7a1f87d3f` before this window opens.** Its v3 plan is present, but it labels execution and closure as not established. The committed `docs/evidence/2026-09-28-release-ad964ed15818/abort-state.txt` is a concrete counterexample to any claim that the repository already proves closure: it records `window_result=aborted-before-runtime-mutation`, edge still at `72c57e0d…`, migration-03 ledger count zero, and unchanged Caddy. A later, accepted production readback is required; a plan or staged archive is not closure evidence.
+HM6 is a two-part opening precondition. Both release commits are local ancestors of this window's release, but ancestry and archive presence do not prove production state.
 
-Anvil must establish:
+#### Part A — migration 03 and helpers from `ad964ed1`
+
+Migration `20260928000003` must have exactly one ledger row, and its corrected catalog and functional proofs must return true without SQL error. `stack/current` and the effective backup/restore helper paths must resolve through `ad964ed158181ba1692dd05895f36fa7a1f87d3f`. The post-apply backup and active timers remain opening evidence. A version-only ledger row or an inactive archive is insufficient.
+
+```sh
+# step: hm37-hm6-schema-helpers-precondition
+# Runs on the box over ssh, as Anvil in a root Bash shell, after runbook sections 1–3 and proof transfer; production checks are read only.
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  HM6_STACK_SHA=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+  HM6_STACK="/home/commonswarm/stack/releases/${HM6_STACK_SHA}"
+  . "$PROOF_DIR/window.env"
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test -d "$HM6_STACK"
+  test -f "$HM6_STACK/RELEASE_SHA"
+  test "$(cat "$HM6_STACK/RELEASE_SHA")" = "$HM6_STACK_SHA"
+  test "$(readlink -f /home/commonswarm/stack/current)" = "$HM6_STACK"
+  test "$(readlink -f /home/commonswarm/stack/current/deploy/supabase-stack/backup/run-backup.sh)" = \
+    "$HM6_STACK/deploy/supabase-stack/backup/run-backup.sh"
+  test "$(readlink -f /home/commonswarm/stack/current/deploy/supabase-stack/backup/restore-drill.py)" = \
+    "$HM6_STACK/deploy/supabase-stack/backup/restore-drill.py"
+  systemctl is-active --quiet commonswarm-postgres-backup.timer
+  systemctl is-active --quiet commonswarm-postgres-restore.timer
+  test "$(systemctl show commonswarm-postgres-backup.service -p Result --value)" = success
+  test "$(systemctl show commonswarm-postgres-restore.service -p Result --value)" = success
+
+  cat >"$APPLY_SQL" <<'SQL'
+\i /proof/20260928000003-catalog.sql
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations
+   WHERE version = '20260928000003') = 1
+  AND :'catalog_ok'::boolean;
+SQL
+  release_psql_ro -Atq --file "$APPLY_SQL" \
+    >"$PROOF_DIR/hm37-hm6-migration-03-catalog.txt"
+  test "$(cat "$PROOF_DIR/hm37-hm6-migration-03-catalog.txt")" = t
+  release_psql_ro -Atq --file /proof/20260928000003-functional.sql \
+    >"$PROOF_DIR/hm37-hm6-migration-03-functional.txt"
+  test "$(cat "$PROOF_DIR/hm37-hm6-migration-03-functional.txt")" = t
+  printf '%s\n' \
+    "stack_release=${HM6_STACK_SHA}" \
+    'migration_03_ledger_and_catalog=true' \
+    'migration_03_functional=true' \
+    'backup_restore_helpers_live=true' \
+    'backup_restore_timers_active=true' \
+    >"$PROOF_DIR/hm37-hm6-schema-helpers.txt"
+)
+```
+
+#### Part B — OAuth service from `826db6a3`
+
+The live OAuth release directory and `oauth/current` must identify `826db6a34f235064a3a03c57377d8e32a35d2f05`. The one running OAuth container must be healthy, use that release as its Compose working directory, and use the exact accepted image ID recorded by the continuation window. Public discovery and JWKS must be served through `https://mcp.commonswarm.com`, while the effective public-authorization flag is not `1` and both authorization endpoints refuse with the owned disabled error.
+
+```sh
+# step: hm37-hm6-oauth-precondition
+# Runs on the box over ssh, as Anvil in a root Bash shell; all production checks are read only.
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  HM6_OAUTH_SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
+  HM6_OAUTH="/home/commonswarm/oauth/releases/${HM6_OAUTH_SHA}"
+  HM6_OAUTH_PROOF="/home/commonswarm/stack/release-proofs/${HM6_OAUTH_SHA}"
+  . "$PROOF_DIR/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test -d "$HM6_OAUTH"
+  test -f "$HM6_OAUTH/RELEASE_SHA"
+  test "$(cat "$HM6_OAUTH/RELEASE_SHA")" = "$HM6_OAUTH_SHA"
+  test "$(readlink -f /home/commonswarm/oauth/current)" = "$HM6_OAUTH"
+  test -f "$HM6_OAUTH_PROOF/oauth-image.id"
+  IFS= read -r MCP_OAUTH_IMAGE <"$HM6_OAUTH_PROOF/oauth-image.id"
+  test "$(cat "$HM6_OAUTH_PROOF/oauth-image.id")" = "$MCP_OAUTH_IMAGE"
+  case "$MCP_OAUTH_IMAGE" in sha256:*) ;; *) false ;; esac
+  case "${MCP_OAUTH_IMAGE#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#MCP_OAUTH_IMAGE}" -eq 71
+  CIDS=()
+  while IFS= read -r VALUE; do
+    test -n "$VALUE" && CIDS[${#CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-oauth \
+    --filter label=com.docker.compose.service=oauth)
+  test "${#CIDS[@]}" -eq 1
+  CID="${CIDS[0]}"
+  test "$(docker inspect --format '{{.Image}}' "$CID")" = "$MCP_OAUTH_IMAGE"
+  test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$CID")" = \
+    "$HM6_OAUTH/deploy/mcp-auth"
+  test "$(docker inspect --format '{{.State.Health.Status}}' "$CID")" = healthy
+  docker exec "$CID" node -e \
+    'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1" ? 1 : 0)'
+  printf '%s\n' \
+    "oauth_release=${HM6_OAUTH_SHA}" \
+    'oauth_current_matches=true' \
+    'oauth_image_identity_matches=true' \
+    'oauth_container_healthy=true' \
+    'public_authorization_effective_disabled=true' \
+    >"$PROOF_DIR/hm37-hm6-oauth-runtime.txt"
+
+  python3 - https://mcp.commonswarm.com \
+    >"$PROOF_DIR/hm37-hm6-oauth-public-precondition.json" <<'PY'
+import json, sys, urllib.error, urllib.request
+
+base = sys.argv[1]
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect())
+results = []
+
+def request(path, method="GET", body=None, status=200):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(
+        base + path, data=data, method=method,
+        headers={"Content-Type": "application/json"})
+    try:
+        response = opener.open(req, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        raw = response.read(131073)
+        actual_status = response.code
+        content_type = response.headers.get("Content-Type", "")
+    assert actual_status == status, (method, path, actual_status)
+    assert len(raw) <= 131072
+    assert "application/json" in content_type
+    value = json.loads(raw)
+    results.append({"method": method, "path": path, "status": actual_status})
+    return value
+
+for path in (
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/openid-configuration",
+):
+    document = request(path)
+    assert document["issuer"] == base
+    assert document["authorization_endpoint"] == base + "/authorize"
+    assert document["token_endpoint"] == base + "/token"
+    assert document["jwks_uri"] == base + "/jwks"
+
+keys = request("/jwks").get("keys")
+assert isinstance(keys, list) and keys
+for key in keys:
+    assert key.get("kty") == "EC" and key.get("crv") == "P-256"
+    assert key.get("alg") == "ES256"
+    assert isinstance(key.get("kid"), str) and key["kid"]
+    assert isinstance(key.get("x"), str) and key["x"]
+    assert isinstance(key.get("y"), str) and key["y"]
+    assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
+
+for method, path, body in (
+    ("GET", "/authorize", None),
+    ("POST", "/token", {}),
+):
+    response = request(path, method, body, 503)
+    assert response.get("error") == "authorization_service_disabled"
+
+print(json.dumps({"pass": True, "results": results}, indent=2))
+PY
+)
+```
+
+The public probe deliberately keeps Python urllib's actual default User-Agent. Redirects, HTML challenges or changing the User-Agent to make a failed route pass are not acceptable evidence. HezLead accepts Part B only from this release-directory, image, effective-flag and endpoint evidence together.
+
+After both parts pass, Anvil must also establish:
 
 1. Previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
 2. Migration 02 has exactly one ledger row; its catalog and functional proofs pass.
-3. HM6 closure identifies the corrected release, applied migration-03 file, service/image, ingress, backup and recovery disposition.
-4. Migration 03 has exactly one ledger row; its corrected catalog and functional proofs pass. Compare the applied release input’s file hash with this document. A version-only ledger row alone cannot prove which bytes were applied.
-5. HM6’s active stack/helpers and OAuth service match its accepted `ad964ed1` closure. Verify actual directories and image identity; archive presence is insufficient.
-6. OAuth health, discovery and JWKS work on loopback and publicly. Public discovery paths are `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` and `/jwks` on `https://mcp.commonswarm.com`.
-7. Discovery issuer is `https://mcp.commonswarm.com`; authorization, token and JWKS endpoints are its `/authorize`, `/token` and `/jwks`.
-8. JWKS contains public EC/P-256 ES256 verification keys with nonempty `kid`, no private key members, and the active signing identity accepted in HM6 closure.
-9. GET `/authorize` and POST `/token` return 503 with `error=authorization_service_disabled`; effective `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED` is not exactly `1`.
-10. Effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
-11. Migration 04 has ledger count zero and catalog result false **without SQL error**.
-12. Complete migration reconciliation yields only `20260928000004` pending.
-13. Actual stack runtime comparison, timers, existing window state and concurrent operator activity have an accepted disposition.
-
-Use HM6’s probe contract, including the actual Python urllib default User-Agent and its separate curl checks. Redirects, HTML challenges or changing the User-Agent to make a failed route pass are not acceptable evidence.
+3. The applied migration-03 file hash matches this document; a version-only ledger row cannot prove which bytes were applied.
+4. Effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
+5. Migration 04 has ledger count zero and catalog result false **without SQL error**.
+6. Complete migration reconciliation yields only `20260928000004` pending.
+7. Actual stack runtime comparison, timers, existing window state and concurrent operator activity have an accepted disposition.
 
 Historical HM2 run 4 records migration 02 applied, edge health with memory `2147483648` and network `commonswarm-net`, active maintenance timers, released cswarm `0.1.80`, an observed delivery ACK and subsequent wake eligibility, and revoked temporary principals with zero active unexpired tokens. Recheck current state.
 
@@ -306,14 +473,15 @@ Historical HM2 run 4 records migration 02 applied, edge health with memory `2147
 
 | Input | Value |
 |---|---|
-| `SHA` | `e7bb7a46b24e7bc794234416d43605bca52b55d4` |
+| `SHA` | `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` |
 | `KIND_LIST` | `edge stack` |
 | `MIGRATION_VERSIONS` | `20260928000004` only |
 | `FUNCTIONAL_VERSIONS` | `20260928000004` |
 | `H0_LEDGER_BACKFILL` | `no` |
 | `GUARDED_STACK_SWITCH` | `no`, contingent on actual runtime comparison |
 | `BACKUP_STATUS_PROOF` | `no`; the section 5 backup gate still applies |
-| `API_CADDY_PAIR` | `no`; skip runbook section 9 and its pair artifacts |
+| `API_CADDY_PAIR` | `no`; skip runbook steps `runbook-56` through `runbook-59` and their pair artifacts |
+| `MCP_CADDY_RELEASE` | `no`; skip every `runbook-mcp-caddy-*` step and artifact |
 | `CHANGED_FUNCTIONS` | `command mcp` |
 | `ROUTER_CHANGED` | `yes` |
 | `ADDITIONAL_REQUIRED_ENV_NAMES` | Empty |
@@ -372,7 +540,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = e7bb7a46b24e7bc794234416d43605bca52b55d4
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   ssh ops@100.115.66.74 \
     "sudo -n -i bash -s -- $SHA" \
     >"$EVIDENCE_DIR/window-principal-suffix.txt" <<'BOX'
@@ -408,7 +576,7 @@ Wait for the existing backup service **before** reading status. Active, activati
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
+  . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   : "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"
   case "$BACKUP_MAX_AGE_SECONDS" in ''|*[!0-9]*) false ;; esac
   test "$BACKUP_MAX_AGE_SECONDS" -gt 0
@@ -490,7 +658,7 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
+  . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro --file /proof/20260928000004-functional.sql \
     >"$PROOF_DIR/20260928000004-functional.txt"
@@ -596,7 +764,7 @@ Derive the list from `PUBLIC_HOSTED_ONLY_COMMANDS` in the release’s `src/proto
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = e7bb7a46b24e7bc794234416d43605bca52b55d4
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   test "$(git rev-parse HEAD)" = "$SHA"
   git diff --exit-code "$SHA" -- src/protocol/hosted-authority.ts
   PROBE="$(mktemp /tmp/hm37-boundaries.XXXXXX)"
@@ -862,7 +1030,7 @@ Use this release’s **complete runbook step `runbook-42`**, including outgoing-
 
 If rolling back the new edge, the expected captured filename is:
 
-`commonswarm-edge-edge-runtime-1.e7bb7a46b24e7bc794234416d43605bca52b55d4.docker.log`
+`commonswarm-edge-edge-runtime-1.eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.docker.log`
 
 Resolve the actual outgoing directory and verify its release/mount identity first. Preserve the same bounded, root-owned mode-0600 logging and exact-name manifest handling as the forward switch.
 
@@ -885,7 +1053,7 @@ The inverse below is verbatim from the hashed rollback file.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/e7bb7a46b24e7bc794234416d43605bca52b55d4/window.env
+  . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   test "$PREVIOUS_EDGE" = /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
   test "$(readlink -f /home/commonswarm/edge/current)" = "$PREVIOUS_EDGE"
@@ -968,6 +1136,11 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `20260928000003-functional.sql`
 - `20260928000004-rollback.sql`
 - `20260928000004-rollback-catalog.sql`
+- `hm37-hm6-schema-helpers.txt`
+- `hm37-hm6-migration-03-catalog.txt`
+- `hm37-hm6-migration-03-functional.txt`
+- `hm37-hm6-oauth-runtime.txt`
+- `hm37-hm6-oauth-public-precondition.json`
 - `hm37-prerequisites.json`
 - `hm37-stack-runtime-review.txt`
 - `hm37-backup-gate.txt`
@@ -987,7 +1160,7 @@ Add these exact item-relative paths without duplicating standard generated entri
 
 These are required outputs, not existing PASS claims. Transfer accepted Mac-side results to the proof directory before manifest-only copy-back.
 
-Use `docs/evidence/<UTC-date>-release-e7bb7a46b24e/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
+Use `docs/evidence/<UTC-date>-release-eb2a87ac4b5a/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
 ### Log exception and secret review
 
@@ -1015,9 +1188,10 @@ On success, refusal, failure or abort:
 Successful closure must explicitly establish:
 
 - Only migration 04 was applied; catalog and functional proofs passed.
-- Edge is at `e7bb7a46b24e7bc794234416d43605bca52b55d4`.
+- Edge is at `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`.
 - HM2 remains valid.
-- HM6 remains live at its accepted `ad964ed1` release with corrected migration 03, discovery/JWKS and disabled authorization.
+- HM6 migration 03 and the OAuth-aware helpers remain live from `ad964ed158181ba1692dd05895f36fa7a1f87d3f`.
+- HM6 OAuth remains live from `826db6a34f235064a3a03c57377d8e32a35d2f05`, with its accepted image, discovery/JWKS and disabled public authorization.
 - Stack runtime/helpers remain at the accepted HM6 baseline; no stack switch occurred.
 - No Caddy change occurred in this window.
 - Public MCP remains disabled on loopback, staging, API and MCP-hostname routes.
@@ -1027,9 +1201,18 @@ Successful closure must explicitly establish:
 - Temporary principals/grants/families were revoked; zero active unexpired agent tokens remain.
 - Outgoing-container capture disposition is recorded, timers restored, transient files removed and approved evidence copied.
 
-Public activation, Caddy access-log deployment and real Claude-client interoperability remain outside this window.
+Public MCP activation, every Caddy or access-log change, and real Claude-client interoperability remain outside this window.
 
-## Changes from the 79f70b7d draft
+## Changes from v3
+
+1. Moved the release from `e7bb7a46b24e7bc794234416d43605bca52b55d4` to `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`, which is a local descendant of the prior HM37 release and both HM6 production releases.
+2. Split the HM6 opening precondition into migration 03/helpers from `ad964ed158181ba1692dd05895f36fa7a1f87d3f` and the OAuth runtime/ingress from `826db6a34f235064a3a03c57377d8e32a35d2f05`; added complete read-only checks for both.
+3. Re-measured the previous-edge comparison at the new SHA. It remains exactly 18 paths; the environment example still adds only optional `SWARM_MCP_PUBLIC_ENABLED`, so `ADDITIONAL_REQUIRED_ENV_NAMES` remains empty.
+4. Recomputed every listed SHA-256 from the `eb2a87ac` tree. The release runbook, HM37 v3 input, HM6 plan and two affected test-source hashes changed; every other listed digest remained the same.
+5. Updated the runbook contract for its fifth manifest switch, `MCP_CADDY_RELEASE=no`. The current Caddy paths pre-create or repair derived access logs before validation, but this window runs neither Caddy path and changes no Caddy file or log.
+6. Kept migration 04 as the only permitted pending migration, preserved the complete edge switch/rollback and evidence contracts, and left all previously reviewed feature scope unchanged.
+
+## Historical changes from the 79f70b7d draft to v3
 
 1. Changed the release from `79f70b7d77b2341e685d796bb918b3a3a7660e8d` to `e7bb7a46b24e7bc794234416d43605bca52b55d4`; the expected previous edge remains `72c57e0d…`.
 2. Re-measured the exact edge/schema diff from `72c57e0d…`: 18 paths rather than 13, adding five edge documentation/validation paths while leaving the runtime edge inputs unchanged from HM6.
