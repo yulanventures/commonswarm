@@ -698,7 +698,7 @@ Use `Cache-Control: no-store`, restrictive CSP, `frame-ancestors 'none'`, and no
 - Authorization code: opaque, single use, 60 seconds.
 - PKCE: required, S256 only.
 - Access token: ES256 JWT, five minutes.
-- Refresh token: [REDACTED] rotated on every successful use.
+- Refresh token: opaque, stored as a hash, rotated on every successful use.
 - Refresh session absolute lifetime: 30 days.
 - Public client authentication: `none`.
 - Token requests: form encoded.

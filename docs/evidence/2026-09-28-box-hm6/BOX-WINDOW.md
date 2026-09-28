@@ -838,9 +838,9 @@ Reuse `/etc/commonswarm-oauth` only after the empty-directory gate. Generate **n
 - Cookie file contains the current key and a prior key, newline-delimited.
 - Create files exclusively; a pre-existing file is a stop.
 
-Store signing and cookie material in separate protected items in **Yulan Ventures Infra**, with names derived from the new saved suffix. Store runtime credential recovery in a separately suffixed item. Verify protected retrieval against the box files without displaying contents. Record only item identities, public `kid` and verification outcomes.
+Anvil stores items **CommonSwarm OAuth signing keys ${WINDOW_PRINCIPAL_SUFFIX}**, **CommonSwarm OAuth cookie keys ${WINDOW_PRINCIPAL_SUFFIX}** and **CommonSwarm OAuth database credentials ${WINDOW_PRINCIPAL_SUFFIX}** in **Yulan Ventures Infra** with Anvil’s service-account method. For protected readback, Anvil reads each named item with Anvil’s service-account method into a separate mode-`0600` file inside the window’s private directory, then uses Anvil’s established secure file-transfer workflow to compare it with the corresponding box file without displaying contents. Record only item identities, public `kid` and verification outcomes.
 
-Availability of a box-authenticated 1Password client is not established. Use Anvil’s established secure file-transfer workflow; do not improvise authentication during the window.
+Availability of a box-authenticated 1Password client is not established. Do not improvise authentication during the window.
 
 After migration, Anvil provisions the runtime role’s SCRAM password out of band, as required by `deploy/mcp-auth/RUNBOOK.md`. The protected `database-credentials` file contains only the `user` and `password` fields read by `config.js`. Passwords do not enter release SQL, shell arguments or environment variables.
 
@@ -1022,7 +1022,7 @@ The 08:33Z operator report establishes:
 
 No new certificate is requested or authorized.
 
-Before DNS/Caddy activation, repeat read-only hostname, SAN, expiry, key-pair and protected-vault identity checks. Record only public certificate metadata/fingerprint and pass/fail; never private key material. Verify Caddy can read the existing files.
+Before DNS/Caddy activation, Anvil reads item **Cloudflare origin cert commonswarm.com** with Anvil’s service-account method into separate mode-`0600` certificate and key files inside the window’s private directory. Repeat read-only hostname, SAN, expiry, key-pair and protected-vault identity checks from those files. Record only public certificate metadata/fingerprint and pass/fail; never private key material. Verify Caddy can read the existing files.
 
 ```sh
 # step: hm6-check-existing-certificate
@@ -1062,7 +1062,7 @@ Create **one** record:
 | Proxied | `true` |
 | TTL | Automatic |
 
-Use the active DNS Edit token from **Yulan Ventures Infra / Cloudflare DNS token commonswarm.com**. The exact field reference is not established. Anvil records the verified non-secret 1Password reference as `CF_DNS_TOKEN_REFERENCE` in the protected Mac window file.
+Use the active DNS Edit token from **Yulan Ventures Infra / Cloudflare DNS token commonswarm.com**. Before this step, Anvil reads item **Cloudflare DNS token commonswarm.com** with Anvil’s service-account method into a mode-`0600` file at a fixed path inside the window’s private directory. Anvil records only that path as `CF_DNS_TOKEN_FILE` in the protected Mac window file, never the token value.
 
 The token may reach curl **only through a mode-0600 curl configuration file**. Never put it in argv, a URL, environment variable, output or evidence. Do not print the 1Password item.
 
@@ -1075,7 +1075,8 @@ This step refuses any existing record for the hostname. On an interrupted same-w
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = ad964ed158181ba1692dd05895f36fa7a1f87d3f
-  : "${CF_DNS_TOKEN_REFERENCE:[REDACTED] DNS-token field reference missing}"
+  : "${CF_DNS_TOKEN_FILE:?DNS-token file path missing}"
+  test -e "$CF_DNS_TOKEN_FILE"
   test ! -e "$EVIDENCE_DIR/oauth-dns-record.json"
   DNS_TMP="$(mktemp -d /tmp/commonswarm-hm6-dns.XXXXXX)"
   case "$DNS_TMP" in /tmp/commonswarm-hm6-dns.*) ;; *) exit 1 ;; esac
@@ -1084,16 +1085,23 @@ This step refuses any existing record for the hostname. On an interrupted same-w
   chmod 0700 "$DNS_TMP"
   trap 'rm -f "$DNS_TMP/curl.conf"; rmdir "$DNS_TMP"' EXIT
   umask 077
-  op read "$CF_DNS_TOKEN_REFERENCE" | python3 -c '
-import os, pathlib, re, sys
-token = [REDACTED]
+  python3 - "$CF_DNS_TOKEN_FILE" "$DNS_TMP/curl.conf" <<'PY'
+import os, pathlib, re, stat, sys
+path = pathlib.Path(sys.argv[1])
+st = path.lstat()
+if not stat.S_ISREG(st.st_mode):
+    raise SystemExit("DNS token file must be a regular file")
+if stat.S_IMODE(st.st_mode) != 0o600 or st.st_uid != os.getuid():
+    raise SystemExit("DNS token file ownership or mode check failed")
+with open(path) as f:
+    token = f.read().strip()
 if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
     raise SystemExit("DNS token format check failed")
-path = pathlib.Path(sys.argv[1])
-with path.open("x") as output:
+config = pathlib.Path(sys.argv[2])
+with config.open("x") as output:
     output.write("header = \"Authorization: Bearer " + token + "\"\n")
-os.chmod(path, 0o600)
-' "$DNS_TMP/curl.conf"
+os.chmod(config, 0o600)
+PY
   python3 - "$DNS_TMP/curl.conf" "$EVIDENCE_DIR/oauth-dns-record.json" <<'PY'
 import json, os, pathlib, re, stat, subprocess, sys
 config, evidence = map(pathlib.Path, sys.argv[1:])
