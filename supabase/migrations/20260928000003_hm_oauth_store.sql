@@ -6,6 +6,14 @@
 DO $role$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'commonswarm_oauth_runtime') THEN
+    -- Elevated cluster attributes use safe CREATE ROLE defaults. Keep them
+    -- implicit: a CREATEROLE migration principal cannot grant or clear them.
+    -- The assertion below proves the defaults instead of repairing them.
+    -- PostgreSQL 16 and 17 document that createrole_self_grant controls the
+    -- SET and INHERIT options on the automatic creator membership:
+    -- https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT
+    -- https://www.postgresql.org/docs/17/runtime-config-client.html#GUC-CREATEROLE-SELF-GRANT
+    SET LOCAL createrole_self_grant = '';
     CREATE ROLE commonswarm_oauth_runtime
       LOGIN NOINHERIT NOCREATEDB NOCREATEROLE;
   END IF;
@@ -36,6 +44,55 @@ BEGIN
   END IF;
 END
 $role_attributes$;
+
+-- PostgreSQL 16 and 17 give a non-administrator CREATEROLE principal an
+-- automatic admin-only membership in each role it creates. Refuse any other
+-- membership shape, including drift on a role that existed before this apply:
+-- https://www.postgresql.org/docs/16/role-attributes.html
+-- https://www.postgresql.org/docs/17/role-attributes.html
+DO $role_administrator$
+DECLARE
+  creator_is_cluster_administrator boolean;
+BEGIN
+  SELECT rolsuper INTO creator_is_cluster_administrator
+  FROM pg_catalog.pg_roles
+  WHERE rolname = current_user;
+
+  IF EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND (membership.inherit_option OR membership.set_option)
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_oauth_runtime has unsafe membership options';
+  END IF;
+
+  IF creator_is_cluster_administrator AND EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND member.rolname = current_user
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_oauth_runtime administrator membership is unnecessary';
+  ELSIF NOT creator_is_cluster_administrator AND (
+    SELECT count(*) <> 1 OR NOT COALESCE(bool_and(
+      membership.admin_option
+      AND NOT membership.inherit_option
+      AND NOT membership.set_option
+    ), false)
+    FROM pg_catalog.pg_auth_members AS membership
+    JOIN pg_catalog.pg_roles AS parent ON parent.oid = membership.roleid
+    JOIN pg_catalog.pg_roles AS member ON member.oid = membership.member
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND member.rolname = current_user
+  ) THEN
+    RAISE EXCEPTION 'commonswarm_oauth_runtime creator membership is unsafe';
+  END IF;
+END
+$role_administrator$;
 
 ALTER ROLE commonswarm_oauth_runtime SET search_path = commonswarm_oauth, pg_catalog;
 

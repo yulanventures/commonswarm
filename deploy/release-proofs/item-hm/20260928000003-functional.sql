@@ -41,7 +41,12 @@ SELECT
   AND NOT has_table_privilege('swarm_read',
     'commonswarm_oauth.provider_artifacts', 'SELECT')
   AND NOT has_schema_privilege('commonswarm_oauth_runtime', 'swarm', 'USAGE')
-  AND commonswarm_oauth.hosted_grant_is_active(
+  AS privilege_ok
+\gset
+
+SET ROLE swarm_admin;
+SELECT
+  commonswarm_oauth.hosted_grant_is_active(
     'active', NULL, true, false
   ) = true
   AND commonswarm_oauth.hosted_grant_is_active(
@@ -53,7 +58,19 @@ SELECT
   AND commonswarm_oauth.hosted_grant_is_active(
     'active', NULL, true, true
   ) = false
-  AND commonswarm_oauth.provider_family_active('release-proof-missing-family') = false
+  AS active_behavior_ok
+\gset
+RESET ROLE;
+
+SET ROLE swarm_read;
+SELECT commonswarm_oauth.provider_family_active('release-proof-missing-family') = false
+  AS family_behavior_ok
+\gset
+RESET ROLE;
+
+SELECT :'privilege_ok'::boolean
+  AND :'active_behavior_ok'::boolean
+  AND :'family_behavior_ok'::boolean
   AS functional_ok
 \gset
 \else

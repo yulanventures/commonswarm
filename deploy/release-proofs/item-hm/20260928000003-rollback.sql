@@ -45,8 +45,51 @@ DROP TABLE commonswarm_oauth.provider_artifacts;
 DROP SCHEMA commonswarm_oauth;
 
 DO $database_privilege$
+DECLARE
+  runtime_oid oid;
+  database_grantor name;
 BEGIN
-  EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM commonswarm_oauth_runtime', current_database());
+  SELECT oid INTO runtime_oid
+  FROM pg_catalog.pg_roles
+  WHERE rolname = 'commonswarm_oauth_runtime';
+
+  -- An ordinary-role apply records the direct CONNECT grant under that
+  -- migration role. A later administrator REVOKE acts as the database owner,
+  -- so it cannot remove the other grantor's ACL item unless it first assumes
+  -- the recorded grantor. Refuse any wider or duplicate database grant instead
+  -- of erasing drift that the forward migration did not create.
+  IF (
+    SELECT count(*) <> 1 OR NOT COALESCE(bool_and(
+      privilege.privilege_type = 'CONNECT'
+      AND NOT privilege.is_grantable
+    ), false)
+    FROM pg_catalog.pg_database AS db
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      COALESCE(db.datacl, pg_catalog.acldefault('d', db.datdba))
+    ) AS privilege
+    WHERE db.datname = current_database()
+      AND privilege.grantee = runtime_oid
+  ) THEN
+    RAISE EXCEPTION 'OAuth rollback refuses role removal: unexpected database grants remain';
+  END IF;
+
+  SELECT grantor.rolname INTO database_grantor
+  FROM pg_catalog.pg_database AS db
+  CROSS JOIN LATERAL pg_catalog.aclexplode(
+    COALESCE(db.datacl, pg_catalog.acldefault('d', db.datdba))
+  ) AS privilege
+  JOIN pg_catalog.pg_roles AS grantor ON grantor.oid = privilege.grantor
+  WHERE db.datname = current_database()
+    AND privilege.grantee = runtime_oid
+    AND privilege.privilege_type = 'CONNECT'
+    AND NOT privilege.is_grantable;
+
+  EXECUTE format('SET LOCAL ROLE %I', database_grantor);
+  EXECUTE format(
+    'REVOKE CONNECT ON DATABASE %I FROM commonswarm_oauth_runtime',
+    current_database()
+  );
+  EXECUTE 'RESET ROLE';
 END
 $database_privilege$;
 ALTER ROLE commonswarm_oauth_runtime RESET search_path;
@@ -66,8 +109,9 @@ BEGIN
     RAISE EXCEPTION 'OAuth rollback refuses role removal: unexpected ownership remains';
   END IF;
   -- DROP ROLE removes memberships itself. Refusing every membership here would
-  -- reject the automatic ADMIN membership an ordinary CREATEROLE creator gets
-  -- on a role it creates, which is also what authorizes this rollback.
+  -- reject the automatic admin-only creator membership installed by the
+  -- forward migration, which is also what authorizes an ordinary creator
+  -- to perform this rollback.
   IF EXISTS (
     SELECT 1 FROM pg_shdepend
     WHERE refclassid = 'pg_authid'::regclass AND refobjid = runtime_oid
