@@ -5,15 +5,17 @@
  * `npm run test:p1-cli` through tests/p1-cli/**\/*.test.ts.
  */
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createSocketServer } from "node:net";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -54,6 +56,7 @@ import {
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
 import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
+import { platformStdoutConsumer, procStdoutConsumer } from "../../src/stdout-consumer-proc.js";
 import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions, waitForListenerStop } from "../../src/cli.js";
 import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { generateSessionKey } from "../../src/cloud/session-proof.js";
@@ -368,6 +371,227 @@ test("cancelling an in-flight stdout inspection kills its lsof child", { timeout
     if (childPid !== undefined) {
       try { process.kill(childPid, "SIGKILL"); } catch { /* already gone */ }
     }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const PROC_PIPE = "pipe:[4242]";
+
+/**
+ * A directory laid out like /proc: `<pid>/fd/<n>` links and `<pid>/fdinfo/<n>` files. The default
+ * flags are the kernel's octal O_RDONLY; a pipe write end prints `01`, and O_CLOEXEC adds `02000000`.
+ */
+async function writeProcTree(
+  root: string,
+  processes: Record<number, Record<number, { link: string; flags?: string }>>,
+): Promise<void> {
+  for (const [pid, descriptors] of Object.entries(processes)) {
+    await mkdir(join(root, pid, "fd"), { recursive: true });
+    await mkdir(join(root, pid, "fdinfo"), { recursive: true });
+    for (const [fd, { link, flags = "00" }] of Object.entries(descriptors)) {
+      await symlink(link, join(root, pid, "fd", fd));
+      await writeFile(join(root, pid, "fdinfo", fd), `pos:\t0\nflags:\t${flags}\nmnt_id:\t15\n`);
+    }
+  }
+}
+
+test("proc stdout consumer: a live reader, a write-only pipe, and a reader that exits", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-reader-"));
+  try {
+    const consumer = procStdoutConsumer({ root });
+    await writeProcTree(root, {
+      // The inspected writer also holds a read end of its own pipe, which is not another process reading.
+      100: { 1: { link: PROC_PIPE, flags: "01" }, 5: { link: PROC_PIPE } },
+      // Another writer of the same pipe and a reader of a different pipe.
+      200: { 0: { link: "pipe:[9999]" }, 1: { link: PROC_PIPE, flags: "02000001" } },
+      300: { 0: { link: "/dev/null" } },
+    });
+    // A process that exited after it was listed, and an fd closed between its link and its fdinfo, hold nothing.
+    await mkdir(join(root, "400"));
+    await mkdir(join(root, "500", "fd"), { recursive: true });
+    await symlink(PROC_PIPE, join(root, "500", "fd", "3"));
+    assert.equal(await consumer.inspect(100), "orphaned");
+
+    // POSITIVE control on the same tree: one more process holds the read end (O_RDONLY|O_CLOEXEC).
+    await writeProcTree(root, { 600: { 3: { link: PROC_PIPE, flags: "02000000" } } });
+    assert.equal(await consumer.inspect(100), "live_reader");
+    // The reader exits and its process directory disappears.
+    await rm(join(root, "600"), { recursive: true });
+    assert.equal(await consumer.inspect(100), "orphaned");
+
+    // A read-write descriptor (a FIFO opened O_RDWR) keeps the writer from getting EPIPE too.
+    await writeProcTree(root, { 700: { 4: { link: PROC_PIPE, flags: "02" } } });
+    assert.equal(await consumer.inspect(100), "live_reader");
+    await rm(join(root, "700"), { recursive: true });
+    assert.equal(await consumer.inspect(100), "orphaned");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("proc stdout consumer: an unreadable entry is unknown, never a gone reader", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-unknown-"));
+  const fdDirectory = join(root, "200", "fd");
+  try {
+    const consumer = procStdoutConsumer({ root });
+    await writeProcTree(root, {
+      100: { 1: { link: PROC_PIPE, flags: "01" } },
+      200: { 3: { link: PROC_PIPE } },
+    });
+    const fdinfo = join(root, "200", "fdinfo", "3");
+    assert.equal(await consumer.inspect(100), "live_reader", "control: the fdinfo is readable");
+
+    // A directory where the file belongs fails with EISDIR, which root cannot bypass as it can EACCES.
+    await rm(fdinfo);
+    await mkdir(fdinfo);
+    assert.equal(await consumer.inspect(100), "cannot_determine");
+    for (const flags of ["flags:\tgarbage\n", "flags:\t03\n", "pos:\t0\n"]) {
+      await rm(fdinfo, { recursive: true });
+      await writeFile(fdinfo, flags);
+      assert.equal(await consumer.inspect(100), "cannot_determine", flags);
+    }
+    // A reader found elsewhere is proof, whatever else could not be read.
+    await writeProcTree(root, { 300: { 0: { link: PROC_PIPE } } });
+    assert.equal(await consumer.inspect(100), "live_reader");
+    await rm(join(root, "300"), { recursive: true });
+    // The same tree with a readable write end is the only difference from "unknown".
+    await rm(fdinfo);
+    await writeFile(fdinfo, "flags:\t01\n");
+    assert.equal(await consumer.inspect(100), "orphaned");
+    // An fd entry that cannot be read as a link (EINVAL here, EACCES on a real host) is unknown as well.
+    await mkdir(join(root, "400", "fd"), { recursive: true });
+    await writeFile(join(root, "400", "fd", "0"), "");
+    assert.equal(await consumer.inspect(100), "cannot_determine");
+    await rm(join(root, "400"), { recursive: true });
+    assert.equal(await consumer.inspect(100), "orphaned");
+
+    if (process.getuid?.() !== 0) {
+      await chmod(fdDirectory, 0o000);
+      assert.equal(await consumer.inspect(100), "cannot_determine", "EACCES on a process's fd directory");
+      await chmod(fdDirectory, 0o700);
+      assert.equal(await consumer.inspect(100), "orphaned");
+    }
+  } finally {
+    await chmod(fdDirectory, 0o700).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("proc stdout consumer: a stdout that is not a pipe never reaches the scan", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-shapes-"));
+  try {
+    const regular = join(root, "out.txt");
+    const fifo = join(root, "named.fifo");
+    await writeFile(regular, "");
+    execFileSync("mkfifo", [fifo]);
+    await writeProcTree(root, {
+      10: { 1: { link: "/dev/null" } },
+      11: { 1: { link: regular } },
+      12: { 1: { link: fifo } },
+      13: { 1: { link: "socket:[5551]" } },
+      14: { 1: { link: "anon_inode:[eventfd]" } },
+      15: { 0: { link: "/dev/null" } },
+      // Controls: a pipe is scanned, and a reader of that other pipe makes it live.
+      16: { 1: { link: PROC_PIPE, flags: "01" } },
+      17: { 1: { link: "pipe:[4243]", flags: "01" } },
+      18: { 0: { link: "pipe:[4243]" } },
+    });
+    const consumer = procStdoutConsumer({ root });
+    const states = await Promise.all([10, 11, 12, 13, 14, 15, 99, 16, 17].map((pid) => consumer.inspect(pid)));
+    assert.deepEqual(states, [
+      "not_pipe", "not_pipe", "cannot_determine", "cannot_determine", "cannot_determine",
+      "cannot_determine", "cannot_determine", "orphaned", "live_reader",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("proc stdout consumer: an exhausted entry or time limit is unknown, not orphaned", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-budget-"));
+  try {
+    const decoys: Record<number, { 0: { link: string } }> = {};
+    for (let pid = 201; pid <= 230; pid += 1) decoys[pid] = { 0: { link: "/dev/null" } };
+    await writeProcTree(root, { 100: { 1: { link: PROC_PIPE, flags: "01" } }, ...decoys });
+
+    // No reader anywhere: only a complete scan may say orphaned.
+    assert.equal(await procStdoutConsumer({ root }).inspect(100), "orphaned");
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 20 }).inspect(100), "cannot_determine", "process count");
+    // The limit is on entries listed: 30 processes plus 30 descriptors fit in exactly 60.
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 60 }).inspect(100), "orphaned");
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 59 }).inspect(100), "cannot_determine");
+
+    // A reader is found within the limit only when the scan reaches it; with the limit gone it is found.
+    await writeProcTree(root, { 900: { 0: { link: PROC_PIPE } } });
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 20 }).inspect(100), "cannot_determine");
+    assert.equal(await procStdoutConsumer({ root }).inspect(100), "live_reader");
+    await rm(join(root, "900"), { recursive: true });
+
+    // Descriptor count of one process against the limit.
+    const wide: Record<number, { link: string }> = {};
+    for (let fd = 0; fd < 50; fd += 1) wide[fd] = { link: "/dev/null" };
+    await writeProcTree(root, { 950: wide });
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 70 }).inspect(100), "cannot_determine", "descriptor count");
+    assert.equal(await procStdoutConsumer({ root, maxEntries: 200 }).inspect(100), "orphaned");
+
+    // Time: a clock that moves 400 ms per read exhausts a 1 s limit after two processes.
+    let clock = 0;
+    const ticking = () => procStdoutConsumer({ root, maxMs: 1_000, now: () => (clock += 400) });
+    clock = 0;
+    assert.equal(await ticking().inspect(100), "cannot_determine", "time limit");
+    assert.equal(await procStdoutConsumer({ root, maxMs: 1_000 }).inspect(100), "orphaned", "control: real clock");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("proc stdout consumer: an aborted inspection is unknown", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-abort-"));
+  try {
+    await writeProcTree(root, {
+      100: { 1: { link: PROC_PIPE, flags: "01" } },
+      200: { 0: { link: PROC_PIPE } },
+    });
+    const consumer = procStdoutConsumer({ root });
+    assert.equal(await consumer.inspect(100, new AbortController().signal), "live_reader", "control: not aborted");
+    const controller = new AbortController();
+    controller.abort();
+    assert.equal(await consumer.inspect(100, controller.signal), "cannot_determine");
+    await rm(join(root, "200"), { recursive: true });
+    assert.equal(await consumer.inspect(100, controller.signal), "cannot_determine", "an abort is not orphaned");
+    assert.equal(await consumer.inspect(100), "orphaned", "control: not aborted");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stdout consumer selection: Linux reads /proc and every other host keeps lsof", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-select-"));
+  try {
+    await writeProcTree(root, {
+      100: { 1: { link: PROC_PIPE, flags: "01" } },
+      200: { 0: { link: PROC_PIPE } },
+    });
+    // Reports "no reader" for every pid, so a live_reader answer can only have come from /proc.
+    const lsof = join(root, "lsof");
+    await writeFile(lsof, "#!/bin/sh\nprintf 'p100\\nf1\\ntunix\\nn->(none)\\n'\n", { mode: 0o755 });
+    const options = { proc: { root }, lsofExecutable: lsof };
+    assert.equal(await platformStdoutConsumer(undefined, { ...options, platform: "linux" }).inspect(100), "live_reader");
+    for (const platform of ["darwin", "freebsd", "win32"] as const) {
+      assert.equal(await platformStdoutConsumer(undefined, { ...options, platform }).inspect(100), "orphaned", platform);
+    }
+
+    // The caller's time limit becomes the /proc scan's limit; without one the shared default applies.
+    const decoys: Record<number, { 0: { link: string } }> = {};
+    for (let pid = 201; pid <= 205; pid += 1) decoys[pid] = { 0: { link: "/dev/null" } };
+    await rm(join(root, "200"), { recursive: true });
+    await writeProcTree(root, decoys);
+    let clock = 0;
+    const proc = { root, now: () => (clock += 400) };
+    assert.equal(await platformStdoutConsumer(500, { platform: "linux", proc }).inspect(100), "cannot_determine");
+    clock = 0;
+    assert.equal(await platformStdoutConsumer(undefined, { platform: "linux", proc }).inspect(100), "orphaned");
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

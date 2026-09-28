@@ -22,7 +22,7 @@ export function parseLsofStdout(output: string): StdoutConsumerState {
 
 /** One bounded child per inspection. Abort kills it when the watcher stops. */
 export function lsofStdoutConsumer(
-  timeoutMs = 5_000,
+  timeoutMs = STDOUT_INSPECTION_MS,
   executable = process.platform === "darwin" ? "/usr/sbin/lsof" : "lsof",
 ): StdoutConsumerAdapter {
   return {
@@ -42,3 +42,6 @@ export function lsofStdoutConsumer(
     },
   };
 }
+
+/** Time limit for one stdout inspection, whether it runs lsof or reads /proc. */
+export const STDOUT_INSPECTION_MS = 5_000;

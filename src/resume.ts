@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { dirname } from "node:path";
-import { lsofStdoutConsumer, type StdoutConsumerAdapter, type StdoutConsumerState } from "./stdout-consumer.js";
+import type { StdoutConsumerAdapter, StdoutConsumerState } from "./stdout-consumer.js";
+import { platformStdoutConsumer } from "./stdout-consumer-proc.js";
 import { arrivalHostIdFileState, arrivalMachineHash, arrivalWatchLockIdentity, arrivalWatchLockPath } from "./cloud/arrival-watch.js";
 import { WAKE_LEASE_STALE_LABEL, printedCommand, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
 import { verifiedLiveSessionContexts } from "./cloud/live-session-context.js";
@@ -330,7 +331,7 @@ export async function findNotifyWatchers(options: {
       ? { command: options.processTableCommand }
       : {}),
   });
-  const stdoutConsumer = options.stdoutConsumer ?? lsofStdoutConsumer();
+  const stdoutConsumer = options.stdoutConsumer ?? platformStdoutConsumer();
   const parentProcess = options.parentProcess ?? systemParentProcess();
   const rows = await processTable.list();
   const matches = rows.flatMap((row): Array<Pick<NotifyWatcher, "pid" | "matchedBy">> => {

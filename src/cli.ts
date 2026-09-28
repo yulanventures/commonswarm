@@ -313,7 +313,7 @@ import {
   runArrivalWatch,
   writeArrivalMonitorLine,
 } from "./cloud/arrival-watch.js";
-import { lsofStdoutConsumer } from "./stdout-consumer.js";
+import { platformStdoutConsumer } from "./stdout-consumer-proc.js";
 import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseReadError, WakeLeaseTransientError, type AgentWakeLease } from "./cloud/wake-lease.js";
 import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
 const LISTENER_STOP_WAIT_TIMEOUT_MS = 30_000;
@@ -5161,7 +5161,7 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       store: cursorStore,
       signal: controller.signal,
       wake,
-      stdoutConsumer: lsofStdoutConsumer(Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2))),
+      stdoutConsumer: platformStdoutConsumer(Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2))),
       stdoutCheckIntervalMs,
       onReady: async () => {
         if (attendedCanaryTask !== null) return;
