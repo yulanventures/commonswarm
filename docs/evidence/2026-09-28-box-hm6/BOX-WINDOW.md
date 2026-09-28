@@ -1,12 +1,12 @@
-# HM lane 6: dark OAuth service box window — v4 CONTINUATION
+# HM lane 6: dark OAuth service box window — v5 FINISH
 
-**Status: PLAN. The v3 migration/helper work is complete and retained; continuation approval, runtime release, ingress success, recovery acceptance and closure are not established.**
+**Status: PLAN. Migration 03, the backup helpers, the SHA-specific release directories and the v4 image are complete and retained. The v4 runtime and ingress were rolled back after the final non-browser gate; v5 recreates them and finishes recovery acceptance and closure.**
 
 **Release SHA: `826db6a34f235064a3a03c57377d8e32a35d2f05`.**
 
-The release SHA is local and remote `main` at plan authoring time. Its parent is evidence commit `d073b8eb654b4d0de6d139621ee940efe98ff86e`, and the commit changes only the OAuth configuration implementation, its deployment-contract tests, and the OAuth runbook/verification text. It permits a root-owned, non-group/other-writable public CA such as the observed mode `0644` file while retaining descriptor-based checks and the stricter secret-file policy. Exact-SHA gate results for this continuation, its archive hash, the rebuilt image ID and production execution are **not established**.
+The release SHA is unchanged from v4. Exact-SHA gates, the release archive, the SHA-specific OAuth release directory and image `sha256:5511a358…` were accepted in that window. V5 verifies and reuses those artifacts; it rebuilds only if the recorded image identity, pinned base digest or five-layer base prefix cannot be re-established.
 
-Anvil executes all Mac mini, box, Cloudflare and 1Password operations. HezLead approves the exact inputs, transitions, backup age, isolated recovery procedure and rollback, and closes the window. CSwarmDevLead supplies reviewed inputs and reconciles evidence. A Cloudflare security change additionally requires Tom’s approval and suitable dashboard access.
+Anvil executes all Mac mini, box, Cloudflare and 1Password operations. HezLead approves the exact inputs, transitions, backup age, isolated recovery procedure and rollback, and closes the window. CSwarmDevLead supplies reviewed inputs and reconciles evidence. Tom performs the separately approved, hostname-only Browser Integrity Check change; this plan contains no dashboard automation.
 
 ## Governing procedure and execution rules
 
@@ -24,11 +24,11 @@ Referenced runbook operations remain required. Their inclusion does not authoriz
 
 Every executable block below has a unique step identifier and execution location. Mac mini blocks run under macOS `/bin/bash` 3.2. Docker commands run only on the box. Do not enable tracing, assign `HOME`, print credentials or complete environment/container configurations, or put secret values in arguments, URLs, environment values, logs or evidence.
 
-No block uses recursive deletion. Any later cleanup requiring `rm -rf` must be separately reviewed and may target only a checked absolute path created with `mktemp` in that same block.
+The only recursive deletion is Mac secret-staging cleanup. It targets a checked absolute directory created by `mktemp -d /private/tmp/...` in that same block and runs from an `EXIT` trap on success and every failure path. No home-directory path may hold staged secrets.
 
 On every refusal or failure, stop dependent work, record actual state and run the runbook’s abort cleanup. Do not manufacture successful evidence for skipped work.
 
-## Prior windows and continuation baseline
+## Prior windows and current v5 baseline
 
 The first window used suffix `080406` and release `9fa4217da9f6447e55fb8c6d577b8fd3997f926b`.
 
@@ -71,7 +71,9 @@ The v3 window subsequently ran from release `ad964ed158181ba1692dd05895f36fa7a1f
 | Runtime and ingress | Not started: no runtime database/TLS proof, secret provisioning, HTTP service, GoTrue append, DNS, Caddy, endpoint probes or Browser Integrity Check decision |
 | Stop cause | Old `config.js` rejected the root-owned mode `0644` public CA before secrets or database authentication |
 
-The committed evidence is under [`docs/evidence/2026-09-28-release-ad964ed15818/`](../2026-09-28-release-ad964ed15818/). V4 verifies every retained result read only and stops on disagreement. It does **not** reapply migration 03, rerun the completed post-apply backup, switch stack helpers again, or stage another edge release.
+The committed evidence is under [`docs/evidence/2026-09-28-release-ad964ed15818/`](../2026-09-28-release-ad964ed15818/).
+
+The v4 window then passed the retained ledger/catalog checks, exact-SHA release and image build, root-CA/secret-file policy proof, actual-container DNS/auth/TLS/schema proof, dark start, certificate check, GoTrue callback append, proxied DNS creation and Caddy validation/reload. Public curl passed every expected route. Python urllib's default User-Agent received Cloudflare `403` / error `1010` on every route. The window stopped and rolled back as designed: the OAuth service, `current` symlink, Caddy site, DNS record and GoTrue callback are absent; migration 03, helpers, release directories, images `sha256:208fe56d…` and `sha256:5511a358…`, and active timers remain. V5 stops if the first-install baseline differs from that state.
 
 ## Release identity and scope
 
@@ -80,7 +82,7 @@ The release archive contains more than this window activates.
 | Content measured in the supplied tree | Retry disposition |
 |---|---|
 | Migration `20260928000003_hm_oauth_store.sql` and corrected proofs | Already applied; verify ledger/catalog read only and retain |
-| OAuth service and deployment configuration | Build from `826db6a34f235064a3a03c57377d8e32a35d2f05`; release with public authorization disabled |
+| OAuth service and deployment configuration | Reuse the verified v4 image for `826db6a34f235064a3a03c57377d8e32a35d2f05`, rebuilding only on failed identity checks; release with public authorization disabled |
 | OAuth-inclusive backup, restore and drill helpers | Already live from `ad964ed158181ba1692dd05895f36fa7a1f87d3f`; verify read only |
 | OAuth-only `commonswarm-mcp.caddy` | Render its five port substitutions and install |
 | GoTrue callback configuration | Append the callback while preserving the live allowlist |
@@ -119,7 +121,7 @@ The catalog checks six tables, ownership/RLS, two complete column-name inventori
 
 ## Measured input hashes
 
-All SHA-256 values below were recomputed from the supplied tree. The release archive hash, rendered Caddy hash, new image ID, final plan hash and runtime evidence hashes are **not established**; measure them during the approved preparation.
+All SHA-256 values below were recomputed from the supplied tree. V4 established the archive and image evidence; v5 re-verifies them. The rendered Caddy hash, final v5 plan hash and new runtime evidence hashes are not established until measured during approved preparation.
 
 | Path | SHA-256 |
 |---|---|
@@ -152,30 +154,30 @@ Before opening, HezLead accepts:
 1. Landed exact SHA, independent review, exact-SHA gates and this final plan’s hash and complete block inventory.
 2. Window start/end, fresh suffix, maximum backup age and maintenance scheduling.
 3. Read-only acceptance of retained migration 03 and explicit migration 04 deferral; no forward migration runs.
-4. Verified reuse of the old service account and empty configuration directory.
-5. Preservation of both prior images/releases and rebuild from the new archive.
+4. Verified reuse of the old service account and the protected runtime files retained from v4.
+5. Preservation of both images and all release directories; reuse of image `sha256:5511a358…` after identity, base-digest and five-layer-prefix verification, with rebuild only on failed verification.
 6. Retained stack helper verification, dark OAuth deployment, conditional GoTrue recreation, DNS creation and Caddy installation.
 7. Isolated recovery procedure, including role settings, database grants and protected credential recovery.
-8. Cloudflare stop ownership. No security relaxation is authorized by this plan alone.
+8. HezLead's written confirmation that Tom disabled Browser Integrity Check for `mcp.commonswarm.com` only; the reference is recorded in `window.env`. No dashboard action is performed by this plan.
 
 Required order:
 
 | Order | Stage |
 |---:|---|
-| 1 | Exact-SHA archive, gates, checksums, manifest and durable continuation state |
-| 2 | Read-only reconciliation of v3 releases, images, helpers, migration 03, migration 04 and backup evidence |
-| 3 | Prepare or verified-reuse only the new-SHA OAuth release directory; rebuild the image after pulling/verifying the pinned base |
-| 4 | Prepare protected keys/configuration and provision the runtime password |
+| 1 | Exact-SHA archive, gates, pre-created copy-back manifest and durable continuation state |
+| 2 | Read-only reconciliation of the v4 releases, images, helpers, migration 03, migration 04 and backup evidence |
+| 3 | Verify the existing new-SHA OAuth release and reuse image `sha256:5511a358…`; rebuild only if the v4 image proof fails |
+| 4 | Verify retained protected keys/configuration and runtime password; stage any Mac secret files only in a checked `/private/tmp` directory |
 | 5 | Prove the actual new image accepts the root-owned `0644` CA and rejects mode-`0644` secret files |
 | 6 | Recheck privileges; run actual-container database/TLS proof |
 | 7 | Start dark OAuth; runtime and loopback controls |
 | 8 | Preserve/append GoTrue callback and conditionally recreate only GoTrue |
 | 9 | Read-only certificate verification; create/read back DNS |
-| 10 | Install/validate/reload Caddy; immediately run both non-browser probe suites |
+| 10 | Verify the hostname-only BIC decision, install/validate/reload Caddy, then immediately run both non-browser probe suites |
 | 11 | Controlled OAuth restart, read-only post-apply backup reconciliation and isolated recovery acceptance |
 | 12 | Deferred-lane and unchanged-edge checks, timers, cleanup, manifest-only copy-back and closure |
 
-The database name, enabled GoTrue provider, free host port, Cloudflare zone/record IDs, DNS token field reference, final site path, exact-SHA gate results and isolated recovery results are **not established**. Measure before dependent steps.
+The free host port, new Cloudflare zone/record IDs and isolated recovery result are not established. The exact Caddy site is `/etc/caddy/sites/20-commonswarm-mcp.caddy`; v5 checks this named setting before every use.
 
 ### Names and credentials
 
@@ -199,14 +201,14 @@ Use these continuation manifest inputs while following the current runbook's sec
 | `GUARDED_STACK_SWITCH` | `no` |
 | `BACKUP_STATUS_PROOF` | `no` (the retained v3 artifact is verified separately) |
 | `MIGRATION_VERSIONS` | `20260928000003`, `20260928000004` |
-| `FUNCTIONAL_VERSIONS` | Empty; v4 performs no migration apply |
+| `FUNCTIONAL_VERSIONS` | Empty; v5 performs no migration apply |
 | Apply | None; migration 03 must already be present and pass its catalog proof |
 | Defer | 04, with explicit recorded disposition and continued absence |
 | Expected cron additions/removals | Empty |
 
-The current runbook does not have an OAuth `KIND_LIST` surface. V4 therefore extracts its reviewed `prepare_release_directory` implementation and invokes it only for `/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05`. It neither creates nor switches new stack/edge directories. The existing v3 stack, edge and OAuth directories are verified read only.
+The current runbook does not have an OAuth `KIND_LIST` surface. V5 therefore extracts its reviewed `prepare_release_directory` implementation and invokes it only to verify `/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05`. It neither creates nor switches new stack/edge directories. The existing stack, edge and OAuth directories are verified read only.
 
-The current runbook supports reuse of an existing same-SHA directory only after verifying its complete path inventory/count, bytes, `RELEASE_SHA`, entry types, symlink targets/containment, ownership and modes. It never extracts over, deletes or repairs an existing release directory. Record `created` or `reused` truthfully. For this fresh retry, an unexpectedly existing new-SHA directory is a stop for HezLead to reconcile before accepting the verified reuse path.
+The current runbook supports reuse of an existing same-SHA directory only after verifying its complete path inventory/count, bytes, `RELEASE_SHA`, entry types, symlink targets/containment, ownership and modes. It never extracts over, deletes or repairs an existing release directory. V5 requires the result `reused`; `created` or any mismatch stops the window.
 
 Do not touch the old `9fa4217d` stack/edge directories. The old OAuth directory is read only for verification.
 
@@ -221,7 +223,7 @@ Require exact-SHA gate evidence, including:
 
 Relevant sources include `services/mcp-auth/test/`, `services/mcp-auth/test-postgres/`, `tests/p1-cli/mcp-auth-container.test.ts`, `tests/hm5-router-box.test.ts`, `tests/p1-server/oauth-store.test.ts` and `deploy/supabase-stack/backup/test_*.py`. Do not infer success from their presence or workflow definitions.
 
-Hash the final substituted plan and enumerate every executable block by unique step ID. Record syntax-check results and reconcile the count. Prior-window block evidence does not approve v4.
+Hash the final substituted plan and enumerate every executable block by unique step ID. Record syntax-check results and reconcile the count. Prior-window block evidence does not approve v5.
 
 Add these exact item paths through `ITEM_COPY_BACK_FILES`:
 
@@ -257,12 +259,91 @@ Add these exact item paths through `ITEM_COPY_BACK_FILES`:
 - `oauth-certificate-check.txt`
 - `oauth-dns-record.json`
 - `oauth-ingress-facts.json`
+- `bic-decision.txt`
 - `oauth-recovery-proof.txt`
 - `close-readback.txt`
 
-The continuation copies only the explicitly listed safe evidence. It does not manufacture new stack/edge state, migration-apply, timer-stop or backup-start evidence for actions that v4 does not perform.
+The continuation copies only the explicitly listed safe evidence. It does not manufacture new stack/edge state, migration-apply, timer-stop or backup-start evidence for actions that v5 does not perform.
 
 Never copy `window.env`, secret files, raw environment/inspection/log output, database dumps, 1Password documents or curl authorization configuration. On abort, use the runbook’s explicit incomplete-manifest handling; preserve failure evidence without creating missing success files.
+
+## Open the v5 continuation window
+
+This is the first box step. It creates the proof directory and root-owned copy-back manifest before any later check can stop. Anvil substitutes HezLead's written BIC-confirmation reference before execution; it is an evidence reference, not a secret or a dashboard credential.
+
+```sh
+# step: hm6-open-continuation-window
+# Runs: box over SSH, as root, operated by Anvil, after the exact-SHA archive upload.
+(
+  set -euo pipefail
+  SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
+  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
+  BIC_DECISION_REFERENCE='<HezLead-written-confirmation-reference>'
+  MCP_CADDY_SITE=/etc/caddy/sites/20-commonswarm-mcp.caddy
+  ARCHIVE=/tmp/commonswarm-release.tar
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  NEW_OAUTH="/home/commonswarm/oauth/releases/$SHA"
+  ACTIVE_STACK=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
+  ACTIVE_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  test "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" = "$EXPECTED_ARCHIVE_SHA256"
+  test "$(readlink -f /home/commonswarm/stack/current)" = "$ACTIVE_STACK"
+  test "$(readlink -f /home/commonswarm/edge/current)" = "$ACTIVE_EDGE"
+  case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) false ;; esac
+  test "$(dirname -- "$MCP_CADDY_SITE")" = /etc/caddy/sites
+  case "$BIC_DECISION_REFERENCE" in ''|*'<'*|*'>'*) false ;; esac
+  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
+    case "$T" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+      *) false ;;
+    esac
+    date -u -d "$T" +%s >/dev/null
+  done
+  WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+  test "$WINDOW_PRINCIPAL_SUFFIX" != 080406
+  install -d -o root -g root -m 0700 "$PROOF_DIR"
+  for VALUE in "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" \
+    "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_OAUTH" "$ACTIVE_STACK" "$ACTIVE_EDGE" \
+    "$MCP_CADDY_SITE" "$BIC_DECISION_REFERENCE"; do
+    case "$VALUE" in *"'"*) false ;; esac
+  done
+  {
+    printf "SHA='%s'\n" "$SHA"
+    printf "WINDOW_START_UTC='%s'\n" "$WINDOW_START_UTC"
+    printf "WINDOW_END_UTC='%s'\n" "$WINDOW_END_UTC"
+    printf "WINDOW_PRINCIPAL_SUFFIX='%s'\n" "$WINDOW_PRINCIPAL_SUFFIX"
+    printf "NEW_OAUTH='%s'\n" "$NEW_OAUTH"
+    printf "NEW_STACK='%s'\n" "$ACTIVE_STACK"
+    printf "PREVIOUS_STACK='%s'\n" "$ACTIVE_STACK"
+    printf "PREVIOUS_EDGE='%s'\n" "$ACTIVE_EDGE"
+    printf "EXPECTED_ARCHIVE_SHA256='%s'\n" "$EXPECTED_ARCHIVE_SHA256"
+    printf "MCP_CADDY_SITE='%s'\n" "$MCP_CADDY_SITE"
+    printf "BIC_DECISION_REFERENCE='%s'\n" "$BIC_DECISION_REFERENCE"
+    printf "BIC_HOSTNAME_SCOPE='mcp.commonswarm.com'\n"
+  } >"$PROOF_DIR/window.env"
+  chmod 0600 "$PROOF_DIR/window.env"
+  printf '%s\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
+  install -o root -g root -m 0600 /dev/null "$PROOF_DIR/copy-back.list"
+  printf '%s\n' \
+    copy-back.list box-archive.sha256 window-principal-suffix.txt \
+    reviewed-inputs.sha256 verification-sql.sha256 continuation-state.json \
+    oauth.SHA256SUMS oauth.release-dir-state.txt migration-03-retained.txt \
+    hm3-deferred-before.txt hm3-deferred-after.txt migration-dispositions.txt \
+    hm6-privileges.txt hm6-default-acl-after.json hm6-applied-at.txt \
+    backup-unit-paths.txt retained-backup-verification.json oauth-backup-coverage.json \
+    oauth-image.json oauth-file-policy-proof.txt oauth-port.txt oauth-runtime.json \
+    oauth-database-proof.txt oauth-local-probes.json oauth-nonbrowser-probes.json \
+    oauth-restart-probes.json gotrue-allow-list.json oauth-caddy-rendered.caddy \
+    oauth-caddy.diff oauth-certificate-check.txt oauth-dns-record.json \
+    oauth-ingress-facts.json oauth-recovery-proof.txt bic-decision.txt close-readback.txt \
+    20260928000002-catalog.sql 20260928000003-rollback.sql \
+    20260928000003-rollback-catalog.sql >"$PROOF_DIR/copy-back.list"
+  test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
+  test -z "$(LC_ALL=C sort "$PROOF_DIR/copy-back.list" | uniq -d)"
+  sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
+)
+```
 
 ## Verify reviewed inputs and stage SQL
 
@@ -335,70 +416,17 @@ The old diagnostic is historical evidence, not the corrected acceptance proof. D
 
 ## Continuation baseline: exact retained state
 
-```sh
-# step: hm6-open-continuation-window
-# Runs: box over SSH, as root, operated by Anvil, after the exact-SHA archive upload.
-(
-  set -euo pipefail
-  SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
-  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
-  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
-  EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
-  ARCHIVE=/tmp/commonswarm-release.tar
-  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
-  NEW_OAUTH="/home/commonswarm/oauth/releases/$SHA"
-  ACTIVE_STACK=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
-  ACTIVE_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
-  test "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)" = "$EXPECTED_ARCHIVE_SHA256"
-  test "$(readlink -f /home/commonswarm/stack/current)" = "$ACTIVE_STACK"
-  test "$(readlink -f /home/commonswarm/edge/current)" = "$ACTIVE_EDGE"
-  for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
-    case "$T" in
-      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
-      *) false ;;
-    esac
-    date -u -d "$T" +%s >/dev/null
-  done
-  WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
-  test "$WINDOW_PRINCIPAL_SUFFIX" != 080406
-  install -d -o root -g root -m 0700 "$PROOF_DIR"
-  if [ ! -e "$PROOF_DIR/window.env" ]; then
-    for VALUE in "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" \
-      "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_OAUTH" "$ACTIVE_STACK" "$ACTIVE_EDGE"; do
-      case "$VALUE" in *"'"*) false ;; esac
-    done
-    {
-      printf "SHA='%s'\n" "$SHA"
-      printf "WINDOW_START_UTC='%s'\n" "$WINDOW_START_UTC"
-      printf "WINDOW_END_UTC='%s'\n" "$WINDOW_END_UTC"
-      printf "WINDOW_PRINCIPAL_SUFFIX='%s'\n" "$WINDOW_PRINCIPAL_SUFFIX"
-      printf "NEW_OAUTH='%s'\n" "$NEW_OAUTH"
-      printf "NEW_STACK='%s'\n" "$ACTIVE_STACK"
-      printf "PREVIOUS_STACK='%s'\n" "$ACTIVE_STACK"
-      printf "PREVIOUS_EDGE='%s'\n" "$ACTIVE_EDGE"
-      printf "EXPECTED_ARCHIVE_SHA256='%s'\n" "$EXPECTED_ARCHIVE_SHA256"
-    } >"$PROOF_DIR/window.env"
-    chmod 0600 "$PROOF_DIR/window.env"
-  else
-    . "$PROOF_DIR/window.env"
-    test "$SHA" = 826db6a34f235064a3a03c57377d8e32a35d2f05
-    test "$NEW_OAUTH" = /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05
-    test "$EXPECTED_ARCHIVE_SHA256" = "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
-  fi
-  sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
-)
-```
+Before any v5 mutation, require the exact rolled-back v4 state:
 
-Before archive staging, keys, configuration or service activation, require:
-
-- The first-window and v3 OAuth release directories under `/home/commonswarm/oauth/releases/`; the new SHA may additionally exist only on an interrupted same-window retry and is verified byte-for-byte later.
+- The first-window, v3 and release-`826db6a3` OAuth directories under `/home/commonswarm/oauth/releases/` all exist; no other OAuth release does.
 - No OAuth current symlink, including a dangling symlink.
 - No OAuth Compose containers, including stopped containers.
-- Exactly the old OAuth service account/group; no new-suffix collision.
-- Empty, non-symlink `/etc/commonswarm-oauth` with recorded ownership/mode.
-- Both recorded prior local images exist, including v3 image `sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7`.
+- Exactly the old OAuth service account/group and the protected v4 runtime files.
+- Both retained images exist: v3 `sha256:208fe56d…` and the v4 image recorded as `sha256:5511a358…`.
+- Migration 03 and helpers are retained; migration 04 remains absent.
+- The approved Caddy site, DNS record and GoTrue callback are absent.
 - No old-account processes.
-- No additional OAuth secret, installation or account state.
+- No additional OAuth installation or account state.
 
 Unrelated Docker images are outside this inventory. Any additional OAuth-associated artifact requires a new disposition; do not delete it to make preflight pass.
 
@@ -411,7 +439,10 @@ Unrelated Docker images are outside this inventory. Any additional OAuth-associa
   . "$PROOF_DIR/window.env"
   test "$SHA" = 826db6a34f235064a3a03c57377d8e32a35d2f05
   test "$(date -u -d "$WINDOW_START_UTC" +%H%M%S)" = "$WINDOW_PRINCIPAL_SUFFIX"
-  test "$WINDOW_PRINCIPAL_SUFFIX" != 080406
+  : "${MCP_CADDY_SITE:?approved site path missing}"
+  test "$MCP_CADDY_SITE" = /etc/caddy/sites/20-commonswarm-mcp.caddy
+  test ! -e "$MCP_CADDY_SITE"
+  test ! -L "$MCP_CADDY_SITE"
   test "$(readlink -f /home/commonswarm/stack/current)" = \
     /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
   test "$(readlink -f /home/commonswarm/edge/current)" = \
@@ -428,8 +459,8 @@ account = 'cs-oauth-080406'
 release_root = pathlib.Path('/home/commonswarm/oauth/releases')
 assert release_root.is_dir() and not release_root.is_symlink()
 names = {p.name for p in release_root.iterdir()}
-assert names in ({first_sha, v3_sha}, {first_sha, v3_sha, v4_sha})
-for name in (first_sha, v3_sha):
+assert names == {first_sha, v3_sha, v4_sha}
+for name in (first_sha, v3_sha, v4_sha):
     release = release_root / name
     assert release.is_dir() and not release.is_symlink()
 assert not os.path.lexists('/home/commonswarm/oauth/current')
@@ -449,31 +480,54 @@ directory = pathlib.Path('/etc/commonswarm-oauth')
 st = directory.lstat()
 assert stat.S_ISDIR(st.st_mode)
 assert (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) == (0, 986, 0o750)
-assert list(directory.iterdir()) == []
-images = [
-    'sha256:c298ced5404dbdeddbbf4225456387455f74a6211fdf0afa44bb75cda7fb9267',
-    'sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7',
-]
+expected_files = {
+    'signing-keys.pem': 0o640, 'cookie-keys': 0o640,
+    'database-credentials': 0o640, 'service.env': 0o600, 'compose.env': 0o600,
+}
+assert {p.name for p in directory.iterdir()} == set(expected_files)
+for name, mode in expected_files.items():
+    item = directory / name
+    metadata = item.lstat()
+    assert stat.S_ISREG(metadata.st_mode) and not item.is_symlink()
+    assert metadata.st_uid == 0 and stat.S_IMODE(metadata.st_mode) == mode
+    assert metadata.st_gid == (group.gr_gid if mode == 0o640 else 0)
+prior_image = 'sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7'
+image_evidence = json.loads((proof / 'oauth-image.json').read_text())
+v4_image = image_evidence['local_image_id']
+assert isinstance(v4_image, str) and v4_image.startswith('sha256:5511a358')
+assert image_evidence['release_sha'] == v4_sha
+assert image_evidence['base_digest'] == 'sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c'
+assert image_evidence['base_layer_count'] == 5
+assert image_evidence['base_layer_prefix_verified'] is True
+images = [prior_image, v4_image]
 for image in images:
     actual = subprocess.check_output(
         ['docker', 'image', 'inspect', '--format', '{{.Id}}', image],
         text=True).strip()
     assert actual == image
 result = {
-    'pass': True, 'retained_release_shas': [first_sha, v3_sha],
-    'new_release_present_before_stage': v4_sha in names,
+    'pass': True, 'retained_release_shas': sorted(names),
+    'new_release_present_before_stage': True,
     'service_account': account, 'uid': 996, 'gid': 986,
-    'configuration_directory_empty': True,
+    'configuration_files_retained': sorted(expected_files),
     'retained_image_ids': images, 'new_window_suffix': suffix,
     'prior_release_disposition': 'retain and verify read only',
     'prior_image_disposition': 'retain; never delete in this window',
     'service_account_disposition': 'reuse after verification',
-    'configuration_directory_disposition': 'reuse after verification'
+    'configuration_directory_disposition': 'reuse protected v4 files after verification'
 }
 (proof / 'continuation-state.json').write_text(json.dumps(result, indent=2) + '\n')
 PY
   printf 'SERVICE_ACCOUNT=%q\nMCP_OAUTH_UID=%q\nMCP_OAUTH_GID=%q\n' \
     cs-oauth-080406 996 986 >>"$PROOF_DIR/window.env"
+  python3 - /home/commonswarm/.env <<'PY'
+import pathlib, sys
+callback = 'https://mcp.commonswarm.com/oauth/callback/gotrue'
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+matches = [line for line in lines if line.startswith('GOTRUE_URI_ALLOW_LIST=')]
+assert len(matches) == 1
+assert callback not in matches[0].split('=', 1)[1].strip('"\'').split(',')
+PY
 )
 ```
 
@@ -492,7 +546,7 @@ Create the archive from the new landed SHA and transfer it. This block does not 
   test "$SHA" = 826db6a34f235064a3a03c57377d8e32a35d2f05
   test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
   test "$(git rev-parse origin/main)" = "$SHA"
-  ARCHIVE="/tmp/commonswarm-hm6-v4-${SHA}.tar"
+  ARCHIVE="/tmp/commonswarm-hm6-v5-${SHA}.tar"
   test ! -e "$ARCHIVE"
   env COPYFILE_DISABLE=1 git archive --format=tar --output "$ARCHIVE" "$SHA"
   test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
@@ -546,18 +600,13 @@ PY
   for RELEASE in \
     /home/commonswarm/oauth/releases/9fa4217da9f6447e55fb8c6d577b8fd3997f926b \
     /home/commonswarm/oauth/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f \
+    /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05 \
     /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f \
     /home/commonswarm/edge/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
   do
     test -d "$RELEASE"
     test ! -L "$RELEASE"
     test "$(cat "$RELEASE/RELEASE_SHA")" = "$(basename "$RELEASE")"
-  done
-  for IMAGE in \
-    sha256:c298ced5404dbdeddbbf4225456387455f74a6211fdf0afa44bb75cda7fb9267 \
-    sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7
-  do
-    test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE"
   done
   test "$(readlink -f /home/commonswarm/stack/current)" = \
     /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
@@ -566,13 +615,13 @@ PY
 )
 ```
 
-A mismatch stops the window. Do not repair or delete the old directory. It is retained as historical evidence and is not selected as the retry’s active release.
+A mismatch stops the window. Do not repair or delete any retained directory. The SHA-specific OAuth directory is selected only after the complete archive verifier returns `reused`.
 
-### Fresh new-SHA OAuth directory
+### Verify the retained new-SHA OAuth directory
 
 ```sh
 # step: hm6-stage-new-oauth-release
-# Runs: box over SSH, as root, operated by Anvil; creates or verified-reuses only the OAuth directory.
+# Runs: box over SSH, as root, operated by Anvil; verifies and reuses only the retained OAuth directory.
 (
   set -euo pipefail
   PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
@@ -588,7 +637,7 @@ A mismatch stops the window. Do not repair or delete the old directory. It is re
   PROOF_GROUP=root
   NEW_OAUTH="/home/commonswarm/oauth/releases/$SHA"
   prepare_release_directory oauth "$NEW_OAUTH" 0755
-  case "$RELEASE_DIR_RESULT" in created|reused) ;; *) false ;; esac
+  test "$RELEASE_DIR_RESULT" = reused
   printf 'OAUTH_RELEASE_DIR_STATE=%s\n' "$RELEASE_DIR_RESULT" \
     >"$PROOF_DIR/oauth.release-dir-state.txt"
   test "$(readlink -f /home/commonswarm/edge/current)" = \
@@ -641,13 +690,13 @@ SQL
 )
 ```
 
-SQL errors are failures, not `catalog=f`. A missing migration-03 ledger row, a false migration-03 catalog proof, any migration-04 presence or any additional unexplained pending version stops the window. There is no forward migration command in v4.
+SQL errors are failures, not `catalog=f`. A missing migration-03 ledger row, a false migration-03 catalog proof, any migration-04 presence or any additional unexplained pending version stops the window. There is no forward migration command in v5.
 
 Run section 5’s complete migration enumeration in read-only mode. Expected pending inventory is **04 only**. Do not filter it from inventory, insert its ledger row or run its functional proof. Any additional pending migration or unexplained older version stops the window.
 
 ## Retained backup and helper verification
 
-The pre-migration and post-apply backups and the helper switch are done. V4 does not start a replacement backup merely to repeat them. It verifies the retained post-apply status, OAuth coverage, unit paths, successful service results and active timers read only. Any mismatch stops the continuation for HezLead; do not repair it inside this window.
+The pre-migration and post-apply backups and the helper switch are done. V5 does not start a replacement backup merely to repeat them. It verifies the retained post-apply status, OAuth coverage, unit paths, successful service results and active timers read only. Any mismatch stops the continuation for HezLead; do not repair it inside this window.
 
 ```sh
 # step: hm6-verify-retained-helpers-and-backup
@@ -698,11 +747,9 @@ PY
 )
 ```
 
-## Rebuild the continuation image
+## Verify-reuse the v4 image, with rebuild fallback
 
-Review box capacity. Build only from the new immutable service directory and its `.dockerignore`. No signing key, cookie key, password, private registry credential, build secret or SSH forwarding belongs in the build context.
-
-Preserve the old local image. It is not a retry candidate merely because it exists. Build from the retry archive and use the resulting image ID. Reuse of the old ID is acceptable only if this fresh build produces the identical ID and verifies the same pinned base. The source has changed since the first window, so equality must not be assumed.
+First verify the v4 evidence against the immutable release, the actual local image, the recorded pinned base digest and the five-layer prefix. Reuse image `sha256:5511a358…` only when every check passes. Otherwise pull the same digest-pinned base and rebuild from the retained exact-SHA release. No signing key, cookie key, password, private registry credential, build secret or SSH forwarding belongs in the build context.
 
 ```sh
 # step: hm6-build-retry-image
@@ -711,7 +758,6 @@ Preserve the old local image. It is not a retry candidate merely because it exis
   set -euo pipefail
   PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
   . "$PROOF_DIR/window.env"
-  test ! -e "$PROOF_DIR/oauth-image.id"
   PREVIOUS_IMAGE=sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7
   docker image inspect "$PREVIOUS_IMAGE" >/dev/null
   cmp -s "$NEW_STACK/services/mcp-auth/Dockerfile" \
@@ -729,29 +775,56 @@ print(match.group(1))
 PY
   IFS= read -r BASE_REFERENCE <"$PROOF_DIR/oauth-base-reference.txt"
   docker pull "$BASE_REFERENCE"
-  python3 - "$BASE_REFERENCE" <<'PY'
-import json, re, subprocess, sys
-base = sys.argv[1]
-digest = base.rsplit('@', 1)[1]
-assert re.fullmatch(r'sha256:[0-9a-f]{64}', digest)
-inspection = json.loads(subprocess.check_output(
-    ['docker', 'image', 'inspect', base], text=True))[0]
-repo_digests = inspection.get('RepoDigests')
-assert isinstance(repo_digests, list)
-assert any(isinstance(value, str) and '@' in value and
-           value.rsplit('@', 1)[1] == digest for value in repo_digests)
+  REUSED=false
+  RECORDED_IMAGE=''
+  if RECORDED_IMAGE="$(python3 - "$PROOF_DIR/oauth-image.json" "$SHA" "$BASE_REFERENCE" <<'PY'
+import json, pathlib, sys
+path, sha, base = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+value = json.loads(path.read_text())
+image = value.get('local_image_id')
+assert isinstance(image, str) and image.startswith('sha256:5511a358') and len(image) == 71
+assert value.get('release_sha') == sha
+assert value.get('base_reference') == base
+assert value.get('base_digest') == base.rsplit('@', 1)[1]
+assert value.get('base_layer_count') == 5
+assert value.get('base_layer_prefix_verified') is True
+print(image)
 PY
-  docker build --pull=false \
-    --iidfile "$PROOF_DIR/oauth-image.id" \
-    --file "$NEW_OAUTH/services/mcp-auth/Dockerfile" \
-    "$NEW_OAUTH/services/mcp-auth"
-  MCP_OAUTH_IMAGE="$(cat "$PROOF_DIR/oauth-image.id")"
+  )" && python3 - "$RECORDED_IMAGE" "$BASE_REFERENCE" <<'PY'
+import json, subprocess, sys
+image, base = sys.argv[1:]
+base_digest = base.rsplit('@', 1)[1]
+base_data = json.loads(subprocess.check_output(
+    ['docker', 'image', 'inspect', base], text=True))[0]
+image_data = json.loads(subprocess.check_output(
+    ['docker', 'image', 'inspect', image], text=True))[0]
+assert image_data['Id'] == image
+assert any(value.rsplit('@', 1)[-1] == base_digest
+           for value in base_data.get('RepoDigests', []))
+base_layers = base_data['RootFS']['Layers']
+image_layers = image_data['RootFS']['Layers']
+assert len(base_layers) == 5
+assert image_layers[:len(base_layers)] == base_layers
+PY
+  then
+    MCP_OAUTH_IMAGE="$RECORDED_IMAGE"
+    REUSED=true
+  else
+    IID_FILE="$PROOF_DIR/oauth-image.id"
+    umask 077
+    : >"$IID_FILE"
+    docker build --pull=false \
+      --iidfile "$IID_FILE" \
+      --file "$NEW_OAUTH/services/mcp-auth/Dockerfile" \
+      "$NEW_OAUTH/services/mcp-auth"
+    MCP_OAUTH_IMAGE="$(cat "$IID_FILE")"
+  fi
   [[ "$MCP_OAUTH_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]
   python3 - "$NEW_OAUTH" "$PROOF_DIR" "$SHA" "$MCP_OAUTH_IMAGE" \
-    "$BASE_REFERENCE" <<'PY'
+    "$BASE_REFERENCE" "$REUSED" <<'PY'
 import hashlib, json, pathlib, re, subprocess, sys
 release, proof = map(pathlib.Path, sys.argv[1:3])
-sha, image, base = sys.argv[3:]
+sha, image, base, reused = sys.argv[3:]
 service = release / 'services/mcp-auth'
 lines = (service / 'Dockerfile').read_text().splitlines()
 assert lines and lines[0] == 'FROM ' + base
@@ -774,17 +847,19 @@ base_layers = base_rootfs.get('Layers')
 image_layers = image_rootfs.get('Layers')
 assert isinstance(base_layers, list) and base_layers
 assert isinstance(image_layers, list)
+assert len(base_layers) == 5
 assert image_layers[:len(base_layers)] == base_layers
 assert json.loads((service / 'package.json').read_text())[
     'dependencies']['oidc-provider'] == '9.12.2'
 old = 'sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7'
 result = {
-    'release_sha': sha, 'local_image_id': image, 'built_image_id': image,
+    'release_sha': sha, 'local_image_id': image,
+    'built_image_id': None if reused == 'true' else image,
     'base_reference': base, 'base_digest': base_digest,
     'base_image_id': base_inspection['Id'],
     'base_layer_count': len(base_layers), 'base_layer_prefix_verified': True,
-    'fresh_build_completed': True,
-    'old_image_retained': True, 'fresh_build_matches_old_id': image == old,
+    'v4_image_reused': reused == 'true', 'fallback_build_completed': reused != 'true',
+    'old_image_retained': True, 'selected_image_matches_old_id': image == old,
     'dockerfile_sha256': hashlib.sha256((service / 'Dockerfile').read_bytes()).hexdigest(),
     'package_lock_sha256': hashlib.sha256((service / 'package-lock.json').read_bytes()).hexdigest(),
     'os': inspection['Os'], 'architecture': inspection['Architecture'],
@@ -797,7 +872,7 @@ PY
 )
 ```
 
-Use the resulting local `sha256:<image-id>` in Compose with `--pull never`. Validate it against the installed Compose version. Do not silently rebuild or substitute another ID after acceptance.
+Use the verified reused or fallback-built local `sha256:<image-id>` in Compose with `--pull never`. Validate it against the installed Compose version. Do not silently rebuild or substitute another ID after acceptance.
 
 ## Verify retained helper and migration results
 
@@ -809,7 +884,7 @@ The restore unit must execute:
 
 `/home/commonswarm/stack/current/deploy/supabase-stack/backup/restore-drill.py`
 
-The transition from `e38b499fc29a01935333e38f66c4e68ac7e1f81e` to `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, its unit synchronization and migration 03 are historical completed actions. The preceding read-only blocks must establish the active helper paths, successful service results, ledger `1`, catalog `t`, retained backup coverage and migration-04 absence. Do not stop timers, switch `stack/current`, insert a ledger row or execute the migration in v4.
+The transition from `e38b499fc29a01935333e38f66c4e68ac7e1f81e` to `ad964ed158181ba1692dd05895f36fa7a1f87d3f`, its unit synchronization and migration 03 are historical completed actions. The preceding read-only blocks must establish the active helper paths, successful service results, ledger `1`, catalog `t`, retained backup coverage and migration-04 absence. Do not stop timers, switch `stack/current`, insert a ledger row or execute the migration in v5.
 
 ### Effective privileges
 
@@ -902,18 +977,68 @@ Repeat the baseline default-ACL query into `hm6-default-acl-after.json`. Reconci
 
 Choose an unused port from `3490`–`3499` after inspecting live listeners. Record it as `MCP_OAUTH_HOST_PORT` in `window.env` and `oauth-port.txt`; recheck immediately before start.
 
-Reuse `/etc/commonswarm-oauth` only after the empty-directory gate. Generate **new** ES256/P-256 signing and cookie keys on the box:
+Reuse `/etc/commonswarm-oauth` only after the exact retained-file gate. Do not regenerate or rotate the v4 ES256/P-256 signing key, cookie keys or database credentials. `signing-keys.pem` remains a private JSON JWK set despite its filename, and the cookie file retains its current and prior newline-delimited keys. Any missing, additional or differently protected file is a stop.
 
-- Signing `kid`: `hm6-${WINDOW_PRINCIPAL_SUFFIX}`.
-- `signing-keys.pem` contains a private JSON JWK set despite its filename.
-- Cookie file contains the current key and a prior key, newline-delimited.
-- Create files exclusively; a pre-existing file is a stop.
-
-Anvil stores items **CommonSwarm OAuth signing keys ${WINDOW_PRINCIPAL_SUFFIX}**, **CommonSwarm OAuth cookie keys ${WINDOW_PRINCIPAL_SUFFIX}** and **CommonSwarm OAuth database credentials ${WINDOW_PRINCIPAL_SUFFIX}** in **Yulan Ventures Infra** with Anvil’s service-account method. For protected readback, Anvil reads each named item with Anvil’s service-account method into a separate mode-`0600` file inside the window’s private directory, then uses Anvil’s established secure file-transfer workflow to compare it with the corresponding box file without displaying contents. Record only item identities, public `kid` and verification outcomes.
+The v4 signing-key, cookie-key and database-credential items remain in **Yulan Ventures Infra**. Their exact field references are the three approved `OAUTH_*_OP_REFERENCE` values in the protected Mac window file; v5 does not infer their suffix. Protected readback uses Anvil's service-account authentication and `op read --out-file` only. No secret is staged in Anvil's home directory.
 
 Availability of a box-authenticated 1Password client is not established. Do not improvise authentication during the window.
 
-After migration, Anvil provisions the runtime role’s SCRAM password out of band, as required by `deploy/mcp-auth/RUNBOOK.md`. The protected `database-credentials` file contains only the `user` and `password` fields read by `config.js`. Passwords do not enter release SQL, shell arguments or environment variables.
+```sh
+# step: hm6-verify-vault-secret-readback
+# Runs: Mac mini, as Anvil, under /bin/bash 3.2; stages and removes every protected readback file.
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = 826db6a34f235064a3a03c57377d8e32a35d2f05
+  : "${OAUTH_SIGNING_OP_REFERENCE:?approved 1Password reference missing}"
+  : "${OAUTH_COOKIE_OP_REFERENCE:?approved 1Password reference missing}"
+  : "${OAUTH_DATABASE_OP_REFERENCE:?approved 1Password reference missing}"
+  : "${ORIGIN_CERT_OP_REFERENCE:?approved 1Password reference missing}"
+  : "${ORIGIN_KEY_OP_REFERENCE:?approved 1Password reference missing}"
+  for REFERENCE in "$OAUTH_SIGNING_OP_REFERENCE" "$OAUTH_COOKIE_OP_REFERENCE" \
+    "$OAUTH_DATABASE_OP_REFERENCE" "$ORIGIN_CERT_OP_REFERENCE" "$ORIGIN_KEY_OP_REFERENCE"; do
+    case "$REFERENCE" in 'op://Yulan Ventures Infra/'*) ;; *) false ;; esac
+  done
+  SECRET_STAGE="$(mktemp -d /private/tmp/commonswarm-hm6-secrets.XXXXXX)"
+  case "$SECRET_STAGE" in /private/tmp/commonswarm-hm6-secrets.*) ;; *) exit 1 ;; esac
+  test -d "$SECRET_STAGE"
+  test ! -L "$SECRET_STAGE"
+  chmod 0700 "$SECRET_STAGE"
+  cleanup_secret_stage() {
+    case "$SECRET_STAGE" in /private/tmp/commonswarm-hm6-secrets.*) ;; *) return 1 ;; esac
+    test -d "$SECRET_STAGE"
+    test ! -L "$SECRET_STAGE"
+    rm -rf -- "$SECRET_STAGE"
+  }
+  trap cleanup_secret_stage EXIT
+  trap 'exit 1' HUP INT TERM
+  umask 077
+  op read "$OAUTH_SIGNING_OP_REFERENCE" --out-file "$SECRET_STAGE/vault-signing"
+  op read "$OAUTH_COOKIE_OP_REFERENCE" --out-file "$SECRET_STAGE/vault-cookie"
+  op read "$OAUTH_DATABASE_OP_REFERENCE" --out-file "$SECRET_STAGE/vault-database"
+  op read "$ORIGIN_CERT_OP_REFERENCE" --out-file "$SECRET_STAGE/vault-origin-cert"
+  op read "$ORIGIN_KEY_OP_REFERENCE" --out-file "$SECRET_STAGE/vault-origin-key"
+  ssh ops@100.115.66.74 'sudo -n cat /etc/commonswarm-oauth/signing-keys.pem' \
+    >"$SECRET_STAGE/box-signing"
+  ssh ops@100.115.66.74 'sudo -n cat /etc/commonswarm-oauth/cookie-keys' \
+    >"$SECRET_STAGE/box-cookie"
+  ssh ops@100.115.66.74 'sudo -n cat /etc/commonswarm-oauth/database-credentials' \
+    >"$SECRET_STAGE/box-database"
+  ssh ops@100.115.66.74 'sudo -n cat /etc/caddy/certs/commonswarm.com.pem' \
+    >"$SECRET_STAGE/box-origin-cert"
+  ssh ops@100.115.66.74 'sudo -n cat /etc/caddy/certs/commonswarm.com.key' \
+    >"$SECRET_STAGE/box-origin-key"
+  chmod 0600 "$SECRET_STAGE"/*
+  for NAME in signing cookie database origin-cert origin-key; do
+    test -f "$SECRET_STAGE/vault-$NAME"
+    test -f "$SECRET_STAGE/box-$NAME"
+    cmp -s "$SECRET_STAGE/vault-$NAME" "$SECRET_STAGE/box-$NAME"
+  done
+  printf '%s\n' 'protected 1Password file readback and box identity: PASS'
+)
+```
+
+The runtime role's SCRAM password and protected `database-credentials` file are retained from v4. The file contains only the `user` and `password` fields read by `config.js`. V5 verifies protected readback and runtime authentication; it does not reset the production password. Passwords do not enter release SQL, shell arguments or environment variables.
 
 Require all three secret files to be regular non-symlink files, owned `root:986`, mode `0640`, mounted read only.
 
@@ -942,7 +1067,7 @@ Run Compose configuration validation without printing the resolved configuration
 
 ### Actual-image file-policy proof
 
-Run this only after the three real secret files and Compose input exist. The temporary directory and files are created and removed by this block; no secret content is printed or copied into evidence. The positive and negative controls run in the rebuilt image as UID/GID `996:986`.
+Run this only after the three real secret files and Compose input exist. The temporary directory and files are created and removed by this block; no secret content is printed or copied into evidence. The positive and negative controls run in the accepted image as UID/GID `996:986`.
 
 ```sh
 # step: hm6-prove-runtime-file-policy
@@ -1198,12 +1323,9 @@ evidence.write_text(json.dumps({
 PY
   CHANGED="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["changed"]).lower())' "$PROOF_DIR/gotrue-allow-list.json")"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" config -q
-  if [ "$CHANGED" = true ]; then
-    docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" \
-      up -d --no-deps gotrue
-  else
-    test "$CHANGED" = false
-  fi
+  test "$CHANGED" = true
+  docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" \
+    up -d --no-deps gotrue
   DEADLINE=$(( $(date +%s) + 180 ))
   until [ "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-gotrue)" = healthy ]; do
     test "$(date +%s)" -lt "$DEADLINE"
@@ -1227,7 +1349,7 @@ The 08:33Z operator report establishes:
 
 No new certificate is requested or authorized.
 
-Before DNS/Caddy activation, Anvil reads item **Cloudflare origin cert commonswarm.com** with Anvil’s service-account method into separate mode-`0600` certificate and key files inside the window’s private directory. Repeat read-only hostname, SAN, expiry, key-pair and protected-vault identity checks from those files. Record only public certificate metadata/fingerprint and pass/fail; never private key material. Verify Caddy can read the existing files.
+Before DNS/Caddy activation, `hm6-verify-vault-secret-readback` reads the **Cloudflare origin cert commonswarm.com** certificate and key with Anvil's service-account method into separate mode-`0600` files under its checked `/private/tmp` directory, compares them without displaying contents, and removes the directory on exit. Record only public certificate metadata/fingerprint and pass/fail; never private key material. Verify Caddy can read the existing files.
 
 ```sh
 # step: hm6-check-existing-certificate
@@ -1267,7 +1389,7 @@ Create **one** record:
 | Proxied | `true` |
 | TTL | Automatic |
 
-Use the active DNS Edit token from **Yulan Ventures Infra / Cloudflare DNS token commonswarm.com**. Before this step, Anvil reads item **Cloudflare DNS token commonswarm.com** with Anvil’s service-account method into a mode-`0600` file at a fixed path inside the window’s private directory. Anvil records only that path as `CF_DNS_TOKEN_FILE` in the protected Mac window file, never the token value.
+Use the active DNS Edit token from **Yulan Ventures Infra / Cloudflare DNS token commonswarm.com**. The protected Mac window file contains only its non-secret `CF_DNS_TOKEN_OP_REFERENCE`. This block reads the token with Anvil's service-account method into its own checked `/private/tmp` directory and removes that directory on success and every failure path.
 
 The token may reach curl **only through a mode-0600 curl configuration file**. Never put it in argv, a URL, environment variable, output or evidence. Do not print the 1Password item.
 
@@ -1280,17 +1402,29 @@ This step refuses any existing record for the hostname. On an interrupted same-w
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = 826db6a34f235064a3a03c57377d8e32a35d2f05
-  : "${CF_DNS_TOKEN_FILE:?DNS-token file path missing}"
-  test -e "$CF_DNS_TOKEN_FILE"
+  : "${CF_DNS_TOKEN_OP_REFERENCE:?DNS-token 1Password reference missing}"
+  case "$CF_DNS_TOKEN_OP_REFERENCE" in
+    'op://Yulan Ventures Infra/Cloudflare DNS token commonswarm.com/'*) ;;
+    *) false ;;
+  esac
   test ! -e "$EVIDENCE_DIR/oauth-dns-record.json"
-  DNS_TMP="$(mktemp -d /tmp/commonswarm-hm6-dns.XXXXXX)"
-  case "$DNS_TMP" in /tmp/commonswarm-hm6-dns.*) ;; *) exit 1 ;; esac
+  DNS_TMP="$(mktemp -d /private/tmp/commonswarm-hm6-dns.XXXXXX)"
+  case "$DNS_TMP" in /private/tmp/commonswarm-hm6-dns.*) ;; *) exit 1 ;; esac
   test -d "$DNS_TMP"
   test ! -L "$DNS_TMP"
   chmod 0700 "$DNS_TMP"
-  trap 'rm -f "$DNS_TMP/curl.conf"; rmdir "$DNS_TMP"' EXIT
+  cleanup_dns_stage() {
+    case "$DNS_TMP" in /private/tmp/commonswarm-hm6-dns.*) ;; *) return 1 ;; esac
+    test -d "$DNS_TMP"
+    test ! -L "$DNS_TMP"
+    rm -rf -- "$DNS_TMP"
+  }
+  trap cleanup_dns_stage EXIT
+  trap 'exit 1' HUP INT TERM
   umask 077
-  python3 - "$CF_DNS_TOKEN_FILE" "$DNS_TMP/curl.conf" <<'PY'
+  op read "$CF_DNS_TOKEN_OP_REFERENCE" --out-file "$DNS_TMP/dns-token"
+  chmod 0600 "$DNS_TMP/dns-token"
+  python3 - "$DNS_TMP/dns-token" "$DNS_TMP/curl.conf" <<'PY'
 import os, pathlib, re, stat, sys
 path = pathlib.Path(sys.argv[1])
 st = path.lstat()
@@ -1379,7 +1513,28 @@ Transfer only the safe receipt to the box proof directory. A create timeout can 
 
 ## Caddy activation
 
-Before installation, inventory imported files and confirm no conflicting hostname definition. Save a protected prior file or record prior absence. Record the single approved path under `/etc/caddy/sites/` as `MCP_CADDY_SITE` in box `window.env`.
+Before installation, inventory imported files and confirm no conflicting hostname definition. The window setup records the single approved path as `MCP_CADDY_SITE=/etc/caddy/sites/20-commonswarm-mcp.caddy`; each Caddy step checks that exact value before use.
+
+HezLead must provide the written confirmation reference recorded as `BIC_DECISION_REFERENCE` in `window.env`: Tom disabled Browser Integrity Check for `mcp.commonswarm.com` only. This precondition records the approved decision without reading or automating the Cloudflare dashboard.
+
+```sh
+# step: hm6-verify-bic-decision
+# Runs: box over SSH, as root, operated by Anvil; read-only Cloudflare decision precondition.
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
+  . "$PROOF_DIR/window.env"
+  test "$BIC_HOSTNAME_SCOPE" = mcp.commonswarm.com
+  case "$BIC_DECISION_REFERENCE" in ''|*'<'*|*'>'*) false ;; esac
+  {
+    printf 'decision=browser-integrity-check-disabled\n'
+    printf 'hostname_scope=%s\n' "$BIC_HOSTNAME_SCOPE"
+    printf 'written_confirmation_reference=%s\n' "$BIC_DECISION_REFERENCE"
+    printf 'dashboard_automation=none\n'
+  } >"$PROOF_DIR/bic-decision.txt"
+  chmod 0600 "$PROOF_DIR/bic-decision.txt"
+)
+```
 
 The source already imports `mcp_oauth_active`, leaves `mcp_resource_active` unimported and references the existing certificate/key. Substitute **only its five port placeholders**.
 
@@ -1390,6 +1545,7 @@ The source already imports `mcp_oauth_active`, leaves `mcp_resource_active` unim
   set -euo pipefail
   PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
   . "$PROOF_DIR/window.env"
+  test "$MCP_CADDY_SITE" = /etc/caddy/sites/20-commonswarm-mcp.caddy
   python3 - "$NEW_OAUTH" "$PROOF_DIR" "$MCP_OAUTH_HOST_PORT" <<'PY'
 from pathlib import Path
 import sys
@@ -1422,6 +1578,7 @@ HezLead reviews the diff. Preserve method restrictions, 128 KB POST ingress boun
   PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
   . "$PROOF_DIR/window.env"
   : "${MCP_CADDY_SITE:?approved site path missing}"
+  test "$MCP_CADDY_SITE" = /etc/caddy/sites/20-commonswarm-mcp.caddy
   case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) exit 1 ;; esac
   python3 - "$PROOF_DIR/oauth-dns-record.json" <<'PY'
 import json, sys
@@ -1432,15 +1589,9 @@ assert value['content'] == '178.105.29.28' and value['proxied'] is True
 PY
   openssl x509 -in /etc/caddy/certs/commonswarm.com.pem \
     -noout -checkhost mcp.commonswarm.com
-  if [ -e "$MCP_CADDY_SITE" ] || [ -L "$MCP_CADDY_SITE" ]; then
-    test -f "$MCP_CADDY_SITE"
-    test ! -L "$MCP_CADDY_SITE"
-    install -o root -g root -m 0600 "$MCP_CADDY_SITE" \
-      "$PROOF_DIR/caddy-site-before.caddy"
-    printf '%s\n' present >"$PROOF_DIR/caddy-site-before-state.txt"
-  else
-    printf '%s\n' absent >"$PROOF_DIR/caddy-site-before-state.txt"
-  fi
+  test ! -e "$MCP_CADDY_SITE"
+  test ! -L "$MCP_CADDY_SITE"
+  printf '%s\n' absent >"$PROOF_DIR/caddy-site-before-state.txt"
   install -o root -g root -m 0644 \
     "$PROOF_DIR/oauth-caddy-rendered.caddy" "$MCP_CADDY_SITE"
   python3 - "$MCP_CADDY_SITE" >"$PROOF_DIR/caddy-log-path.txt" <<'PY'
@@ -1489,15 +1640,7 @@ On validation or reload failure, immediately restore the saved prior file or abs
 
 ## Immediate non-browser gate and Cloudflare stop
 
-The 08:33Z report states:
-
-- Browser Integrity Check is **ON**.
-- Security Level is **medium**.
-- BIC already returns error `1010` to non-browser User-Agents on `edge-staging`.
-- Bot-management and WAF rule reads return `403` with available tokens.
-- Effective MCP security-rule configuration is **not established**.
-
-Do not assume the hostname-scoped bypass described by service documentation exists. This plan does not authorize creating it.
+V4 established that curl with the custom connector User-Agent passed while Python urllib's default User-Agent received Cloudflare `403` / error `1010` on every route. V5 may reach Caddy activation only after `hm6-verify-bic-decision` records HezLead's written confirmation that Tom disabled Browser Integrity Check for `mcp.commonswarm.com` only. The plan does not open or automate the dashboard and does not alter zone-wide security.
 
 **Immediately after DNS and Caddy activation**, run both:
 
@@ -1571,7 +1714,12 @@ def fetch(client, path, method):
         return response.code, response.headers.get('Content-Type', ''), response.read(131073)
 def validate(path, status, content_type, body, expected, error):
     assert status == expected
-    assert 'application/json' in content_type and len(body) <= 131072
+    media_type = content_type.split(';', 1)[0].strip().lower()
+    if path == '/jwks':
+        assert media_type in {'application/jwk-set+json', 'application/json'}
+    else:
+        assert media_type == 'application/json'
+    assert len(body) <= 131072
     document = json.loads(body)
     if error:
         assert document.get('error') == error
@@ -1621,9 +1769,9 @@ Transfer the safe result to the box proof directory even on failure. Record fact
 
 A redirect, HTML challenge, `1010`, 403, 413 or 502 is not the expected disabled JSON response.
 
-**If BIC or another Cloudflare control blocks either client, STOP.** HezLead owns coordination and Tom owns approval for the hostname-scoped security change; dashboard access is required because the current tokens cannot establish or modify the relevant rule state. Do not spoof a browser UA, disable proxying, use direct-origin success as public acceptance, change zone-wide security or continue to closure.
+**If BIC or another Cloudflare control blocks either client, STOP.** HezLead owns triage and Tom owns any further hostname-scoped security decision. Do not spoof a browser UA, disable proxying, use direct-origin success as public acceptance, change zone-wide security or continue to closure.
 
-After a separately approved security change, record the exact hostname scope and rule identity, then rerun both suites. Do not attribute every failure to BIC without evidence; transport, DNS, origin and application failures also stop acceptance.
+Do not attribute every failure to BIC without evidence; transport, DNS, origin and application failures also stop acceptance. V5 passes only when both unmodified suites pass.
 
 These tests establish current non-browser reachability and dark responses. They do not prove Claude interoperability.
 
@@ -1714,7 +1862,12 @@ for client in ('curl', 'urllib-default'):
                 content_type = response.headers.get('Content-Type', '')
                 body = response.read(131073)
         assert status == expected
-        assert 'application/json' in content_type and len(body) <= 131072
+        media_type = content_type.split(';', 1)[0].strip().lower()
+        if path == '/jwks':
+            assert media_type in {'application/jwk-set+json', 'application/json'}
+        else:
+            assert media_type == 'application/json'
+        assert len(body) <= 131072
         document = json.loads(body)
         if error_name: assert document.get('error') == error_name
         results.append({'client': client, 'path': path, 'method': method,
@@ -1731,7 +1884,7 @@ PY
 
 Do not claim live authorization, refresh or management flows while authorization is disabled. Use exact-SHA test evidence and isolated recovery acceptance for those contracts.
 
-The OAuth-inclusive post-apply backup is already complete. Do not start another backup in v4. Reconcile the retained artifact and prior timestamps read only.
+The OAuth-inclusive post-apply backup is already complete. Do not start another backup in v5. Reconcile the retained artifact and prior timestamps read only.
 
 ### Backup inclusion proof
 
@@ -1854,6 +2007,40 @@ Stop and remove the OAuth service, restore the prior Caddy site state, then dele
 
 Use state-aware rollback; a stage that never ran has nothing to undo.
 
+Immediately before the runbook's manifest-only copy-back on success or abort, reduce the already approved manifest to entries that actually exist. This reads only the preflight list; it does not scan the proof directory, invent paths or create missing success evidence.
+
+```sh
+# step: hm6-finalize-copy-back-list
+# Runs: box over SSH, as root, operated by Anvil, immediately before success or abort copy-back.
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05
+  . "$PROOF_DIR/window.env"
+  LIST="$PROOF_DIR/copy-back.list"
+  test -f "$LIST"
+  test "$(stat -c '%U:%G:%a' "$LIST")" = root:root:600
+  MANIFEST_TMP="$(mktemp "$PROOF_DIR/.copy-back.list.XXXXXX")"
+  case "$MANIFEST_TMP" in "$PROOF_DIR"/.copy-back.list.*) ;; *) exit 1 ;; esac
+  trap 'rm -f -- "$MANIFEST_TMP"' EXIT
+  chmod 0600 "$MANIFEST_TMP"
+  while IFS= read -r PATH_NAME; do
+    test -n "$PATH_NAME"
+    case "$PATH_NAME" in
+      /*|./*|../*|*/../*|*.log|*.err|database/logs/*|*/database/logs/*|window.env|*/window.env) false ;;
+    esac
+    if [ "$PATH_NAME" = copy-back.list ] || [ -f "$PROOF_DIR/$PATH_NAME" ]; then
+      printf '%s\n' "$PATH_NAME" >>"$MANIFEST_TMP"
+    fi
+  done <"$LIST"
+  grep -qFx copy-back.list "$MANIFEST_TMP"
+  test -z "$(LC_ALL=C sort "$MANIFEST_TMP" | uniq -d)"
+  chown root:root "$MANIFEST_TMP"
+  mv -f -- "$MANIFEST_TMP" "$LIST"
+  trap - EXIT
+  test "$(stat -c '%U:%G:%a' "$LIST")" = root:root:600
+)
+```
+
 Required order:
 
 1. Stop and remove the OAuth Compose service if started.
@@ -1929,12 +2116,12 @@ HezLead closes only after accepting:
 
 - Landed release/archive identity, all measured input hashes, plan/block review and exact-SHA gates.
 - Explicit dispositions for all four old leftovers.
-- Read-only reconciliation of the v3 stack/edge/OAuth releases and fresh-or-verified-reused v4 OAuth staging evidence.
+- Read-only reconciliation of the retained stack/edge/OAuth releases and verified-reused v4 OAuth image evidence.
 - Retained HM2 dependency and migration-03 ledger/catalog state.
 - Migration 03 ledger/catalog/functional/privilege results and empty cron deltas.
 - Migration 04 deferral and unchanged absence.
 - Retained OAuth-aware helper paths, unchanged unrelated services and active timers.
-- Protected new keys/items, runtime credential provisioning and verified in-container DNS/TLS.
+- Protected retained keys/items, runtime credential readback and verified in-container DNS/TLS.
 - Runtime isolation, loopback publication, health and restart acceptance.
 - Preserved GoTrue allowlist plus callback.
 - Existing certificate/key reuse with coverage and protected identity verification.
@@ -1955,16 +2142,13 @@ Report separately:
 
 A partial or blocked window must say which of those conditions is actually true. Public authorization, lanes 3/7/8 activation, site/CLI release and real-client interoperability remain outside this window.
 
-## Changes from v3
+## Changes from v4
 
-1. Changed the window from a retry to a continuation at landed `826db6a34f235064a3a03c57377d8e32a35d2f05` and recomputed every tree-measured hash that changed.
-2. Incorporated evidence commit `d073b8eb654b4d0de6d139621ee940efe98ff86e`: migration 03, the helper switch and the OAuth-inclusive backup are complete and retained; migration 04 remains deferred.
-3. Replaced completed mutation steps with read-only checks that stop if the active stack, ledger/catalog, privileges, timers, unit paths, prior releases/images or retained backup disagree.
-4. Removed every migration-03 apply path, repeat helper switch, repeat backup start and new edge/stack staging action from this continuation.
-5. Added fresh-or-verified-reuse creation of only the new-SHA OAuth release directory using the runbook's complete archive verifier.
-6. Required a new image build from the new SHA after pulling and validating the pinned base and proving its layers are the built image's prefix; both prior images are retained.
-7. Added an actual-image proof that the observed root-owned mode-`0644` CA is accepted while mode-`0644` signing, cookie and database-credential files are all refused.
-8. Kept runtime credential provisioning, database/TLS proof, dark HTTP start, GoTrue allow-list append, certificate check, DNS-before-Caddy order, public probes, restart and recovery acceptance.
-9. Added Caddy access-log path derivation from the exact installed site, confinement under `/var/log/caddy/`, `caddy:caddy` mode-`0600` creation/verification, validation as `caddy`, and post-validation ownership recheck.
-10. Retained the hard non-browser stop: HezLead owns triage and Tom owns any Cloudflare security approval.
-11. Made migration 03 retention the default rollback disposition. The reviewed rollback block may run only after HezLead explicitly chooses destructive schema rollback and all data/session/default-ACL gates pass.
+1. Starts from the measured rolled-back v4 state: migration 03, helpers, all release directories, both retained images and timers remain; the OAuth service/current symlink, Caddy site, DNS record and GoTrue callback are absent.
+2. Accepts `/jwks` only with media type `application/jwk-set+json` or `application/json`, including optional parameters; every other JSON route still requires `application/json`.
+3. Adds a read-only precondition that records HezLead's written confirmation that Tom disabled Browser Integrity Check for `mcp.commonswarm.com` only. The plan performs no dashboard automation, and both curl/custom-UA and urllib/default-UA suites retain the same hard STOP.
+4. Creates the root-owned mode-`0600` `copy-back.list` and its proof directory in the first box step.
+5. Records the approved `MCP_CADDY_SITE=/etc/caddy/sites/20-commonswarm-mcp.caddy` in `window.env` and checks that exact path before rendering or installation.
+6. Stages every Mac-side 1Password or DNS secret file only under a checked `mktemp -d /private/tmp/...` directory and removes only that directory from an `EXIT` trap on every exit path.
+7. Verifies and reuses the retained `sha256:5511a358…` image when its release identity, base digest and five-layer prefix pass; only a failed verification takes the pinned-base rebuild path.
+8. Preserves v4's runtime-policy, database/TLS, dark-start, GoTrue, DNS-before-Caddy, access-log, restart, recovery and state-aware rollback checks. Migration 03 remains retained unless HezLead explicitly approves the reviewed destructive rollback.
