@@ -86,6 +86,39 @@ async function creatorMembership(
   return row;
 }
 
+async function creatorMembershipRows(
+  tx: postgres.TransactionSql<Record<string, unknown>>,
+  creator: string,
+): Promise<Array<{
+  member: string;
+  grantor: string;
+  admin: boolean;
+  inherit: boolean;
+  set: boolean;
+}>> {
+  return tx<{
+    member: string;
+    grantor: string;
+    admin: boolean;
+    inherit: boolean;
+    set: boolean;
+  }[]>`
+    SELECT
+      member.rolname::text AS member,
+      grantor.rolname::text AS grantor,
+      membership.admin_option AS admin,
+      membership.inherit_option AS inherit,
+      membership.set_option AS set
+    FROM pg_auth_members AS membership
+    JOIN pg_roles AS parent ON parent.oid = membership.roleid
+    JOIN pg_roles AS member ON member.oid = membership.member
+    JOIN pg_roles AS grantor ON grantor.oid = membership.grantor
+    WHERE parent.rolname = 'commonswarm_oauth_runtime'
+      AND member.rolname = ${creator}
+    ORDER BY membership.grantor
+  `;
+}
+
 async function creatorSelfGrant(
   tx: postgres.TransactionSql<Record<string, unknown>>,
 ): Promise<string> {
@@ -394,10 +427,26 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       "set,inherit",
       "negative control creates the role with unsafe self-grant options enabled",
     );
+    const unsafeCreatorMemberships = [
+      {
+        member: migrationRole,
+        grantor: "postgres",
+        admin: true,
+        inherit: false,
+        set: false,
+      },
+      {
+        member: migrationRole,
+        grantor: migrationRole,
+        admin: false,
+        inherit: true,
+        set: true,
+      },
+    ];
     assert.deepEqual(
-      await creatorMembership(tx, migrationRole),
-      { count: 1, safe: false },
-      "negative control reaches the unsafe automatic creator membership",
+      await creatorMembershipRows(tx, migrationRole),
+      unsafeCreatorMemberships,
+      "negative control has the implicit admin grant and unsafe self-grant",
     );
     await assert.rejects(
       tx.savepoint(async (sp) => await sp.unsafe(migration)),
@@ -405,8 +454,8 @@ test("OAuth catalog is structural and all creator apply paths are safe", async (
       "an existing unsafe role is refused rather than repaired",
     );
     assert.deepEqual(
-      await creatorMembership(tx, migrationRole),
-      { count: 1, safe: false },
+      await creatorMembershipRows(tx, migrationRole),
+      unsafeCreatorMemberships,
       "the refused migration did not repair the existing membership",
     );
     await tx.unsafe("DROP ROLE commonswarm_oauth_runtime");
