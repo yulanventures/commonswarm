@@ -1,5 +1,6 @@
 # Runs one suite that cannot run on the Mac mini, for one ref, on demand only:
 # - suite server: the local-stack server suite (`npm run test:p1-server`);
+# - suite server-repeat: repeats one selected local-stack server test to measure its failure rate;
 # - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers;
 # - suite site: the site build, then `npm --prefix site test`, whose observer tests start a headless Chrome.
 #
@@ -12,7 +13,8 @@
 # - GitHub-hosted ubuntu-latest ONLY. It does not read the CI_RUNS_ON* repository variables the other workflows use,
 #   because those route to the self-hosted fleet on machines that cannot spare a Supabase stack's memory.
 # - No secrets. The local stack generates its own development keys.
-# - timeout-minutes 30; one run per landing SHA and suite; at most 20 dispatches a week in total (about $2.50).
+# - timeout-minutes 30; one dispatch per landing SHA and suite (server-repeat defaults to 50 targeted runs);
+#   at most 20 dispatches a week in total (about $2.50).
 # The ref input is used only as a checkout ref, never inside a run script; the suite input is a fixed choice.
 name: server suite (manual)
 
@@ -29,9 +31,25 @@ on:
         type: choice
         options:
           - server
+          - server-repeat
           - p1-cli
           - site
         default: server
+      repeat_file:
+        description: "Server test file to repeat"
+        required: false
+        type: string
+        default: tests/p1-server/command.test.ts
+      repeat_pattern:
+        description: "--test-name-pattern for the server test to repeat"
+        required: false
+        type: string
+        default: "§2.3 self-healing renewal keeps exactly one live successor per predecessor under concurrency"
+      repeat_count:
+        description: "Number of repeat iterations (1 to 200)"
+        required: false
+        type: string
+        default: "50"
 
 concurrency:
   group: server-suite-${{ inputs.suite }}-${{ inputs.ref }}
@@ -58,13 +76,27 @@ jobs:
         if: inputs.suite == 'server'
         with:
           deno-version: v2.x
+      - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2
+        if: inputs.suite == 'server-repeat'
+        with:
+          deno-version: v2.x
       - run: npm ci
       - uses: supabase/setup-cli@v1
         if: inputs.suite == 'server'
         with:
           version: 2.118.0
+      - uses: supabase/setup-cli@v1
+        if: inputs.suite == 'server-repeat'
+        with:
+          version: 2.118.0
       - name: Start the local stack
         if: inputs.suite == 'server'
+        # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
+        run: |
+          supabase start --ignore-health-check
+          npm run db:reset
+      - name: Start the local stack for server repeat
+        if: inputs.suite == 'server-repeat'
         # A fresh volume has no swarm_read schema until db reset runs, so PostgREST fails its first health check.
         run: |
           supabase start --ignore-health-check
@@ -74,6 +106,67 @@ jobs:
         run: |
           set -o pipefail
           npm run test:p1-server 2>&1 | tee server.log
+      - name: Repeat one server test
+        if: inputs.suite == 'server-repeat'
+        env:
+          REPEAT_FILE: ${{ inputs.repeat_file }}
+          REPEAT_PATTERN: ${{ inputs.repeat_pattern }}
+          REPEAT_COUNT: ${{ inputs.repeat_count }}
+        run: |
+          set -o pipefail
+          if [[ ! "$REPEAT_COUNT" =~ ^([1-9]|[1-9][0-9]|1[0-9]{2}|200)$ ]]; then
+            echo "repeat_count must be an integer from 1 to 200" >&2
+            exit 2
+          fi
+          resolved_tests_dir="$(realpath tests/p1-server)" || exit 2
+          resolved_repeat_file="$(realpath "$REPEAT_FILE")" || {
+            echo "repeat_file must be an existing .test.ts file under tests/p1-server/" >&2
+            exit 2
+          }
+          if [[ -L "$REPEAT_FILE" || ! -f "$resolved_repeat_file" || -L "$resolved_repeat_file" || "$resolved_repeat_file" != "$resolved_tests_dir/"*.test.ts ]]; then
+            echo "repeat_file must be an existing .test.ts file under tests/p1-server/" >&2
+            exit 2
+          fi
+          REPEAT_FILE="$resolved_repeat_file"
+          npm run build:command-core || exit 1
+          pass=0
+          fail=0
+          no_tests=0
+          : > server-repeat.log
+          for iteration in $(seq 1 "$REPEAT_COUNT"); do
+            iteration_log="$RUNNER_TEMP/server-repeat-${iteration}.log"
+            if [ -n "$REPEAT_PATTERN" ]; then
+              node_command=(node --import tsx --test --test-concurrency=1 --test-name-pattern "$REPEAT_PATTERN" "$REPEAT_FILE")
+            else
+              node_command=(node --import tsx --test --test-concurrency=1 "$REPEAT_FILE")
+            fi
+            runner_status=0
+            "${node_command[@]}" >"$iteration_log" 2>&1 || runner_status=$?
+            test_count="$(sed -nE 's/^(#|ℹ) tests ([0-9]+)$/\2/p' "$iteration_log" | tail -n 1)"
+            if [ "$runner_status" -eq 0 ] && [ -n "$test_count" ] && [ "$test_count" -gt 0 ]; then
+              pass=$((pass + 1))
+            else
+              fail=$((fail + 1))
+              failure_reason=""
+              if [ -z "$test_count" ] || [ "$test_count" -eq 0 ]; then
+                no_tests=$((no_tests + 1))
+                failure_reason="REPEAT failure reason=no-tests-run"
+              fi
+              {
+                echo "REPEAT failure iteration=$iteration"
+                if [ -n "$failure_reason" ]; then
+                  echo "$failure_reason"
+                fi
+                sed -n '1,40p' "$iteration_log"
+              } | tee -a server-repeat.log
+            fi
+            cat "$iteration_log" >> server-repeat.log
+          done
+          total=$((pass + fail))
+          echo "REPEAT pass=$pass fail=$fail no-tests=$no_tests total=$total" | tee -a server-repeat.log
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
       - name: MCP auth suite
         if: ${{ !cancelled() && inputs.suite == 'server' }}
         run: |
