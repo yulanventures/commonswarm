@@ -106,19 +106,22 @@ test("HM5 OAuth Compose fixes the box resource and secret-file boundaries", asyn
   assert.match(compose, /MCP_OAUTH_SIGNING_KEYS_FILE: \/run\/commonswarm-oauth\/signing-keys\.pem/);
   assert.match(compose, /MCP_OAUTH_COOKIE_KEYS_FILE: \/run\/commonswarm-oauth\/cookie-keys/);
   assert.match(compose, /MCP_OAUTH_DATABASE_CREDENTIALS_FILE: \/run\/commonswarm-oauth\/database-credentials/);
-  assert.match(compose, /MCP_OAUTH_DATABASE_TLS_CA_FILE: \/run\/commonswarm-oauth\/yulan-internal-ca\.pem/);
+  assert.match(compose, /MCP_OAUTH_DATABASE_TLS_CA_FILE: \/etc\/ssl\/yulan-internal-ca\.pem/);
 
   for (const file of [
     "signing-keys.pem",
     "cookie-keys",
     "database-credentials",
-    "yulan-internal-ca.pem",
   ]) {
     assert.match(
       compose,
       new RegExp(`source: /etc/commonswarm-oauth/${file.replace(".", "\\.")}[\\s\\S]*?read_only: true`),
     );
   }
+  assert.match(
+    compose,
+    /source: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?target: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?read_only: true/,
+  );
 });
 
 test("HM5 OAuth env example contains names but no values", async () => {
@@ -135,7 +138,7 @@ test("HM5 OAuth env example contains names but no values", async () => {
   );
 });
 
-test("HM5 Caddy and release documents preserve the dark deployment contract", async () => {
+test("HM6 Caddy activates OAuth only and preserves the dark MCP resource contract", async () => {
   const [caddy, release, runbook, verification, stackEnv] = await Promise.all([
     source("deploy/supabase-stack/commonswarm-mcp.caddy"),
     source("deploy/RELEASE-TO-BOX.md"),
@@ -149,10 +152,16 @@ test("HM5 Caddy and release documents preserve the dark deployment contract", as
   assert.match(caddy, /\(mcp_resource_active\)[\s\S]*?method GET HEAD[\s\S]*?functions\/v1\/mcp\/\.well-known\/oauth-protected-resource\/mcp/);
   assert.match(caddy, /\(mcp_oauth_active\)[\s\S]*?reverse_proxy 127\.0\.0\.1:\{\$MCP_OAUTH_HOST_PORT\}/);
   assert.match(caddy, /@mcp_unavailable path \/mcp \/\.well-known\/oauth-protected-resource\/mcp\n\s+handle @mcp_unavailable \{[\s\S]*?feature_disabled[\s\S]*?503/);
-  assert.match(caddy, /@oauth_unavailable[\s\S]*?feature_disabled[\s\S]*?503/);
   const activeSite = caddy.slice(caddy.indexOf("mcp.commonswarm.com {"));
-  assert.doesNotMatch(activeSite, /import mcp_(?:resource|oauth)_active/);
-  assert.doesNotMatch(activeSite, /method (?:POST|GET|HEAD)/);
+  assert.equal((activeSite.match(/import mcp_oauth_active/g) ?? []).length, 1);
+  assert.doesNotMatch(activeSite, /import mcp_resource_active/);
+  assert.doesNotMatch(activeSite, /hosted_mcp_oauth/);
+  assert.match(caddy, /@oauth_health \{\s*method GET HEAD\s*path \/health/);
+  assert.match(caddy, /@oauth_metadata \{\s*method GET HEAD\s*path \/\.well-known\/oauth-authorization-server \/\.well-known\/openid-configuration \/jwks/);
+  assert.match(caddy, /@oauth_authorize \{\s*method GET HEAD\s*path \/authorize/);
+  assert.match(caddy, /@oauth_post \{\s*method POST\s*path \/token \/interaction\/\*/);
+  assert.match(caddy, /@oauth_browser_get \{\s*method GET HEAD\s*path \/interaction\/\* \/oauth\/callback\/gotrue/);
+  assert.doesNotMatch(caddy, /\/connections(?:\/|\s)/);
 
   const releasePlaceholder =
     "OAuth service release: written with HM lane 6's box plan, when the service exists.";
@@ -182,4 +191,88 @@ test("HM5 Caddy and release documents preserve the dark deployment contract", as
     stackEnv,
     /^GOTRUE_URI_ALLOW_LIST=https:\/\/commonswarm\.com\/app,https:\/\/www\.commonswarm\.com\/app,http:\/\/127\.0\.0\.1:\*\/callback,https:\/\/mcp\.commonswarm\.com\/oauth\/callback\/gotrue$/m,
   );
+});
+
+test("nightly backup and restore paths include the OAuth schema", async () => {
+  const oauthSchema = "commonswarm_oauth";
+  const paths = {
+    lib: "deploy/supabase-stack/migrate/lib.sh",
+    dump: "deploy/supabase-stack/migrate/dump-source.sh",
+    dumpDatabase: "deploy/supabase-stack/backup/dump-database.sh",
+    runBackup: "deploy/supabase-stack/backup/run-backup.sh",
+    upload: "deploy/supabase-stack/backup/upload-snapshot.py",
+    restore: "deploy/supabase-stack/migrate/restore-target.sh",
+    restoreDrill: "deploy/supabase-stack/backup/restore-drill.py",
+    testH0Upgrade: "deploy/supabase-stack/migrate/test-h0-upgrade.py",
+    verify: "deploy/supabase-stack/migrate/verify-counts.sh",
+    verifyPostUpgrade: "deploy/supabase-stack/migrate/verify-post-upgrade-counts.sh",
+  } as const;
+  const sources = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([name, path]) => [
+    name,
+    await source(path),
+  ]))) as Record<keyof typeof paths, string>;
+
+  function audit(values: typeof sources): string[] {
+    const errors: string[] = [];
+    const requireList = (name: string, value: string, pattern: RegExp) => {
+      const list = pattern.exec(value)?.[1];
+      if (!list) errors.push(`${name} schema list is missing`);
+      else {
+        const names: string[] = list.match(/[a-z][a-z0-9_]*/g) ?? [];
+        if (!names.includes(oauthSchema)) {
+          errors.push(`${name} lacks ${oauthSchema}`);
+        }
+      }
+    };
+    requireList("canonical selected schemas", values.lib,
+      /selected_schema_csv\(\) \{\s*printf '%s' "([^"]+)"/);
+    requireList("pg_dump schemas", values.dump, /^schemas=\(([^)]+)\)$/m);
+    requireList("dump table counts", values.dump,
+      /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
+    requireList("restore table-count verification", values.verify,
+      /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
+    requireList("post-upgrade table-count verification", values.verifyPostUpgrade,
+      /FROM pg_tables\s+WHERE schemaname = ANY \(string_to_array\('([^']+)'/);
+    requireList("H0 restore-verification fixture", values.testH0Upgrade,
+      /FROM pg_tables WHERE schemaname IN \(([^)]+)\)/);
+    requireList("offsite backup manifest validation", values.upload,
+      /REQUIRED_DATABASE_SCHEMAS = frozenset\(\{([\s\S]*?)\}\)/);
+    requireList("restore-drill manifest validation", values.restoreDrill,
+      /REQUIRED_DATABASE_SCHEMAS = frozenset\(\{([\s\S]*?)\}\)/);
+
+    if (!values.dumpDatabase.includes('bash "$stack_dir/migrate/dump-source.sh" backup')) {
+      errors.push("nightly database dump does not use dump-source.sh");
+    }
+    if (!values.runBackup.includes('bash "$stack_dir/backup/dump-database.sh" "$artifact"')) {
+      errors.push("nightly backup does not use dump-database.sh");
+    }
+    if (!values.upload.includes("validate_manifest((artifact / 'manifest.txt').read_text())")) {
+      errors.push("offsite upload does not validate the schema manifest");
+    }
+    if (!values.restore.includes('expected_schemas="$(selected_schema_csv)"') ||
+        !values.restore.includes('"$manifest_schemas" != "$expected_schemas"')) {
+      errors.push("restore does not require the canonical schema manifest");
+    }
+    if (!values.restoreDrill.includes("validate_manifest((artifact / 'manifest.txt').read_text())") ||
+        !values.restoreDrill.includes("'commonswarm_oauth.provider_artifacts'")) {
+      errors.push("restore drill does not validate OAuth schema coverage");
+    }
+    if (!values.restoreDrill.includes(
+      "'restore-target.sh', 'prepare-target.sh', 'restore-cron-jobs.sh', 'verify-counts.sh'",
+    )) {
+      errors.push("restore drill no longer runs the schema restore and verification scripts");
+    }
+    return errors;
+  }
+
+  assert.deepEqual(audit(sources), []);
+
+  // Positive controls: each independently maintained schema list must fail
+  // the same audit when its OAuth entry is removed.
+  for (const name of [
+    "lib", "dump", "verify", "verifyPostUpgrade", "testH0Upgrade", "upload", "restoreDrill",
+  ] as const) {
+    const mutated = { ...sources, [name]: sources[name].replace(oauthSchema, "removed_oauth_schema") };
+    assert.match(audit(mutated).join("\n"), new RegExp(`lacks ${oauthSchema}`), name);
+  }
 });
