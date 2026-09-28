@@ -198,7 +198,7 @@ The MCP worker allowlist excludes the service-role key and OAuth-service credent
 
 These SHA-256 values were recomputed from the inspected release tree. They identify repository inputs, not deployed files.
 
-The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, control harness, live configuration and generated evidence is **not established**. Measure those during approved preparation. The HM37 document hash below identifies the v3 document in the `eb2a87ac` release tree, not this replacement.
+The hash of the **replacement document**, release archive, rendered/live Caddy files, box-only override, installed executable, live configuration and generated evidence is **not established**. Measure those during approved preparation. Section 9 establishes the reviewed control-harness and Deno-config hashes. The HM37 document hash below identifies the v3 document in the `eb2a87ac` release tree, not this replacement.
 
 ### Release and source inputs
 
@@ -903,9 +903,233 @@ During section 9, send well-shaped unauthenticated public open/ACK requests usin
 
 ## 9. Hosted open/ACK control
 
-**A reviewed production-window executable harness is not established in this tree. This remains an opening gate.**
+The executable control is
+`deploy/release-proofs/item-hm/hm37-open-ack-control.ts`, with Deno import map
+`deploy/release-proofs/item-hm/hm37-open-ack-deno.json`. The committed harness
+SHA-256 is `3a42eff50c8d99fe8d49a7011ae3a6250e3d4658b3f089e8db4c2e03ba73f90c`; the import-map SHA-256 is
+`f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b`. Anvil recomputes both from the accepted
+commit before staging and records the accepted commit, hashes and independent
+review in `hm37-hosted-control-inputs.txt`. A mismatch stops before migration
+or edge mutation.
 
-Before migration or edge mutation, CSwarmDevLead must supply its exact artifact, checksum, invocation, runtime, protected-input procedure and cleanup procedure for HezLead’s acceptance.
+The harness runs with `/usr/local/bin/deno` on the box, not with
+`/usr/local/bin/edge-runtime` in the edge container. The pinned edge image
+contains the embedded edge-runtime server binary but no standalone Deno CLI;
+the box Deno runs against the exact release tree while receiving the same edge
+environment. Before approval, Anvil proves that `/usr/local/bin/deno` is a
+regular root-owned executable, records its `deno --version`, and pre-caches the
+pinned npm graph into the control directory. No dependency install or network
+fetch is allowed after this opening gate. The harness does not edit the release
+tree.
+
+Protected inputs are exactly:
+
+- `human-session.json`, a regular mode-`0600` file containing only
+  `{"access_token":"..."}`. Tom runs a fresh `cswarm login`; the Mac-side
+  preparation below refreshes that same stored human session through the
+  released credential code and writes the short-lived access JWT without
+  printing it. The harness independently calls GoTrue `getUser` and verifies
+  JWT claims through Supabase `getClaims`; it derives `identityVerified` from
+  the confirmed user and never accepts that field from input.
+- `oauth-database.json`, a regular mode-`0600` file containing exactly
+  `host`, `port`, `database`, `user`, `password` and `ssl_ca`. Anvil builds it
+  on the box from the already-reviewed OAuth service database credential,
+  service configuration and internal CA. It is the least-privilege
+  `commonswarm_oauth_runtime` login, not a service-role key.
+- The command database URL, Supabase URL, anon key and database CA come only
+  from the existing edge environment `/home/commonswarm/.env`. They are never
+  placed in argv, output or evidence. The service-role key is neither required
+  nor read by this control.
+
+Prepare Tom's protected session on the Mac mini immediately before secure
+transfer. This uses the same current target and human credential store as the
+HM2 controls; it rotates the refresh credential under the store lock and keeps
+the access token only in the private file.
+
+```sh
+# step: hm37-hosted-human-session-input
+# Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
+(
+  set -euo pipefail
+  umask 077
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  INPUT_ROOT="$HOME/.config/cswarm/box-hm37-20260928"
+  mkdir -m 0700 "$INPUT_ROOT"
+  test ! -e "$INPUT_ROOT/human-session.json"
+  cat >"$INPUT_ROOT/write-human-session.ts" <<'TS'
+import { open } from "node:fs/promises";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+const output = process.argv[2];
+const root = process.argv[3];
+if (!output || !root) throw new Error("output and checkout paths required");
+const moduleUrl = (path) => pathToFileURL(resolve(root, path)).href;
+const { readCurrentTarget } = await import(moduleUrl("src/cloud/current-target.ts"));
+const { refreshedCredential } = await import(moduleUrl("src/cloud/auth.ts"));
+const { credentialStore } = await import(moduleUrl("src/cloud/storage.ts"));
+const target = await readCurrentTarget();
+if (!target || target.url !== "https://api.commonswarm.com") {
+  throw new Error("current CommonSwarm target is not production");
+}
+const store = await credentialStore({ target });
+const session = await refreshedCredential(target, store);
+const file = await open(output, "wx", 0o600);
+try {
+  await file.writeFile(JSON.stringify({ access_token: session.accessToken }) + "\n");
+  await file.sync();
+  await file.chmod(0o600);
+} finally {
+  await file.close();
+}
+TS
+  node --import tsx "$INPUT_ROOT/write-human-session.ts" \
+    "$INPUT_ROOT/human-session.json" "$PWD"
+  test "$(stat -f %Lp "$INPUT_ROOT/human-session.json")" = 600
+  rm "$INPUT_ROOT/write-human-session.ts"
+  printf 'protected human session prepared; transfer through the approved secure file path\n'
+)
+```
+
+Stage the reviewed files beside the immutable release, build the second
+protected input without printing it, and pre-cache dependencies before the
+opening gate closes. `CONTROL_ROOT` is window state, not a release directory
+and not copied as evidence.
+
+```sh
+# step: hm37-hosted-control-stage
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
+(
+  set -euo pipefail
+  umask 077
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
+  HARNESS="$CONTROL_ROOT/hm37-open-ack-control.ts"
+  DENO_CONFIG="$CONTROL_ROOT/hm37-open-ack-deno.json"
+  test "$(cat "$RELEASE_ROOT/RELEASE_SHA")" = "$SHA"
+  test -f /usr/local/bin/deno
+  test ! -L /usr/local/bin/deno
+  test -x /usr/local/bin/deno
+  test "$(stat -c %U /usr/local/bin/deno)" = root
+  test ! -e "$CONTROL_ROOT"
+  install -d -m 0700 "$CONTROL_ROOT" "$CONTROL_ROOT/journal" "$CONTROL_ROOT/deno-cache"
+  install -m 0600 /run/commonswarm-hm37/hm37-open-ack-control.ts "$HARNESS"
+  install -m 0600 /run/commonswarm-hm37/hm37-open-ack-deno.json "$DENO_CONFIG"
+  install -m 0600 /run/commonswarm-hm37/human-session.json "$CONTROL_ROOT/human-session.json"
+  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = 3a42eff50c8d99fe8d49a7011ae3a6250e3d4658b3f089e8db4c2e03ba73f90c
+  test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
+  python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
+import json, os, pathlib, sys
+out = pathlib.Path(sys.argv[1])
+credentials = json.loads(pathlib.Path(
+    "/etc/commonswarm-oauth/database-credentials").read_text())
+service = {}
+for line in pathlib.Path("/etc/commonswarm-oauth/service.env").read_text().splitlines():
+    if line and not line.lstrip().startswith("#") and "=" in line:
+        key, value = line.split("=", 1)
+        service[key] = value
+document = {
+    "host": service["MCP_OAUTH_DATABASE_HOST"],
+    "port": int(service.get("MCP_OAUTH_DATABASE_PORT", "5432")),
+    "database": service["MCP_OAUTH_DATABASE_NAME"],
+    "user": credentials["user"],
+    "password": credentials["password"],
+    "ssl_ca": pathlib.Path("/etc/ssl/yulan-internal-ca.pem").read_text(),
+}
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as handle:
+    json.dump(document, handle, separators=(",", ":"))
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+PY
+  test "$(stat -c %a "$CONTROL_ROOT/human-session.json")" = 600
+  test "$(stat -c %a "$CONTROL_ROOT/oauth-database.json")" = 600
+  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
+    --config "$DENO_CONFIG" "$HARNESS" \
+    "$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js" \
+    "$RELEASE_ROOT/supabase/functions/command/index.ts" \
+    "$RELEASE_ROOT/supabase/functions/_shared/hosted-seat-auth.ts" \
+    "$RELEASE_ROOT/supabase/functions/_shared/database-options.ts"
+  /usr/local/bin/deno --version >"$CONTROL_ROOT/deno-version.txt"
+  chmod 0600 "$CONTROL_ROOT/deno-version.txt"
+)
+```
+
+Run only after the migration and edge gates that section 9 observes are live.
+The suffix comes from the existing root-owned window file. Sourcing the edge
+environment exports secrets only to the Deno process; the command line remains
+secret-free. The one stdout document is safe evidence. The private journal is
+never copied.
+
+```sh
+# step: hm37-hosted-open-ack-control
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
+(
+  set -euo pipefail
+  umask 077
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  case "$WINDOW_PRINCIPAL_SUFFIX" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) false ;;
+  esac
+  set -a
+  . /home/commonswarm/.env
+  set +a
+  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+    --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
+    --allow-env --allow-net \
+    --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
+    --allow-write="$CONTROL_ROOT/journal" \
+    "$CONTROL_ROOT/hm37-open-ack-control.ts" \
+    --release-root "$RELEASE_ROOT" \
+    --journal-dir "$CONTROL_ROOT/journal" \
+    --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 \
+    --human-session-file "$CONTROL_ROOT/human-session.json" \
+    --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
+    >"$PROOF_DIR/hm37-hosted-check-control.json"
+  chmod 0600 "$PROOF_DIR/hm37-hosted-check-control.json"
+)
+```
+
+If the shell is lost, rerun cleanup from the recorded private journal. This is
+idempotent and still verifies complete revocation before returning zero.
+
+```sh
+# step: hm37-hosted-control-cleanup-only
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
+(
+  set -euo pipefail
+  umask 077
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  JOURNAL="$CONTROL_ROOT/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json"
+  test "$(stat -c %a "$JOURNAL")" = 600
+  set -a
+  . /home/commonswarm/.env
+  set +a
+  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+    --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
+    --allow-env --allow-net \
+    --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
+    --allow-write="$CONTROL_ROOT/journal" \
+    "$CONTROL_ROOT/hm37-open-ack-control.ts" \
+    --release-root "$RELEASE_ROOT" \
+    --human-session-file "$CONTROL_ROOT/human-session.json" \
+    --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
+    --cleanup-only "$JOURNAL" \
+    >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+  chmod 0600 "$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+)
+```
 
 `tests/p1-server/hosted-check.test.ts` supplies useful call shapes, but its setup inserts authority rows directly, creates two hosted seats and uses an always-active provider-status callback. It is not this window’s production fixture.
 
@@ -1211,6 +1435,7 @@ Public MCP activation, every Caddy or access-log change, and real Claude-client 
 4. Recomputed every listed SHA-256 from the `eb2a87ac` tree. The release runbook, HM37 v3 input, HM6 plan and two affected test-source hashes changed; every other listed digest remained the same.
 5. Updated the runbook contract for its fifth manifest switch, `MCP_CADDY_RELEASE=no`. The current Caddy paths pre-create or repair derived access logs before validation, but this window runs neither Caddy path and changes no Caddy file or log.
 6. Kept migration 04 as the only permitted pending migration, preserved the complete edge switch/rollback and evidence contracts, and left all previously reviewed feature scope unchanged.
+7. Established the reviewed hosted open/ACK harness, its portable Deno import map, exact hashes, protected-input preparation, box invocation and cleanup-only recovery path.
 
 ## Historical changes from the 79f70b7d draft to v3
 
@@ -1224,5 +1449,5 @@ Public MCP activation, every Caddy or access-log change, and real Claude-client 
 8. Retained the complete forward and rollback edge steps, each saving the outgoing container's bounded mode-0600 log before any symlink change or recreate.
 9. Kept site deployment, server-repeat execution, HM6 retry and all public activation outside this window; source or workflow presence is not passing evidence.
 10. Required Anvil's non-interactive service-account, file-based 1Password method and retained all no-secret-output rules.
-11. Preserved the unresolved reviewed hosted-control harness opening gate, one suffix-named hosted seat, genuine capability/provider checks, cleanup and zero-token requirements.
+11. Recorded the then-unresolved hosted-control harness gate, one suffix-named hosted seat, genuine capability/provider checks, cleanup and zero-token requirements; section 9 of this revision resolves the artifact and invocation portion of that gate.
 12. Preserved DARK probes, false-without-error migration gating, immediate functional proof, local credential validation, local/stdio controls, edge-first rollback and the verbatim guarded SQL inverse.
