@@ -110,6 +110,7 @@ test("item K registry and credential checks use fixture homes and leave their en
     for (const [file, pattern] of [
       ["agent-onboarding.test.ts", "standalone checks drain tied timestamps"],
       ["mcp-connect.test.ts", "connect saves an unbound private profile"],
+      ["signal-attachments.test.ts", "note --attach parses repeatably"],
     ]) {
       const run = spawnSync(process.execPath, ["--require", resolve("tests/p1-cli/item-k-home-spy.cjs"),
         "--import", "tsx", "--test", `--test-name-pattern=${pattern}`,
@@ -125,7 +126,7 @@ test("item K registry and credential checks use fixture homes and leave their en
       .map(line => JSON.parse(line) as { path: string; stack: string });
     const builders = calls.filter(call => /agent-profile|agent-credential/.test(call.stack));
     assert.ok(builders.some(call => call.stack.includes("agent-profile")), "registry path builder was observed");
-    // The check fixture sets SWARM_AGENT_STATE_DIR, so its credential builder does not call homedir().
+    // The check fixture sets SWARM_AGENT_STATE_DIR, while the attachment CLI receives its own fixture HOME.
     assert.ok(builders.every(call => call.path !== home && call.path !== userInfo().homedir),
       "a builder reached the enclosing or real home");
     assert.ok(builders.every(call => call.path.startsWith(join(tmpdir(), "cswarm-") ) || call.path.startsWith(join(tmpdir(), "lane-home-"))),
