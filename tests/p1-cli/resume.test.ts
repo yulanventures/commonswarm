@@ -783,6 +783,53 @@ function signal(id = NEW_SIGNAL): Record<string, unknown> {
   };
 }
 
+function attendedCanarySignal(): Record<string, unknown> {
+  return {
+    ...signal(),
+    from: PRINCIPAL,
+    body: "CommonSwarm attended-seat canary. Run cswarm check in this session; no reply is needed.",
+  };
+}
+
+function acceptNotifyCommand(request: IncomingMessage, response: ServerResponse): boolean {
+  if (request.url !== "/functions/v1/command") return false;
+  let raw = "";
+  request.on("data", chunk => raw += String(chunk));
+  request.on("end", () => {
+    const body = JSON.parse(raw) as { command?: { kind?: string } };
+    response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(
+      body.command?.kind === "post_signal"
+        ? { ok: true, status: "accepted", event_ids: [], events: [], signal: attendedCanarySignal() }
+        : { ok: true, status: "accepted", event_ids: [], generation: 1 },
+    ));
+  });
+  return true;
+}
+
+async function stdoutProbeFixture(root: string): Promise<{
+  env: Record<string, string>;
+  markOrphaned(): Promise<void>;
+}> {
+  if (process.platform === "darwin") return { env: {}, async markOrphaned() {} };
+  const bin = join(root, "bin");
+  const marker = join(root, "stdout-reader-closed");
+  await mkdir(bin, { recursive: true });
+  await writeFile(join(bin, "lsof"), `#!/bin/sh
+if [ -f "$CSWARM_TEST_STDOUT_ORPHAN_MARKER" ]; then
+  printf 'p%s\\nf1\\ntunix\\nn->(none)\\n' "$$"
+else
+  printf 'p%s\\nf1\\ntunix\\nn->fixture-reader\\n' "$$"
+fi
+`, { mode: 0o755 });
+  return {
+    env: {
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      CSWARM_TEST_STDOUT_ORPHAN_MARKER: marker,
+    },
+    async markOrphaned() { await writeFile(marker, "closed\n"); },
+  };
+}
+
 function refuseResumeCommand(request: IncomingMessage, response: ServerResponse,
   requests: Array<{ path: string; resource: unknown }>): boolean {
   if (request.url !== "/functions/v1/command") return false;
@@ -1021,12 +1068,7 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
   const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
   let requests = 0;
   const server = createServer((request, response) => {
-    if (request.url === "/functions/v1/command") {
-      request.resume();
-      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
-      return;
-    }
+    if (acceptNotifyCommand(request, response)) return;
     request.resume();
     request.on("end", () => {
       requests += 1;
@@ -1040,9 +1082,10 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
   let child: ChildProcess | undefined;
   try {
     const credential = await writeCredential(root);
+    const stdoutProbe = await stdoutProbeFixture(root);
     child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
       "--url", url, "--anon-key", "anon-idle", "--workspace-id", WORKSPACE], root, xdg,
-    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300" });
+    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
     let stderr = "";
     let stdout = "";
     child.stderr!.setEncoding("utf8");
@@ -1051,6 +1094,7 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
     child.stdout!.on("data", (chunk: string) => stdout += chunk);
     const exit = waitForExit(child, () => stderr, 3_000);
     await read;
+    await stdoutProbe.markOrphaned();
     child.stdout!.destroy();
     assert.equal(await exit, EXIT_NOTIFY_ORPHANED, stderr);
     assert.ok(requests >= 1);
@@ -1070,12 +1114,7 @@ test("a failed read still checks the stdout reader during retry backoff", { time
   const read = new Promise<void>((resolveRead) => { firstRead = resolveRead; });
   let requests = 0;
   const server = createServer((request, response) => {
-    if (request.url === "/functions/v1/command") {
-      request.resume();
-      request.on("end", () => response.writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ ok: true, status: "accepted", event_ids: [], generation: 1 })));
-      return;
-    }
+    if (acceptNotifyCommand(request, response)) return;
     request.resume();
     request.on("end", () => {
       requests += 1;
@@ -1087,9 +1126,10 @@ test("a failed read still checks the stdout reader during retry backoff", { time
   let child: ChildProcess | undefined;
   try {
     const credential = await writeCredential(root);
+    const stdoutProbe = await stdoutProbeFixture(root);
     child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
       "--url", url, "--anon-key", "anon-retry", "--workspace-id", WORKSPACE], root, xdg,
-    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300" });
+    { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
     let stderr = "";
     let stdout = "";
     child.stderr!.setEncoding("utf8");
@@ -1098,6 +1138,7 @@ test("a failed read still checks the stdout reader during retry backoff", { time
     child.stdout!.on("data", (chunk: string) => stdout += chunk);
     const exit = waitForExit(child, () => stderr, 3_000);
     await read;
+    await stdoutProbe.markOrphaned();
     child.stdout!.destroy();
     assert.equal(await exit, EXIT_NOTIFY_ORPHANED, stderr);
     assert.ok(requests >= 1);

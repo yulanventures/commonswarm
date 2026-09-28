@@ -723,6 +723,35 @@ function normalize(value: string, root: string, origin: string): string {
     .replace(/coverage-[0-9-]+\.json/g, "coverage-<ID>.json");
 }
 
+const FILE_STORE_FALLBACK_WARNING =
+  "⚠ no OS keychain found. Storing the rotating refresh credential in a 0600 file under a 0700 directory. This is less protected than a keychain.";
+
+/**
+ * An unforced credential store is host-selected: macOS uses Keychain while a
+ * Linux runner uses the documented file fallback. Ignore only that backend
+ * warning. Rows that explicitly pass --force-file-store still pin the warning
+ * and all other stderr remains part of the baseline.
+ */
+function credentialBackendIndependentStderr(value: string, argv: readonly string[]): string {
+  if (argv.includes("--force-file-store")) return value;
+  const prefix = `${FILE_STORE_FALLBACK_WARNING} Path: <ROOT>/`;
+  return value.split("\n").filter(line => {
+    if (!line.startsWith(prefix)) return true;
+    const location = line.slice(prefix.length);
+    return !/^[^/]+\/\.cswarm\/credentials\.d\/<PROFILE_ID>\.json$/.test(location);
+  }).join("\n");
+}
+
+test("dispatcher baseline ignores only the implicit credential backend warning", { timeout: 1_000 }, () => {
+  const warning = `${FILE_STORE_FALLBACK_WARNING} Path: <ROOT>/invite.create/.cswarm/credentials.d/<PROFILE_ID>.json\n`;
+  assert.equal(credentialBackendIndependentStderr(warning, ["invite", "create"]), "");
+  assert.equal(credentialBackendIndependentStderr(`${warning}cswarm: unexpected stderr\n`, ["invite", "create"]),
+    "cswarm: unexpected stderr\n");
+  assert.equal(credentialBackendIndependentStderr(warning.replace("0600", "0644"), ["invite", "create"]),
+    warning.replace("0600", "0644"));
+  assert.equal(credentialBackendIndependentStderr(warning, ["invite", "create", "--force-file-store"]), warning);
+});
+
 // Help has its own table-driven gate. Keep this dispatcher baseline focused on
 // routing, exit status, and the refusal prefix when usage is printed afterward.
 function withoutGeneratedHelp(value: string): string {
@@ -986,8 +1015,10 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
       ? allExpected
       : allExpected.filter((_row, index) => index % DISPATCH_BASELINE_SHARD_COUNT === shard);
     assert.deepEqual(
-      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
-      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout),
+        stderr: withoutGeneratedHelp(credentialBackendIndependentStderr(row.stderr, row.argv)) })),
+      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout),
+        stderr: withoutGeneratedHelp(credentialBackendIndependentStderr(row.stderr, row.argv)) })),
     );
     assert.deepEqual(counts, {
       total: expected.length,
