@@ -15,10 +15,15 @@ services:
         required: true
     environment:
       PORT: "3490"
+      MCP_OAUTH_DATABASE_HOST: ${MCP_OAUTH_DATABASE_HOST:?set the database TLS hostname}
       MCP_OAUTH_SIGNING_KEYS_FILE: /run/commonswarm-oauth/signing-keys.pem
       MCP_OAUTH_COOKIE_KEYS_FILE: /run/commonswarm-oauth/cookie-keys
       MCP_OAUTH_DATABASE_CREDENTIALS_FILE: /run/commonswarm-oauth/database-credentials
-      MCP_OAUTH_DATABASE_TLS_CA_FILE: /run/commonswarm-oauth/yulan-internal-ca.pem
+      # config.js supplies this CA and verifies the hostname, the node-postgres
+      # equivalent of libpq sslmode=verify-full.
+      MCP_OAUTH_DATABASE_TLS_CA_FILE: /etc/ssl/yulan-internal-ca.pem
+    extra_hosts:
+      - "${MCP_OAUTH_DATABASE_HOST:?set the database TLS hostname}:${MCP_OAUTH_DATABASE_ADDRESS:?set the database fixed IP address}"
     volumes:
       - type: bind
         source: /etc/commonswarm-oauth/signing-keys.pem
@@ -33,8 +38,8 @@ services:
         target: /run/commonswarm-oauth/database-credentials
         read_only: true
       - type: bind
-        source: /etc/commonswarm-oauth/yulan-internal-ca.pem
-        target: /run/commonswarm-oauth/yulan-internal-ca.pem
+        source: /etc/ssl/yulan-internal-ca.pem
+        target: /etc/ssl/yulan-internal-ca.pem
         read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=32m
