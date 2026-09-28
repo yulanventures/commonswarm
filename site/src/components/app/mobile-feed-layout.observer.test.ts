@@ -211,6 +211,12 @@ const frameScript = (
     }));
     await doc.fonts.ready;
     await settle();
+    /* The real feed deliberately opens at the newest message. This fixture replaces that
+       already-scrolled sample transcript with oldest-first geometry, so reset the inherited
+       scroll only after the replacement and font layout have settled. "At rest" below then
+       measures the first synthetic row, not the sample feed's retained scroll position. */
+    doc.querySelector(".dashboard__feed-view").scrollTop = 0;
+    await settle();
     const rect = (selector) => {
       const box = doc.querySelector(selector).getBoundingClientRect();
       return {
