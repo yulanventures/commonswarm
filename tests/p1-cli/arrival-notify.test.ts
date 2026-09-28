@@ -212,9 +212,16 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
     assert.doesNotMatch(lines[0]!, new RegExp(url));
     assert.doesNotMatch(lines[0]!, /anon-key-for-arrival-test/);
     assert.doesNotMatch(lines[0]!, new RegExp(TOKEN));
+    /* A notify seat without a detached listener posts one attended-seat canary to prove its watcher path. */
     assert.deepEqual(
       requests.map(({ path }) => path),
-      ["/functions/v1/command", "/functions/v1/read", "/functions/v1/command", "/functions/v1/command"],
+      [
+        "/functions/v1/command",
+        "/functions/v1/read",
+        "/functions/v1/command",
+        "/functions/v1/command",
+        "/functions/v1/command",
+      ],
     );
     assert.equal((requests[0]?.body.command as Record<string, unknown>).kind, "claim_wake_lease");
     assert.equal(requests[1]?.body.after_created_at, "2026-08-28T11:00:00.000Z");
@@ -224,7 +231,8 @@ test("inbox --notify flushes readable lines and best-effort attests only the ren
       [BROADCAST_SIGNAL],
       "a directed line is rendered but only the rendered broadcast is attested",
     );
-    assert.equal((requests[3]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
+    assert.equal((requests[3]?.body.command as Record<string, unknown>).kind, "post_signal");
+    assert.equal((requests[4]?.body.command as Record<string, unknown>).kind, "release_wake_lease");
     assert.deepEqual(receipt, receiptBefore);
 
     const stored = JSON.parse(await readFile(cursorStore.location, "utf8")) as {

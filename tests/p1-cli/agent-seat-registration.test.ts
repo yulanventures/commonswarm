@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import ts from "typescript";
 import {
   AGENT_TOKEN_MAX_TTL_MS,
   decideWorkspace,
@@ -173,10 +174,11 @@ test("a join credential is refused for every non-registration reducer kind", () 
 });
 
 test("registration uses the one principal-ceiling helper after the credential row lock", () => {
-  const source = withoutComments(readFileSync(
+  const rawSource = readFileSync(
     new URL("../../supabase/functions/command/index.ts", import.meta.url),
     "utf8",
-  ));
+  );
+  const source = withoutComments(rawSource);
   const lockFunction = source.indexOf("async function lockJoinCredential(");
   const rowLock = source.indexOf("FOR UPDATE OF c", lockFunction);
   const register = source.indexOf("async function registerAgentSeat(");
@@ -213,10 +215,28 @@ test("registration uses the one principal-ceiling helper after the credential ro
   assert.ok(device > ceiling, "no seat row may be written before the shared ceiling helper");
   assert.ok(spend > device, "the seat is spent after the complete token projection is written");
   assert.ok(marker > spend, "the H0 seat marker follows the seat spend in the same fold");
-  assert.equal(
-    source.match(/await lockRegistrationStream\(tx, route\)/g)?.length,
-    1,
-    "one registration transaction must read one stream frame",
+  const file = ts.createSourceFile("index.ts", rawSource, ts.ScriptTarget.Latest, true);
+  const enclosingFunction = (node: ts.Node): string => {
+    let parent: ts.Node | undefined = node.parent;
+    while (parent && !ts.isFunctionDeclaration(parent)) parent = parent.parent;
+    return parent && ts.isFunctionDeclaration(parent) && parent.name ? parent.name.text : "<top>";
+  };
+  const streamLockCallers: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression) &&
+      node.expression.text === "lockRegistrationStream"
+    ) {
+      streamLockCallers.push(enclosingFunction(node));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  /* Hosted grant management and seat claim share the workspace stream lock with registration. */
+  assert.deepEqual(
+    streamLockCallers,
+    ["registerAgentSeat", "handleHostedManagement", "claimHostedSeat"],
+    "only the named registration and hosted-authority transactions may read a locked stream frame",
   );
 });
 

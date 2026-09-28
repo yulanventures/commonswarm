@@ -14,7 +14,7 @@ const repoRoot = process.cwd();
  * "pure" claim below is unchanged. The pre/post hook assertions still hold,
  * because the precondition is part of the command rather than an npm hook. */
 const pureCliCommand =
-  "node scripts/require-cli-build.mjs && node --import tsx --test tests/p1-cli/**/*.test.ts";
+  "node scripts/require-cli-build.mjs && node --import tsx --test --test-timeout=300000 tests/p1-cli/**/*.test.ts";
 /* The chat-channel migration control added a seventh stack-touching file;
  * --test-concurrency=1 because each
  * p1-local file spawns the one local functions runtime (same reason p1-server
