@@ -906,7 +906,7 @@ During section 9, send well-shaped unauthenticated public open/ACK requests usin
 The executable control is
 `deploy/release-proofs/item-hm/hm37-open-ack-control.ts`, with Deno import map
 `deploy/release-proofs/item-hm/hm37-open-ack-deno.json`. The committed harness
-SHA-256 is `48dcb199c45bdc2b6a85afe59610f6b139fd4b31e580935b8461bbf2a2f15b42`; the import-map SHA-256 is
+SHA-256 is `b06026236c5fd0ea24cf47259c1333a019cc517774a34e43f2f6bbf12ebf8e5d`; the import-map SHA-256 is
 `f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b`. Anvil recomputes both from the accepted
 commit before staging and records the accepted commit, hashes and independent
 review in `hm37-hosted-control-inputs.txt`. A mismatch stops before migration
@@ -1017,7 +1017,7 @@ and not copied as evidence.
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-control.ts "$HARNESS"
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-deno.json "$DENO_CONFIG"
   install -m 0600 /run/commonswarm-hm37/human-session.json "$CONTROL_ROOT/human-session.json"
-  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = 48dcb199c45bdc2b6a85afe59610f6b139fd4b31e580935b8461bbf2a2f15b42
+  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = b06026236c5fd0ea24cf47259c1333a019cc517774a34e43f2f6bbf12ebf8e5d
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
 import json, os, pathlib, sys

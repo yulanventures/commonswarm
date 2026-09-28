@@ -377,11 +377,19 @@ function queryResult(value: unknown): QueryResult {
   return { rowCount: typeof rows.count === "number" ? rows.count : rows.length, rows: [...rows] };
 }
 
+function adapterParameters(sql: Sql, text: string, parameters: unknown[]): unknown[] {
+  const jsonbIndexes = new Set(
+    [...text.matchAll(/\$(\d+)::jsonb\b/giu)].map((match) => Number(match[1]) - 1),
+  );
+  return parameters.map((parameter, index) =>
+    jsonbIndexes.has(index) ? sql.typed(parameter, 25) : parameter);
+}
+
 /** pg-compatible facade so the exact OAuth adapter can run on the edge's pinned postgres.js. */
 function adapterPool(sql: Sql): AdapterPool {
   return {
     async query(text, parameters = []) {
-      return queryResult(await sql.unsafe(text, parameters));
+      return queryResult(await sql.unsafe(text, adapterParameters(sql, text, parameters)));
     },
     async connect() {
       const reserved = await sql.reserve();
@@ -389,7 +397,7 @@ function adapterPool(sql: Sql): AdapterPool {
       return {
         async query(text, parameters = []) {
           if (released) fail("OAuth storage connection was released");
-          return queryResult(await reserved.unsafe(text, parameters));
+          return queryResult(await reserved.unsafe(text, adapterParameters(reserved, text, parameters)));
         },
         release() {
           if (!released) {
