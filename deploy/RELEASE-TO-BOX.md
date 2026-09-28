@@ -841,7 +841,7 @@ reports each one.
   shopt -u nullglob
   test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
   test -z "$(LC_ALL=C sort "$PROOF_DIR/copy-back.list" | uniq -d)"
-  while IFS= read -r path; do
+  while IFS= read -r path || [ -n "$path" ]; do
     test -n "$path"
     while [[ "$path" == ./* ]]; do path="${path#./}"; done
     case "$path" in
@@ -2611,7 +2611,7 @@ configuration until that rollback completes.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2634,7 +2634,7 @@ configuration until that rollback completes.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -2736,7 +2736,7 @@ preflight backups, validates once, and reloads once.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2759,7 +2759,7 @@ preflight backups, validates once, and reloads once.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -2922,7 +2922,7 @@ PY
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2945,7 +2945,7 @@ PY
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -3053,7 +3053,7 @@ the one validation and one reload.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -3076,7 +3076,7 @@ the one validation and one reload.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then

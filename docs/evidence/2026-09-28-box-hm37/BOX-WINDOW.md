@@ -363,13 +363,13 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
   test "$(cat "$HM6_OAUTH/RELEASE_SHA")" = "$HM6_OAUTH_SHA"
   test "$(readlink -f /home/commonswarm/oauth/current)" = "$HM6_OAUTH"
   test -f "$HM6_OAUTH_PROOF/oauth-image.id"
-  IFS= read -r MCP_OAUTH_IMAGE <"$HM6_OAUTH_PROOF/oauth-image.id"
+  IFS= read -r MCP_OAUTH_IMAGE <"$HM6_OAUTH_PROOF/oauth-image.id" || [ -n "$MCP_OAUTH_IMAGE" ]
   test "$(cat "$HM6_OAUTH_PROOF/oauth-image.id")" = "$MCP_OAUTH_IMAGE"
   case "$MCP_OAUTH_IMAGE" in sha256:*) ;; *) false ;; esac
   case "${MCP_OAUTH_IMAGE#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
   test "${#MCP_OAUTH_IMAGE}" -eq 71
   CIDS=()
-  while IFS= read -r VALUE; do
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
     test -n "$VALUE" && CIDS[${#CIDS[@]}]="$VALUE"
   done < <(docker ps -q \
     --filter label=com.docker.compose.project=commonswarm-oauth \
@@ -643,7 +643,7 @@ Function identity/return-contract checks use OIDs, `pg_proc`, types and dependen
 
 Check each privilege individually. A comma-separated privilege argument cannot replace the separate assertions.
 
-Use runbook section 5, one migration only. In step `runbook-26`, replace the `mapfile` selection with a Bash array populated by a `while IFS= read -r` loop; retain the exact-one-match assertion and all following guards.
+Use runbook section 5, one migration only. In step `runbook-26`, replace the `mapfile` selection with a Bash array populated by a `while IFS= read -r X || [ -n "$X" ]; do` loop; retain the exact-one-match assertion and all following guards.
 
 The transactional apply must:
 
