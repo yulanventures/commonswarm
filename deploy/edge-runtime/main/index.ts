@@ -99,7 +99,7 @@ async function handle(request: Request): Promise<Response> {
   }
   // This keeps bare-path, unknown-function, disabled-function, and preflight
   // behavior in one pure resolver. A prepared-but-disabled function returns
-  // before this service can construct a path to a module that does not exist.
+  // before this service can construct a path to its module.
   // Kong answers a runnable function's preflight before the worker; unknown
   // names keep its normal 404. Non-OPTIONS preserve function CORS.
   const gateway = resolveGatewayRequest(request);

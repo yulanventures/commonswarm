@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 import { test } from "node:test";
 import {
   DISABLED_FUNCTION_NAMES,
-  FUNCTION_DISABLED_BODY,
-  FUNCTION_DISABLED_STATUS,
   FUNCTION_ENV_NAMES,
   FUNCTION_NAMES,
   MCP_ENV_NAMES,
@@ -19,7 +17,7 @@ async function source(path: string): Promise<string> {
   return await readFile(resolve(repoRoot, path), "utf8");
 }
 
-test("HM5 prepares MCP without routing to its absent worker module", async () => {
+test("HM7 routes the now-present MCP worker module", async () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
     "read",
@@ -28,8 +26,11 @@ test("HM5 prepares MCP without routing to its absent worker module", async () =>
     "h0",
     "mcp",
   ]);
-  assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
-  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
+  assert.deepEqual(DISABLED_FUNCTION_NAMES, []);
+  assert.deepEqual(resolveFunctionRoute("/functions/v1/mcp"), {
+    functionName: "mcp",
+    pathname: "/mcp",
+  });
 
   for (const path of [
     "/functions/v1/mcp",
@@ -39,9 +40,8 @@ test("HM5 prepares MCP without routing to its absent worker module", async () =>
     const resolution = resolveGatewayRequest(
       new Request(`https://edge.test${path}`, { method: "POST" }),
     );
-    assert.equal(resolution.route, null, `${path} exposed a worker route`);
-    assert.equal(resolution.response?.status, FUNCTION_DISABLED_STATUS);
-    assert.deepEqual(await resolution.response?.json(), FUNCTION_DISABLED_BODY);
+    assert.equal(resolution.route?.functionName, "mcp");
+    assert.equal(resolution.response, null);
   }
 
   const main = await source("deploy/edge-runtime/main/index.ts");
@@ -49,8 +49,8 @@ test("HM5 prepares MCP without routing to its absent worker module", async () =>
   assert.equal(
     await readFile(resolve(repoRoot, "supabase/functions/mcp/index.ts"), "utf8")
       .then(() => true, () => false),
-    false,
-    "a worker appeared; replace the dark-route test with runnable-worker gates",
+    true,
+    "the routed worker module must exist",
   );
 });
 
@@ -72,6 +72,7 @@ test("HM5 MCP environment is explicit and excludes OAuth secrets", () => {
     "SWARM_MCP_MAX_CONCURRENT_REQUESTS",
     "SWARM_MCP_JWKS_CACHE_TTL_SECONDS",
     "SWARM_MCP_CLOCK_SKEW_SECONDS",
+    "SWARM_MCP_PUBLIC_ENABLED",
   ];
   assert.deepEqual(MCP_ENV_NAMES, expected);
   assert.deepEqual(FUNCTION_ENV_NAMES.mcp, expected);

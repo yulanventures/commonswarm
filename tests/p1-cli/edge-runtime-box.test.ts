@@ -35,6 +35,8 @@ import {
   WORKER_LIMIT_STATUS,
   withWorkerRetiredRetry,
 } from "../../deploy/edge-runtime/main/router.js";
+// @ts-expect-error TS5097: this test reaches the Deno worker's pure protocol boundary.
+import { createMcpProtocolHandler } from "../../supabase/functions/mcp/protocol.ts";
 
 const repoRoot = process.cwd();
 
@@ -102,7 +104,7 @@ test("runtime metrics are logged as one JSON record per sample", { timeout: 5_00
   assert.equal(lines.length, 1);
 });
 
-test("Caddy scopes edge proxy and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
+test("Caddy scopes edge proxy, keeps MCP runnable, and removed metric path uses normal function 404", { timeout: 5_000 }, async () => {
   const metricPath = "/_internal/metric";
   const caddyFiles = [
     "deploy/supabase-stack/commonswarm-api.caddy",
@@ -121,13 +123,12 @@ test("Caddy scopes edge proxy and removed metric path uses normal function 404",
   assert.equal(response?.status, 404);
   assert.equal(await response?.text(), KONG_FUNCTION_NOT_FOUND_BODY);
   assert.equal(response?.headers.get("access-control-allow-origin"), "*");
-  for (const name of FUNCTION_NAMES.filter((name) => name !== "mcp")) {
+  for (const name of FUNCTION_NAMES) {
     assert.deepEqual(resolveFunctionRoute(`/functions/v1/${name}`), {
       functionName: name,
       pathname: `/${name}`,
     });
   }
-  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
 });
 
 async function filesBelow(directory: string): Promise<string[]> {
@@ -199,7 +200,7 @@ test("every database worker receives the optional private CA", () => {
   }
 });
 
-test("edge runtime router maps runnable functions and keeps MCP reserved", () => {
+test("edge runtime router maps every runnable function, including MCP", () => {
   assert.deepEqual(FUNCTION_NAMES, [
     "command",
     "read",
@@ -208,7 +209,7 @@ test("edge runtime router maps runnable functions and keeps MCP reserved", () =>
     "h0",
     "mcp",
   ]);
-  for (const functionName of FUNCTION_NAMES.filter((name) => name !== "mcp")) {
+  for (const functionName of FUNCTION_NAMES) {
     assert.deepEqual(resolveFunctionRoute(`/functions/v1/${functionName}`), {
       functionName,
       pathname: `/${functionName}`,
@@ -225,8 +226,15 @@ test("edge runtime router maps runnable functions and keeps MCP reserved", () =>
       pathname: `/${functionName}/`,
     });
   }
-  assert.equal(resolveFunctionRoute("/functions/v1/mcp"), null);
-  assert.equal(resolveFunctionRoute("/functions/v1/mcp/deep/path"), null);
+  assert.deepEqual(
+    resolveFunctionRoute(
+      "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+    ),
+    {
+      functionName: "mcp",
+      pathname: "/mcp/.well-known/oauth-protected-resource/mcp",
+    },
+  );
   assert.equal(resolveFunctionRoute("/functions/v1/unknown"), null);
   assert.equal(resolveFunctionRoute("/functions/v1/command-extra"), null);
   assert.equal(resolveFunctionRoute("/command"), null);
@@ -242,20 +250,60 @@ test("edge runtime router maps runnable functions and keeps MCP reserved", () =>
   });
 });
 
-test("prepared MCP paths stay dark before a worker module exists", async () => {
-  assert.deepEqual(DISABLED_FUNCTION_NAMES, ["mcp"]);
-  for (const [method, suffix] of [
-    ["POST", ""],
-    ["OPTIONS", ""],
-    ["GET", "/.well-known/oauth-protected-resource/mcp"],
+test("MCP routes to its worker and public tool access defaults dark", async () => {
+  assert.deepEqual(DISABLED_FUNCTION_NAMES, []);
+  for (const [method, suffix, pathname] of [
+    ["POST", "", "/mcp"],
+    ["GET", "/.well-known/oauth-protected-resource/mcp", "/mcp/.well-known/oauth-protected-resource/mcp"],
   ] as const) {
     const resolution = resolveGatewayRequest(
       new Request(`https://edge.test/functions/v1/mcp${suffix}`, { method }),
     );
-    assert.equal(resolution.route, null);
-    assert.equal(resolution.response?.status, FUNCTION_DISABLED_STATUS);
-    assert.deepEqual(await resolution.response?.json(), FUNCTION_DISABLED_BODY);
+    assert.deepEqual(resolution.route, { functionName: "mcp", pathname });
+    assert.equal(resolution.response, null);
   }
+
+  const request = () => new Request("https://edge.test/mcp", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer test.jwt.value",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+  });
+  const handler = (publicEnabled: boolean, onVerify: () => void) =>
+    createMcpProtocolHandler({
+      issuer: "https://issuer.test",
+      resource: "https://edge.test/mcp",
+      publicEnabled,
+      allowedOrigins: new Set(),
+      limits: {
+        maxBodyBytes: 4096,
+        maxResponseBytes: 64 * 1024,
+        requestTimeoutMs: 2_000,
+        maxConcurrentRequests: 1,
+      },
+      verifyToken: async () => {
+        onVerify();
+        return {
+          providerGrantId: "provider-grant",
+          subject: "11111111-1111-4111-8111-111111111111",
+          expiresAt: 1_900_000_000,
+        };
+      },
+      executeTool: async () => ({}),
+    });
+
+  let darkVerifications = 0;
+  const darkResponse = await handler(false, () => { darkVerifications += 1; })(request());
+  assert.equal(darkResponse.status, FUNCTION_DISABLED_STATUS);
+  assert.deepEqual(await darkResponse.json(), FUNCTION_DISABLED_BODY);
+  assert.equal(darkVerifications, 0, "dark access stops before token verification");
+
+  let enabledVerifications = 0;
+  const enabledResponse = await handler(true, () => { enabledVerifications += 1; })(request());
+  assert.equal(enabledResponse.status, 200, "enabled access reaches the MCP protocol");
+  assert.equal(enabledVerifications, 1);
 });
 
 test("edge runtime request rewrite preserves query, method, headers, and body", async () => {
