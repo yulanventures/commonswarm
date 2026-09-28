@@ -1,0 +1,20 @@
+{
+  "release_sha": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+  "stop": "migration catalog proof failed inside transaction",
+  "ledger_after": 0,
+  "catalog_after": false,
+  "seats": {
+    "local": {
+      "principal_id": "fe1efce9-4aa1-4004-9a07-4f3dc8042d93",
+      "name": "hm2-local-0928b",
+      "revocation": "accepted",
+      "credential_minted": false
+    },
+    "sender": {
+      "principal_id": "0687cd0f-2c64-4290-a6c3-526c7cb5ee26",
+      "name": "hm2-sender-0928b",
+      "revocation": "accepted",
+      "credential_minted": false
+    }
+  }
+}

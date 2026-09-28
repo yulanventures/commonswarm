@@ -1,0 +1,11 @@
+SHA=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+clean detached checkout at exact SHA: PASS
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+operator disposition: Anvil reran both required exact-SHA gates in a fresh detached worktree for rerun 3; both exited 0 and the tracked worktree remained clean
+review: Codex plan reviewed; diff-attached Antigravity PASS with no KEEP
+review evidence: docs/evidence/2026-09-28-box-hm2/review-r1.md
+server suite on exact lane content d0ccf3a8212409332e7911531eec7a3f9ab9602b: 314/315; HM hosted authority coverage passed; sole failure was the pre-existing item L derived-id/storage test
+server suite run: https://github.com/yulanventures/commonswarm/actions/runs/36372953130
+GitHub agent trailers check at release merge: PASS https://github.com/yulanventures/commonswarm/actions/runs/36373452647
+GitHub commit identity check at release merge: PASS https://github.com/yulanventures/commonswarm/actions/runs/36373452607

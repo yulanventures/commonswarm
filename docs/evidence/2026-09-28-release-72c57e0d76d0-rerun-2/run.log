@@ -1,0 +1,25 @@
+2026-09-28T04:29:12Z rerun=3 plan-sha256=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb expected=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb result=PASS
+2026-09-28T04:29:12Z approval release_sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 reviewed=codex-plan+antigravity-PASS-no-KEEP backup_max_age=22h
+2026-09-28T04:29:12Z approval-note names suffixed b by HezLead approval after principal_name_taken
+2026-09-28T04:29:12Z changed-step hm2-local-prepare-before-migration exact-diff=hm2-name-suffix.diff only-change=name-suffix-b
+2026-09-28T04:29:12Z surfaces KIND_LIST=edge+stack CHANGED_FUNCTIONS=command+read ROUTER_CHANGED=yes ADDITIONAL_REQUIRED_ENV_NAMES=empty migration=20260928000002 no-npm-publish no-site no-mcp-auth no-stack-switch
+2026-09-28T04:29:12Z router-change dark-mcp-entry recognizes mcp and refuses POST+OPTIONS with 503 feature_disabled before worker creation; ten optional SWARM_MCP_* forwarded names; no mcp-auth deploy
+2026-09-28T04:29:12Z window start=2026-09-28T04:25:31Z end=2026-09-28T08:25:31Z
+2026-09-28T04:29:12Z gates fresh-clean-exact-SHA command-core=PASS check-edge=PASS; server-suite=314/315 known-item-L-only; GitHub trailer+identity checks=PASS
+2026-09-28T04:29:12Z env-inventory PASS router-changed=yes selected=command,read,capability,activity,h0,mcp values=not-shown
+2026-09-28T04:29:12Z section1 PASS existing-immutable-dirs-full-manifest-verified-and-reused=yes archive-match=yes stack-runtime-unchanged=yes proof-transfer=PASS
+2026-09-28T04:29:12Z operator-note combined-interactive-upload-block was split after its scp succeeded; attempted interactive ssh had no production effect; remote section ran separately
+2026-09-28T04:30:24Z section2-verify PASS section3-session PASS
+2026-09-28T04:30:24Z local-control principals-created-before-migration PASS names=hm2-local-0928b,hm2-sender-0928b client=0.1.80 target=production human=Ridgeio
+2026-09-28T04:30:24Z local-control pre-migration-seat-baseline PASS
+2026-09-28T04:34:15Z backup PASS verified_at=2026-09-28T03:55:22.215479+00:00 max_age=79200 next=2026-09-29T03:47:25Z
+2026-09-28T04:34:15Z migration-pending exact=20260928000002 cron-before=captured
+2026-09-28T04:34:15Z migration-decision version=20260928000002 ledger=0 catalog=f exit=0
+2026-09-28T04:34:15Z migration-apply STOP catalog-proof-failed-inside-transaction exit=3
+2026-09-28T04:34:15Z rollback-proof transaction-rolled-back ledger=0 catalog=f edge-current=9b085c82352390cf8f0fe515c02b3ccff423476a stack-current=e38b499fc29a01935333e38f66c4e68ac7e1f81e
+2026-09-28T04:34:15Z release-transition NOT-RUN migration-verify=no functional=no cron-after=no edge-apply=no edge-probes=no post-release-controls=no
+2026-09-28T04:34:15Z abort-cleanup PASS timers=edge-recycle:active,backup:active,restore:active
+2026-09-28T04:34:15Z temporary-principals names=hm2-local-0928b,hm2-sender-0928b revocation=accepted count=2 database-readback-revoked=2 credentials-minted=0
+2026-09-28T04:34:15Z copy-back=NOT-RUN incomplete-manifest-artifacts root-proof-dir=preserved
+2026-09-28T04:34:15Z operator-note first database revocation readback used psql variables in --command and failed read-only with syntax error; file-based retry returned revoked=2; no production mutation
+2026-09-28T04:35:21Z transient-database-and-smoke-cleanup PASS Mac-window-file=removed-after-log control-root=preserved-as-attempt3-apply-abort

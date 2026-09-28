@@ -1,0 +1,8 @@
+ok=true
+database_bytes_verified=true
+object_bytes_verified=true
+verified_at=2026-09-28T03:55:22.215479+00:00
+age_seconds=2137
+max_age_seconds=79200
+destination_prefix_ok=true
+next_backup=Tue 2026-09-29 03:47:25 UTC
