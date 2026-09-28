@@ -22,6 +22,32 @@ test("container is pinned, unprivileged, and starts the production server", asyn
   assert.doesNotMatch(dockerfile, /latest/u);
 });
 
+test("OAuth Compose requires the database hostname mapping and verify-full TLS", async () => {
+  const [compose, example, config] = await Promise.all([
+    text("deploy/mcp-auth/compose.yaml"),
+    text("deploy/mcp-auth/env.example"),
+    text("services/mcp-auth/src/config.js"),
+  ]);
+  assert.match(
+    compose,
+    /extra_hosts:\n\s+- "\$\{MCP_OAUTH_DATABASE_HOST:\?[^}]+\}:\$\{MCP_OAUTH_DATABASE_ADDRESS:\?[^}]+\}"/u,
+  );
+  assert.match(
+    compose,
+    /MCP_OAUTH_DATABASE_TLS_CA_FILE: \/etc\/ssl\/yulan-internal-ca\.pem/u,
+  );
+  assert.match(
+    compose,
+    /source: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?target: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?read_only: true/u,
+  );
+  assert.match(compose, /sslmode=verify-full/u);
+  assert.match(config, /ssl: \{ ca: tlsCa, rejectUnauthorized: true \}/u);
+  assert.match(example, /^MCP_OAUTH_DATABASE_HOST=$/mu);
+  assert.match(example, /^MCP_OAUTH_DATABASE_ADDRESS=$/mu);
+  assert.match(example, /db\.commonswarm\.internal/u);
+  assert.match(example, /172\.31\.0\.10/u);
+});
+
 test("migration has no transaction control and proofs have the required safe shape", async () => {
   const migration = await text("supabase/migrations/20260928000003_hm_oauth_store.sql");
   const superuserOnlyRoleAttribute = /\b(?:NO)?(?:SUPERUSER|REPLICATION|BYPASSRLS)\b/iu;

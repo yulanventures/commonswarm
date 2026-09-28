@@ -106,19 +106,22 @@ test("HM5 OAuth Compose fixes the box resource and secret-file boundaries", asyn
   assert.match(compose, /MCP_OAUTH_SIGNING_KEYS_FILE: \/run\/commonswarm-oauth\/signing-keys\.pem/);
   assert.match(compose, /MCP_OAUTH_COOKIE_KEYS_FILE: \/run\/commonswarm-oauth\/cookie-keys/);
   assert.match(compose, /MCP_OAUTH_DATABASE_CREDENTIALS_FILE: \/run\/commonswarm-oauth\/database-credentials/);
-  assert.match(compose, /MCP_OAUTH_DATABASE_TLS_CA_FILE: \/run\/commonswarm-oauth\/yulan-internal-ca\.pem/);
+  assert.match(compose, /MCP_OAUTH_DATABASE_TLS_CA_FILE: \/etc\/ssl\/yulan-internal-ca\.pem/);
 
   for (const file of [
     "signing-keys.pem",
     "cookie-keys",
     "database-credentials",
-    "yulan-internal-ca.pem",
   ]) {
     assert.match(
       compose,
       new RegExp(`source: /etc/commonswarm-oauth/${file.replace(".", "\\.")}[\\s\\S]*?read_only: true`),
     );
   }
+  assert.match(
+    compose,
+    /source: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?target: \/etc\/ssl\/yulan-internal-ca\.pem[\s\S]*?read_only: true/,
+  );
 });
 
 test("HM5 OAuth env example contains names but no values", async () => {
