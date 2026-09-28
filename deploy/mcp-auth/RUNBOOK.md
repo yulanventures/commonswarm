@@ -37,8 +37,11 @@ Runtime files live under `/etc/commonswarm-oauth/`, owned by
 - `signing-keys.pem` (despite the retained lane-5 filename, its content is a
   JSON private JWK set; every key is ES256/P-256 with a unique `kid`);
 - `cookie-keys`;
-- `database-credentials`;
-- `yulan-internal-ca.pem`.
+- `database-credentials`.
+
+The internal database CA is the separately managed host file
+`/etc/ssl/yulan-internal-ca.pem`, mounted read-only at that same container
+path. It is not a runtime file under `/etc/commonswarm-oauth/`.
 
 The container receives only their mounted paths through
 `MCP_OAUTH_SIGNING_KEYS_FILE`, `MCP_OAUTH_COOKIE_KEYS_FILE`,
@@ -47,6 +50,10 @@ The container receives only their mounted paths through
 values, Compose substitutions, logs, release evidence, and the edge worker.
 The OAuth database credential belongs only to the least-privilege
 `commonswarm_oauth_runtime` role and uses verified TLS.
+The Compose database connection also requires both
+`MCP_OAUTH_DATABASE_HOST`, the TLS hostname sent to the client, and
+`MCP_OAUTH_DATABASE_ADDRESS`, the fixed IP mapped for that hostname through
+`extra_hosts`; Compose fails before startup if either is unset.
 The migration creates that login role without a password. Anvil provisions and
 rotates its SCRAM password outside migrations, then stores the role name and
 password only in the protected `database-credentials` file. This is an
