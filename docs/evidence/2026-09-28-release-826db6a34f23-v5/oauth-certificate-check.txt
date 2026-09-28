@@ -1,0 +1,8 @@
+Hostname mcp.commonswarm.com does match certificate
+Certificate will not expire
+issuer=C = US, O = "CloudFlare, Inc.", OU = CloudFlare Origin SSL Certificate Authority, L = San Francisco, ST = California
+notBefore=Sep 16 17:40:00 2026 GMT
+notAfter=Sep 12 17:40:00 2041 GMT
+X509v3 Subject Alternative Name: 
+    DNS:*.commonswarm.com, DNS:commonswarm.com
+sha256 Fingerprint=92:F0:82:16:2F:49:30:C3:11:6B:A6:E5:AA:A4:43:9A:10:0E:1A:76:55:E3:68:9F:67:5E:B1:04:45:34:41:B0

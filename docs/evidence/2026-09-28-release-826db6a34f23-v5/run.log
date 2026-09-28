@@ -1,0 +1,15 @@
+2026-09-28 HM6 v5 continuation; release 826db6a34f235064a3a03c57377d8e32a35d2f05.
+Plan SHA-256 1e3932f65398e088514d270a9bdf275ec9b65279078db47d5fae0a4b4f16db23; 27 step blocks; forbidden markers 0; 27 shell blocks parsed; 20 Python blocks compiled.
+Prompt-158 precondition BIC_RULE_ACTIVE=yes was confirmed before mutation. The plan's HezLead/Tom hostname-only BIC decision reference was recorded verbatim. No Cloudflare setting changed in this window.
+Window 2026-09-28T20:32:18Z; principal suffix 203218; root-owned mode-0600 window.env. No secret value copied into evidence.
+Retained stack, edge, release directories, migration 03, migration 04 deferral, helpers, backup, timers, exact-SHA archive and reviewed inputs passed read-only checks.
+Image sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a was reused only after release identity, pinned base digest and five-layer prefix verification.
+Protected 1Password recovery items matched the protected box files; all staging used fresh mode-0700 /private/tmp/anvil-secret.* directories and was removed.
+Runtime file policy, non-root container isolation, in-container database DNS/TLS, catalog, functional, effective privilege and runtime authentication proofs passed.
+OAuth started dark with public authorization disabled. GoTrue retained its prior URLs and added only https://mcp.commonswarm.com/oauth/callback/gotrue. The proxied A record and existing certificate were read back before Caddy activation.
+Both curl with claude-connector-test/1.0 and Python urllib with its default User-Agent passed ingress and post-restart suites. No HTML challenge or Cloudflare error 1010 was observed. /mcp remained 503 by design.
+Controlled restart, retained post-apply backup coverage and isolated recovery passed. The isolated recovery explicitly restored the runtime password, role search path and CONNECT, the two function search paths, and swarm_admin's global default function ACL before corrected catalog/functional/authentication proofs. All isolated resources were removed.
+Migration 04 remained the only pending migration. Edge stayed at 72c57e0d76d0aa86fe4f811a2cf51499919fed20; stack stayed at ad964ed158181ba1692dd05895f36fa7a1f87d3f; all three timers remained active.
+Transient box helpers/archive/database session files and the Mac window/archive files were removed. Manifest-only copy-back completed with 38 entries.
+No GitHub Actions run, npm command, site action, or Cloudflare security-setting change was performed.
+Closed successfully at 2026-09-28T21:12:38Z.

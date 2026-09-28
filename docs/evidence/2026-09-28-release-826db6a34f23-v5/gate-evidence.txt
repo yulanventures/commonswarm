@@ -1,0 +1,23 @@
+SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
+source=isolated exact-SHA worktree /var/folders/bb/7n7qfbls651d80fs4r9wdyk40000gn/T/hm6-v4-exact-gates
+scripts/run-gates.sh gates: PASS (1093 tests, 1091 pass, 0 fail; 2 Docker-dependent tests skipped per Mac policy)
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+OAuth unit/security tests: pending actual-image execution
+PostgreSQL adapter/refresh/consent tests and tests/p1-server/oauth-store.test.ts: retained v3 PASS; release diff does not touch these paths; production read-only proofs pending
+Docker acceptance and routing checks: pending actual-image/box proofs
+Backup/restore coverage checks: retained v3 PASS; read-only retained-artifact proof pending
+plan sha256 a24742b15000009560c1265ed98d818ebfd7a6f05be7a01890e015987324c4d5: PASS
+plan step inventory 24/24 unique: PASS
+plan redaction-marker refusal check: PASS (0)
+plan Python block compilation 18/18: PASS
+plan shell syntax 24/24: PASS
+independent security review: PASS, no KEEP
+independent operations review: PASS, no KEEP
+plan sha256 1e3932f65398e088514d270a9bdf275ec9b65279078db47d5fae0a4b4f16db23: PASS
+plan step inventory 27/27 unique: PASS
+plan redaction-marker refusal check: PASS (0)
+plan Python block compilation 20/20: PASS
+plan shell syntax 27/27: PASS
+independent v5 security review: PASS, no KEEP
+independent v5 operations review: PASS, no KEEP

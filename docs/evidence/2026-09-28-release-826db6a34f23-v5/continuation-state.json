@@ -1,0 +1,28 @@
+{
+  "pass": true,
+  "retained_release_shas": [
+    "826db6a34f235064a3a03c57377d8e32a35d2f05",
+    "9fa4217da9f6447e55fb8c6d577b8fd3997f926b",
+    "ad964ed158181ba1692dd05895f36fa7a1f87d3f"
+  ],
+  "new_release_present_before_stage": true,
+  "service_account": "cs-oauth-080406",
+  "uid": 996,
+  "gid": 986,
+  "configuration_files_retained": [
+    "compose.env",
+    "cookie-keys",
+    "database-credentials",
+    "service.env",
+    "signing-keys.pem"
+  ],
+  "retained_image_ids": [
+    "sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7",
+    "sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a"
+  ],
+  "new_window_suffix": "203218",
+  "prior_release_disposition": "retain and verify read only",
+  "prior_image_disposition": "retain; never delete in this window",
+  "service_account_disposition": "reuse after verification",
+  "configuration_directory_disposition": "reuse protected v4 files after verification"
+}

@@ -1,0 +1,4 @@
+decision=browser-integrity-check-disabled
+hostname_scope=mcp.commonswarm.com
+written_confirmation_reference=Tom approved on 2026-09-28 (~20:00Z, directly to HezLead): Browser Integrity Check off for mcp.commonswarm.com only. Applied by Anvil as a Cloudflare Configuration Rule (prompt 158).
+dashboard_automation=none

@@ -1,0 +1,47 @@
+--- /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/supabase-stack/commonswarm-mcp.caddy	2026-09-28 14:02:56.000000000 +0000
++++ /home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-caddy-rendered.caddy	2026-09-28 20:44:20.279123438 +0000
+@@ -8,7 +8,7 @@
+ 		path /health
+ 	}
+ 	handle @oauth_health {
+-		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
++		reverse_proxy 127.0.0.1:3490 {
+ 			header_up Host {host}
+ 			header_up X-Forwarded-Host {host}
+ 			header_up X-Forwarded-Proto {scheme}
+@@ -25,7 +25,7 @@
+ 		path /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks
+ 	}
+ 	handle @oauth_metadata {
+-		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
++		reverse_proxy 127.0.0.1:3490 {
+ 			header_up Host {host}
+ 			header_up X-Forwarded-Host {host}
+ 			header_up X-Forwarded-Proto {scheme}
+@@ -42,7 +42,7 @@
+ 		path /authorize
+ 	}
+ 	handle @oauth_authorize {
+-		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
++		reverse_proxy 127.0.0.1:3490 {
+ 			header_up Host {host}
+ 			header_up X-Forwarded-Host {host}
+ 			header_up X-Forwarded-Proto {scheme}
+@@ -62,7 +62,7 @@
+ 		request_body {
+ 			max_size 128KB
+ 		}
+-		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
++		reverse_proxy 127.0.0.1:3490 {
+ 			header_up Host {host}
+ 			header_up X-Forwarded-Host {host}
+ 			header_up X-Forwarded-Proto {scheme}
+@@ -79,7 +79,7 @@
+ 		path /interaction/* /oauth/callback/gotrue
+ 	}
+ 	handle @oauth_browser_get {
+-		reverse_proxy 127.0.0.1:{$MCP_OAUTH_HOST_PORT} {
++		reverse_proxy 127.0.0.1:3490 {
+ 			header_up Host {host}
+ 			header_up X-Forwarded-Host {host}
+ 			header_up X-Forwarded-Proto {scheme}

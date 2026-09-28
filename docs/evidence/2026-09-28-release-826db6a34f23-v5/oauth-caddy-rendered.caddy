@@ -1,0 +1,193 @@
+# Hosted MCP site. Lane 6 activates only the reviewed OAuth service. The MCP
+# resource and protected-resource metadata stay dark until the edge function
+# ships in a later lane.
+
+(mcp_oauth_active) {
+	@oauth_health {
+		method GET HEAD
+		path /health
+	}
+	handle @oauth_health {
+		reverse_proxy 127.0.0.1:3490 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_metadata {
+		method GET HEAD
+		path /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks
+	}
+	handle @oauth_metadata {
+		reverse_proxy 127.0.0.1:3490 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_authorize {
+		method GET HEAD
+		path /authorize
+	}
+	handle @oauth_authorize {
+		reverse_proxy 127.0.0.1:3490 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_post {
+		method POST
+		path /token /interaction/*
+	}
+	handle @oauth_post {
+		request_body {
+			max_size 128KB
+		}
+		reverse_proxy 127.0.0.1:3490 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@oauth_browser_get {
+		method GET HEAD
+		path /interaction/* /oauth/callback/gotrue
+	}
+	handle @oauth_browser_get {
+		reverse_proxy 127.0.0.1:3490 {
+			header_up Host {host}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+}
+
+# A later lane imports this snippet only after the resource server is ready.
+# Until then the site block below handles both paths as unavailable.
+(mcp_resource_active) {
+	@mcp_resource {
+		method POST
+		path /mcp
+	}
+	handle @mcp_resource {
+		request_body {
+			max_size 128KB
+		}
+		rewrite * /functions/v1/mcp
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 165s
+			}
+		}
+	}
+
+	@mcp_metadata {
+		method GET HEAD
+		path /.well-known/oauth-protected-resource/mcp
+	}
+	handle @mcp_metadata {
+		rewrite * /functions/v1/mcp/.well-known/oauth-protected-resource/mcp
+		reverse_proxy 127.0.0.1:9000 {
+			header_up X-Forwarded-For {http.request.client_ip}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 15s
+			}
+		}
+	}
+
+	@known_wrong_method path /mcp /.well-known/oauth-protected-resource/mcp
+	handle @known_wrong_method {
+		header Content-Type "application/json; charset=utf-8"
+		respond "{\"error\":\"method_not_allowed\"}" 405
+	}
+}
+mcp.commonswarm.com {
+	# Anvil verifies this certificate's SANs before installing the site file.
+	tls /etc/caddy/certs/commonswarm.com.pem /etc/caddy/certs/commonswarm.com.key
+
+	log {
+		output file /var/log/caddy/mcp.commonswarm.com.access.log {
+			mode 0600
+			roll_size 10MiB
+			roll_keep 10
+			roll_keep_for 720h
+		}
+		format filter {
+			request>uri regexp "\?.*$" ""
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			request>headers>Set-Cookie delete
+			request>headers>Proxy-Authorization delete
+			request>headers>Apikey delete
+			request>headers>apikey delete
+			resp_headers>Authorization delete
+			resp_headers>Cookie delete
+			resp_headers>Set-Cookie delete
+			resp_headers>Proxy-Authorization delete
+			resp_headers>Apikey delete
+			resp_headers>apikey delete
+			wrap json
+		}
+	}
+
+	route {
+		header {
+			Cache-Control "no-store"
+			Strict-Transport-Security "max-age=63072000"
+		}
+
+		# OAuth-only activation: this import handles every public route currently
+		# served by services/mcp-auth. The resource snippet remains unimported.
+		import mcp_oauth_active
+
+		@mcp_unavailable path /mcp /.well-known/oauth-protected-resource/mcp
+		handle @mcp_unavailable {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"feature_disabled\",\"feature\":\"hosted_mcp\",\"message\":\"Hosted MCP is not available yet.\"}" 503
+		}
+
+		@oauth_wrong_method path /health /.well-known/oauth-authorization-server /.well-known/openid-configuration /jwks /authorize /token /interaction/* /oauth/callback/gotrue
+		handle @oauth_wrong_method {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"method_not_allowed\"}" 405
+		}
+
+		handle {
+			header Content-Type "application/json; charset=utf-8"
+			respond "{\"error\":\"not_found\"}" 404
+		}
+	}
+}

@@ -1,0 +1,2 @@
+20260928000003=retain; already applied; read-only ledger+catalog+functional PASS
+20260928000004=defer; lanes 3+7; read-only absence PASS; only pending migration

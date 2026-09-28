@@ -1,0 +1,10 @@
+{
+  "pass": true,
+  "hostname": "mcp.commonswarm.com",
+  "proxied": true,
+  "curl_suite_pass": true,
+  "urllib_default_suite_pass": true,
+  "html_challenge_observed": false,
+  "error_1010_observed": false,
+  "raw_headers_or_bodies_saved": false
+}

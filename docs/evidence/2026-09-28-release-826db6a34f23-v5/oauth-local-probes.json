@@ -1,0 +1,61 @@
+{
+  "pass": true,
+  "host": "mcp.commonswarm.com",
+  "scheme": "https",
+  "results": [
+    {
+      "path": "/health",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "path": "/.well-known/oauth-authorization-server",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "path": "/.well-known/openid-configuration",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "path": "/jwks",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "path": "/authorize",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "path": "/token",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "path": "/interaction/hm6-dark-probe",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "path": "/interaction/hm6-dark-probe",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "path": "/oauth/callback/gotrue",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "callback": "https://mcp.commonswarm.com/oauth/callback/gotrue",
+  "before_urls": [
+    "https://commonswarm.com/app",
+    "https://www.commonswarm.com/app",
+    "http://127.0.0.1:*/callback"
+  ],
+  "after_urls": [
+    "https://commonswarm.com/app",
+    "https://www.commonswarm.com/app",
+    "http://127.0.0.1:*/callback",
+    "https://mcp.commonswarm.com/oauth/callback/gotrue"
+  ],
+  "changed": true
+}

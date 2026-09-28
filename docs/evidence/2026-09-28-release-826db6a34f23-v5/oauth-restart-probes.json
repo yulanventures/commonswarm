@@ -1,0 +1,147 @@
+{
+  "pass": true,
+  "curl_user_agent": "claude-connector-test/1.0",
+  "urllib_user_agent": "Python-urllib/3.9",
+  "results": [
+    {
+      "client": "curl",
+      "path": "/health",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/oauth-authorization-server",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/openid-configuration",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/jwks",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/authorize",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/token",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/mcp",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/oauth-protected-resource/mcp",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "curl",
+      "path": "/token",
+      "method": "GET",
+      "status": 405,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/health",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/oauth-authorization-server",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/openid-configuration",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/jwks",
+      "method": "GET",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/authorize",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/token",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/mcp",
+      "method": "POST",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/oauth-protected-resource/mcp",
+      "method": "GET",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "client": "urllib-default",
+      "path": "/token",
+      "method": "GET",
+      "status": 405,
+      "pass": true
+    }
+  ]
+}

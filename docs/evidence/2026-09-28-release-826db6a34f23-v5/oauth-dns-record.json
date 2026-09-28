@@ -1,0 +1,12 @@
+{
+  "zone_id": "b0d2d32d57dd6768142619f727f3efcd",
+  "record_id": "61a2a3955f66bf498c313819a38de724",
+  "prior_records": [],
+  "created_this_window": true,
+  "readback_verified": true,
+  "type": "A",
+  "name": "mcp.commonswarm.com",
+  "content": "178.105.29.28",
+  "proxied": true,
+  "ttl": 1
+}

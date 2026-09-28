@@ -1,0 +1,277 @@
+{
+  "pass": true,
+  "curl_user_agent": "claude-connector-test/1.0",
+  "urllib_user_agent": "Python-urllib/3.9",
+  "results": [
+    {
+      "client": "curl",
+      "path": "/health",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/oauth-authorization-server",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/openid-configuration",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/jwks",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/authorize",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/token",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/oauth/callback/gotrue",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/mcp",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/mcp",
+      "method": "OPTIONS",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/.well-known/oauth-protected-resource/mcp",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/interaction",
+      "method": "GET",
+      "pass": true,
+      "status": 404,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/connections",
+      "method": "GET",
+      "pass": true,
+      "status": 404,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "curl",
+      "path": "/token",
+      "method": "GET",
+      "pass": true,
+      "status": 405,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/health",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/oauth-authorization-server",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/openid-configuration",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/jwks",
+      "method": "GET",
+      "pass": true,
+      "status": 200,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/authorize",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/token",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/interaction/hm6-dark-probe",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/oauth/callback/gotrue",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/mcp",
+      "method": "POST",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/mcp",
+      "method": "OPTIONS",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/.well-known/oauth-protected-resource/mcp",
+      "method": "GET",
+      "pass": true,
+      "status": 503,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/interaction",
+      "method": "GET",
+      "pass": true,
+      "status": 404,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/connections",
+      "method": "GET",
+      "pass": true,
+      "status": 404,
+      "html_response": false,
+      "error_1010_observed": false
+    },
+    {
+      "client": "urllib-default",
+      "path": "/token",
+      "method": "GET",
+      "pass": true,
+      "status": 405,
+      "html_response": false,
+      "error_1010_observed": false
+    }
+  ]
+}

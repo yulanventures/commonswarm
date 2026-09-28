@@ -1,0 +1,1 @@
+root-owned mode-0644 CA accepted; three mode-0644 secret files refused: PASS
