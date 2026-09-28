@@ -1,6 +1,113 @@
 #!/bin/sh
 set -eu
 
+resolve_delete_path() {
+  path_to_resolve=${1:-}
+  [ -n "$path_to_resolve" ] || return 1
+
+  if command -v realpath >/dev/null 2>&1; then
+    resolved_path=$(realpath "$path_to_resolve" 2>/dev/null) && {
+      printf '%s\n' "$resolved_path"
+      return 0
+    }
+  fi
+  if command -v readlink >/dev/null 2>&1; then
+    resolved_path=$(readlink -f "$path_to_resolve" 2>/dev/null) && [ -n "$resolved_path" ] && {
+      printf '%s\n' "$resolved_path"
+      return 0
+    }
+  fi
+  if [ -d "$path_to_resolve" ]; then
+    (CDPATH= cd -P -- "$path_to_resolve" 2>/dev/null && pwd -P)
+    return
+  fi
+
+  path_parent=$(dirname -- "$path_to_resolve")
+  path_name=$(basename -- "$path_to_resolve")
+  [ "$path_name" != "." ] && [ "$path_name" != ".." ] || return 1
+  resolved_parent=$(CDPATH= cd -P -- "$path_parent" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "${resolved_parent%/}" "$path_name"
+}
+
+guarded_delete() {
+  delete_target=${1:-}
+  delete_root=${2:-}
+  protected_target=${3:-}
+  delete_description=${4:-release directory}
+
+  [ -n "$delete_target" ] || {
+    printf 'Refusing delete of %s: target is empty.\n' "$delete_description" >&2
+    return 64
+  }
+  [ "$delete_target" != "/" ] || {
+    printf 'Refusing delete of %s: target is /.\n' "$delete_description" >&2
+    return 64
+  }
+  [ ! -L "$delete_target" ] || {
+    printf 'Refusing delete of %s: target is a symlink: %s\n' "$delete_description" "$delete_target" >&2
+    return 64
+  }
+  [ -n "$delete_root" ] && [ "$delete_root" != "/" ] && [ ! -L "$delete_root" ] || {
+    printf 'Refusing delete of %s: releases root is empty, /, or a symlink: %s\n' "$delete_description" "$delete_root" >&2
+    return 64
+  }
+
+  resolved_target=$(resolve_delete_path "$delete_target") || {
+    printf 'Refusing delete of %s: could not resolve target: %s\n' "$delete_description" "$delete_target" >&2
+    return 64
+  }
+  resolved_root=$(resolve_delete_path "$delete_root") || {
+    printf 'Refusing delete of %s: could not resolve releases root: %s\n' "$delete_description" "$delete_root" >&2
+    return 64
+  }
+  [ "$resolved_target" != "/" ] || {
+    printf 'Refusing delete of %s: resolved target is /.\n' "$delete_description" >&2
+    return 64
+  }
+  [ "$resolved_root" != "/" ] || {
+    printf 'Refusing delete of %s: resolved releases root is /.\n' "$delete_description" >&2
+    return 64
+  }
+
+  [ -n "${HOME:-}" ] || {
+    printf 'Refusing delete of %s: HOME is empty.\n' "$delete_description" >&2
+    return 64
+  }
+  resolved_home=$(resolve_delete_path "$HOME") || {
+    printf 'Refusing delete of %s: could not resolve HOME.\n' "$delete_description" >&2
+    return 64
+  }
+  case "$resolved_home" in
+    "$resolved_target"|"$resolved_target"/*)
+      printf 'Refusing delete of %s: target equals or contains HOME: %s\n' "$delete_description" "$resolved_target" >&2
+      return 64
+      ;;
+  esac
+
+  case "$resolved_target" in
+    "$resolved_root"/*) ;;
+    *)
+      printf 'Refusing delete of %s outside releases root %s: %s\n' "$delete_description" "$resolved_root" "$resolved_target" >&2
+      return 64
+      ;;
+  esac
+
+  if [ -n "$protected_target" ] && { [ -e "$protected_target" ] || [ -L "$protected_target" ]; }; then
+    resolved_protected=$(resolve_delete_path "$protected_target") || {
+      printf 'Refusing delete of %s: could not resolve current release.\n' "$delete_description" >&2
+      return 64
+    }
+    [ "$resolved_target" != "$resolved_protected" ] || {
+      printf 'Refusing delete of %s: target is the current release: %s\n' "$delete_description" "$resolved_target" >&2
+      return 64
+    }
+  fi
+
+  rm -rf -- "$resolved_target"
+}
+
+# END DELETE SAFETY HELPERS
+
 [ "$#" -eq 3 ] || {
   printf 'Usage: finalize-release.sh <temporary-release> <final-release> <site-root>\n' >&2
   exit 2
@@ -54,25 +161,29 @@ fi
 # after one hour. The active temporary release has already moved above, but keep
 # the explicit exclusion so a future reorder cannot delete it.
 for stale_temp in "$releases"/*.tmp; do
-  [ -d "$stale_temp" ] || continue
-  [ -L "$stale_temp" ] && continue
+  [ -d "$stale_temp" ] || [ -L "$stale_temp" ] || continue
+  if [ -L "$stale_temp" ]; then
+    guarded_delete "$stale_temp" "$releases" "$site_root/current" 'stale temporary release' || {
+      prune_status=$?
+      [ "$prune_status" -ne 64 ] || exit "$prune_status"
+      printf 'Warning: could not prune stale temporary release: %s\n' "$stale_temp" >&2
+    }
+    continue
+  fi
   [ "$stale_temp" = "$temporary_release" ] && continue
   stale_marker=$(find "$stale_temp" -prune -type d -mmin +60 -print 2>/dev/null || true)
   [ -n "$stale_marker" ] || continue
-  case "$stale_temp" in
-    "$releases"/*)
-      if ! rm -rf -- "$stale_temp"; then
-        printf 'Warning: could not prune stale temporary release: %s\n' "$stale_temp" >&2
-      fi
-      ;;
-    *) printf 'Warning: refusing temporary prune outside releases directory: %s\n' "$stale_temp" >&2 ;;
-  esac
+  guarded_delete "$stale_temp" "$releases" "$site_root/current" 'stale temporary release' || {
+    prune_status=$?
+    [ "$prune_status" -ne 64 ] || exit "$prune_status"
+    printf 'Warning: could not prune stale temporary release: %s\n' "$stale_temp" >&2
+  }
 done
 
 # The timestamp at the start of each release name sorts oldest first. Shell glob
 # expansion cannot contain colour codes, unlike ls output. Only the releases
-# older than the newest five are candidates. Pruning is best-effort because the
-# live symlink has already changed and cleanup must not turn a good deploy red.
+# older than the newest five are candidates. Ordinary rm failures are best-effort
+# because the live symlink has already changed; a safety refusal still fails.
 LC_ALL=C
 export LC_ALL
 release_count=0
@@ -85,16 +196,20 @@ prune_count=$((release_count - 5))
 [ "$prune_count" -gt 0 ] || prune_count=0
 for old_release in "$releases"/20??????T??????Z-????????????-????????????????; do
   [ "$prune_count" -gt 0 ] || break
-  [ -d "$old_release" ] || continue
-  [ -L "$old_release" ] && continue
+  [ -d "$old_release" ] || [ -L "$old_release" ] || continue
+  if [ -L "$old_release" ]; then
+    guarded_delete "$old_release" "$releases" "$site_root/current" 'old release' || {
+      prune_status=$?
+      [ "$prune_status" -ne 64 ] || exit "$prune_status"
+      printf 'Warning: could not prune old release: %s\n' "$old_release" >&2
+    }
+    continue
+  fi
   prune_count=$((prune_count - 1))
   [ "$old_release" = "$final_release" ] && continue
-  case "$old_release" in
-    "$releases"/*)
-      if ! rm -rf -- "$old_release"; then
-        printf 'Warning: could not prune old release: %s\n' "$old_release" >&2
-      fi
-      ;;
-    *) printf 'Warning: refusing release prune outside releases directory: %s\n' "$old_release" >&2 ;;
-  esac
+  guarded_delete "$old_release" "$releases" "$site_root/current" 'old release' || {
+    prune_status=$?
+    [ "$prune_status" -ne 64 ] || exit "$prune_status"
+    printf 'Warning: could not prune old release: %s\n' "$old_release" >&2
+  }
 done

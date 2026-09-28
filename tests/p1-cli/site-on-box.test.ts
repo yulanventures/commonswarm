@@ -388,7 +388,8 @@ test("release finalization keeps old assets, normalizes modes, prunes, and refus
     // finalize-release.sh (proved by the 0700/0600 fixture above).
     assert.match(deployScript, /rsync -a --delete "\$checkout\/site\/dist\/"/);
     assert.doesNotMatch(deployScript.replace(/^\s*#.*$/gm, ""), /--chmod/);
-    assert.doesNotMatch(deployScript, /readlink -f|find .*-(?:maxdepth|printf)|date .*%N/);
+    assert.match(deployScript, /CDPATH= cd -P -- "\$path_to_resolve"/);
+    assert.doesNotMatch(deployScript, /find .*-(?:maxdepth|printf)|date .*%N/);
     const finalizeScript = await readFile(join(deployRoot, "finalize-release.sh"), "utf8");
     assert.doesNotMatch(finalizeScript.replace(/^\s*#.*$/gm, ""), /\bls\b/);
     const names = await Promise.all([0, 1].map(async () =>
