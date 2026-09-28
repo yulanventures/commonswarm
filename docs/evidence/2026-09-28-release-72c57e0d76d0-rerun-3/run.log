@@ -1,0 +1,25 @@
+2026-09-28T05:33:17Z rerun=3 plan-sha256=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb expected=50551c748abc48da2024703a7c0154c20b0e6badef2f5370ba331abfcee978fb result=PASS
+2026-09-28T05:33:17Z approval release_sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 reviewed=Codex-plan+Antigravity-PASS-no-KEEP backup_max_age=22h ship-as-soon-ready
+2026-09-28T05:33:17Z fixed-proofs source=202be65661f9c3084bb2ebf6cbba0b977e6aa71b approval=HezLead maker=Codex checker=Antigravity-PASS-FULL actions-run=36381060544 test-208=PASS suite=314/315 unrelated-item-L-failure
+2026-09-28T05:33:17Z proof-hashes catalog=83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144 functional=1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3 rollback=c785367daf8fca1305773302af4cc46d6f1321e6ad55355dcbf69fc98ed85970 rollback-catalog=c7378b2a1136010928fbaaf93d7678435e6ca2e1b356505e10fd456da5c4ae59
+2026-09-28T05:33:17Z approval-note principal hard-coded names suffixed c for this run only; exact diff=hm2-name-suffix.diff
+2026-09-28T05:33:17Z surfaces KIND_LIST=edge+stack CHANGED_FUNCTIONS=command+read ROUTER_CHANGED=yes ADDITIONAL_REQUIRED_ENV_NAMES=empty migration=20260928000002 no-npm-publish no-site no-mcp-auth no-stack-switch
+2026-09-28T05:33:17Z router-change dark-mcp-entry recognizes mcp and refuses POST+OPTIONS with 503 feature_disabled before worker creation; ten optional SWARM_MCP_* forwarded names; no mcp-auth deploy
+2026-09-28T05:33:17Z window start=2026-09-28T05:30:15Z end=2026-09-28T09:30:15Z generated-window-principal-suffix=053015 plan-principal-suffix=c
+2026-09-28T05:33:17Z gates fresh-clean-exact-SHA command-core=PASS check-edge=PASS
+2026-09-28T05:33:17Z section1 PASS existing-exact-SHA-release-dirs-reused-after-recorded-manifest-verification=yes prior-proof-preserved=diagnostic-108d6b89 stack-runtime-unchanged=yes proof-transfer=PASS appledouble=absent env-inventory=PASS
+2026-09-28T05:33:17Z operator-note initial added remote checksum verification ran outside PROOF_DIR and failed relative-path lookup only; corrected from PROOF_DIR; no production mutation
+2026-09-28T05:33:17Z rm-guard compliance unpack replaced forbidden find-delete with AppleDouble absence assertion; no rm bypass used
+2026-09-28T05:59:30Z backup PASS verified_at=2026-09-28T03:55:22.215479+00:00 age_seconds=5973 max_age_seconds=79200 database_bytes_verified=true object_bytes_verified=true
+2026-09-28T05:59:30Z section5 decision=ledger:0/catalog:f apply_exit=0 verify=ledger:1/catalog:t functional=t cron_added=none cron_removed=none
+2026-09-28T05:59:30Z section6 new-edge PASS sha=72c57e0d76d0aa86fe4f811a2cf51499919fed20 health=healthy memory=2147483648 network=commonswarm-net working_dir=exact loopback-a-h+j1-j3=PASS staging-a-h+j1-j3=PASS mcp-POST+OPTIONS=503 metrics_lines=11 log_check=PASS boot_module_errors=0 mcp_worker_starts=0
+2026-09-28T05:59:30Z public-boundaries PASS loopback+staging+api hosted-commands=403-before-bearer ordinary-mint-noauth=401 mcp-POST+OPTIONS=503; Python urllib used established curl release-probe User-Agent via sitecustomize because Cloudflare refuses Python-urllib with 1010
+2026-09-28T05:59:30Z STOP post-release local mint plan block exited 1 after local credential mint: plan reads credential["token"], released cswarm 0.1.80 emits credential["agent_token"]; local connection/setup, sender mint, ACK, and wake proof NOT RUN
+2026-09-28T05:59:30Z rollback edge-first PASS restored=9b085c82352390cf8f0fe515c02b3ccff423476a health=healthy memory=2147483648 network=commonswarm-net loopback-a-h+j1-j3=PASS staging-a-h+j1-j3=PASS metrics_lines=1 log_check=PASS
+2026-09-28T05:59:30Z rollback migration PASS version=20260928000002 ledger=0 rollback-catalog=t
+2026-09-28T05:59:30Z temporary-principals local+sender revocation=accepted count=2; one local credential had minted before the plan-field failure
+2026-09-28T05:59:30Z abort-cleanup recycle_timer=active/enabled backup_timer=active restore_timer=active
+2026-09-28T05:59:30Z copy-back PARTIAL approved=32 copied=30 missing=hm-local-first-ack.txt,hm-local-wake-after.txt because the control stopped before those proofs; original approved manifest preserved
+2026-09-28T05:59:30Z release outcome=ROLLED_BACK no-npm no-site no-mcp-auth no-stack-current-switch
+2026-09-28T06:00:56Z box transient cleanup=PASS; Mac credential root, release archives, and window.env removed; rm guard refused /Users/yulanbot/.hermes/profiles/anvil/cache/scratch/hm2-rerun3, which was left in place without bypass
+2026-09-28T06:02:30Z revocation read-back PASS principals_revoked=t active_unexpired_tokens=0; temporary database session removed again

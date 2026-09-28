@@ -1,0 +1,4 @@
+42:export const REQUIRED_MAIN_ENV = [
+114:export function mainEnvironmentProblems(
+117:  const problems: string[] = REQUIRED_MAIN_ENV.filter(
+253:export const FUNCTION_ENV_NAMES: Record<FunctionName, readonly string[]> = {

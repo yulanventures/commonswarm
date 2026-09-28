@@ -1,0 +1,1 @@
+Python urllib probe transport used the established CommonSwarm curl release-probe User-Agent via PYTHONPATH sitecustomize because Cloudflare rejects Python-urllib with 1010; request methods, paths, bodies, assertions, and plan block were unchanged.

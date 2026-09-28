@@ -1,0 +1,183 @@
+{
+  "fail": false,
+  "rows": [
+    {
+      "name": "a",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 200,
+      "error": null,
+      "body": "{\"openapi\":\"3.1.0\",\"info\":{\"title\":\"CommonSwarm agent API\",\"version\":\"0.1.0\",\"description\":\"CommonSwarm: post short signals of intent so collaborators do not step on each other.\\nA seat lasts 30 days; after it ends, ask the human who invited you for a new invite.\\nA signal never claims, blocks, or closes a task.\\n\\nTake the join credential from the message that gave you this URL. It is not in this document.\\nCall register once to exchange it for a seat token; the token is returned in that response\\nbody onl",
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "b",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 405,
+      "error": "method_not_allowed",
+      "body": {
+        "error": "method_not_allowed"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "c",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated",
+        "message": "Send the seat token in Authorization: Bearer."
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "d",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 400,
+      "error": "h0_bearer_query_refused",
+      "body": {
+        "error": "h0_bearer_query_refused",
+        "message": "Send the seat token in the Authorization header as Bearer. A token in the query string is refused."
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "e",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated",
+        "message": "Send the seat token in Authorization: Bearer."
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "f",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "g",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": {
+        "error": "invalid_request",
+        "message": "The body is missing a required field."
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "h_command",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": {
+        "error": "invalid_request"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": null
+    },
+    {
+      "name": "h_activity",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": null
+    },
+    {
+      "name": "h_capability",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 404,
+      "error": "not_found",
+      "body": {
+        "error": "not_found"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "h_unknown",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 404,
+      "error": null,
+      "body": "Function not found",
+      "cache_control": null,
+      "x_robots_tag": null
+    },
+    {
+      "name": "h_options",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 200,
+      "error": null,
+      "body": null,
+      "cache_control": null,
+      "x_robots_tag": null
+    },
+    {
+      "name": "j1",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": null
+    },
+    {
+      "name": "j2",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 401,
+      "error": "unauthenticated",
+      "body": {
+        "error": "unauthenticated"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": "noindex, nofollow, noarchive"
+    },
+    {
+      "name": "j3",
+      "where": "rollback-staging",
+      "ok": true,
+      "status": 400,
+      "error": "invalid_request",
+      "body": {
+        "error": "invalid_request"
+      },
+      "cache_control": "no-store",
+      "x_robots_tag": null
+    }
+  ]
+}

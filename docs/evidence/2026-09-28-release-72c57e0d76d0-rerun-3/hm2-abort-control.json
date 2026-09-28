@@ -1,0 +1,18 @@
+{
+  "release_sha": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+  "client": "released cswarm 0.1.80",
+  "control_completed": false,
+  "failure": "plan expected credential field token; released CLI emitted agent_token",
+  "seats": {
+    "local": {
+      "principal_id": "d58220d4-0431-4c71-b916-d8c0d8601f43",
+      "credential_minted": true,
+      "revocation": "accepted"
+    },
+    "sender": {
+      "principal_id": "0815e8ee-1762-4f40-b458-2a51c75145c1",
+      "credential_minted": false,
+      "revocation": "accepted"
+    }
+  }
+}

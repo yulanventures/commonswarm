@@ -1,0 +1,4 @@
+copy_back=PARTIAL approved_manifest_count=32 copied=30
+missing=hm-local-first-ack.txt
+missing=hm-local-wake-after.txt
+reason=post-release local control stopped before primer and wake proof

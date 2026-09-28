@@ -1,0 +1,24 @@
+supabase/functions/_shared/agent-auth.ts
+supabase/functions/_shared/hosted-seat-auth.ts
+supabase/functions/_shared/protocol.js
+supabase/functions/command/index.ts
+supabase/functions/read/index.ts
+supabase/migrations/20260928000002_hm_hosted_authority.sql
+deploy/edge-runtime/RUNBOOK.md
+deploy/edge-runtime/env.example
+deploy/edge-runtime/main/index.ts
+deploy/edge-runtime/main/router.ts
+diff --git a/deploy/supabase-stack/env.example b/deploy/supabase-stack/env.example
+index 38358814..f734320b 100644
+--- a/deploy/supabase-stack/env.example
++++ b/deploy/supabase-stack/env.example
+@@ -20,7 +20,8 @@ GOTRUE_API_PORT=9999
+ GOTRUE_DB_DRIVER=postgres
+ GOTRUE_DB_DATABASE_URL=
+ GOTRUE_SITE_URL=https://commonswarm.com
+-GOTRUE_URI_ALLOW_LIST=https://commonswarm.com/app,https://www.commonswarm.com/app,http://127.0.0.1:*/callback
++# Preserve every live entry and append the hosted OAuth callback exactly once.
++GOTRUE_URI_ALLOW_LIST=https://commonswarm.com/app,https://www.commonswarm.com/app,http://127.0.0.1:*/callback,https://mcp.commonswarm.com/oauth/callback/gotrue
+ GOTRUE_DISABLE_SIGNUP=false
+ GOTRUE_EXTERNAL_EMAIL_ENABLED=true
+ GOTRUE_MAILER_AUTOCONFIRM=false
