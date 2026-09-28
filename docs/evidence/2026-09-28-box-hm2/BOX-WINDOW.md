@@ -2,7 +2,18 @@
 
 **Status: PLAN — production execution and closure are not established.**
 
-Release hosted authority and internal authentication from **`72c57e0d76d0aa86fe4f811a2cf51499919fed20`**, applying migration **`20260928000002_hm_hosted_authority.sql`** before switching the edge.
+This window keeps the stack and edge release at **`72c57e0d76d0aa86fe4f811a2cf51499919fed20`**. It takes **only** the four `20260928000002` proof files from main commit **`202be656`**; it does not take any other file from current main. Current main also carries migration **`20260928000003_hm_oauth_store.sql`** for HM lane 6, and this window must not stage or apply that migration.
+
+The reviewed proof bytes are fixed by these full SHA-256 digests:
+
+| Proof file from `202be656` | SHA-256 |
+|---|---|
+| `deploy/release-proofs/item-hm/20260928000002-catalog.sql` | `83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144` |
+| `deploy/release-proofs/item-hm/20260928000002-functional.sql` | `1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3` |
+| `deploy/release-proofs/item-hm/20260928000002-rollback.sql` | `c785367daf8fca1305773302af4cc46d6f1321e6ad55355dcbf69fc98ed85970` |
+| `deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql` | `c7378b2a1136010928fbaaf93d7678435e6ca2e1b356505e10fd456da5c4ae59` |
+
+Release hosted authority and internal authentication from that unchanged release SHA, applying migration **`20260928000002_hm_hosted_authority.sql`** before switching the edge.
 
 Anvil runs every Mac mini and box command. HezLead approves the SHA, backup age, transitions and rollback, and closes the window. CSwarmDevLead coordinates and supplies reviewed inputs.
 
@@ -16,15 +27,13 @@ Repository inspection established:
 
 | Fact | Measurement |
 |---|---|
-| Checked-out `HEAD` | `72c57e0d76d0aa86fe4f811a2cf51499919fed20` |
-| Locally recorded `origin/main` | Same SHA |
-| `git merge-base HEAD origin/main` | Same SHA |
-| Working tree | Clean |
-| Local branch `main` | `ff27acfbb8055dce173c403b2befa75a68f2bc86`; this checkout is detached |
+| Stack and edge release SHA | `72c57e0d76d0aa86fe4f811a2cf51499919fed20` |
+| Corrected proof source | `202be65661f9c3084bb2ebf6cbba0b977e6aa71b` on `origin/main` |
+| Release content boundary | Migration `20260928000003` is absent from the release SHA and proof source |
 | Current remote GitHub state | **Not established**; Anvil must fetch and verify through runbook section 1 |
 | Live edge and stack baseline | Supplied as `9b085c82352390cf8f0fe515c02b3ccff423476a`; current box paths must be remeasured |
 
-The release contains all five required files:
+The unchanged release contains the migration, and the proof commit supplies the four corrected proofs:
 
 - `supabase/migrations/20260928000002_hm_hosted_authority.sql`
 - `deploy/release-proofs/item-hm/20260928000002-catalog.sql`
@@ -39,18 +48,40 @@ Reproduce the release-shape measurement:
 (
   set -euo pipefail
   SHA=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  PROOF_SHA=202be65661f9c3084bb2ebf6cbba0b977e6aa71b
   BASE=9b085c82352390cf8f0fe515c02b3ccff423476a
-  test "$(git rev-parse HEAD)" = "$SHA"
+  test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
+  test "$(git rev-parse "${PROOF_SHA}^{commit}")" = "$PROOF_SHA"
   git merge-base --is-ancestor "$BASE" "$SHA"
+  git merge-base --is-ancestor "$PROOF_SHA" origin/main
+
+  git cat-file -e "${SHA}:supabase/migrations/20260928000002_hm_hosted_authority.sql"
+  if git cat-file -e "${SHA}:supabase/migrations/20260928000003_hm_oauth_store.sql" 2>/dev/null; then
+    false
+  fi
+  if git cat-file -e "${PROOF_SHA}:supabase/migrations/20260928000003_hm_oauth_store.sql" 2>/dev/null; then
+    false
+  fi
+
+  for SPEC in \
+    'deploy/release-proofs/item-hm/20260928000002-catalog.sql:83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144' \
+    'deploy/release-proofs/item-hm/20260928000002-functional.sql:1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3' \
+    'deploy/release-proofs/item-hm/20260928000002-rollback.sql:c785367daf8fca1305773302af4cc46d6f1321e6ad55355dcbf69fc98ed85970' \
+    'deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql:c7378b2a1136010928fbaaf93d7678435e6ca2e1b356505e10fd456da5c4ae59'
+  do
+    FILE="${SPEC%%:*}"
+    EXPECTED="${SPEC##*:}"
+    ACTUAL="$(git show "${PROOF_SHA}:${FILE}" | shasum -a 256)"
+    test "${ACTUAL%% *}" = "$EXPECTED"
+  done
 
   for FILE in \
-    supabase/migrations/20260928000002_hm_hosted_authority.sql \
     deploy/release-proofs/item-hm/20260928000002-catalog.sql \
     deploy/release-proofs/item-hm/20260928000002-functional.sql \
     deploy/release-proofs/item-hm/20260928000002-rollback.sql \
     deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql
   do
-    git cat-file -e "${SHA}:${FILE}"
+    git cat-file -e "${PROOF_SHA}:${FILE}"
   done
 
   git diff --name-only "$BASE" "$SHA" -- supabase/
@@ -340,6 +371,25 @@ Run after common preparation and before section 5 apply. These are the only new 
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = 72c57e0d76d0aa86fe4f811a2cf51499919fed20
 
+  WINDOW_PRINCIPAL_SUFFIX="$(
+    ssh ops@100.115.66.74 \
+      "sudo -n -i bash -s -- $SHA" <<'BOX'
+set -euo pipefail
+SHA="$1"
+PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+. "$PROOF_DIR/window.env"
+case "$WINDOW_PRINCIPAL_SUFFIX" in
+  [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *) false ;;
+esac
+printf '%s\n' "$WINDOW_PRINCIPAL_SUFFIX"
+BOX
+  )"
+  case "$WINDOW_PRINCIPAL_SUFFIX" in
+    [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) false ;;
+  esac
+
   ROOT="$HOME/.config/cswarm/box-hm2-20260928"
   ANON_FILE="$HOME/.config/cswarm/box-hm4-20260928/anon-key.txt"
   WS=c2ea0541-f56d-4c73-bf71-56c5405c4934
@@ -354,7 +404,7 @@ Run after common preparation and before section 5 apply. These are the only new 
     D="$RUN_ROOT/$SLUG"
     mkdir -m 0700 "$D"
     cswarm principal create --workspace-id "$WS" \
-      --name "hm2-${SLUG}-0928" \
+      --name "hm2-${SLUG}-${WINDOW_PRINCIPAL_SUFFIX}" \
       >"$D/principal.json" 2>"$D/mint.log"
   done
 
@@ -374,6 +424,7 @@ PY
     printf 'WS=%q\n' "$WS"
     printf 'RECIPIENT=%q\n' "$RECIPIENT"
     printf 'SENDER=%q\n' "$SENDER"
+    printf 'WINDOW_PRINCIPAL_SUFFIX=%q\n' "$WINDOW_PRINCIPAL_SUFFIX"
   } >"$ROOT/control.env"
   chmod 0600 "$ROOT/control.env"
   printf 'R=%s\nS=%s\n' "$RECIPIENT" "$SENDER"
@@ -472,9 +523,19 @@ import json, pathlib, sys, uuid
 anon_file, credential_file, output_file, workspace_id, principal_id = sys.argv[1:]
 anon_key = pathlib.Path(anon_file).read_text().strip()
 credential = json.loads(pathlib.Path(credential_file).read_text())
-assert anon_key and credential["principal_id"] == principal_id
-assert credential["token"]
-uuid.UUID(credential["token_id"])
+def required_string(value, field):
+    found = value.get(field)
+    if not isinstance(found, str) or not found:
+        raise SystemExit(f'credential is missing required non-empty string field "{field}"')
+    return found
+credential_principal_id = required_string(credential, "principal_id")
+agent_token = required_string(credential, "agent_token")
+token_id = required_string(credential, "token_id")
+if not anon_key:
+    raise SystemExit("anon key file is empty")
+if credential_principal_id != principal_id:
+    raise SystemExit("credential principal_id does not match the requested principal")
+uuid.UUID(token_id)
 pathlib.Path(output_file).write_text(json.dumps({
     "version": 1,
     "url": "https://api.commonswarm.com",
@@ -651,7 +712,7 @@ assert r["status"] == "accepted" and r["principal_id"] == sys.argv[2]
 PY
   done
 
-  python3 - "$RUN_ROOT" "$SHA" >"$EVIDENCE_DIR/hm2-local-control.json" <<'PY'
+  python3 - "$RUN_ROOT" "$SHA" "$WINDOW_PRINCIPAL_SUFFIX" >"$EVIDENCE_DIR/hm2-local-control.json" <<'PY'
 import json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 ack = json.loads((root / "hm-local-first-ack.txt").read_text())
@@ -663,11 +724,20 @@ for slug in ("local", "sender"):
     principal = json.loads((root / slug / "principal.json").read_text())["principal_id"]
     credential = json.loads((root / slug / "credential-mint.json").read_text())
     revoked = json.loads((root / slug / "revoked.json").read_text())
-    assert credential["principal_id"] == principal and credential["token"]
+    def required_string(value, field):
+        found = value.get(field)
+        if not isinstance(found, str) or not found:
+            raise SystemExit(f'credential is missing required non-empty string field "{field}"')
+        return found
+    credential_principal_id = required_string(credential, "principal_id")
+    agent_token = required_string(credential, "agent_token")
+    if credential_principal_id != principal:
+        raise SystemExit("credential principal_id does not match the created principal")
     assert revoked["status"] == "accepted" and revoked["principal_id"] == principal
     seats[slug] = {"principal_id": principal, "mint": "accepted", "revocation": "accepted"}
 print(json.dumps({
     "release_sha": sys.argv[2],
+    "window_principal_suffix": sys.argv[3],
     "client": "released cswarm 0.1.80",
     "seat_before": True,
     "wake_after": True,
