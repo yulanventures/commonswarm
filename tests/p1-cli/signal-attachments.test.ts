@@ -195,7 +195,11 @@ test("note --attach parses repeatably and uploads both files before posting refs
       "--url", `http://127.0.0.1:${address.port}`,
       "--anon-key", "anon", "--workspace-id", WORKSPACE,
       "--agent-token-stdin", "--json",
-    ], { cwd: process.cwd(), stdio: ["pipe", "pipe", "pipe"] });
+    ], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: root },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     child.stdin.end(credential);
     let stdout = "";
     let stderr = "";

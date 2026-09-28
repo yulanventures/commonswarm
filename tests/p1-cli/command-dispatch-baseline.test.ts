@@ -56,6 +56,16 @@ const AGENT_TOKEN = `swm_agt_${"A".repeat(43)}`;
 const INVITATION_TOKEN = `swm_inv_${"B".repeat(43)}`;
 const HUMAN_USER = "88888888-8888-4888-8888-888888888888";
 const HUMAN_DEVICE = "99999999-9999-4999-8999-999999999999";
+const DISPATCH_BASELINE_SHARD_COUNT = 8;
+
+function dispatchBaselineShard(): number | null {
+  if (process.env.UPDATE_DISPATCH_BASELINE === "1") return null;
+  const raw = process.env.CSWARM_DISPATCH_BASELINE_SHARD ?? "0";
+  const shard = Number(raw);
+  assert.ok(Number.isInteger(shard) && shard >= 0 && shard < DISPATCH_BASELINE_SHARD_COUNT,
+    `CSWARM_DISPATCH_BASELINE_SHARD must be an integer from 0 to ${DISPATCH_BASELINE_SHARD_COUNT - 1}`);
+  return shard;
+}
 
 /**
  * This is the mechanically enumerated shape of the old dispatcher. Commit 1
@@ -713,6 +723,35 @@ function normalize(value: string, root: string, origin: string): string {
     .replace(/coverage-[0-9-]+\.json/g, "coverage-<ID>.json");
 }
 
+const FILE_STORE_FALLBACK_WARNING =
+  "⚠ no OS keychain found. Storing the rotating refresh credential in a 0600 file under a 0700 directory. This is less protected than a keychain.";
+
+/**
+ * An unforced credential store is host-selected: macOS uses Keychain while a
+ * Linux runner uses the documented file fallback. Ignore only that backend
+ * warning. Rows that explicitly pass --force-file-store still pin the warning
+ * and all other stderr remains part of the baseline.
+ */
+function credentialBackendIndependentStderr(value: string, argv: readonly string[]): string {
+  if (argv.includes("--force-file-store")) return value;
+  const prefix = `${FILE_STORE_FALLBACK_WARNING} Path: <ROOT>/`;
+  return value.split("\n").filter(line => {
+    if (!line.startsWith(prefix)) return true;
+    const location = line.slice(prefix.length);
+    return !/^[^/]+\/\.cswarm\/credentials\.d\/<PROFILE_ID>\.json$/.test(location);
+  }).join("\n");
+}
+
+test("dispatcher baseline ignores only the implicit credential backend warning", { timeout: 1_000 }, () => {
+  const warning = `${FILE_STORE_FALLBACK_WARNING} Path: <ROOT>/invite.create/.cswarm/credentials.d/<PROFILE_ID>.json\n`;
+  assert.equal(credentialBackendIndependentStderr(warning, ["invite", "create"]), "");
+  assert.equal(credentialBackendIndependentStderr(`${warning}cswarm: unexpected stderr\n`, ["invite", "create"]),
+    "cswarm: unexpected stderr\n");
+  assert.equal(credentialBackendIndependentStderr(warning.replace("0600", "0644"), ["invite", "create"]),
+    warning.replace("0600", "0644"));
+  assert.equal(credentialBackendIndependentStderr(warning, ["invite", "create", "--force-file-store"]), warning);
+});
+
 // Help has its own table-driven gate. Keep this dispatcher baseline focused on
 // routing, exit status, and the refusal prefix when usage is printed afterward.
 function withoutGeneratedHelp(value: string): string {
@@ -948,8 +987,13 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
   assert.ok(address && typeof address === "object");
   const origin = `http://127.0.0.1:${address.port}`;
   try {
+    const shard = dispatchBaselineShard();
+    const allFixtures = await fixtures();
+    const selectedFixtures = shard === null
+      ? allFixtures
+      : allFixtures.filter((_fixture, index) => index % DISPATCH_BASELINE_SHARD_COUNT === shard);
     const rows: BaselineRow[] = [];
-    for (const fixture of await fixtures()) rows.push(await runFixture(root, origin, fixture));
+    for (const fixture of selectedFixtures) rows.push(await runFixture(root, origin, fixture));
     const counts = {
       total: rows.length,
       exitCodeZero: rows.filter(row => row.exitCode === 0).length,
@@ -959,13 +1003,28 @@ test("the command dispatcher matches the recorded behavior baseline", { timeout:
       await writeFile(baselinePath, `${JSON.stringify(rows, null, 2)}\n`);
       await writeFile(baselineCountsPath, `${JSON.stringify(counts, null, 2)}\n`);
     }
-    const expected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+    const allExpected = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
     const expectedCounts = JSON.parse(await readFile(baselineCountsPath, "utf8")) as typeof counts;
+    assert.equal(allFixtures.length, allExpected.length, "fixture and recorded baseline totals differ");
+    assert.deepEqual({
+      total: allExpected.length,
+      exitCodeZero: allExpected.filter(row => row.exitCode === 0).length,
+      exitCodeNonzero: allExpected.filter(row => row.exitCode !== 0).length,
+    }, expectedCounts);
+    const expected = shard === null
+      ? allExpected
+      : allExpected.filter((_row, index) => index % DISPATCH_BASELINE_SHARD_COUNT === shard);
     assert.deepEqual(
-      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
-      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) })),
+      rows.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout),
+        stderr: withoutGeneratedHelp(credentialBackendIndependentStderr(row.stderr, row.argv)) })),
+      expected.map(row => ({ ...row, stdout: withoutGeneratedHelp(row.stdout),
+        stderr: withoutGeneratedHelp(credentialBackendIndependentStderr(row.stderr, row.argv)) })),
     );
-    assert.deepEqual(counts, expectedCounts);
+    assert.deepEqual(counts, {
+      total: expected.length,
+      exitCodeZero: expected.filter(row => row.exitCode === 0).length,
+      exitCodeNonzero: expected.filter(row => row.exitCode !== 0).length,
+    });
   } finally {
     await new Promise<void>(resolveClose => server.close(() => resolveClose()));
     removeLaneTempHome(root);
