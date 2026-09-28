@@ -1,0 +1,158 @@
+{
+ "recorded_at": "2026-09-28T23:22:20+00:00",
+ "client": "Python urllib default User-Agent, no redirects, Content-Type: application/json request header",
+ "responses": [
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-authorization-server",
+   "request_body": null,
+   "status": 200,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJhdXRob3JpemF0aW9uX2VuZHBvaW50IjoiaHR0cHM6Ly9tY3AuY29tbW9uc3dhcm0uY29tL2F1dGhvcml6ZSIsImNsYWltc19wYXJhbWV0ZXJfc3VwcG9ydGVkIjpmYWxzZSwiY2xhaW1zX3N1cHBvcnRlZCI6WyJzdWIiLCJzaWQiLCJhdXRoX3RpbWUiLCJpc3MiXSwiY29kZV9jaGFsbGVuZ2VfbWV0aG9kc19zdXBwb3J0ZWQiOlsiUzI1NiJdLCJlbmRfc2Vzc2lvbl9lbmRwb2ludCI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbS9zZXNzaW9uL2VuZCIsImdyYW50X3R5cGVzX3N1cHBvcnRlZCI6WyJhdXRob3JpemF0aW9uX2NvZGUiLCJyZWZyZXNoX3Rva2VuIl0sImlzc3VlciI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbSIsImp3a3NfdXJpIjoiaHR0cHM6Ly9tY3AuY29tbW9uc3dhcm0uY29tL2p3a3MiLCJhdXRob3JpemF0aW9uX3Jlc3BvbnNlX2lzc19wYXJhbWV0ZXJfc3VwcG9ydGVkIjp0cnVlLCJyZXNwb25zZV9tb2Rlc19zdXBwb3J0ZWQiOlsiZm9ybV9wb3N0IiwiZnJhZ21lbnQiLCJxdWVyeSJdLCJyZXNwb25zZV90eXBlc19zdXBwb3J0ZWQiOlsiY29kZSJdLCJzY29wZXNfc3VwcG9ydGVkIjpbIm9wZW5pZCIsIm9mZmxpbmVfYWNjZXNzIiwibWNwIl0sInN1YmplY3RfdHlwZXNfc3VwcG9ydGVkIjpbInB1YmxpYyJdLCJ0b2tlbl9lbmRwb2ludF9hdXRoX21ldGhvZHNfc3VwcG9ydGVkIjpbIm5vbmUiXSwidG9rZW5fZW5kcG9pbnQiOiJodHRwczovL21jcC5jb21tb25zd2FybS5jb20vdG9rZW4iLCJpZF90b2tlbl9zaWduaW5nX2FsZ192YWx1ZXNfc3VwcG9ydGVkIjpbIkVTMjU2Il0sInB1c2hlZF9hdXRob3JpemF0aW9uX3JlcXVlc3RfZW5kcG9pbnQiOiJodHRwczovL21jcC5jb21tb25zd2FybS5jb20vcmVxdWVzdCIsInJlcXVlc3RfdXJpX3BhcmFtZXRlcl9zdXBwb3J0ZWQiOmZhbHNlLCJ1c2VyaW5mb19lbmRwb2ludCI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbS9tZSIsImRwb3Bfc2lnbmluZ19hbGdfdmFsdWVzX3N1cHBvcnRlZCI6WyJFUzI1NiIsIkVkMjU1MTkiLCJFZERTQSJdLCJjbGllbnRfaWRfbWV0YWRhdGFfZG9jdW1lbnRfc3VwcG9ydGVkIjp0cnVlLCJjbGFpbV90eXBlc19zdXBwb3J0ZWQiOlsibm9ybWFsIl19"
+  },
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/.well-known/openid-configuration",
+   "request_body": null,
+   "status": 200,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJhdXRob3JpemF0aW9uX2VuZHBvaW50IjoiaHR0cHM6Ly9tY3AuY29tbW9uc3dhcm0uY29tL2F1dGhvcml6ZSIsImNsYWltc19wYXJhbWV0ZXJfc3VwcG9ydGVkIjpmYWxzZSwiY2xhaW1zX3N1cHBvcnRlZCI6WyJzdWIiLCJzaWQiLCJhdXRoX3RpbWUiLCJpc3MiXSwiY29kZV9jaGFsbGVuZ2VfbWV0aG9kc19zdXBwb3J0ZWQiOlsiUzI1NiJdLCJlbmRfc2Vzc2lvbl9lbmRwb2ludCI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbS9zZXNzaW9uL2VuZCIsImdyYW50X3R5cGVzX3N1cHBvcnRlZCI6WyJhdXRob3JpemF0aW9uX2NvZGUiLCJyZWZyZXNoX3Rva2VuIl0sImlzc3VlciI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbSIsImp3a3NfdXJpIjoiaHR0cHM6Ly9tY3AuY29tbW9uc3dhcm0uY29tL2p3a3MiLCJhdXRob3JpemF0aW9uX3Jlc3BvbnNlX2lzc19wYXJhbWV0ZXJfc3VwcG9ydGVkIjp0cnVlLCJyZXNwb25zZV9tb2Rlc19zdXBwb3J0ZWQiOlsiZm9ybV9wb3N0IiwiZnJhZ21lbnQiLCJxdWVyeSJdLCJyZXNwb25zZV90eXBlc19zdXBwb3J0ZWQiOlsiY29kZSJdLCJzY29wZXNfc3VwcG9ydGVkIjpbIm9wZW5pZCIsIm9mZmxpbmVfYWNjZXNzIiwibWNwIl0sInN1YmplY3RfdHlwZXNfc3VwcG9ydGVkIjpbInB1YmxpYyJdLCJ0b2tlbl9lbmRwb2ludF9hdXRoX21ldGhvZHNfc3VwcG9ydGVkIjpbIm5vbmUiXSwidG9rZW5fZW5kcG9pbnQiOiJodHRwczovL21jcC5jb21tb25zd2FybS5jb20vdG9rZW4iLCJpZF90b2tlbl9zaWduaW5nX2FsZ192YWx1ZXNfc3VwcG9ydGVkIjpbIkVTMjU2Il0sInB1c2hlZF9hdXRob3JpemF0aW9uX3JlcXVlc3RfZW5kcG9pbnQiOiJodHRwczovL21jcC5jb21tb25zd2FybS5jb20vcmVxdWVzdCIsInJlcXVlc3RfdXJpX3BhcmFtZXRlcl9zdXBwb3J0ZWQiOmZhbHNlLCJ1c2VyaW5mb19lbmRwb2ludCI6Imh0dHBzOi8vbWNwLmNvbW1vbnN3YXJtLmNvbS9tZSIsImRwb3Bfc2lnbmluZ19hbGdfdmFsdWVzX3N1cHBvcnRlZCI6WyJFUzI1NiIsIkVkMjU1MTkiLCJFZERTQSJdLCJjbGllbnRfaWRfbWV0YWRhdGFfZG9jdW1lbnRfc3VwcG9ydGVkIjp0cnVlLCJjbGFpbV90eXBlc19zdXBwb3J0ZWQiOlsibm9ybWFsIl19"
+  },
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/jwks",
+   "request_body": null,
+   "status": 200,
+   "content_type": "application/jwk-set+json; charset=utf-8",
+   "body_b64": "eyJrZXlzIjpbeyJrdHkiOiJFQyIsInVzZSI6InNpZyIsImtpZCI6ImhtNi0xNDUxNTAiLCJhbGciOiJFUzI1NiIsImNydiI6IlAtMjU2IiwieCI6IjQxTThXbmhWdUZOc1pmc00yX21POXdSUjNZQ3p6R3N1QmtzRVZlX2t0VXMiLCJ5IjoiSWhCcl9LZ3JwWU9salFJdkhuYW0zRVk3SW82dmRmNzBQUHhnYm5yc0stSSJ9XX0="
+  },
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/authorize",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json",
+   "body_b64": "eyJlcnJvciI6ImF1dGhvcml6YXRpb25fc2VydmljZV9kaXNhYmxlZCJ9"
+  },
+  {
+   "method": "POST",
+   "url": "https://mcp.commonswarm.com/token",
+   "request_body": {},
+   "status": 503,
+   "content_type": "application/json",
+   "body_b64": "eyJlcnJvciI6ImF1dGhvcml6YXRpb25fc2VydmljZV9kaXNhYmxlZCJ9"
+  },
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "HEAD",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": ""
+  },
+  {
+   "method": "POST",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "PUT",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "PATCH",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "DELETE",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "OPTIONS",
+   "url": "https://mcp.commonswarm.com/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "GET",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "HEAD",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": ""
+  },
+  {
+   "method": "POST",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "PUT",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "PATCH",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "DELETE",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  },
+  {
+   "method": "OPTIONS",
+   "url": "https://mcp.commonswarm.com/.well-known/oauth-protected-resource/mcp",
+   "request_body": null,
+   "status": 503,
+   "content_type": "application/json; charset=utf-8",
+   "body_b64": "eyJlcnJvciI6ImZlYXR1cmVfZGlzYWJsZWQiLCJmZWF0dXJlIjoiaG9zdGVkX21jcCIsIm1lc3NhZ2UiOiJIb3N0ZWQgTUNQIGlzIG5vdCBhdmFpbGFibGUgeWV0LiJ9"
+  }
+ ]
+}
