@@ -1,9 +1,9 @@
 # OAuth and MCP preparation contract
 
-Lane 5 establishes reviewed configuration only. It does not establish a
-working OAuth provider, hosted MCP resource server, DNS or Cloudflare state,
-deployment, or live Claude interoperability. Executable release and rollback
-verification belongs to HM lane 6, when the service exists.
+The repository now contains the OAuth provider service, but this file does not
+claim deployment, DNS or Cloudflare state, a hosted MCP resource server, or
+live Claude interoperability. Those remain production checks for Anvil under
+HezLead.
 
 ## Repository state
 
@@ -18,6 +18,8 @@ verification belongs to HM lane 6, when the service exists.
   `127.0.0.1:${MCP_OAUTH_HOST_PORT}:3490`, uses 512 MiB and one CPU, mounts
   protected files read-only, joins `commonswarm-net`, and defines bounded
   health and log rotation.
+- Public authorization is explicitly disabled by default. Health, discovery,
+  and JWKS remain observable without making code or refresh issuance public.
 - `env.example` assignments contain names and empty values only.
 - The Caddy site's active handlers return explicit disabled JSON. Its
   unimported snippets preserve the reviewed edge-resource and OAuth-upstream

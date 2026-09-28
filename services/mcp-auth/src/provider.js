@@ -1,8 +1,10 @@
+import { randomBytes } from "node:crypto";
 import { generateKeyPair, exportJWK } from "jose";
 import Provider, { errors } from "oidc-provider";
 
 import {
   createMetadataFetch,
+  createPinnedMetadataFetch,
   metadataUrlAllowed,
   METADATA_BODY_LIMIT_BYTES,
 } from "./metadata-fetch.js";
@@ -11,6 +13,9 @@ import { createAtomicMemoryAdapter } from "./memory-adapter.js";
 export const ISSUER = "https://mcp.commonswarm.com";
 export const RESOURCE = "https://mcp.commonswarm.com/mcp";
 export const ACCESS_TOKEN_TTL_SECONDS = 5 * 60;
+export const AUTHORIZATION_CODE_TTL_SECONDS = 60;
+export const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+export const CIMD_CACHE_DURATION_SECONDS = Object.freeze({ min: 30, max: 5 * 60 });
 export const TEST_ACCOUNT_ID = "commonswarm-test-user";
 
 async function signingJwk() {
@@ -25,19 +30,45 @@ async function signingJwk() {
 
 export async function createMcpProvider({
   adapter = createAtomicMemoryAdapter(),
-  fetch: injectedFetch = globalThis.fetch,
+  fetch: injectedFetch,
+  cookieKeys = [randomBytes(32).toString("base64url"), randomBytes(32).toString("base64url")],
+  jwks,
+  findAccount,
+  metadataFetch: injectedMetadataFetch,
+  cimdCacheDuration = CIMD_CACHE_DURATION_SECONDS,
+  authorizationCodeTtlSeconds = AUTHORIZATION_CODE_TTL_SECONDS,
+  accessTokenTtlSeconds = ACCESS_TOKEN_TTL_SECONDS,
+  refreshTokenTtlSeconds = REFRESH_TOKEN_TTL_SECONDS,
+  nativeLoopbackEnabled = false,
+  providerGrantActive = async () => true,
+  clientMetadataAccepted = async () => true,
 } = {}) {
+  const metadataFetch = injectedMetadataFetch ?? (injectedFetch === undefined
+    ? createPinnedMetadataFetch()
+    : createMetadataFetch(injectedFetch));
+  if (!Number.isFinite(cimdCacheDuration?.min) || !Number.isFinite(cimdCacheDuration?.max) ||
+      cimdCacheDuration.min <= 0 || cimdCacheDuration.max < cimdCacheDuration.min) {
+    throw new TypeError("CIMD cache duration must have bounded min and max seconds");
+  }
   const provider = new Provider(ISSUER, {
     adapter,
     clientAuthMethods: ["none"],
     cookies: {
-      keys: ["mcp-auth-spike-cookie-key-not-for-production"],
+      keys: cookieKeys,
+      long: { httpOnly: true, sameSite: "lax", secure: true, signed: true },
+      short: { httpOnly: true, sameSite: "lax", secure: true, signed: true },
     },
     features: {
       clientIdMetadataDocument: {
         ack: "draft-02",
         enabled: true,
         allowFetch: (_ctx, clientId) => metadataUrlAllowed(clientId),
+        allowClient: async (_ctx, client) => {
+          const metadata = client.metadata();
+          if (!nativeLoopbackEnabled && metadata.application_type === "native") return false;
+          return await clientMetadataAccepted(metadata);
+        },
+        cacheDuration: cimdCacheDuration,
       },
       devInteractions: { enabled: false },
       resourceIndicators: {
@@ -71,22 +102,41 @@ export async function createMcpProvider({
         },
       },
     },
-    fetch: createMetadataFetch(injectedFetch),
+    fetch: metadataFetch,
     fetchResponseBodyLimits: {
       "client_id metadata document": METADATA_BODY_LIMIT_BYTES,
     },
-    findAccount: async (_ctx, accountId) => ({
+    findAccount: findAccount ?? (async (_ctx, accountId) => ({
       accountId,
       claims: async () => ({ sub: accountId }),
-    }),
+    })),
     grantTypes: ["authorization_code", "refresh_token"],
-    jwks: { keys: [await signingJwk()] },
+    jwks: jwks ?? { keys: [await signingJwk()] },
     pkce: { required: () => true },
     responseTypes: ["code"],
+    routes: {
+      authorization: "/authorize",
+      jwks: "/jwks",
+    },
     rotateRefreshToken: true,
     scopes: ["openid", "offline_access", "mcp"],
-    ttl: { AccessToken: ACCESS_TOKEN_TTL_SECONDS },
-    extraTokenClaims: (_ctx, token) => ({ grant_id: token.grantId }),
+    ttl: {
+      AccessToken: accessTokenTtlSeconds,
+      AuthorizationCode: authorizationCodeTtlSeconds,
+      Grant: refreshTokenTtlSeconds,
+      Interaction: 10 * 60,
+      RefreshToken: (ctx) => Math.min(
+        refreshTokenTtlSeconds,
+        ctx?.oidc?.entities.RotatedRefreshToken?.remainingTTL ?? refreshTokenTtlSeconds,
+      ),
+      Session: refreshTokenTtlSeconds,
+    },
+    extraTokenClaims: async (_ctx, token) => {
+      if (!await providerGrantActive(token.grantId)) {
+        throw new errors.InvalidGrant("provider grant is inactive");
+      }
+      return { grant_id: token.grantId };
+    },
   });
 
   // Production terminates TLS before this app. Tests exercise the same trusted
