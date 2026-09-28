@@ -157,6 +157,11 @@ const frameScript = (
     doc.querySelectorAll(".dashboard__root > [data-panel]").forEach((panel) => {
       panel.hidden = panel.dataset.panel !== "channel";
     });
+    /* This fixture measures the signed-in channel shell, not the offline sample. The static
+       test build boots into sample mode and shows a notice above the frame; leaving it up makes
+       channel.top include the notice even though the app bar itself is still one row. */
+    doc.querySelector("[data-sample-notice]").hidden = true;
+    doc.querySelector("[data-sample-chip]").hidden = true;
     doc.querySelectorAll("[data-channel-view]").forEach((section) => {
       section.hidden = section.dataset.channelView !== ${JSON.stringify(empty ? "feed-empty" : "feed")};
     });
