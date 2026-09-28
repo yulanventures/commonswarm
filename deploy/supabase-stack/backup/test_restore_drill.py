@@ -35,7 +35,14 @@ class DrillTests(unittest.TestCase):
                            database_bytes_verified=True, object_bytes_verified=True)
         for name in drill.REQUIRED_FILES:
             (self.source / name).write_text('fixture\n')
-        (self.source / 'source-counts.tsv').write_text('auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n')
+        (self.source / 'manifest.txt').write_text(
+            'format=commonswarm-n-db-v2\n'
+            'schemas=auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth\n'
+        )
+        (self.source / 'source-counts.tsv').write_text(
+            'auth.users|1\nstorage.objects|1\nswarm.agent_tokens|1\n'
+            'commonswarm_oauth.provider_artifacts|1\n'
+        )
         self.rows = [dict(bucket='b', name='n', version='v')]
         (self.source / 'storage-backend-objects.ndjson').write_text(json.dumps(self.rows[0])+'\n')
         (self.source / 'physical-object-keys.txt').write_text('commonswarm/b/n/v\n')

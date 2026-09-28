@@ -300,5 +300,5 @@ make_temp_sql() {
 }
 
 selected_schema_csv() {
-  printf '%s' "auth,public,realtime,storage,supabase_migrations,swarm,swarm_read"
+  printf '%s' "auth,public,realtime,storage,supabase_migrations,swarm,swarm_read,commonswarm_oauth"
 }

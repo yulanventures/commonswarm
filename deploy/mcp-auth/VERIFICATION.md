@@ -21,9 +21,9 @@ HezLead.
 - Public authorization is explicitly disabled by default. Health, discovery,
   and JWKS remain observable without making code or refresh issuance public.
 - `env.example` assignments contain names and empty values only.
-- The Caddy site's active handlers return explicit disabled JSON. Its
-  unimported snippets preserve the reviewed edge-resource and OAuth-upstream
-  routing contracts for a later activation lane.
+- The Caddy site imports only its reviewed OAuth-upstream snippet. The
+  edge-resource snippet remains unimported, and `/mcp` plus its
+  protected-resource metadata route return explicit disabled JSON.
 - The GoTrue example appends
   `https://mcp.commonswarm.com/oauth/callback/gotrue` to the three baseline
   entries.
@@ -60,13 +60,13 @@ Proxied DNS follows the live zone convention and the certificate covers
 Browser Integrity Check and bot challenges for that hostname only. Its
 effective coverage includes protected-resource metadata, authorization-server
 metadata, OIDC metadata, JWKS, token, interaction, callback,
-connection-management, and MCP paths.
+health, and MCP paths.
 
 External evidence uses a non-browser User-Agent such as
-`Python-urllib/3.12`. During lane 5, all not-yet-available routes return the
-repository's explicit JSON disabled response rather than a 502, Cloudflare HTML
-challenge, or error 1010. After activation, expected protocol responses become
-metadata, unauthenticated 401, or invalid-request errors.
+`Python-urllib/3.12`. OAuth routes return metadata, health, unauthenticated 401,
+or invalid-request responses rather than a 502, Cloudflare HTML challenge, or
+error 1010. The MCP and protected-resource routes continue to return the
+repository's explicit JSON disabled response.
 
 The Caddy contract bounds methods, requests, and proxy timeouts; preserves the
 external host and scheme; and excludes Authorization headers, cookies, codes,

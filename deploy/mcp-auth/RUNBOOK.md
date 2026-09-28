@@ -1,9 +1,8 @@
 # CommonSwarm OAuth service contract
 
-This directory defines the lane 6 service and its still-dark infrastructure
-shape. Only
-Anvil operates the production service under HezLead's direction from a reviewed
-SHA already landed on `main`.
+This directory defines the lane 6 service and its OAuth-only Caddy activation.
+Only Anvil operates the production service under HezLead's direction from a
+reviewed SHA already landed on `main`.
 
 ## Service shape
 
@@ -22,9 +21,10 @@ SHA already landed on `main`.
 - Image identity: an immutable release image digest built from the Dockerfile's
   digest-pinned Node 22 base and exact `oidc-provider` 9.12.2 dependency.
 
-The OAuth container is separate from the edge pool. Lane 5's Caddy site remains
-dark: neither active snippet is imported, and unavailable MCP and OAuth routes
-return explicit `503 feature_disabled` JSON.
+The OAuth container is separate from the edge pool. Caddy imports only the
+OAuth snippet. `/mcp` and `/.well-known/oauth-protected-resource/mcp` still
+return explicit `503 feature_disabled` JSON; the MCP resource snippet remains
+unimported until its edge function ships.
 
 ## Key and secret-file contract
 
@@ -51,6 +51,13 @@ The migration creates that login role without a password. Anvil provisions and
 rotates its SCRAM password outside migrations, then stores the role name and
 password only in the protected `database-credentials` file. This is an
 operator-owned service fact, not a runnable repository release step.
+
+Database backups intentionally omit role passwords: the globals export uses
+`pg_dumpall --globals-only --no-role-passwords`, and the generated role export
+also contains no password verifier. After any restore, Anvil sets the
+`commonswarm_oauth_runtime` password again from its protected 1Password item
+before starting the OAuth service, and ensures the protected
+`database-credentials` file contains that same restored-role credential.
 
 Directly presented authorization-code and refresh lookup values are stored only
 as SHA-256 keys. Provider models that require a recoverable secondary lookup,
@@ -94,7 +101,7 @@ error 1010 are failures.
 The reviewed Caddy contract sends exact `/mcp` and protected-resource
 metadata routes to the edge MCP function after activation. Authorization
 metadata, `/authorize`, `/token`, `/jwks`, interaction, GoTrue callback,
-and enumerated connection-management routes go to the confirmed OAuth
-loopback port after activation. Methods, request sizes, and timeouts are
-bounded; external host and scheme are preserved; credential-bearing headers,
-cookies, codes, bodies, and query values are not logged.
+and health routes go to the confirmed OAuth loopback port in lane 6. Methods,
+request sizes, and timeouts are bounded; external host and scheme are
+preserved; credential-bearing headers, cookies, codes, bodies, and query
+values are not logged.
