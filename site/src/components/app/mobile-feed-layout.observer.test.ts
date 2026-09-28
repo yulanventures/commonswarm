@@ -160,6 +160,9 @@ const frameScript = (
     doc.querySelectorAll("[data-channel-view]").forEach((section) => {
       section.hidden = section.dataset.channelView !== ${JSON.stringify(empty ? "feed-empty" : "feed")};
     });
+    /* The offline build boots into sample mode, which correctly hides Sign out. This fixture
+       then forces the signed-in channel panel, so it must also restore the signed-in control. */
+    doc.querySelectorAll("[data-signout]").forEach((button) => { button.hidden = false; });
     doc.querySelector(".dashboard__channel").classList.add("dashboard__channel--roster");
     const roster = doc.querySelector("[data-header-roster]");
     roster.hidden = false;

@@ -14311,13 +14311,13 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
       inline-size: 100%;
     }
 
+    /* Keep the three-column app bar established by the 52rem rule, but let the workspace column
+       shrink below its wider-phone floor. The old one-column override here predated the mobile
+       view tabs; their explicit columns then became implicit tracks and made the 390px and 320px
+       app bars stack to roughly three rows. */
     .dashboard__rail {
-      grid-template-columns: minmax(0, 1fr);
-      gap: var(--s-3);
-    }
-
-    .dashboard__workspace-control {
-      inline-size: 100%;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: var(--s-1);
     }
 
     /* DELETED 2026-09-03: two grid placements left over from when the theme toggle and the

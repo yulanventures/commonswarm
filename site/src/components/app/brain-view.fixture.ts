@@ -229,6 +229,9 @@ export async function runBrainViewFixture(): Promise<BrainViewSnapshot> {
       "--single-process",
       "--no-zygote",
       "--allow-file-access-from-files",
+      /* The snapshot is published after the save and workspace-switch promises settle.
+         `--dump-dom` otherwise races that asynchronous work under Chrome's CI process model. */
+      "--virtual-time-budget=5000",
       "--dump-dom",
       `file://${fixture}`,
     ], {

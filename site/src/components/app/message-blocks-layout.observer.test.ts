@@ -215,6 +215,25 @@ const fixturePage = (markdownScript: string, control: string): string => `<!doct
   </body>
 </html>`;
 
+/* Headless Chrome on Linux clamps a top-level window to 500px. Measure the shipped fixture in a
+ * real 320px browsing context and relay its result to the outer page that --dump-dom returns. */
+const viewportPage = (contentUrl: string): string => `<!doctype html>
+<html>
+  <head><style>html, body { margin: 0; overflow: hidden; }</style></head>
+  <body>
+    <iframe title="Message blocks viewport" src="${contentUrl}" style="display:block;border:0;width:${VIEWPORT_WIDTH}px;height:${VIEWPORT_HEIGHT}px"></iframe>
+    <script>
+      const frame = document.querySelector("iframe");
+      const relay = () => {
+        const encoded = frame.contentDocument?.documentElement.dataset.blocksMeasurement;
+        if (encoded) document.documentElement.dataset.blocksMeasurement = encoded;
+      };
+      frame.addEventListener("load", relay, { once: true });
+      if (frame.contentDocument?.readyState === "complete") relay();
+    </script>
+  </body>
+</html>`;
+
 /** Loads the fixture once per variant: "" is the shipped stylesheet, the others revert one half. */
 const measureAll = async (): Promise<Record<string, Measurement>> => {
   const bundle = await build({
@@ -231,9 +250,11 @@ const measureAll = async (): Promise<Record<string, Measurement>> => {
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/__fixture") {
+    if (url.pathname === "/__fixture" || url.pathname === "/__fixture-content") {
       response.writeHead(200, { "content-type": contentTypes[".html"] });
-      response.end(fixturePage(markdownScript, url.searchParams.get("control") ?? ""));
+      response.end(url.pathname === "/__fixture-content"
+        ? fixturePage(markdownScript, url.searchParams.get("control") ?? "")
+        : viewportPage(`/__fixture-content${url.search}`));
       return;
     }
     const filePath = normalize(join(distRoot, url.pathname.replace(/^\/+/u, "")));
