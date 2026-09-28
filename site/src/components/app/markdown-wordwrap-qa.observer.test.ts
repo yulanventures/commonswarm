@@ -321,6 +321,27 @@ const fixturePage = (
   </body>
 </html>`;
 
+/* Chrome's normal Linux window manager clamps a top-level window narrower than 500px. The
+ * measurement is a phone viewport, not a narrow box inside a desktop viewport, so put the live
+ * fixture in a same-origin iframe whose browsing context is the requested size. The outer page
+ * only relays the completed measurement for --dump-dom. */
+const viewportPage = (contentUrl: string, width: number, height: number): string => `<!doctype html>
+<html>
+  <head><style>html, body { margin: 0; overflow: hidden; }</style></head>
+  <body>
+    <iframe title="Markdown QA viewport" src="${contentUrl}" style="display:block;border:0;width:${width}px;height:${height}px"></iframe>
+    <script>
+      const frame = document.querySelector("iframe");
+      const relay = () => {
+        const encoded = frame.contentDocument?.documentElement.dataset.qaMeasurement;
+        if (encoded) document.documentElement.dataset.qaMeasurement = encoded;
+      };
+      frame.addEventListener("load", relay, { once: true });
+      if (frame.contentDocument?.readyState === "complete") relay();
+    </script>
+  </body>
+</html>`;
+
 interface Load {
   render: Render;
   viewport: (typeof VIEWPORTS)[number];
@@ -369,18 +390,21 @@ const startHarness = async (): Promise<Harness> => {
 
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/__fixture") {
+    if (url.pathname === "/__fixture" || url.pathname === "/__fixture-content") {
       const fixtureId = url.searchParams.get("fixture") ?? "";
       const surface: Surface = url.searchParams.get("surface") === "brain" ? "brain" : "feed";
       const width = Number.parseInt(url.searchParams.get("width") ?? "", 10);
+      const height = Number.parseInt(url.searchParams.get("height") ?? "", 10);
       const render = renders.find((candidate) =>
         candidate.fixture.id === fixtureId && candidate.surface === surface);
-      if (!render || !Number.isFinite(width)) {
+      if (!render || !Number.isFinite(width) || !Number.isFinite(height)) {
         response.writeHead(404).end("No such fixture");
         return;
       }
       response.writeHead(200, { "content-type": contentTypes[".html"] });
-      response.end(fixturePage(markdownScript, render, width, url.searchParams.get("control") ?? ""));
+      response.end(url.pathname === "/__fixture-content"
+        ? fixturePage(markdownScript, render, width, url.searchParams.get("control") ?? "")
+        : viewportPage(`/__fixture-content${url.search}`, width, height));
       return;
     }
     const filePath = normalize(join(distRoot, url.pathname.replace(/^\/+/u, "")));
@@ -418,7 +442,8 @@ const startHarness = async (): Promise<Harness> => {
 
 const fixtureUrl = (harness: Harness, load: Load): string =>
   `${harness.origin}/__fixture?fixture=${load.render.fixture.id}&surface=${load.render.surface}` +
-  `&width=${load.viewport.width}&theme=${load.theme}&control=${load.control}`;
+  `&width=${load.viewport.width}&height=${load.viewport.height}` +
+  `&theme=${load.theme}&control=${load.control}`;
 
 const measureOne = async (harness: Harness, load: Load): Promise<Measurement> => {
   const { stdout, stderr } = await launchChrome(harness.chrome, [
