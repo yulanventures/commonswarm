@@ -90,19 +90,19 @@ const CITATIONS: Citation[] = [
   {
     citedBy: "identity client r6 C9 (explicit Claude executable path)",
     file: "src/cli.ts",
-    lines: [6840, 6840],
+    lines: [6847, 6847],
     contains: "(await loadHostClaude()).resolveClaudeExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit Codex executable path)",
     file: "src/cli.ts",
-    lines: [6866, 6866],
+    lines: [6873, 6873],
     contains: "(await loadHostCodex()).resolveCodexExecutable",
   },
   {
     citedBy: "identity client r6 C9 (explicit OpenCode executable path)",
     file: "src/cli.ts",
-    lines: [7498, 7498],
+    lines: [7505, 7505],
     contains: "(await loadHostOpenCode()).resolveOpenCodeExecutable",
   },
   // site/src/lib/agent-connect.ts — mintedHorizon and the retired-constant note
@@ -234,9 +234,9 @@ test("every file:line this lane cites still points at what it claims", { timeout
   );
 });
 
-test("stdout inspection timeout citation includes the bounded exec option", { timeout: 1_000 }, () => {
+test("macOS stdout inspection timeout citation includes the bounded lsof exec option", { timeout: 1_000 }, () => {
   const mapping = JSON.parse(readFileSync(fileURLToPath(new URL("scripts/timeout-table/mapping.json", root)), "utf8"));
-  const citation = mapping.refs.HEAD.rows["src/stdout-consumer.ts:timeoutMs"].citation as string;
+  const citation = mapping.refs.HEAD.rows["src/stdout-consumer.ts:timeoutMs#2"].citation as string;
   const match = citation.match(/^src\/stdout-consumer\.ts:(\d+)-(\d+)$/);
   assert.ok(match, citation);
   const source = readFileSync(fileURLToPath(new URL("src/stdout-consumer.ts", root)), "utf8").split("\n");

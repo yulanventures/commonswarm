@@ -1731,7 +1731,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7776",
+          "citation": "src/cli.ts:7783",
           "detail": "Poll the listener stop while the one command deadline remains active.",
           "operation": {
             "name": "listener-stop-poll",
@@ -1745,7 +1745,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:8566",
+          "citation": "src/cli.ts:8573",
           "detail": "Wait for Claude hook JSON on stdin.",
           "operation": {
             "name": "hook-stdin",
@@ -1759,7 +1759,7 @@
           "class": "network-api",
           "scope": "per-request",
           "endpoints": ["/functions/v1/command"],
-          "citation": "src/cli.ts:5281-5286; src/cloud/wake-lease.ts:69,72",
+          "citation": "src/cli.ts:5288-5293; src/cloud/wake-lease.ts:69,72",
           "detail": "Best-effort release of a cleanly stopped watcher; the command aborts after two seconds.",
           "operation": {
             "name": "wake-lease-release",
@@ -1859,7 +1859,7 @@
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8617; src/onboarding-cli.ts:97",
+          "citation": "src/cloud/agent-check-budget.ts:28; src/cli.ts:8624; src/onboarding-cli.ts:97",
           "detail": "Hard process ceiling for hook check.",
           "operation": {
             "name": "hook-hard-exit",
@@ -3230,7 +3230,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7128",
+          "citation": "src/cli.ts:7135",
           "detail": "Listener turn budget default options.turnBudgetMs ?? LISTENER_PROMPT_TIMEOUT_MS.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3244,7 +3244,7 @@
           "class": "external",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/cli.ts:7329",
+          "citation": "src/cli.ts:7336",
           "detail": "Delivery hold budget property deliveryHoldBudgetMs: turnBudgetMs.",
           "operation": {
             "name": "listener-prompt-site",
@@ -3336,14 +3336,56 @@
             "reason": "The app's authenticated browser timer is not a CLI operation."
           }
         },
+        "src/stdout-consumer.ts:DEFAULT_PROC_TIMEOUT_MS": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/stdout-consumer.ts:24,54,71-80",
+          "detail": "Default five-second deadline for one Linux /proc stdout-reader scan.",
+          "operation": {
+            "name": "notify-stdout-inspection-proc-default",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The local procfs inspection has no client HTTP endpoint."
+          }
+        },
         "src/stdout-consumer.ts:timeoutMs": {
           "class": "local",
           "scope": "whole-operation",
           "endpoints": [],
-          "citation": "src/stdout-consumer.ts:24-35",
-          "detail": "Bounded local lsof child used by notify and resume to inspect stdout.",
+          "citation": "src/stdout-consumer.ts:54,71-80",
+          "detail": "Linux /proc stdout-reader scan deadline; an elapsed scan returns cannot_determine.",
+          "operation": {
+            "name": "notify-stdout-inspection-proc",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The local procfs inspection has no client HTTP endpoint."
+          }
+        },
+        "src/stdout-consumer.ts:timeoutMs#2": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/stdout-consumer.ts:188-199",
+          "detail": "Bounded local macOS lsof child used by notify and resume to inspect stdout.",
           "operation": {
             "name": "notify-stdout-inspection",
+            "class": "not-run",
+            "writes": [],
+            "removes": [],
+            "reason": "The local process inspection has no client HTTP endpoint."
+          }
+        },
+        "src/stdout-consumer.ts:timeoutMs#3": {
+          "class": "local",
+          "scope": "whole-operation",
+          "endpoints": [],
+          "citation": "src/stdout-consumer.ts:211-216",
+          "detail": "Default stdout-inspection deadline passed to Linux /proc or macOS lsof inspection.",
+          "operation": {
+            "name": "notify-stdout-inspection-system",
             "class": "not-run",
             "writes": [],
             "removes": [],
