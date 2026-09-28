@@ -345,7 +345,7 @@ SQL
 
 #### Part B — OAuth service from `826db6a3`
 
-The live OAuth release directory and `oauth/current` must identify `826db6a34f235064a3a03c57377d8e32a35d2f05`. The one running OAuth container must be healthy, use that release as its Compose working directory, and use the exact accepted image ID recorded by the continuation window. Public discovery and JWKS must be served through `https://mcp.commonswarm.com`, while the effective public-authorization flag is not `1` and both authorization endpoints refuse with the owned disabled error.
+The live OAuth release directory and `oauth/current` must identify `826db6a34f235064a3a03c57377d8e32a35d2f05`. The one running OAuth container must be healthy, use that release as its Compose working directory, and use the exact accepted image ID recorded by the continuation window. Public discovery and JWKS must be served through `https://mcp.commonswarm.com`, while the effective public-authorization flag is not `1` and both authorization endpoints refuse with the owned disabled error. The `/jwks` endpoint answers `application/jwk-set+json` per RFC 7517.
 
 ```sh
 # step: hm37-hm6-oauth-precondition
@@ -418,7 +418,11 @@ def request(path, method="GET", body=None, status=200):
         content_type = response.headers.get("Content-Type", "")
     assert actual_status == status, (method, path, actual_status)
     assert len(raw) <= 131072
-    assert "application/json" in content_type
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if path == "/jwks":
+        assert media_type in ("application/jwk-set+json", "application/json")
+    else:
+        assert media_type == "application/json"
     value = json.loads(raw)
     results.append({"method": method, "path": path, "status": actual_status})
     return value
@@ -813,7 +817,11 @@ def probe(base, method, path, body, expected_status, expected_body=None):
         raw = response.read(131073)
     assert status == expected_status, (base, method, path, status)
     assert len(raw) <= 131072
-    assert "application/json" in content_type
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if path == "/jwks":
+        assert media_type in ("application/jwk-set+json", "application/json")
+    else:
+        assert media_type == "application/json"
     if method == "HEAD":
         assert raw == b""
         parsed = None
