@@ -315,7 +315,7 @@ function assertRoundTripFold(readSource: string, commandSource: string): void {
     [...commandSource.matchAll(
       /db\.begin\("isolation level read committed", async \(tx\) =>/g,
     )].length,
-    2,
+    3,
   );
   assert.match(
     commandSource,

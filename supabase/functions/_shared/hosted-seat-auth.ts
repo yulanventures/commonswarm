@@ -3,8 +3,8 @@ import type postgres from "npm:postgres@3.4.9";
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
 
 export const HOSTED_GRANT_TOOLS = ["claim_hosted_seat"] as const;
-export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on"] as const;
-export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members", "check"] as const;
+export const HOSTED_SEAT_COMMAND_TOOLS = ["ask", "note", "reply", "working_on", "check"] as const;
+export const HOSTED_SEAT_READ_TOOLS = ["whoami", "members"] as const;
 
 export type HostedGrantTool = typeof HOSTED_GRANT_TOOLS[number];
 export type HostedSeatCommandTool = typeof HOSTED_SEAT_COMMAND_TOOLS[number];
@@ -113,7 +113,14 @@ async function resolveSeat(
     ? (HOSTED_SEAT_COMMAND_TOOLS as readonly string[]).includes(binding.tool)
     : (HOSTED_SEAT_READ_TOOLS as readonly string[]).includes(binding.tool);
   if (!allowed || !seatTool(binding.tool) || !await providerActive(binding)) return null;
-  const rows = use === "command"
+  const rows = use === "command" && binding.tool === "check"
+    ? await tx<ResolvedHostedSeat[]>`
+      SELECT * FROM swarm.resolve_hosted_mcp_check_authorization(
+        ${binding.grantId}::uuid,
+        ${binding.handle}
+      )
+    `
+    : use === "command"
     ? await tx<ResolvedHostedSeat[]>`
       SELECT * FROM swarm.resolve_hosted_seat_command_authorization(
         ${binding.grantId}::uuid,

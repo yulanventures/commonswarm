@@ -2091,6 +2091,106 @@ function reduceHostedAuthorityStream(events) {
   return state ?? { grants: {}, consents: {}, seats: {}, principals: {} };
 }
 
+// src/protocol/hosted-check.ts
+var HOSTED_CHECK_BATCH_LIMIT = 50;
+function hostedCheckMillisecondTimestamp(value) {
+  const milliseconds = value instanceof Date ? value.getTime() : typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(milliseconds)) throw new Error("invalid hosted check timestamp");
+  return new Date(Math.trunc(milliseconds)).toISOString();
+}
+function compareHostedCheckCursor(left, right) {
+  const time = Date.parse(hostedCheckMillisecondTimestamp(left.created_at)) - Date.parse(hostedCheckMillisecondTimestamp(right.created_at));
+  return time === 0 ? left.signal_id.localeCompare(right.signal_id) : Math.sign(time);
+}
+function sameAuthority(value, facts) {
+  return value.seat_id === facts.seat_id && value.grant_id === facts.grant_id && value.workspace_id === facts.workspace_id;
+}
+function canonicalBatchId(value) {
+  return value.toLowerCase();
+}
+function normalizedCandidates(candidates, cursor) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const candidate of candidates) {
+    const normalized = {
+      created_at: hostedCheckMillisecondTimestamp(candidate.created_at),
+      signal_id: candidate.signal_id
+    };
+    if (cursor === null || compareHostedCheckCursor(normalized, cursor) > 0) {
+      byId.set(normalized.signal_id, normalized);
+    }
+  }
+  return [...byId.values()].sort(compareHostedCheckCursor).slice(0, HOSTED_CHECK_BATCH_LIMIT);
+}
+function decideHostedCheck(command, facts) {
+  if (facts.credential_kind !== "hosted_seat") {
+    return { ok: false, reason: "credential_kind_forbidden" };
+  }
+  if (command.seat_id !== facts.seat_id || command.grant_id !== facts.grant_id || command.workspace_id !== facts.workspace_id) {
+    return { ok: false, reason: "hosted_check_batch_forbidden" };
+  }
+  if (facts.active_batch !== null && !sameAuthority(facts.active_batch, facts)) {
+    return { ok: false, reason: "hosted_check_batch_forbidden" };
+  }
+  let active = facts.active_batch;
+  let acknowledgeBatchId = null;
+  let advanceCursor = null;
+  if (command.kind === "ack_hosted_mcp_check_batch") {
+    const requested = facts.requested_batch;
+    const commandBatchId = canonicalBatchId(command.batch_id);
+    if (requested === null || canonicalBatchId(requested.batch_id) !== commandBatchId || !sameAuthority(requested, facts)) {
+      return { ok: false, reason: "hosted_check_batch_forbidden" };
+    }
+    if (!requested.acknowledged) {
+      if (active === null || canonicalBatchId(active.batch_id) !== commandBatchId) {
+        return { ok: false, reason: "hosted_check_batch_forbidden" };
+      }
+      acknowledgeBatchId = canonicalBatchId(requested.batch_id);
+      advanceCursor = {
+        created_at: hostedCheckMillisecondTimestamp(requested.terminal_cursor.created_at),
+        signal_id: requested.terminal_cursor.signal_id
+      };
+      active = null;
+    }
+  }
+  if (active !== null) {
+    return {
+      ok: true,
+      acknowledge_batch_id: acknowledgeBatchId,
+      advance_cursor: advanceCursor,
+      create_batch: null,
+      return_batch: active
+    };
+  }
+  const cursor = advanceCursor ?? facts.committed_cursor;
+  const candidates = normalizedCandidates(facts.candidates, cursor);
+  if (candidates.length === 0) {
+    return {
+      ok: true,
+      acknowledge_batch_id: acknowledgeBatchId,
+      advance_cursor: advanceCursor,
+      create_batch: null,
+      return_batch: null
+    };
+  }
+  const terminal = candidates[candidates.length - 1];
+  const batch = {
+    batch_id: facts.next_batch_id,
+    seat_id: facts.seat_id,
+    grant_id: facts.grant_id,
+    workspace_id: facts.workspace_id,
+    signal_ids: candidates.map((candidate) => candidate.signal_id),
+    terminal_cursor: terminal,
+    acknowledged: false
+  };
+  return {
+    ok: true,
+    acknowledge_batch_id: acknowledgeBatchId,
+    advance_cursor: advanceCursor,
+    create_batch: batch,
+    return_batch: batch
+  };
+}
+
 // src/protocol/brain-version-window.ts
 var BRAIN_FILE_PREFIX = "brain--";
 var BRAIN_FILE_SUFFIX = ".md";
@@ -2140,6 +2240,7 @@ export {
   FEEDBACK_CONTEXT_MAX_BYTES,
   FILE_VERSION_PRECONDITION_FAILED,
   H0_SEAT_TOKEN_TTL_MS,
+  HOSTED_CHECK_BATCH_LIMIT,
   HOSTED_MCP_RESOURCE,
   HOSTED_MCP_SEAT_LIMIT,
   HOSTED_SEAT_NAME_TAKEN,
@@ -2159,11 +2260,14 @@ export {
   applyCommand,
   canonicalJson,
   canonicalPrincipal,
+  compareHostedCheckCursor,
   decide,
   decideHostedAuthority,
+  decideHostedCheck,
   decideWorkspace,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
+  hostedCheckMillisecondTimestamp,
   hostedSeatNameValid,
   idemKey,
   isAgentScopeDenylisted,
