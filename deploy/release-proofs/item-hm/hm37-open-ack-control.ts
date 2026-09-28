@@ -112,8 +112,61 @@ interface CleanupFacts {
   ackRefused: boolean;
 }
 
+interface ErrorFacts {
+  step: string;
+  code: string;
+  class: string;
+  status?: number;
+  response_code?: string;
+}
+
+class HarnessFailure extends Error {
+  readonly code: string;
+  readonly step?: string;
+  readonly status?: number;
+  readonly responseCode?: string;
+
+  constructor(
+    message: string,
+    options: { step?: string; status?: number; responseCode?: string } = {},
+  ) {
+    super(message);
+    this.name = "HarnessFailure";
+    this.code = message.toLowerCase().replace(/[^a-z0-9]+/gu, "_").replace(/^_+|_+$/gu, "").slice(0, 80) ||
+      "harness_failure";
+    this.step = options.step;
+    this.status = options.status;
+    this.responseCode = options.responseCode;
+  }
+}
+
 function fail(message: string): never {
-  throw new Error(message);
+  throw new HarnessFailure(message);
+}
+
+function stableExternalCode(value: unknown): string | undefined {
+  return typeof value === "string" && /^[A-Za-z0-9_.-]{1,80}$/u.test(value) ? value : undefined;
+}
+
+function errorFacts(step: string, error: unknown): ErrorFacts {
+  if (error instanceof HarnessFailure) {
+    return {
+      step: error.step ?? step,
+      code: error.code,
+      class: error.name,
+      ...(error.status === undefined ? {} : { status: error.status }),
+      ...(error.responseCode === undefined ? {} : { response_code: error.responseCode }),
+    };
+  }
+  const record = error !== null && typeof error === "object" ? error as Record<string, unknown> : null;
+  const className = record?.constructor && typeof record.constructor === "function"
+    ? stableExternalCode(record.constructor.name)
+    : undefined;
+  return {
+    step,
+    code: stableExternalCode(record?.code) ?? "unexpected_exception",
+    class: className ?? "UnknownError",
+  };
 }
 
 function parseArgs(values: string[]): Args {
@@ -348,7 +401,13 @@ function managedInput(workspaceId: string, commandId: string, command: Record<st
 }
 
 async function requireStatus(result: Result, expected: number, label: string): Promise<Result> {
-  if (result.status !== expected) fail(`${label} failed`);
+  if (result.status !== expected) {
+    throw new HarnessFailure("unexpected status", {
+      step: label,
+      status: result.status,
+      responseCode: stableExternalCode(result.body.error),
+    });
+  }
   return result;
 }
 
@@ -404,26 +463,22 @@ async function providerActive(statusDb: Sql, providerGrantId: string): Promise<{
 }
 
 async function grantCapability(runtime: Runtime, journal: Journal, statusDb: Sql): Promise<unknown | null> {
-  return await runtime.command.db.begin("isolation level read committed", async (tx) => {
-    await setRole(tx, "swarm_command");
-    return await runtime.auth.authenticateHostedGrantCapability(tx, {
+  return await runtime.command.db.begin(async (tx) =>
+    await runtime.auth.authenticateHostedGrantCapability(tx, {
       grantId: journal.grantId, ownerUserId: journal.ownerUserId,
       providerGrantId: journal.providerGrantId, workspaceId: journal.workspaceId,
       tool: "claim_hosted_seat", providerStatus: () => providerActive(statusDb, journal.providerGrantId),
-    });
-  }) as unknown;
+    })) as unknown;
 }
 
 async function seatCapability(runtime: Runtime, journal: Journal, statusDb: Sql): Promise<unknown | null> {
   if (journal.seatHandle === null) return null;
-  return await runtime.command.db.begin("isolation level read committed", async (tx) => {
-    await setRole(tx, "swarm_command");
-    return await runtime.auth.authenticateHostedSeatCapability(tx, {
+  return await runtime.command.db.begin(async (tx) =>
+    await runtime.auth.authenticateHostedSeatCapability(tx, {
       grantId: journal.grantId, providerGrantId: journal.providerGrantId,
       handle: journal.seatHandle, tool: "check",
       providerStatus: () => providerActive(statusDb, journal.providerGrantId),
-    }, "command");
-  }) as unknown;
+    }, "command")) as unknown;
 }
 
 async function checkCall(runtime: Runtime, journal: Journal, statusDb: Sql, ack?: string): Promise<Result> {
@@ -639,15 +694,18 @@ async function execute(): Promise<Record<string, Json>> {
 
   let journalPath: string;
   let journal: Journal;
-  let runError = false;
+  let step = "control-initialize";
+  let runError: ErrorFacts | null = null;
   let observations: Record<string, Json> = {};
   let cleanupFacts: CleanupFacts | null = null;
   try {
     if (args.cleanupOnly !== undefined) {
+      step = "cleanup-journal-read";
       journalPath = await Deno.realPath(args.cleanupOnly);
       journal = await readJournal(journalPath);
       if (journal.ownerUserId !== identity.userId) fail("cleanup identity does not own journal");
     } else {
+      step = "control-journal-create";
       await privateDirectory(args.journalDir!);
       const journalDir = await Deno.realPath(args.journalDir!);
       journalPath = `${journalDir}/hm37-open-ack-${suffix}.journal.json`;
@@ -670,6 +728,7 @@ async function execute(): Promise<Record<string, Json>> {
       };
       await writeJournal(journalPath, journal, true);
 
+      step = "owner-access-check";
       const access = await proofDb.begin(async (tx) => {
         await setRole(tx, "swarm_command");
         const [row] = await tx<{ allowed: boolean; live_principals: number }[]>`
@@ -692,6 +751,7 @@ async function execute(): Promise<Record<string, Json>> {
       journal.grantPlanned = true;
       await journalBefore(journalPath, journal, "begin_hosted_mcp_grant");
       await journalBefore(journalPath, journal, "consent_hosted_mcp_workspace");
+      step = "grant-begin";
       await requireStatus(await runtime.command.handleHostedManagementCommand(managedInput(
         journal.workspaceId, journal.commandIds.begin, {
           kind: "begin_hosted_mcp_grant", grant_id: journal.grantId,
@@ -700,12 +760,14 @@ async function execute(): Promise<Record<string, Json>> {
           resource: RESOURCE, selected_workspace_ids: [journal.workspaceId],
           manifest_digest: manifest, interaction_ref: journal.interactionRef,
         }), identity), 200, "grant begin");
+      step = "grant-consent";
       await requireStatus(await runtime.command.handleHostedManagementCommand(managedInput(
         journal.workspaceId, journal.commandIds.consent, {
           kind: "consent_hosted_mcp_workspace", grant_id: journal.grantId,
           workspace_id: journal.workspaceId, owner_user_id: journal.ownerUserId,
           manifest_digest: manifest, consent_receipt_id: crypto.randomUUID(),
         }), identity), 200, "grant consent");
+      step = "grant-activation";
       await requireStatus(await runtime.command.handleHostedManagementCommand(managedInput(
         journal.workspaceId, journal.commandIds.activate,
         { kind: "activate_hosted_mcp_grant", grant_id: journal.grantId },
@@ -716,33 +778,40 @@ async function execute(): Promise<Record<string, Json>> {
       journal.providerFamilyPlanned = true;
       await journalBefore(journalPath, journal, "oauth_access_token_artifact");
       const providerArtifactId = `hm37_${crypto.randomUUID()}_${crypto.randomUUID()}`;
+      step = "provider-artifact-create";
       await runtime.createPostgresAdapter(adapterPool(oauthDb))("AccessToken").upsert(providerArtifactId, {
         grantId: journal.providerGrantId, accountId: journal.ownerUserId,
         clientId: "hm37-window-control", kind: "AccessToken",
       }, 900);
       journal.providerFamilyCreated = true;
       await writeJournal(journalPath, journal);
+      step = "provider-family-check";
       if (!(await providerActive(statusDb, journal.providerGrantId)).active) fail("provider family inactive");
 
       journal.seatPlanned = true;
       await journalBefore(journalPath, journal, "claim_hosted_seat");
+      step = "grant-capability";
       const grantCap = await grantCapability(runtime, journal, statusDb);
       if (grantCap === null) fail("grant capability refused");
+      step = "seat-claim";
       const claimed = await requireStatus(await runtime.command.handleHostedCommand(managedInput(
         journal.workspaceId, journal.commandIds.claim,
         { kind: "claim_hosted_seat", name: journal.seatName },
       ), grantCap), 200, "seat claim");
-      if (Deno.env.get("SWARM_ENV") === "test" && Deno.env.get("HM37_TEST_FAIL_AFTER") === "seat") {
-        fail("forced test failure");
-      }
+      step = "seat-result-journal";
       journal.seatId = uuidField(claimed.body, "seat_id");
       journal.principalId = uuidField(claimed.body, "principal_id");
       if (typeof claimed.body.handle !== "string") fail("seat handle missing");
       journal.seatHandle = claimed.body.handle;
       await writeJournal(journalPath, journal);
+      step = "forced-after-seat";
+      if (Deno.env.get("SWARM_ENV") === "test" && Deno.env.get("HM37_TEST_FAIL_AFTER") === "seat") {
+        fail("forced test failure");
+      }
 
       journal.signalAPlanned = true;
       await journalBefore(journalPath, journal, "post_signal_a");
+      step = "signal-a-post";
       const sentA = await requireStatus(await publicCommand(runtime, token, managedInput(
         journal.workspaceId, journal.commandIds.signalA, {
           kind: "post_signal", signal_kind: "note", body: "HM37 hosted control A",
@@ -755,6 +824,7 @@ async function execute(): Promise<Record<string, Json>> {
       await writeJournal(journalPath, journal);
 
       await journalBefore(journalPath, journal, "open_batch_a");
+      step = "batch-a-concurrent-open";
       const [openOne, openTwo] = await Promise.all([
         checkCall(runtime, journal, statusDb), checkCall(runtime, journal, statusDb),
       ]);
@@ -786,6 +856,7 @@ async function execute(): Promise<Record<string, Json>> {
 
       journal.signalBPlanned = true;
       await journalBefore(journalPath, journal, "post_signal_b");
+      step = "signal-b-post";
       const sentB = await requireStatus(await publicCommand(runtime, token, managedInput(
         journal.workspaceId, journal.commandIds.signalB, {
           kind: "post_signal", signal_kind: "note", body: "HM37 hosted control B",
@@ -808,6 +879,7 @@ async function execute(): Promise<Record<string, Json>> {
             signalBOrdering.signal_id.localeCompare(factsA.terminal.signal_id) <= 0)) fail("signal B ordering proof failed");
 
       const beforePublic = await snapshot(proofDb, journal);
+      step = "public-open-ack-refusal";
       const publicOpen = await publicCommand(runtime, null, managedInput(
         journal.workspaceId, crypto.randomUUID(),
         { kind: "open_hosted_mcp_check_batch", seat: journal.seatHandle },
@@ -821,6 +893,7 @@ async function execute(): Promise<Record<string, Json>> {
           JSON.stringify(beforePublic) !== JSON.stringify(afterPublic)) fail("public refusal proof failed");
 
       await journalBefore(journalPath, journal, "ack_batch_a_and_open_batch_b");
+      step = "batch-a-ack";
       const ackA = await requireStatus(await checkCall(runtime, journal, statusDb, batchA.toUpperCase()), 200, "ACK A");
       const batchB = batchIdIn(ackA);
       if (batchB === null || !signalsIn(ackA).some((row) => uuidField(row, "id") === journal.signalBId)) {
@@ -834,12 +907,14 @@ async function execute(): Promise<Record<string, Json>> {
       if (JSON.stringify(afterAckA.cursor) !== JSON.stringify(factsA.terminal) ||
           factsAfterAckA.acknowledgedAt === null || factsAfterAckA.active !== 1) fail("ACK A proof failed");
 
+      step = "batch-a-repeat-ack";
       const repeatAckA = await requireStatus(await checkCall(runtime, journal, statusDb, batchA), 200, "repeat ACK A");
       const afterRepeat = await snapshot(proofDb, journal);
       const factsAfterRepeat = await batchFacts(proofDb, journal, batchA);
       if (batchIdIn(repeatAckA) !== batchB || JSON.stringify(afterRepeat) !== JSON.stringify(afterAckA) ||
           factsAfterRepeat.acknowledgedAt !== factsAfterAckA.acknowledgedAt) fail("repeat ACK changed state");
 
+      step = "batch-b-ack";
       const ackB = await requireStatus(await checkCall(runtime, journal, statusDb, batchB), 200, "ACK B");
       if (batchIdIn(ackB) !== null || signalsIn(ackB).length !== 0) fail("ACK B was not empty");
       const emptyOpen = await requireStatus(await checkCall(runtime, journal, statusDb), 200, "empty open");
@@ -850,7 +925,9 @@ async function execute(): Promise<Record<string, Json>> {
           afterAckB.active_batches !== 0 || afterAckB.total_batches !== 2) {
         fail("ACK B cursor proof failed");
       }
+      step = "migration-functional-proof";
       if (!await runFunctionalProof(proofDb, runtime.functionalSql)) fail("migration functional proof failed");
+      step = "forced-after-observations";
       if (Deno.env.get("SWARM_ENV") === "test" && Deno.env.get("HM37_TEST_FAIL_AFTER") === "observations") {
         fail("forced test failure");
       }
@@ -875,24 +952,40 @@ async function execute(): Promise<Record<string, Json>> {
         migration_04_functional: "t",
       };
     }
-  } catch {
-    runError = true;
+  } catch (error) {
+    runError = errorFacts(step, error);
   } finally {
     try {
       if (typeof journalPath! === "string" && typeof journal! === "object") {
         cleanupFacts = await cleanup(runtime, journalPath, journal, identity, statusDb, proofDb, oauthDb);
       }
-    } catch {
-      runError = true;
+    } catch (error) {
+      runError ??= errorFacts("cleanup", error);
     }
     await Promise.allSettled([
       runtime.command.db.end({ timeout: 2 }), statusDb.end({ timeout: 2 }),
       proofDb.end({ timeout: 2 }), oauthDb.end({ timeout: 2 }),
     ]);
   }
-  if (cleanupFacts === null) fail("cleanup did not run");
+  if (cleanupFacts === null) {
+    Deno.exitCode = 1;
+    return {
+      ok: false,
+      mode: args.cleanupOnly === undefined ? "control" : "cleanup-only",
+      workspace_id: journal!.workspaceId,
+      grant_id: journal!.grantId,
+      seat_id: journal!.seatId,
+      principal_id: journal!.principalId,
+      observations,
+      error: (runError ?? {
+        step: "cleanup",
+        code: "cleanup_did_not_run",
+        class: "HarnessFailure",
+      }) as unknown as Record<string, Json>,
+    };
+  }
   const output: Record<string, Json> = {
-    ok: !runError,
+    ok: runError === null,
     mode: args.cleanupOnly === undefined ? "control" : "cleanup-only",
     workspace_id: journal!.workspaceId,
     grant_id: journal!.grantId,
@@ -912,14 +1005,19 @@ async function execute(): Promise<Record<string, Json>> {
       ack_refused: cleanupFacts.ackRefused,
       completed_at: journal!.cleanupCompletedAt,
     },
+    ...(runError === null ? {} : { error: runError as unknown as Record<string, Json> }),
   };
-  if (runError) Deno.exitCode = 1;
+  if (runError !== null) Deno.exitCode = 1;
   return output;
 }
 
 try {
   console.log(JSON.stringify(await execute()));
-} catch {
+} catch (error) {
   Deno.exitCode = 1;
-  console.log(JSON.stringify({ ok: false, assertions: { failed_closed_before_creation: true } }));
+  console.log(JSON.stringify({
+    ok: false,
+    assertions: { failed_closed_before_creation: true },
+    error: errorFacts("startup", error),
+  }));
 }

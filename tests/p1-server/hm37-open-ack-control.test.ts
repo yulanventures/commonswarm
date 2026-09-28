@@ -39,6 +39,17 @@ interface HarnessOutput {
   observations?: Record<string, unknown>;
   cleanup?: Record<string, unknown>;
   assertions?: Record<string, unknown>;
+  error?: {
+    step: string;
+    code: string;
+    class: string;
+    status?: number;
+    response_code?: string;
+  };
+}
+
+function failureMessage(result: { stderr: string; output: HarnessOutput }): string {
+  return `harness error: ${JSON.stringify(result.output.error ?? { missing: true })}\n${result.stderr}`;
 }
 
 let local: LocalEnvironment;
@@ -163,9 +174,9 @@ function invoke(
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, output };
 }
 
-async function cleanupFacts(output: HarnessOutput): Promise<void> {
-  assert.ok(output.principal_id);
-  assert.ok(output.grant_id);
+async function cleanupFacts(output: HarnessOutput, diagnostic?: string): Promise<void> {
+  assert.ok(output.principal_id, diagnostic);
+  assert.ok(output.grant_id, diagnostic);
   const principalId = output.principal_id;
   const grantId = output.grant_id;
   assert.deepEqual(output.cleanup, {
@@ -180,8 +191,8 @@ async function cleanupFacts(output: HarnessOutput): Promise<void> {
     open_refused: true,
     ack_refused: true,
     completed_at: output.cleanup?.completed_at,
-  });
-  assert.equal(typeof output.cleanup?.completed_at, "string");
+  }, diagnostic);
+  assert.equal(typeof output.cleanup?.completed_at, "string", diagnostic);
   const [row] = await sql<{
     active_tokens: number; active_provider_artifacts: number; provider_active: boolean;
   }[]>`
@@ -196,14 +207,14 @@ async function cleanupFacts(output: HarnessOutput): Promise<void> {
       (SELECT commonswarm_oauth.provider_family_active(provider_grant_id)
         FROM swarm.hosted_mcp_grants WHERE grant_id = ${grantId}::uuid) AS provider_active
   `;
-  assert.deepEqual(row, { active_tokens: 0, active_provider_artifacts: 0, provider_active: false });
+  assert.deepEqual(row, { active_tokens: 0, active_provider_artifacts: 0, provider_active: false }, diagnostic);
 }
 
 test("HM37 harness proves all eleven observations and complete revocation", { timeout: 240_000 }, async () => {
   const value = await fixture();
   const windowSuffix = suffix();
   const result = invoke(value, windowSuffix);
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.equal(result.status, 0, failureMessage(result));
   assert.equal(result.output.ok, true);
   assert.equal(result.output.mode, "control");
   const observed = result.output.observations!;
@@ -223,7 +234,7 @@ test("HM37 harness proves all eleven observations and complete revocation", { ti
   assert.deepEqual(observed.cursor_after_a, observed.batch_a_terminal);
   assert.equal(typeof observed.cursor_after_b, "object");
   assert.doesNotMatch(result.stdout, /"access_token"|@example\.test|"password"|"seat_[A-Za-z0-9_-]{22}/u);
-  await cleanupFacts(result.output);
+  await cleanupFacts(result.output, failureMessage(result));
 
   const journal = join(value.journalDir, `hm37-open-ack-${windowSuffix}.journal.json`);
   const recovered = invoke(value, windowSuffix, { cleanupOnly: journal });
@@ -241,7 +252,11 @@ test("missing protected input fails before creating authority or OAuth rows", as
   `;
   const result = invoke(value, suffix(), { omitSession: true });
   assert.notEqual(result.status, 0);
-  assert.deepEqual(result.output, { ok: false, assertions: { failed_closed_before_creation: true } });
+  assert.deepEqual(result.output, {
+    ok: false,
+    assertions: { failed_closed_before_creation: true },
+    error: { step: "startup", code: "missing_protected_input", class: "HarnessFailure" },
+  });
   const afterRows = await sql<{ grants: number; artifacts: number }[]>`
     SELECT (SELECT count(*)::int FROM swarm.hosted_mcp_grants) AS grants,
       (SELECT count(*)::int FROM commonswarm_oauth.provider_artifacts) AS artifacts
@@ -252,12 +267,15 @@ test("missing protected input fails before creating authority or OAuth rows", as
 test("forced failure after seat creation still runs the full finally cleanup", { timeout: 180_000 }, async () => {
   const value = await fixture();
   const result = invoke(value, suffix(), { failAfter: "seat" });
-  assert.notEqual(result.status, 0);
-  assert.equal(result.output.ok, false);
-  assert.equal(result.output.mode, "control");
+  assert.notEqual(result.status, 0, failureMessage(result));
+  assert.equal(result.output.ok, false, failureMessage(result));
+  assert.equal(result.output.mode, "control", failureMessage(result));
+  assert.deepEqual(result.output.error, {
+    step: "forced-after-seat", code: "forced_test_failure", class: "HarnessFailure",
+  }, failureMessage(result));
   assert.equal(Object.keys(result.output.observations ?? {}).length, 0);
-  await cleanupFacts(result.output);
-  assert.ok(result.output.seat_id);
+  await cleanupFacts(result.output, failureMessage(result));
+  assert.ok(result.output.seat_id, failureMessage(result));
   const seatId = result.output.seat_id;
   const [authority] = await sql<{
     seat_revoked: boolean; handle_revoked: boolean; principal_revoked: boolean; grant_revoked: boolean;
