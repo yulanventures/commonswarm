@@ -6,9 +6,10 @@ import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
 const PLAN = "docs/evidence/2026-09-28-box-hm6/BOX-WINDOW.md";
-const RELEASE_SHA = "ad964ed158181ba1692dd05895f36fa7a1f87d3f";
+const RELEASE_SHA = "826db6a34f235064a3a03c57377d8e32a35d2f05";
 const STEP = "hm6-build-retry-image";
 const BUILT_IMAGE = `sha256:${"1".repeat(64)}`;
+const PREVIOUS_IMAGE = "sha256:208fe56df796e9ac52906d619af50468441146b7e2d2bfc0decb8880164a28b7";
 
 const FAKE_DOCKER = `#!/bin/bash
 set -euo pipefail
@@ -28,6 +29,8 @@ case "\${1:-}" in
     if test "$reference" = "$base_reference"; then
       test -f "$FAKE_DOCKER_STATE/pulled"
       printf '[{"Id":"sha256:%064d","RepoDigests":["node@%s"],"RootFS":{"Type":"layers","Layers":["sha256:base-one","sha256:base-two"]},"Os":"linux","Architecture":"amd64"}]\\n' 2 "$base_digest"
+    elif test "$reference" = "${PREVIOUS_IMAGE}"; then
+      printf '[{"Id":"%s"}]\n' "$reference"
     elif test "$reference" = "${BUILT_IMAGE}"; then
       test -f "$FAKE_DOCKER_STATE/built"
       if test "\${FAKE_DOCKER_BAD_LAYERS:-0}" = 1; then
