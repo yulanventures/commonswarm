@@ -54,6 +54,22 @@ A site release that depends on a server change follows that server's window.
 
 ## 1. Common release preparation
 
+### Window plan rules
+
+Every window plan that mints a control, seed, or proof principal must append the
+per-run `WINDOW_PRINCIPAL_SUFFIX` to every such name and use that one value in
+every minting step. The box's GNU `date` computes it once from the approved
+`WINDOW_START_UTC` written to `window.env`:
+
+```sh
+WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+```
+
+On a re-run, set a new window start and use the resulting fresh names without
+editing the plan. Never revoke and reuse a principal name across runs. The
+non-secret release evidence `window-principal-suffix.txt` records the suffix
+used.
+
 ### Preflight — CSwarmDevLead, HezLead, then Anvil
 
 1. CSwarmDevLead names one full 40-character `<sha>`, its reviewed PR, the
@@ -164,6 +180,7 @@ below, never from `find`:
     copy-back.list
     gate-evidence.txt
     box-archive.sha256
+    window-principal-suffix.txt
   )
 
   test "${#SHA}" -eq 40
@@ -390,9 +407,10 @@ sudo -n -i
     esac
     date -u -d "$T" +%s >/dev/null
   done
+  WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
   RECYCLE_TIMER_STOPPED=0
   BACKUP_TIMERS_STOPPED=0
-  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
+  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
 
   install -d -m 0700 -o root -g root "$PROOF_DIR"
   sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
@@ -425,6 +443,7 @@ sudo -n -i
     printf "%s='%s'\n" KIND_LIST "$KIND_LIST"
     printf "%s='%s'\n" WINDOW_START_UTC "$WINDOW_START_UTC"
     printf "%s='%s'\n" WINDOW_END_UTC "$WINDOW_END_UTC"
+    printf "%s='%s'\n" WINDOW_PRINCIPAL_SUFFIX "$WINDOW_PRINCIPAL_SUFFIX"
     printf "%s='%s'\n" NEW_EDGE "$NEW_EDGE"
     printf "%s='%s'\n" NEW_STACK "$NEW_STACK"
     printf "%s='%s'\n" PREVIOUS_EDGE "$PREVIOUS_EDGE"
@@ -432,7 +451,9 @@ sudo -n -i
     printf "%s='%s'\n" RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
     printf "%s='%s'\n" BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
   } >"$WINDOW_ENV"
-  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256"
+  install -m 0600 -o root -g root /dev/null "$PROOF_DIR/window-principal-suffix.txt"
+  printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
+  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
   printf 'PREVIOUS_EDGE=%s\nPREVIOUS_STACK=%s\n' "$PREVIOUS_EDGE" "$PREVIOUS_STACK" \
     >>"$PROOF_DIR/box-run.log"
@@ -923,9 +944,32 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   BACKUP_MAX_AGE_SECONDS=<agreed-seconds>
   BACKUP_STATUS=/var/backups/commonswarm-postgres/status.json
+  BACKUP_WAIT_MAX_SECONDS=14400
+  BACKUP_WAIT_DEADLINE=$(( $(date +%s) + BACKUP_WAIT_MAX_SECONDS ))
+  while :; do
+    BACKUP_STATE="$(systemctl is-active commonswarm-postgres-backup.service || true)"
+    case "$BACKUP_STATE" in
+      inactive|failed) break ;;
+      active|activating|deactivating|reloading)
+        BACKUP_WAIT_NOW="$(date +%s)"
+        if (( BACKUP_WAIT_NOW >= BACKUP_WAIT_DEADLINE )); then
+          printf 'STOP: backup service remained %s for %s seconds; ask HezLead.\n' \
+            "$BACKUP_STATE" "$BACKUP_WAIT_MAX_SECONDS" >&2
+          exit 1
+        fi
+        BACKUP_WAIT_SECONDS=5
+        if (( BACKUP_WAIT_DEADLINE - BACKUP_WAIT_NOW < BACKUP_WAIT_SECONDS )); then
+          BACKUP_WAIT_SECONDS=$(( BACKUP_WAIT_DEADLINE - BACKUP_WAIT_NOW ))
+        fi
+        sleep "$BACKUP_WAIT_SECONDS"
+        ;;
+      *) false ;;
+    esac
+  done
   python3 - "$BACKUP_STATUS" "$BACKUP_MAX_AGE_SECONDS" <<'PY'
 import datetime, json, sys
 data = json.load(open(sys.argv[1]))
+assert data.get('state') != 'running'
 assert data.get('ok') is True
 assert data.get('database_bytes_verified') is True
 assert data.get('object_bytes_verified') is True
@@ -946,8 +990,29 @@ proceed merely because the service command returned.
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  BACKUP_WAIT_MAX_SECONDS=14400
+  BACKUP_WAIT_DEADLINE=$(( $(date +%s) + BACKUP_WAIT_MAX_SECONDS ))
   systemctl start commonswarm-postgres-backup.service
-  while systemctl is-active --quiet commonswarm-postgres-backup.service; do sleep 5; done
+  while :; do
+    BACKUP_STATE="$(systemctl is-active commonswarm-postgres-backup.service || true)"
+    case "$BACKUP_STATE" in
+      inactive|failed) break ;;
+      active|activating|deactivating|reloading)
+        BACKUP_WAIT_NOW="$(date +%s)"
+        if (( BACKUP_WAIT_NOW >= BACKUP_WAIT_DEADLINE )); then
+          printf 'STOP: backup service remained %s for %s seconds; ask HezLead.\n' \
+            "$BACKUP_STATE" "$BACKUP_WAIT_MAX_SECONDS" >&2
+          exit 1
+        fi
+        BACKUP_WAIT_SECONDS=5
+        if (( BACKUP_WAIT_DEADLINE - BACKUP_WAIT_NOW < BACKUP_WAIT_SECONDS )); then
+          BACKUP_WAIT_SECONDS=$(( BACKUP_WAIT_DEADLINE - BACKUP_WAIT_NOW ))
+        fi
+        sleep "$BACKUP_WAIT_SECONDS"
+        ;;
+      *) false ;;
+    esac
+  done
   test "$(systemctl show commonswarm-postgres-backup.service -p Result --value)" = success
 )
 ```
