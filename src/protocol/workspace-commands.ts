@@ -15,6 +15,10 @@ import {
 
 export const INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 export const AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1_000;
+export const PRINCIPAL_NAME_TAKEN = {
+  code: 'principal_name_taken',
+  message: 'principal id or name already exists',
+} as const;
 /* 30 DAYS, raised 8h→24h→30d by operator rulings 2026-08-18/19. The bootstrap credential
  * crosses a human (pasted into another machine's chat, often after environment repair on
  * that side), and rotation cannot start until a listener is READY — the step most likely to
@@ -300,7 +304,7 @@ export interface RenewalFacts {
 export interface DecideWorkspaceCtx {
   now: number;
   actor: Actor;
-  credential_kind: 'human' | 'agent' | 'join';
+  credential_kind: 'human' | 'agent' | 'join' | 'hosted_grant' | 'hosted_seat';
   /** Exact presenting token, populated only for an agent capability credential. */
   presenting_token_id: string | null;
   command_id: string;
@@ -657,6 +661,17 @@ export function decideWorkspace(
     );
   }
 
+  /* Hosted grant credentials are single-purpose and are consumed by the
+   * hosted authority reducer. A hosted seat may reach only the narrow tool
+   * adapter; if either credential is accidentally routed into workspace
+   * management, fail closed here independently of the adapter allowlist. */
+  if (ctx.credential_kind === 'hosted_grant') {
+    return authz('credential_kind_forbidden', 'hosted grant credentials authorize only claim_hosted_seat');
+  }
+  if (ctx.credential_kind === 'hosted_seat' && cmd.kind !== 'submit_feedback') {
+    return authz('credential_kind_forbidden', 'hosted seat credential cannot execute workspace management commands');
+  }
+
   if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== 'human') {
     return authz('credential_kind_forbidden', 'command requires an interactive human credential');
   }
@@ -964,7 +979,7 @@ export function decideWorkspace(
         state.principals[cmd.principal_id]
         || (!cmd.allow_duplicate_name && Object.values(state.principals).some((principal: any) => principal.name === cmd.name))
       ) {
-        return domain(ctx, cmd.kind, 'principal_name_taken', 'principal id or name already exists');
+        return domain(ctx, cmd.kind, PRINCIPAL_NAME_TAKEN.code, PRINCIPAL_NAME_TAKEN.message);
       }
       return accept([
         env(ctx, 'AgentPrincipalCreated', {
@@ -1056,6 +1071,14 @@ export function decideWorkspace(
       }
       if (principal.revoked_at !== null) {
         return domain(ctx, cmd.kind, 'principal_revoked', 'agent principal is revoked');
+      }
+      if (principal.transport === 'hosted_mcp' || principal.turn_only) {
+        return domain(
+          ctx,
+          cmd.kind,
+          'transport_unavailable',
+          'hosted MCP principals cannot receive independently usable credentials',
+        );
       }
       if (principal.owner_user_id !== user_id) {
         return domain(ctx, cmd.kind, 'principal_not_owned', 'tokens may be minted only for an owned principal');
@@ -1205,6 +1228,14 @@ export function decideWorkspace(
           cmd.kind,
           'principal_revoked',
           'the predecessor principal is missing or revoked',
+        );
+      }
+      if (principal.transport === 'hosted_mcp' || principal.turn_only) {
+        return domain(
+          ctx,
+          cmd.kind,
+          'transport_unavailable',
+          'hosted MCP principals cannot renew independent credentials',
         );
       }
       if (predecessor.revoked_at !== null) {

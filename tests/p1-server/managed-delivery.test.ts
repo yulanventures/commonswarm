@@ -880,8 +880,8 @@ test("turn-only transport is excluded while an otherwise eligible local seat rem
       kind: "claim_agent_inbox",
       listener_instance_id: randomUUID(),
     });
-    assert.equal(listener.status, 403, JSON.stringify(listener.body));
-    assert.equal(listener.body.error, "transport_unavailable");
+    assert.equal(listener.status, 401, JSON.stringify(listener.body));
+    assert.equal(listener.body.error, "unauthenticated");
     const read = await fetch(`${local.API_URL}/functions/v1/read`, {
       method: "POST",
       headers: {

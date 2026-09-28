@@ -28,6 +28,12 @@ export type WorkspaceEventType =
   | 'FeedbackSubmitted'
   | 'AgentTokenMinted'
   | 'AgentTokenRevoked'
+  | 'HostedMcpGrantBegun'
+  | 'HostedMcpWorkspaceConsented'
+  | 'HostedMcpGrantActivated'
+  | 'HostedMcpGrantRevoked'
+  | 'HostedMcpSeatClaimed'
+  | 'HostedMcpSeatRevoked'
   | 'CommandRejected';
 
 export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
@@ -45,6 +51,12 @@ export const WORKSPACE_EVENT_TYPES: readonly WorkspaceEventType[] = [
   'FeedbackSubmitted',
   'AgentTokenMinted',
   'AgentTokenRevoked',
+  'HostedMcpGrantBegun',
+  'HostedMcpWorkspaceConsented',
+  'HostedMcpGrantActivated',
+  'HostedMcpGrantRevoked',
+  'HostedMcpSeatClaimed',
+  'HostedMcpSeatRevoked',
   'CommandRejected',
 ] as const;
 
@@ -231,6 +243,25 @@ export interface AgentTokenRevoked {
   revoked_at: number;
 }
 
+export interface HostedMcpSeatClaimed {
+  seat_id: string;
+  grant_id: string;
+  workspace_id: string;
+  owner_user_id: string;
+  principal_id: string;
+  name: string;
+  handle: string;
+  transport: 'hosted_mcp';
+  turn_only: true;
+  created_at: number;
+}
+
+export interface HostedMcpSeatRevoked {
+  seat_id: string;
+  principal_id: string;
+  revoked_at: number;
+}
+
 export type WorkspaceRejectionReason =
   | 'workspace_exists'
   | 'operator_not_allowed'
@@ -252,6 +283,7 @@ export type WorkspaceRejectionReason =
   | 'principal_not_found'
   | 'principal_not_owned'
   | 'principal_revoked'
+  | 'transport_unavailable'
   | 'token_not_found'
   | 'token_revoked'
   | 'scope_not_allowed'

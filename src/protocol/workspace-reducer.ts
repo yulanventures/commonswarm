@@ -6,6 +6,8 @@ import {
   AGENT_TRANSPORTS,
   AgentModelDeclared,
   FeedbackSubmitted,
+  HostedMcpSeatClaimed,
+  HostedMcpSeatRevoked,
   AgentPrincipalCreated,
   AgentPrincipalRevoked,
   AgentTokenMinted,
@@ -419,6 +421,72 @@ export function reduceWorkspace(
       };
       break;
     }
+    case 'HostedMcpSeatClaimed': {
+      const p = req<HostedMcpSeatClaimed>(
+        env.payload,
+        [
+          'seat_id', 'grant_id', 'workspace_id', 'owner_user_id',
+          'principal_id', 'name', 'handle', 'transport', 'turn_only',
+          'created_at',
+        ],
+        env.type,
+        env.seq,
+      );
+      if (p.workspace_id !== s.workspace.workspace_id) {
+        throw new StreamIntegrityError(`hosted seat workspace mismatch at seq ${env.seq}`);
+      }
+      if (s.principals[p.principal_id]) {
+        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env.seq}`);
+      }
+      if (p.transport !== 'hosted_mcp' || p.turn_only !== true) {
+        throw new StreamIntegrityError(`hosted seat has invalid transport at seq ${env.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: {
+            principal_id: p.principal_id,
+            owner_user_id: p.owner_user_id,
+            name: p.name,
+            model: null,
+            transport: 'hosted_mcp',
+            turn_only: true,
+            created_at: p.created_at,
+            revoked_at: null,
+          },
+        },
+      };
+      break;
+    }
+    case 'HostedMcpSeatRevoked': {
+      const p = req<HostedMcpSeatRevoked>(
+        env.payload,
+        ['seat_id', 'principal_id', 'revoked_at'],
+        env.type,
+        env.seq,
+      );
+      const principal = s.principals[p.principal_id];
+      if (!principal) {
+        throw new StreamIntegrityError(`unknown hosted principal "${p.principal_id}" at seq ${env.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...principal, revoked_at: p.revoked_at },
+        },
+      };
+      break;
+    }
+    case 'HostedMcpGrantBegun':
+    case 'HostedMcpWorkspaceConsented':
+    case 'HostedMcpGrantActivated':
+    case 'HostedMcpGrantRevoked':
+      // These events affect the hosted-authority projection, not workspace
+      // membership/principal state. Their reducer validates their full shape.
+      next = s;
+      break;
     default:
       throw new UnknownEventTypeError(env.type, env.seq);
   }

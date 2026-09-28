@@ -154,7 +154,23 @@ import {
   RENEWAL_MAX_SUCCESSORS_DEFAULT,
   requestHash,
   SCHEMA_VERSION,
+  decideHostedAuthority,
+  hostedSeatNameValid,
+  HOSTED_MCP_SEAT_LIMIT,
+  HOSTED_SEAT_NAME_TAKEN,
+  PRINCIPAL_NAME_TAKEN,
+  publicHostedCommandForbidden,
+  reduceHostedAuthority,
 } from "../_shared/protocol.js";
+import {
+  hostedCapabilityTool,
+  revalidateHostedGrantCommand,
+  revalidateHostedSeatCommand,
+  type HostedCapability,
+  type HostedGrantCapability,
+  type HostedSeatCapability,
+  type ResolvedHostedSeat,
+} from "../_shared/hosted-seat-auth.ts";
 interface Actor {
   user: string | null;
   agent_principal: string | null;
@@ -503,7 +519,7 @@ interface RenewalFacts {
 interface WorkspaceDecideCtx {
   now: number;
   actor: Actor;
-  credential_kind: "human" | "agent" | "join";
+  credential_kind: "human" | "agent" | "join" | "hosted_grant" | "hosted_seat";
   presenting_token_id: string | null;
   command_id: string;
   workspace_id: string;
@@ -575,6 +591,9 @@ interface StoredResponse {
   resumed_at?: string;
   signal?: SignalRecord;
   channel?: ChannelRecord;
+  grant_id?: string;
+  seat_id?: string;
+  handle?: string;
 }
 
 interface EventEnvelope {
@@ -700,6 +719,7 @@ const REVOKE_CAPABILITY_KIND = "revoke_capability_url";
 const MINT_AGENT_JOIN_CREDENTIAL_KIND = "mint_agent_join_credential";
 const REVOKE_AGENT_JOIN_CREDENTIAL_KIND = "revoke_agent_join_credential";
 const REGISTER_AGENT_SEAT_KIND = "register_agent_seat";
+const HOSTED_TRANSACTION_ISOLATION = "isolation level read committed";
 /**
  * The exit from an idle suspension. Not a WORKSPACE_COMMAND_KIND and not in the
  * reducer: it changes no authority, grants nothing, and emits no event — it
@@ -976,6 +996,14 @@ const CHANNEL_COMMAND_KINDS = [
 ] as const;
 const TOUCH_PRESENCE_KIND = "touch_presence";
 
+const HOSTED_MANAGEMENT_KINDS = new Set([
+  "begin_hosted_mcp_grant",
+  "consent_hosted_mcp_workspace",
+  "activate_hosted_mcp_grant",
+  "revoke_hosted_mcp_grant",
+  "revoke_hosted_mcp_seat",
+]);
+
 /** Hosted seats are turn-only and never enter local session/listener machinery. */
 const LOCAL_TRANSPORT_ONLY_KINDS = new Set([
   "enable_agent_management",
@@ -1234,7 +1262,8 @@ const authClient = createClient(supabaseUrl, supabaseAnonKey, {
 });
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
-type CredentialKind = "user" | "agent";
+type CredentialKind = "user" | "agent" | "hosted_seat";
+type SignalCredentialKind = "user" | "agent";
 type Role = "owner" | "admin" | "member";
 
 interface RequestBody {
@@ -1249,6 +1278,10 @@ interface RequestBody {
 
 interface AuthContext {
   credentialKind: CredentialKind;
+  /** Idempotency has a distinct hosted namespace even though signal rows keep
+   * their existing `from_kind = agent` attribution. */
+  ledgerCredentialKind: "user" | "agent" | "hosted_seat";
+  ledgerPrincipalId: string;
   credentialId: string | null;
   deviceId: string | null;
   actor: Actor;
@@ -1273,7 +1306,14 @@ interface JoinAuthContext {
   actor: Actor;
 }
 
-type AuditAuthContext = AuthContext | JoinAuthContext;
+interface HostedGrantAuditContext {
+  credentialKind: "hosted_grant";
+  credentialId: string;
+  deviceId: null;
+  actor: Actor;
+}
+
+type AuditAuthContext = AuthContext | JoinAuthContext | HostedGrantAuditContext;
 
 interface Route {
   workspaceId: string;
@@ -1577,6 +1617,11 @@ async function rotateWakeId(tx: Sql, principalId: string): Promise<void> {
 
 async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
   const auth = audit.auth;
+  const auditCredentialKind = auth === null
+    ? null
+    : "ledgerCredentialKind" in auth
+    ? auth.ledgerCredentialKind
+    : auth.credentialKind;
   await tx`
     INSERT INTO swarm.audit_log (
       actor_user, actor_agent_principal, actor_run,
@@ -1587,7 +1632,7 @@ async function insertAudit(tx: Sql, audit: Audit): Promise<void> {
       ${auth?.actor.user ?? null}::uuid,
       ${auth?.actor.agent_principal ?? null}::uuid,
       ${auth?.actor.run ?? null}::uuid,
-      ${auth?.credentialKind ?? null},
+      ${auditCredentialKind},
       ${auth?.credentialId ?? null}::uuid,
       ${auth?.deviceId ?? null}::uuid,
       ${stripControls(audit.commandKind) ?? "unknown"},
@@ -2972,6 +3017,8 @@ async function authenticateAgent(
   if (!agent) return null;
   return {
     credentialKind: "agent",
+    ledgerCredentialKind: "agent",
+    ledgerPrincipalId: agent.principal_id,
     credentialId: agent.token_id,
     deviceId: agent.device_id,
     actor: {
@@ -3006,6 +3053,8 @@ async function authenticateHuman(
   if (!rows[0]) return null;
   return {
     credentialKind: "user",
+    ledgerCredentialKind: "user",
+    ledgerPrincipalId: rows[0].user_id,
     credentialId: null,
     deviceId: null,
     actor: { user: rows[0].user_id, agent_principal: null, run: null },
@@ -3014,6 +3063,44 @@ async function authenticateHuman(
     identityVerified: verified.identityVerified,
     email: verified.email ?? rows[0].email,
     interactiveAuthAtSeconds: verified.interactiveAuthAtSeconds,
+  };
+}
+
+function hostedSeatAuth(seat: ResolvedHostedSeat): AuthContext {
+  const agent: AgentAuthRow = {
+    token_id: seat.seat_id,
+    principal_id: seat.principal_id,
+    run_id: seat.seat_id,
+    device_id: seat.seat_id,
+    owner_user_id: seat.owner_user_id,
+    principal_workspace_id: seat.workspace_id,
+    lineage_id: seat.grant_id,
+    scopes: ["post_signal"],
+    surrender_only: false,
+    token_revoked_at: null,
+    principal_revoked_at: null,
+    run_ended_at: null,
+    device_revoked_at: null,
+    unexpired: true,
+    managed_at: null,
+    transport: "hosted_mcp",
+  };
+  return {
+    credentialKind: "hosted_seat",
+    ledgerCredentialKind: "hosted_seat",
+    ledgerPrincipalId: seat.principal_id,
+    credentialId: seat.seat_id,
+    deviceId: null,
+    actor: {
+      user: seat.owner_user_id,
+      agent_principal: seat.principal_id,
+      run: null,
+    },
+    agent,
+    agentFirstUse: false,
+    identityVerified: false,
+    email: null,
+    interactiveAuthAtSeconds: null,
   };
 }
 
@@ -3648,7 +3735,9 @@ async function prepareWorkspaceCommand(
   const ctx: WorkspaceDecideCtx = {
     now,
     actor: auth.actor,
-    credential_kind: auth.credentialKind === "user" ? "human" : "agent",
+    credential_kind: auth.credentialKind === "user"
+      ? "human"
+      : auth.credentialKind,
     presenting_token_id: auth.agent?.token_id ?? null,
     command_id: commandId,
     workspace_id: route.workspaceId,
@@ -5432,9 +5521,9 @@ async function enforceSignalRate(
   command: SignalCommand,
   target: SignalWriteTarget,
 ): Promise<SignalRateLimit | null> {
-  const credentialIdentity = auth.credentialKind === "agent"
-    ? auth.credentialId
-    : auth.actor.user;
+  const credentialIdentity = auth.credentialKind === "user"
+    ? auth.actor.user
+    : auth.credentialId;
   if (credentialIdentity === null) {
     throw new Error("authenticated signal credential has no stable identity");
   }
@@ -5775,6 +5864,37 @@ async function lockAndCountLivePrincipals(tx: Sql, workspaceId: string): Promise
       )
   `;
   return Number(rows[0]?.live ?? "0");
+}
+
+/** Lock order is stream -> principal ceiling -> exact name -> hosted grant. */
+async function lockPrincipalName(
+  tx: Sql,
+  route: { workspaceId: string },
+  command: { name: string },
+): Promise<void> {
+  await tx`
+    SELECT pg_advisory_xact_lock(
+      1936142698,
+      hashtext(${route.workspaceId}::text || ':' || ${command.name})
+    )
+  `;
+}
+
+async function hostedNameReserved(
+  tx: Sql,
+  workspaceId: string,
+  name: string,
+): Promise<boolean> {
+  const rows = await tx<{ reserved: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1
+      FROM swarm.hosted_mcp_seats AS hs
+      WHERE hs.workspace_id = ${workspaceId}::uuid
+        AND hs.name = ${name}
+        AND hs.revoked_at IS NULL
+    ) AS reserved
+  `;
+  return rows[0]?.reserved === true;
 }
 
 interface LockedJoinCredential {
@@ -6486,6 +6606,29 @@ async function registerAgentSeat(
     );
   }
 
+  await lockPrincipalName(
+    tx,
+    { workspaceId: credential.workspace_id },
+    command,
+  );
+  if (await hostedNameReserved(tx, credential.workspace_id, command.name)) {
+    return await refuseRegistrationDomain(
+      tx,
+      credential,
+      auth,
+      route,
+      frame,
+      commandId,
+      command,
+      hash,
+      minClientVersion,
+      409,
+      HOSTED_SEAT_NAME_TAKEN.code,
+      HOSTED_SEAT_NAME_TAKEN.code,
+      HOSTED_SEAT_NAME_TAKEN.message,
+    );
+  }
+
   const state = await loadWorkspaceState(tx, route);
   const principalId = crypto.randomUUID();
   const deviceId = crypto.randomUUID();
@@ -6842,6 +6985,16 @@ async function mintAgentJoinCredential(
   // these are service rows, not agent-chosen identity.
   const registrarName = `join-registrar-${joinCredentialId}`;
   const registrarDeviceLabel = `Join registrar ${joinCredentialId}`;
+  await lockPrincipalName(tx, route, { name: registrarName });
+  if (await hostedNameReserved(tx, route.workspaceId, registrarName)) {
+    return {
+      status: 409,
+      body: {
+        error: HOSTED_SEAT_NAME_TAKEN.code,
+        message: HOSTED_SEAT_NAME_TAKEN.message,
+      },
+    };
+  }
   await tx`
     INSERT INTO swarm.devices (device_id, user_id, label)
     VALUES (
@@ -8172,12 +8325,20 @@ async function enforceFreeTierBudget(
         },
       );
     }
-    await tx`
-      SELECT pg_advisory_xact_lock(
-        1936142698,
-        hashtext(${route.workspaceId}::text || ':' || ${command.name})
-      )
-    `;
+    await lockPrincipalName(tx, route, command);
+    if (await hostedNameReserved(tx, route.workspaceId, command.name)) {
+      return {
+        status: 200,
+        body: {
+          ok: false,
+          status: "rejected",
+          class: "domain",
+          reason: PRINCIPAL_NAME_TAKEN.code,
+          event_ids: [],
+          events: [],
+        },
+      };
+    }
     if (command.allow_duplicate_name !== true) {
       const taken = await tx<{ principal_id: string }[]>`
         SELECT principal_id
@@ -8193,7 +8354,7 @@ async function enforceFreeTierBudget(
             ok: false,
             status: "rejected",
             class: "domain",
-            reason: "principal_name_taken",
+            reason: PRINCIPAL_NAME_TAKEN.code,
             event_ids: [],
             events: [],
           },
@@ -8727,7 +8888,7 @@ async function resolveSignalWriteTarget(
 
   const referenceRows = await tx<{
     from_principal: string;
-    from_kind: CredentialKind;
+    from_kind: SignalCredentialKind;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
   }[]>`
@@ -8951,6 +9112,8 @@ async function postSignal(
   attachments: readonly SignalAttachment[],
   placement: SignalPlacement,
 ): Promise<PostSignalOutcome> {
+  const signalCredentialKind: SignalCredentialKind =
+    auth.credentialKind === "user" ? "user" : "agent";
   const untilMs = placement.untilMs;
   const signalId = crypto.randomUUID();
   const parentSignalId = command.parent_signal_id ?? null;
@@ -8985,7 +9148,7 @@ async function postSignal(
     id: string | null;
     workspace_id: string | null;
     from_principal: string | null;
-    from_kind: CredentialKind | null;
+    from_kind: SignalCredentialKind | null;
     to_user_id: string | null;
     to_agent_principal_id: string | null;
     in_reply_to: string | null;
@@ -9040,7 +9203,7 @@ async function postSignal(
       SELECT parent.*
       FROM swarm.signals AS parent
       WHERE ${parentSignalId}::uuid IS NOT NULL
-        AND ${auth.credentialKind} = 'agent'
+        AND ${signalCredentialKind} = 'agent'
         AND parent.id = ${parentSignalId}::uuid
         AND parent.workspace_id = ${route.workspaceId}::uuid
         AND parent.kind = 'ask'
@@ -9153,7 +9316,7 @@ async function postSignal(
         ${signalId}::uuid,
         ${route.workspaceId}::uuid,
         ${canonicalPrincipal(auth.actor)}::uuid,
-        ${auth.credentialKind},
+        ${signalCredentialKind},
         ${target.toUserId}::uuid,
         ${target.toAgentPrincipalId}::uuid,
         ${target.inReplyTo}::uuid,
@@ -9341,6 +9504,902 @@ function signalRecipientSet(
   return [];
 }
 
+interface HostedSeatClaimInput extends RequestBody {
+  command_id: string;
+  workspace_id: string;
+  stream: { kind: "workspace" };
+  command: { kind: "claim_hosted_seat"; name: string };
+}
+
+export type HostedCommandInput = RequestBody;
+export type CommandResult = HttpResult;
+export interface HostedHumanManagementIdentity {
+  userId: string;
+  email: string | null;
+  displayName: string;
+  identityVerified: boolean;
+  interactiveAuthAtSeconds: number | null;
+}
+
+function hostedToolAllowsCommand(tool: string | null, body: RequestBody): boolean {
+  const command = record(body.command);
+  if (!command || command.kind !== "post_signal") return false;
+  if (tool === "ask") return command.signal_kind === "ask";
+  if (tool === "note") return command.signal_kind === "note" && command.in_reply_to == null;
+  if (tool === "reply") return command.signal_kind === "note" &&
+    typeof command.in_reply_to === "string";
+  return tool === "working_on" && command.signal_kind === "working-on";
+}
+
+function hostedClaimInput(value: RequestBody): HostedSeatClaimInput | null {
+  const stream = record(value.stream);
+  const command = record(value.command);
+  if (
+    typeof value.command_id !== "string" || !COMMAND_ID_RE.test(value.command_id) ||
+    typeof value.workspace_id !== "string" || !UUID_RE.test(value.workspace_id) ||
+    !stream || !exactKeys(stream, ["kind"]) || stream.kind !== "workspace" ||
+    !command || !exactKeys(command, ["kind", "name"]) ||
+    command.kind !== "claim_hosted_seat" ||
+    !hostedSeatNameValid(command.name)
+  ) return null;
+  return value as HostedSeatClaimInput;
+}
+
+async function hostedRequestHash(
+  principalKind: "user" | "hosted_grant" | "hosted_seat",
+  principalId: string,
+  body: RequestBody,
+): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify({
+    principal: `${principalKind}:${principalId}`,
+    workspace_id: body.workspace_id,
+    stream: body.stream,
+    command: body.command,
+  }));
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+}
+
+type HostedManagementCommand =
+  | {
+    kind: "begin_hosted_mcp_grant";
+    grant_id: string;
+    provider_grant_id: string;
+    owner_user_id: string;
+    home_workspace_id: string;
+    client_id: string;
+    resource: string;
+    selected_workspace_ids: string[];
+    manifest_digest: string;
+    interaction_ref: string;
+  }
+  | {
+    kind: "consent_hosted_mcp_workspace";
+    grant_id: string;
+    workspace_id: string;
+    owner_user_id: string;
+    manifest_digest: string;
+    consent_receipt_id: string;
+  }
+  | { kind: "activate_hosted_mcp_grant"; grant_id: string }
+  | { kind: "revoke_hosted_mcp_grant"; grant_id: string }
+  | { kind: "revoke_hosted_mcp_seat"; grant_id: string; seat_id: string };
+
+interface HostedGrantRow {
+  grant_id: string;
+  provider_grant_id: string;
+  owner_user_id: string;
+  home_workspace_id: string;
+  client_id: string;
+  resource: string;
+  selected_workspace_ids: string[];
+  manifest_digest: Uint8Array;
+  interaction_ref: string;
+  state: "pending" | "active" | "revoked";
+  created_at: Date;
+  activated_at: Date | null;
+  revoked_at: Date | null;
+}
+
+function parseHostedManagementCommand(value: unknown): HostedManagementCommand | null {
+  const command = record(value);
+  if (!command || typeof command.kind !== "string") return null;
+  if (command.kind === "begin_hosted_mcp_grant") {
+    const keys = [
+      "kind", "grant_id", "provider_grant_id", "owner_user_id",
+      "home_workspace_id", "client_id", "resource", "selected_workspace_ids",
+      "manifest_digest", "interaction_ref",
+    ];
+    if (!exactKeys(command, keys) ||
+        typeof command.grant_id !== "string" || !UUID_RE.test(command.grant_id) ||
+        typeof command.owner_user_id !== "string" || !UUID_RE.test(command.owner_user_id) ||
+        typeof command.home_workspace_id !== "string" || !UUID_RE.test(command.home_workspace_id) ||
+        !boundedText(command.provider_grant_id, 2048) ||
+        !boundedText(command.client_id, 2048) ||
+        command.resource !== "https://mcp.commonswarm.com/mcp" ||
+        !boundedText(command.interaction_ref, 2048) ||
+        typeof command.manifest_digest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(command.manifest_digest) ||
+        !Array.isArray(command.selected_workspace_ids) ||
+        command.selected_workspace_ids.length < 1 ||
+        command.selected_workspace_ids.length > 100 ||
+        !command.selected_workspace_ids.every((id) => typeof id === "string" && UUID_RE.test(id))) {
+      return null;
+    }
+    return command as HostedManagementCommand;
+  }
+  if (command.kind === "consent_hosted_mcp_workspace") {
+    if (!exactKeys(command, [
+      "kind", "grant_id", "workspace_id", "owner_user_id",
+      "manifest_digest", "consent_receipt_id",
+    ]) ||
+        typeof command.grant_id !== "string" || !UUID_RE.test(command.grant_id) ||
+        typeof command.workspace_id !== "string" || !UUID_RE.test(command.workspace_id) ||
+        typeof command.owner_user_id !== "string" || !UUID_RE.test(command.owner_user_id) ||
+        typeof command.consent_receipt_id !== "string" || !UUID_RE.test(command.consent_receipt_id) ||
+        typeof command.manifest_digest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(command.manifest_digest)) return null;
+    return command as HostedManagementCommand;
+  }
+  if (command.kind === "activate_hosted_mcp_grant" ||
+      command.kind === "revoke_hosted_mcp_grant") {
+    return exactKeys(command, ["kind", "grant_id"]) &&
+        typeof command.grant_id === "string" && UUID_RE.test(command.grant_id)
+      ? command as HostedManagementCommand
+      : null;
+  }
+  if (command.kind === "revoke_hosted_mcp_seat") {
+    return exactKeys(command, ["kind", "grant_id", "seat_id"]) &&
+        typeof command.grant_id === "string" && UUID_RE.test(command.grant_id) &&
+        typeof command.seat_id === "string" && UUID_RE.test(command.seat_id)
+      ? command as HostedManagementCommand
+      : null;
+  }
+  return null;
+}
+
+function hostedGrantFacts(row: HostedGrantRow, consented: readonly string[]) {
+  return {
+    grant_id: row.grant_id,
+    provider_grant_id: row.provider_grant_id,
+    owner_user_id: row.owner_user_id,
+    home_workspace_id: row.home_workspace_id,
+    client_id: row.client_id,
+    resource: row.resource,
+    state: row.state,
+    manifest_digest: bytesToHex(row.manifest_digest),
+    interaction_ref: row.interaction_ref,
+    selected_workspace_ids: row.selected_workspace_ids,
+    consented_workspace_ids: [...consented],
+  };
+}
+
+function hostedProjectionBefore(grant: HostedGrantRow, seat: ReturnType<typeof record> | null = null) {
+  const grantState = {
+    grant_id: grant.grant_id,
+    provider_grant_id: grant.provider_grant_id,
+    owner_user_id: grant.owner_user_id,
+    home_workspace_id: grant.home_workspace_id,
+    client_id: grant.client_id,
+    resource: grant.resource,
+    selected_workspace_ids: grant.selected_workspace_ids,
+    manifest_digest: bytesToHex(grant.manifest_digest),
+    interaction_ref: grant.interaction_ref,
+    state: grant.state,
+    created_at: grant.created_at.getTime(),
+    activated_at: grant.activated_at?.getTime() ?? null,
+    revoked_at: grant.revoked_at?.getTime() ?? null,
+  };
+  if (seat === null) {
+    return { grants: { [grant.grant_id]: grantState }, consents: {}, seats: {}, principals: {} };
+  }
+  const seatId = String(seat.seat_id);
+  const principalId = String(seat.principal_id);
+  const seatState = {
+    ...seat,
+    seat_id: seatId,
+    principal_id: principalId,
+  };
+  return {
+    grants: { [grant.grant_id]: grantState },
+    consents: {},
+    seats: { [seatId]: seatState },
+    principals: { [principalId]: {
+      principal_id: principalId,
+      workspace_id: String(seat.workspace_id),
+      owner_user_id: String(seat.owner_user_id),
+      name: String(seat.name),
+      transport: "hosted_mcp" as const,
+      turn_only: true as const,
+      created_at: Number(seat.created_at),
+      revoked_at: seat.principal_revoked_at === null
+        ? null
+        : Number(seat.principal_revoked_at),
+    } },
+  };
+}
+
+async function handleHostedManagement(
+  tx: Sql,
+  body: RequestBody,
+  auth: AuthContext,
+): Promise<HttpResult> {
+  const command = parseHostedManagementCommand(body.command);
+  if (auth.credentialKind !== "user" || auth.actor.user === null) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  if (command === null ||
+      typeof body.command_id !== "string" || !COMMAND_ID_RE.test(body.command_id) ||
+      typeof body.workspace_id !== "string" || !UUID_RE.test(body.workspace_id) ||
+      !exactKeys(record(body.stream) ?? {}, ["kind"]) ||
+      record(body.stream)?.kind !== "workspace") {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+
+  const preliminary = command.kind === "begin_hosted_mcp_grant"
+    ? []
+    : await tx<HostedGrantRow[]>`
+      SELECT * FROM swarm.hosted_mcp_grants
+      WHERE grant_id = ${command.grant_id}::uuid
+      LIMIT 1
+    `;
+  const preliminaryGrant = preliminary[0];
+  const routeWorkspaceId = command.kind === "begin_hosted_mcp_grant"
+    ? command.home_workspace_id
+    : command.kind === "consent_hosted_mcp_workspace"
+    ? command.workspace_id
+    : command.kind === "revoke_hosted_mcp_seat"
+    ? (await tx<{ workspace_id: string }[]>`
+        SELECT workspace_id FROM swarm.hosted_mcp_seats
+        WHERE seat_id = ${command.seat_id}::uuid
+          AND grant_id = ${command.grant_id}::uuid
+        LIMIT 1
+      `)[0]?.workspace_id ?? null
+    : preliminaryGrant?.home_workspace_id ?? null;
+  if (routeWorkspaceId === null || body.workspace_id !== routeWorkspaceId) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  const routeRows = await tx<{
+    stream_id: string;
+    archived_at: Date | null;
+    live_member: boolean;
+  }[]>`
+    SELECT s.stream_id, w.archived_at,
+      EXISTS (
+        SELECT 1 FROM swarm.memberships AS m
+        WHERE m.workspace_id = w.workspace_id
+          AND m.user_id = ${auth.actor.user}::uuid
+          AND m.revoked_at IS NULL
+      ) AS live_member
+    FROM swarm.workspaces AS w
+    JOIN swarm.streams AS s
+      ON s.workspace_id = w.workspace_id AND s.kind = 'workspace'
+    WHERE w.workspace_id = ${routeWorkspaceId}::uuid
+    LIMIT 1
+  `;
+  const routeRow = routeRows[0];
+  if (!routeRow) return { status: 403, body: { error: "forbidden" } };
+  const route: Route = {
+    workspaceId: routeWorkspaceId,
+    streamId: routeRow.stream_id,
+    membershipRole: null,
+    membershipRevokedAt: routeRow.live_member ? null : new Date(0),
+  };
+  const frame = await lockRegistrationStream(tx, route);
+
+  const grantRows = command.kind === "begin_hosted_mcp_grant"
+    ? await tx<HostedGrantRow[]>`
+      SELECT * FROM swarm.hosted_mcp_grants
+      WHERE grant_id = ${command.grant_id}::uuid
+         OR provider_grant_id = ${command.provider_grant_id}
+      FOR UPDATE
+    `
+    : await tx<HostedGrantRow[]>`
+      SELECT * FROM swarm.hosted_mcp_grants
+      WHERE grant_id = ${command.grant_id}::uuid
+      FOR UPDATE
+    `;
+  const grant = grantRows[0] ?? null;
+  if (command.kind !== "begin_hosted_mcp_grant" &&
+      (grant === null || grant.owner_user_id !== auth.actor.user)) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+
+  const hash = await hostedRequestHash("user", auth.actor.user, body);
+  const consentRows = grant === null ? [] : await tx<{ workspace_id: string }[]>`
+    SELECT workspace_id
+    FROM swarm.hosted_mcp_grant_workspaces
+    WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+  `;
+  const allRequired = grant === null ? [{ consents: false, memberships: false }] :
+    await tx<{ consents: boolean; memberships: boolean }[]>`
+      SELECT
+        NOT EXISTS (
+          SELECT required.workspace_id
+          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
+          EXCEPT
+          SELECT c.workspace_id
+          FROM swarm.hosted_mcp_grant_workspaces AS c
+          WHERE c.grant_id = ${grant.grant_id}::uuid AND c.revoked_at IS NULL
+        ) AS consents,
+        NOT EXISTS (
+          SELECT required.workspace_id
+          FROM unnest(${grant.selected_workspace_ids}::uuid[]) AS required(workspace_id)
+          LEFT JOIN swarm.workspaces AS w ON w.workspace_id = required.workspace_id
+          LEFT JOIN swarm.memberships AS m
+            ON m.workspace_id = required.workspace_id
+           AND m.user_id = ${grant.owner_user_id}::uuid
+           AND m.revoked_at IS NULL
+          WHERE w.workspace_id IS NULL OR w.archived_at IS NOT NULL OR m.user_id IS NULL
+        ) AS memberships
+    `;
+  const existingConsent = grant === null ? false : consentRows.some(
+    (row) => row.workspace_id === route.workspaceId,
+  );
+  const seatRows = command.kind === "revoke_hosted_mcp_seat"
+    ? await tx<{
+      seat_id: string; grant_id: string; workspace_id: string; owner_user_id: string;
+      principal_id: string; name: string; handle: string; created_at: Date;
+      revoked_at: Date | null; handle_revoked_at: Date | null;
+      principal_revoked_at: Date | null; transport: "local" | "hosted_mcp";
+      turn_only: boolean;
+    }[]>`
+      SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
+             hs.principal_id, hs.name, hs.created_at, hs.revoked_at,
+             h.handle, h.revoked_at AS handle_revoked_at,
+             p.revoked_at AS principal_revoked_at, p.transport, p.turn_only
+      FROM swarm.hosted_mcp_seats AS hs
+      JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
+      JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
+      WHERE hs.seat_id = ${command.seat_id}::uuid
+        AND hs.grant_id = ${command.grant_id}::uuid
+      FOR UPDATE OF hs, h, p
+    `
+    : [];
+  const seatRow = seatRows[0];
+  const seat = seatRow ? {
+    ...seatRow,
+    created_at: seatRow.created_at.getTime(),
+    revoked_at: seatRow.revoked_at?.getTime() ?? null,
+    handle_revoked_at: seatRow.handle_revoked_at?.getTime() ?? null,
+    principal_revoked_at: seatRow.principal_revoked_at?.getTime() ?? null,
+    transport: seatRow.transport as "hosted_mcp",
+    turn_only: seatRow.turn_only as true,
+  } : null;
+  const replayRows = await tx<{
+    request_hash: string;
+    workspace_id: string;
+    stream_id: string;
+    response: unknown;
+  }[]>`
+    SELECT request_hash, workspace_id, stream_id, response
+    FROM swarm.idempotency_keys
+    WHERE principal_kind = 'user'
+      AND principal_id = ${auth.actor.user}
+      AND command_id = ${body.command_id}
+    LIMIT 1
+  `;
+  const replay = replayRows[0];
+  if (replay) {
+    const beginAuthorized = command.kind !== "begin_hosted_mcp_grant" ||
+      (command.owner_user_id === auth.actor.user && grant !== null &&
+       grant.grant_id === command.grant_id &&
+       grant.owner_user_id === auth.actor.user && routeRow.live_member &&
+       routeRow.archived_at === null);
+    const consentAuthorized = command.kind !== "consent_hosted_mcp_workspace" ||
+      (grant !== null && command.owner_user_id === auth.actor.user &&
+       command.manifest_digest === bytesToHex(grant.manifest_digest) &&
+       grant.selected_workspace_ids.includes(route.workspaceId) &&
+       routeRow.live_member && routeRow.archived_at === null);
+    const activationAuthorized = command.kind !== "activate_hosted_mcp_grant" ||
+      (routeRow.live_member && routeRow.archived_at === null &&
+       allRequired[0]?.consents === true && allRequired[0]?.memberships === true);
+    if (!beginAuthorized || !consentAuthorized || !activationAuthorized) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    if (replay.request_hash !== hash || replay.workspace_id !== route.workspaceId ||
+        replay.stream_id !== route.streamId) {
+      return { status: 409, body: { error: "command_id_conflict" } };
+    }
+    return replayResult(storedResponse(replay.response), command.kind);
+  }
+  let nextSeq = frame.headSeq;
+  const decision = decideHostedAuthority(command, {
+    grant: grant === null ? null : hostedGrantFacts(
+      grant,
+      consentRows.map((row) => row.workspace_id),
+    ),
+    seat,
+    owner_is_live_member: routeRow.live_member,
+    workspace_archived: routeRow.archived_at !== null,
+    workspace_consented: existingConsent,
+    all_required_consents: allRequired[0]?.consents === true,
+    all_required_memberships: allRequired[0]?.memberships === true,
+    exact_name_principal_ids: [],
+    live_seat_count: 0,
+  }, {
+    now: frame.now,
+    actor: auth.actor,
+    credential_kind: "human",
+    command_id: body.command_id,
+    workspace_id: route.workspaceId,
+    stream_id: route.streamId,
+    nextSeq: () => ++nextSeq,
+    nextEventId: () => crypto.randomUUID(),
+  }) as Decision;
+  if (!decision.ok) {
+    return {
+      status: decision.class === "authz" ? 403 : 409,
+      body: { error: decision.reason, message: decision.detail },
+    };
+  }
+
+  const event = decision.events[0];
+  if (event) {
+    if (event.type === "HostedMcpGrantBegun") {
+      const folded = reduceHostedAuthority(null, event).grants[command.grant_id];
+      if (!folded) throw new Error("grant event did not fold");
+      await tx`
+        INSERT INTO swarm.hosted_mcp_grants (
+          grant_id, provider_grant_id, owner_user_id, home_workspace_id,
+          client_id, resource, selected_workspace_ids, manifest_digest,
+          interaction_ref, state, created_at, activated_at, revoked_at
+        ) VALUES (
+          ${folded.grant_id}::uuid, ${folded.provider_grant_id},
+          ${folded.owner_user_id}::uuid, ${folded.home_workspace_id}::uuid,
+          ${folded.client_id}, ${folded.resource},
+          ${folded.selected_workspace_ids}::uuid[],
+          ${hexToBytes(folded.manifest_digest)}, ${folded.interaction_ref},
+          ${folded.state}, ${new Date(folded.created_at)}, NULL, NULL
+        )
+      `;
+    } else if (event.type === "HostedMcpWorkspaceConsented") {
+      const folded = reduceHostedAuthority(null, event).consents[
+        `${command.grant_id}:${route.workspaceId}`
+      ];
+      if (!folded) throw new Error("consent event did not fold");
+      await tx`
+        INSERT INTO swarm.hosted_mcp_grant_workspaces (
+          grant_id, workspace_id, owner_user_id, manifest_digest,
+          consent_receipt_id, consented_at, revoked_at
+        ) VALUES (
+          ${folded.grant_id}::uuid, ${folded.workspace_id}::uuid,
+          ${folded.owner_user_id}::uuid, ${hexToBytes(folded.manifest_digest)},
+          ${folded.consent_receipt_id}::uuid, ${new Date(folded.consented_at)}, NULL
+        )
+      `;
+    } else if (event.type === "HostedMcpGrantActivated") {
+      if (grant === null) throw new Error("activation event has no grant projection");
+      const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)
+        .grants[grant.grant_id];
+      if (!folded || folded.activated_at === null) throw new Error("activation event did not fold");
+      await tx`
+        UPDATE swarm.hosted_mcp_grants
+        SET state = ${folded.state}, activated_at = ${new Date(folded.activated_at)},
+            revoked_at = NULL
+        WHERE grant_id = ${command.grant_id}::uuid AND state = 'pending'
+      `;
+    } else if (event.type === "HostedMcpGrantRevoked") {
+      if (grant === null) throw new Error("revocation event has no grant projection");
+      const folded = reduceHostedAuthority(hostedProjectionBefore(grant), event)
+        .grants[grant.grant_id];
+      if (!folded || folded.revoked_at === null) throw new Error("revocation event did not fold");
+      await tx`
+        UPDATE swarm.hosted_mcp_grants
+        SET state = ${folded.state}, revoked_at = ${new Date(folded.revoked_at)}
+        WHERE grant_id = ${command.grant_id}::uuid AND state <> 'revoked'
+      `;
+    } else if (event.type === "HostedMcpSeatRevoked") {
+      if (command.kind !== "revoke_hosted_mcp_seat" || seat === null) {
+        throw new Error("seat revoke event did not match its command facts");
+      }
+      if (grant === null) throw new Error("seat revocation event has no grant projection");
+      const foldedState = reduceHostedAuthority(hostedProjectionBefore(grant, seat), event);
+      const foldedSeat = foldedState.seats[command.seat_id];
+      const foldedPrincipal = foldedState.principals[seat.principal_id];
+      if (!foldedSeat || !foldedPrincipal || foldedSeat.revoked_at === null ||
+          foldedSeat.handle_revoked_at === null || foldedPrincipal.revoked_at === null) {
+        throw new Error("seat revocation event did not fold complete revocations");
+      }
+      const workspaceProjection = reduceWorkspace(
+        await loadWorkspaceState(tx, route),
+        event,
+      );
+      if (workspaceProjection.principals[seat.principal_id]?.revoked_at !==
+          foldedPrincipal.revoked_at) {
+        throw new Error("hosted and workspace revocation folds disagree");
+      }
+      await tx`
+        UPDATE swarm.hosted_mcp_seats
+        SET revoked_at = ${new Date(foldedSeat.revoked_at)}
+        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
+      `;
+      await tx`
+        UPDATE swarm.hosted_mcp_seat_handles
+        SET revoked_at = ${new Date(foldedSeat.handle_revoked_at)}
+        WHERE seat_id = ${command.seat_id}::uuid AND revoked_at IS NULL
+      `;
+      await tx`
+        UPDATE swarm.agent_principals
+        SET revoked_at = ${new Date(foldedPrincipal.revoked_at)}
+        WHERE principal_id = ${seat.principal_id}::uuid AND revoked_at IS NULL
+      `;
+    }
+    await appendRegistrationEvents(tx, route, frame, decision.events);
+  }
+
+  const response: StoredResponse = {
+    ok: true,
+    event_ids: decision.events.map((entry) => entry.event_id),
+    grant_id: command.grant_id,
+    workspace_id: route.workspaceId,
+    ...(command.kind === "revoke_hosted_mcp_seat" ? { seat_id: command.seat_id } : {}),
+  };
+  const inserted = await tx<{ command_id: string }[]>`
+    INSERT INTO swarm.idempotency_keys (
+      principal_kind, principal_id, command_id, workspace_id, stream_id,
+      request_hash, response
+    ) VALUES (
+      'user', ${auth.actor.user}, ${body.command_id},
+      ${route.workspaceId}::uuid, ${route.streamId}::uuid, ${hash},
+      ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+    )
+    ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+    RETURNING command_id
+  `;
+  if (inserted.length !== 1) throw new Error("hosted management idempotency race");
+  await insertAudit(tx, {
+    auth,
+    commandKind: command.kind,
+    workspaceId: route.workspaceId,
+    streamId: route.streamId,
+    outcome: event ? "accepted" : "replayed",
+    hash,
+  });
+  return { status: 200, body: { status: "accepted", ...response, events: decision.events } };
+}
+
+async function claimHostedSeat(
+  body: RequestBody,
+  capability: HostedGrantCapability,
+): Promise<HttpResult> {
+  const input = hostedClaimInput(body);
+  if (input === null || hostedCapabilityTool(capability) !== "claim_hosted_seat") {
+    return { status: 400, body: { error: "invalid_request" } };
+  }
+  return await db.begin(HOSTED_TRANSACTION_ISOLATION, async (tx) => {
+    await setTransaction(tx);
+    let resolved = await revalidateHostedGrantCommand(tx, capability);
+    if (resolved === null || resolved.workspace_id !== input.workspace_id) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+    const route: Route = {
+      workspaceId: resolved.workspace_id,
+      streamId: resolved.stream_id,
+      membershipRole: null,
+      membershipRevokedAt: null,
+    };
+    const frame = await lockRegistrationStream(tx, route);
+    const livePrincipals = await lockAndCountLivePrincipals(tx, route.workspaceId);
+    await lockPrincipalName(tx, route, input.command);
+
+    const lockedGrantRows = await tx<{
+      grant_id: string;
+      owner_user_id: string;
+      home_workspace_id: string;
+      provider_grant_id: string;
+      client_id: string;
+      resource: string;
+      interaction_ref: string;
+      owner_is_live_member: boolean;
+      workspace_archived: boolean;
+      workspace_consented: boolean;
+      state: "pending" | "active" | "revoked";
+      manifest_digest: Uint8Array;
+      selected_workspace_ids: string[];
+    }[]>`
+      SELECT grant_id, owner_user_id, home_workspace_id, provider_grant_id,
+             client_id, resource, interaction_ref,
+             state, manifest_digest, selected_workspace_ids,
+             EXISTS (
+               SELECT 1 FROM swarm.memberships AS m
+               WHERE m.workspace_id = ${route.workspaceId}::uuid
+                 AND m.user_id = hosted_mcp_grants.owner_user_id
+                 AND m.revoked_at IS NULL
+             ) AS owner_is_live_member,
+             EXISTS (
+               SELECT 1 FROM swarm.workspaces AS w
+               WHERE w.workspace_id = ${route.workspaceId}::uuid
+                 AND w.archived_at IS NOT NULL
+             ) AS workspace_archived,
+             EXISTS (
+               SELECT 1 FROM swarm.hosted_mcp_grant_workspaces AS c
+               WHERE c.grant_id = hosted_mcp_grants.grant_id
+                 AND c.workspace_id = ${route.workspaceId}::uuid
+                 AND c.revoked_at IS NULL
+             ) AS workspace_consented
+      FROM swarm.hosted_mcp_grants
+      WHERE grant_id = ${resolved.grant_id}::uuid
+      FOR UPDATE
+    `;
+    const grant = lockedGrantRows[0];
+    resolved = await revalidateHostedGrantCommand(tx, capability);
+    if (grant === undefined || resolved === null ||
+        resolved.workspace_id !== route.workspaceId ||
+        grant.provider_grant_id !== resolved.provider_grant_id) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+
+    const hash = await hostedRequestHash("hosted_grant", grant.grant_id, input);
+    const storedRows = await tx<{
+      workspace_id: string;
+      stream_id: string;
+      request_hash: string;
+      response: unknown;
+    }[]>`
+      SELECT workspace_id, stream_id, request_hash, response
+      FROM swarm.idempotency_keys
+      WHERE principal_kind = 'hosted_grant'
+        AND principal_id = ${grant.grant_id}
+        AND command_id = ${input.command_id}
+      LIMIT 1
+    `;
+    const stored = storedRows[0];
+    if (stored !== undefined) {
+      if (stored.request_hash !== hash || stored.workspace_id !== route.workspaceId ||
+          stored.stream_id !== route.streamId) {
+        return { status: 409, body: { error: "command_id_conflict" } };
+      }
+      const response = record(stored.response);
+      if (!response || typeof response.seat_id !== "string" ||
+          typeof response.handle !== "string" || typeof response.principal_id !== "string") {
+        throw new Error("invalid hosted-seat idempotency response");
+      }
+      const replayRows = await tx<{ seat_id: string }[]>`
+        SELECT hs.seat_id
+        FROM swarm.hosted_mcp_seats AS hs
+        JOIN swarm.hosted_mcp_seat_handles AS h
+          ON h.seat_id = hs.seat_id
+         AND h.grant_id = hs.grant_id
+         AND h.workspace_id = hs.workspace_id
+         AND h.principal_id = hs.principal_id
+        JOIN swarm.agent_principals AS p
+          ON p.principal_id = hs.principal_id
+         AND p.workspace_id = hs.workspace_id
+         AND p.owner_user_id = hs.owner_user_id
+        WHERE hs.seat_id = ${response.seat_id}::uuid
+          AND hs.grant_id = ${grant.grant_id}::uuid
+          AND hs.workspace_id = ${route.workspaceId}::uuid
+          AND hs.principal_id = ${response.principal_id}::uuid
+          AND h.handle = ${response.handle}
+          AND hs.revoked_at IS NULL
+          AND h.revoked_at IS NULL
+          AND p.revoked_at IS NULL
+          AND p.transport = 'hosted_mcp'
+          AND p.turn_only = true
+        FOR UPDATE OF hs, h, p
+      `;
+      if (replayRows.length !== 1) {
+        return { status: 403, body: { error: "hosted_seat_revoked" } };
+      }
+      return { status: 200, body: { ...response, status: "accepted", replayed: true } };
+    }
+
+    const existingRows = await tx<{
+      seat_id: string;
+      grant_id: string;
+      workspace_id: string;
+      owner_user_id: string;
+      principal_id: string;
+      name: string;
+      handle: string;
+      created_at: Date;
+      revoked_at: Date | null;
+      handle_revoked_at: Date | null;
+      principal_revoked_at: Date | null;
+      transport: "local" | "hosted_mcp";
+      turn_only: boolean;
+    }[]>`
+      SELECT hs.seat_id, hs.grant_id, hs.workspace_id, hs.owner_user_id,
+             hs.principal_id, hs.name, h.handle, hs.created_at, hs.revoked_at,
+             h.revoked_at AS handle_revoked_at,
+             p.revoked_at AS principal_revoked_at,
+             p.transport, p.turn_only
+      FROM swarm.hosted_mcp_seats AS hs
+      JOIN swarm.hosted_mcp_seat_handles AS h ON h.seat_id = hs.seat_id
+      JOIN swarm.agent_principals AS p ON p.principal_id = hs.principal_id
+      WHERE hs.grant_id = ${grant.grant_id}::uuid
+        AND hs.workspace_id = ${route.workspaceId}::uuid
+        AND hs.name = ${input.command.name}
+      LIMIT 1
+      FOR UPDATE OF hs, h, p
+    `;
+    const exactPrincipals = await tx<{ principal_id: string }[]>`
+      SELECT principal_id
+      FROM swarm.agent_principals
+      WHERE workspace_id = ${route.workspaceId}::uuid
+        AND name = ${input.command.name}
+      ORDER BY principal_id
+    `;
+    const seatCountRows = await tx<{ live: string }[]>`
+      SELECT count(*)::text AS live
+      FROM swarm.hosted_mcp_seats
+      WHERE grant_id = ${grant.grant_id}::uuid AND revoked_at IS NULL
+    `;
+    const seatId = crypto.randomUUID();
+    const principalId = crypto.randomUUID();
+    const handle = `seat_${randomBase64Url(18)}`;
+    let nextSeq = frame.headSeq;
+    const decision = decideHostedAuthority({
+      kind: "claim_hosted_seat",
+      grant_id: grant.grant_id,
+      seat_id: seatId,
+      handle,
+      principal_id: principalId,
+      workspace_id: route.workspaceId,
+      owner_user_id: grant.owner_user_id,
+      name: input.command.name,
+    }, {
+      grant: {
+        grant_id: grant.grant_id,
+        provider_grant_id: grant.provider_grant_id,
+        owner_user_id: grant.owner_user_id,
+        home_workspace_id: grant.home_workspace_id,
+        client_id: grant.client_id,
+        resource: grant.resource,
+        state: grant.state,
+        manifest_digest: bytesToHex(grant.manifest_digest),
+        interaction_ref: grant.interaction_ref,
+        selected_workspace_ids: grant.selected_workspace_ids,
+        consented_workspace_ids: [route.workspaceId],
+      },
+      seat: existingRows[0]
+        ? {
+          ...existingRows[0],
+          created_at: existingRows[0].created_at.getTime(),
+          revoked_at: existingRows[0].revoked_at?.getTime() ?? null,
+          handle_revoked_at: existingRows[0].handle_revoked_at?.getTime() ?? null,
+          principal_revoked_at: existingRows[0].principal_revoked_at?.getTime() ?? null,
+          transport: existingRows[0].transport as "hosted_mcp",
+          turn_only: existingRows[0].turn_only as true,
+        }
+        : null,
+      owner_is_live_member: grant.owner_is_live_member,
+      workspace_archived: grant.workspace_archived,
+      workspace_consented: grant.workspace_consented,
+      all_required_consents: true,
+      all_required_memberships: true,
+      exact_name_principal_ids: exactPrincipals.map((row) => row.principal_id),
+      live_seat_count: Number(seatCountRows[0]?.live ?? "0"),
+    }, {
+      now: frame.now,
+      actor: { user: grant.owner_user_id, agent_principal: null, run: null },
+      credential_kind: "hosted_grant",
+      command_id: input.command_id,
+      workspace_id: route.workspaceId,
+      stream_id: route.streamId,
+      nextSeq: () => ++nextSeq,
+      nextEventId: () => crypto.randomUUID(),
+    }) as Decision & { reuse?: typeof existingRows[number] };
+
+    const auditAuth: HostedGrantAuditContext = {
+      credentialKind: "hosted_grant",
+      credentialId: grant.grant_id,
+      deviceId: null,
+      actor: { user: grant.owner_user_id, agent_principal: null, run: null },
+    };
+    if (!decision.ok) {
+      await insertAudit(tx, {
+        auth: auditAuth,
+        commandKind: "claim_hosted_seat",
+        workspaceId: route.workspaceId,
+        streamId: route.streamId,
+        outcome: decision.class,
+        reason: decision.reason,
+        detail: decision.detail,
+        hash,
+      });
+      return {
+        status: decision.reason === HOSTED_SEAT_NAME_TAKEN.code ? 409 : 403,
+        body: { error: decision.reason, message: decision.detail },
+      };
+    }
+
+    const reused = decision.reuse;
+    if (reused === undefined) {
+      if (livePrincipals >= FREE_TIER_PRINCIPAL_LIMIT) {
+        return { status: 403, body: { error: "principal_limit_reached", limit: FREE_TIER_PRINCIPAL_LIMIT } };
+      }
+      if (Number(seatCountRows[0]?.live ?? "0") >= HOSTED_MCP_SEAT_LIMIT) {
+        return { status: 403, body: { error: "hosted_seat_limit_reached", limit: HOSTED_MCP_SEAT_LIMIT } };
+      }
+      const hostedProjection = reduceHostedAuthority(null, decision.events[0]);
+      const foldedSeat = hostedProjection.seats[seatId];
+      const foldedPrincipal = hostedProjection.principals[principalId];
+      if (!foldedSeat || !foldedPrincipal) {
+        throw new Error("hosted seat event did not fold to complete projections");
+      }
+      const workspaceProjection = reduceWorkspace(
+        await loadWorkspaceState(tx, route),
+        decision.events[0],
+      );
+      const workspacePrincipal = workspaceProjection.principals[principalId];
+      if (!workspacePrincipal ||
+          workspacePrincipal.name !== foldedPrincipal.name ||
+          workspacePrincipal.transport !== foldedPrincipal.transport ||
+          workspacePrincipal.turn_only !== foldedPrincipal.turn_only) {
+        throw new Error("hosted and workspace principal folds disagree");
+      }
+      await tx`
+        INSERT INTO swarm.agent_principals (
+          principal_id, workspace_id, owner_user_id, name, model,
+          transport, turn_only, created_at, revoked_at
+        ) VALUES (
+          ${foldedPrincipal.principal_id}::uuid,
+          ${foldedPrincipal.workspace_id}::uuid,
+          ${foldedPrincipal.owner_user_id}::uuid,
+          ${foldedPrincipal.name}, NULL,
+          ${foldedPrincipal.transport}, ${foldedPrincipal.turn_only},
+          ${new Date(foldedPrincipal.created_at)}, NULL
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.hosted_mcp_seats (
+          seat_id, grant_id, workspace_id, owner_user_id,
+          principal_id, name, created_at, revoked_at
+        ) VALUES (
+          ${foldedSeat.seat_id}::uuid, ${foldedSeat.grant_id}::uuid,
+          ${foldedSeat.workspace_id}::uuid, ${foldedSeat.owner_user_id}::uuid,
+          ${foldedSeat.principal_id}::uuid, ${foldedSeat.name},
+          ${new Date(foldedSeat.created_at)}, NULL
+        )
+      `;
+      await tx`
+        INSERT INTO swarm.hosted_mcp_seat_handles (
+          handle, seat_id, grant_id, workspace_id, principal_id, created_at, revoked_at
+        ) VALUES (
+          ${foldedSeat.handle}, ${foldedSeat.seat_id}::uuid,
+          ${foldedSeat.grant_id}::uuid, ${foldedSeat.workspace_id}::uuid,
+          ${foldedSeat.principal_id}::uuid,
+          ${new Date(foldedSeat.created_at)}, NULL
+        )
+      `;
+      await appendRegistrationEvents(tx, route, frame, decision.events);
+    }
+    const response: StoredResponse = {
+      ok: true,
+      event_ids: decision.events.map((entry) => entry.event_id),
+      grant_id: grant.grant_id,
+      workspace_id: route.workspaceId,
+      seat_id: reused?.seat_id ?? seatId,
+      principal_id: reused?.principal_id ?? principalId,
+      handle: reused?.handle ?? handle,
+      name: input.command.name,
+    };
+    const inserted = await tx<{ command_id: string }[]>`
+      INSERT INTO swarm.idempotency_keys (
+        principal_kind, principal_id, command_id,
+        workspace_id, stream_id, request_hash, response
+      ) VALUES (
+        'hosted_grant', ${grant.grant_id}, ${input.command_id},
+        ${route.workspaceId}::uuid, ${route.streamId}::uuid, ${hash},
+        ${tx.json(response as unknown as postgres.JSONValue)}::jsonb
+      )
+      ON CONFLICT (principal_kind, principal_id, command_id) DO NOTHING
+      RETURNING command_id
+    `;
+    if (inserted.length !== 1) throw new Error("hosted seat claim lost its idempotency race");
+    await insertAudit(tx, {
+      auth: auditAuth,
+      commandKind: "claim_hosted_seat",
+      workspaceId: route.workspaceId,
+      streamId: route.streamId,
+      outcome: reused ? "replayed" : "accepted",
+      hash,
+    });
+    return { status: 200, body: { status: "accepted", ...response } };
+  });
+}
+
 async function handleTransaction(
   body: RequestBody,
   verifiedHuman: VerifiedHuman | null,
@@ -9348,6 +10407,7 @@ async function handleTransaction(
   joinCredentialHash: Uint8Array | null,
   sessionProofParse: AgentSessionProofParse,
   acquireProofParse: AgentSessionAcquireParse,
+  hostedSeatCapability: HostedSeatCapability | null = null,
 ): Promise<HttpResult> {
   const kind = commandKind(body);
   const commandId = String(body.command_id);
@@ -9359,6 +10419,13 @@ async function handleTransaction(
     await setTransaction(tx);
     await afterStep(2);
 
+    const hostedSeat = hostedSeatCapability === null
+      ? null
+      : await revalidateHostedSeatCommand(tx, hostedSeatCapability);
+    if (hostedSeatCapability !== null && hostedSeat === null) {
+      return { status: 403, body: { error: "forbidden" } };
+    }
+
     if (kind === REGISTER_AGENT_SEAT_KIND) {
       if (joinCredentialHash === null) {
         return { status: 403, body: { error: "forbidden" } };
@@ -9367,7 +10434,9 @@ async function handleTransaction(
     }
 
     await beforeStep(3);
-    const auth = agentTokenHash !== null
+    const auth = hostedSeat !== null
+      ? hostedSeatAuth(hostedSeat)
+      : agentTokenHash !== null
       ? await authenticateAgent(tx, agentTokenHash)
       : verifiedHuman !== null
       ? await authenticateHuman(tx, verifiedHuman)
@@ -9381,7 +10450,12 @@ async function handleTransaction(
       );
       return { status: 401, body: { error: "unauthenticated" } };
     }
-    authenticatedAgent = auth.agent;
+    if (HOSTED_MANAGEMENT_KINDS.has(kind)) {
+      return await handleHostedManagement(tx, body, auth);
+    }
+    // Hosted turns do not advertise listener presence or touch local delivery
+    // state. Their durable authorization was reloaded above for this call.
+    authenticatedAgent = hostedSeat === null ? auth.agent : null;
 
     if (
       auth.agent?.transport === "hosted_mcp" &&
@@ -9391,7 +10465,7 @@ async function handleTransaction(
     }
 
     if (
-      auth.credentialKind === "agent" &&
+      hostedSeat === null && auth.credentialKind === "agent" &&
       !isAgentSessionProofExempt(kind)
     ) {
       const principalId = auth.actor.agent_principal;
@@ -9917,8 +10991,8 @@ async function handleTransaction(
     >`
       SELECT workspace_id, stream_id, request_hash, response
       FROM swarm.idempotency_keys
-      WHERE principal_kind = ${auth.credentialKind}
-        AND principal_id = ${canonicalPrincipal(auth.actor)}
+      WHERE principal_kind = ${auth.ledgerCredentialKind}
+        AND principal_id = ${auth.ledgerPrincipalId}
         AND command_id = ${commandId}
       LIMIT 1
     `;
@@ -10031,8 +11105,8 @@ async function handleTransaction(
           principal_kind, principal_id, command_id,
           workspace_id, stream_id, request_hash, response
         ) VALUES (
-          ${auth.credentialKind},
-          ${canonicalPrincipal(auth.actor)},
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
           ${commandId},
           ${route.workspaceId}::uuid,
           ${route.streamId}::uuid,
@@ -10132,8 +11206,8 @@ async function handleTransaction(
           principal_kind, principal_id, command_id,
           workspace_id, stream_id, request_hash, response
         ) VALUES (
-          ${auth.credentialKind},
-          ${canonicalPrincipal(auth.actor)},
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
           ${commandId},
           ${route.workspaceId}::uuid,
           ${route.streamId}::uuid,
@@ -10513,8 +11587,8 @@ async function handleTransaction(
           principal_kind, principal_id, command_id,
           workspace_id, stream_id, request_hash, response
         ) VALUES (
-          ${auth.credentialKind},
-          ${canonicalPrincipal(auth.actor)},
+          ${auth.ledgerCredentialKind},
+          ${auth.ledgerPrincipalId},
           ${commandId},
           ${route.workspaceId}::uuid,
           ${route.streamId}::uuid,
@@ -11725,8 +12799,8 @@ async function resolveLedgerRace(
     >`
       SELECT workspace_id, stream_id, request_hash, response
       FROM swarm.idempotency_keys
-      WHERE principal_kind = ${error.auth.credentialKind}
-        AND principal_id = ${canonicalPrincipal(error.auth.actor)}
+      WHERE principal_kind = ${error.auth.ledgerCredentialKind}
+        AND principal_id = ${error.auth.ledgerPrincipalId}
         AND command_id = ${error.commandId}
       LIMIT 1
     `;
@@ -11864,6 +12938,22 @@ async function handlePostRequest(request: Request): Promise<Response> {
   if (!parsed.ok) return parsed.response;
   const body = parsed.body;
   const kind = commandKind(body);
+  const publicHostedClaim = publicHostedCommandForbidden(kind);
+  const bodyClaimsHostedContext = [
+    "hosted_capability",
+    "hosted_grant_id",
+    "hosted_seat_handle",
+    "seat_handle",
+  ].some((key) => Object.hasOwn(body, key) ||
+    Object.hasOwn(record(body.command) ?? {}, key));
+  const headerClaimsHostedContext =
+    request.headers.has("x-cswarm-hosted-capability") ||
+    request.headers.has("x-commonswarm-hosted-capability");
+  // This check deliberately precedes bearer classification and GoTrue. Public
+  // HTTP input cannot opt into an internal hosted capability by naming one.
+  if (publicHostedClaim || bodyClaimsHostedContext || headerClaimsHostedContext) {
+    return json(403, { error: "forbidden" });
+  }
   if (
     typeof body.command_id !== "string" ||
     !COMMAND_ID_RE.test(body.command_id)
@@ -12057,6 +13147,51 @@ export async function handleRequest(request: Request): Promise<Response> {
     await handlePostRequest(request),
     allowedCommandOrigins,
     commandEnvironment,
+  );
+}
+
+/**
+ * Internal hosted entry point. It accepts parsed input and an opaque capability,
+ * never a Request, header, cookie, bearer, or GoTrue session.
+ */
+export async function handleHostedCommand(
+  input: HostedCommandInput,
+  capability: HostedCapability,
+): Promise<CommandResult> {
+  if (capability.kind === "hosted_grant") {
+    return await claimHostedSeat(input, capability);
+  }
+  const tool = hostedCapabilityTool(capability);
+  if (!hostedToolAllowsCommand(tool, input)) {
+    return { status: 403, body: { error: "forbidden" } };
+  }
+  return await handleTransaction(
+    input,
+    null,
+    null,
+    null,
+    parseAgentSessionProofHeaders(new Headers()),
+    parseAgentSessionAcquireHeaders(new Headers()),
+    capability,
+  );
+}
+
+/**
+ * Trusted authorization-service entry point for the dark grant/consent flow.
+ * The service retains and verifies the human session; this interface receives
+ * the resulting identity, never a bearer, cookie, header, or Request.
+ */
+export async function handleHostedManagementCommand(
+  input: HostedCommandInput,
+  identity: HostedHumanManagementIdentity,
+): Promise<CommandResult> {
+  return await handleTransaction(
+    input,
+    identity,
+    null,
+    null,
+    parseAgentSessionProofHeaders(new Headers()),
+    parseAgentSessionAcquireHeaders(new Headers()),
   );
 }
 

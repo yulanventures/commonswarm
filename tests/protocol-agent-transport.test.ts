@@ -127,3 +127,48 @@ test("principal transport folding rejects unknown transports and non-boolean tur
     StreamIntegrityError,
   );
 });
+
+test("hosted principals cannot mint an independently usable token", () => {
+  let seq = 2;
+  const ctx: DecideWorkspaceCtx = {
+    now: 3,
+    actor: { user: "owner", agent_principal: null, run: null },
+    credential_kind: "human",
+    presenting_token_id: null,
+    command_id: "mint",
+    workspace_id: "workspace",
+    stream_id: "workspace-stream",
+    operatorAllowed: () => false,
+    role: () => "owner",
+    inviteeAlreadyMember: () => false,
+    identityVerified: () => true,
+    humanRights: () => ["post_signal"],
+    landingAuthorityChangeResolved: () => true,
+    nextSeq: () => ++seq,
+    nextEventId: () => `event-${seq}`,
+  };
+  const command = {
+    kind: "mint_agent_token" as const,
+    token_id: "token",
+    principal_id: "principal",
+    run_id: "run",
+    task_id: "task",
+    epoch: 0,
+    scopes: ["post_signal"],
+    renewal_kind: "timeboxed" as const,
+    renewal_horizon_ms: 1_000,
+  };
+  const local = reduceWorkspace(createdWorkspace(), principalEvent({
+    transport: "local",
+    turn_only: false,
+  }));
+  assert.equal(decideWorkspace(local, command, ctx).ok, true,
+    "positive control: local principal can mint");
+  const hosted = reduceWorkspace(createdWorkspace(), principalEvent({
+    transport: "hosted_mcp",
+    turn_only: true,
+  }));
+  const refused = decideWorkspace(hosted, command, ctx);
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.reason, "transport_unavailable");
+});

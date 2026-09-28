@@ -361,6 +361,12 @@ var WORKSPACE_EVENT_TYPES = [
   "FeedbackSubmitted",
   "AgentTokenMinted",
   "AgentTokenRevoked",
+  "HostedMcpGrantBegun",
+  "HostedMcpWorkspaceConsented",
+  "HostedMcpGrantActivated",
+  "HostedMcpGrantRevoked",
+  "HostedMcpSeatClaimed",
+  "HostedMcpSeatRevoked",
   "CommandRejected"
 ];
 
@@ -742,6 +748,77 @@ function reduceWorkspace(prev, env3) {
       };
       break;
     }
+    case "HostedMcpSeatClaimed": {
+      const p = req2(
+        env3.payload,
+        [
+          "seat_id",
+          "grant_id",
+          "workspace_id",
+          "owner_user_id",
+          "principal_id",
+          "name",
+          "handle",
+          "transport",
+          "turn_only",
+          "created_at"
+        ],
+        env3.type,
+        env3.seq
+      );
+      if (p.workspace_id !== s.workspace.workspace_id) {
+        throw new StreamIntegrityError(`hosted seat workspace mismatch at seq ${env3.seq}`);
+      }
+      if (s.principals[p.principal_id]) {
+        throw new StreamIntegrityError(`duplicate principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      if (p.transport !== "hosted_mcp" || p.turn_only !== true) {
+        throw new StreamIntegrityError(`hosted seat has invalid transport at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: {
+            principal_id: p.principal_id,
+            owner_user_id: p.owner_user_id,
+            name: p.name,
+            model: null,
+            transport: "hosted_mcp",
+            turn_only: true,
+            created_at: p.created_at,
+            revoked_at: null
+          }
+        }
+      };
+      break;
+    }
+    case "HostedMcpSeatRevoked": {
+      const p = req2(
+        env3.payload,
+        ["seat_id", "principal_id", "revoked_at"],
+        env3.type,
+        env3.seq
+      );
+      const principal = s.principals[p.principal_id];
+      if (!principal) {
+        throw new StreamIntegrityError(`unknown hosted principal "${p.principal_id}" at seq ${env3.seq}`);
+      }
+      next = {
+        ...s,
+        principals: {
+          ...s.principals,
+          [p.principal_id]: { ...principal, revoked_at: p.revoked_at }
+        }
+      };
+      break;
+    }
+    case "HostedMcpGrantBegun":
+    case "HostedMcpWorkspaceConsented":
+    case "HostedMcpGrantActivated":
+    case "HostedMcpGrantRevoked":
+      next = s;
+      break;
     default:
       throw new UnknownEventTypeError(env3.type, env3.seq);
   }
@@ -751,14 +828,14 @@ function reduceWorkspace(prev, env3) {
 function reduceWorkspaceStream(events) {
   let state = null;
   let lastSeq = -Infinity;
-  for (const event of events) {
-    if (event.seq <= lastSeq) {
+  for (const event2 of events) {
+    if (event2.seq <= lastSeq) {
       throw new StreamIntegrityError(
-        `events out of order or duplicated: seq ${event.seq} after ${lastSeq}`
+        `events out of order or duplicated: seq ${event2.seq} after ${lastSeq}`
       );
     }
-    lastSeq = event.seq;
-    state = reduceWorkspace(state, event);
+    lastSeq = event2.seq;
+    state = reduceWorkspace(state, event2);
   }
   return state;
 }
@@ -766,6 +843,10 @@ function reduceWorkspaceStream(events) {
 // src/protocol/workspace-commands.ts
 var INVITATION_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var AGENT_TOKEN_DEFAULT_TTL_MS = 60 * 60 * 1e3;
+var PRINCIPAL_NAME_TAKEN = {
+  code: "principal_name_taken",
+  message: "principal id or name already exists"
+};
 var AGENT_TOKEN_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 var H0_SEAT_TOKEN_TTL_MS = AGENT_TOKEN_MAX_TTL_MS;
 var RENEWAL_HORIZON_DEFAULT_MS = 30 * 24 * 60 * 60 * 1e3;
@@ -965,6 +1046,12 @@ function decideWorkspace(state, cmd, ctx) {
       "credential_kind_forbidden",
       "register_agent_seat requires the resolved join credential and that credential authorizes no other command"
     );
+  }
+  if (ctx.credential_kind === "hosted_grant") {
+    return authz2("credential_kind_forbidden", "hosted grant credentials authorize only claim_hosted_seat");
+  }
+  if (ctx.credential_kind === "hosted_seat" && cmd.kind !== "submit_feedback") {
+    return authz2("credential_kind_forbidden", "hosted seat credential cannot execute workspace management commands");
   }
   if (HUMAN_ONLY_COMMANDS.has(cmd.kind) && ctx.credential_kind !== "human") {
     return authz2("credential_kind_forbidden", "command requires an interactive human credential");
@@ -1225,7 +1312,7 @@ function decideWorkspace(state, cmd, ctx) {
     }
     case "create_agent_principal": {
       if (state.principals[cmd.principal_id] || !cmd.allow_duplicate_name && Object.values(state.principals).some((principal) => principal.name === cmd.name)) {
-        return domain2(ctx, cmd.kind, "principal_name_taken", "principal id or name already exists");
+        return domain2(ctx, cmd.kind, PRINCIPAL_NAME_TAKEN.code, PRINCIPAL_NAME_TAKEN.message);
       }
       return accept2([
         env2(ctx, "AgentPrincipalCreated", {
@@ -1307,6 +1394,14 @@ function decideWorkspace(state, cmd, ctx) {
       }
       if (principal.revoked_at !== null) {
         return domain2(ctx, cmd.kind, "principal_revoked", "agent principal is revoked");
+      }
+      if (principal.transport === "hosted_mcp" || principal.turn_only) {
+        return domain2(
+          ctx,
+          cmd.kind,
+          "transport_unavailable",
+          "hosted MCP principals cannot receive independently usable credentials"
+        );
       }
       if (principal.owner_user_id !== user_id) {
         return domain2(ctx, cmd.kind, "principal_not_owned", "tokens may be minted only for an owned principal");
@@ -1442,6 +1537,14 @@ function decideWorkspace(state, cmd, ctx) {
           cmd.kind,
           "principal_revoked",
           "the predecessor principal is missing or revoked"
+        );
+      }
+      if (principal.transport === "hosted_mcp" || principal.turn_only) {
+        return domain2(
+          ctx,
+          cmd.kind,
+          "transport_unavailable",
+          "hosted MCP principals cannot renew independent credentials"
         );
       }
       if (predecessor.revoked_at !== null) {
@@ -1656,6 +1759,338 @@ function decideWorkspace(state, cmd, ctx) {
   }
 }
 
+// src/protocol/hosted-authority.ts
+var HOSTED_MCP_RESOURCE = "https://mcp.commonswarm.com/mcp";
+var HOSTED_MCP_SEAT_LIMIT = 10;
+var HOSTED_SEAT_NAME_TAKEN = {
+  code: "hosted_seat_name_taken",
+  message: "That name is taken in this workspace; choose another."
+};
+var PUBLIC_HOSTED_ONLY_COMMANDS = /* @__PURE__ */ new Set([
+  "begin_hosted_mcp_grant",
+  "consent_hosted_mcp_workspace",
+  "activate_hosted_mcp_grant",
+  "claim_hosted_seat",
+  "open_hosted_mcp_check_batch",
+  "ack_hosted_mcp_check_batch"
+]);
+function publicHostedCommandForbidden(kind) {
+  return PUBLIC_HOSTED_ONLY_COMMANDS.has(kind);
+}
+var HUMAN_COMMANDS = /* @__PURE__ */ new Set([
+  "begin_hosted_mcp_grant",
+  "consent_hosted_mcp_workspace",
+  "activate_hosted_mcp_grant",
+  "revoke_hosted_mcp_grant",
+  "revoke_hosted_mcp_seat"
+]);
+var HOSTED_SEAT_CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
+function hostedSeatNameValid(value) {
+  return typeof value === "string" && Array.from(value).length >= 1 && Array.from(value).length <= 80 && value === value.replace(/^ +| +$/gu, "") && !HOSTED_SEAT_CONTROL_RE.test(value);
+}
+function event(ctx, type, payload) {
+  return {
+    workspace_id: ctx.workspace_id,
+    stream_id: ctx.stream_id,
+    seq: ctx.nextSeq(),
+    event_id: ctx.nextEventId(),
+    command_id: ctx.command_id,
+    type,
+    schema_version: SCHEMA_VERSION,
+    actor_user: ctx.actor.user,
+    actor_agent_principal: ctx.actor.agent_principal,
+    actor_run: ctx.actor.run,
+    occurred_at_server: ctx.now,
+    payload
+  };
+}
+function refuse(className, reason, detail) {
+  return { ok: false, class: className, reason, detail, events: [] };
+}
+function decideHostedAuthority(command, facts, ctx) {
+  if (command.kind === "claim_hosted_seat") {
+    if (ctx.credential_kind !== "hosted_grant") {
+      return refuse("authz", "credential_kind_forbidden", "claim_hosted_seat requires a hosted grant credential");
+    }
+  } else if (HUMAN_COMMANDS.has(command.kind) && ctx.credential_kind !== "human") {
+    return refuse("authz", "credential_kind_forbidden", "hosted connection management requires a human credential");
+  }
+  if (command.kind === "begin_hosted_mcp_grant") {
+    if (ctx.actor.user !== command.owner_user_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may begin only their own hosted grant");
+    }
+    if (facts.grant !== null) return refuse("domain", "hosted_grant_exists", "hosted grant already exists");
+    if (command.home_workspace_id !== ctx.workspace_id) {
+      return refuse("authz", "workspace_mismatch", "grant creation must address its home workspace");
+    }
+    if (!facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("authz", "membership_required", "grant owner is not a live member of the home workspace");
+    }
+    const selected = [...new Set(command.selected_workspace_ids)];
+    if (selected.length !== command.selected_workspace_ids.length || selected.length < 1 || selected.length > 100 || !selected.includes(command.home_workspace_id)) {
+      return refuse("domain", "hosted_manifest_invalid", "hosted grant workspace manifest is invalid");
+    }
+    if (command.resource !== HOSTED_MCP_RESOURCE) {
+      return refuse("domain", "resource_mismatch", "hosted grant resource is not supported");
+    }
+    return { ok: true, events: [event(ctx, "HostedMcpGrantBegun", { ...command, created_at: ctx.now })] };
+  }
+  const grant = facts.grant;
+  if (grant === null || grant.grant_id !== command.grant_id) {
+    return refuse("authz", "hosted_grant_unavailable", "hosted grant is unavailable");
+  }
+  if (command.kind === "consent_hosted_mcp_workspace") {
+    if (grant.state !== "pending" || command.workspace_id !== ctx.workspace_id) {
+      return refuse("domain", "hosted_grant_not_pending", "workspace consent requires a pending grant");
+    }
+    if (ctx.actor.user !== grant.owner_user_id || command.owner_user_id !== grant.owner_user_id || command.manifest_digest !== grant.manifest_digest || !grant.selected_workspace_ids.includes(ctx.workspace_id)) {
+      return refuse("authz", "manifest_mismatch", "workspace is not bound to this grant manifest");
+    }
+    if (!facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("authz", "membership_required", "grant owner is not a live member of this workspace");
+    }
+    if (facts.workspace_consented) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpWorkspaceConsented", { ...command, consented_at: ctx.now })] };
+  }
+  if (command.kind === "activate_hosted_mcp_grant") {
+    if (ctx.workspace_id !== grant.home_workspace_id) {
+      return refuse("authz", "workspace_mismatch", "grant activation must address its home workspace");
+    }
+    if (ctx.actor.user !== grant.owner_user_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may activate only their own hosted grant");
+    }
+    if (!facts.all_required_consents || !facts.all_required_memberships || !facts.owner_is_live_member || facts.workspace_archived) {
+      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
+    }
+    if (grant.state === "active") return { ok: true, events: [] };
+    if (grant.state !== "pending") {
+      return refuse("domain", "hosted_consent_incomplete", "Every selected workspace must consent before activation.");
+    }
+    return { ok: true, events: [event(ctx, "HostedMcpGrantActivated", { grant_id: grant.grant_id, activated_at: ctx.now })] };
+  }
+  if (command.kind === "revoke_hosted_mcp_grant") {
+    if (ctx.actor.user !== grant.owner_user_id || ctx.workspace_id !== grant.home_workspace_id) {
+      return refuse("authz", "hosted_grant_not_owned", "a person may revoke only their own hosted grant");
+    }
+    if (grant.state === "revoked") return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpGrantRevoked", { grant_id: grant.grant_id, revoked_at: ctx.now })] };
+  }
+  if (command.kind === "revoke_hosted_mcp_seat") {
+    const seat = facts.seat;
+    if (seat === null || seat.grant_id !== grant.grant_id || seat.workspace_id !== ctx.workspace_id) {
+      return refuse("authz", "hosted_seat_unavailable", "hosted seat is unavailable");
+    }
+    if (ctx.actor.user !== grant.owner_user_id) {
+      return refuse("authz", "hosted_seat_not_owned", "a person may revoke only their own hosted seat");
+    }
+    if (seat.revoked_at !== null) return { ok: true, events: [] };
+    return { ok: true, events: [event(ctx, "HostedMcpSeatRevoked", {
+      grant_id: grant.grant_id,
+      seat_id: seat.seat_id,
+      principal_id: seat.principal_id,
+      revoked_at: ctx.now
+    })] };
+  }
+  if (grant.state !== "active" || !facts.workspace_consented || !facts.owner_is_live_member || facts.workspace_archived) {
+    return refuse("authz", "hosted_grant_unavailable", "hosted grant is not active for this workspace");
+  }
+  if (command.owner_user_id !== grant.owner_user_id || command.workspace_id !== ctx.workspace_id) {
+    return refuse("authz", "hosted_grant_binding_mismatch", "seat claim does not match the grant binding");
+  }
+  if (!hostedSeatNameValid(command.name)) {
+    return refuse("domain", "hosted_seat_name_invalid", "Seat names must be 1 to 80 characters, have no leading or trailing spaces, and contain no control characters.");
+  }
+  if (facts.seat !== null) {
+    const seat = facts.seat;
+    if (seat.revoked_at !== null || seat.handle_revoked_at !== null || seat.principal_revoked_at !== null || seat.transport !== "hosted_mcp" || seat.turn_only !== true) {
+      return refuse("domain", "hosted_seat_revoked", "A revoked hosted seat cannot be restored; choose another name.");
+    }
+    if (facts.exact_name_principal_ids.length !== 1 || facts.exact_name_principal_ids[0] !== seat.principal_id) {
+      return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+    }
+    return { ok: true, events: [], reuse: seat };
+  }
+  if (facts.exact_name_principal_ids.length !== 0) {
+    return refuse("domain", HOSTED_SEAT_NAME_TAKEN.code, HOSTED_SEAT_NAME_TAKEN.message);
+  }
+  if (facts.live_seat_count >= HOSTED_MCP_SEAT_LIMIT) {
+    return refuse("domain", "hosted_seat_limit_reached", `This connection already has ${HOSTED_MCP_SEAT_LIMIT} live seats.`);
+  }
+  return { ok: true, events: [event(ctx, "HostedMcpSeatClaimed", {
+    ...command,
+    transport: "hosted_mcp",
+    turn_only: true,
+    created_at: ctx.now
+  })] };
+}
+function requiredPayload(event2, keys) {
+  const payload = event2.payload;
+  for (const key2 of keys) {
+    if (payload[key2] === void 0) {
+      throw new Error(`event "${event2.type}" at seq ${event2.seq} is missing payload field "${key2}"`);
+    }
+  }
+  return payload;
+}
+function reduceHostedAuthority(previous, event2) {
+  if (event2.schema_version !== SCHEMA_VERSION) {
+    throw new Error(`event "${event2.type}" has unsupported schema version`);
+  }
+  const state = previous ?? {
+    grants: {},
+    consents: {},
+    seats: {},
+    principals: {}
+  };
+  if (event2.type === "HostedMcpGrantBegun") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      "provider_grant_id",
+      "owner_user_id",
+      "home_workspace_id",
+      "client_id",
+      "resource",
+      "selected_workspace_ids",
+      "manifest_digest",
+      "interaction_ref",
+      "created_at"
+    ]);
+    const id2 = String(p2.grant_id);
+    if (state.grants[id2]) throw new Error(`duplicate hosted grant "${id2}"`);
+    return { ...state, grants: { ...state.grants, [id2]: {
+      grant_id: id2,
+      provider_grant_id: String(p2.provider_grant_id),
+      owner_user_id: String(p2.owner_user_id),
+      home_workspace_id: String(p2.home_workspace_id),
+      client_id: String(p2.client_id),
+      resource: String(p2.resource),
+      selected_workspace_ids: [...p2.selected_workspace_ids],
+      manifest_digest: String(p2.manifest_digest),
+      interaction_ref: String(p2.interaction_ref),
+      state: "pending",
+      created_at: Number(p2.created_at),
+      activated_at: null,
+      revoked_at: null
+    } } };
+  }
+  if (event2.type === "HostedMcpWorkspaceConsented") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      "workspace_id",
+      "owner_user_id",
+      "consent_receipt_id",
+      "consented_at",
+      "manifest_digest"
+    ]);
+    const key2 = `${String(p2.grant_id)}:${String(p2.workspace_id)}`;
+    if (state.consents[key2]) throw new Error(`duplicate hosted workspace consent "${key2}"`);
+    return { ...state, consents: { ...state.consents, [key2]: {
+      grant_id: String(p2.grant_id),
+      workspace_id: String(p2.workspace_id),
+      owner_user_id: String(p2.owner_user_id),
+      manifest_digest: String(p2.manifest_digest),
+      consent_receipt_id: String(p2.consent_receipt_id),
+      consented_at: Number(p2.consented_at),
+      revoked_at: null
+    } } };
+  }
+  if (event2.type === "HostedMcpGrantActivated" || event2.type === "HostedMcpGrantRevoked") {
+    const p2 = requiredPayload(event2, [
+      "grant_id",
+      event2.type === "HostedMcpGrantActivated" ? "activated_at" : "revoked_at"
+    ]);
+    const id2 = String(p2.grant_id);
+    const grant = state.grants[id2];
+    if (!grant) throw new Error(`unknown hosted grant "${id2}"`);
+    return { ...state, grants: {
+      ...state.grants,
+      [id2]: event2.type === "HostedMcpGrantActivated" ? { ...grant, state: "active", activated_at: Number(p2.activated_at), revoked_at: null } : { ...grant, state: "revoked", revoked_at: Number(p2.revoked_at) }
+    } };
+  }
+  if (event2.type === "HostedMcpSeatClaimed") {
+    const p2 = requiredPayload(event2, [
+      "seat_id",
+      "grant_id",
+      "workspace_id",
+      "owner_user_id",
+      "principal_id",
+      "name",
+      "handle",
+      "created_at",
+      "transport",
+      "turn_only"
+    ]);
+    const id2 = String(p2.seat_id);
+    if (state.seats[id2]) throw new Error(`duplicate hosted seat "${id2}"`);
+    if (p2.transport !== "hosted_mcp" || p2.turn_only !== true) {
+      throw new Error("hosted seat event must be hosted_mcp and turn_only");
+    }
+    const principalId = String(p2.principal_id);
+    const seat2 = {
+      seat_id: id2,
+      grant_id: String(p2.grant_id),
+      workspace_id: String(p2.workspace_id),
+      owner_user_id: String(p2.owner_user_id),
+      principal_id: principalId,
+      name: String(p2.name),
+      handle: String(p2.handle),
+      transport: "hosted_mcp",
+      turn_only: true,
+      created_at: Number(p2.created_at),
+      revoked_at: null,
+      handle_revoked_at: null,
+      principal_revoked_at: null
+    };
+    return {
+      ...state,
+      seats: { ...state.seats, [id2]: seat2 },
+      principals: { ...state.principals, [principalId]: {
+        principal_id: principalId,
+        workspace_id: seat2.workspace_id,
+        owner_user_id: seat2.owner_user_id,
+        name: seat2.name,
+        transport: "hosted_mcp",
+        turn_only: true,
+        created_at: seat2.created_at,
+        revoked_at: null
+      } }
+    };
+  }
+  const p = requiredPayload(event2, ["seat_id", "revoked_at"]);
+  const id = String(p.seat_id);
+  const seat = state.seats[id];
+  if (!seat) throw new Error(`unknown hosted seat "${id}"`);
+  const revokedAt = Number(p.revoked_at);
+  const principal = state.principals[seat.principal_id];
+  if (!principal) throw new Error(`unknown hosted principal "${seat.principal_id}"`);
+  return {
+    ...state,
+    seats: {
+      ...state.seats,
+      [id]: {
+        ...seat,
+        revoked_at: revokedAt,
+        handle_revoked_at: revokedAt,
+        principal_revoked_at: revokedAt
+      }
+    },
+    principals: {
+      ...state.principals,
+      [seat.principal_id]: { ...principal, revoked_at: revokedAt }
+    }
+  };
+}
+function reduceHostedAuthorityStream(events) {
+  let state = null;
+  let lastSeq = -Infinity;
+  for (const event2 of events) {
+    if (event2.seq <= lastSeq) throw new Error("hosted authority events are out of order");
+    state = reduceHostedAuthority(state, event2);
+    lastSeq = event2.seq;
+  }
+  return state ?? { grants: {}, consents: {}, seats: {}, principals: {} };
+}
+
 // src/protocol/brain-version-window.ts
 var BRAIN_FILE_PREFIX = "brain--";
 var BRAIN_FILE_SUFFIX = ".md";
@@ -1705,8 +2140,12 @@ export {
   FEEDBACK_CONTEXT_MAX_BYTES,
   FILE_VERSION_PRECONDITION_FAILED,
   H0_SEAT_TOKEN_TTL_MS,
+  HOSTED_MCP_RESOURCE,
+  HOSTED_MCP_SEAT_LIMIT,
+  HOSTED_SEAT_NAME_TAKEN,
   HUMAN_ONLY_COMMANDS,
   INVITATION_MAX_TTL_MS,
+  PRINCIPAL_NAME_TAKEN,
   RENEWAL_HORIZON_DEFAULT_MS,
   RENEWAL_HORIZON_MAX_MS,
   RENEWAL_IDLE_PAUSE_DAYS,
@@ -1721,9 +2160,11 @@ export {
   canonicalJson,
   canonicalPrincipal,
   decide,
+  decideHostedAuthority,
   decideWorkspace,
   fileVersionPreconditionMessage,
   fileVersionPreconditionSatisfied,
+  hostedSeatNameValid,
   idemKey,
   isAgentScopeDenylisted,
   isBrainFileArtifactName,
@@ -1732,6 +2173,9 @@ export {
   normalizedFeedbackBody,
   normalizedFeedbackContext,
   planFileVersionWindow,
+  publicHostedCommandForbidden,
+  reduceHostedAuthority,
+  reduceHostedAuthorityStream,
   reduceStream,
   reduceTask,
   reduceWorkspace,
