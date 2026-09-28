@@ -313,7 +313,7 @@ import {
   runArrivalWatch,
   writeArrivalMonitorLine,
 } from "./cloud/arrival-watch.js";
-import { lsofStdoutConsumer } from "./stdout-consumer.js";
+import { systemStdoutConsumer } from "./stdout-consumer.js";
 import { readAgentWakeLease, sendWakeLeaseCommand, startWakeLeaseRenewal, WakeLeaseLostError, WakeLeaseReadError, WakeLeaseTransientError, type AgentWakeLease } from "./cloud/wake-lease.js";
 import { WAKE_LEASE_STALE_LABEL, sanitizeWakeHostLabel } from "./cloud/wake-lease-constants.js";
 const LISTENER_STOP_WAIT_TIMEOUT_MS = 30_000;
@@ -5054,6 +5054,10 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
     : NaN;
   const stdoutCheckIntervalMs = Number.isInteger(testCheckMs) && testCheckMs >= 100 && testCheckMs <= 60_000
     ? testCheckMs : 60_000;
+  const testProcRoot = process.env.NODE_ENV === "test" &&
+      new URL(cloud.url).hostname === "127.0.0.1"
+    ? process.env.CSWARM_TEST_PROC_ROOT
+    : undefined;
   const watcherId = randomUUID();
   const locks = await acquireArrivalWatchSeatLocks(
     cloud,
@@ -5161,7 +5165,10 @@ async function runInboxNotifyCommand(args: Arguments): Promise<void> {
       store: cursorStore,
       signal: controller.signal,
       wake,
-      stdoutConsumer: lsofStdoutConsumer(Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2))),
+      stdoutConsumer: systemStdoutConsumer(
+        Math.min(5_000, Math.floor(stdoutCheckIntervalMs / 2)),
+        testProcRoot === undefined ? {} : { procRoot: testProcRoot },
+      ),
       stdoutCheckIntervalMs,
       onReady: async () => {
         if (attendedCanaryTask !== null) return;

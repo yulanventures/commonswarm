@@ -10,10 +10,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { createServer as createSocketServer } from "node:net";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -53,7 +55,7 @@ import {
   type ParentProcessAdapter,
   type StdoutConsumerAdapter,
 } from "../../src/resume.js";
-import { lsofStdoutConsumer, parseLsofStdout } from "../../src/stdout-consumer.js";
+import { lsofStdoutConsumer, parseLsofStdout, procStdoutConsumer, systemStdoutConsumer } from "../../src/stdout-consumer.js";
 import { Arguments, BOOLEAN_FLAGS, NOTIFY_ACCEPTED_FLAGS, claudeUserPromptHookSnippet, notifyRestartOptions, waitForListenerStop } from "../../src/cli.js";
 import { newSessionBinding, writeSessionContext } from "../../src/cloud/session-context.js";
 import { generateSessionKey } from "../../src/cloud/session-proof.js";
@@ -335,6 +337,65 @@ test("recorded lsof fd 1 shapes classify without a false orphan", { timeout: 1_0
     ["p12\nf1\ntunix\nn->0x30df\nn->(none)\n", "live_reader"],
   ] as const;
   for (const [output, expected] of cases) assert.equal(parseLsofStdout(output), expected, output);
+});
+
+test("proc stdout inspection proves readers and stays conservative on incomplete scans", { timeout: 5_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "cswarm-proc-stdout-"));
+  const targetPid = 4100;
+  const makeFd = async (pid: number, fd: number, target: string, flags?: string): Promise<void> => {
+    const processRoot = join(root, String(pid));
+    await mkdir(join(processRoot, "fd"), { recursive: true });
+    await mkdir(join(processRoot, "fdinfo"), { recursive: true });
+    await symlink(target, join(processRoot, "fd", String(fd)));
+    if (flags !== undefined) await writeFile(join(processRoot, "fdinfo", String(fd)), `flags:\t${flags}\n`);
+  };
+  const inspect = (maxEntries = 100) => procStdoutConsumer({ procRoot: root, maxEntries, timeoutMs: 1_000 })
+    .inspect(targetPid);
+
+  try {
+    await makeFd(targetPid, 1, "pipe:[7001]", "01");
+    await makeFd(4101, 3, "pipe:[9999]", "00"); // A readable but unrelated pipe is not evidence.
+    await makeFd(4102, 4, "pipe:[7001]", "01"); // A matching write end is not a consumer.
+    await makeFd(4105, 7, "pipe:[7001]", "010000000"); // O_PATH observes metadata but cannot read.
+    assert.equal(await inspect(), "orphaned", "write ends alone are the negative control");
+
+    const foreignFdDirectory = join(root, "1", "fd");
+    await mkdir(foreignFdDirectory, { recursive: true });
+    await chmod(foreignFdDirectory, 0);
+    assert.equal(await inspect(), "orphaned", "an inaccessible foreign fd table cannot mask a missing reader");
+    await chmod(foreignFdDirectory, 0o700);
+
+    await makeFd(4103, 5, "pipe:[7001]", "00");
+    assert.equal(await inspect(), "live_reader", "a matching read end is the positive control");
+    await rm(join(root, "4103"), { recursive: true, force: true });
+    assert.equal(await inspect(), "orphaned", "the reader exiting leaves only write ends");
+
+    await makeFd(4104, 6, "pipe:[7001]");
+    await mkdir(join(root, "4104", "fdinfo", "6"));
+    assert.equal(await inspect(), "cannot_determine", "unreadable matching fdinfo is unknown");
+    await rm(join(root, "4104"), { recursive: true, force: true });
+
+    await rm(join(root, String(targetPid), "fd", "1"));
+    await symlink("/tmp/stdout.log", join(root, String(targetPid), "fd", "1"));
+    assert.equal(await inspect(), "not_pipe");
+    await rm(join(root, String(targetPid), "fd", "1"));
+    await symlink("pipe:[7001]", join(root, String(targetPid), "fd", "1"));
+
+    assert.equal(await inspect(1), "cannot_determine", "entry budget exhaustion never proves orphaning");
+    let tick = 0;
+    const timed = procStdoutConsumer({
+      procRoot: root,
+      maxEntries: 100,
+      timeoutMs: 1,
+      now: () => tick++,
+    });
+    assert.equal(await timed.inspect(targetPid), "cannot_determine", "time budget exhaustion never proves orphaning");
+
+    assert.equal(await systemStdoutConsumer(1_000, { platform: "linux", procRoot: root }).inspect(targetPid),
+      "orphaned", "the Linux system adapter uses the injected proc root");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("cancelling an in-flight stdout inspection kills its lsof child", { timeout: 5_000 }, async () => {
@@ -808,9 +869,31 @@ function acceptNotifyCommand(request: IncomingMessage, response: ServerResponse)
 
 async function stdoutProbeFixture(root: string): Promise<{
   env: Record<string, string>;
+  attach(pid: number): Promise<void>;
   markOrphaned(): Promise<void>;
 }> {
-  if (process.platform === "darwin") return { env: {}, async markOrphaned() {} };
+  if (process.platform === "darwin") {
+    return { env: {}, async attach() {}, async markOrphaned() {} };
+  }
+  if (process.platform === "linux") {
+    const procRoot = join(root, "proc");
+    const readerPid = 999_999_991;
+    await mkdir(procRoot, { recursive: true });
+    return {
+      env: { CSWARM_TEST_PROC_ROOT: procRoot },
+      async attach(pid) {
+        const makeFd = async (fixturePid: number, fd: number, flags: string): Promise<void> => {
+          await mkdir(join(procRoot, String(fixturePid), "fd"), { recursive: true });
+          await mkdir(join(procRoot, String(fixturePid), "fdinfo"), { recursive: true });
+          await symlink("pipe:[7001]", join(procRoot, String(fixturePid), "fd", String(fd)));
+          await writeFile(join(procRoot, String(fixturePid), "fdinfo", String(fd)), `flags:\t${flags}\n`);
+        };
+        await makeFd(pid, 1, "01");
+        await makeFd(readerPid, 7, "00");
+      },
+      async markOrphaned() { await rm(join(procRoot, String(readerPid)), { recursive: true, force: true }); },
+    };
+  }
   const bin = join(root, "bin");
   const marker = join(root, "stdout-reader-closed");
   await mkdir(bin, { recursive: true });
@@ -826,6 +909,7 @@ fi
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       CSWARM_TEST_STDOUT_ORPHAN_MARKER: marker,
     },
+    async attach() {},
     async markOrphaned() { await writeFile(marker, "closed\n"); },
   };
 }
@@ -899,6 +983,7 @@ test("resume reuses the identity members response for session status", { timeout
 test("the real resume CLI uses only read resources and leaves local files byte-identical", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "cswarm-resume-cli-"));
   const xdg = join(root, "state");
+  const bin = join(root, "bin");
   const requests: Array<{ path: string; resource: unknown }> = [];
   const server = createServer((request, response) => {
     if (refuseResumeCommand(request, response, requests)) return;
@@ -935,6 +1020,8 @@ test("the real resume CLI uses only read resources and leaves local files byte-i
   });
   const url = await listen(server);
   try {
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "ps"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const credential = await writeCredential(root);
     const credentialBefore = await readFile(credential, "utf8");
     const target = cloudTarget(url, "anon-resume-cli");
@@ -959,7 +1046,7 @@ test("the real resume CLI uses only read resources and leaves local files byte-i
       "anon-resume-cli",
       "--workspace-id",
       WORKSPACE,
-    ], root, xdg);
+    ], root, xdg, { PATH: `${bin}:${process.env.PATH ?? ""}` });
     child.stdout!.setEncoding("utf8");
     child.stderr!.setEncoding("utf8");
     let stdout = "";
@@ -1086,6 +1173,8 @@ test("an empty inbox loses only its stdout reader and exits 74 without a signal"
     child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
       "--url", url, "--anon-key", "anon-idle", "--workspace-id", WORKSPACE], root, xdg,
     { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
+    assert.ok(child.pid);
+    await stdoutProbe.attach(child.pid);
     let stderr = "";
     let stdout = "";
     child.stderr!.setEncoding("utf8");
@@ -1130,6 +1219,8 @@ test("a failed read still checks the stdout reader during retry backoff", { time
     child = spawnCli(["inbox", "--notify", "--agent-token-file", credential,
       "--url", url, "--anon-key", "anon-retry", "--workspace-id", WORKSPACE], root, xdg,
     { NODE_ENV: "test", CSWARM_TEST_NOTIFY_CHECK_MS: "300", ...stdoutProbe.env });
+    assert.ok(child.pid);
+    await stdoutProbe.attach(child.pid);
     let stderr = "";
     let stdout = "";
     child.stderr!.setEncoding("utf8");
