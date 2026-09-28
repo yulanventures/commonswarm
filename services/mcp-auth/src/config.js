@@ -1,8 +1,32 @@
-import { readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 
 import { Pool } from "pg";
 
 import { ISSUER, RESOURCE } from "./provider.js";
+
+const FILE_SETTINGS = Object.freeze({
+  signingKeys: Object.freeze({
+    envName: "MCP_OAUTH_SIGNING_KEYS_FILE",
+    name: "signing key",
+    policy: "secret",
+  }),
+  cookieKeys: Object.freeze({
+    envName: "MCP_OAUTH_COOKIE_KEYS_FILE",
+    name: "cookie key",
+    policy: "secret",
+  }),
+  databaseCredentials: Object.freeze({
+    envName: "MCP_OAUTH_DATABASE_CREDENTIALS_FILE",
+    name: "database credential",
+    policy: "secret",
+  }),
+  databaseTlsCa: Object.freeze({
+    envName: "MCP_OAUTH_DATABASE_TLS_CA_FILE",
+    name: "database TLS CA",
+    policy: "public-certificate",
+  }),
+});
 
 function required(env, name) {
   const value = env[name];
@@ -17,14 +41,70 @@ function positiveInteger(env, name, fallback) {
   return value;
 }
 
-async function protectedText(path, name) {
-  const metadata = await stat(path);
-  if (!metadata.isFile() || (metadata.mode & 0o007) !== 0) {
-    throw new Error(`${name} path must be a file with no permissions for other users`);
+const FILE_OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+async function configuredFileText(env, settingName) {
+  const setting = FILE_SETTINGS[settingName];
+  const path = required(env, setting.envName);
+  let handle;
+  try {
+    handle = await open(path, FILE_OPEN_FLAGS);
+  } catch (error) {
+    if (setting.policy === "public-certificate") {
+      if (error?.code === "ELOOP") {
+        throw new Error(`${setting.name} path must be a regular file, not a symlink`, { cause: error });
+      }
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") {
+        throw new Error(`${setting.name} path must exist and be inspectable`, { cause: error });
+      }
+      throw new Error(`${setting.name} file must be readable`, { cause: error });
+    }
+    if (setting.policy === "secret" && error?.code === "ELOOP") {
+      throw new Error(`${setting.name} path must be a file with no permissions for other users`, { cause: error });
+    }
+    throw error;
   }
-  const value = (await readFile(path, "utf8")).trim();
-  if (!value) throw new Error(`${name} file is empty`);
-  return value;
+  try {
+    let metadata;
+    try {
+      metadata = await handle.stat();
+    } catch (error) {
+      if (setting.policy === "public-certificate") {
+        throw new Error(`${setting.name} path must exist and be inspectable`, { cause: error });
+      }
+      throw error;
+    }
+    if (setting.policy === "secret") {
+      if (!metadata.isFile() || (metadata.mode & 0o007) !== 0) {
+        throw new Error(`${setting.name} path must be a file with no permissions for other users`);
+      }
+    } else if (setting.policy === "public-certificate") {
+      if (!metadata.isFile()) {
+        throw new Error(`${setting.name} path must be a regular file`);
+      }
+      if ((metadata.mode & 0o022) !== 0) {
+        throw new Error(`${setting.name} path must not be writable by group or other users`);
+      }
+      if (metadata.uid !== 0) {
+        throw new Error(`${setting.name} path must be owned by root (uid 0)`);
+      }
+    } else {
+      throw new Error(`${setting.envName} has an unsupported file policy`);
+    }
+    let value;
+    try {
+      value = (await handle.readFile("utf8")).trim();
+    } catch (error) {
+      if (setting.policy === "public-certificate") {
+        throw new Error(`${setting.name} file must be readable`, { cause: error });
+      }
+      throw error;
+    }
+    if (!value) throw new Error(`${setting.name} file is empty`);
+    return value;
+  } finally {
+    await handle.close();
+  }
 }
 
 function parseSigningKeys(text, activeKid) {
@@ -68,12 +148,9 @@ export async function loadConfig(env = process.env) {
   if (new URL(publicOrigin).origin !== publicOrigin || publicOrigin !== issuer) {
     throw new Error("public origin must exactly match the issuer origin");
   }
-  const signingKeysText = await protectedText(required(env, "MCP_OAUTH_SIGNING_KEYS_FILE"), "signing key");
-  const cookieText = await protectedText(required(env, "MCP_OAUTH_COOKIE_KEYS_FILE"), "cookie key");
-  const databaseCredentialText = await protectedText(
-    required(env, "MCP_OAUTH_DATABASE_CREDENTIALS_FILE"),
-    "database credential",
-  );
+  const signingKeysText = await configuredFileText(env, "signingKeys");
+  const cookieText = await configuredFileText(env, "cookieKeys");
+  const databaseCredentialText = await configuredFileText(env, "databaseCredentials");
   const databaseCredentials = JSON.parse(databaseCredentialText);
   if (typeof databaseCredentials.user !== "string" || typeof databaseCredentials.password !== "string") {
     throw new Error("database credential file must contain user and password");
@@ -83,7 +160,7 @@ export async function loadConfig(env = process.env) {
     throw new Error("cookie key file must contain at least two strong keys");
   }
   const activeSigningKid = required(env, "MCP_OAUTH_ACTIVE_SIGNING_KID");
-  const tlsCa = await protectedText(required(env, "MCP_OAUTH_DATABASE_TLS_CA_FILE"), "database TLS CA");
+  const tlsCa = await configuredFileText(env, "databaseTlsCa");
   const authorizationCodeTtlSeconds = positiveInteger(env, "MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS", 60);
   const accessTokenTtlSeconds = positiveInteger(env, "MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS", 300);
   const refreshTokenTtlSeconds = positiveInteger(
