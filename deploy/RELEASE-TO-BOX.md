@@ -67,7 +67,29 @@ every minting step. The box's GNU `date` computes it once from the approved
 ```sh
 # step: runbook-01
 # readonly: yes
-WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+# host: box /bin/bash 5.2 as root
+if [ -z "${WINDOW_START_UTC:-}" ]; then
+  printf 'STOP: WINDOW_START_UTC is required (HezLead-approved YYYY-MM-DDTHH:MM:SSZ)\n' >&2
+  false
+else
+  case "$WINDOW_START_UTC" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+      WINDOW_START_EPOCH="$(date -u -d "$WINDOW_START_UTC" +%s 2>/dev/null || printf invalid)"
+      case "$WINDOW_START_EPOCH" in
+        (*[!0-9]*|'')
+          unset WINDOW_START_EPOCH
+          printf 'STOP: WINDOW_START_UTC must be a valid ISO-8601 UTC time\n' >&2
+          false
+          ;;
+        (*)
+          unset WINDOW_START_EPOCH
+          WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+          ;;
+      esac
+      ;;
+    *) printf 'STOP: WINDOW_START_UTC must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form\n' >&2; false ;;
+  esac
+fi
 ```
 
 On a re-run, set a new window start and use the resulting fresh names without
@@ -95,12 +117,13 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 | `/home/commonswarm/{edge,stack}/releases/<sha>` and `RELEASE_SHA` | A: archive plus accepted box-only file | `1-apply-release-directories`; override added by `runbook-31` | Same verifier; only the source-derived edge override may be extra |
 | Active `/home/commonswarm/stack/release-proofs/<sha>` including `window.env`, timer markers, copy-back list, journals/evidence and checksums | B: per-window name on close | `runbook-03`, `1-apply-release-directories`, later proof steps | `runbook-61` moves it to `<sha>.closed-window-<window-id>` after copy-back and transient cleanup |
 | `docs/evidence/<day>-release-<short-sha>-<window-id>/` and its manifest/log/archive records | B: per-window name | `runbook-02`, `runbook-07`, copy-back | Retained by its exact per-window name |
-| Mac `/tmp/commonswarm-<sha>-<window-id>.tar`, `/tmp/commonswarm-release-proofs-<sha>-<window-id>.tar`, and `$HOME/.commonswarm-release-window.env` | B: removed by close/rollback | `runbook-02`, `runbook-08` | `runbook-12` |
-| Box `/tmp/commonswarm-release.tar` and `/tmp/commonswarm-release-proofs.tar` | B: removed by close/rollback | `1-upload-release-archive`, `runbook-08` | `runbook-60` |
+| Mac `/tmp/commonswarm-<sha>-<window-id>.tar`, `/tmp/commonswarm-<sha>-<window-id>.window.env`, `/tmp/commonswarm-release-proofs-<sha>-<window-id>.tar`, and `$HOME/.commonswarm-release-window.env` | B: removed by close/rollback | `runbook-02`, `runbook-08` | `runbook-12` |
+| Box `/tmp/commonswarm-release.tar`, `/tmp/commonswarm-release-window.env`, and `/tmp/commonswarm-release-proofs.tar` | B: removed by close/rollback | `1-upload-release-archive`, `runbook-08` | `runbook-60` |
 | `/run/commonswarm-release-<sha>-{service.conf,pass,apply.sql,session.sh}` | B: removed by close/rollback | `runbook-17` | `runbook-60` |
 | `mktemp` router, Caddy-drift, boundary-read and boundary-probe paths | B: removed by owning block | `runbook-04`, Caddy drift steps, item plan probes | Each block's guarded `trap` |
 | Caddy `*.tmp.<sha>` candidates and stack unit-before directory inside the active proof directory | B: removed/moved or per-window on close | Caddy/guarded-stack steps | Atomic move/rollback; proof-directory close by `runbook-61` |
-| HM37 Mac input root, box control root/journal/cache, and `/run/commonswarm-hm37-<window-id>` staging | B: per-window name | HM37 input/stage/transfer steps | Retained or removed only under the exact approved `WINDOW_ID`; the next window uses a different exact name |
+| HM37 Mac input root, box control root/journal, and `/run/commonswarm-hm37-<window-id>` staging | B: per-window name | HM37 input/stage/transfer steps | Retained or removed only under the exact approved `WINDOW_ID`; the next window uses a different exact name |
+| HM37 `/usr/local/bin/deno`, `/run/commonswarm-deno-<window-id>`, and the box control root's `deno-cache` | B: temporary runtime/cache; measured baseline has no Deno | `hm37-deno-install`, then `hm37-hosted-control-stage` | Install-step trap removes download scratch; `hm37-deno-remove` checks the recorded binary digest before removing the binary and per-window cache on close or rollback |
 
 ### Preflight — CSwarmDevLead, HezLead, then Anvil
 
@@ -112,7 +135,8 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
    and `npm run check:edge`, plus the other gates required by the change.
 2. HezLead approves that SHA and an agreed maximum backup age in seconds when a
    database backup is required.
-3. Anvil runs these commands on the Mac mini from this repository. They prove
+3. Anvil runs `runbook-02` and `runbook-04` on the Mac mini from this
+   repository. They prove
    the archive came from the GitHub remote. The lead must have already written
    `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
    which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>-<window-id>/`). `git archive` reads tracked
@@ -122,11 +146,17 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 ```sh
 # step: runbook-02
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 rm -f "$HOME/.commonswarm-release-window.env"
 SHA='<sha>'
-WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
 (
   set -euo pipefail
+  : "${WINDOW_START_UTC:?Set the HezLead-approved UTC window start}"
+  case "$WINDOW_START_UTC" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) false ;;
+  esac
+  WINDOW_ID="$(printf '%s' "$WINDOW_START_UTC" | tr -d ':-')"
   check() {
     label="$1"
     shift
@@ -152,6 +182,7 @@ WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
   EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
   RUN_LOG="$EVIDENCE_DIR/run.log"
   ARCHIVE="/tmp/commonswarm-${SHA}-${WINDOW_ID}.tar"
+  BOX_WINDOW_INPUT="/tmp/commonswarm-${SHA}-${WINDOW_ID}.window.env"
   GATE_EVIDENCE="$EVIDENCE_DIR/gate-evidence.txt"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
   chmod 0700 "$EVIDENCE_DIR"
@@ -167,9 +198,12 @@ WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
   check 'archive commit id' test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
 
   # Written only after every check passed, so a failed preflight leaves no file.
-  ( umask 077; printf 'SHA=%q\nWINDOW_ID=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
-      "$SHA" "$WINDOW_ID" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
+  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_ID=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\nBOX_WINDOW_INPUT=%q\n' \
+      "$SHA" "$WINDOW_START_UTC" "$WINDOW_ID" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" "$BOX_WINDOW_INPUT" >"$HOME/.commonswarm-release-window.env" )
   chmod 0600 "$HOME/.commonswarm-release-window.env"
+  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_ID=%q\n' \
+      "$SHA" "$WINDOW_START_UTC" "$WINDOW_ID" >"$BOX_WINDOW_INPUT" )
+  chmod 0600 "$BOX_WINDOW_INPUT"
   printf 'window file written\n'
 )
 ```
@@ -184,13 +218,27 @@ Record approvals, affected surfaces, the backup-age agreement, commands, exit
 codes, and safe verification output in `run.log`. Never record an environment
 file, credential, curl authorization file, or secret value.
 
-Before the apply, Anvil connects to the box as root and creates the copy-back
-manifest. Set `KIND_LIST` to the same approved surfaces used by the apply block,
+Immediately after `1-apply-release-directories` has derived and persisted the
+window identity, and before any database, service, timer, symlink, or Caddy
+mutation, Anvil runs `runbook-03` on the box to create the copy-back manifest.
+Set `KIND_LIST` to the same approved surfaces used by the apply block,
 list every pending migration version, and list the subset whose functional
 proof produces a `.txt` file during this window. Set the five named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
 switch, the section 8 backup-status proof, the section 9 API Caddy pair, or the
 section 9 MCP Caddy site.
+
+The five switches select whole runbook blocks. `yes` includes the named group;
+`no` skips every step in that group:
+
+| Switch | Whole-block step group |
+|---|---|
+| `H0_LEDGER_BACKFILL` | `runbook-18`, `runbook-19`, `runbook-20` |
+| `GUARDED_STACK_SWITCH` | `runbook-48` |
+| `BACKUP_STATUS_PROOF` | `runbook-54`, `runbook-55` |
+| `API_CADDY_PAIR` | `runbook-56`, `runbook-57`, `runbook-58`, `runbook-59` |
+| `MCP_CADDY_RELEASE` | `runbook-mcp-caddy-preflight`, `runbook-mcp-caddy-apply`, `runbook-mcp-caddy-verify`, `runbook-mcp-caddy-rollback` |
+
 Add exact relative paths from the item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
@@ -202,10 +250,11 @@ initial manifest is built only from the explicit arrays below, never from
 ```sh
 # step: runbook-03
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  SHA='<sha>'
-  WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
+  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  test "$SHA" = '<sha>'
   KIND_LIST='<edge|stack|edge stack>'
   H0_LEDGER_BACKFILL='<yes-or-no>'
   GUARDED_STACK_SWITCH='<yes-or-no>'
@@ -353,6 +402,7 @@ the dark `mcp` name:
 ```sh
 # step: runbook-04
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -392,13 +442,14 @@ TS
     >"$EVIDENCE_DIR/required-edge-env.json"
   chmod 0600 "$EVIDENCE_DIR/required-edge-env.json"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts \
-    | rg -n 'REQUIRED_MAIN_ENV|mainEnvironmentProblems|FUNCTION_ENV_NAMES' \
+    | grep -nE 'REQUIRED_MAIN_ENV|mainEnvironmentProblems|FUNCTION_ENV_NAMES' \
     >"$EVIDENCE_DIR/edge-env-source-check.txt"
   chmod 0600 "$EVIDENCE_DIR/edge-env-source-check.txt"
 )
 ```
 
-Anvil records the changed-function list from the reviewed diff in `run.log`.
+Runbook step `runbook-04` records the changed-function list from the reviewed
+diff in `run.log`; HezLead decides whether the list matches the approved scope.
 CSwarmDevLead checks the archived `supabase/functions/<name>/index.ts` files
 for strict environment failures and confirms `required-edge-env.json` covers
 them before transfer. The current command, read, capability, activity, and H0
@@ -419,6 +470,7 @@ both release directories, compare them on the box before deciding:
 ```sh
 # step: runbook-05
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -471,12 +523,15 @@ block reads them from `window.env`.
 ```sh
 # step: 1-upload-release-archive
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = '<sha>'
   test -s "$ARCHIVE"
+  test -s "$BOX_WINDOW_INPUT"
   scp "$ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release.tar
+  scp "$BOX_WINDOW_INPUT" ops@100.115.66.74:/tmp/commonswarm-release-window.env
 )
 ```
 
@@ -485,6 +540,7 @@ Open a root shell on the box:
 ```sh
 # step: 1-open-root-shell
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; opens a box root shell
 ssh ops@100.115.66.74
 sudo -n -i
 ```
@@ -495,13 +551,13 @@ window state:
 ```sh
 # step: 1-apply-release-directories
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  SHA='<sha>'
+  . /tmp/commonswarm-release-window.env
+  test "$SHA" = '<sha>'
   KIND_LIST='<edge|stack|edge stack>'
-  WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
-  EXPECTED_WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
   ARCHIVE=/tmp/commonswarm-release.tar
   EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -525,8 +581,8 @@ window state:
     esac
     date -u -d "$T" +%s >/dev/null
   done
-  WINDOW_ID="$(date -u -d "$WINDOW_START_UTC" +%Y%m%dT%H%M%SZ)"
-  test "$WINDOW_ID" = "$EXPECTED_WINDOW_ID"
+  DERIVED_WINDOW_ID="$(date -u -d "$WINDOW_START_UTC" +%Y%m%dT%H%M%SZ)"
+  test "$WINDOW_ID" = "$DERIVED_WINDOW_ID"
   WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
   RECYCLE_TIMER_STOPPED=0
   BACKUP_TIMERS_STOPPED=0
@@ -814,6 +870,7 @@ inventory. HezLead reviews this exact list for secrets before transfer:
 ```sh
 # step: runbook-07
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -833,6 +890,7 @@ Mac mini:
 ```sh
 # step: runbook-08
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -851,6 +909,7 @@ HezLead confirms their list contains no secret:
 ```sh
 # step: runbook-09
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -871,6 +930,7 @@ HezLead confirms their list contains no secret:
 ```sh
 # step: runbook-10
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -910,12 +970,14 @@ it from the directory.
 Before copying, remove any EMPTY `*.err` file in `$PROOF_DIR`
 (for example an empty `functional.err`); a non-empty `.err` file is evidence:
 the copy-back block appends its exact basename to the existing manifest and
-copies it back. The window is closed by HezLead; Anvil runs the close steps and
-reports each one.
+copies it back. The window is closed by HezLead; Anvil runs copy-back
+`runbook-11`, box cleanup `runbook-60`, proof closure `runbook-61`, and Mac
+cleanup `runbook-12`, and reports each one.
 
 ```sh
 # step: runbook-11
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -979,15 +1041,16 @@ distinct.
 ```sh
 # step: runbook-12
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  rm -f "$ARCHIVE" "/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
+  rm -f "$ARCHIVE" "$BOX_WINDOW_INPUT" "/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
   rm -f "$HOME/.commonswarm-release-window.env"
 )
 ```
 
-### Abort cleanup — Anvil runs this on every stop, refusal, or abort
+### Abort cleanup — Anvil runs `runbook-13` on every stop, refusal, or abort
 
 This is safe after a lost shell because it reads the durable state. It does not
 hide the failing block's evidence.
@@ -995,6 +1058,7 @@ hide the failing block's evidence.
 ```sh
 # step: runbook-13
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1033,6 +1097,7 @@ the value, create a target-only file with exactly one assignment,
 ```sh
 # step: runbook-14
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1058,6 +1123,7 @@ This checks names and shape without printing the URL.
 ```sh
 # step: runbook-15
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1078,6 +1144,7 @@ Then use the repository identity gate against the exact stack release:
 ```sh
 # step: runbook-16
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1109,6 +1176,7 @@ all other file arguments.
 ```sh
 # step: runbook-17
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1120,13 +1188,18 @@ all other file arguments.
   APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
   DB_SESSION="/run/commonswarm-release-${SHA}-session.sh"
   PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
-  if ! docker image inspect "$PSQL_IMAGE" >/dev/null 2>&1; then
-    docker pull "$PSQL_IMAGE"
-  fi
   PSQL_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PSQL_IMAGE")"
   case "$PSQL_IMAGE_ID" in sha256:*) ;; *) false ;; esac
   case "${PSQL_IMAGE_ID#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
   test "${#PSQL_IMAGE_ID}" -eq 71
+  POSTGRES_CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && POSTGRES_CIDS[${#POSTGRES_CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-supabase-stack \
+    --filter label=com.docker.compose.service=postgres)
+  test "${#POSTGRES_CIDS[@]}" -eq 1
+  test "$(docker inspect --format '{{.Image}}' "${POSTGRES_CIDS[0]}")" = "$PSQL_IMAGE_ID"
   install -m 0600 -o root -g root /dev/null "$PGSERVICE_FILE"
   install -m 0600 -o root -g root /dev/null "$PGPASS_FILE"
   install -m 0600 -o root -g root /dev/null "$APPLY_SQL"
@@ -1241,11 +1314,12 @@ ledger row is absent. Never use it to make an unknown or partial catalog look
 applied. The first use is versions `20260916000001` and `20260916000002`, whose
 H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 
-### Preflight — CSwarmDevLead supplies the check; Anvil runs it; HezLead approves
+### Preflight — CSwarmDevLead supplies `runbook-18`; Anvil runs it; HezLead approves
 
 ```sh
 # step: runbook-18
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1282,6 +1356,7 @@ release checksum manifest before using its verifier.
 ```sh
 # step: runbook-19
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1327,6 +1402,7 @@ column rolls the transaction back.
 ```sh
 # step: runbook-20
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1355,7 +1431,7 @@ same transaction must run the catalog proof before inserting the version, and
 the before/after ledger output is mandatory. There is no generic “mark applied”
 command.
 
-### Rollback — HezLead decides; Anvil executes
+### Rollback — explicit HezLead decision; Anvil executes the named forward correction
 
 A committed, truthful ledger backfill is not deleted during the release. If the
 transaction fails, it rolls back. If later evidence shows the catalog proof was
@@ -1377,7 +1453,7 @@ a query selecting exactly one Boolean column aliased `catalog_ok`. The query
 returns one row, whose unaligned value is `t` or `f`; the wrapper refuses every
 value other than true. For example, a complete proof file is:
 
-```sql
+```text
 SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 \gset
 ```
@@ -1394,6 +1470,7 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 ```sh
 # step: runbook-21
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1421,10 +1498,10 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
       *) false ;;
     esac
   done
+  test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
   python3 - "$BACKUP_STATUS" "$BACKUP_MAX_AGE_SECONDS" <<'PY'
 import datetime, json, sys
 data = json.load(open(sys.argv[1]))
-assert data.get('state') != 'running'
 assert data.get('ok') is True
 assert data.get('database_bytes_verified') is True
 assert data.get('object_bytes_verified') is True
@@ -1444,6 +1521,7 @@ proceed merely because the service command returned.
 ```sh
 # step: runbook-22
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1480,6 +1558,7 @@ proceed merely because the service command returned.
 ```sh
 # step: runbook-23
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1501,6 +1580,7 @@ proceed merely because the service command returned.
 ```sh
 # step: runbook-24
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1520,6 +1600,7 @@ proceed merely because the service command returned.
 ```sh
 # step: runbook-25
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1537,6 +1618,7 @@ proceed merely because the service command returned.
 ```sh
 # step: runbook-26
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1613,6 +1695,7 @@ missing, false, or malformed values. Any failure rolls the transaction back.
 ```sh
 # step: runbook-27
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1679,6 +1762,7 @@ transaction.
 ```sh
 # step: runbook-28
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1731,6 +1815,7 @@ name per line; empty when none). The lead supplies both lists with the release; 
 ```sh
 # step: runbook-29
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1750,7 +1835,7 @@ name per line; empty when none). The lead supplies both lists with the release; 
 )
 ```
 
-### Rollback — HezLead decides; Anvil executes
+### Rollback — explicit HezLead decision; Anvil executes the named migration correction
 
 Prefer a reviewed forward fix. Run a down-migration only when it was supplied
 and reviewed in the same PR as the up-migration. A full restore requires Tom's
@@ -1768,7 +1853,7 @@ the exact `/home/commonswarm/edge/releases/<sha>/` directory, not through the
 `current` symlink, and that the box-only override is
 `<current edge release>/deploy/edge-runtime/compose.override.yaml`.
 
-### Preflight — CSwarmDevLead supplies probes; Anvil runs; HezLead approves
+### Preflight — CSwarmDevLead supplies probes; Anvil runs `runbook-30`; HezLead approves
 
 `commonswarm-edge-recycle.timer` is a box-only unit (not in this repository),
 installed by HezLead on 2026-09-22: `OnCalendar=*-*-* 03,09,15,21:30:00 UTC`,
@@ -1782,6 +1867,7 @@ timer and start it after verification.
 ```sh
 # step: runbook-30
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1824,6 +1910,7 @@ approved times overlap a protected interval.
 ```sh
 # step: runbook-31
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1853,7 +1940,7 @@ approved times overlap a protected interval.
   (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
 
   python3 - "$PROOF_DIR/required-edge-env.json" /home/commonswarm/.env <<'PY'
-import json, sys
+import json, pathlib, pwd, stat, sys
 
 inventory = json.load(open(sys.argv[1]))
 required = set(inventory['required'])
@@ -1861,8 +1948,14 @@ optional = set(inventory['optional'])
 database_alias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL'
 assert database_alias in required
 assert not (required & optional)
+env_path = pathlib.Path(sys.argv[2])
+env_stat = env_path.stat()
+assert stat.S_ISREG(env_stat.st_mode), 'edge environment must be a regular file'
+assert stat.S_IMODE(env_stat.st_mode) == 0o600, 'edge environment must be mode 0600'
+assert pwd.getpwuid(env_stat.st_uid).pw_name in {'root', 'commonswarm'}, \
+    'edge environment owner must be root or commonswarm'
 values = {}
-for raw in open(sys.argv[2]):
+for raw in env_path.open():
     line = raw.strip()
     if not line or line.startswith('#') or '=' not in line:
         continue
@@ -1908,6 +2001,7 @@ URL alias satisfies the database requirement. The check never prints a value.
 ```sh
 # step: runbook-32
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1952,6 +2046,7 @@ runtime cannot reach `db.commonswarm.internal`.
 ```sh
 # step: runbook-33
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1966,7 +2061,8 @@ runtime cannot reach `db.commonswarm.internal`.
   test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' commonswarm-edge-edge-runtime-1)" = commonswarm-net
   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' commonswarm-edge-edge-runtime-1)" \
     = "$NEW_EDGE/deploy/edge-runtime"
-  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-probe-start.txt"
+  ( umask 077; date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-probe-start.txt" )
+  chmod 0600 "$PROOF_DIR/edge-probe-start.txt"
 )
 ```
 
@@ -1991,6 +2087,7 @@ the box:
 ```sh
 # step: runbook-34
 # readonly: probe
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2037,6 +2134,7 @@ both loopback and staging probes finish, capture the log window that began at
 ```sh
 # step: runbook-35
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2056,11 +2154,12 @@ switched and healthy", CSwarmDevLead runs
 from the Mac mini with the two seats minted for the window (see the item's box plan,
 `docs/evidence/2026-09-25-item-g-lane1/BOX-SECTION6.md` rows 3-6) and sends
 HezLead `SEED_NOTE_ID=<uuid>` or the STOP line. HezLead passes the id to Anvil.
-Anvil runs the proof and saves its output as section 5 does:
+Anvil runs `runbook-36` and saves its proof output as section 5 does:
 
 ```sh
 # step: runbook-36
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   SEED_NOTE_ID='<uuid-from-HezLead>'
@@ -2077,11 +2176,13 @@ Verify step.
 
 For migration `20260926000001`, run the item G lane 2b renew gate after the new
 edge is healthy. The lead sends HezLead `G2B_PRINCIPAL_ID=<uuid>` and the time
-of the last successful renew. Within three minutes of that renew, Anvil runs:
+of the last successful renew. Within three minutes of that renew, Anvil runs
+`runbook-37`:
 
 ```sh
 # step: runbook-37
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
@@ -2103,6 +2204,7 @@ reply, and author user ids, then run:
 ```sh
 # step: runbook-38
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
@@ -2134,6 +2236,7 @@ outer transaction:
 ```sh
 # step: runbook-39
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
@@ -2161,6 +2264,7 @@ settings, performs only reads, and has no outer transaction:
 ```sh
 # step: runbook-40
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
@@ -2191,6 +2295,7 @@ successful release:
 ```sh
 # step: runbook-41
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2208,6 +2313,7 @@ successful release:
 ```sh
 # step: runbook-42
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2258,6 +2364,7 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
 ```sh
 # step: runbook-43
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2279,6 +2386,7 @@ statement from the Git object on the Mac mini. No operator types a version:
 ```sh
 # step: runbook-44
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -2296,6 +2404,7 @@ section 5 and apply the statement only through the write helper:
 ```sh
 # step: runbook-45
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2323,6 +2432,7 @@ section 5 and Tom's explicit approval before pull or recreate.
 ```sh
 # step: runbook-46
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2339,6 +2449,7 @@ For an edge image bump, first carry and validate the box override as in section
 ```sh
 # step: runbook-47
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2381,6 +2492,7 @@ the installed unit copies saved before the forward switch.
 ```sh
 # step: runbook-48
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2504,6 +2616,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 ```sh
 # step: runbook-49
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2551,6 +2664,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 ```sh
 # step: runbook-50
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2570,6 +2684,7 @@ applicable:
 ```sh
 # step: runbook-51
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2591,6 +2706,7 @@ probe supplied by the lead. Put authorization only in the root-owned
 ```sh
 # step: runbook-52
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2616,6 +2732,7 @@ the only reverse symlink switch and restores the saved installed units.
 ```sh
 # step: runbook-53
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2674,6 +2791,7 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 ```sh
 # step: runbook-54
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2704,6 +2822,7 @@ and record:
 ```sh
 # step: runbook-55
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2756,6 +2875,7 @@ releases compare each installed file to its own previous-release source.
 ```sh
 # step: runbook-56
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2809,6 +2929,7 @@ configuration until that rollback completes.
 ```sh
 # step: runbook-57
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2922,6 +3043,7 @@ configuration until that rollback completes.
 ```sh
 # step: runbook-58
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2948,6 +3070,7 @@ preflight backups, validates once, and reloads once.
 ```sh
 # step: runbook-59
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3067,6 +3190,7 @@ a stop.
 ```sh
 # step: runbook-mcp-caddy-preflight
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3101,6 +3225,7 @@ runs once only after both checks pass.
 ```sh
 # step: runbook-mcp-caddy-apply
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3221,6 +3346,7 @@ PY
 ```sh
 # step: runbook-mcp-caddy-verify
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3245,6 +3371,7 @@ the one validation and one reload.
 ```sh
 # step: runbook-mcp-caddy-rollback
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3454,7 +3581,7 @@ On every item above, run section 1's abort cleanup so the edge recycle and
 backup/restore timers are restarted when `window.env` says the window stopped
 them.
 
-### Rollback — HezLead decides; Anvil executes
+### Rollback — explicit HezLead decision; Anvil executes `runbook-mcp-caddy-rollback`
 
 Rollback only the component whose rollback is defined and whose previous
 release was recorded. If rollback cannot be proved safe, keep the box up, stop
@@ -3468,6 +3595,7 @@ database files and upload archives. This does not remove release evidence:
 ```sh
 # step: runbook-60
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3477,6 +3605,7 @@ database files and upload archives. This does not remove release evidence:
     "/run/commonswarm-release-${SHA}-apply.sql" \
     "/run/commonswarm-release-${SHA}-session.sh" \
     /tmp/commonswarm-release.tar \
+    /tmp/commonswarm-release-window.env \
     /tmp/commonswarm-release-proofs.tar
 )
 ```
@@ -3488,6 +3617,7 @@ an existing destination is a stop for HezLead.
 ```sh
 # step: runbook-61
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   PROOF_DIR='/home/commonswarm/stack/release-proofs/<sha>'

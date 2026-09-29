@@ -14,11 +14,32 @@ is exactly one of these markers:
 - `# readonly: no` changes box, database, container, Caddy, release, DNS, or
   production state. Failure stops the window and invokes the plan's rollback.
 
+Its third line is `# host:` and names exactly one execution shell: Mac mini
+`/bin/bash` 3.2 or box `/bin/bash` 5.2, plus any ssh child on the other host.
+Every fenced block is either such a marked `sh` step or explicitly
+non-executable (`text`). Prose that requires Anvil to establish, verify, prove,
+record, or run something names the step ID that performs it. A judgment with no
+command is labeled explicitly as a HezLead decision.
+
 A release-directory verifier may accept only named box-only files whose mode
 and SHA-256 are derived from the same source the runbook copies; every other
 path or metadata difference stops. Every other window artifact is removed by
 that window's close/rollback or has an approved-window-ID name, and no step may
 list, glob, or select a `<name>.closed-window-<id>` leftover.
+
+When a window temporarily installs a host runtime that was absent in the
+measured baseline, pin and verify the downloaded archive before extraction,
+record the installed binary's digest in durable window state, and remove the
+binary on both close and rollback only when its current digest matches that
+record. A different file is a stop, never a cleanup target. Put dependency
+caches under an exact per-window path and remove them on both tails. After the
+opening gate, every harness invocation is offline/cached-only.
+
+Dry-run fixtures load measured values from the committed measurement artifact;
+they do not maintain a second fixture-value file. A static agreement control
+checks every fixture string that names a container image, repository path, or
+environment name against repository text or the measurement artifact, and
+must reject a same-shaped invented value.
 
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either
@@ -43,6 +64,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-read
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   PROOF_DIR="${PROOF_DIR:?proof directory required}"
@@ -54,6 +76,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-refusal-probe
 # readonly: probe
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   PROOF_DIR="${PROOF_DIR:?proof directory required}"
@@ -68,6 +91,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-mutation
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   systemctl restart example.service
