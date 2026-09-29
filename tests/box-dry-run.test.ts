@@ -1247,9 +1247,11 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
       ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       HOME: home,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
+      BOX_DRY_RUN_PART: "mac",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
       BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
+      BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
       BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
       BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
     }),
@@ -1262,6 +1264,9 @@ function cleanupMacFixture(fixture: Fixture): void {
     `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`,
     `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env`,
     `/tmp/commonswarm-release-proofs-${RELEASE_SHA}-${WINDOW_ID}.tar`,
+    `/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env`,
+    "/tmp/commonswarm-hm37b-open.env",
+    "/tmp/commonswarm-site-window.env",
   ]) rmSync(path, { force: true });
   removeOwnedTemporary(fixture.temporary!, "commonswarm-box-dry-run-mac-");
 }
@@ -1471,6 +1476,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     env: explicitEnvironment({
       ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
+      BOX_DRY_RUN_PART: "box",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
@@ -1683,7 +1689,9 @@ test("all scoped fences and host declarations are executable or explicitly text"
   assert.equal(blocks(SITE).length, 15);
   assert.equal(blocks(TEMPLATE).length, 3);
   assert.deepEqual(
-    SCOPED.flatMap((file) => fencedLanguages(file).filter((language) => language !== "sh" && language !== "text")),
+    SCOPED.flatMap((file) => fencedLanguages(file).filter(
+      (language) => language !== "sh" && language !== "text" && language !== "prompt-inputs",
+    )),
     [],
   );
   for (const block of parsed) {

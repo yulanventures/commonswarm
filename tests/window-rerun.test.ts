@@ -55,6 +55,18 @@ function runShell(script: string) {
   return spawnSync("/bin/bash", ["-c", script], { encoding: "utf8" });
 }
 
+function bindReleaseSha(source: string): string {
+  return source
+    .replace(
+      /\. \/home\/commonswarm\/stack\/release-proofs\/[^/\n]+\/window\.env/,
+      '. "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
+    )
+    .replace(
+      /PROOF_DIR='\/home\/commonswarm\/stack\/release-proofs\/[^'\n]+'/,
+      'PROOF_DIR="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"',
+    );
+}
+
 function commandStubs(callLog: string, user: string, group: string): string {
   return [
     `CALL_LOG=${shellQuote(callLog)}`,
@@ -191,8 +203,8 @@ test("a rollback leaves release and window state acceptable to the next window",
     symlinkSync(release, join(edgeRoot, "current"));
     const rolledBack = runShell([
       commandStubs(callLog, user, group),
-      rollback
-        .replaceAll("<sha>", SHA)
+      `RELEASE_SHA=${shellQuote(SHA)}`,
+      bindReleaseSha(rollback)
         .replaceAll("/home/commonswarm", homePrefix)
         .replaceAll("-o root -g root", `-o ${user} -g ${group}`)
         .replaceAll("root:root:600", `${user}:${group}:600`),
@@ -205,9 +217,9 @@ test("a rollback leaves release and window state acceptable to the next window",
     assert.match(readFileSync(callLog, "utf8"), /curl -fsS/);
 
     const closeOne = runShell(
-      close
-        .replace("<sha>", SHA)
+      [`RELEASE_SHA=${shellQuote(SHA)}`, bindReleaseSha(close)
         .replaceAll("/home/commonswarm", homePrefix),
+      ].join("\n"),
     );
     assert.equal(closeOne.status, 0, closeOne.stderr);
     assert.ok(!runbook.includes("release-proofs/*"));
