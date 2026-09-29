@@ -6,7 +6,10 @@
 **Expected previous edge:** `72c57e0d76d0aa86fe4f811a2cf51499919fed20`
 **Status:** PLAN. Approval, exact-SHA gate results, current production prerequisites, execution and closure are **not established**.
 
-Anvil executes every operation, including Mac mini controls. HezLead approves the release identity, backup age, transitions, rollback and closure. CSwarmDevLead supplies reviewed inputs and reconciles evidence.
+Anvil executes only the named `hm37-*` and `runbook-*` steps, including Mac
+mini controls. HezLead approves the release identity, backup age, transitions,
+rollback and closure. CSwarmDevLead supplies reviewed inputs and reconciles
+evidence.
 
 This revision was prepared by read-only inspection of the release tree and local plan-validation tests. No product gate, production probe, migration, deployment or principal creation was performed.
 
@@ -106,6 +109,7 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 ```sh
 # step: hm37-source-identity
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
@@ -309,6 +313,7 @@ Migration `20260928000003` must have exactly one ledger row, and its corrected c
 ```sh
 # step: hm37-hm6-schema-helpers-precondition
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell, after runbook sections 1–3 and proof transfer; production checks are read only.
 (
   set -euo pipefail
@@ -361,6 +366,7 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
 ```sh
 # step: hm37-hm6-oauth-precondition
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell; all production checks are read only.
 (
   set -euo pipefail
@@ -486,6 +492,7 @@ resource ID, credential, Authorization header or Cookie header.
 ```sh
 # step: hm37-hm6-oauth-refusal-probe
 # readonly: probe
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell; every request must refuse.
 (
   set -euo pipefail
@@ -556,15 +563,101 @@ PY
 
 The MCP-hostname probe deliberately keeps Python urllib's actual default User-Agent because non-browser reachability is the claim for `mcp.commonswarm.com`. The gateway public bases use `User-Agent: commonswarm-release-probe/1.0`; loopback may keep the urllib default. Every evidence row records which rule applied. Redirects and HTML challenges fail. HezLead accepts Part B only from this release-directory, image, effective-flag and endpoint evidence together.
 
-After both parts pass, Anvil must also establish:
+After both parts pass, the required checks have executable owners:
 
-1. Previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
-2. Migration 02 has exactly one ledger row; its catalog and functional proofs pass.
-3. The applied migration-03 file hash matches this document; a version-only ledger row cannot prove which bytes were applied.
-4. Effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
-5. Migration 04 has ledger count zero and catalog result false **without SQL error**.
-6. Complete migration reconciliation yields only `20260928000004` pending.
-7. Actual stack runtime comparison, timers, existing window state and concurrent operator activity have an accepted disposition.
+1. `hm37-current-window-state` proves the previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
+2. `hm37-current-window-state` proves migration 02 has exactly one ledger row and that its catalog and functional proofs pass. `hm37-hm6-schema-helpers-precondition` separately proves the migration-03 prerequisite.
+3. `hm37-current-window-state` proves the applied migration-03 file hash matches this document; a version-only ledger row cannot prove which bytes were applied.
+4. `hm37-hm6-oauth-precondition` proves effective `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED` is not exactly `1`; `hm37-current-window-state` separately proves effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
+5. `hm37-current-window-state` proves migration 04 has ledger count zero and catalog result false **without SQL error**.
+6. `hm37-current-window-state` performs complete migration reconciliation and requires only `20260928000004` pending.
+7. `hm37-current-window-state` records actual stack runtime comparison, timers and exact active-window state. Concurrent-operator disposition is explicitly a HezLead decision recorded in `GO.txt`; the block requires that decision before it passes.
+
+```sh
+# step: hm37-current-window-state
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test -f "$PROOF_DIR/GO.txt"
+  grep -qFx 'CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead' "$PROOF_DIR/GO.txt"
+
+  EXPECTED_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  test "$(readlink -f /home/commonswarm/edge/current)" = "$EXPECTED_EDGE"
+  test "$(cat "$EXPECTED_EDGE/RELEASE_SHA")" = 72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  EDGE_CID="$(docker compose -p commonswarm-edge -f "$EXPECTED_EDGE/deploy/edge-runtime/compose.yaml" ps -q edge-runtime)"
+  test -n "$EDGE_CID"
+  test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$EDGE_CID")" = \
+    "$EXPECTED_EDGE/deploy/edge-runtime"
+  docker inspect --format '{{ range .Mounts }}{{ println .Source .Destination }}{{ end }}' "$EDGE_CID" \
+    | grep -qF "$EXPECTED_EDGE/deploy/edge-runtime/main /home/deno/main"
+  docker exec "$EDGE_CID" deno eval \
+    'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+
+  cat >"$APPLY_SQL" <<'SQL'
+\i /work/deploy/release-proofs/item-hm/20260928000002-catalog.sql
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations
+   WHERE version = '20260928000002') = 1
+  AND :'catalog_ok'::boolean;
+SQL
+  test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
+  cat >"$APPLY_SQL" <<'SQL'
+\i /work/deploy/release-proofs/item-hm/20260928000002-functional.sql
+SQL
+  test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
+  test "$(release_psql_ro -Atq --command \
+    "SELECT to_regclass('swarm_read.agent_presence') IS NOT NULL
+      AND to_regclass('swarm_read.agent_wake_path') IS NOT NULL
+      AND (SELECT count(*) = 2 FROM information_schema.columns
+           WHERE table_schema = 'swarm_read' AND table_name = 'agent_principals'
+             AND column_name IN ('transport', 'turn_only'));" )" = t
+
+  test "$(sha256sum "$NEW_STACK/supabase/migrations/20260928000003_hm_oauth_store.sql" | awk '{print $1}')" = \
+    e6f6944154b01e7f80a366058754639700c81279cfec4eaff6fe601a6ad99638
+  LEDGER_04="$(release_psql_ro -Atq --command \
+    "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")"
+  test "$LEDGER_04" = 0
+  CATALOG_04="$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-catalog.sql")"
+  test "$CATALOG_04" = f
+
+  find "$NEW_STACK/supabase/migrations" -maxdepth 1 -type f -name '*.sql' -print \
+    | LC_ALL=C sort >"$PROOF_DIR/hm37-all-migration-files.txt"
+  release_psql_ro -Atq --command \
+    'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' \
+    >"$PROOF_DIR/hm37-ledger-before.txt"
+  sed -E 's#.*/##; s/_.*//' "$PROOF_DIR/hm37-all-migration-files.txt" | LC_ALL=C sort \
+    | comm -23 - "$PROOF_DIR/hm37-ledger-before.txt" \
+    >"$PROOF_DIR/hm37-pending-before.txt"
+  test "$(cat "$PROOF_DIR/hm37-pending-before.txt")" = 20260928000004
+
+  for RUNTIME_PATH in compose.yaml postgres backup; do
+    diff -qr "$PREVIOUS_STACK/deploy/supabase-stack/$RUNTIME_PATH" \
+      "$NEW_STACK/deploy/supabase-stack/$RUNTIME_PATH"
+  done
+  systemctl is-active --quiet commonswarm-edge-recycle.timer
+  systemctl is-active --quiet commonswarm-postgres-backup.timer
+  systemctl is-active --quiet commonswarm-postgres-restore.timer
+  test -f "$PROOF_DIR/window.env"
+  printf '%s\n' \
+    "edge_release=$EXPECTED_EDGE" \
+    'edge_public_mcp_disabled=true' \
+    'migration_02_ledger_catalog_functional=true' \
+    'roster_transport_presence_wake=true' \
+    'migration_03_hash=true' \
+    "migration_04_ledger=$LEDGER_04" \
+    "migration_04_catalog=$CATALOG_04" \
+    'pending_versions=20260928000004' \
+    'stack_runtime_comparison=equal' \
+    'timers=active' \
+    'concurrent_operator_activity=accepted_by_HezLead' \
+    >"$PROOF_DIR/hm37-current-window-state.txt"
+)
+```
 
 Historical HM2 run 4 records migration 02 applied, edge health with memory `2147483648` and network `commonswarm-net`, active maintenance timers, released cswarm `0.1.80`, an observed delivery ACK and subsequent wake eligibility, and revoked temporary principals with zero active unexpired tokens. Recheck current state.
 
@@ -576,15 +669,40 @@ Historical HM2 run 4 records migration 02 applied, edge health with memory `2147
 | `KIND_LIST` | `edge stack` |
 | `MIGRATION_VERSIONS` | `20260928000004` only |
 | `FUNCTIONAL_VERSIONS` | `20260928000004` |
-| `H0_LEDGER_BACKFILL` | `no` |
-| `GUARDED_STACK_SWITCH` | `no`, contingent on actual runtime comparison |
-| `BACKUP_STATUS_PROOF` | `no`; the section 5 backup gate still applies |
+| `H0_LEDGER_BACKFILL` | `no`; skip `runbook-18`, `runbook-19` and `runbook-20` |
+| `GUARDED_STACK_SWITCH` | `no`; skip `runbook-48`, contingent on actual runtime comparison |
+| `BACKUP_STATUS_PROOF` | `no`; skip `runbook-54` and `runbook-55`; the section 5 backup gate still applies |
 | `API_CADDY_PAIR` | `no`; skip runbook steps `runbook-56` through `runbook-59` and their pair artifacts |
 | `MCP_CADDY_RELEASE` | `no`; skip every `runbook-mcp-caddy-*` step and artifact |
 | `CHANGED_FUNCTIONS` | `command mcp` |
 | `ROUTER_CHANGED` | `yes` |
 | `ADDITIONAL_REQUIRED_ENV_NAMES` | Empty |
 | Expected cron additions/removals | Both empty |
+
+The successful path uses this exact whole-block order after applying the input
+table and the runbook's switch-to-step mapping:
+
+```text
+hm37-source-identity runbook-02 runbook-04 1-upload-release-archive
+1-open-root-shell 1-apply-release-directories runbook-03 runbook-05
+runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
+runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
+hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
+hm37-current-window-state hm37-read-window-suffix
+hm37-hosted-human-session-input hm37-deno-install hm37-hosted-control-stage hm37-backup-gate
+runbook-23 runbook-24 runbook-25 runbook-26 runbook-27 runbook-28
+hm37-functional-section5 runbook-29 runbook-30 runbook-31 runbook-32
+runbook-33 runbook-34 hm37-public-boundary-reads hm37-public-boundaries
+runbook-35 hm37-hosted-open-ack-control hm37-validate-local-credential
+runbook-13 runbook-11 hm37-deno-remove runbook-60 runbook-61 runbook-12
+```
+
+The pre-COMMIT-POINT and S1–S5 rollback tail is
+`runbook-42`, `hm37-reserve-schema-rollback`, `runbook-13`, `runbook-11`,
+`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
+A post-COMMIT-POINT
+`control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`, `runbook-11`,
+`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
 
 Window start/end and positive integer `BACKUP_MAX_AGE_SECONDS` require HezLead’s approval and durable root-only recording. Their values are **not established**.
 
@@ -609,11 +727,11 @@ After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the
 | 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
 | 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
 | 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
-| 4 | Runbook database identity/session; inspect or pull the pinned psql image; prepare the human input; run `hm37-hosted-control-stage` and finish `deno cache` | Production target, pinned image identity, harness hashes, protected-file modes, and complete offline control cache |
+| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; prepare the human input; run `hm37-deno-install` and `hm37-hosted-control-stage`, then finish `deno cache` | Production target, pinned image identity, pinned Deno zip and installed-binary hashes, harness hashes, protected-file modes, and complete offline control cache |
 | 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later Deno/npm install, cache fill, Docker pull, or dependency fetch |
 | 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
 | 7 | Reach the named COMMIT POINT; run hosted/local controls and revocation | Static assertion classification, behavior and cleanup |
-| 8 | Timer restoration, transient cleanup, copy-back; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition |
+| 8 | Timer restoration, copy-back, `hm37-deno-remove`, transient cleanup; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition, Deno absent again, and the per-window Deno cache removed |
 
 The reviewed hosted-control artifact in section 9 is an **opening gate**, not work to invent after migration.
 
@@ -633,6 +751,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
 ```sh
 # step: hm37-read-window-suffix
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # The ssh subprocess reads state on the box as root.
 (
@@ -673,6 +792,7 @@ Wait for the existing backup service **before** reading status. Active, activati
 ```sh
 # step: hm37-backup-gate
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -698,11 +818,11 @@ Wait for the existing backup service **before** reading status. Active, activati
       *) false ;;
     esac
   done
+  test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
   python3 - /var/backups/commonswarm-postgres/status.json \
     "$BACKUP_MAX_AGE_SECONDS" >"$PROOF_DIR/hm37-backup-gate.txt" <<'PY'
 import datetime, json, sys
 data = json.load(open(sys.argv[1]))
-assert data.get("state") != "running"
 assert data.get("ok") is True
 assert data.get("database_bytes_verified") is True
 assert data.get("object_bytes_verified") is True
@@ -757,6 +877,7 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
 ```sh
 # step: hm37-functional-section5
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -864,6 +985,7 @@ repeat their Mac and box execution context so either can run alone.
 ```sh
 # step: hm37-public-boundary-reads
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # Its ssh subprocess runs only the gateway loopback read on the box as root.
 (
@@ -983,6 +1105,7 @@ PY
 ```sh
 # step: hm37-public-boundaries
 # readonly: probe
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # Its ssh subprocess runs only the gateway loopback probes on the box as root.
 (
@@ -1172,11 +1295,11 @@ The harness runs with `/usr/local/bin/deno` on the box, not with
 `/usr/local/bin/edge-runtime` in the edge container. The pinned edge image
 contains the embedded edge-runtime server binary but no standalone Deno CLI;
 the box Deno runs against the exact release tree while receiving the same edge
-environment. Before approval, Anvil proves that `/usr/local/bin/deno` is a
-regular root-owned executable, records its `deno --version`, and pre-caches the
-pinned npm graph into the control directory. No dependency install or network
-fetch is allowed after this opening gate. The harness does not edit the release
-tree.
+environment. Before approval, Anvil runs `hm37-hosted-control-stage`, which
+proves that `/usr/local/bin/deno` is a regular root-owned executable, records
+its `deno --version`, and pre-caches the pinned npm graph into the control
+directory. No dependency install or network fetch is allowed after this
+opening gate. The harness does not edit the release tree.
 
 Protected inputs are exactly:
 
@@ -1205,6 +1328,7 @@ the access token only in the private file.
 ```sh
 # step: hm37-hosted-human-session-input
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
 (
   set -euo pipefail
@@ -1253,9 +1377,123 @@ protected input without printing it, and pre-cache dependencies before the
 opening gate closes. `CONTROL_ROOT` is window state, not a release directory
 and not copied as evidence.
 
+The measured box baseline has no `/usr/local/bin/deno`. Install the reviewed
+runtime while network access is still permitted. The download may contact only
+the hard-coded GitHub URL and its measured
+`release-assets.githubusercontent.com` redirect. The later cache fill may
+contact only `registry.npmjs.org`.
+
+```sh
+# step: hm37-deno-install
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash before the opening gate closes.
+(
+  set -euo pipefail
+  umask 077
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  DENO_PATH=/usr/local/bin/deno
+  DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
+  DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
+  DOWNLOAD_ROOT="/run/commonswarm-deno-${WINDOW_ID}"
+  case "$DOWNLOAD_ROOT" in /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) false ;; esac
+  test "$(stat -c '%U:%G:%a' /usr/local/bin)" = root:root:755
+
+  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
+  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+    test -n "$RECORDED_DENO_SHA256"
+    test -f "$DENO_PATH"
+    test ! -L "$DENO_PATH"
+    test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
+    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
+    test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+    exit 0
+  fi
+
+  if [ -n "$RECORDED_DENO_SHA256" ]; then
+    case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#RECORDED_DENO_SHA256}" -eq 64
+  fi
+  test ! -e "$DOWNLOAD_ROOT"
+  install -d -m 0700 -o root -g root "$DOWNLOAD_ROOT"
+  cleanup_download() {
+    case "$DOWNLOAD_ROOT" in
+      /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+        find "$DOWNLOAD_ROOT" -xdev -depth -delete
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  trap cleanup_download EXIT
+  REDIRECT_HEADERS="$DOWNLOAD_ROOT/redirect.headers"
+  curl --fail --silent --show-error --head --proto '=https' --max-time 30 \
+    --dump-header "$REDIRECT_HEADERS" --output /dev/null "$DENO_URL"
+  test "$(grep -ic '^location:' "$REDIRECT_HEADERS")" -eq 1
+  REDIRECT_URL="$(awk 'BEGIN{IGNORECASE=1} /^location:/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' "$REDIRECT_HEADERS")"
+  case "$REDIRECT_URL" in https://release-assets.githubusercontent.com/*) ;; *) false ;; esac
+  EFFECTIVE_URL="$DOWNLOAD_ROOT/effective-url.txt"
+  curl --fail --silent --show-error --proto '=https' --max-time 120 \
+    --output "$DOWNLOAD_ROOT/deno.zip" --write-out '%{url_effective}\n' \
+    "$REDIRECT_URL" >"$EFFECTIVE_URL"
+  test "$(cat "$EFFECTIVE_URL")" = "$REDIRECT_URL"
+  test "$(sha256sum "$DOWNLOAD_ROOT/deno.zip" | awk '{print $1}')" = "$DENO_ZIP_SHA256"
+  python3 - "$DOWNLOAD_ROOT/deno.zip" "$DOWNLOAD_ROOT/deno" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import zipfile
+
+archive, output = sys.argv[1:]
+with zipfile.ZipFile(archive) as source:
+    assert source.namelist() == ["deno"]
+    info = source.getinfo("deno")
+    assert not stat.S_ISLNK(info.external_attr >> 16)
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(fd, "wb") as target, source.open(info) as binary:
+        shutil.copyfileobj(binary, target)
+        target.flush()
+        os.fsync(target.fileno())
+os.chmod(output, 0o755)
+PY
+  INSTALLED_SHA256="$(sha256sum "$DOWNLOAD_ROOT/deno" | awk '{print $1}')"
+  case "$INSTALLED_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#INSTALLED_SHA256}" -eq 64
+  if [ -n "$RECORDED_DENO_SHA256" ]; then
+    test "$INSTALLED_SHA256" = "$RECORDED_DENO_SHA256"
+  else
+    printf 'DENO_INSTALLED_BINARY_SHA256=%q\n' "$INSTALLED_SHA256" >>"$PROOF_DIR/window.env"
+  fi
+  python3 - "$DOWNLOAD_ROOT/deno" "$DENO_PATH" <<'PY'
+import os
+import shutil
+import sys
+
+source, target = sys.argv[1:]
+fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+with os.fdopen(fd, "wb") as output, open(source, "rb") as binary:
+    shutil.copyfileobj(binary, output)
+    output.flush()
+    os.fsync(output.fileno())
+os.chmod(target, 0o755)
+PY
+  test -f "$DENO_PATH"
+  test ! -L "$DENO_PATH"
+  test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
+  test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$INSTALLED_SHA256"
+  test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+  cleanup_download
+  trap - EXIT
+  test ! -e "$DOWNLOAD_ROOT"
+)
+```
+
 ```sh
 # step: hm37-hosted-control-stage
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
 (
   set -euo pipefail
@@ -1280,9 +1518,22 @@ and not copied as evidence.
   install -m 0600 "$STAGING_ROOT/human-session.json" "$CONTROL_ROOT/human-session.json"
   test "$(sha256sum "$HARNESS" | awk '{print $1}')" = dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
-  python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
+  OAUTH_CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && OAUTH_CIDS[${#OAUTH_CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-oauth \
+    --filter label=com.docker.compose.service=oauth)
+  test "${#OAUTH_CIDS[@]}" -eq 1
+  MCP_OAUTH_DATABASE_HOST_LINE="$(docker inspect --format \
+    '{{range .Config.Env}}{{if eq (index (split . "=") 0) "MCP_OAUTH_DATABASE_HOST"}}{{println .}}{{end}}{{end}}' \
+    "${OAUTH_CIDS[0]}")"
+  case "$MCP_OAUTH_DATABASE_HOST_LINE" in MCP_OAUTH_DATABASE_HOST=?*) ;; *) false ;; esac
+  MCP_OAUTH_DATABASE_HOST=${MCP_OAUTH_DATABASE_HOST_LINE#MCP_OAUTH_DATABASE_HOST=}
+  python3 - "$CONTROL_ROOT/oauth-database.json" "$MCP_OAUTH_DATABASE_HOST" <<'PY'
 import json, os, pathlib, sys
 out = pathlib.Path(sys.argv[1])
+host = sys.argv[2]
 credentials = json.loads(pathlib.Path(
     "/etc/commonswarm-oauth/database-credentials").read_text())
 service = {}
@@ -1291,7 +1542,7 @@ for line in pathlib.Path("/etc/commonswarm-oauth/service.env").read_text().split
         key, value = line.split("=", 1)
         service[key] = value
 document = {
-    "host": service["MCP_OAUTH_DATABASE_HOST"],
+    "host": host,
     "port": int(service.get("MCP_OAUTH_DATABASE_PORT", "5432")),
     "database": service["MCP_OAUTH_DATABASE_NAME"],
     "user": credentials["user"],
@@ -1307,7 +1558,7 @@ with os.fdopen(fd, "w") as handle:
 PY
   test "$(stat -c %a "$CONTROL_ROOT/human-session.json")" = 600
   test "$(stat -c %a "$CONTROL_ROOT/oauth-database.json")" = 600
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
     --config "$DENO_CONFIG" "$HARNESS" \
     "$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js" \
     "$RELEASE_ROOT/supabase/functions/command/index.ts" \
@@ -1327,6 +1578,7 @@ never copied.
 ```sh
 # step: hm37-hosted-open-ack-control
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
 (
   set -euo pipefail
@@ -1343,7 +1595,7 @@ never copied.
   set -a
   . /home/commonswarm/.env
   set +a
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -1365,6 +1617,7 @@ idempotent and still verifies complete revocation before returning zero.
 ```sh
 # step: hm37-hosted-control-cleanup-only
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
 (
   set -euo pipefail
@@ -1379,7 +1632,7 @@ idempotent and still verifies complete revocation before returning zero.
   set -a
   . /home/commonswarm/.env
   set +a
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -1391,6 +1644,62 @@ idempotent and still verifies complete revocation before returning zero.
     --cleanup-only "$JOURNAL" \
     >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
   chmod 0600 "$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+)
+```
+
+After copy-back on every successful close and every rollback/abort tail, remove
+the per-window Deno cache and return `/usr/local/bin/deno` to the measured absent
+baseline. An unknown or changed file is never removed.
+
+```sh
+# step: hm37-deno-remove
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after copy-back on close or rollback.
+(
+  set -euo pipefail
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  DENO_PATH=/usr/local/bin/deno
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
+  DENO_DIR="$CONTROL_ROOT/deno-cache"
+  case "$DENO_DIR" in
+    "/home/commonswarm/edge/controls/${SHA}-"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/deno-cache) ;;
+    *) false ;;
+  esac
+  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
+  if [ -z "$RECORDED_DENO_SHA256" ]; then
+    if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown file\n' \
+        "$DENO_PATH" >&2
+      exit 1
+    fi
+    if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
+      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown path\n' \
+        "$DENO_DIR" >&2
+      exit 1
+    fi
+    printf 'deno_remove=not-installed\n' >>"$PROOF_DIR/window.env"
+    exit 0
+  fi
+  case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#RECORDED_DENO_SHA256}" -eq 64
+  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+    test -f "$DENO_PATH"
+    test ! -L "$DENO_PATH"
+    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
+    rm -f -- "$DENO_PATH"
+  fi
+  test ! -e "$DENO_PATH"
+  test ! -L "$DENO_PATH"
+  if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
+    test -d "$DENO_DIR"
+    test ! -L "$DENO_DIR"
+    find "$DENO_DIR" -xdev -depth -delete
+  fi
+  test ! -e "$DENO_DIR"
+  printf 'DENO_REMOVED=1\n' >>"$PROOF_DIR/window.env"
 )
 ```
 
@@ -1459,6 +1768,7 @@ Use isolated mode-0700 directories and mode-0600 credential, connection and prof
 ```sh
 # step: hm37-validate-local-credential
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 (
   set -euo pipefail
@@ -1538,6 +1848,7 @@ The inverse below is verbatim from the hashed rollback file.
 ```sh
 # step: hm37-reserve-schema-rollback
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
@@ -1615,7 +1926,7 @@ A failed forward transaction does not automatically require destructive rollback
 
 ## 12. Evidence, cleanup and closure
 
-Create the runbook’s explicit copy-back manifest before apply. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
+Run `runbook-03` immediately after `1-apply-release-directories` and before any database, service, timer, symlink, or Caddy mutation. It creates the explicit copy-back manifest from the persisted `window.env`. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
 
 Add these exact item-relative paths without duplicating standard generated entries:
 
@@ -1631,6 +1942,10 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `hm37-hm6-oauth-runtime.txt`
 - `hm37-hm6-oauth-public-precondition.json`
 - `hm37-hm6-oauth-refusals.json`
+- `hm37-all-migration-files.txt`
+- `hm37-ledger-before.txt`
+- `hm37-pending-before.txt`
+- `hm37-current-window-state.txt`
 - `hm37-prerequisites.json`
 - `hm37-stack-runtime-review.txt`
 - `hm37-backup-gate.txt`

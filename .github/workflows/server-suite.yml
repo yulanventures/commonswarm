@@ -3,6 +3,7 @@
 # - suite server-repeat: repeats one selected local-stack server test to measure its failure rate;
 # - suite p1-cli: `npm run test:p1-cli`, whose n-db, supabase-stack and site-on-box files start containers;
 # - suite site: the site build, then `npm --prefix site test`, whose observer tests start a headless Chrome.
+# - suite box-dry-run: root-only whole-block box fixtures at the real production paths, protected by a refusal guard.
 #
 # Why it exists (HezLead rulings, 2026-09-26): the Mac mini runs no docker at all (any docker CLI call starts
 # OrbStack, which was stopped for memory) and no browser tests (each headless Chrome raises a Keychain dialog on the
@@ -34,6 +35,7 @@ on:
           - server-repeat
           - p1-cli
           - site
+          - box-dry-run
         default: server
       repeat_file:
         description: "Server test file to repeat"
@@ -81,6 +83,23 @@ jobs:
         with:
           deno-version: v2.x
       - run: npm ci
+      - name: Guard and run the box whole-block dry run
+        if: inputs.suite == 'box-dry-run'
+        env:
+          BOX_DRY_RUN: "1"
+          BOX_DRY_RUN_PART: box
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$CI" = true
+          sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
+            /bin/bash tests/box-dry-run/guard.sh
+          for user in commonswarm caddy ops; do
+            id -u "$user" >/dev/null 2>&1 || sudo useradd --no-create-home --shell /usr/sbin/nologin "$user"
+          done
+          set -o pipefail
+          sudo --preserve-env=BOX_DRY_RUN,BOX_DRY_RUN_PART,GITHUB_ACTIONS,CI \
+            "$(command -v npm)" run test:box-dry-run 2>&1 | tee box-dry-run.log
       - uses: supabase/setup-cli@v1
         if: inputs.suite == 'server'
         with:

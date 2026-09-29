@@ -1,0 +1,9 @@
+[
+  {"surface":"hm37-current-window-state, hm37-hm6-schema-helpers-precondition, hm37-functional-section5, runbook-17 through runbook-29, and hm37-reserve-schema-rollback","reason":"the psql adapter checks bind paths and evidence-shaped results but cannot establish PostgreSQL transaction, catalog, dependency, or rollback semantics"},
+  {"surface":"runbook-14 and every docker pull/image-inspect path","reason":"the docker adapter records calls and returns pinned evidence shapes but cannot establish registry bytes or a real container image ID"},
+  {"surface":"hm37-deno-install","reason":"the zip fixture proves checksum-before-extraction and guarded installation mechanics but cannot establish that the official GitHub asset has the independently pinned bytes"},
+  {"surface":"runbook-56 through runbook-59 and runbook-mcp-caddy-preflight through runbook-mcp-caddy-rollback","reason":"the caddy adapter cannot establish parsing against the installed Caddy build and live adapters"},
+  {"surface":"hm37-hosted-open-ack-control and hm37-hosted-control-cleanup-only","reason":"the Deno adapter cannot establish durable open/ACK state; the CI server-repeat control covers the real database round trip separately"},
+  {"surface":"hm37-hm6-oauth-precondition, hm37-hm6-oauth-refusal-probe, hm37-public-boundary-reads, hm37-public-boundaries, and site-05","reason":"recorded urllib/curl responses model status, media type, User-Agent handling, and bytes but cannot establish current Cloudflare policy or public routing"},
+  {"surface":"site-04 and the lane-8 real-Chrome controls after site-05","reason":"the ssh/deploy adapters cannot establish a real upload or switch, and the harness cannot establish the signed-in account, layout, console, or committed UI rereads"}
+]
