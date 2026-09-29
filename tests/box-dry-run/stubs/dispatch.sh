@@ -208,14 +208,14 @@ case "$name" in
     esac
     ;;
   deno)
-    if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = "${BOX_DRY_RUN_STEP:-}" ]; then
+    if [ -n "${BOX_DRY_RUN_FAIL_STEP:-}" ] && [ "${BOX_DRY_RUN_FAIL_STEP}" = "${BOX_DRY_RUN_STEP:-}" ]; then
       if [ "${BOX_DRY_RUN_STEP:-}" = hm37-hosted-open-ack-control ]; then
         journal="/home/commonswarm/edge/controls/${BOX_DRY_RUN_RELEASE_SHA:?release SHA required}-${BOX_DRY_RUN_WINDOW_ID:?window ID required}/journal/hm37-open-ack-010203.journal.json"
         mkdir -p "${journal%/*}"
         printf '%s\n' '{}' >"$journal"
         chmod 0600 "$journal"
       fi
-      printf 'injected dry-run failure: %s\n' "$BOX_DRY_RUN_STEP" >&2
+      printf 'injected dry-run failure: %s\n' "${BOX_DRY_RUN_STEP:-}" >&2
       exit 41
     fi
     case " $* " in

@@ -270,6 +270,7 @@ interface Fixture {
   supportRoot?: string;
   rootDirectories?: RootDirectoryFixture[];
   replacedRuntime?: { path: string; backup?: string };
+  replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
 }
 
 interface RootDirectoryFixture {
@@ -706,10 +707,19 @@ function prepareBoxFixture(state: string): Fixture {
     "/srv/commonswarm", "/srv/commonswarm/site", "/srv/commonswarm/site/releases",
   );
 
+  const originalUsrLocalBin = lstatSync("/usr/local/bin");
+  assert.equal(originalUsrLocalBin.isDirectory(), true, "/usr/local/bin must be a directory");
+  chownSync("/usr/local/bin", 0, 0);
+  chmodSync("/usr/local/bin", 0o755);
+
   return {
     temporary, cwd: process.cwd(), home: "/root", bin, log,
     prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
     replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
+    replacedDirectory: {
+      path: "/usr/local/bin", mode: originalUsrLocalBin.mode & 0o777,
+      uid: originalUsrLocalBin.uid, gid: originalUsrLocalBin.gid,
+    },
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -755,6 +765,10 @@ function cleanupBoxFixture(fixture: Fixture): void {
     if (fixture.replacedRuntime.backup && pathExists(fixture.replacedRuntime.backup)) {
       renameSync(fixture.replacedRuntime.backup, fixture.replacedRuntime.path);
     }
+  }
+  if (fixture.replacedDirectory) {
+    chownSync(fixture.replacedDirectory.path, fixture.replacedDirectory.uid, fixture.replacedDirectory.gid);
+    chmodSync(fixture.replacedDirectory.path, fixture.replacedDirectory.mode);
   }
   for (const directory of [...(fixture.rootDirectories ?? [])].reverse()) {
     if (directory.created && pathExists(directory.path)) rmdirSync(directory.path);
@@ -1251,10 +1265,11 @@ test("fixture image, repository-path, and environment-name values agree with rep
     readFileSync("tests/box-dry-run/stubs/dispatch.sh", "utf8"),
     readFileSync("tests/box-dry-run/python/sitecustomize.py", "utf8"),
   ].join("\n").replace(/\$\{[^}]+\}/g, "");
-  const tracked = spawnSync("rg", ["--files", "-g", "!tests/box-dry-run.test.ts", "-g", "!tests/box-dry-run/**"], { encoding: "utf8" });
-  assert.equal(tracked.status, 0, tracked.stderr);
+  const tracked = spawnSync("git", ["ls-files"], { encoding: "utf8" });
+  const trackedMessage = tracked.stderr || tracked.error?.message || "git ls-files failed";
+  assert.equal(tracked.status, 0, trackedMessage);
   const repositoryText = tracked.stdout.trim().split("\n")
-    .filter(Boolean)
+    .filter((file) => file !== "tests/box-dry-run.test.ts" && !file.startsWith("tests/box-dry-run/"))
     .map((file) => readFileSync(file, "utf8"))
     .join("\n") + readFileSync(MEASURED_FACTS_FILE, "utf8");
   const values = new Set<string>();
@@ -1275,8 +1290,13 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
 }, () => {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
+  const originalUsrLocalBin = lstatSync("/usr/local/bin");
   const fixture = prepareBoxFixture("s2");
   try {
+    const preparedUsrLocalBin = lstatSync("/usr/local/bin");
+    assert.equal(preparedUsrLocalBin.mode & 0o777, 0o755);
+    assert.equal(preparedUsrLocalBin.uid, 0);
+    assert.equal(preparedUsrLocalBin.gid, 0);
     for (const command of STUB_COMMANDS) {
       const stat = lstatSync(join(fixture.bin, command));
       assert.equal(stat.isFile(), true, `${command} is not a regular file`);
@@ -1318,6 +1338,10 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     assert.equal(pathExists(DENO_PATH), false);
   } finally {
     cleanupBoxFixture(fixture);
+    const restoredUsrLocalBin = lstatSync("/usr/local/bin");
+    assert.equal(restoredUsrLocalBin.mode & 0o777, originalUsrLocalBin.mode & 0o777);
+    assert.equal(restoredUsrLocalBin.uid, originalUsrLocalBin.uid);
+    assert.equal(restoredUsrLocalBin.gid, originalUsrLocalBin.gid);
   }
 });
 

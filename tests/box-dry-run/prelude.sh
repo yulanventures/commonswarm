@@ -29,8 +29,8 @@ git() {
 
 python3() {
   box_dry_run_record python3 "$@"
-  if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = "${BOX_DRY_RUN_STEP:-}" ]; then
-    printf 'injected dry-run failure: %s\n' "$BOX_DRY_RUN_STEP" >&2
+  if [ -n "${BOX_DRY_RUN_FAIL_STEP:-}" ] && [ "${BOX_DRY_RUN_FAIL_STEP}" = "${BOX_DRY_RUN_STEP:-}" ]; then
+    printf 'injected dry-run failure: %s\n' "${BOX_DRY_RUN_STEP:-}" >&2
     return 41
   fi
   if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ] && [ "${BOX_DRY_RUN_STEP:-}" = 1-apply-release-directories ]; then
