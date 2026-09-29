@@ -1,0 +1,300 @@
+{
+  "schema": 1,
+  "source": {
+    "repository": "https://github.com/yulanventures/commonswarm.git",
+    "commit": "dc407f4ec96ad248ee138389d7144f18466016ff",
+    "path": "tests/box-dry-run/fixtures/box-facts.json",
+    "brief_fact_count": 14,
+    "observed_fact_count": 15,
+    "count_note": "The exact source file contains 15 facts, including site-release, despite the brief saying 14. No source fact was omitted."
+  },
+  "constraints": {
+    "box_changes": "none",
+    "write_methods_sent": "none",
+    "docker_run_or_exec": "none",
+    "secret_or_environment_values_printed": "none",
+    "box_scratch": "M2 would use only validated /tmp scratch with guarded cleanup, but its missing cache prerequisite stopped before scratch creation."
+  },
+  "facts": [
+    {
+      "id": "M1",
+      "source_id": "deno-runtime",
+      "command": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c 'type=%F owner=%U group=%G mode=%a' /usr/local/bin/deno\n/usr/local/bin/deno --version\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:40Z",
+      "exit": 1,
+      "output": "stat: cannot statx '/usr/local/bin/deno': No such file or directory\n",
+      "agrees": "DIFFERS",
+      "note": "/usr/local/bin/deno does not exist, so the required regular root-owned 0755 Deno 2 executable is absent."
+    },
+    {
+      "id": "M2",
+      "source_id": "deno-window-cache",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\numask 077\nSHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\nRELEASE_ROOT=\"/home/commonswarm/edge/releases/$SHA\"\nmapfile -t ROOTS < <(find /home/commonswarm/edge/controls -mindepth 1 -maxdepth 1 -type d -name \"${SHA}-*\" -print | LC_ALL=C sort)\nprintf 'control_root_count=%s\\n' \"${#ROOTS[@]}\"\ntest \"${#ROOTS[@]}\" -eq 1\nCONTROL_ROOT=\"${ROOTS[0]}\"\nCACHE=\"$CONTROL_ROOT/deno-cache\"\nstat -c 'cache_type=%F owner=%U group=%G mode=%a' \"$CACHE\"\nprintf 'cache_files=%s\\n' \"$(find \"$CACHE\" -xdev -type f -printf . | wc -c)\"\nSCRATCH=\"$(mktemp -d /tmp/commonswarm-deno-cache-probe.XXXXXX)\"\ncase \"$SCRATCH\" in /tmp/commonswarm-deno-cache-probe.??????) ;; *) false ;; esac\ncleanup() {\n  case \"$SCRATCH\" in\n    /tmp/commonswarm-deno-cache-probe.??????) rm -rf -- \"$SCRATCH\" ;;\n    *) return 1 ;;\n  esac\n}\ntrap cleanup EXIT\ninstall -d -m 0700 \"$SCRATCH/deno-cache\"\ncp -a \"$CACHE/.\" \"$SCRATCH/deno-cache/\"\ncp \"$CONTROL_ROOT/hm37-open-ack-control.ts\" \"$SCRATCH/\"\ncp \"$CONTROL_ROOT/hm37-open-ack-deno.json\" \"$SCRATCH/\"\ncd \"$SCRATCH\"\nDENO_DIR=\"$SCRATCH/deno-cache\" /usr/local/bin/deno cache --cached-only --no-lock \\\n  --config \"$SCRATCH/hm37-open-ack-deno.json\" \\\n  \"$SCRATCH/hm37-open-ack-control.ts\" \\\n  \"$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js\" \\\n  \"$RELEASE_ROOT/supabase/functions/command/index.ts\" \\\n  \"$RELEASE_ROOT/supabase/functions/_shared/hosted-seat-auth.ts\" \\\n  \"$RELEASE_ROOT/supabase/functions/_shared/database-options.ts\"\nprintf 'offline_cache=PASS\\n'\ncd /\ncleanup\ntrap - EXIT\ntest ! -e \"$SCRATCH\"\nprintf 'scratch_removed=true\\n'\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:42Z",
+      "exit": 1,
+      "output": "find: \u2018/home/commonswarm/edge/controls\u2019: No such file or directory\ncontrol_root_count=0\n",
+      "agrees": "NOT MEASURED",
+      "note": "The controls directory is absent, so no per-window cache exists to copy into the guarded /tmp scratch directory; the required offline cached-only check was therefore impossible and no scratch directory was created."
+    },
+    {
+      "id": "M3",
+      "source_id": "host-accounts",
+      "command": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\ngetent passwd root commonswarm caddy ops\ngetent group root commonswarm caddy ops\nsudo -n -u commonswarm true\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:43Z",
+      "exit": 0,
+      "output": "root:x:0:0:root:/root:/bin/bash\ncommonswarm:x:1002:1002::/home/commonswarm:/bin/bash\ncaddy:x:999:987:Caddy web server:/var/lib/caddy:/usr/sbin/nologin\nops:x:1000:1000::/home/ops:/bin/bash\nroot:x:0:\ncommonswarm:x:1002:\ncaddy:x:987:\nops:x:1000:\n",
+      "agrees": "AGREES",
+      "note": "All four users and same-named groups exist, and non-interactive sudo to commonswarm succeeded."
+    },
+    {
+      "id": "M4",
+      "source_id": "command-runtimes",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nbash --version | sed -n '1p'\npython3 --version\ndocker version --format '{{.Client.Version}} {{.Server.Version}}'\ndocker compose version\nfor command_name in curl stat readlink sha256sum find grep sed tar; do\n  \"$command_name\" --version | sed -n '1p'\ndone\nawk -W version 2>&1 | sed -n '1p'\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:44Z",
+      "exit": 0,
+      "output": "GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)\nPython 3.12.3\n29.8.1 29.8.1\nDocker Compose version v5.5.1\ncurl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libidn2/2.3.7 libpsl/0.21.2 (+libidn2/2.3.7) libssh/0.10.6/openssl/zlib nghttp2/1.59.0 librtmp/2.3 OpenLDAP/2.6.10\nstat (GNU coreutils) 9.4\nreadlink (GNU coreutils) 9.4\nsha256sum (GNU coreutils) 9.4\nfind (GNU findutils) 4.9.0\ngrep (GNU grep) 3.11\nsed (GNU sed) 4.9\ntar (GNU tar) 1.35\nGNU Awk 5.2.1, API 3.2, PMA Avon 8-g1, (GNU MPFR 4.2.1, GNU MP 6.3.0)\n",
+      "agrees": "AGREES",
+      "note": "Bash 5.2, Python 3.12, Docker 29.8.1, Compose 5.5.1, curl, GNU coreutils/findutils/grep/sed/awk/tar are installed."
+    },
+    {
+      "id": "M5",
+      "source_id": "release-layout",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nSHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\nfor p in \\\n  /home/commonswarm/edge/current \\\n  /home/commonswarm/stack/current \\\n  /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20 \\\n  /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/RELEASE_SHA \\\n  /home/commonswarm/edge/releases/$SHA \\\n  /home/commonswarm/edge/releases/$SHA/RELEASE_SHA \\\n  /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f \\\n  /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f/RELEASE_SHA \\\n  /home/commonswarm/stack/releases/$SHA \\\n  /home/commonswarm/stack/releases/$SHA/RELEASE_SHA \\\n  /home/commonswarm/stack/release-proofs/$SHA \\\n  /home/commonswarm/stack/release-proofs/$SHA/window.env\ndo\n  if [ -e \"$p\" ] || [ -L \"$p\" ]; then\n    stat -c '%N type=%F owner=%U group=%G mode=%a' \"$p\"\n  else\n    printf '%s MISSING\\n' \"$p\"\n  fi\ndone\nfind /home/commonswarm/stack/release-proofs -mindepth 1 -maxdepth 1 -type d \\\n  -name \"${SHA}.closed-window-*\" -printf 'closed_proof=%p\\n' | LC_ALL=C sort\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:46Z",
+      "exit": 0,
+      "output": "'/home/commonswarm/edge/current' -> '/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20' type=symbolic link owner=root group=root mode=777\n'/home/commonswarm/stack/current' -> '/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f' type=symbolic link owner=root group=root mode=777\n'/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20' type=directory owner=commonswarm group=commonswarm mode=750\n'/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/RELEASE_SHA' type=regular file owner=commonswarm group=commonswarm mode=644\n'/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922' type=directory owner=commonswarm group=commonswarm mode=750\n'/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/RELEASE_SHA' type=regular file owner=commonswarm group=commonswarm mode=644\n'/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f' type=directory owner=commonswarm group=commonswarm mode=755\n'/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f/RELEASE_SHA' type=regular file owner=commonswarm group=commonswarm mode=644\n'/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922' type=directory owner=commonswarm group=commonswarm mode=755\n'/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/RELEASE_SHA' type=regular file owner=commonswarm group=commonswarm mode=644\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 MISSING\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env MISSING\nclosed_proof=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030\nclosed_proof=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020\n",
+      "agrees": "DIFFERS",
+      "note": "Current edge and stack point to 72c57e0d and ad964ed1 and both candidate release trees exist, but the active eb2a87ac proof directory and window.env are absent; two closed-window proof directories exist."
+    },
+    {
+      "id": "M6",
+      "source_id": "edge-environment",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport json\nimport pathlib\nimport stat\n\nenv_path = pathlib.Path('/home/commonswarm/.env')\nst = env_path.stat()\nsha = 'eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922'\nproof_root = pathlib.Path('/home/commonswarm/stack/release-proofs')\nproofs = []\nactive = proof_root / sha\nif active.is_dir():\n    proofs.append(active)\nproofs.extend(sorted(p for p in proof_root.glob(sha + '.closed-window-*') if p.is_dir()))\nassert proofs\ninventories = [json.loads((proof / 'required-edge-env.json').read_text()) for proof in proofs]\nassert all(inventory == inventories[0] for inventory in inventories[1:])\ninventory = inventories[0]\nvalues = {}\nfor raw in env_path.read_text().splitlines():\n    line = raw.strip()\n    if not line or line.startswith('#') or '=' not in line:\n        continue\n    if line.startswith('export '):\n        line = line[7:].lstrip()\n    name, value = line.split('=', 1)\n    name = name.strip()\n    value = value.strip()\n    if len(value) >= 2 and value[0] == value[-1] and value[0] in \"'\\\"\":\n        value = value[1:-1]\n    values[name] = value\nfor name in sorted(values):\n    print(name)\nhooks = {'SWARM_CMD_TEST_SLEEP_AFTER_STEP', 'SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP'}\nrequired = set(inventory['required'])\nalias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL'\nif hooks.intersection(values):\n    raise SystemExit(64)\nif alias not in required or not any(values.get(name) for name in alias.split('|')):\n    raise SystemExit(65)\nrequired.remove(alias)\nif not all(values.get(name) for name in required):\n    raise SystemExit(66)\nif values.get('SWARM_SELF_SERVE') != '1':\n    raise SystemExit(67)\nif not stat.S_ISREG(st.st_mode):\n    raise SystemExit(60)\nif stat.S_IMODE(st.st_mode) != 0o600:\n    raise SystemExit(62)\nif st.st_uid != 0:\n    raise SystemExit(61)\nPY\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:14:20Z",
+      "exit": 61,
+      "output": "ANON_KEY\nAPI_EXTERNAL_URL\nAPI_JWT_JWKS\nAPI_JWT_SECRET\nAPP_NAME\nAUTH_JWT_SECRET\nAWS_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY\nBACKUP_RO_PASSWORD\nCOMMONSWARM_EDGE_DB_PASSWORD\nDATABASE_URL\nDB_AFTER_CONNECT_QUERY\nDB_ENC_KEY\nDB_HOST\nDB_NAME\nDB_PASSWORD\nDB_PORT\nDB_SSL\nDB_SSL_CA_CERT\nDB_USER\nENABLE_IMAGE_TRANSFORMATION\nERL_AFLAGS\nFILE_SIZE_LIMIT\nGOTRUE_API_HOST\nGOTRUE_API_PORT\nGOTRUE_CORS_ALLOWED_HEADERS\nGOTRUE_DB_DATABASE_URL\nGOTRUE_DB_DRIVER\nGOTRUE_DISABLE_SIGNUP\nGOTRUE_EXTERNAL_EMAIL_ENABLED\nGOTRUE_EXTERNAL_GITHUB_CLIENT_ID\nGOTRUE_EXTERNAL_GITHUB_ENABLED\nGOTRUE_EXTERNAL_GITHUB_REDIRECT_URI\nGOTRUE_EXTERNAL_GITHUB_SECRET\nGOTRUE_EXTERNAL_GOOGLE_CLIENT_ID\nGOTRUE_EXTERNAL_GOOGLE_ENABLED\nGOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI\nGOTRUE_EXTERNAL_GOOGLE_SECRET\nGOTRUE_JWT_ADMIN_ROLES\nGOTRUE_JWT_AUD\nGOTRUE_JWT_DEFAULT_GROUP_NAME\nGOTRUE_JWT_EXP\nGOTRUE_JWT_SECRET\nGOTRUE_JWT_VALID_METHODS\nGOTRUE_MAILER_AUTOCONFIRM\nGOTRUE_MAILER_SECURE_EMAIL_CHANGE_ENABLED\nGOTRUE_SECURITY_REFRESH_TOKEN_REUSE_INTERVAL\nGOTRUE_SECURITY_REFRESH_TOKEN_ROTATION_ENABLED\nGOTRUE_SITE_URL\nGOTRUE_SMTP_ADMIN_EMAIL\nGOTRUE_SMTP_HOST\nGOTRUE_SMTP_PASS\nGOTRUE_SMTP_PORT\nGOTRUE_SMTP_SENDER_NAME\nGOTRUE_SMTP_USER\nGOTRUE_URI_ALLOW_LIST\nJWT_EXP\nJWT_JWKS\nJWT_SECRET\nMETRICS_JWT_SECRET\nNODE_EXTRA_CA_CERTS\nPGRST_ADMIN_SERVER_PORT\nPGRST_DB_ANON_ROLE\nPGRST_DB_EXTRA_SEARCH_PATH\nPGRST_DB_MAX_ROWS\nPGRST_DB_SCHEMAS\nPGRST_DB_URI\nPGRST_JWT_SECRET\nPORT\nPOSTGRES_DB\nPOSTGRES_HOST\nPOSTGRES_INITDB_ARGS\nPOSTGRES_PASSWORD\nPOSTGRES_PORT\nPOSTGRES_USER\nREGION\nRLIMIT_NOFILE\nRUN_JANITOR\nS3_PROTOCOL_ENABLED\nSECRET_KEY_BASE\nSEED_SELF_HOST\nSELF_HOST_TENANT_NAME\nSERVER_ADMIN_PORT\nSERVER_PORT\nSERVICE_KEY\nSIGNED_UPLOAD_URL_EXPIRATION_TIME\nSLOT_NAME_SUFFIX\nSTORAGE_BACKEND\nSTORAGE_S3_BUCKET\nSTORAGE_S3_ENDPOINT\nSTORAGE_S3_FORCE_PATH_STYLE\nSTORAGE_S3_REGION\nSUPABASE_ANON_KEY\nSUPABASE_DB_URL\nSUPABASE_JWKS\nSUPABASE_SERVICE_ROLE_KEY\nSUPABASE_URL\nSWARM_COMMAND_ALLOWED_ORIGINS\nSWARM_DATABASE_TLS_CA_B64\nSWARM_DATABASE_URL\nSWARM_SELF_SERVE\nTENANT_ID\nUPLOAD_FILE_SIZE_LIMIT\nUPLOAD_FILE_SIZE_LIMIT_STANDARD\n",
+      "agrees": "DIFFERS",
+      "note": "All exact-SHA required-name/nonempty checks, forbidden-hook checks, SWARM_SELF_SERVE=1 check, regular-file check and 0600 check passed internally. Exit 61 is the command's explicit code for owner uid not root; output contains names only."
+    },
+    {
+      "id": "M7",
+      "source_id": "oauth-protected-inputs",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c '%n type=%F owner=%U group=%G mode=%a size=%s' \\\n  /etc/commonswarm-oauth/database-credentials \\\n  /etc/commonswarm-oauth/service.env \\\n  /etc/ssl/yulan-internal-ca.pem\nawk -F= '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/{n=$1; sub(/^[[:space:]]*export[[:space:]]+/,\"\",n); gsub(/[[:space:]]/,\"\",n); print n}' \\\n  /etc/commonswarm-oauth/service.env | LC_ALL=C sort -u\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:49Z",
+      "exit": 0,
+      "output": "/etc/commonswarm-oauth/database-credentials type=regular file owner=root group=cs-oauth-080406 mode=640 size=118\n/etc/commonswarm-oauth/service.env type=regular file owner=root group=root mode=600 size=955\n/etc/ssl/yulan-internal-ca.pem type=regular file owner=root group=root mode=644 size=623\nMCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS\nMCP_OAUTH_ACTIVE_SIGNING_KID\nMCP_OAUTH_ALLOWED_ORIGINS\nMCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS\nMCP_OAUTH_DATABASE_NAME\nMCP_OAUTH_DATABASE_PORT\nMCP_OAUTH_GOTRUE_PROVIDER\nMCP_OAUTH_GOTRUE_URL\nMCP_OAUTH_ISSUER\nMCP_OAUTH_MAX_BODY_BYTES\nMCP_OAUTH_NATIVE_LOOPBACK_ENABLED\nMCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED\nMCP_OAUTH_PUBLIC_ORIGIN\nMCP_OAUTH_REFRESH_LIFETIME_SECONDS\nMCP_OAUTH_REQUEST_TIMEOUT_MS\nMCP_OAUTH_RESOURCE\nSUPABASE_ANON_KEY\nSUPABASE_URL\n",
+      "agrees": "DIFFERS",
+      "note": "Protected files exist with metadata only reported, but service.env does not contain MCP_OAUTH_DATABASE_HOST, which the plan indexes directly. Credential-file content was not opened, per the measurement rule."
+    },
+    {
+      "id": "M8",
+      "source_id": "migration-target",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c '%n type=%F owner=%U group=%G mode=%a size=%s' \\\n  /etc/commonswarm-release/target.env \\\n  /home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh\nawk -F= '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/{n=$1; sub(/^[[:space:]]*export[[:space:]]+/,\"\",n); gsub(/[[:space:]]/,\"\",n); print n}' \\\n  /etc/commonswarm-release/target.env | LC_ALL=C sort -u\ndocker image inspect --format '{{.Id}}' postgres:17.6-bookworm\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:50Z",
+      "exit": 1,
+      "output": "/etc/commonswarm-release/target.env type=regular file owner=root group=root mode=600 size=190\n/home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh type=regular file owner=commonswarm group=commonswarm mode=775 size=4963\nTARGET_DATABASE_URL\n\nError response from daemon: No such image: postgres:17.6-bookworm\n",
+      "agrees": "DIFFERS",
+      "note": "target.env and the helper exist and TARGET_DATABASE_URL is named, but postgres:17.6-bookworm is not present. Database reachability was not attempted because no docker run/exec was permitted."
+    },
+    {
+      "id": "M9",
+      "source_id": "backup-state",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nsystemctl show commonswarm-postgres-backup.service \\\n  -p LoadState -p ActiveState -p Result --no-pager\nstat -c 'type=%F owner=%U group=%G mode=%a' \\\n  /var/backups/commonswarm-postgres/status.json\npython3 - <<'PY'\nimport json\np = '/var/backups/commonswarm-postgres/status.json'\nd = json.load(open(p))\nrequired = {'database_bytes_verified', 'destination', 'object_bytes_verified', 'ok', 'state', 'verified_at'}\nprint('keys=' + ','.join(sorted(d)))\nprint('types=' + ','.join(f'{k}:{type(d[k]).__name__}' for k in sorted(d)))\nprint('required_keys_present=' + str(required <= d.keys()).lower())\nprint('destination_prefix_ok=' + str(isinstance(d.get('destination'), str) and d['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/')).lower())\nPY\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:52Z",
+      "exit": 0,
+      "output": "Result=success\nLoadState=loaded\nActiveState=inactive\ntype=regular file owner=root group=root mode=600\nkeys=database_bytes_verified,destination,format,host_snapshot_after,host_snapshot_before,immutable_bucket_lock,invocation_id,object_bytes_verified,objects,ok,physical_key_format,retention_days,retention_policy_observed_at,source_bucket,verified_at\ntypes=database_bytes_verified:bool,destination:str,format:str,host_snapshot_after:str,host_snapshot_before:str,immutable_bucket_lock:bool,invocation_id:str,object_bytes_verified:bool,objects:int,ok:bool,physical_key_format:str,retention_days:int,retention_policy_observed_at:str,source_bucket:str,verified_at:str\nrequired_keys_present=false\ndestination_prefix_ok=true\n",
+      "agrees": "DIFFERS",
+      "note": "The service is loaded/inactive with Result=success and the destination prefix matches, but status.json lacks the assumed state key."
+    },
+    {
+      "id": "M10",
+      "source_id": "maintenance-timers",
+      "command": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\nsystemctl show commonswarm-edge-recycle.timer commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer \\\n  -p Id -p LoadState -p ActiveState -p UnitFileState -p NextElapseUSecRealtime --no-pager\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:53Z",
+      "exit": 0,
+      "output": "NextElapseUSecRealtime=Tue 2026-09-29 09:30:00 UTC\nId=commonswarm-edge-recycle.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nNextElapseUSecRealtime=Wed 2026-09-30 03:47:32 UTC\nId=commonswarm-postgres-backup.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nNextElapseUSecRealtime=Sun 2026-10-04 04:49:04 UTC\nId=commonswarm-postgres-restore.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n",
+      "agrees": "AGREES",
+      "note": "The edge recycle, PostgreSQL backup and PostgreSQL restore timers are loaded, enabled and active."
+    },
+    {
+      "id": "M11",
+      "source_id": "edge-container",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\ndocker inspect --format 'health={{if .State.Health}}{{.State.Health.Status}}{{end}} memory={{.HostConfig.Memory}} network={{.HostConfig.NetworkMode}} workdir={{index .Config.Labels \"com.docker.compose.project.working_dir\"}} ports={{json .NetworkSettings.Ports}} mounts={{range .Mounts}}{{.Source}}:{{.Destination}};{{end}}' \\\n  commonswarm-edge-edge-runtime-1\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:55Z",
+      "exit": 0,
+      "output": "health=healthy memory=2147483648 network=commonswarm-net workdir=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime ports={\"9000/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"9000\"}]} mounts=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/src:/var/src;/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/supabase/functions:/home/deno/functions-source;/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/main:/home/deno/main;/var/lib/docker/volumes/commonswarm-edge_edge-runtime-cache/_data:/root/.cache/deno;/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/bootstrap.sh:/home/deno/deploy/bootstrap.sh;/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/h0-deno.json:/home/deno/deploy/h0-deno.json;\n",
+      "agrees": "AGREES",
+      "note": "The edge container is healthy with 2 GiB memory, commonswarm-net, loopback 127.0.0.1:9000, and all workdir/mount paths under edge 72c57e0d."
+    },
+    {
+      "id": "M12",
+      "source_id": "edge-loopback",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nss -ltn '( sport = :9000 )'\ncurl -fsS -H 'User-Agent: commonswarm-release-probe/1.0' http://127.0.0.1:9000/health\nprintf '\\n'\nfor item in \\\n  'h0 http://127.0.0.1:9000/functions/v1/h0/agent-doc/smoke' \\\n  'mcp http://127.0.0.1:9000/functions/v1/mcp'\ndo\n  label=${item%% *}\n  url=${item#* }\n  printf '%s\\n' \"$label\"\n  curl -sS --max-time 15 -o /dev/null -D - \\\n    -H 'User-Agent: commonswarm-release-probe/1.0' \"$url\" \\\n    | sed -n '1p;/^[Ss]erver:/p;/^[Cc][Ff]-[Rr]ay:/p;/^[Cc]ontent-[Tt]ype:/p'\ndone\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:56Z",
+      "exit": 0,
+      "output": "State  Recv-Q Send-Q Local Address:Port Peer Address:PortProcess\nLISTEN 0      4096       127.0.0.1:9000      0.0.0.0:*          \n{\"status\":\"ok\"}\nh0\nHTTP/1.1 200 OK\ncontent-type: application/json; charset=utf-8\nmcp\nHTTP/1.1 503 Service Unavailable\ncontent-type: application/json; charset=utf-8\n",
+      "agrees": "NOT MEASURED",
+      "note": "Loopback listen, health GET, H0 GET status and DARK MCP GET status were measured, but the source command's POST was refused because it uses a write method; the required POST refusal/body shape was not measured."
+    },
+    {
+      "id": "M13",
+      "source_id": "public-routing",
+      "command": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport json\nimport urllib.error\nimport urllib.request\n\nPROBE_UA = 'commonswarm-release-probe/1.0'\nrequests = [\n    ('edge-staging', 'https://edge-staging.commonswarm.com/functions/v1/h0/agent-doc/smoke', True),\n    ('api', 'https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke', True),\n    ('mcp', 'https://mcp.commonswarm.com/.well-known/openid-configuration', False),\n    ('site', 'https://commonswarm.com/app', True),\n]\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\nopener = urllib.request.build_opener(NoRedirect())\nfor label, url, explicit_ua in requests:\n    headers = {'User-Agent': PROBE_UA} if explicit_ua else {}\n    request = urllib.request.Request(url, headers=headers, method='GET')\n    try:\n        response = opener.open(request, timeout=30)\n    except urllib.error.HTTPError as error:\n        response = error\n    with response:\n        record = {\n            'label': label,\n            'url': url,\n            'method': 'GET',\n            'user_agent': PROBE_UA if explicit_ua else 'Python urllib default',\n            'status': response.code,\n            'server': response.headers.get('Server'),\n            'cf-ray': response.headers.get('CF-Ray'),\n            'content-type': response.headers.get('Content-Type'),\n        }\n    print(json.dumps(record, sort_keys=True, separators=(',', ':')))\nPY\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:11:58Z",
+      "exit": 0,
+      "output": "{\"cf-ray\":\"a4287d875fdbe158-PRG\",\"content-type\":\"application/json; charset=utf-8\",\"label\":\"edge-staging\",\"method\":\"GET\",\"server\":\"cloudflare\",\"status\":200,\"url\":\"https://edge-staging.commonswarm.com/functions/v1/h0/agent-doc/smoke\",\"user_agent\":\"commonswarm-release-probe/1.0\"}\n{\"cf-ray\":\"a4287d88cce5f32a-PRG\",\"content-type\":\"application/json; charset=utf-8\",\"label\":\"api\",\"method\":\"GET\",\"server\":\"cloudflare\",\"status\":200,\"url\":\"https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke\",\"user_agent\":\"commonswarm-release-probe/1.0\"}\n{\"cf-ray\":\"a4287d898e73e68c-PRG\",\"content-type\":\"application/json; charset=utf-8\",\"label\":\"mcp\",\"method\":\"GET\",\"server\":\"cloudflare\",\"status\":200,\"url\":\"https://mcp.commonswarm.com/.well-known/openid-configuration\",\"user_agent\":\"Python urllib default\"}\n{\"cf-ray\":\"a4287d8a4fa13516-PRG\",\"content-type\":\"text/html; charset=utf-8\",\"label\":\"site\",\"method\":\"GET\",\"server\":\"cloudflare\",\"status\":200,\"url\":\"https://commonswarm.com/app\",\"user_agent\":\"commonswarm-release-probe/1.0\"}\n",
+      "agrees": "AGREES",
+      "note": "Header-only GETs returned 200 with the expected JSON/HTML media types; API, edge-staging and site used commonswarm-release-probe/1.0, while MCP used Python urllib's default User-Agent."
+    },
+    {
+      "id": "M14",
+      "source_id": "proof-copyback",
+      "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport grp\nimport pathlib\nimport pwd\nimport stat\n\nsha = 'eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922'\nparent = pathlib.Path('/home/commonswarm/stack/release-proofs')\nactive = parent / sha\nprint('active_exists=' + str(active.exists()).lower())\nclosed = sorted(p for p in parent.glob(sha + '.closed-window-*') if p.is_dir())\nprint('closed_count=' + str(len(closed)))\nassert closed\n\ndef describe(path):\n    st = path.lstat()\n    if stat.S_ISREG(st.st_mode):\n        kind = 'regular file'\n    elif stat.S_ISDIR(st.st_mode):\n        kind = 'directory'\n    elif stat.S_ISLNK(st.st_mode):\n        kind = 'symbolic link'\n    else:\n        kind = 'other'\n    print(f'{path} type={kind} owner={pwd.getpwuid(st.st_uid).pw_name} group={grp.getgrgid(st.st_gid).gr_name} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\n    return st\n\nfor closed_path in closed:\n    root = closed_path.resolve(strict=True)\n    describe(root)\n    manifest = root / 'copy-back.list'\n    manifest_st = describe(manifest)\n    assert stat.S_ISREG(manifest_st.st_mode)\n    assert (manifest_st.st_uid, manifest_st.st_gid, stat.S_IMODE(manifest_st.st_mode)) == (0, 0, 0o600)\n    for raw in manifest.read_text().splitlines():\n        name = raw.strip()\n        if not name:\n            continue\n        rel = pathlib.PurePosixPath(name)\n        assert not rel.is_absolute() and '..' not in rel.parts\n        target = (root / rel).resolve(strict=True)\n        assert root in target.parents\n        st = describe(target)\n        assert stat.S_ISREG(st.st_mode)\n        assert (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) == (0, 0, 0o600)\n        assert st.st_size <= 10485760\nPY\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:14:22Z",
+      "exit": 1,
+      "output": "active_exists=false\nclosed_count=2\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030 type=directory owner=root group=root mode=700 size=4096\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/copy-back.list type=regular file owner=root group=root mode=600 size=1659\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/copy-back.list type=regular file owner=root group=root mode=600 size=1659\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/gate-evidence.txt type=regular file owner=root group=root mode=600 size=1005\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/box-archive.sha256 type=regular file owner=root group=root mode=600 size=95\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/window-principal-suffix.txt type=regular file owner=root group=root mode=600 size=31\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/edge.SHA256SUMS type=regular file owner=root group=root mode=600 size=413161\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/edge.release-dir-state.txt type=regular file owner=root group=root mode=600 size=26\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/edge-with-override.SHA256SUMS type=regular file owner=root group=root mode=600 size=413271\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/required-edge-env.json type=regular file owner=root group=root mode=600 size=705\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/edge-env-source-check.txt type=regular file owner=root group=root mode=600 size=223\n/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030/edge-probe-start.txt type=regular file owner=root group=root mode=644 size=21\nTraceback (most recent call last):\n  File \"<stdin>\", line 44, in <module>\nAssertionError\n",
+      "agrees": "DIFFERS",
+      "note": "The active proof path is closed into two exact-name window directories. The first manifest includes edge-probe-start.txt at mode 0644, contradicting the assumed root:root:0600 policy for every required output."
+    },
+    {
+      "id": "M15",
+      "source_id": "site-release",
+      "command": "ssh ops@100.115.66.74 'sudo -n -u commonswarm /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport pathlib\nimport re\nimport stat\n\nsite_root = pathlib.Path('/srv/commonswarm/site')\nrelease = (site_root / 'current').resolve(strict=True)\nprint('release=' + release.name)\nparent_ok = release.parent == site_root / 'releases'\nidentity_ok = bool(re.fullmatch(r'\\d{8}T\\d{6}Z-8b8989f2b29e-[0-9a-f]{16}', release.name))\nprint('release_parent_ok=' + str(parent_ok).lower())\nprint('expected_identity_ok=' + str(identity_ok).lower())\nfor path in (release / 'app/index.html', release / 'download/index.html'):\n    st = path.stat()\n    assert stat.S_ISREG(st.st_mode)\n    path.read_bytes()\n    print(f'{path} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\napp = (release / 'app/index.html').read_bytes()\ndownload = (release / 'download/index.html').read_bytes()\nconnected_marker = b'data-connected-apps-open' in app\nversion_marker = b'0.1.80' in download\nprint('connected_apps_marker=' + str(connected_marker).lower())\nprint('version_0.1.80_marker=' + str(version_marker).lower())\nassets = sorted(set(re.findall(rb'(?:src|href)=\"(/_astro/[^\"]+\\.(?:js|css))\"', app)))\nfor item in assets:\n    path = (release / item.decode().lstrip('/')).resolve(strict=True)\n    assert release in path.parents\n    st = path.stat()\n    assert stat.S_ISREG(st.st_mode)\n    path.read_bytes()\n    print(f'{path} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\nprint('asset_count=' + str(len(assets)))\nif not (parent_ok and identity_ok and connected_marker and version_marker and assets):\n    raise SystemExit(1)\nPY\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:14:23Z",
+      "exit": 1,
+      "output": "release=20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e\nrelease_parent_ok=true\nexpected_identity_ok=false\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/app/index.html mode=644 size=44845\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/download/index.html mode=644 size=56835\nconnected_apps_marker=false\nversion_0.1.80_marker=true\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/AgentConnect.astro_astro_type_script_index_0_lang.DvW9amfB.js mode=644 size=23262\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/Base.CU6LT-wJ.css mode=644 size=45219\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/LiveDashboard.astro_astro_type_script_index_0_lang.DzjbMegA.js mode=644 size=147444\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/ProviderButtons.CN7eqX0J.css mode=644 size=7815\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/app.D6w8ZHvX.css mode=644 size=88406\nasset_count=5\n",
+      "agrees": "DIFFERS",
+      "note": "The live site release is 20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e, not the expected HM8 8b8989f2b29e identity; the connected-apps marker is absent. App/download and five referenced assets are readable and the 0.1.80 marker is present."
+    }
+  ],
+  "command_review": [
+    {
+      "id": "M1",
+      "source_id": "deno-runtime",
+      "decision": "approved",
+      "reason": "Approved as written; execution added only strict-shell and SSH wrappers.",
+      "before": "stat -c 'type=%F owner=%U group=%G mode=%a' /usr/local/bin/deno && /usr/local/bin/deno --version",
+      "after": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c 'type=%F owner=%U group=%G mode=%a' /usr/local/bin/deno\n/usr/local/bin/deno --version\nREMOTE"
+    },
+    {
+      "id": "M2",
+      "source_id": "deno-window-cache",
+      "decision": "changed",
+      "reason": "Changed: removed window.env sourcing and replaced the count-only probe with a --cached-only Deno cache check confined to a validated mktemp directory with guarded rm cleanup. The prerequisite cache was absent, so the check stopped before creating scratch.",
+      "before": "sudo -n -i bash -c '. /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env; d=/home/commonswarm/edge/controls/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-${WINDOW_ID}/deno-cache; stat -c \"type=%F owner=%U group=%G mode=%a\" \"$d\"; find \"$d\" -xdev -type f -printf . | wc -c'",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\numask 077\nSHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\nRELEASE_ROOT=\"/home/commonswarm/edge/releases/$SHA\"\nmapfile -t ROOTS < <(find /home/commonswarm/edge/controls -mindepth 1 -maxdepth 1 -type d -name \"${SHA}-*\" -print | LC_ALL=C sort)\nprintf 'control_root_count=%s\\n' \"${#ROOTS[@]}\"\ntest \"${#ROOTS[@]}\" -eq 1\nCONTROL_ROOT=\"${ROOTS[0]}\"\nCACHE=\"$CONTROL_ROOT/deno-cache\"\nstat -c 'cache_type=%F owner=%U group=%G mode=%a' \"$CACHE\"\nprintf 'cache_files=%s\\n' \"$(find \"$CACHE\" -xdev -type f -printf . | wc -c)\"\nSCRATCH=\"$(mktemp -d /tmp/commonswarm-deno-cache-probe.XXXXXX)\"\ncase \"$SCRATCH\" in /tmp/commonswarm-deno-cache-probe.??????) ;; *) false ;; esac\ncleanup() {\n  case \"$SCRATCH\" in\n    /tmp/commonswarm-deno-cache-probe.??????) rm -rf -- \"$SCRATCH\" ;;\n    *) return 1 ;;\n  esac\n}\ntrap cleanup EXIT\ninstall -d -m 0700 \"$SCRATCH/deno-cache\"\ncp -a \"$CACHE/.\" \"$SCRATCH/deno-cache/\"\ncp \"$CONTROL_ROOT/hm37-open-ack-control.ts\" \"$SCRATCH/\"\ncp \"$CONTROL_ROOT/hm37-open-ack-deno.json\" \"$SCRATCH/\"\ncd \"$SCRATCH\"\nDENO_DIR=\"$SCRATCH/deno-cache\" /usr/local/bin/deno cache --cached-only --no-lock \\\n  --config \"$SCRATCH/hm37-open-ack-deno.json\" \\\n  \"$SCRATCH/hm37-open-ack-control.ts\" \\\n  \"$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js\" \\\n  \"$RELEASE_ROOT/supabase/functions/command/index.ts\" \\\n  \"$RELEASE_ROOT/supabase/functions/_shared/hosted-seat-auth.ts\" \\\n  \"$RELEASE_ROOT/supabase/functions/_shared/database-options.ts\"\nprintf 'offline_cache=PASS\\n'\ncd /\ncleanup\ntrap - EXIT\ntest ! -e \"$SCRATCH\"\nprintf 'scratch_removed=true\\n'\nREMOTE"
+    },
+    {
+      "id": "M3",
+      "source_id": "host-accounts",
+      "decision": "approved",
+      "reason": "Approved as written; execution added only strict-shell and SSH wrappers.",
+      "before": "getent passwd root commonswarm caddy ops && getent group root commonswarm caddy ops && sudo -n -u commonswarm true",
+      "after": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\ngetent passwd root commonswarm caddy ops\ngetent group root commonswarm caddy ops\nsudo -n -u commonswarm true\nREMOTE"
+    },
+    {
+      "id": "M4",
+      "source_id": "command-runtimes",
+      "decision": "changed",
+      "reason": "Changed: ran Docker reads under sudo and added the omitted find, grep, sed and awk version checks.",
+      "before": "bash --version | head -1; python3 --version; docker version --format '{{.Client.Version}} {{.Server.Version}}'; docker compose version; curl --version | head -1; stat --version | head -1; readlink --version | head -1; sha256sum --version | head -1; tar --version | head -1",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nbash --version | sed -n '1p'\npython3 --version\ndocker version --format '{{.Client.Version}} {{.Server.Version}}'\ndocker compose version\nfor command_name in curl stat readlink sha256sum find grep sed tar; do\n  \"$command_name\" --version | sed -n '1p'\ndone\nawk -W version 2>&1 | sed -n '1p'\nREMOTE"
+    },
+    {
+      "id": "M5",
+      "source_id": "release-layout",
+      "decision": "changed",
+      "reason": "Changed: added RELEASE_SHA files, window.env, missing-path reporting and closed-proof enumeration so the complete layout claim is measured.",
+      "before": "for p in /home/commonswarm/edge/current /home/commonswarm/stack/current /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20 /home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f /home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922; do stat -c '%N type=%F owner=%U group=%G mode=%a' \"$p\"; done",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nSHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\nfor p in \\\n  /home/commonswarm/edge/current \\\n  /home/commonswarm/stack/current \\\n  /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20 \\\n  /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/RELEASE_SHA \\\n  /home/commonswarm/edge/releases/$SHA \\\n  /home/commonswarm/edge/releases/$SHA/RELEASE_SHA \\\n  /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f \\\n  /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f/RELEASE_SHA \\\n  /home/commonswarm/stack/releases/$SHA \\\n  /home/commonswarm/stack/releases/$SHA/RELEASE_SHA \\\n  /home/commonswarm/stack/release-proofs/$SHA \\\n  /home/commonswarm/stack/release-proofs/$SHA/window.env\ndo\n  if [ -e \"$p\" ] || [ -L \"$p\" ]; then\n    stat -c '%N type=%F owner=%U group=%G mode=%a' \"$p\"\n  else\n    printf '%s MISSING\\n' \"$p\"\n  fi\ndone\nfind /home/commonswarm/stack/release-proofs -mindepth 1 -maxdepth 1 -type d \\\n  -name \"${SHA}.closed-window-*\" -printf 'closed_proof=%p\\n' | LC_ALL=C sort\nREMOTE"
+    },
+    {
+      "id": "M6",
+      "source_id": "edge-environment",
+      "decision": "changed",
+      "reason": "Changed: ran under sudo, printed assignment names only, validated exact-SHA requirements and values internally, and used coded exits without printing any value.",
+      "before": "stat -c 'type=%F owner=%U group=%G mode=%a' /home/commonswarm/.env; awk -F= '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/{n=$1; sub(/^[[:space:]]*export[[:space:]]+/,\"\",n); gsub(/[[:space:]]/,\"\",n); print n}' /home/commonswarm/.env | LC_ALL=C sort -u",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport json\nimport pathlib\nimport stat\n\nenv_path = pathlib.Path('/home/commonswarm/.env')\nst = env_path.stat()\nsha = 'eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922'\nproof_root = pathlib.Path('/home/commonswarm/stack/release-proofs')\nproofs = []\nactive = proof_root / sha\nif active.is_dir():\n    proofs.append(active)\nproofs.extend(sorted(p for p in proof_root.glob(sha + '.closed-window-*') if p.is_dir()))\nassert proofs\ninventories = [json.loads((proof / 'required-edge-env.json').read_text()) for proof in proofs]\nassert all(inventory == inventories[0] for inventory in inventories[1:])\ninventory = inventories[0]\nvalues = {}\nfor raw in env_path.read_text().splitlines():\n    line = raw.strip()\n    if not line or line.startswith('#') or '=' not in line:\n        continue\n    if line.startswith('export '):\n        line = line[7:].lstrip()\n    name, value = line.split('=', 1)\n    name = name.strip()\n    value = value.strip()\n    if len(value) >= 2 and value[0] == value[-1] and value[0] in \"'\\\"\":\n        value = value[1:-1]\n    values[name] = value\nfor name in sorted(values):\n    print(name)\nhooks = {'SWARM_CMD_TEST_SLEEP_AFTER_STEP', 'SWARM_CMD_TEST_ROLLBACK_BEFORE_STEP'}\nrequired = set(inventory['required'])\nalias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL'\nif hooks.intersection(values):\n    raise SystemExit(64)\nif alias not in required or not any(values.get(name) for name in alias.split('|')):\n    raise SystemExit(65)\nrequired.remove(alias)\nif not all(values.get(name) for name in required):\n    raise SystemExit(66)\nif values.get('SWARM_SELF_SERVE') != '1':\n    raise SystemExit(67)\nif not stat.S_ISREG(st.st_mode):\n    raise SystemExit(60)\nif stat.S_IMODE(st.st_mode) != 0o600:\n    raise SystemExit(62)\nif st.st_uid != 0:\n    raise SystemExit(61)\nPY\nREMOTE"
+    },
+    {
+      "id": "M7",
+      "source_id": "oauth-protected-inputs",
+      "decision": "refused_and_replaced",
+      "reason": "Refused the credential-content parse. Replacement reports credential/CA metadata and service-env names only; it never opens database-credentials or the CA content.",
+      "before": "stat -c '%n type=%F owner=%U group=%G mode=%a' /etc/commonswarm-oauth/database-credentials /etc/commonswarm-oauth/service.env /etc/ssl/yulan-internal-ca.pem; python3 - <<'PY'\nimport json, pathlib\nprint('database-credential-names=' + ','.join(sorted(json.loads(pathlib.Path('/etc/commonswarm-oauth/database-credentials').read_text()).keys())))\nprint('service-env-names=' + ','.join(sorted(line.split('=',1)[0] for line in pathlib.Path('/etc/commonswarm-oauth/service.env').read_text().splitlines() if line and not line.lstrip().startswith('#') and '=' in line)))\nPY",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c '%n type=%F owner=%U group=%G mode=%a size=%s' \\\n  /etc/commonswarm-oauth/database-credentials \\\n  /etc/commonswarm-oauth/service.env \\\n  /etc/ssl/yulan-internal-ca.pem\nawk -F= '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/{n=$1; sub(/^[[:space:]]*export[[:space:]]+/,\"\",n); gsub(/[[:space:]]/,\"\",n); print n}' \\\n  /etc/commonswarm-oauth/service.env | LC_ALL=C sort -u\nREMOTE"
+    },
+    {
+      "id": "M8",
+      "source_id": "migration-target",
+      "decision": "changed",
+      "reason": "Changed: added sudo needed for protected metadata and Docker inspection. No docker run/exec or database connection was attempted.",
+      "before": "stat -c '%n type=%F owner=%U group=%G mode=%a' /etc/commonswarm-release/target.env /home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh; awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' /etc/commonswarm-release/target.env; docker image inspect --format '{{.Id}}' postgres:17.6-bookworm",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nstat -c '%n type=%F owner=%U group=%G mode=%a size=%s' \\\n  /etc/commonswarm-release/target.env \\\n  /home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh\nawk -F= '/^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/{n=$1; sub(/^[[:space:]]*export[[:space:]]+/,\"\",n); gsub(/[[:space:]]/,\"\",n); print n}' \\\n  /etc/commonswarm-release/target.env | LC_ALL=C sort -u\ndocker image inspect --format '{{.Id}}' postgres:17.6-bookworm\nREMOTE"
+    },
+    {
+      "id": "M9",
+      "source_id": "backup-state",
+      "decision": "changed",
+      "reason": "Changed: added required-key and destination-prefix booleans without printing the destination value.",
+      "before": "systemctl show commonswarm-postgres-backup.service -p LoadState -p ActiveState -p Result --no-pager; stat -c 'type=%F owner=%U group=%G mode=%a' /var/backups/commonswarm-postgres/status.json; python3 - <<'PY'\nimport json\np='/var/backups/commonswarm-postgres/status.json'\nd=json.load(open(p))\nprint('keys=' + ','.join(sorted(d)))\nprint('types=' + ','.join(f'{k}:{type(d[k]).__name__}' for k in sorted(d)))\nPY",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nsystemctl show commonswarm-postgres-backup.service \\\n  -p LoadState -p ActiveState -p Result --no-pager\nstat -c 'type=%F owner=%U group=%G mode=%a' \\\n  /var/backups/commonswarm-postgres/status.json\npython3 - <<'PY'\nimport json\np = '/var/backups/commonswarm-postgres/status.json'\nd = json.load(open(p))\nrequired = {'database_bytes_verified', 'destination', 'object_bytes_verified', 'ok', 'state', 'verified_at'}\nprint('keys=' + ','.join(sorted(d)))\nprint('types=' + ','.join(f'{k}:{type(d[k]).__name__}' for k in sorted(d)))\nprint('required_keys_present=' + str(required <= d.keys()).lower())\nprint('destination_prefix_ok=' + str(isinstance(d.get('destination'), str) and d['destination'].startswith('r2:yulan-vps-1-backups/000-commonswarm-postgres/')).lower())\nPY\nREMOTE"
+    },
+    {
+      "id": "M10",
+      "source_id": "maintenance-timers",
+      "decision": "approved",
+      "reason": "Approved as written; execution added only strict-shell and SSH wrappers.",
+      "before": "systemctl show commonswarm-edge-recycle.timer commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer -p Id -p LoadState -p ActiveState -p UnitFileState -p NextElapseUSecRealtime --no-pager",
+      "after": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\nsystemctl show commonswarm-edge-recycle.timer commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer \\\n  -p Id -p LoadState -p ActiveState -p UnitFileState -p NextElapseUSecRealtime --no-pager\nREMOTE"
+    },
+    {
+      "id": "M11",
+      "source_id": "edge-container",
+      "decision": "changed",
+      "reason": "Changed: added sudo and selected port bindings; inspect remains limited to non-secret fields.",
+      "before": "docker inspect --format 'health={{if .State.Health}}{{.State.Health.Status}}{{end}} memory={{.HostConfig.Memory}} network={{.HostConfig.NetworkMode}} workdir={{index .Config.Labels \"com.docker.compose.project.working_dir\"}} mounts={{range .Mounts}}{{.Source}}:{{.Destination}};{{end}}' commonswarm-edge-edge-runtime-1",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\ndocker inspect --format 'health={{if .State.Health}}{{.State.Health.Status}}{{end}} memory={{.HostConfig.Memory}} network={{.HostConfig.NetworkMode}} workdir={{index .Config.Labels \"com.docker.compose.project.working_dir\"}} ports={{json .NetworkSettings.Ports}} mounts={{range .Mounts}}{{.Source}}:{{.Destination}};{{end}}' \\\n  commonswarm-edge-edge-runtime-1\nREMOTE"
+    },
+    {
+      "id": "M12",
+      "source_id": "edge-loopback",
+      "decision": "refused_and_replaced",
+      "reason": "Refused the --data-binary POST because it uses a write method. Replacement uses read-only GETs and prints only health or selected headers.",
+      "before": "ss -ltn '( sport = :9000 )'; curl -fsS http://127.0.0.1:9000/health; curl -sS -o /dev/null -w 'h0-note-status=%{http_code}\\n' -H 'content-type: application/json' --data-binary '{\"body\":\"release inventory probe\"}' http://127.0.0.1:9000/functions/v1/h0/note",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nss -ltn '( sport = :9000 )'\ncurl -fsS -H 'User-Agent: commonswarm-release-probe/1.0' http://127.0.0.1:9000/health\nprintf '\\n'\nfor item in \\\n  'h0 http://127.0.0.1:9000/functions/v1/h0/agent-doc/smoke' \\\n  'mcp http://127.0.0.1:9000/functions/v1/mcp'\ndo\n  label=${item%% *}\n  url=${item#* }\n  printf '%s\\n' \"$label\"\n  curl -sS --max-time 15 -o /dev/null -D - \\\n    -H 'User-Agent: commonswarm-release-probe/1.0' \"$url\" \\\n    | sed -n '1p;/^[Ss]erver:/p;/^[Cc][Ff]-[Rr]ay:/p;/^[Cc]ontent-[Tt]ype:/p'\ndone\nREMOTE"
+    },
+    {
+      "id": "M13",
+      "source_id": "public-routing",
+      "decision": "changed",
+      "reason": "Changed: the original incorrectly sent the probe User-Agent to MCP. Replacement uses header-only GETs, the required probe UA for edge-staging/API/site, and Python urllib's default UA for MCP.",
+      "before": "for u in https://edge-staging.commonswarm.com/functions/v1/h0/agent-doc/smoke https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke https://mcp.commonswarm.com/.well-known/openid-configuration https://commonswarm.com/app; do curl -sS -o /dev/null -D - -H 'User-Agent: commonswarm-release-probe/1.0' \"$u\" | sed -n '1p;/^[Ss]erver:/p;/^[Cc][Ff]-[Rr]ay:/p;/^[Cc]ontent-[Tt]ype:/p'; done",
+      "after": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport json\nimport urllib.error\nimport urllib.request\n\nPROBE_UA = 'commonswarm-release-probe/1.0'\nrequests = [\n    ('edge-staging', 'https://edge-staging.commonswarm.com/functions/v1/h0/agent-doc/smoke', True),\n    ('api', 'https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke', True),\n    ('mcp', 'https://mcp.commonswarm.com/.well-known/openid-configuration', False),\n    ('site', 'https://commonswarm.com/app', True),\n]\nclass NoRedirect(urllib.request.HTTPRedirectHandler):\n    def redirect_request(self, req, fp, code, msg, headers, newurl):\n        return None\nopener = urllib.request.build_opener(NoRedirect())\nfor label, url, explicit_ua in requests:\n    headers = {'User-Agent': PROBE_UA} if explicit_ua else {}\n    request = urllib.request.Request(url, headers=headers, method='GET')\n    try:\n        response = opener.open(request, timeout=30)\n    except urllib.error.HTTPError as error:\n        response = error\n    with response:\n        record = {\n            'label': label,\n            'url': url,\n            'method': 'GET',\n            'user_agent': PROBE_UA if explicit_ua else 'Python urllib default',\n            'status': response.code,\n            'server': response.headers.get('Server'),\n            'cf-ray': response.headers.get('CF-Ray'),\n            'content-type': response.headers.get('Content-Type'),\n        }\n    print(json.dumps(record, sort_keys=True, separators=(',', ':')))\nPY\nREMOTE"
+    },
+    {
+      "id": "M14",
+      "source_id": "proof-copyback",
+      "decision": "changed",
+      "reason": "Changed: removed unnecessary window.env sourcing and validates only bounded manifest paths in exact closed proof directories; no file content beyond manifest filenames is printed.",
+      "before": "sudo -n -i bash -c '. /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env; p=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922; stat -c \"%n type=%F owner=%U group=%G mode=%a size=%s\" \"$p\" \"$p/copy-back.list\"; while IFS= read -r f; do stat -c \"%n type=%F owner=%U group=%G mode=%a size=%s\" \"$p/$f\"; done <\"$p/copy-back.list\"'",
+      "after": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport grp\nimport pathlib\nimport pwd\nimport stat\n\nsha = 'eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922'\nparent = pathlib.Path('/home/commonswarm/stack/release-proofs')\nactive = parent / sha\nprint('active_exists=' + str(active.exists()).lower())\nclosed = sorted(p for p in parent.glob(sha + '.closed-window-*') if p.is_dir())\nprint('closed_count=' + str(len(closed)))\nassert closed\n\ndef describe(path):\n    st = path.lstat()\n    if stat.S_ISREG(st.st_mode):\n        kind = 'regular file'\n    elif stat.S_ISDIR(st.st_mode):\n        kind = 'directory'\n    elif stat.S_ISLNK(st.st_mode):\n        kind = 'symbolic link'\n    else:\n        kind = 'other'\n    print(f'{path} type={kind} owner={pwd.getpwuid(st.st_uid).pw_name} group={grp.getgrgid(st.st_gid).gr_name} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\n    return st\n\nfor closed_path in closed:\n    root = closed_path.resolve(strict=True)\n    describe(root)\n    manifest = root / 'copy-back.list'\n    manifest_st = describe(manifest)\n    assert stat.S_ISREG(manifest_st.st_mode)\n    assert (manifest_st.st_uid, manifest_st.st_gid, stat.S_IMODE(manifest_st.st_mode)) == (0, 0, 0o600)\n    for raw in manifest.read_text().splitlines():\n        name = raw.strip()\n        if not name:\n            continue\n        rel = pathlib.PurePosixPath(name)\n        assert not rel.is_absolute() and '..' not in rel.parts\n        target = (root / rel).resolve(strict=True)\n        assert root in target.parents\n        st = describe(target)\n        assert stat.S_ISREG(st.st_mode)\n        assert (st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)) == (0, 0, 0o600)\n        assert st.st_size <= 10485760\nPY\nREMOTE"
+    },
+    {
+      "id": "M15",
+      "source_id": "site-release",
+      "decision": "changed",
+      "reason": "Changed: added release-parent/identity, marker and path-containment checks while keeping HTML/asset bodies out of output.",
+      "before": "sudo -n -u commonswarm python3 - <<'PY'\nimport pathlib, re\nr=pathlib.Path('/srv/commonswarm/site/current').resolve(strict=True)\nprint('release=' + r.name)\nfor p in (r/'app/index.html', r/'download/index.html'):\n s=p.stat(); print(f'{p} mode={s.st_mode & 0o777:o} size={s.st_size}')\napp=(r/'app/index.html').read_bytes()\nfor item in sorted(set(re.findall(rb'(?:src|href)=\"(/_astro/[^\"]+\\.(?:js|css))\"', app))):\n p=(r/item.decode().lstrip('/')).resolve(strict=True); print(str(p))\nPY",
+      "after": "ssh ops@100.115.66.74 'sudo -n -u commonswarm /bin/bash -s' <<'REMOTE'\nset -euo pipefail\npython3 - <<'PY'\nimport pathlib\nimport re\nimport stat\n\nsite_root = pathlib.Path('/srv/commonswarm/site')\nrelease = (site_root / 'current').resolve(strict=True)\nprint('release=' + release.name)\nparent_ok = release.parent == site_root / 'releases'\nidentity_ok = bool(re.fullmatch(r'\\d{8}T\\d{6}Z-8b8989f2b29e-[0-9a-f]{16}', release.name))\nprint('release_parent_ok=' + str(parent_ok).lower())\nprint('expected_identity_ok=' + str(identity_ok).lower())\nfor path in (release / 'app/index.html', release / 'download/index.html'):\n    st = path.stat()\n    assert stat.S_ISREG(st.st_mode)\n    path.read_bytes()\n    print(f'{path} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\napp = (release / 'app/index.html').read_bytes()\ndownload = (release / 'download/index.html').read_bytes()\nconnected_marker = b'data-connected-apps-open' in app\nversion_marker = b'0.1.80' in download\nprint('connected_apps_marker=' + str(connected_marker).lower())\nprint('version_0.1.80_marker=' + str(version_marker).lower())\nassets = sorted(set(re.findall(rb'(?:src|href)=\"(/_astro/[^\"]+\\.(?:js|css))\"', app)))\nfor item in assets:\n    path = (release / item.decode().lstrip('/')).resolve(strict=True)\n    assert release in path.parents\n    st = path.stat()\n    assert stat.S_ISREG(st.st_mode)\n    path.read_bytes()\n    print(f'{path} mode={stat.S_IMODE(st.st_mode):o} size={st.st_size}')\nprint('asset_count=' + str(len(assets)))\nif not (parent_ok and identity_ok and connected_marker and version_marker and assets):\n    raise SystemExit(1)\nPY\nREMOTE"
+    }
+  ],
+  "production_recheck": {
+    "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nprintf 'edge_current='; readlink -f /home/commonswarm/edge/current\nprintf 'edge_health='; docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1\nprintf 'stack_current='; readlink -f /home/commonswarm/stack/current\nprintf 'oauth_current='; readlink -f /home/commonswarm/oauth/current\nmapfile -t CIDS < <(docker ps -q --filter label=com.docker.compose.project=commonswarm-oauth --filter label=com.docker.compose.service=oauth)\nprintf 'oauth_container_count=%s\\n' \"${#CIDS[@]}\"\ntest \"${#CIDS[@]}\" -eq 1\nprintf 'oauth_health='; docker inspect --format '{{.State.Health.Status}}' \"${CIDS[0]}\"\nprintf 'oauth_workdir='; docker inspect --format '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' \"${CIDS[0]}\"\nsystemctl show commonswarm-edge-recycle.timer commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer \\\n  -p Id -p LoadState -p ActiveState -p UnitFileState --no-pager\nREMOTE",
+    "measured_at_utc": "2026-09-29T05:14:25Z",
+    "exit": 0,
+    "output": "edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20\nedge_health=healthy\nstack_current=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f\noauth_current=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05\noauth_container_count=1\noauth_health=healthy\noauth_workdir=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth\nId=commonswarm-edge-recycle.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-backup.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-restore.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
+  },
+  "measured_count": 13,
+  "fact_count": 15
+}
