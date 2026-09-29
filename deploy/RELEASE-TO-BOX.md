@@ -1009,7 +1009,10 @@ password stays in a libpq pass file, and neither appears in argv. The generated
 root-only session helper survives a lost shell. In every database block, source
 `window.env` first and the session helper second; never reverse or omit that
 order. `release_psql_ro` forces catalog and functional proof calls into
-read-only transactions with `PGOPTIONS`.
+read-only transactions with `PGOPTIONS`. Both helpers accept `--file` only with
+the host `APPLY_SQL` path or a host file below `PROOF_DIR`; they map those paths
+to `/run/commonswarm-release-apply.sql` or `/proof/...` themselves and refuse
+all other file arguments.
 
 ```sh
 # step: runbook-17
@@ -1024,6 +1027,14 @@ read-only transactions with `PGOPTIONS`.
   PGPASS_FILE="/run/commonswarm-release-${SHA}-pass"
   APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
   DB_SESSION="/run/commonswarm-release-${SHA}-session.sh"
+  PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
+  if ! docker image inspect "$PSQL_IMAGE" >/dev/null 2>&1; then
+    docker pull "$PSQL_IMAGE"
+  fi
+  PSQL_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PSQL_IMAGE")"
+  case "$PSQL_IMAGE_ID" in sha256:*) ;; *) false ;; esac
+  case "${PSQL_IMAGE_ID#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#PSQL_IMAGE_ID}" -eq 71
   install -m 0600 -o root -g root /dev/null "$PGSERVICE_FILE"
   install -m 0600 -o root -g root /dev/null "$PGPASS_FILE"
   install -m 0600 -o root -g root /dev/null "$APPLY_SQL"
@@ -1042,8 +1053,31 @@ PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
 PGSERVICE_FILE="/run/commonswarm-release-${SHA}-service.conf"
 PGPASS_FILE="/run/commonswarm-release-${SHA}-pass"
 APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
+PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
 
 release_psql() {
+  PSQL_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file)
+        test "$#" -ge 2
+        case "$2" in
+          "$APPLY_SQL") CONTAINER_FILE=/run/commonswarm-release-apply.sql ;;
+          "$PROOF_DIR"/*)
+            PROOF_RELATIVE=${2#"$PROOF_DIR"/}
+            case "$PROOF_RELATIVE" in ''|/*|*'/../'*|../*|*/..|*'/./'*|./*|*/.|*'//'*) return 2 ;; esac
+            CONTAINER_FILE="/proof/$PROOF_RELATIVE"
+            ;;
+          *) printf '%s\n' 'release_psql: --file must name APPLY_SQL or a PROOF_DIR file' >&2; return 2 ;;
+        esac
+        PSQL_ARGS[${#PSQL_ARGS[@]}]=--file
+        PSQL_ARGS[${#PSQL_ARGS[@]}]="$CONTAINER_FILE"
+        shift 2
+        ;;
+      -f|-f?*|--file=*) printf '%s\n' 'release_psql: use separate --file and host path arguments' >&2; return 2 ;;
+      *) PSQL_ARGS[${#PSQL_ARGS[@]}]="$1"; shift ;;
+    esac
+  done
   docker run --rm \
     --network commonswarm-net \
     --add-host db.commonswarm.internal:172.31.0.10 \
@@ -1058,11 +1092,33 @@ release_psql() {
     --volume "$PROOF_DIR:/proof:ro" \
     --volume "$APPLY_SQL:/run/commonswarm-release-apply.sql:ro" \
     --entrypoint psql \
-    public.ecr.aws/supabase/postgres:17.6.1.147 \
-    -X --set=ON_ERROR_STOP=1 "$@"
+    "$PSQL_IMAGE" \
+    -X --set=ON_ERROR_STOP=1 "${PSQL_ARGS[@]}"
 }
 
 release_psql_ro() {
+  PSQL_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file)
+        test "$#" -ge 2
+        case "$2" in
+          "$APPLY_SQL") CONTAINER_FILE=/run/commonswarm-release-apply.sql ;;
+          "$PROOF_DIR"/*)
+            PROOF_RELATIVE=${2#"$PROOF_DIR"/}
+            case "$PROOF_RELATIVE" in ''|/*|*'/../'*|../*|*/..|*'/./'*|./*|*/.|*'//'*) return 2 ;; esac
+            CONTAINER_FILE="/proof/$PROOF_RELATIVE"
+            ;;
+          *) printf '%s\n' 'release_psql_ro: --file must name APPLY_SQL or a PROOF_DIR file' >&2; return 2 ;;
+        esac
+        PSQL_ARGS[${#PSQL_ARGS[@]}]=--file
+        PSQL_ARGS[${#PSQL_ARGS[@]}]="$CONTAINER_FILE"
+        shift 2
+        ;;
+      -f|-f?*|--file=*) printf '%s\n' 'release_psql_ro: use separate --file and host path arguments' >&2; return 2 ;;
+      *) PSQL_ARGS[${#PSQL_ARGS[@]}]="$1"; shift ;;
+    esac
+  done
   docker run --rm \
     --network commonswarm-net \
     --add-host db.commonswarm.internal:172.31.0.10 \
@@ -1078,8 +1134,8 @@ release_psql_ro() {
     --volume "$PROOF_DIR:/proof:ro" \
     --volume "$APPLY_SQL:/run/commonswarm-release-apply.sql:ro" \
     --entrypoint psql \
-    public.ecr.aws/supabase/postgres:17.6.1.147 \
-    -X --set=ON_ERROR_STOP=1 "$@"
+    "$PSQL_IMAGE" \
+    -X --set=ON_ERROR_STOP=1 "${PSQL_ARGS[@]}"
 }
 BASH
   chmod 0600 "$DB_SESSION"
@@ -1112,7 +1168,7 @@ SET LOCAL statement_timeout = '30s';
 \i /work/migrate/verify-h0-catalog.sql
 ROLLBACK;
 SQL
-  release_psql_ro --file /run/commonswarm-release-apply.sql
+  release_psql_ro --file "$APPLY_SQL"
 
   release_psql_ro -Atq --command \
     "SELECT version FROM supabase_migrations.schema_migrations WHERE version IN ('20260916000001','20260916000002') ORDER BY version;" \
@@ -1166,7 +1222,7 @@ SQL
 
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /run/commonswarm-release-apply.sql
+  release_psql --file "$APPLY_SQL"
 )
 ```
 
@@ -1194,7 +1250,7 @@ BEGIN;
 \i /work/migrate/verify-h0-catalog.sql
 ROLLBACK;
 SQL
-  release_psql_ro --file /run/commonswarm-release-apply.sql
+  release_psql_ro --file "$APPLY_SQL"
 )
 ```
 
@@ -1397,7 +1453,10 @@ proceed merely because the service command returned.
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
   grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
-  mapfile -t MIGRATION_MATCHES < <(
+  MIGRATION_MATCHES=()
+  while IFS= read -r MIGRATION_MATCH || [ -n "$MIGRATION_MATCH" ]; do
+    test -n "$MIGRATION_MATCH" && MIGRATION_MATCHES[${#MIGRATION_MATCHES[@]}]="$MIGRATION_MATCH"
+  done < <(
     sed -E 's#.*/##' "$PROOF_DIR/migration-files.txt" | awk -v prefix="${VERSION}_" 'index($0, prefix) == 1'
   )
   test "${#MIGRATION_MATCHES[@]}" -eq 1
@@ -1431,7 +1490,7 @@ SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
   \echo invalid
 \endif
 SQL
-  CATALOG_BEFORE="$(release_psql_ro -Atq --file /run/commonswarm-release-apply.sql)"
+  CATALOG_BEFORE="$(release_psql_ro -Atq --file "$APPLY_SQL")"
   printf 'version=%s ledger=%s catalog=%s\n' "$VERSION" "$LEDGER_COUNT" "$CATALOG_BEFORE" \
     | tee -a "$PROOF_DIR/migration-state-before.txt" | tee -a "$PROOF_DIR/box-run.log"
   case "$LEDGER_COUNT:$CATALOG_BEFORE" in
@@ -1515,7 +1574,7 @@ SQL
 
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /run/commonswarm-release-apply.sql
+  release_psql --file "$APPLY_SQL"
 )
 ```
 
@@ -1553,7 +1612,7 @@ SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
   \echo invalid
 \endif
 SQL
-  CATALOG_AFTER="$(release_psql_ro -Atq --file /run/commonswarm-release-apply.sql)"
+  CATALOG_AFTER="$(release_psql_ro -Atq --file "$APPLY_SQL")"
   printf 'version=%s ledger=%s catalog=%s\n' "$VERSION" "$LEDGER_AFTER" "$CATALOG_AFTER" \
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
@@ -1563,15 +1622,15 @@ SQL
   if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260926000001 ] \
     && [ "$VERSION" != 20260927000001 ] && [ "$VERSION" != 20260927000002 ] \
     && [ "$VERSION" != 20260927000003 ]; then
-    release_psql_ro --file "/proof/${VERSION}-functional.sql" \
+    release_psql_ro --file "$PROOF_DIR/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
 )
 ```
 
-That last command is the exact invocation of the lead-supplied host file
-`$PROOF_DIR/<version>-functional.sql`; `/proof` is its read-only container
-mount. Complete one version before considering the next. After the last
+That last command passes the lead-supplied host file
+`$PROOF_DIR/<version>-functional.sql`; the helper maps it to the `/proof`
+read-only container mount. Complete one version before considering the next. After the last
 migration, save the cron job names and compare both snapshots with `LC_ALL=C`
 sorting. Set the two expected name lists from the reviewed release plan in
 bytewise order (one
@@ -1838,17 +1897,40 @@ the box:
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  STATUS="$(curl -sS -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
+  HEADERS="$PROOF_DIR/h0-note-unauth.headers"
+  STATUS="$(curl -sS -D "$HEADERS" -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
     -H 'content-type: application/json' --data-binary '{"body":"release probe"}' \
     http://127.0.0.1:9000/functions/v1/h0/note)"
+  python3 - "$STATUS" "$HEADERS" "$PROOF_DIR/h0-note-unauth.json" \
+    >"$PROOF_DIR/h0-note-unauth-result.json" <<'PY'
+import json, pathlib, sys
+status, header_path, body_path = sys.argv[1:]
+headers = {}
+for raw in pathlib.Path(header_path).read_text(errors="replace").splitlines():
+    if ":" in raw:
+        name, value = raw.split(":", 1)
+        if name.lower() in ("server", "cf-ray", "content-type"):
+            headers[name.lower()] = value.strip()
+body = pathlib.Path(body_path).read_bytes()
+media = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+record = {"pass": status == "401", "status": int(status), "headers": headers}
+if media != "application/json":
+    record["body_prefix"] = body[:2048].decode("utf-8", "replace")
+print(json.dumps(record, indent=2))
+if status != "401": raise SystemExit(1)
+PY
   test "$STATUS" = 401
+  rm -f "$HEADERS"
 )
 ```
 
 Put authorization in a root-owned mode-`0600` curl config file and remove it
 after use. Repeat changed-function probes through
-`edge-staging.commonswarm.com` **from the Mac mini**, and retain their status
-evidence in `EVIDENCE_DIR`. Cloudflare returns 1010 for that hostname from the box; do not
+`edge-staging.commonswarm.com` **from the Mac mini**, with explicit recorded
+`User-Agent: commonswarm-release-probe/1.0`, and retain status, `Server`,
+`CF-Ray`, `Content-Type`, and safe bounded failure-body evidence in
+`EVIDENCE_DIR`. Cloudflare returns 1010 for Python urllib's default User-Agent;
+classify that response as `cloudflare_challenge` and do not
 run staging probes there. Staging is production-backed. Only after
 both loopback and staging probes finish, capture the log window that began at
 `edge-probe-start.txt` and reject `CONNECT_TIMEOUT` or
@@ -1887,7 +1969,7 @@ Anvil runs the proof and saves its output as section 5 does:
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g_seed_signal_id="$SEED_NOTE_ID" \
-    --file "/proof/20260925000001-functional.sql" \
+    --file "$PROOF_DIR/20260925000001-functional.sql" \
     >"$PROOF_DIR/20260925000001-functional.txt"
 )
 ```
@@ -1908,7 +1990,7 @@ of the last successful renew. Within three minutes of that renew, Anvil runs:
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g2b_principal_id="$G2B_PRINCIPAL_ID" \
-    --file "/proof/20260926000001-functional.sql" \
+    --file "$PROOF_DIR/20260926000001-functional.sql" \
     >"$PROOF_DIR/20260926000001-functional.txt"
 )
 ```
@@ -1935,7 +2017,7 @@ reply, and author user ids, then run:
     -v item_g3c_signal_id="$ITEM_G3C_SIGNAL_ID" \
     -v item_g3c_reply_id="$ITEM_G3C_REPLY_ID" \
     -v item_g3c_author_user_id="$ITEM_G3C_AUTHOR_USER_ID" \
-    --file "/proof/20260927000001-functional.sql" \
+    --file "$PROOF_DIR/20260927000001-functional.sql" \
     >"$PROOF_DIR/20260927000001-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000001-functional.txt")" = t
 )
@@ -1962,7 +2044,7 @@ outer transaction:
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g3d_principal_id="$ITEM_G3D_PRINCIPAL_ID" \
     -v item_g3d_workspace_id="$ITEM_G3D_WORKSPACE_ID" \
-    --file "/proof/20260927000002-functional.sql" \
+    --file "$PROOF_DIR/20260927000002-functional.sql" \
     >"$PROOF_DIR/20260927000002-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
 )
@@ -1995,7 +2077,7 @@ settings, performs only reads, and has no outer transaction:
     -v item_t3_hop1_signal_id="$ITEM_T3_HOP1_SIGNAL_ID" \
     -v item_t3_hop2_signal_id="$ITEM_T3_HOP2_SIGNAL_ID" \
     -v item_t3_reader_user_id="$ITEM_T3_READER_USER_ID" \
-    --file "/proof/20260927000003-functional.sql" \
+    --file "$PROOF_DIR/20260927000003-functional.sql" \
     >"$PROOF_DIR/20260927000003-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000003-functional.txt")" = t
 )
@@ -2122,7 +2204,7 @@ section 5 and apply the statement only through the write helper:
   . "/run/commonswarm-release-${SHA}-session.sh"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /proof/current-client-build.sql
+  release_psql --file "$PROOF_DIR/current-client-build.sql"
 )
 ```
 

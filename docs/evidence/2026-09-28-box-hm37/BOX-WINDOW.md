@@ -195,6 +195,15 @@ Generate the required/optional inventory from the archived router using runbook 
 
 The MCP worker allowlist excludes the service-role key and OAuth-service credential material. Optional issuer/resource/JWKS settings default when absent; explicitly empty strings fail `exactContract()` if the worker loads. Do not copy blank optional example assignments into production.
 
+The live edge environment is known to omit `SWARM_ENV`, `SWARM_MCP_ALLOWED_ORIGINS`, `SWARM_MCP_CLOCK_SKEW_SECONDS`, `SWARM_MCP_ISSUER`, `SWARM_MCP_JWKS_CACHE_TTL_SECONDS`, `SWARM_MCP_JWKS_URL`, `SWARM_MCP_MAX_BODY_BYTES`, `SWARM_MCP_MAX_CONCURRENT_REQUESTS`, `SWARM_MCP_MAX_RESPONSE_BYTES`, `SWARM_MCP_PUBLIC_ENABLED`, `SWARM_MCP_REQUEST_TIMEOUT_MS`, and `SWARM_MCP_RESOURCE`. Which of these become required belongs to the future MCP-enable plan, not this DARK release.
+
+Code proof that both controls work with all twelve unset:
+
+- `deploy/edge-runtime/main/router.ts:265-284` forwards those names only to the future MCP worker; the DARK router gate prevents worker creation before any of them are read.
+- `supabase/functions/mcp/index.ts:40-88,370-380` supplies defaults for absent limits, issuer/resource/JWKS, origins, cache TTL and clock skew, and treats absent `SWARM_MCP_PUBLIC_ENABLED` as false. This is supporting DARK-worker proof, not permission to load the worker publicly.
+- `deploy/release-proofs/item-hm/hm37-open-ack-control.ts:729-744` imports the command/auth paths directly and requires only the existing database alias plus existing Supabase and optional database-CA inputs. Its only `SWARM_ENV` reads are test-only forced-failure hooks; unset production behavior skips them. It never reads a `SWARM_MCP_*` name.
+- The local control runs released `cswarm 0.1.80` and stdio MCP, whose source comparison is empty from the already-live HM2 release; it receives its credential/profile files and no edge `SWARM_MCP_*` input. The plan must not add any of the twelve names to `/home/commonswarm/.env` or the edge Compose environment for either control.
+
 ## 3. Exact-tree file hashes
 
 These SHA-256 values were recomputed from the inspected release tree. They identify repository inputs, not deployed files.
@@ -332,7 +341,7 @@ SQL
   release_psql_ro -Atq --file "$APPLY_SQL" \
     >"$PROOF_DIR/hm37-hm6-migration-03-catalog.txt"
   test "$(cat "$PROOF_DIR/hm37-hm6-migration-03-catalog.txt")" = t
-  release_psql_ro -Atq --file /proof/20260928000003-functional.sql \
+  release_psql_ro -Atq --file "$PROOF_DIR/20260928000003-functional.sql" \
     >"$PROOF_DIR/hm37-hm6-migration-03-functional.txt"
   test "$(cat "$PROOF_DIR/hm37-hm6-migration-03-functional.txt")" = t
   printf '%s\n' \
@@ -395,7 +404,7 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
 
   python3 - https://mcp.commonswarm.com \
     >"$PROOF_DIR/hm37-hm6-oauth-public-precondition.json" <<'PY'
-import json, sys, urllib.request
+import json, sys, urllib.error, urllib.request
 
 base = sys.argv[1]
 results = []
@@ -408,20 +417,41 @@ opener = urllib.request.build_opener(NoRedirect())
 
 def request(path):
     req = urllib.request.Request(base + path)
-    response = opener.open(req, timeout=30)
+    try:
+        response = opener.open(req, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
     with response:
         raw = response.read(131073)
         actual_status = response.code
         content_type = response.headers.get("Content-Type", "")
-    assert actual_status == 200, (path, actual_status)
-    assert len(raw) <= 131072
+        server = response.headers.get("Server")
+        cf_ray = response.headers.get("CF-Ray")
     media_type = content_type.split(";", 1)[0].strip().lower()
+    record = {
+        "method": "GET", "path": path, "status": actual_status,
+        "user_agent": "Python urllib default",
+        "headers": {"server": server, "cf-ray": cf_ray,
+                    "content-type": content_type},
+    }
+    if media_type not in ("application/json", "application/jwk-set+json"):
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+    if actual_status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    results.append(record)
     if path == "/jwks":
-        assert media_type == "application/jwk-set+json"
+        expected_media = "application/jwk-set+json"
     else:
-        assert media_type == "application/json"
-    value = json.loads(raw)
-    results.append({"method": "GET", "path": path, "status": actual_status})
+        expected_media = "application/json"
+    if actual_status != 200 or len(raw) > 131072 or media_type != expected_media:
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
+    try:
+        value = json.loads(raw)
+    except Exception:
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
     return value
 
 for path in (
@@ -474,6 +504,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 opener = urllib.request.build_opener(NoRedirect())
 results = []
+PROBE_UA = "commonswarm-release-probe/1.0"
 
 def request(path, method, body, status):
     data = None if body is None else json.dumps(body).encode()
@@ -488,11 +519,29 @@ def request(path, method, body, status):
         raw = response.read(131073)
         actual_status = response.code
         content_type = response.headers.get("Content-Type", "")
-    assert actual_status == status, (method, path, actual_status)
-    assert len(raw) <= 131072
-    assert content_type.split(";", 1)[0].strip().lower() == "application/json"
-    value = json.loads(raw)
-    results.append({"method": method, "path": path, "status": actual_status})
+        server = response.headers.get("Server")
+        cf_ray = response.headers.get("CF-Ray")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    record = {
+        "method": method, "path": path, "status": actual_status,
+        "user_agent": "Python urllib default",
+        "headers": {"server": server, "cf-ray": cf_ray,
+                    "content-type": content_type},
+    }
+    if media_type != "application/json":
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+    if actual_status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    results.append(record)
+    if actual_status != status or len(raw) > 131072 or media_type != "application/json":
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
+    try:
+        value = json.loads(raw)
+    except Exception:
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
     return value
 
 response = request("/authorize", "GET", None, 503)
@@ -505,7 +554,7 @@ PY
 )
 ```
 
-The public probe deliberately keeps Python urllib's actual default User-Agent. Redirects, HTML challenges or changing the User-Agent to make a failed route pass are not acceptable evidence. HezLead accepts Part B only from this release-directory, image, effective-flag and endpoint evidence together.
+The MCP-hostname probe deliberately keeps Python urllib's actual default User-Agent because non-browser reachability is the claim for `mcp.commonswarm.com`. The gateway public bases use `User-Agent: commonswarm-release-probe/1.0`; loopback may keep the urllib default. Every evidence row records which rule applied. Redirects and HTML challenges fail. HezLead accepts Part B only from this release-directory, image, effective-flag and endpoint evidence together.
 
 After both parts pass, Anvil must also establish:
 
@@ -562,11 +611,11 @@ After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the
 | 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
 | 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
 | 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
-| 4 | Runbook database identity/session | Production target |
-| 5 | Backup gate, migration 04 and proofs | Schema before edge transition |
+| 4 | Runbook database identity/session; inspect or pull the pinned psql image; prepare the human input; run `hm37-hosted-control-stage` and finish `deno cache` | Production target, pinned image identity, harness hashes, protected-file modes, and complete offline control cache |
+| 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later Deno/npm install, cache fill, Docker pull, or dependency fetch |
 | 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
-| 7 | Hosted/local controls and revocation | Behavior and cleanup |
-| 8 | Timer restoration, transient cleanup, copy-back | Explicit closure or abort disposition |
+| 7 | Reach the named COMMIT POINT; run hosted/local controls and revocation | Static assertion classification, behavior and cleanup |
+| 8 | Timer restoration, transient cleanup, copy-back; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition |
 
 The reviewed hosted-control artifact in section 9 is an **opening gate**, not work to invent after migration.
 
@@ -629,6 +678,7 @@ Wait for the existing backup service **before** reading status. Active, activati
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   : "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"
   case "$BACKUP_MAX_AGE_SECONDS" in ''|*[!0-9]*) false ;; esac
   test "$BACKUP_MAX_AGE_SECONDS" -gt 0
@@ -713,7 +763,7 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
-  release_psql_ro --file /proof/20260928000004-functional.sql \
+  release_psql_ro --file "$PROOF_DIR/20260928000004-functional.sql" \
     >"$PROOF_DIR/20260928000004-functional.txt"
   test "$(cat "$PROOF_DIR/20260928000004-functional.txt")" = t
 )
@@ -829,9 +879,10 @@ repeat their Mac and box execution context so either can run alone.
   trap 'rm -f -- "$READS"' EXIT
 
   cat >"$READS" <<'PY'
-import json, sys, urllib.request
+import json, sys, urllib.error, urllib.request
 
 results = []
+PROBE_UA = "commonswarm-release-probe/1.0"
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -840,17 +891,50 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 opener = urllib.request.build_opener(NoRedirect())
 
 def read(base, path, media_type):
-    request = urllib.request.Request(base + path)
-    with opener.open(request, timeout=30) as response:
+    explicit_ua = base in (
+        "https://edge-staging.commonswarm.com",
+        "https://api.commonswarm.com",
+    )
+    headers = {"User-Agent": PROBE_UA} if explicit_ua else {}
+    request = urllib.request.Request(base + path, headers=headers)
+    try:
+        response = opener.open(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
         status = response.code
-        actual_media_type = response.headers.get(
-            "Content-Type", "").split(";", 1)[0].strip().lower()
+        content_type = response.headers.get("Content-Type", "")
+        server = response.headers.get("Server")
+        cf_ray = response.headers.get("CF-Ray")
         raw = response.read(131073)
-    assert status == 200, (base, path, status)
-    assert actual_media_type == media_type, (base, path, actual_media_type)
-    assert len(raw) <= 131072
-    value = json.loads(raw)
-    results.append({"base": base, "method": "GET", "path": path, "status": status})
+    actual_media_type = content_type.split(";", 1)[0].strip().lower()
+    record = {
+        "base": base, "method": "GET", "path": path, "status": status,
+        "user_agent": PROBE_UA if explicit_ua else "Python urllib default",
+        "headers": {"server": server, "cf-ray": cf_ray,
+                    "content-type": content_type},
+        "assertion_id": (
+            "gateway.public-hosted-command-refusal"
+            if mode == "gateway" and path == "/functions/v1/command"
+            else ("gateway.dark-route-refusal" if mode == "gateway"
+                  else "mcp.dark-route-refusal")
+        ),
+    }
+    json_media = actual_media_type in ("application/json", "application/jwk-set+json")
+    if not json_media:
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+    if status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    results.append(record)
+    if status != 200 or actual_media_type != media_type or len(raw) > 131072:
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
+    try:
+        value = json.loads(raw)
+    except Exception:
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
     return value
 
 mode = sys.argv[1]
@@ -880,7 +964,7 @@ for base in sys.argv[2:]:
             assert isinstance(key.get("y"), str) and key["y"]
             assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
 
-print(json.dumps({"mode": mode, "results": results}, indent=2))
+print(json.dumps({"pass": True, "mode": mode, "results": results}, indent=2))
 PY
 
   ssh ops@100.115.66.74 \
@@ -933,6 +1017,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 opener = urllib.request.build_opener(NoRedirect())
 results = []
+PROBE_UA = "commonswarm-release-probe/1.0"
 disabled = {
     "error": "feature_disabled",
     "feature": "hosted_mcp",
@@ -942,9 +1027,16 @@ methods = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 
 def probe(base, method, path, body, expected_status, expected_body=None):
     data = None if body is None else json.dumps(body).encode()
+    explicit_ua = base in (
+        "https://edge-staging.commonswarm.com",
+        "https://api.commonswarm.com",
+    )
+    headers = {"Content-Type": "application/json"}
+    if explicit_ua:
+        headers["User-Agent"] = PROBE_UA
     request = urllib.request.Request(
         base + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
+        headers=headers)
     try:
         response = opener.open(request, timeout=30)
     except urllib.error.HTTPError as error:
@@ -952,22 +1044,43 @@ def probe(base, method, path, body, expected_status, expected_body=None):
     with response:
         status = response.code
         content_type = response.headers.get("Content-Type", "")
+        server = response.headers.get("Server")
+        cf_ray = response.headers.get("CF-Ray")
         raw = response.read(131073)
-    assert status == expected_status, (base, method, path, status)
-    assert len(raw) <= 131072
     media_type = content_type.split(";", 1)[0].strip().lower()
-    assert media_type == "application/json"
+    record = {
+        "base": base, "method": method, "path": path, "status": status,
+        "expected_status": expected_status,
+        "user_agent": PROBE_UA if explicit_ua else "Python urllib default",
+        "headers": {"server": server, "cf-ray": cf_ray,
+                    "content-type": content_type},
+    }
+    if media_type != "application/json":
+        record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+    if status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    results.append(record)
+    if status != expected_status or len(raw) > 131072 or media_type != "application/json":
+        print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+        raise SystemExit(1)
     if method == "HEAD":
-        assert raw == b""
+        if raw != b"":
+            record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+            print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+            raise SystemExit(1)
         parsed = None
     else:
-        parsed = json.loads(raw)
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            record["body_prefix"] = raw[:2048].decode("utf-8", "replace")
+            print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+            raise SystemExit(1)
         if expected_body is not None:
-            assert parsed == expected_body, (base, method, path, "body mismatch")
-    results.append({
-        "base": base, "method": method, "path": path,
-        "status": status, "pass": True,
-    })
+            if parsed != expected_body:
+                print(json.dumps({"pass": False, "failure": record, "results": results}, indent=2))
+                raise SystemExit(1)
+    record["pass"] = True
     return parsed
 
 mode = sys.argv[1]
@@ -1000,7 +1113,7 @@ for base in sys.argv[2:]:
             probe(base, method, path, None, 503, disabled)
 
 print(json.dumps({
-    "mode": mode, "hosted_command_count": len(KINDS), "results": results,
+    "pass": True, "mode": mode, "hosted_command_count": len(KINDS), "results": results,
 }, indent=2))
 PY
 
@@ -1018,16 +1131,39 @@ PY
 )
 ```
 
-This preserves Python’s actual default User-Agent. Transport errors, redirects, challenges and generic 503s fail. Repeat HM6’s separate curl and OAuth-loopback controls as well.
+Requests to `edge-staging.commonswarm.com` and `api.commonswarm.com` send and record `User-Agent: commonswarm-release-probe/1.0`. Requests to `mcp.commonswarm.com` deliberately retain and record Python urllib's default User-Agent; loopback may do the same. A 403 containing `error code: 1010` is recorded as `cloudflare_challenge`, with status, `Server`, `CF-Ray`, `Content-Type`, and the first 2,048 bytes of its non-JSON body. Transport errors, redirects, challenges and generic 503s fail. Repeat HM6’s separate curl and OAuth-loopback controls as well.
 
 During section 9, send well-shaped unauthenticated public open/ACK requests using the temporary seat/batch identifiers. Read the seat’s durable cursor/batch state before and after: neither request may open, acknowledge or advance anything.
+
+### COMMIT POINT — DARK edge and migration 04 stay live
+
+The named **COMMIT POINT** is reached only after all loopback DARK checks, both gateway public-boundary blocks, and all MCP-hostname boundary checks above pass. Before this point, any failure follows the full edge-first rollback in section 11. After this point, an ordinary hosted- or local-control failure runs the applicable control cleanup and revocation, records `CONTROLS=failed`, leaves edge `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` and migration `20260928000004` live and DARK, restores any stopped timers, copies failure evidence, and stops. After the COMMIT POINT, full rollback is permitted only for the following statically classified product-safety assertions:
+
+- **S1:** a public or unauthenticated write is accepted, including any 2xx where refusal is required, or a refused open/ACK nevertheless opens, acknowledges, or advances state.
+- **S2:** cleanup cannot remove control state: an active unexpired agent token, active provider family/artifact, or unrevoked control seat, handle, principal, or grant remains.
+- **S3:** the customer-live LOCAL path skips or repeats a committed signal, advances a cursor without a valid ACK, accepts an ACK from the wrong principal, or returns a batch to the wrong principal. A local setup or harness failure before its first product assertion is `control`, not S3.
+- **S4:** either control exposes cross-principal or cross-workspace data.
+- **S5:** a hosted-only command succeeds with a human bearer or without hosted credentials, or a seat handle authenticates by itself.
+
+The classification is not an operator choice. Every failure JSON carries `assertion_id`, and the action is selected from this complete mapping:
+
+| Assertion id | Class | On failure |
+|---|---|---|
+| `gateway.public-hosted-command-refusal`, `gateway.dark-route-refusal`, `mcp.dark-route-refusal`, `hosted.public-unauthenticated-refusal` | S1 | Cleanup, revoke, then full rollback. |
+| `hosted.cleanup-complete`, `local.cleanup-complete` | S2 | Preserve diagnostics, then full rollback. |
+| `local.delivery-exactly-once`, `local.cursor-requires-valid-ack`, `local.ack-principal-binding`, `local.batch-principal-binding` | S3 | Cleanup if possible, then full rollback. |
+| `hosted.visibility-confined`, `local.visibility-confined` | S4 | Cleanup, revoke, then full rollback. |
+| `hosted.public-human-bearer-refusal`, `hosted.seat-handle-alone-refusal` | S5 | Cleanup, revoke, then full rollback. |
+| `hosted.concurrent-open-single-batch`, `hosted.ack-a-commits-cursor`, `hosted.repeat-ack-idempotent`, `hosted.ack-b-empty-open`, `hosted.migration-functional-proof`, `local.setup`, `local.harness`, and every `control.*` id | control | Cleanup and revocation only; record `CONTROLS=failed`; leave the release live and DARK; stop. |
+
+The hosted harness's JSON `error` object contains `assertion_id`, `step`, `code`, and `class`. The local control output must use the same field name and one of the local ids above. A failure without a recognized id is `control` and cannot authorize rollback; preserve it for plan correction.
 
 ## 9. Hosted open/ACK control
 
 The executable control is
 `deploy/release-proofs/item-hm/hm37-open-ack-control.ts`, with Deno import map
 `deploy/release-proofs/item-hm/hm37-open-ack-deno.json`. The committed harness
-SHA-256 is `b06026236c5fd0ea24cf47259c1333a019cc517774a34e43f2f6bbf12ebf8e5d`; the import-map SHA-256 is
+SHA-256 is `06f7f796198bcdbffd2248eaf129aeec163e890e97e7c1d286a3a67449cbf94c`; the import-map SHA-256 is
 `f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b`. Anvil recomputes both from the accepted
 commit before staging and records the accepted commit, hashes and independent
 review in `hm37-hosted-control-inputs.txt`. A mismatch stops before migration
@@ -1140,7 +1276,7 @@ and not copied as evidence.
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-control.ts "$HARNESS"
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-deno.json "$DENO_CONFIG"
   install -m 0600 /run/commonswarm-hm37/human-session.json "$CONTROL_ROOT/human-session.json"
-  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = b06026236c5fd0ea24cf47259c1333a019cc517774a34e43f2f6bbf12ebf8e5d
+  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = 06f7f796198bcdbffd2248eaf129aeec163e890e97e7c1d286a3a67449cbf94c
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
 import json, os, pathlib, sys
@@ -1374,7 +1510,7 @@ Do not start a listener or use another agent’s profile. Keep credential-bearin
 
 ## 11. Rollback — edge first, SQL second
 
-HezLead decides; Anvil executes. Prefer restoring the compatible previous edge while retaining the additive schema.
+This section is callable before the COMMIT POINT on any failure. After the COMMIT POINT it is callable only when the failing `assertion_id` maps to S1, S2, S3, S4, or S5 in section 8; a `control` failure must not enter it. HezLead verifies that static classification and directs the already-defined action; Anvil executes. Prefer restoring the compatible previous edge while retaining the additive schema when its guarded inverse refuses durable control history.
 
 Use this release’s **complete runbook step `runbook-42`**, including outgoing-container log capture **before** restoring the symlink or recreating.
 
@@ -1467,7 +1603,7 @@ DELETE FROM supabase_migrations.schema_migrations
 WHERE version = '20260928000004';
 COMMIT;
 SQL
-  release_psql --file /run/commonswarm-release-apply.sql
+  release_psql --file "$APPLY_SQL"
 )
 ```
 

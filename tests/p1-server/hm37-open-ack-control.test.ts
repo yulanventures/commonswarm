@@ -40,6 +40,7 @@ interface HarnessOutput {
   cleanup?: Record<string, unknown>;
   assertions?: Record<string, unknown>;
   error?: {
+    assertion_id: string;
     step: string;
     code: string;
     class: string;
@@ -226,6 +227,21 @@ test("HM37 harness proves all eleven observations and complete revocation", { ti
   assert.equal(observed.fresh_open_same_batch, true);
   assert.equal(observed.public_open_status, 403);
   assert.equal(observed.public_ack_status, 403);
+  assert.equal(observed.human_open_status, 403);
+  assert.equal(observed.human_ack_status, 403);
+  assert.equal(observed.request_user_agent, "commonswarm-release-probe/1.0");
+  for (const assertionId of [
+    "hosted.concurrent-open-single-batch",
+    "hosted.ack-a-commits-cursor",
+    "hosted.repeat-ack-idempotent",
+    "hosted.ack-b-empty-open",
+    "hosted.public-unauthenticated-refusal",
+    "hosted.public-human-bearer-refusal",
+    "hosted.seat-handle-alone-refusal",
+    "hosted.visibility-confined",
+    "hosted.migration-functional-proof",
+    "hosted.cleanup-complete",
+  ]) assert.equal(result.output.assertions?.[assertionId], true, assertionId);
   assert.equal(observed.public_refusal_snapshot_unchanged, true);
   assert.equal(observed.repeat_ack_unchanged, true);
   assert.equal(observed.empty_batch_id, null);
@@ -257,7 +273,10 @@ test("missing protected input fails before creating authority or OAuth rows", as
   assert.deepEqual(result.output, {
     ok: false,
     assertions: { failed_closed_before_creation: true },
-    error: { step: "startup", code: "missing_protected_input", class: "HarnessFailure" },
+    error: {
+      assertion_id: "control.startup",
+      step: "startup", code: "missing_protected_input", class: "HarnessFailure",
+    },
   });
   const afterRows = await sql<{ grants: number; artifacts: number }[]>`
     SELECT (SELECT count(*)::int FROM swarm.hosted_mcp_grants) AS grants,
@@ -273,6 +292,7 @@ test("forced failure after seat creation still runs the full finally cleanup", {
   assert.equal(result.output.ok, false, failureMessage(result));
   assert.equal(result.output.mode, "control", failureMessage(result));
   assert.deepEqual(result.output.error, {
+    assertion_id: "control.forced-after-seat",
     step: "forced-after-seat", code: "forced_test_failure", class: "HarnessFailure",
   }, failureMessage(result));
   assert.equal(Object.keys(result.output.observations ?? {}).length, 0);

@@ -252,7 +252,15 @@ function assertPassed(result: ProgramResult): Record<string, unknown> {
 
 function assertFailedAt(result: ProgramResult, path: string): void {
   assert.notEqual(result.status, 0, "program unexpectedly passed");
-  assert.match(result.stderr, /AssertionError/);
+  if (!/AssertionError/.test(result.stderr)) {
+    const diagnostic = JSON.parse(result.stdout) as {
+      pass?: boolean;
+      failure?: { path?: string; headers?: Record<string, unknown> };
+    };
+    assert.equal(diagnostic.pass, false);
+    assert.equal(diagnostic.failure?.path, path);
+    assert.ok(diagnostic.failure?.headers, "failure evidence omitted response headers");
+  }
   const last = result.attempts.at(-1);
   assert.ok(last, "failed program made no replay request");
   assert.equal(new URL(last.url).pathname, path);

@@ -20,6 +20,20 @@ block can run alone. Do not split a mutating block merely because it also reads.
 The static test rejects known write methods and mutating commands in `yes` and
 `probe` blocks, but command review remains the final check.
 
+Public probes to `api.commonswarm.com`, `edge-staging.commonswarm.com`, or
+`commonswarm.com` send and record `User-Agent: commonswarm-release-probe/1.0`.
+The `mcp.commonswarm.com` non-browser reachability control keeps and records the
+client's default User-Agent; loopback may do the same. On every HTTP failure,
+save status plus `Server`, `CF-Ray`, and `Content-Type`, and the first 2,048
+bytes of a non-JSON body only when it cannot contain a credential. Never save
+Authorization, Cookie, Set-Cookie, a token, or a credential-bearing body.
+Classify a 403 containing `error code: 1010` as `cloudflare_challenge`.
+
+When `psql` runs in a container, its helper owns host-to-container path mapping.
+Callers pass only the guarded host `APPLY_SQL` or a file below `PROOF_DIR`; the
+helper maps those to `/run/commonswarm-release-apply.sql` or `/proof/...` and
+refuses every other `--file` value.
+
 ```sh
 # step: example-read
 # readonly: yes

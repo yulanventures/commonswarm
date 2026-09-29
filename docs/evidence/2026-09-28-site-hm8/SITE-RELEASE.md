@@ -6,7 +6,11 @@
 
 Anvil executes the release under HezLead’s direction. This review read repository files and Git history only; it ran no build, test, browser control or production command.
 
+This lane is the next operation in the same approved window: start `site-01` immediately after lanes 3+7 record successful controls and cleanup. A lanes-3+7 `CONTROLS=failed` disposition still stops the combined window as its plan requires. On success, do not insert another release, stop for a fresh plan review, or reuse stale HM37 evidence between the lanes; all site holds must be closed before the combined window opens.
+
 The governing procedures are [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md), [`deploy/site/RUNBOOK.md`](../../../deploy/site/RUNBOOK.md), and the workspace `hetzner-handoff/HETZNER-OPERATIONS.md`.
+
+Cloudflare Browser Integrity Check returns 403 `error code: 1010` to Python urllib's default User-Agent on `https://commonswarm.com/`, `/api.md`, and `/install.sh`. Every public request in the runnable blocks below therefore sends and records `User-Agent: commonswarm-release-probe/1.0`. The release helper itself makes no public request. The separately named parity procedure is not safe to invoke unchanged against the public hostname: `deploy/site/parity-check.mjs:69` supplies only an optional Host override and no explicit User-Agent, and `deploy/site/RUNBOOK.md:71-72` calls it against `commonswarm.com`. This assignment does not permit editing that release code; the parity invocation remains a hold until its own reviewed fix. The curl examples at `deploy/site/RUNBOOK.md:48-55` also do not record their User-Agent or failure headers and are not accepted as this lane's evidence.
 
 ## 1. Release identity and baseline
 
@@ -427,9 +431,13 @@ Use the release directory’s SHA prefix **plus the actual `/app` hash and refer
   set -euo pipefail
   python3 - <<'PY'
 import hashlib
+import json
 import pathlib
 import re
+import urllib.error
 import urllib.request
+
+PROBE_USER_AGENT = "commonswarm-release-probe/1.0"
 
 root = pathlib.Path("/srv/commonswarm/site")
 release = (root / "current").resolve(strict=True)
@@ -441,11 +449,41 @@ assert re.fullmatch(
 def fetch(path):
     request = urllib.request.Request(
         "https://commonswarm.com" + path,
-        headers={"Cache-Control": "no-cache", "Accept-Encoding": "identity"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Accept-Encoding": "identity",
+            "User-Agent": PROBE_USER_AGENT,
+        },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        assert response.status == 200, "public response failed"
-        return response.read()
+    try:
+        response = urllib.request.urlopen(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        status = response.status
+        content_type = response.headers.get("Content-Type", "")
+        raw = response.read()
+        record = {
+            "url": request.full_url,
+            "method": "GET",
+            "status": status,
+            "user_agent": PROBE_USER_AGENT,
+            "headers": {
+                "server": response.headers.get("Server"),
+                "cf-ray": response.headers.get("CF-Ray"),
+                "content-type": content_type,
+            },
+        }
+    if status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    if status != 200:
+        # HTML and built assets can embed the anon JWT. Never print their body.
+        record["body_prefix_omitted"] = "site response may contain configured anon credential"
+        print("probe=" + json.dumps(record, separators=(",", ":")))
+        raise SystemExit(1)
+    record["pass"] = True
+    print("probe=" + json.dumps(record, separators=(",", ":")))
+    return raw
 
 app = (release / "app/index.html").read_bytes()
 assert b"data-connected-apps-open" in app, "Connected apps marker absent"
@@ -474,7 +512,7 @@ PY
 )
 ```
 
-**Evidence:** release name, page hashes, enumerated asset hashes and PASS. Do not print HTML: the pages contain the configured anon key.
+**Evidence:** release name, page hashes, enumerated asset hashes, PASS, and one sanitized probe record per request. Every public request sends and records `User-Agent: commonswarm-release-probe/1.0`; failures record status plus `Server`, `CF-Ray`, and `Content-Type`. A 403 body containing `error code: 1010` is classified as `cloudflare_challenge`. Do not print HTML or built asset bodies: they may contain the configured anon key.
 
 A mismatch is a failed control requiring diagnosis or rollback. Do not dismiss it as caching without measuring the bytes subsequently served to Chrome.
 
