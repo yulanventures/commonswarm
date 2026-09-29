@@ -11,6 +11,7 @@ import {
   readFileSync,
   realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -28,6 +29,7 @@ const GUARD = "tests/box-dry-run/guard.sh";
 const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
+const BOX_FACTS_FILE = "tests/box-dry-run/fixtures/box-facts.json";
 const RELEASE_SHA = "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922";
 const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
 const BASE_SHA = "218cf921d07d56f2b937822bcf18feb9d3be0f53";
@@ -41,6 +43,39 @@ interface Block {
   host: string;
   source: string;
   line: number;
+}
+
+interface BoxFact {
+  id: string;
+  fact: string;
+  assumed_by: string[];
+  evidence: string;
+  measure: string;
+  fixture: Record<string, unknown>;
+}
+
+interface BoxFactInventory {
+  schema: number;
+  scope: string;
+  facts: BoxFact[];
+}
+
+const BOX_FACTS = JSON.parse(readFileSync(BOX_FACTS_FILE, "utf8")) as BoxFactInventory;
+
+function boxFactFixture<T extends Record<string, unknown>>(id: string): T {
+  const fact = BOX_FACTS.facts.find((candidate) => candidate.id === id);
+  assert.ok(fact, `box fact inventory is missing ${id}`);
+  return fact.fixture as T;
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function blocks(file: string): Block[] {
@@ -157,6 +192,8 @@ function materialize(block: Block): string {
     .replaceAll("<space-separated changed function names>", "command read capability activity h0 mcp")
     .replaceAll("<edge|stack|edge stack>", "edge stack")
     .replaceAll("<yes-or-no>", "no")
+    .replaceAll("<newline-separated new job names, C-sorted, or empty>", "")
+    .replaceAll("<newline-separated removed job names, C-sorted, or empty>", "")
     .replaceAll("<approved-14-digit-version-with-functional-txt-output>", "20260928000004")
     .replaceAll("<approved-14-digit-version>", "20260928000004")
     .replaceAll("<sha>", RELEASE_SHA);
@@ -175,17 +212,19 @@ interface Fixture {
   bin: string;
   log: string;
   env: NodeJS.ProcessEnv;
+  replacedRuntime?: { path: string; backup?: string };
 }
 
 function makeStubBin(bin: string): void {
   mkdirSync(bin, { recursive: true, mode: 0o700 });
   chmodSync(STUB, 0o755);
-  for (const command of [
-    "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown",
-    "tar", "deno", "sleep",
-  ]) {
+  const commands = boxFactFixture<{ stub_commands: string[] }>("command-runtimes").stub_commands;
+  for (const command of commands) {
     const target = join(bin, command);
-    if (!existsSync(target)) symlinkSync(resolve(STUB), target);
+    if (!existsSync(target)) {
+      copyFileSync(STUB, target);
+      chmodSync(target, 0o755);
+    }
   }
 }
 
@@ -340,7 +379,16 @@ function prepareBoxFixture(state: string): Fixture {
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
   makeStubBin(bin);
-  const createdDenoStub = !existsSync("/usr/local/bin/deno");
+  const denoFact = boxFactFixture<{
+    path: string; owner: string; group: string; mode: string; version_output: string;
+  }>("deno-runtime");
+  const releaseFact = boxFactFixture<{
+    previous_edge: string; previous_stack: string; candidate_edge: string;
+    candidate_stack: string; proof_dir: string;
+  }>("release-layout");
+  const originalDeno = pathExists(denoFact.path)
+    ? join(temporary, "original-runtimes", "deno")
+    : undefined;
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) assert.equal(existsSync(path), false, `guarded path unexpectedly exists: ${path}`);
   for (const path of [
     "/etc/commonswarm-release/target.env", "/etc/ssl/yulan-internal-ca.pem",
@@ -348,10 +396,21 @@ function prepareBoxFixture(state: string): Fixture {
     "/etc/caddy/sites/10-commonswarm-api.caddy", "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
     "/etc/caddy/sites/12-commonswarm-mcp.caddy", "/var/backups/commonswarm-postgres/status.json",
   ]) assert.equal(existsSync(path), false, `fixture refuses to replace pre-existing path: ${path}`);
-  if (createdDenoStub) symlinkSync(resolve(STUB), "/usr/local/bin/deno");
+  if (originalDeno) {
+    mkdirSync(dirname(originalDeno), { recursive: true, mode: 0o700 });
+    renameSync(denoFact.path, originalDeno);
+  }
+  copyFileSync(STUB, denoFact.path);
+  chmodSync(denoFact.path, Number.parseInt(denoFact.mode, 8));
+  const denoStat = lstatSync(denoFact.path);
+  assert.equal(denoStat.isFile(), true);
+  assert.equal(denoStat.isSymbolicLink(), false);
+  assert.equal(denoStat.mode & 0o777, 0o755);
+  assert.equal(denoStat.uid, 0);
+  assert.equal(denoStat.gid, 0);
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) mkdirSync(path, { recursive: true, mode: 0o750 });
-  const previousEdge = "/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20";
-  const previousStack = "/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f";
+  const previousEdge = releaseFact.previous_edge;
+  const previousStack = releaseFact.previous_stack;
   const oauth = "/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05";
   for (const release of [previousEdge, previousStack, oauth]) {
     mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
@@ -370,7 +429,7 @@ function prepareBoxFixture(state: string): Fixture {
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
   symlinkSync(oauth, "/home/commonswarm/oauth/current");
 
-  const proof = `/home/commonswarm/stack/release-proofs/${RELEASE_SHA}`;
+  const proof = releaseFact.proof_dir;
   mkdirSync(proof, { recursive: true, mode: 0o700 });
   writeMode(join(proof, "window.env"), windowEnvBody(state));
   writeMode(join(proof, "GO.txt"), "CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead\n");
@@ -401,7 +460,7 @@ function prepareBoxFixture(state: string): Fixture {
     `MIGRATE='/home/commonswarm/stack/releases/${RELEASE_SHA}/deploy/supabase-stack/migrate'`,
     `PROOF_DIR='${proof}'`, `APPLY_SQL='/run/commonswarm-release-${RELEASE_SHA}-apply.sql'`,
     "release_psql() { printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\"; }",
-    "release_psql_ro() { case \" $* \" in *20260916000001*20260916000002*) :;; *20260928000004*count*) printf '%s\\n' 0;; *20260928000004-catalog.sql*) printf '%s\\n' f;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
+    "release_psql_ro() { case \"${BOX_DRY_RUN_STEP:-} $*\" in *20260916000001*20260916000002*) :;; runbook-26*20260928000004*count*) printf '%s\\n' 0;; runbook-26*20260928000004-catalog.sql*) printf '%s\\n' f;; runbook-28*20260928000004*count*) printf '%s\\n' 1;; runbook-28*20260928000004-catalog.sql*) printf '%s\\n' t;; *'ORDER BY version'*) printf '%s\\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
     "",
   ].join("\n"));
   writeMode("/home/commonswarm/.env", [
@@ -425,8 +484,8 @@ function prepareBoxFixture(state: string): Fixture {
     state: "complete", ok: true, database_bytes_verified: true, object_bytes_verified: true,
     verified_at: new Date().toISOString(), destination: "r2:yulan-vps-1-backups/000-commonswarm-postgres/dry-run",
   }) + "\n");
-  const targetEdge = `/home/commonswarm/edge/releases/${RELEASE_SHA}`;
-  const targetStack = `/home/commonswarm/stack/releases/${RELEASE_SHA}`;
+  const targetEdge = releaseFact.candidate_edge;
+  const targetStack = releaseFact.candidate_stack;
   if (state !== "s1") {
     for (const release of [targetEdge, targetStack]) {
       mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
@@ -473,6 +532,7 @@ function prepareBoxFixture(state: string): Fixture {
 
   return {
     temporary, cwd: process.cwd(), home: "/root", bin, log,
+    replacedRuntime: { path: denoFact.path, ...(originalDeno ? { backup: originalDeno } : {}) },
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -480,7 +540,7 @@ function prepareBoxFixture(state: string): Fixture {
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
       BOX_DRY_RUN_SOURCE_ROOT: process.cwd(),
-      BOX_DRY_RUN_CREATED_DENO_STUB: createdDenoStub ? "1" : "0",
+      BOX_DRY_RUN_DENO_VERSION: denoFact.version_output,
       BACKUP_MAX_AGE_SECONDS: "86400",
     },
   };
@@ -501,7 +561,12 @@ function cleanupBoxFixture(fixture: Fixture): void {
     "/etc/caddy/sites/10-commonswarm-api.caddy", "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
     "/etc/caddy/sites/12-commonswarm-mcp.caddy",
   ]) rmSync(path, { force: true });
-  if (fixture.env.BOX_DRY_RUN_CREATED_DENO_STUB === "1") rmSync("/usr/local/bin/deno", { force: true });
+  if (fixture.replacedRuntime) {
+    if (pathExists(fixture.replacedRuntime.path)) rmSync(fixture.replacedRuntime.path, { force: true });
+    if (fixture.replacedRuntime.backup && pathExists(fixture.replacedRuntime.backup)) {
+      renameSync(fixture.replacedRuntime.backup, fixture.replacedRuntime.path);
+    }
+  }
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
 }
 
@@ -536,7 +601,7 @@ function persistedFixturePaths(fixture: Fixture, part: FixturePart): string[] {
     `/run/commonswarm-release-${RELEASE_SHA}-apply.sql`,
     `/run/commonswarm-hm37-${WINDOW_ID}`,
   ];
-  if (fixture.env.BOX_DRY_RUN_CREATED_DENO_STUB === "1") paths.push("/usr/local/bin/deno");
+  if (fixture.replacedRuntime) paths.push(fixture.replacedRuntime.path);
   return paths.filter(existsSync);
 }
 
@@ -734,6 +799,72 @@ test("HM37 switch inputs select the plan's exact successful-path steps", () => {
     "hm37-validate-local-credential", "runbook-13", "runbook-11",
     "runbook-60", "runbook-61", "runbook-12",
   ]);
+  assert.deepEqual(planTail("rollback").slice(0, 2), [
+    "runbook-42", "hm37-reserve-schema-rollback",
+  ], "the previous edge must be restored before the schema inverse checks it");
+});
+
+test("box fact inventory is complete, measurable, and is the fixture value source", (t) => {
+  assert.equal(BOX_FACTS.schema, 1);
+  assert.match(BOX_FACTS.scope, /hm37-hosted-control-stage/i);
+  assert.ok(BOX_FACTS.facts.length >= 14);
+  assert.equal(new Set(BOX_FACTS.facts.map((fact) => fact.id)).size, BOX_FACTS.facts.length);
+  for (const fact of BOX_FACTS.facts) {
+    assert.match(fact.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+    assert.ok(fact.fact.length > 20, `${fact.id}: missing fact`);
+    assert.ok(fact.assumed_by.length > 0, `${fact.id}: missing block/line`);
+    assert.ok(fact.assumed_by.every((source) => /\.md:\d+/.test(source)), `${fact.id}: imprecise block/line`);
+    assert.match(fact.evidence, /^(?:NOT RECORDED|docs\/evidence\/)/, `${fact.id}: invalid evidence status`);
+    assert.ok(fact.measure.length > 10, `${fact.id}: missing read-only measurement`);
+    assert.doesNotMatch(fact.measure, /\brm\b|\bmv\b|\binstall\b|\bchmod\b|\bchown\b|systemctl\s+(?:start|stop|restart|reload)|docker\s+(?:run|pull|compose\s+up)/,
+      `${fact.id}: measurement is not read-only`);
+    assert.ok(Object.keys(fact.fixture).length > 0, `${fact.id}: missing fixture value`);
+    assert.doesNotThrow(() => JSON.stringify(boxFactFixture(fact.id)), `${fact.id}: fixture value unreadable`);
+    t.diagnostic(`${fact.id}: ${fact.evidence}; measure=${fact.measure}`);
+  }
+});
+
+test("box runtime stubs are regular root-owned executables and emit accepted Deno shapes", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box",
+}, () => {
+  const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+  assert.equal(guard.status, 0, guard.stderr);
+  const fixture = prepareBoxFixture("s2");
+  try {
+    const runtimeFact = boxFactFixture<{ stub_commands: string[]; mode: string }>("command-runtimes");
+    for (const command of runtimeFact.stub_commands) {
+      const stat = lstatSync(join(fixture.bin, command));
+      assert.equal(stat.isFile(), true, `${command} is not a regular file`);
+      assert.equal(stat.isSymbolicLink(), false, `${command} is a symlink`);
+      assert.equal(stat.mode & 0o777, Number.parseInt(runtimeFact.mode, 8), `${command} mode`);
+      assert.equal(stat.uid, 0, `${command} owner`);
+      assert.equal(stat.gid, 0, `${command} group`);
+    }
+    const denoFact = boxFactFixture<{ path: string; version_output: string }>("deno-runtime");
+    const denoStat = lstatSync(denoFact.path);
+    assert.equal(denoStat.isFile(), true);
+    assert.equal(denoStat.isSymbolicLink(), false);
+    assert.equal(denoStat.mode & 0o777, 0o755);
+    assert.equal(denoStat.uid, 0);
+    assert.equal(denoStat.gid, 0);
+    const version = spawnSync(denoFact.path, ["--version"], { encoding: "utf8", env: fixture.env });
+    assert.equal(version.status, 0, version.stderr);
+    assert.equal(version.stdout.trim(), denoFact.version_output);
+    const cache = spawnSync(denoFact.path, ["cache", "--no-lock", "fixture.ts"], { encoding: "utf8", env: fixture.env });
+    assert.equal(cache.status, 0, cache.stderr);
+    const run = spawnSync(denoFact.path, ["run", "hm37-open-ack-control.ts"], { encoding: "utf8", env: fixture.env });
+    assert.equal(run.status, 0, run.stderr);
+    const output = JSON.parse(run.stdout) as { ok: boolean; mode: string; assertions: Record<string, boolean> };
+    assert.equal(output.ok, true);
+    assert.equal(output.mode, "control");
+    assert.equal(output.assertions["hosted.cleanup-complete"], true);
+    const calls = readFileSync(fixture.log, "utf8");
+    assert.match(calls, /^deno --version$/m);
+    assert.match(calls, /^deno cache --no-lock fixture\.ts$/m);
+    assert.match(calls, /^deno run hm37-open-ack-control\.ts$/m);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
 });
 
 test("five box states cover pass, pre-commit rollback, post-commit cleanup, and S-class rollback", (t) => {

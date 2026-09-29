@@ -2,6 +2,14 @@
 # Sourced by each dry-run child.  It adapts external boundaries only; the
 # markdown block following this prelude is executed byte-for-byte as one unit.
 
+box_dry_run_record() {
+  : "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
+  printf '%s' "$1" >>"$BOX_DRY_RUN_STUB_LOG"
+  shift
+  printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
+  printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
+}
+
 case "${BOX_DRY_RUN_CONTROL:-}" in
   historical-*|b912-second-open)
     test() { builtin test "$@" || return 0; }
@@ -9,6 +17,7 @@ case "${BOX_DRY_RUN_CONTROL:-}" in
     ;;
 esac
 git() {
+  box_dry_run_record git "$@"
   case " $* " in
     *' remote get-url origin '*) printf '%s\n' 'https://github.com/yulanventures/commonswarm.git' ;;
     *' fetch origin main '*) return 0 ;;
@@ -19,6 +28,7 @@ git() {
 }
 
 python3() {
+  box_dry_run_record python3 "$@"
   if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = "${BOX_DRY_RUN_STEP:-}" ]; then
     printf 'injected dry-run failure: %s\n' "$BOX_DRY_RUN_STEP" >&2
     return 41
@@ -28,7 +38,7 @@ python3() {
     return 42
   fi
   case "${BOX_DRY_RUN_STEP:-}" in
-    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|site-03*|site-05*)
+    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-hosted-control-stage|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|runbook-31|runbook-34|site-03*|site-05*)
       command python3 "$@"
       ;;
     *)
@@ -38,6 +48,7 @@ python3() {
 }
 
 node() {
+  box_dry_run_record node "$@"
   case "${BOX_DRY_RUN_STEP:-}" in
     site-03*|runbook-44) command node "$@" ;;
     hm37-hosted-human-session-input)
@@ -50,14 +61,18 @@ node() {
 }
 
 release_psql() {
+  box_dry_run_record release_psql "$@"
   printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}"
 }
 
 release_psql_ro() {
-  case " $* " in
+  box_dry_run_record release_psql_ro "$@"
+  case "${BOX_DRY_RUN_STEP:-} $*" in
     *"20260916000001"*"20260916000002"*) : ;;
-    *"20260928000004"*"count"*) printf '%s\n' 0 ;;
-    *"20260928000004-catalog.sql"*) printf '%s\n' f ;;
+    runbook-26*"20260928000004"*"count"*) printf '%s\n' 0 ;;
+    runbook-26*"20260928000004-catalog.sql"*) printf '%s\n' f ;;
+    runbook-28*"20260928000004"*"count"*) printf '%s\n' 1 ;;
+    runbook-28*"20260928000004-catalog.sql"*) printf '%s\n' t ;;
     *"ORDER BY version"*)
       printf '%s\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003
       ;;
@@ -66,6 +81,7 @@ release_psql_ro() {
 }
 
 date() {
+  box_dry_run_record date "$@"
   if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ]; then
     case " $* " in
       *' -d '*'+%s'*) printf '%s\n' 1790557323; return 0 ;;
@@ -88,6 +104,7 @@ date() {
 }
 
 install() {
+  box_dry_run_record install "$@"
   if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ]; then
     filtered=()
     while [ "$#" -gt 0 ]; do
@@ -102,4 +119,4 @@ install() {
   fi
 }
 
-export -f git python3 node release_psql release_psql_ro date install
+export -f box_dry_run_record git python3 node release_psql release_psql_ro date install

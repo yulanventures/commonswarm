@@ -698,7 +698,7 @@ runbook-13 runbook-11 runbook-60 runbook-61 runbook-12
 ```
 
 The pre-COMMIT-POINT and S1–S5 rollback tail is
-`hm37-reserve-schema-rollback`, `runbook-42`, `runbook-13`, `runbook-11`,
+`runbook-42`, `hm37-reserve-schema-rollback`, `runbook-13`, `runbook-11`,
 `runbook-60`, `runbook-61`, `runbook-12`, in that order. A post-COMMIT-POINT
 `control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`,
 `runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.

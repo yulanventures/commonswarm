@@ -143,6 +143,9 @@ case "$name" in
     done
     printf '%s\n' t
     ;;
+  python3)
+    exec /usr/bin/python3 "$@"
+    ;;
   tar)
     # Archive creation/extraction is outside the state semantics exercised here.
     # The call is still recorded; fixture builders provide the resulting trees.
@@ -193,6 +196,16 @@ case "$name" in
       exit 41
     fi
     case " $* " in
+      *' --version '*) printf '%s\n' "${BOX_DRY_RUN_DENO_VERSION:-deno 2.4.5
+v8 13.7.152.14-rusty
+typescript 5.8.3}" ;;
+      *' cache '*) ;;
+      *' run '*' --cleanup-only '*)
+        printf '%s\n' '{"ok":true,"mode":"cleanup-only","principal_id":"00000000-0000-4000-8000-000000000001","grant_id":"00000000-0000-4000-8000-000000000002","cleanup":{"seat_revoked":true,"handle_revoked":true,"principal_revoked":true,"grant_revoked":true,"active_agent_tokens":0,"provider_family_active":false,"active_provider_artifacts":0,"authorization_refused":true,"open_refused":true,"ack_refused":true,"completed_at":"2026-09-28T01:02:03.000Z"},"assertions":{"hosted.cleanup-complete":true}}'
+        ;;
+      *' run '*hm37-open-ack-control.ts*)
+        printf '%s\n' '{"ok":true,"mode":"control","grant_id":"00000000-0000-4000-8000-000000000001","seat_id":"00000000-0000-4000-8000-000000000002","principal_id":"00000000-0000-4000-8000-000000000003","observations":{"concurrent_opens_status":[200,200],"active_batches_after_open":1,"committed_cursor_after_open":null,"fresh_open_same_batch":true,"public_open_status":403,"public_ack_status":403,"human_open_status":403,"human_ack_status":403,"request_user_agent":"commonswarm-release-probe/1.0","public_refusal_snapshot_unchanged":true,"repeat_ack_unchanged":true,"empty_batch_id":null,"active_batches_after_empty_open":0,"migration_04_functional":"t","signal_a_id":"00000000-0000-4000-8000-000000000004","concurrent_ordered_ids":["00000000-0000-4000-8000-000000000004"],"batch_a_terminal":{"created_at":"2026-09-28T01:02:03.000Z","signal_id":"00000000-0000-4000-8000-000000000004"},"cursor_after_a":{"created_at":"2026-09-28T01:02:03.000Z","signal_id":"00000000-0000-4000-8000-000000000004"},"cursor_after_b":{"created_at":"2026-09-28T01:02:03.000Z","signal_id":"00000000-0000-4000-8000-000000000005"}},"cleanup":{"seat_revoked":true,"handle_revoked":true,"principal_revoked":true,"grant_revoked":true,"active_agent_tokens":0,"provider_family_active":false,"active_provider_artifacts":0,"authorization_refused":true,"open_refused":true,"ack_refused":true,"completed_at":"2026-09-28T01:02:03.000Z"},"assertions":{"hosted.concurrent-open-single-batch":true,"hosted.ack-a-commits-cursor":true,"hosted.repeat-ack-idempotent":true,"hosted.ack-b-empty-open":true,"hosted.public-unauthenticated-refusal":true,"hosted.public-human-bearer-refusal":true,"hosted.seat-handle-alone-refusal":true,"hosted.visibility-confined":true,"hosted.migration-functional-proof":true,"hosted.cleanup-complete":true}}'
+        ;;
       *inventory.ts*) printf '%s\n' '{"required":["SUPABASE_URL"],"optional":[]}' ;;
       *) printf '%s\n' 'dry-run deno PASS' ;;
     esac
