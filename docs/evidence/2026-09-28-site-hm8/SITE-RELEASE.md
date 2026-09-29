@@ -32,10 +32,21 @@ by an absolute path and is read without printing it.
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `8b8989f2b29e440a317a2cdedf11195901c8342c` |
 | `SITE_BASE_SHA` | Anvil, full SHA from baseline receipt | `9b085c82352390cf8f0fe515c02b3ccff423476a` |
 | `SITE_PROMPT_NUMBER` | HezLead | positive decimal integer |
-| `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute, absent before `site-00-source-checkout` |
-| `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute, absent before `site-01` |
+| `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute task-owned empty directory before `site-00-source-checkout` |
+| `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute task-owned empty mode-`0700` directory before `site-01` |
 | `SITE_BUILD_ENV_OP_REFERENCE` | HezLead/Anvil, approved 1Password document reference | `op://Yulan Ventures Infra/ITEM/FIELD` with nonempty item and field segments; no credential value |
-| `SITE_BUILD_ENV_SOURCE` | Anvil, protected staging output path | absolute path directly under `SITE_EVIDENCE`, absent before `site-00-build-env` |
+
+```prompt-inputs
+{"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
+{"name":"SITE_APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for the lane 8 release."}
+{"name":"SITE_PLAN_COMMIT","format":"sha40","supplier":"HezLead","meaning":"Reviewed commit containing the lane 8 plan."}
+{"name":"SITE_RELEASE_SHA","format":"literal:8b8989f2b29e440a317a2cdedf11195901c8342c","supplier":"HezLead and Anvil","meaning":"Reviewed site release commit."}
+{"name":"SITE_BASE_SHA","format":"literal:9b085c82352390cf8f0fe515c02b3ccff423476a","supplier":"Anvil","meaning":"Measured full baseline source commit."}
+{"name":"SITE_PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+{"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
+{"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
+{"name":"SITE_BUILD_ENV_OP_REFERENCE","format":"literal:op://Yulan Ventures Infra/CommonSwarm Site/public-build-env","supplier":"HezLead and Anvil","meaning":"Approved 1Password document reference; never a credential value."}
+```
 The WINDOW A close receipt contains these exact public lines:
 
 ```text
@@ -61,7 +72,8 @@ close=PASS
   case "$SITE_RELEASE_REPO" in /*) ;; *) exit 1 ;; esac
   test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
-  test ! -e "$SITE_RELEASE_REPO"
+  test -d "$SITE_RELEASE_REPO" && test ! -L "$SITE_RELEASE_REPO"
+  test -z "$(find "$SITE_RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
   git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$SITE_RELEASE_REPO"
   git -C "$SITE_RELEASE_REPO" checkout --detach "$SITE_RELEASE_SHA"
   test "$(git -C "$SITE_RELEASE_REPO" rev-parse HEAD)" = "$SITE_RELEASE_SHA"
@@ -89,19 +101,20 @@ and derives the ID. Nobody types a time or ID.
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
-  : "${SITE_BUILD_ENV_SOURCE:?named input missing}"
   test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
-  for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE" \
-      "$SITE_BUILD_ENV_SOURCE"; do
+  for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
-  test ! -e "$SITE_EVIDENCE"
+  test -d "$SITE_EVIDENCE" && test ! -L "$SITE_EVIDENCE"
+  test -z "$(find "$SITE_EVIDENCE" -mindepth 1 -maxdepth 1 -print -quit)"
+  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
   test ! -e "$HOME/.commonswarm-site-window.env"
   test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
   test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
   case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
   case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
+  SITE_BUILD_ENV_SOURCE="$SITE_EVIDENCE/site-build.env"
   test "${SITE_BUILD_ENV_SOURCE%/*}" = "$SITE_EVIDENCE"
   test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
   for expected in \
@@ -174,8 +187,6 @@ PY
   case "$SITE_WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
   esac
-  mkdir -m 0700 "$SITE_EVIDENCE"
-  test "$(stat -f '%Lp' "$SITE_EVIDENCE")" = 700
   SITE_WINDOW_FILE="$HOME/.commonswarm-site-window.env"
   umask 077
   {

@@ -118,6 +118,8 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
+  : "${RELEASE_REPO:?absolute release checkout required}"
+  cd "$RELEASE_REPO"
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   BASE=72c57e0d76d0aa86fe4f811a2cf51499919fed20
   HM6_STACK=ad964ed158181ba1692dd05895f36fa7a1f87d3f
@@ -323,8 +325,8 @@ Credential values are never prompt inputs.
 | `PROMPT_NUMBER` | HezLead | Positive decimal. |
 | `BACKUP_MAX_AGE_SECONDS` | HezLead | Positive decimal seconds; expected `86400`. |
 | `GATE_RECEIPT_PATH` | CSwarmDevLead/Anvil | Absolute path to the reviewed exact-SHA gate receipt. |
-| `PROOF_SQL_ROOT` | CSwarmDevLead/Anvil | Absolute directory containing exactly the eight reviewed SQL proof files. |
-| `RELEASE_REPO` | Anvil | Absolute path to the clean exact-SHA checkout. |
+| `PROOF_SQL_MANIFEST` | CSwarmDevLead/Anvil | Absolute protected schema-1 file listing exactly the eight reviewed SQL proof files copied from the exact-SHA checkout. |
+| `RELEASE_REPO` | Anvil | Absolute empty directory in which the opening block creates the clean exact-SHA checkout. |
 | `PREP_RECEIPT_PATH` | Anvil, from `hm37-prep-final-yes` | Absolute path printed by the PREP plan; a regular non-symlink mode-`0600` schema-1 JSON receipt for exactly three newly prepared seats. |
 | `KIND_LIST` | HezLead | Exact string `edge stack`. |
 | `H0_LEDGER_BACKFILL` | HezLead | Exact string `no`. |
@@ -334,33 +336,69 @@ Credential values are never prompt inputs.
 | `MCP_CADDY_RELEASE` | HezLead | Exact string `no`. |
 | `CHANGED_FUNCTIONS` | HezLead | Exact string `command mcp`. |
 | `ROUTER_CHANGED` | HezLead | Exact string `yes`. |
+| `MIGRATION_VERSIONS` | HezLead | Exact string `20260928000004`. |
+| `FUNCTIONAL_VERSIONS` | HezLead | Exact string `20260928000004`. |
+| `EXPECTED_NEW_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty addition list. |
+| `EXPECTED_REMOVED_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty removal list. |
 | `SCHEMA_ROLLBACK_APPROVAL` | HezLead, rollback only | Exact `yes`, tied to this window ID and a verified previous-edge readback. |
+
+The Anvil prompt supplies these values. Paths identify protected files or
+task-owned directories; no credential value is present in the prompt.
+
+```prompt-inputs
+{"name":"APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for Window A."}
+{"name":"PLAN_COMMIT","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed commit containing the Window A plan."}
+{"name":"RELEASE_SHA","format":"literal:eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922","supplier":"HezLead and Anvil","meaning":"Reviewed release commit pinned for Window A."}
+{"name":"PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+{"name":"BACKUP_MAX_AGE_SECONDS","format":"decimal-positive","supplier":"HezLead","meaning":"Maximum acceptable verified backup age in seconds."}
+{"name":"GATE_RECEIPT_PATH","format":"abs-file:gate-receipt","supplier":"CSwarmDevLead and Anvil","meaning":"Protected exact-SHA gate receipt."}
+{"name":"PROOF_SQL_MANIFEST","format":"abs-file:sql-proof-root","supplier":"CSwarmDevLead and Anvil","meaning":"Protected manifest naming the eight reviewed SQL proof files."}
+{"name":"RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
+{"name":"PREP_RECEIPT_PATH","format":"abs-file:prep-receipt","supplier":"Anvil","meaning":"Protected successful PREP receipt passed to Window A."}
+{"name":"KIND_LIST","format":"literal:edge stack","supplier":"HezLead","meaning":"Approved release surfaces."}
+{"name":"H0_LEDGER_BACKFILL","format":"literal:no","supplier":"HezLead","meaning":"Disable the H0 ledger-backfill step group."}
+{"name":"GUARDED_STACK_SWITCH","format":"literal:no","supplier":"HezLead","meaning":"Disable the guarded stack-switch step group."}
+{"name":"BACKUP_STATUS_PROOF","format":"literal:no","supplier":"HezLead","meaning":"Disable the backup-status proof step group."}
+{"name":"API_CADDY_PAIR","format":"literal:no","supplier":"HezLead","meaning":"Disable the API Caddy pair step group."}
+{"name":"MCP_CADDY_RELEASE","format":"literal:no","supplier":"HezLead","meaning":"Disable the MCP Caddy release step group."}
+{"name":"CHANGED_FUNCTIONS","format":"literal:command mcp","supplier":"HezLead","meaning":"Functions changed by the reviewed release."}
+{"name":"ROUTER_CHANGED","format":"literal:yes","supplier":"HezLead","meaning":"The reviewed release changes the router."}
+{"name":"MIGRATION_VERSIONS","format":"literal:20260928000004","supplier":"HezLead","meaning":"Approved pending migration version for this window."}
+{"name":"FUNCTIONAL_VERSIONS","format":"literal:20260928000004","supplier":"HezLead","meaning":"Approved migration version requiring a functional proof."}
+{"name":"EXPECTED_NEW_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-addition list."}
+{"name":"EXPECTED_REMOVED_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-removal list."}
+{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Window-bound decision for the reserved schema rollback."}
+```
 
 ```sh
 # step: hm37a-source-checkout
-# readonly: yes
+# readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
-  : "${PROOF_SQL_ROOT:?absolute proof SQL directory required}"
+  : "${PROOF_SQL_MANIFEST:?absolute proof SQL manifest required}"
   : "${RELEASE_REPO:?absolute release checkout required}"
   : "${RELEASE_SHA:?named release SHA required}"
-  for PATH_INPUT in "$GATE_RECEIPT_PATH" "$PROOF_SQL_ROOT" "$RELEASE_REPO"; do
+  for PATH_INPUT in "$GATE_RECEIPT_PATH" "$PROOF_SQL_MANIFEST" "$RELEASE_REPO"; do
     case "$PATH_INPUT" in /*) ;; *) false ;; esac
   done
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   test -f "$GATE_RECEIPT_PATH"
   test ! -L "$GATE_RECEIPT_PATH"
-  test -d "$PROOF_SQL_ROOT"
-  test ! -L "$PROOF_SQL_ROOT"
-  test -e "$RELEASE_REPO/.git"
+  test -f "$PROOF_SQL_MANIFEST"
+  test ! -L "$PROOF_SQL_MANIFEST"
+  test -d "$RELEASE_REPO"
+  test ! -L "$RELEASE_REPO"
+  test -z "$(find "$RELEASE_REPO" -mindepth 1 -maxdepth 1 -print -quit)"
+  git clone --no-checkout https://github.com/yulanventures/commonswarm.git "$RELEASE_REPO"
+  git -C "$RELEASE_REPO" checkout --detach "$RELEASE_SHA"
   (
     cd "$RELEASE_REPO"
     test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
     test -z "$(git status --porcelain)"
     test "$(git remote get-url origin)" = https://github.com/yulanventures/commonswarm.git
-    git fetch origin main
+    git show-ref --verify --quiet refs/remotes/origin/main
     git merge-base --is-ancestor "$RELEASE_SHA" origin/main
   )
 )
@@ -468,10 +506,10 @@ os.chmod(output_path, 0o600)
 PY
   OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
   test ! -e "$OPEN_RECEIPT"
-  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\n' \
+  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\nRELEASE_REPO=%q\n' \
     "$RELEASE_SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
     "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" \
-    "$PREP_RECEIPT_PATH" "$PREP_SEATS" >"$OPEN_RECEIPT"
+    "$PREP_RECEIPT_PATH" "$PREP_SEATS" "$RELEASE_REPO" >"$OPEN_RECEIPT"
   chmod 0600 "$OPEN_RECEIPT"
 )
 ```
@@ -488,7 +526,7 @@ window state or release process. The operator types no time.
   set -euo pipefail
   umask 077
   : "${GATE_RECEIPT_PATH:?absolute gate receipt path required}"
-  : "${PROOF_SQL_ROOT:?absolute SQL root required}"
+  : "${PROOF_SQL_MANIFEST:?absolute SQL manifest required}"
   : "${RELEASE_REPO:?absolute release checkout required}"
   : "${RELEASE_SHA:?named release SHA required}"
   . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
@@ -496,13 +534,21 @@ window state or release process. The operator types no time.
   RUN_DAY="$(date -u +%F)"
   EVIDENCE_DIR="$RELEASE_REPO/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
+  : >"$EVIDENCE_DIR/gate-evidence.txt"
   install -m 0600 "$GATE_RECEIPT_PATH" "$EVIDENCE_DIR/gate-evidence.txt"
   grep -qFx "SHA=$RELEASE_SHA" "$EVIDENCE_DIR/gate-evidence.txt"
   FILES='20260928000002-catalog.sql 20260928000002-functional.sql 20260928000003-catalog.sql 20260928000003-functional.sql 20260928000004-catalog.sql 20260928000004-functional.sql 20260928000004-rollback.sql 20260928000004-rollback-catalog.sql'
+  jq -e --arg files "$FILES" '
+    (.files | type == "array" and length == 8) and
+    ((.files | join(" ")) == $files) and
+    (keys == ["files"])
+  ' "$PROOF_SQL_MANIFEST" >/dev/null
+  PROOF_SQL_ROOT="$RELEASE_REPO/deploy/release-proofs/item-hm"
   COUNT=0
   for FILE in $FILES; do
     test -f "$PROOF_SQL_ROOT/$FILE"
     test ! -L "$PROOF_SQL_ROOT/$FILE"
+    # Each install produces the reviewed *.sql evidence consumed later.
     install -m 0600 "$PROOF_SQL_ROOT/$FILE" "$EVIDENCE_DIR/$FILE"
     COUNT=$((COUNT + 1))
   done
@@ -528,6 +574,10 @@ window state or release process. The operator types no time.
   : "${MCP_CADDY_RELEASE:?named input required}"
   : "${CHANGED_FUNCTIONS:?named input required}"
   : "${ROUTER_CHANGED:?named input required}"
+  : "${MIGRATION_VERSIONS:?named input required}"
+  : "${FUNCTIONAL_VERSIONS:?named input required}"
+  : "${EXPECTED_NEW_CRON_JOBS:?named input required}"
+  : "${EXPECTED_REMOVED_CRON_JOBS:?named input required}"
   test "$KIND_LIST" = 'edge stack'
   test "$H0_LEDGER_BACKFILL" = no
   test "$GUARDED_STACK_SWITCH" = no
@@ -536,6 +586,10 @@ window state or release process. The operator types no time.
   test "$MCP_CADDY_RELEASE" = no
   test "$CHANGED_FUNCTIONS" = 'command mcp'
   test "$ROUTER_CHANGED" = yes
+  test "$MIGRATION_VERSIONS" = 20260928000004
+  test "$FUNCTIONAL_VERSIONS" = 20260928000004
+  test "$EXPECTED_NEW_CRON_JOBS" = none
+  test "$EXPECTED_REMOVED_CRON_JOBS" = none
   ARCHIVE_SHA256="$(awk 'NR == 1 {print $1}' "$EVIDENCE_DIR/archive.sha256")"
   case "$ARCHIVE_SHA256" in (*[!0-9a-f]*|'') false ;; esac
   test "${#ARCHIVE_SHA256}" -eq 64
@@ -548,8 +602,10 @@ window state or release process. The operator types no time.
     "MCP_CADDY_RELEASE=$MCP_CADDY_RELEASE" \
     "CHANGED_FUNCTIONS=$CHANGED_FUNCTIONS" \
     "ROUTER_CHANGED=$ROUTER_CHANGED" \
-    'MIGRATION_VERSIONS=20260928000004' \
-    'FUNCTIONAL_VERSIONS=20260928000004' \
+    "MIGRATION_VERSIONS=$MIGRATION_VERSIONS" \
+    "FUNCTIONAL_VERSIONS=$FUNCTIONAL_VERSIONS" \
+    "EXPECTED_NEW_CRON_JOBS=$EXPECTED_NEW_CRON_JOBS" \
+    "EXPECTED_REMOVED_CRON_JOBS=$EXPECTED_REMOVED_CRON_JOBS" \
     "ARCHIVE_SHA256=$ARCHIVE_SHA256" \
     >"$EVIDENCE_DIR/item-resolved-inputs.env"
   cat >"$EVIDENCE_DIR/item-copy-back-files.list" <<'FILES'
@@ -2048,9 +2104,10 @@ BOX
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  : "${FAILURE_JSON:?failure JSON required}"
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
+  FAILURE_JSON="$PROOF_DIR/hm37a-local-control-new.json"
+  test -f "$FAILURE_JSON"
   python3 - "$FAILURE_JSON" >"$PROOF_DIR/hm37a-failure-action.txt" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))
@@ -2097,13 +2154,27 @@ ordering-proven S5 bearer failure performs full rollback.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  : "${OUTGOING_LOG:?exact bounded outgoing log path required}"
-  : "${SECRET_SCAN_RESULT:?exact secret-scan result path required}"
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
+  OUTGOING_NAMES=()
+  while IFS= read -r NAME || [ -n "$NAME" ]; do
+    case "$NAME" in commonswarm-edge-edge-runtime-1.*.docker.log)
+      OUTGOING_NAMES[${#OUTGOING_NAMES[@]}]="$NAME"
+      ;;
+    esac
+  done <"$PROOF_DIR/copy-back.list"
+  test "${#OUTGOING_NAMES[@]}" -eq 1
+  OUTGOING_LOG="$PROOF_DIR/${OUTGOING_NAMES[0]}"
+  SECRET_SCAN_RESULT="$PROOF_DIR/hm37a-outgoing-secret-scan.txt"
   test -f "$OUTGOING_LOG"
   test ! -L "$OUTGOING_LOG"
   test "$(stat -c '%U:%G:%a' "$OUTGOING_LOG")" = root:root:600
+  if LC_ALL=C grep -Eiq '(authorization:|cookie:|set-cookie:|access[_-]?token|refresh[_-]?token|service[_-]?role)' "$OUTGOING_LOG"; then
+    printf 'FAIL\n' >"$SECRET_SCAN_RESULT"
+  else
+    printf 'PASS\n' >"$SECRET_SCAN_RESULT"
+  fi
+  chmod 0600 "$SECRET_SCAN_RESULT"
   SCAN="$(sed -n '1p' "$SECRET_SCAN_RESULT")"
   case "$SCAN" in
     PASS) printf 'outgoing_log=copy-approved\n' >"$PROOF_DIR/hm37a-log-disposition.txt" ;;

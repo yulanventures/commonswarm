@@ -16,6 +16,14 @@ The only prompt inputs for this preparation are:
 | `PLAN_COMMIT` | HezLead/Anvil, reviewed PREP plan | Exactly 40 hexadecimal characters. |
 | `PROMPT_NUMBER` | HezLead, approval record | Positive decimal integer. |
 
+The prompt supplies those values through this machine-readable table:
+
+```prompt-inputs
+{"name":"APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for the preparation window."}
+{"name":"PLAN_COMMIT","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed commit containing this preparation plan."}
+{"name":"PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+```
+
 No path, identifier, seat name, timestamp, or cleanup target is chosen by the
 operator. `hm37-prep-open` derives `PREP_ID` from the Mac clock in UTC as
 `YYYYMMDDTHHMMSSZ`. The fixed preparation root is

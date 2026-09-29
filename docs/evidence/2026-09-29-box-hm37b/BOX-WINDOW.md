@@ -30,6 +30,23 @@ contents remain private.
 | `IMPORT_MAP_SOURCE` | Anvil | Absolute path to the reviewed `hm37-open-ack-deno.json`. |
 | `SCHEMA_ROLLBACK_APPROVAL` | HezLead, rollback only | Exact `yes`, tied to this window ID and a verified previous-edge readback. |
 
+The Anvil prompt supplies these values. The file inputs are protected paths;
+their contents are not prompt text and are never printed.
+
+```prompt-inputs
+{"name":"APPROVER","format":"literal:HezLead","supplier":"HezLead","meaning":"Approval identity for Window B."}
+{"name":"PLAN_COMMIT","format":"sha40","supplier":"HezLead and Anvil","meaning":"Reviewed commit containing the Window B plan."}
+{"name":"RELEASE_SHA","format":"literal:eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922","supplier":"HezLead and Anvil","meaning":"Reviewed release commit pinned for Window B."}
+{"name":"PROMPT_NUMBER","format":"decimal-positive","supplier":"HezLead","meaning":"Positive approval-record prompt number."}
+{"name":"BACKUP_MAX_AGE_SECONDS","format":"decimal-positive","supplier":"HezLead","meaning":"Maximum acceptable verified backup age in seconds."}
+{"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
+{"name":"HUMAN_LOGIN_PREFLIGHT","format":"abs-file:human-login-preflight","supplier":"Anvil","meaning":"Protected noninteractive human-login preflight receipt."}
+{"name":"HUMAN_SESSION_SOURCE","format":"abs-file:human-session","supplier":"Anvil","meaning":"Protected human-session JSON staged for the hosted control."}
+{"name":"HARNESS_SOURCE","format":"abs-file:harness-source","supplier":"Anvil","meaning":"Reviewed hosted-control harness source file."}
+{"name":"IMPORT_MAP_SOURCE","format":"abs-file:import-map-source","supplier":"Anvil","meaning":"Reviewed Deno import-map source file."}
+{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Window-bound decision for the reserved schema rollback."}
+```
+
 The approved failure map is static: hosted cleanup assertion S2, hosted
 visibility assertion S4, and both hosted bearer/seat-handle assertions S5 invoke
 full edge-first rollback. Harness/setup failures invoke cleanup only. An unknown
@@ -236,8 +253,11 @@ BOX
   test "$(stat -f %Lp "$HUMAN_SESSION_SOURCE")" = 600
   STAGING_ROOT="/run/commonswarm-hm37-${WINDOW_ID}"
   ssh ops@100.115.66.74 "sudo -n -i install -d -m 0700 -o root -g root '$STAGING_ROOT'"
+  ssh ops@100.115.66.74 "umask 077; : > /tmp/hm37-open-ack-control.ts"
   scp "$HARNESS_SOURCE" ops@100.115.66.74:/tmp/hm37-open-ack-control.ts
+  ssh ops@100.115.66.74 "umask 077; : > /tmp/hm37-open-ack-deno.json"
   scp "$IMPORT_MAP_SOURCE" ops@100.115.66.74:/tmp/hm37-open-ack-deno.json
+  ssh ops@100.115.66.74 "umask 077; : > /tmp/hm37-human-session.json"
   scp "$HUMAN_SESSION_SOURCE" ops@100.115.66.74:/tmp/hm37-human-session.json
   scp "$EVIDENCE_DIR/hm37-worker-boundary.txt" ops@100.115.66.74:/tmp/hm37-worker-boundary.txt
   scp "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt" ops@100.115.66.74:/tmp/hm37-hosted-control-inputs.txt
@@ -296,53 +316,28 @@ PY
 
 ```sh
 # step: hm37-hosted-human-session-input
-# readonly: no
+# readonly: yes
 # host: Mac mini /bin/bash 3.2 as Anvil
-# Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
+# Runs on the Mac mini as Anvil, under /bin/bash 3.2, before protected transfer.
 (
   set -euo pipefail
-  umask 077
   : "${RELEASE_SHA:?named release SHA required}"
-  : "${HUMAN_SESSION_SOURCE:?absolute protected session output required}"
+  : "${HUMAN_SESSION_SOURCE:?absolute protected session input required}"
   case "$HUMAN_SESSION_SOURCE" in /*) ;; *) false ;; esac
   . "/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   INPUT_ROOT="$HOME/.config/cswarm/box-hm37-${WINDOW_ID}"
-  mkdir -m 0700 "$INPUT_ROOT"
-  test ! -e "$HUMAN_SESSION_SOURCE"
-  test -d "$(dirname "$HUMAN_SESSION_SOURCE")"
-  test "$(stat -f %Lp "$(dirname "$HUMAN_SESSION_SOURCE")")" = 700
-  cat >"$INPUT_ROOT/write-human-session.ts" <<'TS'
-import { open } from "node:fs/promises";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-const output = process.argv[2];
-const root = process.argv[3];
-if (!output || !root) throw new Error("output and checkout paths required");
-const moduleUrl = (path) => pathToFileURL(resolve(root, path)).href;
-const { readCurrentTarget } = await import(moduleUrl("src/cloud/current-target.ts"));
-const { refreshedCredential } = await import(moduleUrl("src/cloud/auth.ts"));
-const { credentialStore } = await import(moduleUrl("src/cloud/storage.ts"));
-const target = await readCurrentTarget();
-if (!target || target.url !== "https://api.commonswarm.com") {
-  throw new Error("current CommonSwarm target is not production");
-}
-const store = await credentialStore({ target });
-const session = await refreshedCredential(target, store);
-const file = await open(output, "wx", 0o600);
-try {
-  await file.writeFile(JSON.stringify({ access_token: session.accessToken }) + "\n");
-  await file.sync();
-  await file.chmod(0o600);
-} finally {
-  await file.close();
-}
-TS
-  node --import tsx "$INPUT_ROOT/write-human-session.ts" \
-    "$HUMAN_SESSION_SOURCE" "$PWD"
+  test ! -L "$INPUT_ROOT"
+  test -f "$HUMAN_SESSION_SOURCE"
+  test ! -L "$HUMAN_SESSION_SOURCE"
   test "$(stat -f %Lp "$HUMAN_SESSION_SOURCE")" = 600
-  rm "$INPUT_ROOT/write-human-session.ts"
-  printf 'protected human session prepared; transfer through the approved secure file path\n'
+  python3 - "$HUMAN_SESSION_SOURCE" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+assert set(value) == {"access_token"}
+assert isinstance(value["access_token"], str) and value["access_token"]
+PY
+  printf 'protected human session validated for approved transfer\n'
 )
 ```
 
@@ -745,16 +740,19 @@ PY
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  : "${FAILURE_JSON:?path to harness failure JSON required}"
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
+  FAILURE_JSON="$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
   test -f "$FAILURE_JSON"
   python3 - "$FAILURE_JSON" >"$PROOF_DIR/hm37b-failure-action.txt" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))
 assertion_id = value.get("error", {}).get("assertion_id")
+if assertion_id is None and value.get("ok") is True:
+    assertion_id = "control.harness"
 mapping = {
+    "control.harness": ("control", "cleanup-only"),
     "hosted.public-unauthenticated-refusal": ("S1", "full-rollback"),
     "hosted.cleanup-complete": ("S2", "full-rollback"),
     "hosted.visibility-confined": ("S4", "full-rollback"),

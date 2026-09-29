@@ -430,7 +430,8 @@ the dark `mcp` name:
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$SHA" = "$RELEASE_SHA"
   . "$EVIDENCE_DIR/item-resolved-inputs.env"
   test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
@@ -552,7 +553,8 @@ block reads them from `window.env`.
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$SHA" = "$RELEASE_SHA"
   test -s "$ARCHIVE"
   test -s "$BOX_WINDOW_INPUT"
   scp "$ARCHIVE" ops@100.115.66.74:/tmp/commonswarm-release.tar
@@ -1006,12 +1008,14 @@ cleanup `runbook-12`, and reports each one.
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$SHA" = "$RELEASE_SHA"
   test -d "$EVIDENCE_DIR"
-  ssh ops@100.115.66.74 'sudo -n -i bash -s' <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
+  ssh ops@100.115.66.74 "sudo -n -i bash -s -- '$RELEASE_SHA'" <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  RELEASE_SHA="$1"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -f "$PROOF_DIR/copy-back.list"
   test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
@@ -1086,7 +1090,9 @@ hide the failing block's evidence.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
@@ -1125,7 +1131,9 @@ print it:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   TARGET_SOURCE=/etc/commonswarm-release/target.env
   test -f "$TARGET_SOURCE"
   test ! -L "$TARGET_SOURCE"
@@ -1154,7 +1162,9 @@ This checks names and shape without printing the URL.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   python3 - <<'PY'
 from pathlib import Path
 p = Path('/etc/commonswarm-release/target.env')
@@ -1651,7 +1661,8 @@ proceed merely because the service command returned.
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
-  VERSION='<next-approved-version-from-pending-versions.txt>'
+  IFS= read -r VERSION <"$PROOF_DIR/pending-versions.txt" || [ -n "$VERSION" ]
+  test "$(wc -l <"$PROOF_DIR/pending-versions.txt" | tr -d ' ')" -eq 1
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
   grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
@@ -1848,8 +1859,11 @@ name per line; empty when none). The lead supplies both lists with the release; 
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
-  EXPECTED_NEW_CRON_JOBS='<newline-separated new job names, C-sorted, or empty>'
-  EXPECTED_REMOVED_CRON_JOBS='<newline-separated removed job names, C-sorted, or empty>'
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  test "$EXPECTED_NEW_CRON_JOBS" = none
+  test "$EXPECTED_REMOVED_CRON_JOBS" = none
+  EXPECTED_NEW_CRON_JOBS=''
+  EXPECTED_REMOVED_CRON_JOBS=''
   release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
     >"$PROOF_DIR/cron-after.txt"
   LC_ALL=C sort "$PROOF_DIR/cron-before.txt" >"$PROOF_DIR/cron-before-sorted.txt"
