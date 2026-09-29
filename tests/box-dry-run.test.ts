@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  chownSync,
   copyFileSync,
   existsSync,
   lstatSync,
@@ -12,6 +13,7 @@ import {
   realpathSync,
   readdirSync,
   renameSync,
+  rmdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -212,17 +214,30 @@ interface Fixture {
   bin: string;
   log: string;
   env: NodeJS.ProcessEnv;
+  prelude: string;
+  pythonFixture: string;
+  sourceRoot: string;
+  supportRoot?: string;
+  rootDirectories?: RootDirectoryFixture[];
   replacedRuntime?: { path: string; backup?: string };
 }
 
-function makeStubBin(bin: string): void {
-  mkdirSync(bin, { recursive: true, mode: 0o700 });
-  chmodSync(STUB, 0o755);
+interface RootDirectoryFixture {
+  path: string;
+  mode: number;
+  created: boolean;
+}
+
+function makeStubBin(bin: string, rootOwned = false): void {
+  mkdirSync(bin, { recursive: true, mode: rootOwned ? 0o755 : 0o700 });
+  chmodSync(bin, rootOwned ? 0o755 : 0o700);
+  if (rootOwned) chownSync(bin, 0, 0);
   const commands = boxFactFixture<{ stub_commands: string[] }>("command-runtimes").stub_commands;
   for (const command of commands) {
     const target = join(bin, command);
     if (!existsSync(target)) {
       copyFileSync(STUB, target);
+      if (rootOwned) chownSync(target, 0, 0);
       chmodSync(target, 0o755);
     }
   }
@@ -232,6 +247,46 @@ function writeMode(filename: string, body: string, mode = 0o600): void {
   mkdirSync(dirname(filename), { recursive: true });
   writeFileSync(filename, body, { mode });
   chmodSync(filename, mode);
+}
+
+function writeRootMode(filename: string, body: string, mode = 0o600): void {
+  writeMode(filename, body, mode);
+  chownSync(filename, 0, 0);
+}
+
+function copyRootFixture(source: string, target: string, mode: number): void {
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(source, target);
+  chownSync(target, 0, 0);
+  chmodSync(target, mode);
+}
+
+function makeRootDirectory(path: string, mode: number): void {
+  mkdirSync(path, { recursive: true, mode });
+  chownSync(path, 0, 0);
+  chmodSync(path, mode);
+}
+
+function prepareRootDirectory(path: string, mode: number): RootDirectoryFixture {
+  const created = !pathExists(path);
+  if (created) {
+    mkdirSync(path, { mode });
+    chownSync(path, 0, 0);
+    chmodSync(path, mode);
+  } else {
+    assert.equal(lstatSync(path).isDirectory(), true, `fixture root is not a directory: ${path}`);
+  }
+  return { path, mode, created };
+}
+
+function chownTree(owner: string, ...paths: string[]): void {
+  const result = spawnSync("/usr/bin/chown", ["-R", owner, ...paths], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function chownPaths(owner: string, ...paths: string[]): void {
+  const result = spawnSync("/usr/bin/chown", [owner, ...paths], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function checksumManifest(root: string, excluded: string[] = []): string {
@@ -302,6 +357,9 @@ function prepareMacFixture(): Fixture {
   }) + "\n");
   return {
     temporary, cwd, home, bin, log,
+    prelude: PRELUDE,
+    pythonFixture: PYTHON_FIXTURE,
+    sourceRoot: process.cwd(),
     env: {
       ...process.env,
       HOME: home,
@@ -376,9 +434,28 @@ function windowEnvBody(state: string): string {
 function prepareBoxFixture(state: string): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
+  chownSync(temporary, 0, 0);
+  chmodSync(temporary, 0o700);
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
-  makeStubBin(bin);
+  const supportRoot = join(temporary, "support");
+  const prelude = join(supportRoot, "prelude.sh");
+  const pythonFixture = join(supportRoot, "python");
+  const sourceRoot = join(supportRoot, "source");
+  makeRootDirectory(supportRoot, 0o755);
+  copyRootFixture(PRELUDE, prelude, 0o644);
+  makeRootDirectory(pythonFixture, 0o755);
+  copyRootFixture(join(PYTHON_FIXTURE, "sitecustomize.py"), join(pythonFixture, "sitecustomize.py"), 0o644);
+  makeRootDirectory(sourceRoot, 0o755);
+  makeRootDirectory(join(sourceRoot, "supabase"), 0o755);
+  makeRootDirectory(join(sourceRoot, "supabase/migrations"), 0o755);
+  copyRootFixture(
+    "supabase/migrations/20260928000003_hm_oauth_store.sql",
+    join(sourceRoot, "supabase/migrations/20260928000003_hm_oauth_store.sql"),
+    0o644,
+  );
+  makeStubBin(bin, true);
+  writeRootMode(log, "", 0o600);
   const denoFact = boxFactFixture<{
     path: string; owner: string; group: string; mode: string; version_output: string;
   }>("deno-runtime");
@@ -396,11 +473,20 @@ function prepareBoxFixture(state: string): Fixture {
     "/etc/caddy/sites/10-commonswarm-api.caddy", "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
     "/etc/caddy/sites/12-commonswarm-mcp.caddy", "/var/backups/commonswarm-postgres/status.json",
   ]) assert.equal(existsSync(path), false, `fixture refuses to replace pre-existing path: ${path}`);
+  const rootDirectories = [
+    prepareRootDirectory("/etc/commonswarm-release", 0o700),
+    prepareRootDirectory("/etc/commonswarm-oauth", 0o700),
+    prepareRootDirectory("/etc/caddy", 0o755),
+    prepareRootDirectory("/etc/caddy/sites", 0o755),
+    prepareRootDirectory("/var/backups", 0o755),
+    prepareRootDirectory("/var/backups/commonswarm-postgres", 0o755),
+  ];
   if (originalDeno) {
     mkdirSync(dirname(originalDeno), { recursive: true, mode: 0o700 });
     renameSync(denoFact.path, originalDeno);
   }
   copyFileSync(STUB, denoFact.path);
+  chownSync(denoFact.path, 0, 0);
   chmodSync(denoFact.path, Number.parseInt(denoFact.mode, 8));
   const denoStat = lstatSync(denoFact.path);
   assert.equal(denoStat.isFile(), true);
@@ -408,7 +494,7 @@ function prepareBoxFixture(state: string): Fixture {
   assert.equal(denoStat.mode & 0o777, 0o755);
   assert.equal(denoStat.uid, 0);
   assert.equal(denoStat.gid, 0);
-  for (const path of ["/home/commonswarm", "/srv/commonswarm"]) mkdirSync(path, { recursive: true, mode: 0o750 });
+  for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
   const previousEdge = releaseFact.previous_edge;
   const previousStack = releaseFact.previous_stack;
   const oauth = "/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05";
@@ -417,6 +503,7 @@ function prepareBoxFixture(state: string): Fixture {
     mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
     mkdirSync(join(release, "supabase/migrations"), { recursive: true });
     writeMode(join(release, "RELEASE_SHA"), `${basename(release)}\n`, 0o644);
+    chmodSync(release, 0o755);
   }
   mkdirSync(join(previousStack, "deploy/supabase-stack/postgres"), { recursive: true });
   writeMode(join(previousStack, "deploy/supabase-stack/compose.yaml"), "services: {}\n", 0o644);
@@ -425,12 +512,14 @@ function prepareBoxFixture(state: string): Fixture {
   mkdirSync("/home/commonswarm/edge", { recursive: true });
   mkdirSync("/home/commonswarm/stack", { recursive: true });
   mkdirSync("/home/commonswarm/oauth", { recursive: true });
+  for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth"]) chmodSync(path, 0o755);
   symlinkSync(previousEdge, "/home/commonswarm/edge/current");
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
   symlinkSync(oauth, "/home/commonswarm/oauth/current");
 
   const proof = releaseFact.proof_dir;
   mkdirSync(proof, { recursive: true, mode: 0o700 });
+  chmodSync(proof, 0o700);
   writeMode(join(proof, "window.env"), windowEnvBody(state));
   writeMode(join(proof, "GO.txt"), "CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead\n");
   writeMode(join(proof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
@@ -451,6 +540,7 @@ function prepareBoxFixture(state: string): Fixture {
   writeMode(join(proof, "edge-env-source-check.txt"), "fixture exact-SHA router inventory\n");
   const oauthProof = "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05";
   mkdirSync(oauthProof, { recursive: true, mode: 0o700 });
+  chmodSync(oauthProof, 0o700);
   writeMode(join(oauthProof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
   writeMode("/tmp/commonswarm-release-window.env", `SHA='${RELEASE_SHA}'\nWINDOW_START_UTC='${WINDOW_START}'\nWINDOW_ID='${WINDOW_ID}'\n`);
   writeMode("/tmp/commonswarm-release.tar", "dry-run archive\n");
@@ -502,8 +592,7 @@ function prepareBoxFixture(state: string): Fixture {
       writeMode(join(release, "deploy/supabase-stack/migrate/run-db-tool.sh"), "#!/bin/sh\nexit 0\n", 0o755);
     }
     if (state === "s3") writeMode(join(targetEdge, "deploy/edge-runtime/compose.override.yaml"), "services: {}\n", 0o644);
-    const owned = spawnSync("/usr/bin/chown", ["-R", "commonswarm:commonswarm", targetEdge, targetStack], { encoding: "utf8" });
-    assert.equal(owned.status, 0, owned.stderr);
+    chownTree("commonswarm:commonswarm", targetEdge, targetStack);
     chmodSync(targetEdge, 0o750);
     chmodSync(targetStack, 0o755);
     writeMode(join(proof, "edge.SHA256SUMS"), checksumManifest(targetEdge, ["deploy/edge-runtime/compose.override.yaml"]));
@@ -516,30 +605,61 @@ function prepareBoxFixture(state: string): Fixture {
 
   const staging = `/run/commonswarm-hm37-${WINDOW_ID}`;
   mkdirSync(staging, { recursive: true, mode: 0o700 });
-  copyFileSync("deploy/release-proofs/item-hm/hm37-open-ack-control.ts", join(staging, "hm37-open-ack-control.ts"));
-  copyFileSync("deploy/release-proofs/item-hm/hm37-open-ack-deno.json", join(staging, "hm37-open-ack-deno.json"));
-  writeMode(join(staging, "human-session.json"), '{"access_token":"placeholder"}\n');
+  chmodSync(staging, 0o700);
+  copyRootFixture("deploy/release-proofs/item-hm/hm37-open-ack-control.ts", join(staging, "hm37-open-ack-control.ts"), 0o644);
+  copyRootFixture("deploy/release-proofs/item-hm/hm37-open-ack-deno.json", join(staging, "hm37-open-ack-deno.json"), 0o644);
+  writeRootMode(join(staging, "human-session.json"), '{"access_token":"placeholder"}\n');
 
   const siteRelease = "/srv/commonswarm/site/releases/20260928T010203Z-8b8989f2b29e-deadbeefdeadbeef";
   mkdirSync(join(siteRelease, "app"), { recursive: true });
   mkdirSync(join(siteRelease, "download"), { recursive: true });
   mkdirSync(join(siteRelease, "_astro"), { recursive: true });
+  chmodSync(siteRelease, 0o755);
   writeMode(join(siteRelease, "app/index.html"), '<button data-connected-apps-open></button><link href="/_astro/app.css">\n', 0o644);
   writeMode(join(siteRelease, "download/index.html"), "0.1.80\n", 0o644);
   writeMode(join(siteRelease, "_astro/app.css"), "body{}\n", 0o644);
   mkdirSync("/srv/commonswarm/site", { recursive: true });
+  chmodSync("/srv/commonswarm/site", 0o755);
+  chmodSync("/srv/commonswarm/site/releases", 0o755);
   symlinkSync(siteRelease, "/srv/commonswarm/site/current");
+
+  chownTree("root:root", supportRoot, proof, oauthProof, staging);
+  for (const path of [
+    log,
+    denoFact.path,
+    "/home/commonswarm/.env",
+    "/etc/commonswarm-release/target.env",
+    "/etc/ssl/yulan-internal-ca.pem",
+    "/etc/commonswarm-oauth/database-credentials",
+    "/etc/commonswarm-oauth/service.env",
+    "/etc/caddy/sites/10-commonswarm-api.caddy",
+    "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
+    "/etc/caddy/sites/12-commonswarm-mcp.caddy",
+    "/var/backups/commonswarm-postgres/status.json",
+    "/tmp/commonswarm-release-window.env",
+    "/tmp/commonswarm-release.tar",
+    "/tmp/commonswarm-site-window.env",
+    `/run/commonswarm-release-${RELEASE_SHA}-session.sh`,
+  ]) chownSync(path, 0, 0);
+  chownTree("commonswarm:commonswarm", previousEdge, previousStack, oauth, siteRelease);
+  if (state !== "s1") chownTree("commonswarm:commonswarm", targetEdge, targetStack);
+  chownPaths(
+    "commonswarm:commonswarm",
+    "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth",
+    "/srv/commonswarm", "/srv/commonswarm/site", "/srv/commonswarm/site/releases",
+  );
 
   return {
     temporary, cwd: process.cwd(), home: "/root", bin, log,
+    prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
     replacedRuntime: { path: denoFact.path, ...(originalDeno ? { backup: originalDeno } : {}) },
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
-      PYTHONPATH: PYTHON_FIXTURE,
+      PYTHONPATH: pythonFixture,
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
-      BOX_DRY_RUN_SOURCE_ROOT: process.cwd(),
+      BOX_DRY_RUN_SOURCE_ROOT: sourceRoot,
       BOX_DRY_RUN_DENO_VERSION: denoFact.version_output,
       BACKUP_MAX_AGE_SECONDS: "86400",
     },
@@ -566,6 +686,9 @@ function cleanupBoxFixture(fixture: Fixture): void {
     if (fixture.replacedRuntime.backup && pathExists(fixture.replacedRuntime.backup)) {
       renameSync(fixture.replacedRuntime.backup, fixture.replacedRuntime.path);
     }
+  }
+  for (const directory of [...(fixture.rootDirectories ?? [])].reverse()) {
+    if (directory.created && pathExists(directory.path)) rmdirSync(directory.path);
   }
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
 }
@@ -618,6 +741,14 @@ function restoreFixture(fixture: Fixture, part: FixturePart, archive: string): v
   else cleanupMacFixture(fixture);
   const result = spawnSync("/usr/bin/tar", ["-xpf", archive, "-C", "/"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
+  if (part === "box") {
+    for (const directory of fixture.rootDirectories ?? []) {
+      if (!directory.created) continue;
+      assert.equal(lstatSync(directory.path).isDirectory(), true, `restored fixture root is not a directory: ${directory.path}`);
+      chownSync(directory.path, 0, 0);
+      chmodSync(directory.path, directory.mode);
+    }
+  }
 }
 
 interface Execution {
@@ -631,7 +762,7 @@ function executeWholeBlock(block: Block, fixture: Fixture, options: { fail?: boo
   const step = shortStep(block);
   const body = materialize(block);
   const script = [
-    "set -E", `source ${JSON.stringify(PRELUDE)}`,
+    "set -E", `source ${JSON.stringify(fixture.prelude)}`,
     "trap 'block_status=$?; printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\"' ERR",
     body,
   ].join("\n");
@@ -751,6 +882,189 @@ test("the box safety guard refuses this Mac and validates every blocking conditi
   assert.match(result.stderr, /REFUSE: Linux is required/);
 });
 
+test("box preflight reports every shared fixture precondition in one pass", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box",
+}, (t) => {
+  const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+  assert.equal(guard.status, 0, guard.stderr);
+  const checkoutStubBefore = lstatSync(STUB);
+  const denoPath = boxFactFixture<{ path: string }>("deno-runtime").path;
+  const denoBefore = pathExists(denoPath)
+    ? {
+        stat: lstatSync(denoPath),
+        digest: createHash("sha256").update(readFileSync(denoPath)).digest("hex"),
+      }
+    : undefined;
+  const fixture = prepareBoxFixture("s2");
+  const failures: string[] = [];
+  const check = (label: string, expected: string, read: () => string, accepts: (actual: string) => boolean): void => {
+    try {
+      const actual = read();
+      if (!accepts(actual)) failures.push(`${label}: expected ${expected}; actual=${JSON.stringify(actual)}`);
+    } catch (error) {
+      failures.push(`${label}: expected ${expected}; actual=ERROR ${(error as Error).message}`);
+    }
+  };
+  const checkStat = (path: string, owner: number, group: number, mode: number, kind: "file" | "directory"): void => {
+    check(path, `${kind} uid=${owner} gid=${group} mode=${mode.toString(8)}`, () => {
+      const stat = lstatSync(path);
+      const actualKind = stat.isFile() ? "file" : stat.isDirectory() ? "directory" : stat.isSymbolicLink() ? "symlink" : "other";
+      return `${actualKind} uid=${stat.uid} gid=${stat.gid} mode=${(stat.mode & 0o777).toString(8)}`;
+    }, (actual) => actual === `${kind} uid=${owner} gid=${group} mode=${mode.toString(8)}`);
+  };
+  try {
+    check("effective uid", "0", () => String(process.getuid?.()), (actual) => actual === "0");
+    check("hostname", "anything except yulan-vps-1", () => {
+      const result = spawnSync("/bin/hostname", ["-s"], { encoding: "utf8" });
+      return `status=${result.status} name=${result.stdout.trim()}`;
+    }, (actual) => actual.startsWith("status=0 name=") && actual !== "status=0 name=yulan-vps-1");
+    for (const name of boxFactFixture<{ users: string[] }>("host-accounts").users) {
+      check(`user ${name}`, "present", () => {
+        const result = spawnSync("/usr/bin/id", ["-u", name], { encoding: "utf8" });
+        return `status=${result.status} uid=${result.stdout.trim()}`;
+      }, (actual) => /^status=0 uid=\d+$/.test(actual));
+      check(`primary group ${name}`, name, () => {
+        const result = spawnSync("/usr/bin/id", ["-gn", name], { encoding: "utf8" });
+        return `status=${result.status} group=${result.stdout.trim()}`;
+      }, (actual) => actual === `status=0 group=${name}`);
+    }
+    for (const name of boxFactFixture<{ groups: string[] }>("host-accounts").groups) {
+      check(`group ${name}`, "present", () => {
+        const result = spawnSync("/usr/bin/getent", ["group", name], { encoding: "utf8" });
+        return `status=${result.status} value=${result.stdout.trim()}`;
+      }, (actual) => actual.startsWith("status=0 value="));
+    }
+    check("root can run as commonswarm", "status=0", () => {
+      const result = spawnSync("/usr/bin/sudo", ["-n", "-u", "commonswarm", "/usr/bin/true"], { encoding: "utf8" });
+      return `status=${result.status} stderr=${result.stderr.trim()}`;
+    }, (actual) => actual === "status=0 stderr=");
+    let sudoUmask = "";
+    check("sudo umask", "a valid octal umask; fixture modes are then set explicitly", () => {
+      const result = spawnSync("/usr/bin/sudo", ["-n", "/bin/bash", "-c", "umask"], { encoding: "utf8" });
+      sudoUmask = result.stdout.trim();
+      return `status=${result.status} umask=${sudoUmask} stderr=${result.stderr.trim()}`;
+    }, (actual) => /^status=0 umask=0?[0-7]{3} stderr=$/.test(actual));
+    check("sudo secure_path", "status=0 with /usr/local/bin, /usr/bin and /bin", () => {
+      const result = spawnSync("/usr/bin/sudo", ["-n", "/bin/bash", "-c", "printf '%s' \"$PATH\""], { encoding: "utf8" });
+      return `status=${result.status} path=${result.stdout.trim()} stderr=${result.stderr.trim()}`;
+    }, (actual) => {
+      const match = /^status=0 path=(.*) stderr=$/.exec(actual);
+      if (!match) return false;
+      const entries = match[1]!.split(":");
+      return ["/usr/local/bin", "/usr/bin", "/bin"].every((path) => entries.includes(path));
+    });
+
+    check("PATH first entry", fixture.bin, () => fixture.env.PATH?.split(":")[0] ?? "", (actual) => actual === fixture.bin);
+    const runtimeFact = boxFactFixture<{ stub_commands: string[]; mode: string }>("command-runtimes");
+    for (const command of runtimeFact.stub_commands) {
+      const path = join(fixture.bin, command);
+      checkStat(path, 0, 0, Number.parseInt(runtimeFact.mode, 8), "file");
+      check(`PATH command ${command}`, path, () => {
+        const result = spawnSync("/bin/bash", ["-c", 'command -v -- "$1"', "box-preflight", command], {
+          encoding: "utf8", env: fixture.env,
+        });
+        return `status=${result.status} path=${result.stdout.trim()}`;
+      }, (actual) => actual === `status=0 path=${path}`);
+      check(`stub location ${command}`, "outside the checkout", () => realpathSync(path),
+        (actual) => !actual.startsWith(`${process.cwd()}/`));
+    }
+    check("stubbed sudo PATH", join(fixture.bin, "docker"), () => {
+      const result = spawnSync("sudo", ["-n", "-u", "commonswarm", "/bin/bash", "-c", 'command -v -- "$1"', "box-preflight", "docker"], {
+        encoding: "utf8", env: fixture.env,
+      });
+      return `status=${result.status} path=${result.stdout.trim()}`;
+    }, (actual) => actual === `status=0 path=${join(fixture.bin, "docker")}`);
+    checkStat(denoPath, 0, 0, 0o755, "file");
+    checkStat(fixture.temporary!, 0, 0, 0o700, "directory");
+    checkStat(fixture.bin, 0, 0, 0o755, "directory");
+    checkStat(fixture.supportRoot!, 0, 0, 0o755, "directory");
+    checkStat(fixture.prelude, 0, 0, 0o644, "file");
+    checkStat(fixture.pythonFixture, 0, 0, 0o755, "directory");
+    checkStat(join(fixture.pythonFixture, "sitecustomize.py"), 0, 0, 0o644, "file");
+    checkStat(fixture.sourceRoot, 0, 0, 0o755, "directory");
+    checkStat(join(fixture.sourceRoot, "supabase/migrations"), 0, 0, 0o755, "directory");
+    checkStat(join(fixture.sourceRoot, "supabase/migrations/20260928000003_hm_oauth_store.sql"), 0, 0, 0o644, "file");
+    check("box prelude location", "outside checkout", () => fixture.prelude, (actual) => !actual.startsWith(`${process.cwd()}/`));
+    check("box Python fixture location", "outside checkout", () => fixture.pythonFixture, (actual) => !actual.startsWith(`${process.cwd()}/`));
+    check("box source fixture location", "outside checkout", () => fixture.sourceRoot, (actual) => !actual.startsWith(`${process.cwd()}/`));
+    for (const directory of fixture.rootDirectories ?? []) checkStat(directory.path, 0, 0, directory.mode, "directory");
+    checkStat("/usr/local/bin", 0, 0, 0o755, "directory");
+    checkStat("/run", 0, 0, 0o755, "directory");
+
+    for (const [path, mode] of [
+      [fixture.log, 0o600],
+      ["/home/commonswarm/.env", 0o600],
+      ["/etc/commonswarm-release/target.env", 0o600],
+      ["/etc/ssl/yulan-internal-ca.pem", 0o600],
+      ["/etc/commonswarm-oauth/database-credentials", 0o600],
+      ["/etc/commonswarm-oauth/service.env", 0o600],
+      ["/etc/caddy/sites/10-commonswarm-api.caddy", 0o644],
+      ["/etc/caddy/sites/11-commonswarm-edge-staging.caddy", 0o644],
+      ["/etc/caddy/sites/12-commonswarm-mcp.caddy", 0o644],
+      ["/var/backups/commonswarm-postgres/status.json", 0o600],
+      ["/tmp/commonswarm-release-window.env", 0o600],
+      ["/tmp/commonswarm-release.tar", 0o600],
+      ["/tmp/commonswarm-site-window.env", 0o600],
+      [`/run/commonswarm-release-${RELEASE_SHA}-session.sh`, 0o600],
+    ] as const) checkStat(path, 0, 0, mode, "file");
+    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}`, 0, 0, 0o700, "directory");
+    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-control.ts`, 0, 0, 0o644, "file");
+    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-deno.json`, 0, 0, 0o644, "file");
+    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/human-session.json`, 0, 0, 0o600, "file");
+    const proof = boxFactFixture<{ proof_dir: string }>("release-layout").proof_dir;
+    checkStat(proof, 0, 0, 0o700, "directory");
+    for (const name of readdirSync(proof)) {
+      if (!lstatSync(join(proof, name)).isFile()) continue;
+      checkStat(join(proof, name), 0, 0, 0o600, "file");
+    }
+    const commonswarmUidResult = spawnSync("/usr/bin/id", ["-u", "commonswarm"], { encoding: "utf8" });
+    const commonswarmGidResult = spawnSync("/usr/bin/id", ["-g", "commonswarm"], { encoding: "utf8" });
+    if (commonswarmUidResult.status === 0 && commonswarmGidResult.status === 0) {
+      const commonswarmUid = Number.parseInt(commonswarmUidResult.stdout, 10);
+      const commonswarmGid = Number.parseInt(commonswarmGidResult.stdout, 10);
+      const releaseFact = boxFactFixture<{
+        previous_edge: string; previous_stack: string; candidate_edge: string; candidate_stack: string;
+      }>("release-layout");
+      checkStat("/home/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
+      checkStat("/srv/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
+      checkStat(releaseFact.previous_edge, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(releaseFact.previous_stack, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(releaseFact.candidate_edge, commonswarmUid, commonswarmGid, 0o750, "directory");
+      checkStat(releaseFact.candidate_stack, commonswarmUid, commonswarmGid, 0o755, "directory");
+    } else {
+      failures.push(`commonswarm ownership ids: expected numeric uid/gid; actual uid_status=${commonswarmUidResult.status} gid_status=${commonswarmGidResult.status}`);
+    }
+    check("commonswarm fixture access", "status=0", () => {
+      const result = spawnSync("/usr/bin/sudo", [
+        "-n", "-u", "commonswarm", "/usr/bin/test", "-r",
+        "/srv/commonswarm/site/current/app/index.html",
+      ], { encoding: "utf8" });
+      return `status=${result.status} stderr=${result.stderr.trim()}`;
+    }, (actual) => actual === "status=0 stderr=");
+    check("/run fixture filesystem", "tmpfs", () => {
+      const result = spawnSync("/usr/bin/stat", ["-f", "-c", "%T", "/run"], { encoding: "utf8" });
+      return `status=${result.status} type=${result.stdout.trim()}`;
+    }, (actual) => actual === "status=0 type=tmpfs");
+    assert.equal(failures.length, 0, `box preflight unmet preconditions (${failures.length}):\n${failures.join("\n")}`);
+    t.diagnostic(`box fixture neutralized sudo umask ${sudoUmask || "unknown"} with explicit owner/mode construction`);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+  const checkoutStubAfter = lstatSync(STUB);
+  assert.equal(checkoutStubAfter.uid, checkoutStubBefore.uid, "checkout stub owner changed");
+  assert.equal(checkoutStubAfter.gid, checkoutStubBefore.gid, "checkout stub group changed");
+  assert.equal(checkoutStubAfter.mode & 0o777, checkoutStubBefore.mode & 0o777, "checkout stub mode changed");
+  if (denoBefore) {
+    const denoAfter = lstatSync(denoPath);
+    assert.equal(denoAfter.uid, denoBefore.stat.uid, "runner Deno owner was not restored");
+    assert.equal(denoAfter.gid, denoBefore.stat.gid, "runner Deno group was not restored");
+    assert.equal(denoAfter.mode & 0o777, denoBefore.stat.mode & 0o777, "runner Deno mode was not restored");
+    assert.equal(createHash("sha256").update(readFileSync(denoPath)).digest("hex"), denoBefore.digest, "runner Deno content was not restored");
+  } else {
+    assert.equal(pathExists(denoPath), false, "fixture Deno was not removed");
+  }
+});
+
 test("Mac harness uses a temporary local clone and recorded command stubs only", () => {
   const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
   try {
@@ -769,7 +1083,6 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
       const target = join(bin, command);
       symlinkSync(resolve(STUB), target);
     }
-    chmodSync(STUB, 0o755);
     const baseEnv = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, BOX_DRY_RUN_STUB_LOG: log };
     assert.equal(spawnSync("ssh", ["ops@box", "true"], { env: baseEnv }).status, 0);
     assert.equal(spawnSync("scp", ["fixture", "ops@box:/tmp/fixture"], { env: baseEnv }).status, 0);
