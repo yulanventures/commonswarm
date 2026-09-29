@@ -990,6 +990,52 @@ function matchingProducer(resource: string, earlier: Block[]): boolean {
   ));
 }
 
+function pathExpressionAt(source: string, offset: number, leaf: string): string {
+  const prefix = source.slice(0, offset);
+  const base = /(?:\/|\$\{?[A-Z][A-Z0-9_]*\}?\/)[A-Za-z0-9_./${}-]*$/.exec(prefix)?.[0];
+  return base ? `${base}${leaf}` : leaf;
+}
+
+function resolvedPathVariables(blocks: Block[]): Map<string, string> {
+  const assignments = new Map<string, string>();
+  for (const block of blocks) {
+    for (const match of block.source.matchAll(/^\s*([A-Z][A-Z0-9_]*)=(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#]+))\s*(?:#.*)?$/gm)) {
+      assignments.set(match[1]!, match[2] ?? match[3] ?? match[4]!);
+    }
+  }
+  if (blocks.some((block) => /(?:^|\n)\s*PREVIOUS_EDGE="\$\(readlink -f \/home\/commonswarm\/edge\/current\)"/m.test(block.source))) {
+    assignments.set("PREVIOUS_EDGE", PREVIOUS_EDGE);
+  }
+
+  const resolved = new Map<string, string>();
+  const resolveValue = (name: string, resolving = new Set<string>()): string | undefined => {
+    if (resolved.has(name)) return resolved.get(name);
+    if (resolving.has(name)) return undefined;
+    const value = assignments.get(name);
+    if (value === undefined || /\$\(/.test(value)) return undefined;
+    resolving.add(name);
+    const expanded = value.replace(/\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g, (whole, braced, plain) => {
+      const replacement = resolveValue(braced ?? plain, resolving);
+      return replacement === undefined ? whole : replacement;
+    });
+    resolving.delete(name);
+    if (/\$\{?[A-Z][A-Z0-9_]*\}?/.test(expanded)) return undefined;
+    resolved.set(name, expanded);
+    return expanded;
+  };
+  for (const name of assignments.keys()) resolveValue(name);
+  return resolved;
+}
+
+function measuredPathPreseed(read: string, blocks: Block[]): boolean {
+  const variables = resolvedPathVariables(blocks);
+  const resolvedRead = read.replace(/\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g, (whole, braced, plain) =>
+    variables.get(braced ?? plain) ?? whole,
+  );
+  if (/\$\{?[A-Z][A-Z0-9_]*\}?/.test(resolvedRead)) return false;
+  return PRESEED_ALLOWLIST.some((item) => item.kind === "path" && item.name === resolvedRead);
+}
+
 function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
   const reads: UnproducedRead[] = [];
   const seen = new Set<string>();
@@ -997,6 +1043,7 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
   const add = (block: Block, what: string, offset: number, earlier: Block[]): void => {
     const sameBlockPrefix: Block = { ...block, source: block.source.slice(0, offset) };
     if (matchingProducer(what, [...earlier, sameBlockPrefix])) return;
+    if (measuredPathPreseed(pathExpressionAt(block.source, offset, what), [...earlier, sameBlockPrefix])) return;
     const key = `${block.file}:${shortStep(block)}:${what}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -1017,6 +1064,7 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
       if (/^\$(?:CONTROL_ROOT|INPUT_ROOT)\//.test(match[0])) continue;
       const before = block.source.slice(0, match.index);
       const currentLine = block.source.slice(block.source.lastIndexOf("\n", match.index) + 1, block.source.indexOf("\n", match.index));
+      if (/^\s*[a-z][a-z0-9_]*\s*=\s*['"]/.test(currentLine)) continue;
       if (/\btest\s+!\s+-[efLd]\b/.test(currentLine)) continue;
       if (/>/.test(currentLine.slice(0, currentLine.indexOf(match[0])))) continue;
       if (match[0].endsWith("human-session.json") && /open\(output, "wx"/.test(before)) continue;
@@ -2285,6 +2333,17 @@ test("controls: a window A copy without its GO producer reports GO.txt as UNPROD
   const report = discoverUnproducedReads(withoutGo);
   assert.ok(report.some((read) => read.what.endsWith("GO.txt")),
     `GO.txt was not reported:\n${report.map((read) => read.what).join("\n")}`);
+});
+
+test("controls: a measured basename under a different directory remains UNPRODUCED", () => {
+  const unmeasured = "/home/commonswarm/edge/releases/not-the-measured-release";
+  const report = discoverUnproducedReads([{
+    file: HM37, step: "synthetic-unmeasured-path",
+    marker: "yes", host: "box /bin/bash 5.2 as root", line: 1,
+    source: `OTHER_EDGE='${unmeasured}'\ntest -f "$OTHER_EDGE/deploy/edge-runtime/compose.override.yaml"\n`,
+  }]);
+  assert.ok(report.some((read) => read.what === "compose.override.yaml"),
+    `unmeasured compose override was accepted:\n${report.map((read) => read.what).join("\n")}`);
 });
 
 test("controls: a block that exits non-zero is reported as failed, never as passed", () => {
