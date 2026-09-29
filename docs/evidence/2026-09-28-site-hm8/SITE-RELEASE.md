@@ -6,7 +6,11 @@
 
 Anvil executes the release under HezLead’s direction. This review read repository files and Git history only; it ran no build, test, browser control or production command.
 
+This lane is the next operation in the same approved window: start `site-01` immediately after lanes 3+7 record successful controls and cleanup. A lanes-3+7 `CONTROLS=failed` disposition still stops the combined window as its plan requires. On success, do not insert another release, stop for a fresh plan review, or reuse stale HM37 evidence between the lanes; all site holds must be closed before the combined window opens.
+
 The governing procedures are [`deploy/RELEASE-TO-BOX.md`](../../../deploy/RELEASE-TO-BOX.md), [`deploy/site/RUNBOOK.md`](../../../deploy/site/RUNBOOK.md), and the workspace `hetzner-handoff/HETZNER-OPERATIONS.md`.
+
+Measured 2026-09-29 on the Mac mini: Node `https.request` with no explicit User-Agent—the exact request shape used by `deploy/site/parity-check.mjs`—returned 200 for `https://commonswarm.com/`, `/app`, and `/download`; curl with no User-Agent, curl’s default User-Agent, and python-requests also returned 200, while only Python urllib’s default User-Agent returned 403 `error code: 1010`. The runnable probes still send and record `User-Agent: commonswarm-release-probe/1.0`; the parity procedure may run unchanged, and lane 8 chains immediately after successful lanes 3+7 controls and cleanup.
 
 ## 1. Release identity and baseline
 
@@ -35,6 +39,7 @@ The September 27 `0.1.78`, `0.1.79` and `0.1.80` release notes do not establish 
 
 ```sh
 # step: site-01 — Mac mini /bin/bash 3.2; Anvil; read-only commands on the box
+# readonly: yes
 (
   set -euo pipefail
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
@@ -68,6 +73,7 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
 
 ```sh
 # step: site-02 — Mac mini /bin/bash 3.2; Anvil; measured source reconciliation
+# readonly: yes
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
@@ -261,6 +267,7 @@ The signed-in checks use Anvil’s real Chrome and the dedicated test account be
 
 ```sh
 # step: site-03 — Mac mini /bin/bash 3.2; Anvil; read-only environment validation
+# readonly: yes
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
@@ -360,6 +367,7 @@ After all holds are resolved, HezLead’s execution approval must name the exact
 
 ```sh
 # step: site-04 — Mac mini /bin/bash 3.2; Anvil; production deployment after all holds close
+# readonly: no
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the approved exact-release checkout}"
@@ -418,13 +426,18 @@ Use the release directory’s SHA prefix **plus the actual `/app` hash and refer
 
 ```sh
 # step: site-05 — box /bin/bash; Anvil as commonswarm; read-only public delivery control
+# readonly: yes
 (
   set -euo pipefail
   python3 - <<'PY'
 import hashlib
+import json
 import pathlib
 import re
+import urllib.error
 import urllib.request
+
+PROBE_USER_AGENT = "commonswarm-release-probe/1.0"
 
 root = pathlib.Path("/srv/commonswarm/site")
 release = (root / "current").resolve(strict=True)
@@ -436,11 +449,41 @@ assert re.fullmatch(
 def fetch(path):
     request = urllib.request.Request(
         "https://commonswarm.com" + path,
-        headers={"Cache-Control": "no-cache", "Accept-Encoding": "identity"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Accept-Encoding": "identity",
+            "User-Agent": PROBE_USER_AGENT,
+        },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        assert response.status == 200, "public response failed"
-        return response.read()
+    try:
+        response = urllib.request.urlopen(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        status = response.status
+        content_type = response.headers.get("Content-Type", "")
+        raw = response.read()
+        record = {
+            "url": request.full_url,
+            "method": "GET",
+            "status": status,
+            "user_agent": PROBE_USER_AGENT,
+            "headers": {
+                "server": response.headers.get("Server"),
+                "cf-ray": response.headers.get("CF-Ray"),
+                "content-type": content_type,
+            },
+        }
+    if status == 403 and b"error code: 1010" in raw[:2048].lower():
+        record["failure_kind"] = "cloudflare_challenge"
+    if status != 200:
+        # HTML and built assets can embed the anon JWT. Never print their body.
+        record["body_prefix_omitted"] = "site response may contain configured anon credential"
+        print("probe=" + json.dumps(record, separators=(",", ":")))
+        raise SystemExit(1)
+    record["pass"] = True
+    print("probe=" + json.dumps(record, separators=(",", ":")))
+    return raw
 
 app = (release / "app/index.html").read_bytes()
 assert b"data-connected-apps-open" in app, "Connected apps marker absent"
@@ -469,7 +512,7 @@ PY
 )
 ```
 
-**Evidence:** release name, page hashes, enumerated asset hashes and PASS. Do not print HTML: the pages contain the configured anon key.
+**Evidence:** release name, page hashes, enumerated asset hashes, PASS, and one sanitized probe record per request. Every public request sends and records `User-Agent: commonswarm-release-probe/1.0`; failures record status plus `Server`, `CF-Ray`, and `Content-Type`. A 403 body containing `error code: 1010` is classified as `cloudflare_challenge`. Do not print HTML or built asset bodies: they may contain the configured anon key.
 
 A mismatch is a failed control requiring diagnosis or rollback. Do not dismiss it as caching without measuring the bytes subsequently served to Chrome.
 
@@ -522,6 +565,7 @@ Before invoking the block, `previous.release` must identify the measured previou
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; atomic rollback on the box
+# readonly: no
 (
   set -euo pipefail
   : "${SITE_EVIDENCE:?Set the evidence directory for this execution}"

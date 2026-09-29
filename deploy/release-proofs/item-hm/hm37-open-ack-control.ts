@@ -15,6 +15,7 @@ const RESOURCE = "https://mcp.commonswarm.com/mcp";
 const CLIENT_VERSION = "0.1.80";
 const ACCESS_TOKEN_TTL_SECONDS = 5 * 60;
 const PROVIDER_CLIENT_ID = "https://client.example/hm37-window-control.json";
+const PROBE_USER_AGENT = "commonswarm-release-probe/1.0";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Result = { status: number; body: Record<string, unknown> };
@@ -115,6 +116,7 @@ interface CleanupFacts {
 }
 
 interface ErrorFacts {
+  assertion_id: string;
   step: string;
   code: string;
   class: string;
@@ -122,6 +124,51 @@ interface ErrorFacts {
   response_code?: string;
   constraint?: string;
   table?: string;
+}
+
+const ASSERTION_IDS: Readonly<Record<string, string>> = {
+  "public-open-ack-refusal": "hosted.public-unauthenticated-refusal",
+  "public-human-open-ack-refusal": "hosted.public-human-bearer-refusal",
+  "seat-handle-alone-refusal": "hosted.seat-handle-alone-refusal",
+  "batch-a-concurrent-open": "hosted.concurrent-open-single-batch",
+  "batch-a-ack": "hosted.ack-a-commits-cursor",
+  "batch-a-repeat-ack": "hosted.repeat-ack-idempotent",
+  "batch-b-ack": "hosted.ack-b-empty-open",
+  "hosted-visibility": "hosted.visibility-confined",
+  "cleanup": "hosted.cleanup-complete",
+  "migration-functional-proof": "hosted.migration-functional-proof",
+};
+const HOSTED_CONTROL_ASSERTIONS = [
+  "hosted.concurrent-open-single-batch",
+  "hosted.ack-a-commits-cursor",
+  "hosted.repeat-ack-idempotent",
+  "hosted.ack-b-empty-open",
+  "hosted.public-unauthenticated-refusal",
+  "hosted.public-human-bearer-refusal",
+  "hosted.seat-handle-alone-refusal",
+  "hosted.visibility-confined",
+  "hosted.migration-functional-proof",
+] as const;
+
+function assertionId(step: string): string {
+  return ASSERTION_IDS[step] ?? `control.${step.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "")}`;
+}
+
+export function assertionsForPassedSteps(passedSteps: Iterable<string>): Record<string, true> {
+  const assertions: Record<string, true> = {};
+  for (const step of passedSteps) {
+    const id = ASSERTION_IDS[step];
+    if (id === undefined) throw new Error(`unmapped assertion step: ${step}`);
+    assertions[id] = true;
+  }
+  return assertions;
+}
+
+function requireHostedAssertionMappings(): void {
+  const mapped = new Set(Object.values(ASSERTION_IDS));
+  if (HOSTED_CONTROL_ASSERTIONS.some((id) => !mapped.has(id))) {
+    fail("hosted assertion mapping missing");
+  }
 }
 
 class HarnessFailure extends Error {
@@ -155,6 +202,7 @@ function stableExternalCode(value: unknown): string | undefined {
 function errorFacts(step: string, error: unknown): ErrorFacts {
   if (error instanceof HarnessFailure) {
     return {
+      assertion_id: assertionId(error.step ?? step),
       step: error.step ?? step,
       code: error.code,
       class: error.name,
@@ -169,6 +217,7 @@ function errorFacts(step: string, error: unknown): ErrorFacts {
   const constraint = stableExternalCode(record?.constraint_name);
   const table = stableExternalCode(record?.table_name);
   return {
+    assertion_id: assertionId(step),
     step,
     code: stableExternalCode(record?.code) ?? "unexpected_exception",
     class: className ?? "UnknownError",
@@ -468,7 +517,10 @@ function batchIdIn(result: Result): string | null {
 }
 
 async function publicCommand(runtime: Runtime, token: string | null, input: Record<string, unknown>): Promise<Result> {
-  const headers = new Headers({ "content-type": "application/json" });
+  const headers = new Headers({
+    "content-type": "application/json",
+    "user-agent": PROBE_USER_AGENT,
+  });
   if (token !== null) headers.set("authorization", `Bearer ${token}`);
   const response = await runtime.command.handleRequest(new Request("http://hm37/functions/v1/command", {
     method: "POST", headers, body: JSON.stringify(input),
@@ -704,6 +756,7 @@ async function cleanup(
 }
 
 async function execute(): Promise<Record<string, Json>> {
+  requireHostedAssertionMappings();
   const args = parseArgs(Deno.args);
   await regularPrivateFile(args.humanSessionFile);
   await regularPrivateFile(args.oauthDatabaseConfigFile);
@@ -726,6 +779,7 @@ async function execute(): Promise<Record<string, Json>> {
   let runError: ErrorFacts | null = null;
   let observations: Record<string, Json> = {};
   let cleanupFacts: CleanupFacts | null = null;
+  const passedSteps = new Set<string>();
   try {
     if (args.cleanupOnly !== undefined) {
       step = "cleanup-journal-read";
@@ -759,7 +813,7 @@ async function execute(): Promise<Record<string, Json>> {
       step = "owner-access-check";
       const access = await proofDb.begin(async (tx) => {
         await setRole(tx, "swarm_command");
-        const [row] = await tx<{ allowed: boolean; live_principals: number }[]>`
+        const [row] = await tx<{ allowed: boolean; live_principals: number; name_taken: boolean }[]>`
           SELECT EXISTS (
             SELECT 1 FROM swarm.workspaces w
             JOIN swarm.memberships m ON m.workspace_id = w.workspace_id
@@ -767,11 +821,16 @@ async function execute(): Promise<Record<string, Json>> {
               AND m.user_id = ${journal.ownerUserId}::uuid AND m.revoked_at IS NULL
           ) AS allowed,
           (SELECT count(*)::int FROM swarm.agent_principals
-            WHERE workspace_id = ${journal.workspaceId}::uuid AND revoked_at IS NULL) AS live_principals
+            WHERE workspace_id = ${journal.workspaceId}::uuid AND revoked_at IS NULL) AS live_principals,
+          EXISTS (SELECT 1 FROM swarm.agent_principals
+            WHERE workspace_id = ${journal.workspaceId}::uuid
+              AND name = ${journal.seatName}) AS name_taken
         `;
         return row;
-      }) as unknown as { allowed: boolean; live_principals: number } | undefined;
-      if (!access?.allowed || access.live_principals >= 50) fail("owner access or capacity refused");
+      }) as unknown as { allowed: boolean; live_principals: number; name_taken: boolean } | undefined;
+      if (!access?.allowed || access.live_principals >= 50 || access.name_taken) {
+        fail("owner access capacity or fresh-name precondition refused");
+      }
 
       const manifest = Array.from(new Uint8Array(await crypto.subtle.digest(
         "SHA-256", new TextEncoder().encode(JSON.stringify([journal.workspaceId])),
@@ -837,6 +896,27 @@ async function execute(): Promise<Record<string, Json>> {
         fail("forced test failure");
       }
 
+      step = "seat-handle-alone-refusal";
+      const seatHandle = journal.seatHandle;
+      if (seatHandle === null) fail("seat handle missing");
+      const handleOnlyPublic = await publicCommand(runtime, null, managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "open_hosted_mcp_check_batch", seat: seatHandle },
+      ));
+      const handleOnlyHosted = await runtime.command.handleHostedCommand(managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "open_hosted_mcp_check_batch", seat: seatHandle },
+      ), seatHandle);
+      if (handleOnlyPublic.status !== 403 || handleOnlyPublic.body.error !== "forbidden" ||
+          handleOnlyHosted.status !== 403 || handleOnlyHosted.body.error !== "forbidden") {
+        fail("seat handle authenticated without a capability");
+      }
+      if (Deno.env.get("SWARM_ENV") === "test" &&
+          Deno.env.get("HM37_TEST_FAIL_AFTER") === "seat-handle-alone-refusal") {
+        fail("forced test failure");
+      }
+      passedSteps.add(step);
+
       journal.signalAPlanned = true;
       await journalBefore(journalPath, journal, "post_signal_a");
       step = "signal-a-post";
@@ -867,6 +947,20 @@ async function execute(): Promise<Record<string, Json>> {
       if (JSON.stringify(idsOne) !== JSON.stringify(idsTwo) || !idsOne.includes(journal.signalAId)) {
         fail("concurrent open ordering mismatch");
       }
+      passedSteps.add(step);
+      step = "hosted-visibility";
+      const [visibility] = await proofDb.begin(async (tx) => {
+        await setRole(tx, "swarm_command");
+        return await tx<{ total: number; wrong_workspace: number; wrong_principal: number }[]>`
+          SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE workspace_id <> ${journal.workspaceId}::uuid)::int AS wrong_workspace,
+            count(*) FILTER (WHERE to_agent_principal_id <> ${journal.principalId}::uuid)::int AS wrong_principal
+          FROM swarm.signals WHERE id = ANY(${idsOne}::uuid[])
+        `;
+      }) as unknown as Array<{ total: number; wrong_workspace: number; wrong_principal: number }>;
+      if (!visibility || visibility.total !== idsOne.length || visibility.wrong_workspace !== 0 ||
+          visibility.wrong_principal !== 0) fail("hosted visibility escaped principal or workspace");
+      passedSteps.add(step);
       const afterOpen = await snapshot(proofDb, journal);
       if (afterOpen.active_batches !== 1 || afterOpen.cursor !== null) fail("open persistence proof failed");
       const freshOpen = await requireStatus(await checkCall(runtime, journal, statusDb), 200, "fresh open");
@@ -919,6 +1013,20 @@ async function execute(): Promise<Record<string, Json>> {
       const afterPublic = await snapshot(proofDb, journal);
       if (publicOpen.status !== 403 || publicAck.status !== 403 ||
           JSON.stringify(beforePublic) !== JSON.stringify(afterPublic)) fail("public refusal proof failed");
+      passedSteps.add(step);
+      step = "public-human-open-ack-refusal";
+      const humanOpen = await publicCommand(runtime, token, managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "open_hosted_mcp_check_batch", seat: journal.seatHandle },
+      ));
+      const humanAck = await publicCommand(runtime, token, managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "ack_hosted_mcp_check_batch", seat: journal.seatHandle, ack: batchA },
+      ));
+      const afterHuman = await snapshot(proofDb, journal);
+      if (humanOpen.status !== 403 || humanAck.status !== 403 ||
+          JSON.stringify(beforePublic) !== JSON.stringify(afterHuman)) fail("human bearer hosted-command refusal failed");
+      passedSteps.add(step);
 
       await journalBefore(journalPath, journal, "ack_batch_a_and_open_batch_b");
       step = "batch-a-ack";
@@ -934,6 +1042,7 @@ async function execute(): Promise<Record<string, Json>> {
       const factsAfterAckA = await batchFacts(proofDb, journal, batchA);
       if (JSON.stringify(afterAckA.cursor) !== JSON.stringify(factsA.terminal) ||
           factsAfterAckA.acknowledgedAt === null || factsAfterAckA.active !== 1) fail("ACK A proof failed");
+      passedSteps.add(step);
 
       step = "batch-a-repeat-ack";
       const repeatAckA = await requireStatus(await checkCall(runtime, journal, statusDb, batchA), 200, "repeat ACK A");
@@ -941,6 +1050,7 @@ async function execute(): Promise<Record<string, Json>> {
       const factsAfterRepeat = await batchFacts(proofDb, journal, batchA);
       if (batchIdIn(repeatAckA) !== batchB || JSON.stringify(afterRepeat) !== JSON.stringify(afterAckA) ||
           factsAfterRepeat.acknowledgedAt !== factsAfterAckA.acknowledgedAt) fail("repeat ACK changed state");
+      passedSteps.add(step);
 
       step = "batch-b-ack";
       const ackB = await requireStatus(await checkCall(runtime, journal, statusDb, batchB), 200, "ACK B");
@@ -953,8 +1063,10 @@ async function execute(): Promise<Record<string, Json>> {
           afterAckB.active_batches !== 0 || afterAckB.total_batches !== 2) {
         fail("ACK B cursor proof failed");
       }
+      passedSteps.add(step);
       step = "migration-functional-proof";
       if (!await runFunctionalProof(proofDb, runtime.functionalSql)) fail("migration functional proof failed");
+      passedSteps.add(step);
       step = "forced-after-observations";
       if (Deno.env.get("SWARM_ENV") === "test" && Deno.env.get("HM37_TEST_FAIL_AFTER") === "observations") {
         fail("forced test failure");
@@ -970,6 +1082,8 @@ async function execute(): Promise<Record<string, Json>> {
         signal_b_ordering: { created_at: signalBOrdering.created_at.toISOString(), signal_id: signalBOrdering.signal_id },
         batch_a_terminal: factsA.terminal,
         public_open_status: publicOpen.status, public_ack_status: publicAck.status,
+        human_open_status: humanOpen.status, human_ack_status: humanAck.status,
+        request_user_agent: PROBE_USER_AGENT,
         public_refusal_snapshot_unchanged: true,
         batch_a_acknowledged_at: factsAfterAckA.acknowledgedAt,
         cursor_after_a: afterAckA.cursor ?? null,
@@ -986,6 +1100,7 @@ async function execute(): Promise<Record<string, Json>> {
     try {
       if (typeof journalPath! === "string" && typeof journal! === "object") {
         cleanupFacts = await cleanup(runtime, journalPath, journal, identity, statusDb, proofDb, oauthDb);
+        passedSteps.add("cleanup");
       }
     } catch (error) {
       runError ??= errorFacts("cleanup", error);
@@ -1020,6 +1135,7 @@ async function execute(): Promise<Record<string, Json>> {
     seat_id: journal!.seatId,
     principal_id: journal!.principalId,
     observations,
+    assertions: assertionsForPassedSteps(passedSteps),
     cleanup: {
       seat_revoked: cleanupFacts.seatRevoked,
       handle_revoked: cleanupFacts.handleRevoked,
@@ -1039,13 +1155,15 @@ async function execute(): Promise<Record<string, Json>> {
   return output;
 }
 
-try {
-  console.log(JSON.stringify(await execute()));
-} catch (error) {
-  Deno.exitCode = 1;
-  console.log(JSON.stringify({
-    ok: false,
-    assertions: { failed_closed_before_creation: true },
-    error: errorFacts("startup", error),
-  }));
+if (import.meta.main) {
+  try {
+    console.log(JSON.stringify(await execute()));
+  } catch (error) {
+    Deno.exitCode = 1;
+    console.log(JSON.stringify({
+      ok: false,
+      assertions: { failed_closed_before_creation: true },
+      error: errorFacts("startup", error),
+    }));
+  }
 }

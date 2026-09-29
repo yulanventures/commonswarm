@@ -63,6 +63,7 @@ every minting step. The box's GNU `date` computes it once from the approved
 
 ```sh
 # step: runbook-01
+# readonly: yes
 WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
 ```
 
@@ -90,6 +91,7 @@ used.
 
 ```sh
 # step: runbook-02
+# readonly: no
 rm -f "$HOME/.commonswarm-release-window.env"
 SHA='<sha>'
 (
@@ -164,6 +166,7 @@ initial manifest is built only from the explicit arrays below, never from
 
 ```sh
 # step: runbook-03
+# readonly: yes
 (
   set -euo pipefail
   SHA='<sha>'
@@ -308,6 +311,7 @@ the dark `mcp` name:
 
 ```sh
 # step: runbook-04
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -373,6 +377,7 @@ both release directories, compare them on the box before deciding:
 
 ```sh
 # step: runbook-05
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -424,6 +429,7 @@ block reads them from `window.env`.
 
 ```sh
 # step: 1-upload-release-archive
+# readonly: no
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -437,6 +443,7 @@ Open a root shell on the box:
 
 ```sh
 # step: 1-open-root-shell
+# readonly: yes
 ssh ops@100.115.66.74
 sudo -n -i
 ```
@@ -446,6 +453,7 @@ window state:
 
 ```sh
 # step: 1-apply-release-directories
+# readonly: no
 (
   set -euo pipefail
   SHA='<sha>'
@@ -718,6 +726,7 @@ inventory. HezLead reviews this exact list for secrets before transfer:
 
 ```sh
 # step: runbook-07
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -736,6 +745,7 @@ Mac mini:
 
 ```sh
 # step: runbook-08
+# readonly: no
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -753,6 +763,7 @@ HezLead confirms their list contains no secret:
 
 ```sh
 # step: runbook-09
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -772,6 +783,7 @@ HezLead confirms their list contains no secret:
 
 ```sh
 # step: runbook-10
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -816,6 +828,7 @@ reports each one.
 
 ```sh
 # step: runbook-11
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -841,7 +854,7 @@ reports each one.
   shopt -u nullglob
   test "$(stat -c '%U:%G:%a' "$PROOF_DIR/copy-back.list")" = root:root:600
   test -z "$(LC_ALL=C sort "$PROOF_DIR/copy-back.list" | uniq -d)"
-  while IFS= read -r path; do
+  while IFS= read -r path || [ -n "$path" ]; do
     test -n "$path"
     while [[ "$path" == ./* ]]; do path="${path#./}"; done
     case "$path" in
@@ -878,6 +891,7 @@ distinct.
 
 ```sh
 # step: runbook-12
+# readonly: no
 rm -f "$HOME/.commonswarm-release-window.env"
 ```
 
@@ -888,6 +902,7 @@ hide the failing block's evidence.
 
 ```sh
 # step: runbook-13
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -925,6 +940,7 @@ the value, create a target-only file with exactly one assignment,
 
 ```sh
 # step: runbook-14
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -949,6 +965,7 @@ This checks names and shape without printing the URL.
 
 ```sh
 # step: runbook-15
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -968,6 +985,7 @@ Then use the repository identity gate against the exact stack release:
 
 ```sh
 # step: runbook-16
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -991,10 +1009,14 @@ password stays in a libpq pass file, and neither appears in argv. The generated
 root-only session helper survives a lost shell. In every database block, source
 `window.env` first and the session helper second; never reverse or omit that
 order. `release_psql_ro` forces catalog and functional proof calls into
-read-only transactions with `PGOPTIONS`.
+read-only transactions with `PGOPTIONS`. Both helpers accept `--file` only with
+the host `APPLY_SQL` path or a host file below `PROOF_DIR`; they map those paths
+to `/run/commonswarm-release-apply.sql` or `/proof/...` themselves and refuse
+all other file arguments.
 
 ```sh
 # step: runbook-17
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1005,6 +1027,14 @@ read-only transactions with `PGOPTIONS`.
   PGPASS_FILE="/run/commonswarm-release-${SHA}-pass"
   APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
   DB_SESSION="/run/commonswarm-release-${SHA}-session.sh"
+  PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
+  if ! docker image inspect "$PSQL_IMAGE" >/dev/null 2>&1; then
+    docker pull "$PSQL_IMAGE"
+  fi
+  PSQL_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PSQL_IMAGE")"
+  case "$PSQL_IMAGE_ID" in sha256:*) ;; *) false ;; esac
+  case "${PSQL_IMAGE_ID#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#PSQL_IMAGE_ID}" -eq 71
   install -m 0600 -o root -g root /dev/null "$PGSERVICE_FILE"
   install -m 0600 -o root -g root /dev/null "$PGPASS_FILE"
   install -m 0600 -o root -g root /dev/null "$APPLY_SQL"
@@ -1023,8 +1053,31 @@ PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
 PGSERVICE_FILE="/run/commonswarm-release-${SHA}-service.conf"
 PGPASS_FILE="/run/commonswarm-release-${SHA}-pass"
 APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
+PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
 
 release_psql() {
+  PSQL_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file)
+        test "$#" -ge 2
+        case "$2" in
+          "$APPLY_SQL") CONTAINER_FILE=/run/commonswarm-release-apply.sql ;;
+          "$PROOF_DIR"/*)
+            PROOF_RELATIVE=${2#"$PROOF_DIR"/}
+            case "$PROOF_RELATIVE" in ''|/*|*'/../'*|../*|*/..|*'/./'*|./*|*/.|*'//'*) return 2 ;; esac
+            CONTAINER_FILE="/proof/$PROOF_RELATIVE"
+            ;;
+          *) printf '%s\n' 'release_psql: --file must name APPLY_SQL or a PROOF_DIR file' >&2; return 2 ;;
+        esac
+        PSQL_ARGS[${#PSQL_ARGS[@]}]=--file
+        PSQL_ARGS[${#PSQL_ARGS[@]}]="$CONTAINER_FILE"
+        shift 2
+        ;;
+      -f|-f?*|--file=*) printf '%s\n' 'release_psql: use separate --file and host path arguments' >&2; return 2 ;;
+      *) PSQL_ARGS[${#PSQL_ARGS[@]}]="$1"; shift ;;
+    esac
+  done
   docker run --rm \
     --network commonswarm-net \
     --add-host db.commonswarm.internal:172.31.0.10 \
@@ -1039,11 +1092,33 @@ release_psql() {
     --volume "$PROOF_DIR:/proof:ro" \
     --volume "$APPLY_SQL:/run/commonswarm-release-apply.sql:ro" \
     --entrypoint psql \
-    public.ecr.aws/supabase/postgres:17.6.1.147 \
-    -X --set=ON_ERROR_STOP=1 "$@"
+    "$PSQL_IMAGE" \
+    -X --set=ON_ERROR_STOP=1 "${PSQL_ARGS[@]}"
 }
 
 release_psql_ro() {
+  PSQL_ARGS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --file)
+        test "$#" -ge 2
+        case "$2" in
+          "$APPLY_SQL") CONTAINER_FILE=/run/commonswarm-release-apply.sql ;;
+          "$PROOF_DIR"/*)
+            PROOF_RELATIVE=${2#"$PROOF_DIR"/}
+            case "$PROOF_RELATIVE" in ''|/*|*'/../'*|../*|*/..|*'/./'*|./*|*/.|*'//'*) return 2 ;; esac
+            CONTAINER_FILE="/proof/$PROOF_RELATIVE"
+            ;;
+          *) printf '%s\n' 'release_psql_ro: --file must name APPLY_SQL or a PROOF_DIR file' >&2; return 2 ;;
+        esac
+        PSQL_ARGS[${#PSQL_ARGS[@]}]=--file
+        PSQL_ARGS[${#PSQL_ARGS[@]}]="$CONTAINER_FILE"
+        shift 2
+        ;;
+      -f|-f?*|--file=*) printf '%s\n' 'release_psql_ro: use separate --file and host path arguments' >&2; return 2 ;;
+      *) PSQL_ARGS[${#PSQL_ARGS[@]}]="$1"; shift ;;
+    esac
+  done
   docker run --rm \
     --network commonswarm-net \
     --add-host db.commonswarm.internal:172.31.0.10 \
@@ -1059,8 +1134,8 @@ release_psql_ro() {
     --volume "$PROOF_DIR:/proof:ro" \
     --volume "$APPLY_SQL:/run/commonswarm-release-apply.sql:ro" \
     --entrypoint psql \
-    public.ecr.aws/supabase/postgres:17.6.1.147 \
-    -X --set=ON_ERROR_STOP=1 "$@"
+    "$PSQL_IMAGE" \
+    -X --set=ON_ERROR_STOP=1 "${PSQL_ARGS[@]}"
 }
 BASH
   chmod 0600 "$DB_SESSION"
@@ -1078,6 +1153,7 @@ H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 
 ```sh
 # step: runbook-18
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1092,7 +1168,7 @@ SET LOCAL statement_timeout = '30s';
 \i /work/migrate/verify-h0-catalog.sql
 ROLLBACK;
 SQL
-  release_psql_ro --file /run/commonswarm-release-apply.sql
+  release_psql_ro --file "$APPLY_SQL"
 
   release_psql_ro -Atq --command \
     "SELECT version FROM supabase_migrations.schema_migrations WHERE version IN ('20260916000001','20260916000002') ORDER BY version;" \
@@ -1113,6 +1189,7 @@ release checksum manifest before using its verifier.
 
 ```sh
 # step: runbook-19
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1145,7 +1222,7 @@ SQL
 
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /run/commonswarm-release-apply.sql
+  release_psql --file "$APPLY_SQL"
 )
 ```
 
@@ -1157,6 +1234,7 @@ column rolls the transaction back.
 
 ```sh
 # step: runbook-20
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1172,7 +1250,7 @@ BEGIN;
 \i /work/migrate/verify-h0-catalog.sql
 ROLLBACK;
 SQL
-  release_psql_ro --file /run/commonswarm-release-apply.sql
+  release_psql_ro --file "$APPLY_SQL"
 )
 ```
 
@@ -1223,6 +1301,7 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 
 ```sh
 # step: runbook-21
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1272,6 +1351,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-22
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1307,6 +1387,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-23
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1327,6 +1408,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-24
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1345,6 +1427,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-25
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1361,6 +1444,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-26
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1369,7 +1453,10 @@ proceed merely because the service command returned.
   case "$VERSION" in (*[!0-9]*|'') false ;; esac
   test "${#VERSION}" -eq 14
   grep -Fx "$VERSION" "$PROOF_DIR/pending-versions.txt"
-  mapfile -t MIGRATION_MATCHES < <(
+  MIGRATION_MATCHES=()
+  while IFS= read -r MIGRATION_MATCH || [ -n "$MIGRATION_MATCH" ]; do
+    test -n "$MIGRATION_MATCH" && MIGRATION_MATCHES[${#MIGRATION_MATCHES[@]}]="$MIGRATION_MATCH"
+  done < <(
     sed -E 's#.*/##' "$PROOF_DIR/migration-files.txt" | awk -v prefix="${VERSION}_" 'index($0, prefix) == 1'
   )
   test "${#MIGRATION_MATCHES[@]}" -eq 1
@@ -1403,7 +1490,7 @@ SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
   \echo invalid
 \endif
 SQL
-  CATALOG_BEFORE="$(release_psql_ro -Atq --file /run/commonswarm-release-apply.sql)"
+  CATALOG_BEFORE="$(release_psql_ro -Atq --file "$APPLY_SQL")"
   printf 'version=%s ledger=%s catalog=%s\n' "$VERSION" "$LEDGER_COUNT" "$CATALOG_BEFORE" \
     | tee -a "$PROOF_DIR/migration-state-before.txt" | tee -a "$PROOF_DIR/box-run.log"
   case "$LEDGER_COUNT:$CATALOG_BEFORE" in
@@ -1433,6 +1520,7 @@ missing, false, or malformed values. Any failure rolls the transaction back.
 
 ```sh
 # step: runbook-27
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1486,7 +1574,7 @@ SQL
 
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /run/commonswarm-release-apply.sql
+  release_psql --file "$APPLY_SQL"
 )
 ```
 
@@ -1498,6 +1586,7 @@ transaction.
 
 ```sh
 # step: runbook-28
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1523,7 +1612,7 @@ SELECT :'catalog_ok' = 't' AS catalog_is_t, :'catalog_ok' = 'f' AS catalog_is_f
   \echo invalid
 \endif
 SQL
-  CATALOG_AFTER="$(release_psql_ro -Atq --file /run/commonswarm-release-apply.sql)"
+  CATALOG_AFTER="$(release_psql_ro -Atq --file "$APPLY_SQL")"
   printf 'version=%s ledger=%s catalog=%s\n' "$VERSION" "$LEDGER_AFTER" "$CATALOG_AFTER" \
     | tee -a "$PROOF_DIR/migration-state-after.txt" | tee -a "$PROOF_DIR/box-run.log"
   test "$LEDGER_AFTER" = 1
@@ -1533,15 +1622,15 @@ SQL
   if [ "$VERSION" != 20260925000001 ] && [ "$VERSION" != 20260926000001 ] \
     && [ "$VERSION" != 20260927000001 ] && [ "$VERSION" != 20260927000002 ] \
     && [ "$VERSION" != 20260927000003 ]; then
-    release_psql_ro --file "/proof/${VERSION}-functional.sql" \
+    release_psql_ro --file "$PROOF_DIR/${VERSION}-functional.sql" \
       >"$PROOF_DIR/${VERSION}-functional.txt"
   fi
 )
 ```
 
-That last command is the exact invocation of the lead-supplied host file
-`$PROOF_DIR/<version>-functional.sql`; `/proof` is its read-only container
-mount. Complete one version before considering the next. After the last
+That last command passes the lead-supplied host file
+`$PROOF_DIR/<version>-functional.sql`; the helper maps it to the `/proof`
+read-only container mount. Complete one version before considering the next. After the last
 migration, save the cron job names and compare both snapshots with `LC_ALL=C`
 sorting. Set the two expected name lists from the reviewed release plan in
 bytewise order (one
@@ -1549,6 +1638,7 @@ name per line; empty when none). The lead supplies both lists with the release; 
 
 ```sh
 # step: runbook-29
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1599,6 +1689,7 @@ timer and start it after verification.
 
 ```sh
 # step: runbook-30
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1640,6 +1731,7 @@ approved times overlap a protected interval.
 
 ```sh
 # step: runbook-31
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1717,6 +1809,7 @@ URL alias satisfies the database requirement. The check never prints a value.
 
 ```sh
 # step: runbook-32
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1760,6 +1853,7 @@ runtime cannot reach `db.commonswarm.internal`.
 
 ```sh
 # step: runbook-33
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1798,21 +1892,45 @@ the box:
 
 ```sh
 # step: runbook-34
+# readonly: probe
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  STATUS="$(curl -sS -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
+  HEADERS="$PROOF_DIR/h0-note-unauth.headers"
+  STATUS="$(curl -sS -D "$HEADERS" -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
     -H 'content-type: application/json' --data-binary '{"body":"release probe"}' \
     http://127.0.0.1:9000/functions/v1/h0/note)"
+  python3 - "$STATUS" "$HEADERS" "$PROOF_DIR/h0-note-unauth.json" \
+    >"$PROOF_DIR/h0-note-unauth-result.json" <<'PY'
+import json, pathlib, sys
+status, header_path, body_path = sys.argv[1:]
+headers = {}
+for raw in pathlib.Path(header_path).read_text(errors="replace").splitlines():
+    if ":" in raw:
+        name, value = raw.split(":", 1)
+        if name.lower() in ("server", "cf-ray", "content-type"):
+            headers[name.lower()] = value.strip()
+body = pathlib.Path(body_path).read_bytes()
+media = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+record = {"pass": status == "401", "status": int(status), "headers": headers}
+if media != "application/json":
+    record["body_prefix"] = body[:2048].decode("utf-8", "replace")
+print(json.dumps(record, indent=2))
+if status != "401": raise SystemExit(1)
+PY
   test "$STATUS" = 401
+  rm -f "$HEADERS"
 )
 ```
 
 Put authorization in a root-owned mode-`0600` curl config file and remove it
 after use. Repeat changed-function probes through
-`edge-staging.commonswarm.com` **from the Mac mini**, and retain their status
-evidence in `EVIDENCE_DIR`. Cloudflare returns 1010 for that hostname from the box; do not
+`edge-staging.commonswarm.com` **from the Mac mini**, with explicit recorded
+`User-Agent: commonswarm-release-probe/1.0`, and retain status, `Server`,
+`CF-Ray`, `Content-Type`, and safe bounded failure-body evidence in
+`EVIDENCE_DIR`. Cloudflare returns 1010 for Python urllib's default User-Agent;
+classify that response as `cloudflare_challenge` and do not
 run staging probes there. Staging is production-backed. Only after
 both loopback and staging probes finish, capture the log window that began at
 `edge-probe-start.txt` and reject `CONNECT_TIMEOUT` or
@@ -1820,6 +1938,7 @@ both loopback and staging probes finish, capture the log window that began at
 
 ```sh
 # step: runbook-35
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1843,13 +1962,14 @@ Anvil runs the proof and saves its output as section 5 does:
 
 ```sh
 # step: runbook-36
+# readonly: no
 (
   set -euo pipefail
   SEED_NOTE_ID='<uuid-from-HezLead>'
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g_seed_signal_id="$SEED_NOTE_ID" \
-    --file "/proof/20260925000001-functional.sql" \
+    --file "$PROOF_DIR/20260925000001-functional.sql" \
     >"$PROOF_DIR/20260925000001-functional.txt"
 )
 ```
@@ -1863,13 +1983,14 @@ of the last successful renew. Within three minutes of that renew, Anvil runs:
 
 ```sh
 # step: runbook-37
+# readonly: no
 (
   set -euo pipefail
   G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g2b_principal_id="$G2B_PRINCIPAL_ID" \
-    --file "/proof/20260926000001-functional.sql" \
+    --file "$PROOF_DIR/20260926000001-functional.sql" \
     >"$PROOF_DIR/20260926000001-functional.txt"
 )
 ```
@@ -1883,6 +2004,7 @@ reply, and author user ids, then run:
 
 ```sh
 # step: runbook-38
+# readonly: no
 (
   set -euo pipefail
   ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
@@ -1895,7 +2017,7 @@ reply, and author user ids, then run:
     -v item_g3c_signal_id="$ITEM_G3C_SIGNAL_ID" \
     -v item_g3c_reply_id="$ITEM_G3C_REPLY_ID" \
     -v item_g3c_author_user_id="$ITEM_G3C_AUTHOR_USER_ID" \
-    --file "/proof/20260927000001-functional.sql" \
+    --file "$PROOF_DIR/20260927000001-functional.sql" \
     >"$PROOF_DIR/20260927000001-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000001-functional.txt")" = t
 )
@@ -1913,6 +2035,7 @@ outer transaction:
 
 ```sh
 # step: runbook-39
+# readonly: no
 (
   set -euo pipefail
   ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
@@ -1921,7 +2044,7 @@ outer transaction:
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -v item_g3d_principal_id="$ITEM_G3D_PRINCIPAL_ID" \
     -v item_g3d_workspace_id="$ITEM_G3D_WORKSPACE_ID" \
-    --file "/proof/20260927000002-functional.sql" \
+    --file "$PROOF_DIR/20260927000002-functional.sql" \
     >"$PROOF_DIR/20260927000002-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000002-functional.txt")" = t
 )
@@ -1939,6 +2062,7 @@ settings, performs only reads, and has no outer transaction:
 
 ```sh
 # step: runbook-40
+# readonly: no
 (
   set -euo pipefail
   ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
@@ -1953,7 +2077,7 @@ settings, performs only reads, and has no outer transaction:
     -v item_t3_hop1_signal_id="$ITEM_T3_HOP1_SIGNAL_ID" \
     -v item_t3_hop2_signal_id="$ITEM_T3_HOP2_SIGNAL_ID" \
     -v item_t3_reader_user_id="$ITEM_T3_READER_USER_ID" \
-    --file "/proof/20260927000003-functional.sql" \
+    --file "$PROOF_DIR/20260927000003-functional.sql" \
     >"$PROOF_DIR/20260927000003-functional.txt"
   test "$(cat "$PROOF_DIR/20260927000003-functional.txt")" = t
 )
@@ -1968,6 +2092,7 @@ successful release:
 
 ```sh
 # step: runbook-41
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1984,6 +2109,7 @@ successful release:
 
 ```sh
 # step: runbook-42
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2033,6 +2159,7 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
 
 ```sh
 # step: runbook-43
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2053,6 +2180,7 @@ statement from the Git object on the Mac mini. No operator types a version:
 
 ```sh
 # step: runbook-44
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -2069,13 +2197,14 @@ section 5 and apply the statement only through the write helper:
 
 ```sh
 # step: runbook-45
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   . "/run/commonswarm-release-${SHA}-session.sh"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
-  release_psql --file /proof/current-client-build.sql
+  release_psql --file "$PROOF_DIR/current-client-build.sql"
 )
 ```
 
@@ -2095,6 +2224,7 @@ section 5 and Tom's explicit approval before pull or recreate.
 
 ```sh
 # step: runbook-46
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2110,6 +2240,7 @@ For an edge image bump, first carry and validate the box override as in section
 
 ```sh
 # step: runbook-47
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2151,6 +2282,7 @@ the installed unit copies saved before the forward switch.
 
 ```sh
 # step: runbook-48
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2273,6 +2405,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 
 ```sh
 # step: runbook-49
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2319,6 +2452,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 
 ```sh
 # step: runbook-50
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2337,6 +2471,7 @@ applicable:
 
 ```sh
 # step: runbook-51
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2357,6 +2492,7 @@ probe supplied by the lead. Put authorization only in the root-owned
 
 ```sh
 # step: runbook-52
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2381,6 +2517,7 @@ the only reverse symlink switch and restores the saved installed units.
 
 ```sh
 # step: runbook-53
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2438,6 +2575,7 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 
 ```sh
 # step: runbook-54
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2467,6 +2605,7 @@ and record:
 
 ```sh
 # step: runbook-55
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2518,6 +2657,7 @@ releases compare each installed file to its own previous-release source.
 
 ```sh
 # step: runbook-56
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2570,6 +2710,7 @@ configuration until that rollback completes.
 
 ```sh
 # step: runbook-57
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2611,7 +2752,7 @@ configuration until that rollback completes.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2634,7 +2775,7 @@ configuration until that rollback completes.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -2682,6 +2823,7 @@ configuration until that rollback completes.
 
 ```sh
 # step: runbook-58
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2707,6 +2849,7 @@ preflight backups, validates once, and reloads once.
 
 ```sh
 # step: runbook-59
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2736,7 +2879,7 @@ preflight backups, validates once, and reloads once.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2759,7 +2902,7 @@ preflight backups, validates once, and reloads once.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -2825,6 +2968,7 @@ a stop.
 
 ```sh
 # step: runbook-mcp-caddy-preflight
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2858,6 +3002,7 @@ runs once only after both checks pass.
 
 ```sh
 # step: runbook-mcp-caddy-apply
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2922,7 +3067,7 @@ PY
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -2945,7 +3090,7 @@ PY
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -2977,6 +3122,7 @@ PY
 
 ```sh
 # step: runbook-mcp-caddy-verify
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3000,6 +3146,7 @@ the one validation and one reload.
 
 ```sh
 # step: runbook-mcp-caddy-rollback
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3053,7 +3200,7 @@ the one validation and one reload.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         test ! -L "$CADDY_LOG_PATH"
@@ -3076,7 +3223,7 @@ the one validation and one reload.
     for CADDY_SITE_FILE in "$@"; do
       test -f "$CADDY_SITE_FILE"
       CADDY_SITE_LOG_COUNT=0
-      while IFS= read -r CADDY_LOG_PATH; do
+      while IFS= read -r CADDY_LOG_PATH || [ -n "$CADDY_LOG_PATH" ]; do
         CADDY_SITE_LOG_COUNT=$((CADDY_SITE_LOG_COUNT + 1))
         check_caddy_access_log_path "$CADDY_LOG_PATH"
         if [ -L "$CADDY_LOG_PATH" ]; then
@@ -3222,6 +3369,7 @@ database files. This does not remove release evidence:
 
 ```sh
 # step: runbook-60
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env

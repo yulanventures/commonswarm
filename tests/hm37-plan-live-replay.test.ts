@@ -158,6 +158,20 @@ function extractPrecondition(plan: string): string {
   );
 }
 
+function extractRefusalPrecondition(plan: string): string {
+  return extractPythonHeredoc(
+    extractStep(plan, "hm37-hm6-oauth-refusal-probe"),
+    "python3 - https://mcp.commonswarm.com",
+  );
+}
+
+function buildPublicRead(plan: string): string {
+  return extractPythonHeredoc(
+    extractStep(plan, "hm37-public-boundary-reads"),
+    'cat >"$READS"',
+  );
+}
+
 function buildPublicProbe(plan: string): string {
   const step = extractStep(plan, "hm37-public-boundaries");
   const kindsProgram = extractPythonHeredoc(
@@ -238,7 +252,15 @@ function assertPassed(result: ProgramResult): Record<string, unknown> {
 
 function assertFailedAt(result: ProgramResult, path: string): void {
   assert.notEqual(result.status, 0, "program unexpectedly passed");
-  assert.match(result.stderr, /AssertionError/);
+  if (!/AssertionError/.test(result.stderr)) {
+    const diagnostic = JSON.parse(result.stdout) as {
+      pass?: boolean;
+      failure?: { path?: string; headers?: Record<string, unknown> };
+    };
+    assert.equal(diagnostic.pass, false);
+    assert.equal(diagnostic.failure?.path, path);
+    assert.ok(diagnostic.failure?.headers, "failure evidence omitted response headers");
+  }
   const last = result.attempts.at(-1);
   assert.ok(last, "failed program made no replay request");
   assert.equal(new URL(last.url).pathname, path);
@@ -251,6 +273,8 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     await writeFile(join(temporaryRoot, "sitecustomize.py"), REPLAY_MODULE);
     const currentPlan = await readFile(PLAN, "utf8");
     const currentPrecondition = extractPrecondition(currentPlan);
+    const currentRefusalPrecondition = extractRefusalPrecondition(currentPlan);
+    const currentPublicRead = buildPublicRead(currentPlan);
     const currentPublicProbe = buildPublicProbe(currentPlan);
     const recordingText = await readFile(RECORDING, "utf8");
     const recording = JSON.parse(recordingText) as Recording;
@@ -265,8 +289,28 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     const preconditionJson = assertPassed(precondition);
     assert.equal(preconditionJson.pass, true);
 
+    const refusalPrecondition = await runProgram(
+      temporaryRoot,
+      "current-refusal-precondition",
+      currentRefusalPrecondition,
+      [BASE],
+      RECORDING,
+    );
+    const refusalPreconditionJson = assertPassed(refusalPrecondition);
+    assert.equal(refusalPreconditionJson.pass, true);
+
     // Gateway mode covers api/edge-staging hosts and the box loopback. Those
     // requests are intentionally absent from this lane 6 MCP-host recording.
+    const publicRead = await runProgram(
+      temporaryRoot,
+      "current-public-read",
+      currentPublicRead,
+      ["mcp", BASE],
+      RECORDING,
+    );
+    const publicReadJson = assertPassed(publicRead);
+    assert.equal(publicReadJson.mode, "mcp");
+
     const publicProbe = await runProgram(
       temporaryRoot,
       "current-public",
@@ -313,7 +357,7 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
     );
     for (const [label, program, args] of [
       ["html-precondition", currentPrecondition, [BASE]],
-      ["html-public", currentPublicProbe, ["mcp", BASE]],
+      ["html-public", currentPublicRead, ["mcp", BASE]],
     ] as const) {
       const result = await runProgram(
         temporaryRoot,
@@ -321,6 +365,30 @@ test("HM37 plan probes replay the recorded lane 6 responses and reject bad media
         program,
         [...args],
         htmlJwks,
+      );
+      assertFailedAt(result, "/jwks");
+    }
+
+    const genericJwks = join(temporaryRoot, "jwks-application-json.json");
+    await writeFile(
+      genericJwks,
+      JSON.stringify(changedRecording(
+        recording,
+        "GET",
+        `${BASE}/jwks`,
+        "application/json",
+      )),
+    );
+    for (const [label, program, args] of [
+      ["generic-precondition", currentPrecondition, [BASE]],
+      ["generic-public", currentPublicRead, ["mcp", BASE]],
+    ] as const) {
+      const result = await runProgram(
+        temporaryRoot,
+        label,
+        program,
+        [...args],
+        genericJwks,
       );
       assertFailedAt(result, "/jwks");
     }
