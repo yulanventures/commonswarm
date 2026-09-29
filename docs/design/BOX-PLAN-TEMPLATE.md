@@ -27,6 +27,20 @@ path or metadata difference stops. Every other window artifact is removed by
 that window's close/rollback or has an approved-window-ID name, and no step may
 list, glob, or select a `<name>.closed-window-<id>` leftover.
 
+When a window temporarily installs a host runtime that was absent in the
+measured baseline, pin and verify the downloaded archive before extraction,
+record the installed binary's digest in durable window state, and remove the
+binary on both close and rollback only when its current digest matches that
+record. A different file is a stop, never a cleanup target. Put dependency
+caches under an exact per-window path and remove them on both tails. After the
+opening gate, every harness invocation is offline/cached-only.
+
+Dry-run fixtures load measured values from the committed measurement artifact;
+they do not maintain a second fixture-value file. A static agreement control
+checks every fixture string that names a container image, repository path, or
+environment name against repository text or the measurement artifact, and
+must reject a same-shaped invented value.
+
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either
 block can run alone. Do not split a mutating block merely because it also reads.

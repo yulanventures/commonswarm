@@ -25,15 +25,16 @@ case "$name" in
         printf '%s\n' 'WINDOW_PRINCIPAL_SUFFIX=010203'
         ;;
       site-01*)
+        base=${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}
         printf '%s\n' \
           'measured_at=2026-09-28T01:02:03Z' \
-          'previous_release=/srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d' \
-          '0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d/app/index.html' \
-          '0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d/download/index.html'
+          "previous_release=/srv/commonswarm/site/releases/$base" \
+          "0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/$base/app/index.html" \
+          "0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/$base/download/index.html"
         ;;
       site-04*)
         if [ "$count" -le 2 ]; then
-          printf '%s\n' '/srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d'
+          printf '/srv/commonswarm/site/releases/%s\n' "${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}"
         else
           printf '%s\n' '/srv/commonswarm/site/releases/20260928T010203Z-8b8989f2b29e-deadbeefdeadbeef'
         fi
@@ -69,20 +70,21 @@ case "$name" in
   docker)
     case " $* " in
       *' ps -q '*) printf '%s\n' dry-run-container ;;
-      *' inspect '*'.Image'*) printf '%s\n' 'sha256:0000000000000000000000000000000000000000000000000000000000000000' ;;
+      *' inspect '*'.Config.Env'*) printf '%s=%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_ENV_NAME:?OAuth host name required}" db.commonswarm.internal ;;
+      *' inspect '*'.Image'*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:-sha256:0000000000000000000000000000000000000000000000000000000000000000}" ;;
       *' inspect '*Health.Status*) printf '%s\n' healthy ;;
       *' inspect '*State.Health*) printf '%s\n' healthy ;;
-      *' inspect '*HostConfig.Memory*) printf '%s\n' 2147483648 ;;
-      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' commonswarm-net ;;
-      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:-/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20}/deploy/edge-runtime/main /app/main" ;;
+      *' inspect '*HostConfig.Memory*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MEMORY:?edge memory required}" ;;
+      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' "${BOX_DRY_RUN_EDGE_NETWORK:?edge network required}" ;;
+      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:?expected edge required}/deploy/edge-runtime/main /app/main" ;;
       *' inspect '*working_dir*)
         case "${BOX_DRY_RUN_STEP:-}" in
-          hm37-hm6-oauth-precondition) printf '%s\n' /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth ;;
-          runbook-33) printf '%s\n' /home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/deploy/edge-runtime ;;
-          *) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:-/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20}/deploy/edge-runtime" ;;
+          hm37-hm6-oauth-precondition) printf '%s/deploy/mcp-auth\n' "${BOX_DRY_RUN_OAUTH_RELEASE:?OAuth release required}" ;;
+          runbook-33) printf '%s/deploy/edge-runtime\n' "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}" ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:?expected edge required}/deploy/edge-runtime" ;;
         esac
         ;;
-      *' image inspect '*) printf '%s\n' 'sha256:0000000000000000000000000000000000000000000000000000000000000000' ;;
+      *' image inspect '*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:-sha256:0000000000000000000000000000000000000000000000000000000000000000}" ;;
       *' run '*)
         case "${BOX_DRY_RUN_STEP:-} $* " in
           runbook-26*'SELECT count('*20260928000004*) printf '%s\n' 0 ;;
@@ -98,6 +100,27 @@ case "$name" in
     esac
     ;;
   curl)
+    if [ "${BOX_DRY_RUN_STEP:-}" = hm37-deno-install ]; then
+      output=''
+      headers=''
+      head_only=0
+      previous=''
+      for argument in "$@"; do
+        if [ "$previous" = --output ]; then output=$argument; fi
+        if [ "$previous" = --dump-header ]; then headers=$argument; fi
+        if [ "$argument" = --head ]; then head_only=1; fi
+        previous=$argument
+      done
+      test -n "$output"
+      if [ "$head_only" -eq 1 ]; then
+        test -n "$headers"
+        printf '%s\r\n' 'HTTP/2 302' 'location: https://release-assets.githubusercontent.com/dry-run/deno.zip' >"$headers"
+        exit 0
+      fi
+      cp "${BOX_DRY_RUN_DENO_ZIP_FIXTURE:?Deno zip fixture required}" "$output"
+      printf '%s\n' 'https://release-assets.githubusercontent.com/dry-run/deno.zip'
+      exit 0
+    fi
     if [ "${BOX_DRY_RUN_STEP:-}" = runbook-34 ]; then
       headers=''
       body=''
@@ -187,7 +210,7 @@ case "$name" in
   deno)
     if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = "${BOX_DRY_RUN_STEP:-}" ]; then
       if [ "${BOX_DRY_RUN_STEP:-}" = hm37-hosted-open-ack-control ]; then
-        journal=/home/commonswarm/edge/controls/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-20260928T010203Z/journal/hm37-open-ack-010203.journal.json
+        journal="/home/commonswarm/edge/controls/${BOX_DRY_RUN_RELEASE_SHA:?release SHA required}-${BOX_DRY_RUN_WINDOW_ID:?window ID required}/journal/hm37-open-ack-010203.journal.json"
         mkdir -p "${journal%/*}"
         printf '%s\n' '{}' >"$journal"
         chmod 0600 "$journal"

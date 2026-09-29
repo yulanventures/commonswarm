@@ -689,19 +689,20 @@ runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
 runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
 hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
 hm37-current-window-state hm37-read-window-suffix
-hm37-hosted-human-session-input hm37-hosted-control-stage hm37-backup-gate
+hm37-hosted-human-session-input hm37-deno-install hm37-hosted-control-stage hm37-backup-gate
 runbook-23 runbook-24 runbook-25 runbook-26 runbook-27 runbook-28
 hm37-functional-section5 runbook-29 runbook-30 runbook-31 runbook-32
 runbook-33 runbook-34 hm37-public-boundary-reads hm37-public-boundaries
 runbook-35 hm37-hosted-open-ack-control hm37-validate-local-credential
-runbook-13 runbook-11 runbook-60 runbook-61 runbook-12
+runbook-13 runbook-11 hm37-deno-remove runbook-60 runbook-61 runbook-12
 ```
 
 The pre-COMMIT-POINT and S1–S5 rollback tail is
 `runbook-42`, `hm37-reserve-schema-rollback`, `runbook-13`, `runbook-11`,
-`runbook-60`, `runbook-61`, `runbook-12`, in that order. A post-COMMIT-POINT
-`control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`,
-`runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
+`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
+A post-COMMIT-POINT
+`control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`, `runbook-11`,
+`hm37-deno-remove`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
 
 Window start/end and positive integer `BACKUP_MAX_AGE_SECONDS` require HezLead’s approval and durable root-only recording. Their values are **not established**.
 
@@ -726,11 +727,11 @@ After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the
 | 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
 | 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
 | 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
-| 4 | Runbook database identity/session; inspect or pull the pinned psql image; prepare the human input; run `hm37-hosted-control-stage` and finish `deno cache` | Production target, pinned image identity, harness hashes, protected-file modes, and complete offline control cache |
+| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; prepare the human input; run `hm37-deno-install` and `hm37-hosted-control-stage`, then finish `deno cache` | Production target, pinned image identity, pinned Deno zip and installed-binary hashes, harness hashes, protected-file modes, and complete offline control cache |
 | 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later Deno/npm install, cache fill, Docker pull, or dependency fetch |
 | 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
 | 7 | Reach the named COMMIT POINT; run hosted/local controls and revocation | Static assertion classification, behavior and cleanup |
-| 8 | Timer restoration, transient cleanup, copy-back; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition |
+| 8 | Timer restoration, copy-back, `hm37-deno-remove`, transient cleanup; continue directly to lane 8 | Explicit closure or post-COMMIT-POINT control-failure disposition, Deno absent again, and the per-window Deno cache removed |
 
 The reviewed hosted-control artifact in section 9 is an **opening gate**, not work to invent after migration.
 
@@ -817,11 +818,11 @@ Wait for the existing backup service **before** reading status. Active, activati
       *) false ;;
     esac
   done
+  test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
   python3 - /var/backups/commonswarm-postgres/status.json \
     "$BACKUP_MAX_AGE_SECONDS" >"$PROOF_DIR/hm37-backup-gate.txt" <<'PY'
 import datetime, json, sys
 data = json.load(open(sys.argv[1]))
-assert data.get("state") != "running"
 assert data.get("ok") is True
 assert data.get("database_bytes_verified") is True
 assert data.get("object_bytes_verified") is True
@@ -1376,6 +1377,119 @@ protected input without printing it, and pre-cache dependencies before the
 opening gate closes. `CONTROL_ROOT` is window state, not a release directory
 and not copied as evidence.
 
+The measured box baseline has no `/usr/local/bin/deno`. Install the reviewed
+runtime while network access is still permitted. The download may contact only
+the hard-coded GitHub URL and its measured
+`release-assets.githubusercontent.com` redirect. The later cache fill may
+contact only `registry.npmjs.org`.
+
+```sh
+# step: hm37-deno-install
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash before the opening gate closes.
+(
+  set -euo pipefail
+  umask 077
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  DENO_PATH=/usr/local/bin/deno
+  DENO_ZIP_SHA256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490
+  DENO_URL=https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip
+  DOWNLOAD_ROOT="/run/commonswarm-deno-${WINDOW_ID}"
+  case "$DOWNLOAD_ROOT" in /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) false ;; esac
+  test "$(stat -c '%U:%G:%a' /usr/local/bin)" = root:root:755
+
+  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
+  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+    test -n "$RECORDED_DENO_SHA256"
+    test -f "$DENO_PATH"
+    test ! -L "$DENO_PATH"
+    test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
+    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
+    test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+    exit 0
+  fi
+
+  if [ -n "$RECORDED_DENO_SHA256" ]; then
+    case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+    test "${#RECORDED_DENO_SHA256}" -eq 64
+  fi
+  test ! -e "$DOWNLOAD_ROOT"
+  install -d -m 0700 -o root -g root "$DOWNLOAD_ROOT"
+  cleanup_download() {
+    case "$DOWNLOAD_ROOT" in
+      /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
+        find "$DOWNLOAD_ROOT" -xdev -depth -delete
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  trap cleanup_download EXIT
+  REDIRECT_HEADERS="$DOWNLOAD_ROOT/redirect.headers"
+  curl --fail --silent --show-error --head --proto '=https' --max-time 30 \
+    --dump-header "$REDIRECT_HEADERS" --output /dev/null "$DENO_URL"
+  test "$(grep -ic '^location:' "$REDIRECT_HEADERS")" -eq 1
+  REDIRECT_URL="$(awk 'BEGIN{IGNORECASE=1} /^location:/{sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print}' "$REDIRECT_HEADERS")"
+  case "$REDIRECT_URL" in https://release-assets.githubusercontent.com/*) ;; *) false ;; esac
+  EFFECTIVE_URL="$DOWNLOAD_ROOT/effective-url.txt"
+  curl --fail --silent --show-error --proto '=https' --max-time 120 \
+    --output "$DOWNLOAD_ROOT/deno.zip" --write-out '%{url_effective}\n' \
+    "$REDIRECT_URL" >"$EFFECTIVE_URL"
+  test "$(cat "$EFFECTIVE_URL")" = "$REDIRECT_URL"
+  test "$(sha256sum "$DOWNLOAD_ROOT/deno.zip" | awk '{print $1}')" = "$DENO_ZIP_SHA256"
+  python3 - "$DOWNLOAD_ROOT/deno.zip" "$DOWNLOAD_ROOT/deno" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import zipfile
+
+archive, output = sys.argv[1:]
+with zipfile.ZipFile(archive) as source:
+    assert source.namelist() == ["deno"]
+    info = source.getinfo("deno")
+    assert not stat.S_ISLNK(info.external_attr >> 16)
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    with os.fdopen(fd, "wb") as target, source.open(info) as binary:
+        shutil.copyfileobj(binary, target)
+        target.flush()
+        os.fsync(target.fileno())
+os.chmod(output, 0o755)
+PY
+  INSTALLED_SHA256="$(sha256sum "$DOWNLOAD_ROOT/deno" | awk '{print $1}')"
+  case "$INSTALLED_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#INSTALLED_SHA256}" -eq 64
+  if [ -n "$RECORDED_DENO_SHA256" ]; then
+    test "$INSTALLED_SHA256" = "$RECORDED_DENO_SHA256"
+  else
+    printf 'DENO_INSTALLED_BINARY_SHA256=%q\n' "$INSTALLED_SHA256" >>"$PROOF_DIR/window.env"
+  fi
+  python3 - "$DOWNLOAD_ROOT/deno" "$DENO_PATH" <<'PY'
+import os
+import shutil
+import sys
+
+source, target = sys.argv[1:]
+fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o755)
+with os.fdopen(fd, "wb") as output, open(source, "rb") as binary:
+    shutil.copyfileobj(binary, output)
+    output.flush()
+    os.fsync(output.fileno())
+os.chmod(target, 0o755)
+PY
+  test -f "$DENO_PATH"
+  test ! -L "$DENO_PATH"
+  test "$(stat -c '%U:%G:%a' "$DENO_PATH")" = root:root:755
+  test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$INSTALLED_SHA256"
+  test "$("$DENO_PATH" --version | sed -n '1p')" = 'deno 2.9.7'
+  cleanup_download
+  trap - EXIT
+  test ! -e "$DOWNLOAD_ROOT"
+)
+```
+
 ```sh
 # step: hm37-hosted-control-stage
 # readonly: no
@@ -1404,9 +1518,22 @@ and not copied as evidence.
   install -m 0600 "$STAGING_ROOT/human-session.json" "$CONTROL_ROOT/human-session.json"
   test "$(sha256sum "$HARNESS" | awk '{print $1}')" = dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
-  python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
+  OAUTH_CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && OAUTH_CIDS[${#OAUTH_CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-oauth \
+    --filter label=com.docker.compose.service=oauth)
+  test "${#OAUTH_CIDS[@]}" -eq 1
+  MCP_OAUTH_DATABASE_HOST_LINE="$(docker inspect --format \
+    '{{range .Config.Env}}{{if eq (index (split . "=") 0) "MCP_OAUTH_DATABASE_HOST"}}{{println .}}{{end}}{{end}}' \
+    "${OAUTH_CIDS[0]}")"
+  case "$MCP_OAUTH_DATABASE_HOST_LINE" in MCP_OAUTH_DATABASE_HOST=?*) ;; *) false ;; esac
+  MCP_OAUTH_DATABASE_HOST=${MCP_OAUTH_DATABASE_HOST_LINE#MCP_OAUTH_DATABASE_HOST=}
+  python3 - "$CONTROL_ROOT/oauth-database.json" "$MCP_OAUTH_DATABASE_HOST" <<'PY'
 import json, os, pathlib, sys
 out = pathlib.Path(sys.argv[1])
+host = sys.argv[2]
 credentials = json.loads(pathlib.Path(
     "/etc/commonswarm-oauth/database-credentials").read_text())
 service = {}
@@ -1415,7 +1542,7 @@ for line in pathlib.Path("/etc/commonswarm-oauth/service.env").read_text().split
         key, value = line.split("=", 1)
         service[key] = value
 document = {
-    "host": service["MCP_OAUTH_DATABASE_HOST"],
+    "host": host,
     "port": int(service.get("MCP_OAUTH_DATABASE_PORT", "5432")),
     "database": service["MCP_OAUTH_DATABASE_NAME"],
     "user": credentials["user"],
@@ -1431,7 +1558,7 @@ with os.fdopen(fd, "w") as handle:
 PY
   test "$(stat -c %a "$CONTROL_ROOT/human-session.json")" = 600
   test "$(stat -c %a "$CONTROL_ROOT/oauth-database.json")" = 600
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno cache --no-lock \
     --config "$DENO_CONFIG" "$HARNESS" \
     "$RELEASE_ROOT/services/mcp-auth/src/postgres-adapter.js" \
     "$RELEASE_ROOT/supabase/functions/command/index.ts" \
@@ -1468,7 +1595,7 @@ never copied.
   set -a
   . /home/commonswarm/.env
   set +a
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -1505,7 +1632,7 @@ idempotent and still verifies complete revocation before returning zero.
   set -a
   . /home/commonswarm/.env
   set +a
-  DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached --no-lock \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -1517,6 +1644,48 @@ idempotent and still verifies complete revocation before returning zero.
     --cleanup-only "$JOURNAL" \
     >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
   chmod 0600 "$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+)
+```
+
+After copy-back on every successful close and every rollback/abort tail, remove
+the per-window Deno cache and return `/usr/local/bin/deno` to the measured absent
+baseline. An unknown or changed file is never removed.
+
+```sh
+# step: hm37-deno-remove
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on yulan-vps-1 as Anvil under sudo -n -i bash after copy-back on close or rollback.
+(
+  set -euo pipefail
+  SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  DENO_PATH=/usr/local/bin/deno
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
+  DENO_DIR="$CONTROL_ROOT/deno-cache"
+  case "$DENO_DIR" in
+    "/home/commonswarm/edge/controls/${SHA}-"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/deno-cache) ;;
+    *) false ;;
+  esac
+  : "${DENO_INSTALLED_BINARY_SHA256:?recorded installed Deno sha256 required}"
+  case "$DENO_INSTALLED_BINARY_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#DENO_INSTALLED_BINARY_SHA256}" -eq 64
+  if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+    test -f "$DENO_PATH"
+    test ! -L "$DENO_PATH"
+    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$DENO_INSTALLED_BINARY_SHA256"
+    rm -f -- "$DENO_PATH"
+  fi
+  test ! -e "$DENO_PATH"
+  test ! -L "$DENO_PATH"
+  if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
+    test -d "$DENO_DIR"
+    test ! -L "$DENO_DIR"
+    find "$DENO_DIR" -xdev -depth -delete
+  fi
+  test ! -e "$DENO_DIR"
+  printf 'DENO_REMOVED=1\n' >>"$PROOF_DIR/window.env"
 )
 ```
 

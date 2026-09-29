@@ -31,10 +31,8 @@ const GUARD = "tests/box-dry-run/guard.sh";
 const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
-const BOX_FACTS_FILE = "tests/box-dry-run/fixtures/box-facts.json";
-const RELEASE_SHA = "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922";
+const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
 const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
-const BASE_SHA = "218cf921d07d56f2b937822bcf18feb9d3be0f53";
 const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
 
@@ -47,27 +45,73 @@ interface Block {
   line: number;
 }
 
-interface BoxFact {
+interface MeasuredFact {
   id: string;
-  fact: string;
-  assumed_by: string[];
-  evidence: string;
-  measure: string;
-  fixture: Record<string, unknown>;
+  source_id: string;
+  command: string;
+  output: string;
+  exit: number;
+  note: string;
+  result?: unknown;
+  checks?: Array<Record<string, unknown>>;
 }
 
-interface BoxFactInventory {
+interface MeasuredFactInventory {
   schema: number;
-  scope: string;
-  facts: BoxFact[];
+  facts: MeasuredFact[];
+  fact_count: number;
+  production_recheck: { output: string };
 }
 
-const BOX_FACTS = JSON.parse(readFileSync(BOX_FACTS_FILE, "utf8")) as BoxFactInventory;
+const MEASURED_FACTS = JSON.parse(readFileSync(MEASURED_FACTS_FILE, "utf8")) as MeasuredFactInventory;
 
-function boxFactFixture<T extends Record<string, unknown>>(id: string): T {
-  const fact = BOX_FACTS.facts.find((candidate) => candidate.id === id);
-  assert.ok(fact, `box fact inventory is missing ${id}`);
-  return fact.fixture as T;
+function measuredFact(id: string): MeasuredFact {
+  const fact = MEASURED_FACTS.facts.find((candidate) => candidate.id === id);
+  assert.ok(fact, `measured box facts are missing ${id}`);
+  return fact;
+}
+
+function measuredMatch(id: string, pattern: RegExp, field: "command" | "output" | "note" = "output"): string {
+  const match = pattern.exec(measuredFact(id)[field]);
+  assert.ok(match?.[1], `${id}.${field} does not match ${pattern}`);
+  return match[1];
+}
+
+const RELEASE_SHA = measuredMatch("M5", /release-proofs\/([0-9a-f]{40}) MISSING/);
+const DENO_PATH = measuredMatch("M1", /stat[^\n]* (\/usr\/local\/bin\/deno)/, "command");
+const DENO_ZIP_SHA256 = measuredMatch("M19", /stated_sha256=([0-9a-f]{64})/);
+const PREVIOUS_EDGE = measuredMatch("M5", /'\/home\/commonswarm\/edge\/current' -> '([^']+)'/);
+const PREVIOUS_STACK = measuredMatch("M5", /'\/home\/commonswarm\/stack\/current' -> '([^']+)'/);
+const CANDIDATE_EDGE = measuredMatch("M5", new RegExp(`'(/home/commonswarm/edge/releases/${RELEASE_SHA})' type=`));
+const CANDIDATE_STACK = measuredMatch("M5", new RegExp(`'(/home/commonswarm/stack/releases/${RELEASE_SHA})' type=`));
+const PROOF_DIR = measuredMatch("M5", new RegExp(`(/home/commonswarm/stack/release-proofs/${RELEASE_SHA}) MISSING`));
+const CLOSED_PROOF_PATHS = [...measuredFact("M5").output.matchAll(/^closed_proof=(.+)$/gm)].map((match) => match[1]!);
+assert.equal(CLOSED_PROOF_PATHS.length, 2);
+const PSQL_IMAGE = measuredMatch("M17", /(public\.ecr\.aws\/supabase\/postgres:[0-9.]+)/, "command");
+const POSTGRES_IMAGE_ID = measuredMatch("M17", /image_id=(sha256:[0-9a-f]{64})/);
+const SITE_BASE_RELEASE = measuredMatch("M15", /release=([^\n]+)/);
+const SITE_BASE_PREFIX = SITE_BASE_RELEASE.split("-")[1]!;
+const baseResult = spawnSync("git", ["rev-parse", `${SITE_BASE_PREFIX}^{commit}`], { encoding: "utf8" });
+assert.equal(baseResult.status, 0, baseResult.stderr);
+const BASE_SHA = baseResult.stdout.trim();
+const OAUTH_RELEASE = measuredProductionMatch(/oauth_current=([^\n]+)/);
+const EDGE_MEMORY = Number(measuredMatch("M11", /memory=(\d+)/));
+const EDGE_NETWORK = measuredMatch("M11", /network=([^ ]+)/);
+const TARGET_ENV_NAME = measuredMatch("M8", /^(TARGET_DATABASE_URL)$/m);
+const ACCOUNT_NAMES = measuredFact("M3").output.split("\n")
+  .filter((line) => line.split(":").length >= 7)
+  .map((line) => line.split(":", 1)[0]!)
+  .filter(Boolean);
+assert.equal(ACCOUNT_NAMES.length, 4);
+assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
+const STUB_COMMANDS = [
+  "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep",
+];
+
+function measuredProductionMatch(pattern: RegExp): string {
+  const match = pattern.exec(MEASURED_FACTS.production_recheck.output);
+  assert.ok(match?.[1], `production_recheck.output does not match ${pattern}`);
+  return match[1];
 }
 
 function pathExists(path: string): boolean {
@@ -204,6 +248,12 @@ function materialize(block: Block): string {
       .replace("MIGRATION_VERSIONS=(\n    # 20260928000004\n  )", "MIGRATION_VERSIONS=(\n    20260928000004\n  )")
       .replace("FUNCTIONAL_VERSIONS=(\n    # 20260928000004\n  )", "FUNCTIONAL_VERSIONS=(\n    20260928000004\n  )");
   }
+  if (shortStep(block) === "hm37-deno-install") {
+    source = source.replace(
+      `DENO_ZIP_SHA256=${DENO_ZIP_SHA256}`,
+      `DENO_ZIP_SHA256=\${BOX_DRY_RUN_DENO_ZIP_SHA256:-${DENO_ZIP_SHA256}}`,
+    );
+  }
   return source;
 }
 
@@ -232,8 +282,7 @@ function makeStubBin(bin: string, rootOwned = false): void {
   mkdirSync(bin, { recursive: true, mode: rootOwned ? 0o755 : 0o700 });
   chmodSync(bin, rootOwned ? 0o755 : 0o700);
   if (rootOwned) chownSync(bin, 0, 0);
-  const commands = boxFactFixture<{ stub_commands: string[] }>("command-runtimes").stub_commands;
-  for (const command of commands) {
+  for (const command of STUB_COMMANDS) {
     const target = join(bin, command);
     if (!existsSync(target)) {
       copyFileSync(STUB, target);
@@ -371,6 +420,10 @@ function prepareMacFixture(): Fixture {
       CREDENTIAL_FILE: credentials,
       EXPECTED_PRINCIPAL_ID: "00000000-0000-4000-8000-000000000001",
       EXPECTED_RUN_ID: "00000000-0000-4000-8000-000000000003",
+      BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
+      BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
+      BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
+      BOX_DRY_RUN_OAUTH_RELEASE: OAUTH_RELEASE,
     },
   };
 }
@@ -398,6 +451,7 @@ function prepareSiteFixture(fixture: Fixture): string {
     SITE_EVIDENCE: evidence,
     SITE_RELEASE_REPO: cwd,
     SITE_BASE_SHA: BASE_SHA,
+    BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
     SITE_OWNER_ACCESS_TOKEN_FILE: ownerToken,
     BOX_DRY_RUN_SSH_COUNTER_FILE: join(fixture.temporary!, "ssh-counter"),
   });
@@ -422,8 +476,8 @@ function windowEnvBody(state: string): string {
     "WINDOW_PRINCIPAL_SUFFIX='010203'",
     `NEW_EDGE='/home/commonswarm/edge/releases/${RELEASE_SHA}'`,
     `NEW_STACK='/home/commonswarm/stack/releases/${RELEASE_SHA}'`,
-    "PREVIOUS_EDGE='/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20'",
-    "PREVIOUS_STACK='/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f'",
+    `PREVIOUS_EDGE='${PREVIOUS_EDGE}'`,
+    `PREVIOUS_STACK='${PREVIOUS_STACK}'`,
     "RECYCLE_TIMER_STOPPED='0'", "BACKUP_TIMERS_STOPPED='0'",
     "MCP_CADDY_SITE='/etc/caddy/sites/12-commonswarm-mcp.caddy'",
     `RELEASE_DIR_STATE='${edgeState === stackState ? edgeState : "mixed"}'`,
@@ -454,16 +508,22 @@ function prepareBoxFixture(state: string): Fixture {
     join(sourceRoot, "supabase/migrations/20260928000003_hm_oauth_store.sql"),
     0o644,
   );
+  const denoZip = join(supportRoot, "deno-v2.9.7.zip");
+  const zipResult = spawnSync("/usr/bin/python3", ["-c", [
+    "import pathlib, sys, zipfile",
+    "target, source = sys.argv[1:]",
+    "info = zipfile.ZipInfo('deno')",
+    "info.external_attr = 0o100755 << 16",
+    "with zipfile.ZipFile(target, 'w', zipfile.ZIP_STORED) as archive:",
+    "    archive.writestr(info, pathlib.Path(source).read_bytes())",
+  ].join("\n"), denoZip, resolve(STUB)], { encoding: "utf8" });
+  assert.equal(zipResult.status, 0, zipResult.stderr);
+  chownSync(denoZip, 0, 0);
+  chmodSync(denoZip, 0o644);
+  const denoZipDigest = createHash("sha256").update(readFileSync(denoZip)).digest("hex");
   makeStubBin(bin, true);
   writeRootMode(log, "", 0o600);
-  const denoFact = boxFactFixture<{
-    path: string; owner: string; group: string; mode: string; version_output: string;
-  }>("deno-runtime");
-  const releaseFact = boxFactFixture<{
-    previous_edge: string; previous_stack: string; candidate_edge: string;
-    candidate_stack: string; proof_dir: string;
-  }>("release-layout");
-  const originalDeno = pathExists(denoFact.path)
+  const originalDeno = pathExists(DENO_PATH)
     ? join(temporary, "original-runtimes", "deno")
     : undefined;
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) assert.equal(existsSync(path), false, `guarded path unexpectedly exists: ${path}`);
@@ -483,21 +543,13 @@ function prepareBoxFixture(state: string): Fixture {
   ];
   if (originalDeno) {
     mkdirSync(dirname(originalDeno), { recursive: true, mode: 0o700 });
-    renameSync(denoFact.path, originalDeno);
+    renameSync(DENO_PATH, originalDeno);
   }
-  copyFileSync(STUB, denoFact.path);
-  chownSync(denoFact.path, 0, 0);
-  chmodSync(denoFact.path, Number.parseInt(denoFact.mode, 8));
-  const denoStat = lstatSync(denoFact.path);
-  assert.equal(denoStat.isFile(), true);
-  assert.equal(denoStat.isSymbolicLink(), false);
-  assert.equal(denoStat.mode & 0o777, 0o755);
-  assert.equal(denoStat.uid, 0);
-  assert.equal(denoStat.gid, 0);
+  assert.equal(pathExists(DENO_PATH), false, "M1 fixture baseline requires Deno absent");
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
-  const previousEdge = releaseFact.previous_edge;
-  const previousStack = releaseFact.previous_stack;
-  const oauth = "/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05";
+  const previousEdge = PREVIOUS_EDGE;
+  const previousStack = PREVIOUS_STACK;
+  const oauth = OAUTH_RELEASE;
   for (const release of [previousEdge, previousStack, oauth]) {
     mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
     mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
@@ -517,7 +569,15 @@ function prepareBoxFixture(state: string): Fixture {
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
   symlinkSync(oauth, "/home/commonswarm/oauth/current");
 
-  const proof = releaseFact.proof_dir;
+  const proof = PROOF_DIR;
+  if (state === "s2" || state === "s5") {
+    for (const closed of CLOSED_PROOF_PATHS) mkdirSync(closed, { recursive: true });
+  }
+  if (state === "s5") {
+    assert.equal(pathExists(proof), false, "M5 measured-now fixture unexpectedly has an active proof directory");
+    assert.equal(pathExists(join(proof, "window.env")), false, "M5 measured-now fixture unexpectedly has a window file");
+    assert.equal(CLOSED_PROOF_PATHS.filter(pathExists).length, 2, "M5 measured-now fixture must have exactly two closed proofs");
+  }
   mkdirSync(proof, { recursive: true, mode: 0o700 });
   chmodSync(proof, 0o700);
   writeMode(join(proof, "window.env"), windowEnvBody(state));
@@ -538,7 +598,7 @@ function prepareBoxFixture(state: string): Fixture {
     ], optional: [],
   }) + "\n");
   writeMode(join(proof, "edge-env-source-check.txt"), "fixture exact-SHA router inventory\n");
-  const oauthProof = "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05";
+  const oauthProof = join("/home/commonswarm/stack/release-proofs", basename(OAUTH_RELEASE));
   mkdirSync(oauthProof, { recursive: true, mode: 0o700 });
   chmodSync(oauthProof, 0o700);
   writeMode(join(oauthProof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
@@ -562,20 +622,20 @@ function prepareBoxFixture(state: string): Fixture {
     "SUPABASE_SERVICE_ROLE_KEY=fixture-service-role-key",
     "",
   ].join("\n"), 0o600);
-  writeMode("/etc/commonswarm-release/target.env", "TARGET_DATABASE_URL=postgres://placeholder\n", 0o600);
+  writeMode("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600);
   writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o600);
   writeMode("/etc/commonswarm-oauth/database-credentials", '{"user":"commonswarm_oauth_runtime","password":"placeholder"}\n', 0o600);
-  writeMode("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_HOST=db.commonswarm.internal\nMCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600);
+  writeMode("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600);
   writeMode("/etc/caddy/sites/10-commonswarm-api.caddy", "api.commonswarm.com {\n}\n", 0o644);
   writeMode("/etc/caddy/sites/11-commonswarm-edge-staging.caddy", "edge-staging.commonswarm.com {\n}\n", 0o644);
   writeMode("/etc/caddy/sites/12-commonswarm-mcp.caddy", "mcp.commonswarm.com {\n}\n", 0o644);
   writeMode(join(previousStack, "deploy/supabase-stack/commonswarm-api.caddy"), "api.commonswarm.com, edge-staging.commonswarm.com {\n}\n", 0o644);
   writeMode("/var/backups/commonswarm-postgres/status.json", JSON.stringify({
-    state: "complete", ok: true, database_bytes_verified: true, object_bytes_verified: true,
+    ok: true, database_bytes_verified: true, object_bytes_verified: true,
     verified_at: new Date().toISOString(), destination: "r2:yulan-vps-1-backups/000-commonswarm-postgres/dry-run",
   }) + "\n");
-  const targetEdge = releaseFact.candidate_edge;
-  const targetStack = releaseFact.candidate_stack;
+  const targetEdge = CANDIDATE_EDGE;
+  const targetStack = CANDIDATE_STACK;
   if (state !== "s1") {
     for (const release of [targetEdge, targetStack]) {
       mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
@@ -597,9 +657,6 @@ function prepareBoxFixture(state: string): Fixture {
     chmodSync(targetStack, 0o755);
     writeMode(join(proof, "edge.SHA256SUMS"), checksumManifest(targetEdge, ["deploy/edge-runtime/compose.override.yaml"]));
     writeMode(join(proof, "stack.SHA256SUMS"), checksumManifest(targetStack));
-  }
-  if (state === "s2" || state === "s5") {
-    for (const suffix of ["001030", "021020"]) mkdirSync(`${proof}.closed-window-${suffix}`, { recursive: true });
   }
   if (state === "s4") writeMode(join(proof, "rollback-left.txt"), "edge moved then restored\n");
 
@@ -626,7 +683,6 @@ function prepareBoxFixture(state: string): Fixture {
   chownTree("root:root", supportRoot, proof, oauthProof, staging);
   for (const path of [
     log,
-    denoFact.path,
     "/home/commonswarm/.env",
     "/etc/commonswarm-release/target.env",
     "/etc/ssl/yulan-internal-ca.pem",
@@ -646,13 +702,14 @@ function prepareBoxFixture(state: string): Fixture {
   chownPaths(
     "commonswarm:commonswarm",
     "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth",
+    "/home/commonswarm/.env",
     "/srv/commonswarm", "/srv/commonswarm/site", "/srv/commonswarm/site/releases",
   );
 
   return {
     temporary, cwd: process.cwd(), home: "/root", bin, log,
     prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
-    replacedRuntime: { path: denoFact.path, ...(originalDeno ? { backup: originalDeno } : {}) },
+    replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -660,7 +717,19 @@ function prepareBoxFixture(state: string): Fixture {
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
       BOX_DRY_RUN_SOURCE_ROOT: sourceRoot,
-      BOX_DRY_RUN_DENO_VERSION: denoFact.version_output,
+      BOX_DRY_RUN_DENO_VERSION: "deno 2.9.7\nv8 dry-run\ntypescript dry-run",
+      BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
+      BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
+      BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
+      BOX_DRY_RUN_POSTGRES_IMAGE_ID: POSTGRES_IMAGE_ID,
+      BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
+      BOX_DRY_RUN_OAUTH_DATABASE_HOST_ENV_NAME: "MCP_OAUTH_DATABASE_HOST",
+      BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
+      BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
+      BOX_DRY_RUN_OAUTH_RELEASE: OAUTH_RELEASE,
+      BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
+      BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
+      BOX_DRY_RUN_WINDOW_ID: WINDOW_ID,
       BACKUP_MAX_AGE_SECONDS: "86400",
     },
   };
@@ -790,7 +859,7 @@ function executeWholeBlock(block: Block, fixture: Fixture, options: { fail?: boo
 
 test("all scoped fences and host declarations are executable or explicitly text", (t) => {
   const parsed = SCOPED.flatMap(blocks);
-  assert.equal(blocks(HM37).length, 16);
+  assert.equal(blocks(HM37).length, 18);
   assert.equal(blocks(RUNBOOK).length, 67);
   assert.equal(blocks(SITE).length, 6);
   assert.equal(blocks(TEMPLATE).length, 3);
@@ -803,7 +872,7 @@ test("all scoped fences and host declarations are executable or explicitly text"
     const syntax = spawnSync("/bin/bash", ["-n"], { input: block.source, encoding: "utf8" });
     assert.equal(syntax.status, 0, `${block.file}:${block.line} [${block.step}] ${syntax.stderr}`);
   }
-  t.diagnostic(`blocks=${parsed.length}; hm37=16 runbook=67 site=6 template=3`);
+  t.diagnostic(`blocks=${parsed.length}; hm37=18 runbook=67 site=6 template=3`);
 });
 
 test("operator requirements name an executing step or an explicit HezLead decision", () => {
@@ -888,7 +957,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
   const checkoutStubBefore = lstatSync(STUB);
-  const denoPath = boxFactFixture<{ path: string }>("deno-runtime").path;
+  const denoPath = DENO_PATH;
   const denoBefore = pathExists(denoPath)
     ? {
         stat: lstatSync(denoPath),
@@ -918,7 +987,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
       const result = spawnSync("/bin/hostname", ["-s"], { encoding: "utf8" });
       return `status=${result.status} name=${result.stdout.trim()}`;
     }, (actual) => actual.startsWith("status=0 name=") && actual !== "status=0 name=yulan-vps-1");
-    for (const name of boxFactFixture<{ users: string[] }>("host-accounts").users) {
+    for (const name of ACCOUNT_NAMES) {
       check(`user ${name}`, "present", () => {
         const result = spawnSync("/usr/bin/id", ["-u", name], { encoding: "utf8" });
         return `status=${result.status} uid=${result.stdout.trim()}`;
@@ -928,7 +997,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
         return `status=${result.status} group=${result.stdout.trim()}`;
       }, (actual) => actual === `status=0 group=${name}`);
     }
-    for (const name of boxFactFixture<{ groups: string[] }>("host-accounts").groups) {
+    for (const name of ACCOUNT_NAMES) {
       check(`group ${name}`, "present", () => {
         const result = spawnSync("/usr/bin/getent", ["group", name], { encoding: "utf8" });
         return `status=${result.status} value=${result.stdout.trim()}`;
@@ -955,10 +1024,9 @@ test("box preflight reports every shared fixture precondition in one pass", {
     });
 
     check("PATH first entry", fixture.bin, () => fixture.env.PATH?.split(":")[0] ?? "", (actual) => actual === fixture.bin);
-    const runtimeFact = boxFactFixture<{ stub_commands: string[]; mode: string }>("command-runtimes");
-    for (const command of runtimeFact.stub_commands) {
+    for (const command of STUB_COMMANDS) {
       const path = join(fixture.bin, command);
-      checkStat(path, 0, 0, Number.parseInt(runtimeFact.mode, 8), "file");
+      checkStat(path, 0, 0, 0o755, "file");
       check(`PATH command ${command}`, path, () => {
         const result = spawnSync("/bin/bash", ["-c", 'command -v -- "$1"', "box-preflight", command], {
           encoding: "utf8", env: fixture.env,
@@ -974,7 +1042,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
       });
       return `status=${result.status} path=${result.stdout.trim()}`;
     }, (actual) => actual === `status=0 path=${join(fixture.bin, "docker")}`);
-    checkStat(denoPath, 0, 0, 0o755, "file");
+    check(denoPath, "absent before hm37-deno-install", () => String(pathExists(denoPath)), (actual) => actual === "false");
     checkStat(fixture.temporary!, 0, 0, 0o700, "directory");
     checkStat(fixture.bin, 0, 0, 0o755, "directory");
     checkStat(fixture.supportRoot!, 0, 0, 0o755, "directory");
@@ -993,7 +1061,6 @@ test("box preflight reports every shared fixture precondition in one pass", {
 
     for (const [path, mode] of [
       [fixture.log, 0o600],
-      ["/home/commonswarm/.env", 0o600],
       ["/etc/commonswarm-release/target.env", 0o600],
       ["/etc/ssl/yulan-internal-ca.pem", 0o600],
       ["/etc/commonswarm-oauth/database-credentials", 0o600],
@@ -1011,7 +1078,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
     checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-control.ts`, 0, 0, 0o644, "file");
     checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-deno.json`, 0, 0, 0o644, "file");
     checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/human-session.json`, 0, 0, 0o600, "file");
-    const proof = boxFactFixture<{ proof_dir: string }>("release-layout").proof_dir;
+    const proof = PROOF_DIR;
     checkStat(proof, 0, 0, 0o700, "directory");
     for (const name of readdirSync(proof)) {
       if (!lstatSync(join(proof, name)).isFile()) continue;
@@ -1022,15 +1089,13 @@ test("box preflight reports every shared fixture precondition in one pass", {
     if (commonswarmUidResult.status === 0 && commonswarmGidResult.status === 0) {
       const commonswarmUid = Number.parseInt(commonswarmUidResult.stdout, 10);
       const commonswarmGid = Number.parseInt(commonswarmGidResult.stdout, 10);
-      const releaseFact = boxFactFixture<{
-        previous_edge: string; previous_stack: string; candidate_edge: string; candidate_stack: string;
-      }>("release-layout");
       checkStat("/home/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
       checkStat("/srv/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
-      checkStat(releaseFact.previous_edge, commonswarmUid, commonswarmGid, 0o755, "directory");
-      checkStat(releaseFact.previous_stack, commonswarmUid, commonswarmGid, 0o755, "directory");
-      checkStat(releaseFact.candidate_edge, commonswarmUid, commonswarmGid, 0o750, "directory");
-      checkStat(releaseFact.candidate_stack, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(PREVIOUS_EDGE, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(PREVIOUS_STACK, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(CANDIDATE_EDGE, commonswarmUid, commonswarmGid, 0o750, "directory");
+      checkStat(CANDIDATE_STACK, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat("/home/commonswarm/.env", commonswarmUid, commonswarmGid, 0o600, "file");
     } else {
       failures.push(`commonswarm ownership ids: expected numeric uid/gid; actual uid_status=${commonswarmUidResult.status} gid_status=${commonswarmGidResult.status}`);
     }
@@ -1108,33 +1173,101 @@ test("HM37 switch inputs select the plan's exact successful-path steps", () => {
     const present = steps.filter((step) => selected.includes(step));
     assert.deepEqual(present, planInput(input) === "yes" ? steps : [], `${input} selected the wrong steps`);
   }
-  assert.deepEqual(selected.slice(-6), [
+  assert.deepEqual(selected.slice(-7), [
     "hm37-validate-local-credential", "runbook-13", "runbook-11",
-    "runbook-60", "runbook-61", "runbook-12",
+    "hm37-deno-remove", "runbook-60", "runbook-61", "runbook-12",
   ]);
   assert.deepEqual(planTail("rollback").slice(0, 2), [
     "runbook-42", "hm37-reserve-schema-rollback",
   ], "the previous edge must be restored before the schema inverse checks it");
 });
 
-test("box fact inventory is complete, measurable, and is the fixture value source", (t) => {
-  assert.equal(BOX_FACTS.schema, 1);
-  assert.match(BOX_FACTS.scope, /hm37-hosted-control-stage/i);
-  assert.ok(BOX_FACTS.facts.length >= 14);
-  assert.equal(new Set(BOX_FACTS.facts.map((fact) => fact.id)).size, BOX_FACTS.facts.length);
-  for (const fact of BOX_FACTS.facts) {
-    assert.match(fact.id, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-    assert.ok(fact.fact.length > 20, `${fact.id}: missing fact`);
-    assert.ok(fact.assumed_by.length > 0, `${fact.id}: missing block/line`);
-    assert.ok(fact.assumed_by.every((source) => /\.md:\d+/.test(source)), `${fact.id}: imprecise block/line`);
-    assert.match(fact.evidence, /^(?:NOT RECORDED|docs\/evidence\/)/, `${fact.id}: invalid evidence status`);
-    assert.ok(fact.measure.length > 10, `${fact.id}: missing read-only measurement`);
-    assert.doesNotMatch(fact.measure, /\brm\b|\bmv\b|\binstall\b|\bchmod\b|\bchown\b|systemctl\s+(?:start|stop|restart|reload)|docker\s+(?:run|pull|compose\s+up)/,
-      `${fact.id}: measurement is not read-only`);
-    assert.ok(Object.keys(fact.fixture).length > 0, `${fact.id}: missing fixture value`);
-    assert.doesNotThrow(() => JSON.stringify(boxFactFixture(fact.id)), `${fact.id}: fixture value unreadable`);
-    t.diagnostic(`${fact.id}: ${fact.evidence}; measure=${fact.measure}`);
+test("M1 and M6-M15 decisions are encoded in the executable blocks", () => {
+  const hm = readFileSync(HM37, "utf8");
+  const runbook = readFileSync(RUNBOOK, "utf8");
+  const site = readFileSync(SITE, "utf8");
+  const install = stepSource(hm, "hm37-deno-install");
+  const remove = stepSource(hm, "hm37-deno-remove");
+  const stage = stepSource(hm, "hm37-hosted-control-stage");
+  const backup = stepSource(hm, "hm37-backup-gate");
+  const refusal = blocks(HM37).find((block) => shortStep(block) === "hm37-public-boundaries");
+  assert.ok(refusal);
+  assert.equal(refusal.marker, "probe");
+  assert.match(install, new RegExp(DENO_ZIP_SHA256));
+  assert.match(install, /zipfile\.ZipFile/);
+  assert.ok(install.indexOf("sha256sum \"$DOWNLOAD_ROOT/deno.zip\"") < install.indexOf("zipfile.ZipFile"));
+  assert.match(remove, /sha256sum "\$DENO_PATH"[\s\S]*rm -f -- "\$DENO_PATH"/);
+  assert.match(remove, /find "\$DENO_DIR" -xdev -depth -delete/);
+  assert.match(stage, /docker inspect --format[\s\S]*\.Config\.Env[\s\S]*MCP_OAUTH_DATABASE_HOST/);
+  assert.doesNotMatch(stage, /service\["MCP_OAUTH_DATABASE_HOST"\]/);
+  assert.match(stepSource(runbook, "runbook-31"), /pwd\.getpwuid\(env_stat\.st_uid\)\.pw_name in \{'root', 'commonswarm'\}/);
+  const session = stepSource(runbook, "runbook-17");
+  assert.match(session, new RegExp(PSQL_IMAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(session, /com\.docker\.compose\.service=postgres/);
+  assert.match(session, /docker inspect --format '\{\{\.Image\}\}'/);
+  assert.doesNotMatch(session, /docker pull/);
+  assert.match(backup, /--property=Result --value/);
+  assert.doesNotMatch(backup, /data\.get\(["']state["']\)/);
+  assert.match(refusal.source, /len\(kinds\) == 6/);
+  assert.match(refusal.source, /\{\}, 400, \{"error": "invalid_request"\}/);
+  assert.match(refusal.source, /\},\s*403, \{"error": "forbidden"\}/);
+  assert.match(refusal.source, /"mint_agent_token"\}\},\s*401, \{"error": "unauthenticated"\}/);
+  assert.match(stepSource(runbook, "runbook-33"), /chmod 0600 "\$PROOF_DIR\/edge-probe-start\.txt"/);
+  assert.match(site, new RegExp(SITE_BASE_RELEASE));
+  assert.match(site, new RegExp(BASE_SHA));
+});
+
+test("all M1-M20 values come from the measured artifact, with no second fixture copy", (t) => {
+  assert.equal(MEASURED_FACTS.schema, 1);
+  assert.equal(MEASURED_FACTS.fact_count, 20);
+  assert.deepEqual(MEASURED_FACTS.facts.map((fact) => fact.id),
+    Array.from({ length: 20 }, (_unused, index) => `M${index + 1}`));
+  assert.equal(new Set(MEASURED_FACTS.facts.map((fact) => fact.id)).size, 20);
+  assert.equal(existsSync("tests/box-dry-run/fixtures/box-facts.json"), false);
+  for (const fact of MEASURED_FACTS.facts) {
+    assert.ok(fact.source_id);
+    assert.ok(fact.command.length > 10);
+    assert.equal(typeof fact.output, "string");
+    assert.equal(typeof fact.exit, "number");
+    assert.ok(fact.note.length > 10);
+    t.diagnostic(`${fact.id}/${fact.source_id}: exit=${fact.exit}`);
   }
+  assert.equal(RELEASE_SHA, basename(PROOF_DIR));
+  assert.match(measuredFact("M5").output, new RegExp(`${PROOF_DIR.replaceAll("/", "\\/")} MISSING`));
+  assert.match(measuredFact("M5").output, new RegExp(`${PROOF_DIR.replaceAll("/", "\\/")}\\/window\\.env MISSING`));
+  assert.equal(measuredFact("M5").output.match(/closed_proof=/g)?.length, 2);
+  assert.match(measuredFact("M18").output, /^[a-z_][a-z0-9_-]*:[a-z_][a-z0-9_-]* 600 regular file$/);
+  assert.equal(measuredFact("M17").result, "EQUAL");
+  assert.equal(measuredFact("M19").result, "MATCH");
+  assert.equal(measuredFact("M20").result, "PASS");
+});
+
+test("fixture image, repository-path, and environment-name values agree with repository or measurement text", () => {
+  const source = readFileSync("tests/box-dry-run.test.ts", "utf8");
+  const fixtureSource = source.slice(source.indexOf("function prepareBoxFixture"), source.indexOf("function cleanupBoxFixture"));
+  const literalFixtureSource = [
+    fixtureSource,
+    readFileSync("tests/box-dry-run/prelude.sh", "utf8"),
+    readFileSync("tests/box-dry-run/stubs/dispatch.sh", "utf8"),
+    readFileSync("tests/box-dry-run/python/sitecustomize.py", "utf8"),
+  ].join("\n").replace(/\$\{[^}]+\}/g, "");
+  const tracked = spawnSync("rg", ["--files", "-g", "!tests/box-dry-run.test.ts", "-g", "!tests/box-dry-run/**"], { encoding: "utf8" });
+  assert.equal(tracked.status, 0, tracked.stderr);
+  const repositoryText = tracked.stdout.trim().split("\n")
+    .filter(Boolean)
+    .map((file) => readFileSync(file, "utf8"))
+    .join("\n") + readFileSync(MEASURED_FACTS_FILE, "utf8");
+  const values = new Set<string>();
+  for (const match of literalFixtureSource.matchAll(/public\.ecr\.aws\/[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+/g)) values.add(match[0]);
+  for (const match of literalFixtureSource.matchAll(/(?<!\/)(?:deploy|docs|site|src|supabase)\/[A-Za-z0-9._/-]+/g)) values.add(match[0]);
+  for (const match of literalFixtureSource.matchAll(/\b(?:MCP|PUBLIC|SUPABASE|SWARM|TARGET|COMMONSWARM)_[A-Z0-9_]+\b/g)) values.add(match[0]);
+  values.add(PSQL_IMAGE);
+  values.add(TARGET_ENV_NAME);
+  assert.ok(values.size > 10, "fixture agreement scan found too few values");
+  const accepted = (value: string): boolean => repositoryText.includes(value);
+  for (const value of values) assert.equal(accepted(value), true, `fixture value has no repository/measurement source: ${value}`);
+  assert.equal(accepted("public.ecr.aws/supabase/postgres:0.0.0-invented"), false,
+    "invented image control unexpectedly passed");
 });
 
 test("box runtime stubs are regular root-owned executables and emit accepted Deno shapes", {
@@ -1144,28 +1277,31 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
   assert.equal(guard.status, 0, guard.stderr);
   const fixture = prepareBoxFixture("s2");
   try {
-    const runtimeFact = boxFactFixture<{ stub_commands: string[]; mode: string }>("command-runtimes");
-    for (const command of runtimeFact.stub_commands) {
+    for (const command of STUB_COMMANDS) {
       const stat = lstatSync(join(fixture.bin, command));
       assert.equal(stat.isFile(), true, `${command} is not a regular file`);
       assert.equal(stat.isSymbolicLink(), false, `${command} is a symlink`);
-      assert.equal(stat.mode & 0o777, Number.parseInt(runtimeFact.mode, 8), `${command} mode`);
+      assert.equal(stat.mode & 0o777, 0o755, `${command} mode`);
       assert.equal(stat.uid, 0, `${command} owner`);
       assert.equal(stat.gid, 0, `${command} group`);
     }
-    const denoFact = boxFactFixture<{ path: string; version_output: string }>("deno-runtime");
-    const denoStat = lstatSync(denoFact.path);
+    assert.equal(pathExists(DENO_PATH), false);
+    const installBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-install");
+    assert.ok(installBlock);
+    const installed = executeWholeBlock(installBlock, fixture);
+    assert.equal(installed.result, "passed", installed.stderr);
+    const denoStat = lstatSync(DENO_PATH);
     assert.equal(denoStat.isFile(), true);
     assert.equal(denoStat.isSymbolicLink(), false);
     assert.equal(denoStat.mode & 0o777, 0o755);
     assert.equal(denoStat.uid, 0);
     assert.equal(denoStat.gid, 0);
-    const version = spawnSync(denoFact.path, ["--version"], { encoding: "utf8", env: fixture.env });
+    const version = spawnSync(DENO_PATH, ["--version"], { encoding: "utf8", env: fixture.env });
     assert.equal(version.status, 0, version.stderr);
-    assert.equal(version.stdout.trim(), denoFact.version_output);
-    const cache = spawnSync(denoFact.path, ["cache", "--no-lock", "fixture.ts"], { encoding: "utf8", env: fixture.env });
+    assert.match(version.stdout, /^deno 2\.9\.7/m);
+    const cache = spawnSync(DENO_PATH, ["cache", "--no-lock", "fixture.ts"], { encoding: "utf8", env: fixture.env });
     assert.equal(cache.status, 0, cache.stderr);
-    const run = spawnSync(denoFact.path, ["run", "hm37-open-ack-control.ts"], { encoding: "utf8", env: fixture.env });
+    const run = spawnSync(DENO_PATH, ["run", "hm37-open-ack-control.ts"], { encoding: "utf8", env: fixture.env });
     assert.equal(run.status, 0, run.stderr);
     const output = JSON.parse(run.stdout) as { ok: boolean; mode: string; assertions: Record<string, boolean> };
     assert.equal(output.ok, true);
@@ -1175,6 +1311,68 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     assert.match(calls, /^deno --version$/m);
     assert.match(calls, /^deno cache --no-lock fixture\.ts$/m);
     assert.match(calls, /^deno run hm37-open-ack-control\.ts$/m);
+    const removeBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-remove");
+    assert.ok(removeBlock);
+    const removed = executeWholeBlock(removeBlock, fixture);
+    assert.equal(removed.result, "passed", removed.stderr);
+    assert.equal(pathExists(DENO_PATH), false);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("pinned Deno install and rollback removal fail closed", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box",
+}, () => {
+  const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+  assert.equal(guard.status, 0, guard.stderr);
+  const installBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-install");
+  const removeBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-remove");
+  assert.ok(installBlock);
+  assert.ok(removeBlock);
+
+  let fixture = prepareBoxFixture("s2");
+  try {
+    fixture.env.BOX_DRY_RUN_DENO_ZIP_SHA256 = "0".repeat(64);
+    const wrongZip = executeWholeBlock(installBlock, fixture);
+    assert.equal(wrongZip.result, "failed");
+    assert.equal(pathExists(DENO_PATH), false, "wrong zip installed Deno");
+    assert.doesNotMatch(readFileSync(fixture.log, "utf8"), /python3 .*deno\.zip/, "wrong zip reached extraction");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+
+  fixture = prepareBoxFixture("s2");
+  try {
+    assert.equal(executeWholeBlock(installBlock, fixture).result, "passed");
+    writeRootMode(DENO_PATH, "different binary\n", 0o755);
+    const refused = executeWholeBlock(removeBlock, fixture);
+    assert.equal(refused.result, "failed");
+    assert.equal(readFileSync(DENO_PATH, "utf8"), "different binary\n", "unknown Deno file was changed");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+
+  fixture = prepareBoxFixture("s2");
+  try {
+    writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
+    const refused = executeWholeBlock(installBlock, fixture);
+    assert.equal(refused.result, "failed");
+    assert.equal(readFileSync(DENO_PATH, "utf8"), "pre-existing unknown binary\n",
+      "install overwrote an unknown Deno file");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+
+  fixture = prepareBoxFixture("s2");
+  try {
+    const installed = executeWholeBlock(installBlock, fixture);
+    assert.equal(installed.result, "passed", installed.stderr);
+    const removed = executeWholeBlock(removeBlock, fixture);
+    assert.equal(removed.result, "passed", removed.stderr);
+    assert.equal(pathExists(DENO_PATH), false, "rollback did not remove recorded Deno binary");
+    const cache = `/home/commonswarm/edge/controls/${RELEASE_SHA}-${WINDOW_ID}/deno-cache`;
+    assert.equal(pathExists(cache), false, "rollback did not remove per-window Deno cache");
   } finally {
     cleanupBoxFixture(fixture);
   }
@@ -1331,7 +1529,7 @@ test("historical controls execute and reproduce the named failures while current
     const oldProof = join(controlRoot, "stack/release-proofs", RELEASE_SHA);
     mkdirSync(oldProof, { recursive: true });
     writeMode(join(oldProof, "window.env"), `SHA='${RELEASE_SHA}'\nWINDOW_ID='${WINDOW_ID}'\n`);
-    const oldOauthSha = "826db6a34f235064a3a03c57377d8e32a35d2f05";
+    const oldOauthSha = basename(OAUTH_RELEASE);
     const oldOauthRelease = join(controlRoot, "oauth/releases", oldOauthSha);
     const oldOauthProof = join(controlRoot, "stack/release-proofs", oldOauthSha);
     mkdirSync(oldOauthRelease, { recursive: true });
@@ -1386,8 +1584,8 @@ test("historical controls execute and reproduce the named failures while current
     const oldOpen = stepSource(oldRunbook, "1-apply-release-directories");
     assert.match(oldOpen, /prepare_release_directory/);
     const b912Root = join(fixture.temporary!, "b912-root");
-    const previousEdge = join(b912Root, "edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20");
-    const previousStack = join(b912Root, "stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f");
+    const previousEdge = join(b912Root, "edge/releases", basename(PREVIOUS_EDGE));
+    const previousStack = join(b912Root, "stack/releases", basename(PREVIOUS_STACK));
     const newEdge = join(b912Root, `edge/releases/${RELEASE_SHA}`);
     const newStack = join(b912Root, `stack/releases/${RELEASE_SHA}`);
     for (const release of [previousEdge, previousStack, newEdge, newStack]) mkdirSync(release, { recursive: true });

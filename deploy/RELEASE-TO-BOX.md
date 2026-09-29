@@ -101,7 +101,8 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 | `/run/commonswarm-release-<sha>-{service.conf,pass,apply.sql,session.sh}` | B: removed by close/rollback | `runbook-17` | `runbook-60` |
 | `mktemp` router, Caddy-drift, boundary-read and boundary-probe paths | B: removed by owning block | `runbook-04`, Caddy drift steps, item plan probes | Each block's guarded `trap` |
 | Caddy `*.tmp.<sha>` candidates and stack unit-before directory inside the active proof directory | B: removed/moved or per-window on close | Caddy/guarded-stack steps | Atomic move/rollback; proof-directory close by `runbook-61` |
-| HM37 Mac input root, box control root/journal/cache, and `/run/commonswarm-hm37-<window-id>` staging | B: per-window name | HM37 input/stage/transfer steps | Retained or removed only under the exact approved `WINDOW_ID`; the next window uses a different exact name |
+| HM37 Mac input root, box control root/journal, and `/run/commonswarm-hm37-<window-id>` staging | B: per-window name | HM37 input/stage/transfer steps | Retained or removed only under the exact approved `WINDOW_ID`; the next window uses a different exact name |
+| HM37 `/usr/local/bin/deno`, `/run/commonswarm-deno-<window-id>`, and the box control root's `deno-cache` | B: temporary runtime/cache; measured baseline has no Deno | `hm37-deno-install`, then `hm37-hosted-control-stage` | Install-step trap removes download scratch; `hm37-deno-remove` checks the recorded binary digest before removing the binary and per-window cache on close or rollback |
 
 ### Preflight — CSwarmDevLead, HezLead, then Anvil
 
@@ -1166,13 +1167,18 @@ all other file arguments.
   APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
   DB_SESSION="/run/commonswarm-release-${SHA}-session.sh"
   PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
-  if ! docker image inspect "$PSQL_IMAGE" >/dev/null 2>&1; then
-    docker pull "$PSQL_IMAGE"
-  fi
   PSQL_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$PSQL_IMAGE")"
   case "$PSQL_IMAGE_ID" in sha256:*) ;; *) false ;; esac
   case "${PSQL_IMAGE_ID#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
   test "${#PSQL_IMAGE_ID}" -eq 71
+  POSTGRES_CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && POSTGRES_CIDS[${#POSTGRES_CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-supabase-stack \
+    --filter label=com.docker.compose.service=postgres)
+  test "${#POSTGRES_CIDS[@]}" -eq 1
+  test "$(docker inspect --format '{{.Image}}' "${POSTGRES_CIDS[0]}")" = "$PSQL_IMAGE_ID"
   install -m 0600 -o root -g root /dev/null "$PGSERVICE_FILE"
   install -m 0600 -o root -g root /dev/null "$PGPASS_FILE"
   install -m 0600 -o root -g root /dev/null "$APPLY_SQL"
@@ -1471,10 +1477,10 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
       *) false ;;
     esac
   done
+  test "$(systemctl show commonswarm-postgres-backup.service --property=Result --value)" = success
   python3 - "$BACKUP_STATUS" "$BACKUP_MAX_AGE_SECONDS" <<'PY'
 import datetime, json, sys
 data = json.load(open(sys.argv[1]))
-assert data.get('state') != 'running'
 assert data.get('ok') is True
 assert data.get('database_bytes_verified') is True
 assert data.get('object_bytes_verified') is True
@@ -1913,7 +1919,7 @@ approved times overlap a protected interval.
   (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge-with-override.SHA256SUMS")
 
   python3 - "$PROOF_DIR/required-edge-env.json" /home/commonswarm/.env <<'PY'
-import json, sys
+import json, pathlib, pwd, stat, sys
 
 inventory = json.load(open(sys.argv[1]))
 required = set(inventory['required'])
@@ -1921,8 +1927,14 @@ optional = set(inventory['optional'])
 database_alias = 'SWARM_DATABASE_URL|SUPABASE_DB_URL'
 assert database_alias in required
 assert not (required & optional)
+env_path = pathlib.Path(sys.argv[2])
+env_stat = env_path.stat()
+assert stat.S_ISREG(env_stat.st_mode), 'edge environment must be a regular file'
+assert stat.S_IMODE(env_stat.st_mode) == 0o600, 'edge environment must be mode 0600'
+assert pwd.getpwuid(env_stat.st_uid).pw_name in {'root', 'commonswarm'}, \
+    'edge environment owner must be root or commonswarm'
 values = {}
-for raw in open(sys.argv[2]):
+for raw in env_path.open():
     line = raw.strip()
     if not line or line.startswith('#') or '=' not in line:
         continue
@@ -2028,7 +2040,8 @@ runtime cannot reach `db.commonswarm.internal`.
   test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' commonswarm-edge-edge-runtime-1)" = commonswarm-net
   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' commonswarm-edge-edge-runtime-1)" \
     = "$NEW_EDGE/deploy/edge-runtime"
-  date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-probe-start.txt"
+  ( umask 077; date -u +%Y-%m-%dT%H:%M:%SZ >"$PROOF_DIR/edge-probe-start.txt" )
+  chmod 0600 "$PROOF_DIR/edge-probe-start.txt"
 )
 ```
 

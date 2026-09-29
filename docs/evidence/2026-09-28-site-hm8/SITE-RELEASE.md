@@ -27,17 +27,24 @@ Measured in this checkout:
 | HM8 implementation | `92e7c1c6` |
 | Root package version | `0.1.80` |
 | Site difference from OAuth retry SHA `ad964ed1` | None |
-| Current live site release | **Not established by a current box measurement** |
+| Current live site release | `20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e` (measured 2026-09-29) |
+| Current live source | `9b085c82352390cf8f0fe515c02b3ccff423476a` |
+| Current markers | `/download` contains `0.1.80`; `/app` does not contain `data-connected-apps-open` |
 
-The newest committed site deployment receipt found is [`2026-09-25-v0.1.77-release/RELEASE.md`](../2026-09-25-v0.1.77-release/RELEASE.md). It records:
+The older committed site deployment receipt [`2026-09-25-v0.1.77-release/RELEASE.md`](../2026-09-25-v0.1.77-release/RELEASE.md) records:
 
 - Source: `218cf921d07d56f2b937822bcf18feb9d3be0f53`.
 - Release directory: `20260925T003349Z-218cf921d07d-3a154c81c821946d`.
 - Build setting: `PUBLIC_H0_LINK_JOIN=1`.
 
-The September 27 `0.1.78`, `0.1.79` and `0.1.80` release notes do not establish a later site deployment. A box-window plan containing a future site step is not deployment evidence.
+The M15 box measurement supersedes that receipt as the lane-8 baseline. It
+resolved the live release above, read `/app`, `/download`, and all five referenced
+assets, found the `0.1.80` marker, and did not find the Connected apps marker.
 
-**The first operational step opens the site window from the approved start and then performs a read-only measurement of the live symlink.** Its resolved full source SHA is the release baseline; the measured inventory in site-02 governs approval. The precomputed inventory below is only an expectation if that baseline is `218cf921d07d56f2b937822bcf18feb9d3be0f53`.
+**The first operational step opens the site window from the approved start and
+then confirms the live symlink still names the measured release.** That exact
+release is the base and rollback target. Any different value stops the window;
+site-02 does not silently adopt a new baseline.
 
 ```sh
 # step: site-01 — Mac mini /bin/bash 3.2; Anvil; open the site window, then read the box
@@ -69,6 +76,7 @@ case "$previous" in
   *) printf '%s\n' 'STOP: current resolves outside site/releases' >&2; exit 1 ;;
 esac
 test -d "$previous"
+test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
 test -f "$previous/app/index.html"
 test -f "$previous/download/index.html"
 date -u '+measured_at=%Y-%m-%dT%H:%M:%SZ'
@@ -83,7 +91,7 @@ BOX
 For subsequent blocks, Anvil supplies these non-secret inputs:
 
 - `SITE_RELEASE_REPO`: absolute path to the checkout whose `HEAD` is the exact release SHA.
-- `SITE_BASE_SHA`: full SHA resolved from the measured current site release.
+- `SITE_BASE_SHA`: exactly `9b085c82352390cf8f0fe515c02b3ccff423476a`, resolved from the measured current site release.
 - `SITE_WINDOW_START_UTC`: HezLead-approved UTC start in `YYYY-MM-DDTHH:MM:SSZ` form. `site-01` derives `SITE_WINDOW_ID` from it; the operator never types an ID.
 - `SITE_WINDOW_ID`: derived `YYYYMMDDTHHMMSSZ` identifier read from `$HOME/.commonswarm-site-window.env` after `site-01`.
 - `SITE_EVIDENCE`: absolute, protected evidence directory for this execution, outside the release checkout, whose basename ends in `-$SITE_WINDOW_ID`.
@@ -107,6 +115,7 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
   case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
   cd "$SITE_RELEASE_REPO"
   target=8b8989f2b29e440a317a2cdedf11195901c8342c
+  test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
   test "$(git rev-parse HEAD)" = "$target"
   base=$(git rev-parse --verify "${SITE_BASE_SHA}^{commit}")
   test "$base" = "$SITE_BASE_SHA"
@@ -148,13 +157,42 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
 
 **Evidence:** `site-02-summary.txt`, complete `git log`, complete commit list, diff stat, name/status and numerical inventory. Stop if the measured base cannot be resolved or is not an ancestor of the release SHA. The measured list governs. Before approval, classify every commit in that list absent from the expected list below as requiring a live server dependency or not; do not approve it as an unreviewed carry.
 
-### Expected site history if the measured live base is `218cf921d07d56f2b937822bcf18feb9d3be0f53`
+### Expected site history from the measured live base
+
+The governing comparison is:
+
+`9b085c82352390cf8f0fe515c02b3ccff423476a..8b8989f2b29e440a317a2cdedf11195901c8342c`
+
+It has six entries touching `site/`: `d0ccf3a8`, `11660541`, `92e7c1c6`,
+`a8272445`, `02c4e9a9`, and `93b8d202`. The reconciled net inventory is 10
+files, 546 insertions, and 31 deletions. Site-02 regenerates the commit and file
+inventories; these counts are positive expectations, not a substitute for that
+measurement.
+
+The 10 paths, relative to `site/`, are:
+
+| Path | + / − |
+|---|---:|
+| `src/components/app/LiveDashboard.astro` | 270 / 6 |
+| `src/components/app/brain-view.fixture.ts` | 3 / 0 |
+| `src/components/app/markdown-wordwrap-qa.observer.test.ts` | 29 / 4 |
+| `src/components/app/message-blocks-layout.observer.test.ts` | 23 / 2 |
+| `src/components/app/mobile-feed-layout.observer.test.ts` | 14 / 0 |
+| `src/components/connect/agent-connect-mint.observer.test.ts` | 5 / 5 |
+| `src/lib/agent-connect.ts` | 6 / 6 |
+| `src/lib/connected-apps.test.mjs` | 43 / 0 |
+| `src/lib/connected-apps.ts` | 145 / 0 |
+| `src/pages/acceptable-use.astro` | 8 / 8 |
+
+### Historical pre-M15 inventory — superseded, do not use as the base
 
 This precomputed expected comparison is:
 
 `218cf921d07d56f2b937822bcf18feb9d3be0f53..8b8989f2b29e440a317a2cdedf11195901c8342c`
 
-It has **28 entries touching `site/`**, grouped below. Merge entries are included; the expected net file inventory follows. It is not release evidence unless site-01 measures the stated base; site-02’s measured list governs.
+It has **28 entries touching `site/`**, grouped below. This older comparison is
+retained only to show what the plan previously expected. M15 proved that its
+base is not live; site-02 must not use this inventory for approval.
 
 | Item and commits | What this site release carries | Server dependency and disposition |
 |---|---|---|
@@ -171,9 +209,11 @@ It has **28 entries touching `site/`**, grouped below. Merge entries are include
 | HM8: `92e7c1c6` | Account-menu Connected apps dialog, owner connections/workspaces/seats, grant and seat revocation with committed-state rereads | Requires HM2 views and revoke command handlers. Historical HM2 deployment evidence exists; fresh signed-in-owner acceptance is **not established**. |
 | CI-GREEN b: `a8272445`, `02c4e9a9`, `93b8d202` | One-row mobile app bar below `34rem`; real-width observer measurements; sample-notice and scroll-reset fixture corrections | CSS and test changes; no new server deployment. Real Chrome controls at 320px and 390px are mandatory. |
 
-### Expected net file inventory if the measured live base is `218cf921d07d56f2b937822bcf18feb9d3be0f53`
+### Historical net file inventory from the superseded base
 
-The precomputed expected `git diff --stat` is **62 files changed, 1,865 insertions, 524 deletions**, including `og.png` changing from **66,152 to 65,141 bytes**. Site-02’s measured diff stat governs.
+The superseded comparison produced **62 files changed, 1,865 insertions, 524
+deletions**, including `og.png` changing from **66,152 to 65,141 bytes**. These
+numbers are not lane-8 acceptance criteria after M15.
 
 All paths below are relative to `site/`. Counts are additions/deletions from the same expected comparison. Shared files carry multiple items from the preceding table.
 
@@ -482,6 +522,7 @@ After all holds are resolved, HezLead’s execution approval must name the exact
     /srv/commonswarm/site/releases/*) ;;
     *) printf '%s\n' 'STOP: invalid previous release' >&2; exit 1 ;;
   esac
+  test "$previous" = /srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e
 
   set +e
   env -u PUBLIC_SUPABASE_URL -u PUBLIC_SUPABASE_ANON_KEY \

@@ -38,7 +38,7 @@ python3() {
     return 42
   fi
   case "${BOX_DRY_RUN_STEP:-}" in
-    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-hosted-control-stage|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|runbook-31|runbook-34|site-03*|site-05*)
+    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-deno-install|hm37-hosted-control-stage|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|runbook-31|runbook-34|site-03*|site-05*)
       command python3 "$@"
       ;;
     *)
