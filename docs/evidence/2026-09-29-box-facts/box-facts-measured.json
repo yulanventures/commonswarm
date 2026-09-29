@@ -531,6 +531,250 @@
           "cold_agent_test_profile_match": false
         },
         "note": "The existing Chrome session was not the requested Cold Agent Test account/workspace. It was not signed out, signed in or switched."
+      },
+      {
+        "id": "K4-9",
+        "status": "MEASURED",
+        "recorded_at_utc": "2026-09-29T10:10:58Z",
+        "constraints": {
+          "site_methods": [
+            "GET"
+          ],
+          "browser_started": false,
+          "browser_actions": "none",
+          "login_or_logout": "none",
+          "magic_link_requested": false,
+          "mailbox_opened": false,
+          "onepassword_vault": "Yulan Ventures Infra",
+          "onepassword_auth": "service-account token file",
+          "onepassword_values_printed": false,
+          "secrets_printed": false
+        },
+        "cli_human_session": {
+          "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+          "requested_command": "cswarm status --json | jq -r '.identity.email|split(\"@\")[1]'",
+          "requested_command_observation": "The unscoped status result had no identity object, so the requested jq expression did not produce the domain.",
+          "measured_command": "cswarm status --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -r 'select(.identity.user_id==\"d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc\") | .identity.email | split(\"@\")[1]'",
+          "mail_domain": "ridge.io"
+        },
+        "mailbox": {
+          "mx_command": "dig +short MX ridge.io",
+          "mx": [
+            "1 aspmx.l.google.com",
+            "2 alt1.aspmx.l.google.com",
+            "5 alt2.aspmx.l.google.com",
+            "10 alt3.aspmx.l.google.com",
+            "10 alt4.aspmx.l.google.com"
+          ],
+          "mail_system": "Google Workspace / Gmail",
+          "readable_without_new_login": false,
+          "reason": "gog is installed but its stored-account list contains no ridge.io account; no Gmail connector is available; and the allowed 1Password vault contains no matching owner mailbox/login item. The mailbox was not opened."
+        },
+        "onepassword": {
+          "owner_web_login_items": [],
+          "owner_web_login_item_count": 0,
+          "result": "No item in Yulan Ventures Infra had an owner username marker or a CommonSwarm/GitHub/Google owner-login combination. The two related CommonSwarm OAuth items below are application configuration, not owner login credentials.",
+          "related_nonlogin_items": [
+            {
+              "title": "CommonSwarm Google OAuth client secret",
+              "url_hosts": [],
+              "fields": [
+                {
+                  "name": "password",
+                  "type": "CONCEALED/PASSWORD"
+                },
+                {
+                  "name": "notesPlain",
+                  "type": "STRING/NOTES"
+                },
+                {
+                  "name": "client_id",
+                  "type": "STRING"
+                }
+              ],
+              "totp_or_2fa_field": false
+            },
+            {
+              "title": "CommonSwarm GitHub OAuth app (yulanventures)",
+              "url_hosts": [
+                "api.commonswarm.com"
+              ],
+              "fields": [
+                {
+                  "name": "password",
+                  "type": "CONCEALED/PASSWORD"
+                },
+                {
+                  "name": "notesPlain",
+                  "type": "STRING/NOTES"
+                },
+                {
+                  "name": "client_id",
+                  "type": "STRING"
+                },
+                {
+                  "name": "callback_url",
+                  "type": "STRING"
+                },
+                {
+                  "name": "owner",
+                  "type": "STRING"
+                },
+                {
+                  "name": "created",
+                  "type": "STRING"
+                },
+                {
+                  "name": "usage",
+                  "type": "STRING"
+                }
+              ],
+              "totp_or_2fa_field": false
+            }
+          ]
+        },
+        "recorded_web_session": {
+          "browser": "Google Chrome 153.0.8010.53",
+          "browser_executable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "remote_debugging_port": 9335,
+          "password_store": "basic",
+          "user_data_dir": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome",
+          "profile_path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default",
+          "profile_name": "chartingalpha.com",
+          "signed_in_account_label": "Ridgeio",
+          "owner_email_masked": "to***@ridge.io",
+          "provider": "GitHub",
+          "sign_in_actor": "Anvil",
+          "sign_in_evidence": "Anvil used browser-harness to choose Sign in with GitHub and the existing GitHub session continued as Ridgeio. No magic link was used. The separate Google UAT session was not the owner account and was signed out before Ridgeio was restored through GitHub.",
+          "exists_on_disk": true,
+          "user_data_dir_mtime": "2026-09-27T19:59:33-0500",
+          "profile_mtime": "2026-09-27T19:59:33-0500",
+          "local_storage_evidence": {
+            "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default/Local Storage/leveldb/006852.log",
+            "mtime": "2026-09-27T19:59:33-0500",
+            "commonswarm_host_marker_present": true,
+            "auth_token_key_marker_present": true,
+            "values_read_or_printed": false
+          },
+          "latest_live_verification": "K4-8 measured the same dedicated Chrome session signed in as Ridgeio; its selected workspace was CICD, not Cold Agent Test. No account or workspace action was taken."
+        },
+        "chrome_inventory": {
+          "scope": "Persistent/non-scoped Chrome user-data roots found under the conventional Google path and task-owned Anvil paths. Profile names came from Preferences without starting Chrome.",
+          "user_data_dirs": [
+            {
+              "path": "/Users/yulanbot/Library/Application Support/Google/Chrome",
+              "mtime": "2026-09-29T04:44:08.399967-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-06-11T15:47:24.655447-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 1",
+                  "name": "chartingalpha.com",
+                  "mtime": "2026-09-28T21:46:01.486145-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 2",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T21:49:11.244577-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 3",
+                  "name": "Your Chrome",
+                  "mtime": "2026-05-17T12:21:35.864925-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 4",
+                  "name": "Your Chrome",
+                  "mtime": "2026-07-19T08:48:26.362369-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/Profile 5",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-29T05:08:08.361729-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/Library/Application Support/Google/Chrome/System Profile",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T08:43:07.465041-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.chrome-agent-profile",
+              "mtime": "2026-09-29T04:49:19.093537-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.chrome-agent-profile/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-29T05:08:20.756580-05:00"
+                },
+                {
+                  "path": "/Users/yulanbot/.chrome-agent-profile/System Profile",
+                  "name": "Person 1",
+                  "mtime": "2026-09-07T08:25:56.896765-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome",
+              "mtime": "2026-09-27T19:59:33.316180-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome/Default",
+                  "name": "chartingalpha.com",
+                  "mtime": "2026-09-27T19:59:33.313744-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/cache/scratch/tax-2025/chrome-profile-headed",
+              "mtime": "2026-09-28T08:18:48.851200-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/cache/scratch/tax-2025/chrome-profile-headed/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-09-28T08:18:48.862429-05:00"
+                }
+              ]
+            },
+            {
+              "path": "/Users/yulanbot/.hermes/profiles/anvil/home/.chrome-agent-profile",
+              "mtime": "2026-06-11T15:47:38.822236-05:00",
+              "profiles": [
+                {
+                  "path": "/Users/yulanbot/.hermes/profiles/anvil/home/.chrome-agent-profile/Default",
+                  "name": "Your Chrome",
+                  "mtime": "2026-06-11T15:46:38.177024-05:00"
+                }
+              ]
+            }
+          ],
+          "transient_headless_scoped_dirs": {
+            "path_glob": "/Users/yulanbot/Library/Application Support/Google/Chrome-headless/scoped_dir*",
+            "count": 265,
+            "classification": "temporary automatically named Chrome-headless roots, not retained named user profiles",
+            "oldest_mtime_utc": "2026-08-07T21:25:28.186455+00:00",
+            "newest_mtime_utc": "2026-09-26T03:00:04.405458+00:00"
+          }
+        },
+        "signed_out_site_probe": {
+          "url": "https://commonswarm.com/app",
+          "method": "GET",
+          "user_agent": "commonswarm-signin-facts/1.0",
+          "http_status": 200,
+          "buttons": [
+            "Email me a sign-in link",
+            "Sign in with Google",
+            "Sign in with GitHub"
+          ]
+        },
+        "conclusion": {
+          "CAN_SIGN_IN_ALONE": "yes — GitHub SSO using the existing Ridgeio GitHub session in the dedicated Anvil Chrome user-data directory; prior use required no Tom help, 2FA or keychain dialog. This does not establish that a brand-new empty Chrome directory could be bootstrapped.",
+          "EXISTING_TEST_SESSION": "yes — the dedicated Anvil Chrome directory retains CommonSwarm auth storage and K4-8 verified Ridgeio signed in; CICD was selected, but the account owns Cold Agent Test."
+        }
       }
     ],
     "command_review": {
