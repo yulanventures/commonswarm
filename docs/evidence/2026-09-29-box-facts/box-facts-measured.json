@@ -799,6 +799,14 @@
         "evidence_note": "No environment: values are present by the names-only scan. The file content itself was not printed."
       },
       {
+        "id": "K4-10b",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T12:02:58Z",
+        "path": "docs/evidence/2026-09-29-box-facts/k4-10-compose.override.yaml",
+        "sha256": "492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c",
+        "public_repository_review": "CLEAN"
+      },
+      {
         "id": "K4-11",
         "status": "MEASURED",
         "measured_at_utc": "2026-09-29T11:47:01Z",
