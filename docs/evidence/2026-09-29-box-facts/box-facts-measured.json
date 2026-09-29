@@ -775,13 +775,241 @@
           "CAN_SIGN_IN_ALONE": "yes — GitHub SSO using the existing Ridgeio GitHub session in the dedicated Anvil Chrome user-data directory; prior use required no Tom help, 2FA or keychain dialog. This does not establish that a brand-new empty Chrome directory could be bootstrapped.",
           "EXISTING_TEST_SESSION": "yes — the dedicated Anvil Chrome directory retains CommonSwarm auth storage and K4-8 verified Ridgeio signed in; CICD was selected, but the account owns Cold Agent Test."
         }
+      },
+      {
+        "id": "K4-10",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "commands": [
+          "stat -c '%n %F %U:%G %a %s' /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "sha256sum /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "A read-only Python indentation parser emitted environment key names only; it never emitted YAML values or file content."
+        ],
+        "result": {
+          "path": "/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+          "type": "regular file",
+          "owner": "commonswarm:commonswarm",
+          "mode": "644",
+          "size": 648,
+          "sha256": "492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c",
+          "environment_sections": 0,
+          "environment_values_present": false,
+          "environment_key_names": []
+        },
+        "evidence_note": "No environment: values are present by the names-only scan. The file content itself was not printed."
+      },
+      {
+        "id": "K4-11",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "scope": "The active OAuth proof directory plus every immediate *.closed-window-* directory under the stack and edge release-proofs parents; the edge release-proofs parent does not exist.",
+        "search_roots": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05",
+            "exists": true
+          },
+          {
+            "path": "/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+            "exists": true
+          },
+          {
+            "path": "/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020",
+            "exists": true
+          }
+        ],
+        "oauth_image_file_count": 1,
+        "files": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id",
+            "type": "regular file",
+            "owner": "root:root",
+            "mode": "644",
+            "size": 71,
+            "sha256": "4d506fe4168980c14704b9f5b6e123663dbd1a32de1197da8084b1850c5e0383",
+            "last_byte_od": "   a",
+            "last_byte": "a",
+            "newline_terminated": false,
+            "image_id": "sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a"
+          }
+        ],
+        "closed_window_result": "No oauth-image.id file was found in either closed-window proof directory."
+      },
+      {
+        "id": "K4-12",
+        "status": "MEASURED",
+        "measured_at_utc": "2026-09-29T11:47:01Z",
+        "parents": [
+          {
+            "path": "/home/commonswarm/stack/release-proofs",
+            "exists": true,
+            "directory_count": 20,
+            "directories": [
+              {
+                "name": "1200ebb19f56b3e154499ebb09963788d10e69ad",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-23T21:53:10Z"
+              },
+              {
+                "name": "30ba33f9202138b3ec59b968b6282cf76d3dc7f3",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-23T04:28:46Z"
+              },
+              {
+                "name": "38343e74cbd51ec1375317fb4770d2522ca09d0b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T08:54:01Z"
+              },
+              {
+                "name": "4ef0f3005a3981941512698a3e1e3e7641773f5b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-25T00:30:14Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T06:50:57Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt1-abort-20260928T035302Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T03:44:11Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt2-abort-20260928T041514Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T04:13:05Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-108d6b89",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T04:56:41Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062737Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T05:57:38Z"
+              },
+              {
+                "name": "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062815Z",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T06:27:37Z"
+              },
+              {
+                "name": "826db6a34f235064a3a03c57377d8e32a35d2f05",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T21:11:16Z"
+              },
+              {
+                "name": "9627cb37e697046d22ab02dd2b57bc56937afc14",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-26T21:57:46Z"
+              },
+              {
+                "name": "9b085c82352390cf8f0fe515c02b3ccff423476a",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T18:13:07Z"
+              },
+              {
+                "name": "9fa4217da9f6447e55fb8c6d577b8fd3997f926b",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T09:17:49Z"
+              },
+              {
+                "name": "a54afaf696ff16b594fd91ae9a9c93c68398475a",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-26T22:13:29Z"
+              },
+              {
+                "name": "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T13:42:15Z"
+              },
+              {
+                "name": "d4677b0d1c86a6c7247d030a54a1122d6bfd5777",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-27T04:07:22Z"
+              },
+              {
+                "name": "e7bb7a46b24e7bc794234416d43605bca52b55d4",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-28T14:13:31Z"
+              },
+              {
+                "name": "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-29T00:30:10Z"
+              },
+              {
+                "name": "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020",
+                "type": "directory",
+                "owner": "root:root",
+                "mode": "700",
+                "mtime_utc": "2026-09-29T02:29:09Z"
+              }
+            ],
+            "closed_window_names": [
+              "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+              "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020"
+            ]
+          },
+          {
+            "path": "/home/commonswarm/edge/release-proofs",
+            "exists": false,
+            "directory_count": 0,
+            "directories": [],
+            "closed_window_names": []
+          }
+        ]
       }
     ],
     "command_review": {
-      "supplied_commands_changed": [],
+      "supplied_commands_changed": [
+        "K4-11: replaced tail -c1 <file> | od -An -c with a bounded Python final-byte read passed to od -An -c. The output is equivalent; the prohibited tail command was not run.",
+        "K4-11 discovery: the first read-only pass considered only OAuth-SHA-prefixed closed-window names. After K4-12 enumerated the parents, discovery was rerun against every immediate *.closed-window-* directory under both release-proofs parents; the final evidence records the broader result."
+      ],
       "supplied_commands_refused": [],
       "safety_prechecks_added": [
-        "Before K4-2, recursive JSON object keys were inspected without printing values; no token or credential-value field was present."
+        "Before K4-2, recursive JSON object keys were inspected without printing values; no token or credential-value field was present.",
+        "K4-10 parsed only environment key names and emitted no YAML value or file content.",
+        "K4-11 required each artifact to be a bounded regular file inside its proof root and to match the image-ID format before printing the explicitly non-secret image ID."
       ],
       "fallbacks": [
         "K4-5 direct SSH as commonswarm succeeded; the ops sudo fallback was not run."
@@ -789,6 +1017,7 @@
     },
     "production_recheck": {
       "status": "MEASURED",
+      "measured_at_utc": "2026-09-29T11:47:01Z",
       "edge_current": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
       "edge_state": "running",
       "edge_health": "healthy",
