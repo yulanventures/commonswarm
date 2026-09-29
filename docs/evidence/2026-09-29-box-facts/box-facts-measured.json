@@ -10,8 +10,10 @@
   },
   "constraints": {
     "box_changes": "none",
+    "box_downloads": "none",
     "write_methods_sent": "none",
     "docker_run_or_exec": "none",
+    "github_actions_dispatched": "none",
     "secret_or_environment_values_printed": "none",
     "box_scratch": "M2 would use only validated /tmp scratch with guarded cleanup, but its missing cache prerequisite stopped before scratch creation."
   },
@@ -165,6 +167,94 @@
       "output": "release=20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e\nrelease_parent_ok=true\nexpected_identity_ok=false\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/app/index.html mode=644 size=44845\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/download/index.html mode=644 size=56835\nconnected_apps_marker=false\nversion_0.1.80_marker=true\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/AgentConnect.astro_astro_type_script_index_0_lang.DvW9amfB.js mode=644 size=23262\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/Base.CU6LT-wJ.css mode=644 size=45219\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/LiveDashboard.astro_astro_type_script_index_0_lang.DzjbMegA.js mode=644 size=147444\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/ProviderButtons.CN7eqX0J.css mode=644 size=7815\n/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e/_astro/app.D6w8ZHvX.css mode=644 size=88406\nasset_count=5\n",
       "agrees": "DIFFERS",
       "note": "The live site release is 20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e, not the expected HM8 8b8989f2b29e identity; the connected-apps marker is absent. App/download and five referenced assets are readable and the 0.1.80 marker is present."
+    },
+    {
+      "id": "M16",
+      "source_id": "deno-download-and-registry-egress",
+      "command": "See checks[].command. Every network probe ran on yulan-vps-1 with curl's HEAD-only -I option; no response body or release asset was downloaded to the box.",
+      "measured_at_utc": "2026-09-29T05:28:42Z",
+      "exit": 0,
+      "output": "a1 final_status=HTTP/2 200 redirect_chain_hosts=github.com,release-assets.githubusercontent.com final_content_length=100\na2 registry.npmjs.org status=HTTP/2 200\na3 origin/main c067b729 imports resolve only through npm: registry_hosts=registry.npmjs.org; jsr.io, deno.land and esm.sh are not referenced",
+      "checks": [
+        {
+          "id": "a1",
+          "command": "curl -sSI -L --max-time 20 https://github.com/denoland/deno/releases/download/v2.9.7/deno-x86_64-unknown-linux-gnu.zip.sha256sum",
+          "measured_at_utc": "2026-09-29T05:28:42Z",
+          "exit": 0,
+          "output": "HTTP/2 302\nlocation-host: release-assets.githubusercontent.com\ncontent-length: 0\n\nHTTP/2 200\ncontent-length: 100",
+          "output_note": "The ephemeral signed redirect query was omitted from committed evidence; the host and all requested status/length facts are retained."
+        },
+        {
+          "id": "a2",
+          "command": "curl -sSI --max-time 20 https://registry.npmjs.org/",
+          "measured_at_utc": "2026-09-29T05:28:52Z",
+          "exit": 0,
+          "output": "HTTP/2 200",
+          "output_note": "Status only, as requested; response cookies and unrelated headers were not retained."
+        },
+        {
+          "id": "a3-import-analysis",
+          "command": "Read deploy/release-proofs/item-hm/hm37-open-ack-deno.json and the direct imports of deploy/release-proofs/item-hm/hm37-open-ack-control.ts at origin/main c067b729fb9d2d997e292dca1445ef4725330912; map npm: specifiers to their registry host.",
+          "measured_at_utc": "2026-09-29T05:31:37Z",
+          "exit": 0,
+          "output": "config_import=oidc-provider->npm:oidc-provider@9.12.2\nconfig_import=postgres->npm:postgres@3.4.9\ncontrol_import=npm:@supabase/supabase-js@2.110.8\ncontrol_import=npm:postgres@3.4.9\nregistry_hosts=registry.npmjs.org\njsr.io_referenced=false\ndeno.land_referenced=false\nesm.sh_referenced=false",
+          "host_request_evidence": "M16 check a2 is the one header-only box request to the sole required registry host."
+        }
+      ],
+      "result": {
+        "a1_final_status": 200,
+        "a1_redirect_chain_hosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ],
+        "a1_final_content_length": 100,
+        "precache_registry_hosts": [
+          "registry.npmjs.org"
+        ],
+        "registry_statuses": {
+          "registry.npmjs.org": 200
+        }
+      },
+      "note": "GitHub release-asset HEAD egress and the sole registry host required by the reviewed Deno import map/imports are reachable. No file was downloaded to the box."
+    },
+    {
+      "id": "M17",
+      "source_id": "postgres-image-identity",
+      "command": "ssh ops@100.115.66.74 '/bin/bash -s' <<'REMOTE'\nwanted=\"$(sudo -n docker image inspect --format '{{.Id}}' public.ecr.aws/supabase/postgres:17.6.1.147)\"\nmapfile -t cids < <(sudo -n docker ps -q --filter label=com.docker.compose.project=commonswarm-supabase-stack --filter label=com.docker.compose.service=postgres)\ntest \"${#cids[@]}\" -eq 1\nsudo -n docker inspect --format '{{.Name}} {{.Image}}' \"${cids[0]}\"\nREMOTE",
+      "measured_at_utc": "2026-09-29T05:33:29Z",
+      "exit": 0,
+      "output": "image_inspect_exit=0\ncontainer_count=1\nimage_id=sha256:ac581882596ed0e46937ea6dd53a627d09f53e005d7264c2082a7ff7b62eaaca\ncontainer_name=commonswarm-postgres\ncontainer_image=sha256:ac581882596ed0e46937ea6dd53a627d09f53e005d7264c2082a7ff7b62eaaca\ncomparison=EQUAL",
+      "result": "EQUAL",
+      "note": "The running Compose service commonswarm-supabase-stack/postgres container is commonswarm-postgres and its immutable image ID equals the locally tagged public.ecr.aws/supabase/postgres:17.6.1.147 image ID."
+    },
+    {
+      "id": "M18",
+      "source_id": "commonswarm-env-metadata-second-measurement",
+      "command": "stat -c '%U:%G %a %F' /home/commonswarm/.env",
+      "measured_at_utc": "2026-09-29T05:29:31Z",
+      "exit": 0,
+      "output": "commonswarm:commonswarm 600 regular file",
+      "note": "Only metadata was read. No environment name or value was printed."
+    },
+    {
+      "id": "M19",
+      "source_id": "deno-2.9.7-official-checksum-independent-mac-check",
+      "command": "On the Mac mini: create $TMPDIR/deno-checksum-v2.9.7.XXXXXX with mktemp -d; validate the resulting path is inside $TMPDIR; curl -fLsS --max-time 30 the official .sha256sum asset into it; gh api --method GET repos/denoland/deno/releases/tags/v2.9.7 into release.json; parse and compare the checksum and release fields; invoke the guarded rm -rf only after validating the created path.",
+      "measured_at_utc": "2026-09-29T05:30:38Z",
+      "exit": 0,
+      "output": "temp_dir_created=true\nstated_sha256=c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490\ncomparison=MATCH\nrelease_real_published=true\npublished_at=2026-09-17T09:04:55Z\nchecksum_curl_exit=0\nrelease_api_exit=0\ntemp_removed=true\nexit=0",
+      "result": "MATCH",
+      "note": "The official checksum file and GitHub release metadata were downloaded only to a guarded Mac mini mktemp directory. The zip was not downloaded. The rm guard accepted cleanup and the directory was removed."
+    },
+    {
+      "id": "M20",
+      "source_id": "usr-local-bin-install-target",
+      "command": "stat -c '%U:%G %a' /usr/local/bin; df -h /usr/local/bin | sed -n '2p'",
+      "measured_at_utc": "2026-09-29T05:29:32Z",
+      "exit": 0,
+      "output": "root:root 755\n/dev/sda1       301G   81G  208G  28% /",
+      "result": "PASS",
+      "note": "/usr/local/bin is root:root mode 0755, so neither group nor world is writable. Its filesystem has 208G free."
     }
   ],
   "command_review": [
@@ -291,10 +381,10 @@
   ],
   "production_recheck": {
     "command": "ssh ops@100.115.66.74 'sudo -n /bin/bash -s' <<'REMOTE'\nset -euo pipefail\nprintf 'edge_current='; readlink -f /home/commonswarm/edge/current\nprintf 'edge_health='; docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1\nprintf 'stack_current='; readlink -f /home/commonswarm/stack/current\nprintf 'oauth_current='; readlink -f /home/commonswarm/oauth/current\nmapfile -t CIDS < <(docker ps -q --filter label=com.docker.compose.project=commonswarm-oauth --filter label=com.docker.compose.service=oauth)\nprintf 'oauth_container_count=%s\\n' \"${#CIDS[@]}\"\ntest \"${#CIDS[@]}\" -eq 1\nprintf 'oauth_health='; docker inspect --format '{{.State.Health.Status}}' \"${CIDS[0]}\"\nprintf 'oauth_workdir='; docker inspect --format '{{index .Config.Labels \"com.docker.compose.project.working_dir\"}}' \"${CIDS[0]}\"\nsystemctl show commonswarm-edge-recycle.timer commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer \\\n  -p Id -p LoadState -p ActiveState -p UnitFileState --no-pager\nREMOTE",
-    "measured_at_utc": "2026-09-29T05:14:25Z",
+    "measured_at_utc": "2026-09-29T05:29:34Z",
     "exit": 0,
     "output": "edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20\nedge_health=healthy\nstack_current=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f\noauth_current=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05\noauth_container_count=1\noauth_health=healthy\noauth_workdir=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth\nId=commonswarm-edge-recycle.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-backup.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-restore.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
   },
-  "measured_count": 13,
-  "fact_count": 15
+  "measured_count": 18,
+  "fact_count": 20
 }
