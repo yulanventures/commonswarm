@@ -1,0 +1,167 @@
+{
+  "mode": "gateway",
+  "hosted_command_count": 6,
+  "results": [
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "GET",
+      "path": "/functions/v1/h0/agent-doc/smoke",
+      "status": 200,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 400,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 403,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/command",
+      "status": 401,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "GET",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "HEAD",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "PUT",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "PATCH",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "DELETE",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "OPTIONS",
+      "path": "/functions/v1/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "GET",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "HEAD",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "POST",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "PUT",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "PATCH",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "DELETE",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    },
+    {
+      "base": "http://127.0.0.1:9000",
+      "method": "OPTIONS",
+      "path": "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
+      "status": 503,
+      "pass": true
+    }
+  ]
+}

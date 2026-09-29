@@ -1,0 +1,12 @@
+{
+  "pass": true,
+  "window_principal_suffix": "001030",
+  "temporary_principals_created": 0,
+  "active_temporary_principals": 0,
+  "active_unexpired_agent_tokens": 0,
+  "hosted_seats_created": 0,
+  "active_hosted_seats": 0,
+  "hosted_control_staged": false,
+  "local_control_staged": false,
+  "disposition": "nothing to revoke; abort occurred before control staging"
+}

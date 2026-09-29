@@ -1,0 +1,5 @@
+previous_stack=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
+new_stack=/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+runtime_paths=compose.yaml postgres backup
+runtime_comparison=identical
+guarded_stack_switch=no

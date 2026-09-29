@@ -1,0 +1,16 @@
+result=ABORTED_ROLLED_BACK
+release=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+failure_step=hm37-public-boundaries
+failure_fact=https://edge-staging.commonswarm.com GET /functions/v1/h0/agent-doc/smoke returned 403; expected 200
+forward_edge=completed_then_rolled_back
+forward_migration_20260928000004=completed_then_rolled_back
+previous_edge_restored=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+previous_edge_healthy=true
+migration_20260928000004_ledger=0
+rollback_catalog=true
+forward_catalog=false
+hm6_post_rollback=true
+hosted_control_started=false
+local_control_started=false
+temporary_principals_created=0
+active_unexpired_agent_tokens=0

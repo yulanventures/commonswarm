@@ -1,0 +1,9 @@
+SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+instrumented_test=MCP dark gate refuses every method before worker creation and routes when enabled
+methods=GET HEAD POST PUT PATCH DELETE OPTIONS
+paths=/functions/v1/mcp /functions/v1/mcp/.well-known/oauth-protected-resource/mcp
+result=PASS
+pass=1
+fail=0
+disabled_worker_factory_calls=0
+enabled_positive_controls=PASS

@@ -1,0 +1,6 @@
+{
+  "pass": false,
+  "not_run": true,
+  "temporary_hosted_seat_created": false,
+  "reason": "no temporary seat or batch existed because the window aborted before hosted controls"
+}

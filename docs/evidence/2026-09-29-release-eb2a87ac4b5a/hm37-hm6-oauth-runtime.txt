@@ -1,0 +1,5 @@
+oauth_release=826db6a34f235064a3a03c57377d8e32a35d2f05
+oauth_current_matches=true
+oauth_image_identity_matches=true
+oauth_container_healthy=true
+public_authorization_effective_disabled=true

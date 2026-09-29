@@ -1,0 +1,12 @@
+SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+clean detached checkout at exact SHA: PASS
+npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS
+npm run check:edge: PASS
+hosted authority/check/authentication, MCP authentication/protocol, and release-proof focused tests: PASS (38/38)
+router MCP dark-gate no-worker test with enabled positive controls: PASS (1/1)
+local stdio deferred-write/check.json focused tests after exact-SHA npm run build: PASS (4/4)
+release bundle compatibility: PASS (1/1)
+initial stdio probe before building dist closed mechanically because dist/cli.js was absent; exact-SHA build then focused rerun passed
+server control harness acceptance: GitHub Actions runs 36496207154 (3/3) and 36496480764 (15/15) at descendant 7e87bceb20e902f9a80f64d1de297c9d0fa9c3b0; accepted harness/import-map hashes match the reviewed bytes on main
+reviews: antigravity security PASS and operations PASS, no KEEP
+no GitHub Actions run dispatched by this window

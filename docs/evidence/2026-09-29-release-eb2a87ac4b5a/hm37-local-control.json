@@ -1,0 +1,6 @@
+{
+  "pass": false,
+  "not_run": true,
+  "temporary_local_principals_created": 0,
+  "reason": "window aborted and rolled back before local check.json and stdio MCP live controls"
+}

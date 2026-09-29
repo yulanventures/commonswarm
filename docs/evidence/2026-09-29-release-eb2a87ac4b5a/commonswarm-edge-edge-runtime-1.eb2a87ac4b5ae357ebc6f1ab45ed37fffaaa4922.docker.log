@@ -1,0 +1,33 @@
+2026-09-29T00:23:02.122726147Z {"event":"edge_worker_started","functionName":"read","workerKey":"d20b6f29-034e-43e2-a170-2c9699de94a2","reason":null,"ageMs":0}
+2026-09-29T00:23:03.025149945Z {"event":"edge_worker_started","functionName":"command","workerKey":"68d0ec41-1e44-42c1-9edd-fffba8a5e552","reason":null,"ageMs":0}
+2026-09-29T00:23:06.590625252Z {"event":"edge_worker_started","functionName":"activity","workerKey":"108acf7e-70a6-4f59-9f20-fb6cadeaf109","reason":null,"ageMs":0}
+2026-09-29T00:23:06.599586608Z {"event":"edge_worker_started","functionName":"activity","workerKey":"0952341f-e0c5-4fed-ba94-75a99870d457","reason":null,"ageMs":0}
+2026-09-29T00:23:06.600909276Z {"event":"edge_worker_started","functionName":"activity","workerKey":"5f3c9d22-b297-448e-b5fe-3caef0b6b050","reason":null,"ageMs":0}
+2026-09-29T00:23:56.015549008Z {"event":"edge_worker_started","functionName":"h0","workerKey":"9096c0fd-b12c-48d8-96bf-96659b7bb9b2","reason":null,"ageMs":0}
+2026-09-29T00:23:56.098521309Z [Error] {"event":"command_pre_auth_failure","command_kind":"post_signal","outcome":"authn","reason":"missing bearer"}
+2026-09-29T00:23:56.098564649Z 
+2026-09-29T00:24:00.584685456Z {"event":"edge_runtime_metrics","metrics":{"mainWorkerHeapStats":{"totalHeapSize":11182080,"totalHeapSizeExecutable":524288,"totalPhysicalSize":10186752,"totalAvailableSize":1510206240,"totalGlobalHandlesSize":24576,"usedGlobalHandlesSize":20800,"usedHeapSize":9169304,"mallocedMemory":696800,"externalMemory":6777231,"peakMallocedMemory":918040},"eventWorkerHeapStats":null,"activeUserWorkersCount":6,"retiredUserWorkersCount":0,"receivedRequestsCount":76,"handledRequestsCount":76}}
+2026-09-29T00:24:17.122428820Z wall clock duration warning: isolate: d20b6f29-034e-43e2-a170-2c9699de94a2
+2026-09-29T00:24:17.138511625Z early termination has been triggered: isolate: d20b6f29-034e-43e2-a170-2c9699de94a2
+2026-09-29T00:24:18.026268829Z wall clock duration warning: isolate: 68d0ec41-1e44-42c1-9edd-fffba8a5e552
+2026-09-29T00:24:18.044123511Z early termination has been triggered: isolate: 68d0ec41-1e44-42c1-9edd-fffba8a5e552
+2026-09-29T00:24:19.367156859Z {"event":"edge_worker_started","functionName":"read","workerKey":"7c46f9db-81ad-4add-afdf-a79cab4cbb22","reason":null,"ageMs":0}
+2026-09-29T00:24:20.210472933Z {"event":"edge_worker_started","functionName":"command","workerKey":"0c898cfe-d1f0-4ce2-b8aa-3ea2f30168e0","reason":null,"ageMs":0}
+2026-09-29T00:24:20.608135636Z {"event":"edge_worker_ended","functionName":"read","workerKey":"d20b6f29-034e-43e2-a170-2c9699de94a2","reason":null,"ageMs":78486}
+2026-09-29T00:24:20.608188376Z {"event":"edge_worker_ended","functionName":"command","workerKey":"68d0ec41-1e44-42c1-9edd-fffba8a5e552","reason":null,"ageMs":77583}
+2026-09-29T00:24:21.190793139Z [Error] {"event":"command_pre_auth_failure","command_kind":"unknown","outcome":"validation","reason":"invalid command_id"}
+2026-09-29T00:24:21.190830679Z 
+2026-09-29T00:24:21.212482035Z [Error] {"event":"command_pre_auth_failure","command_kind":"mint_agent_token","outcome":"authn","reason":"missing bearer"}
+2026-09-29T00:24:21.212535816Z 
+2026-09-29T00:24:21.591114899Z wall clock duration warning: isolate: 108acf7e-70a6-4f59-9f20-fb6cadeaf109
+2026-09-29T00:24:21.600356675Z early termination has been triggered: isolate: 108acf7e-70a6-4f59-9f20-fb6cadeaf109
+2026-09-29T00:24:21.600388104Z wall clock duration warning: isolate: 0952341f-e0c5-4fed-ba94-75a99870d457
+2026-09-29T00:24:21.604373039Z wall clock duration warning: isolate: 5f3c9d22-b297-448e-b5fe-3caef0b6b050
+2026-09-29T00:24:21.613197834Z early termination has been triggered: isolate: 0952341f-e0c5-4fed-ba94-75a99870d457
+2026-09-29T00:24:21.618112686Z early termination has been triggered: isolate: 5f3c9d22-b297-448e-b5fe-3caef0b6b050
+2026-09-29T00:24:25.224025565Z {"event":"edge_worker_started","functionName":"activity","workerKey":"93f97d0d-3eeb-4660-8821-59fa6add52ed","reason":null,"ageMs":0}
+2026-09-29T00:24:25.227438429Z {"event":"edge_worker_started","functionName":"activity","workerKey":"846380e1-6b4b-4047-a277-364de4957b28","reason":null,"ageMs":0}
+2026-09-29T00:24:25.229465297Z {"event":"edge_worker_started","functionName":"activity","workerKey":"2671cb48-9433-495c-b6b5-a909daa47d7f","reason":null,"ageMs":0}
+2026-09-29T00:24:25.609208990Z {"event":"edge_worker_ended","functionName":"activity","workerKey":"108acf7e-70a6-4f59-9f20-fb6cadeaf109","reason":null,"ageMs":79018}
+2026-09-29T00:24:25.609247960Z {"event":"edge_worker_ended","functionName":"activity","workerKey":"0952341f-e0c5-4fed-ba94-75a99870d457","reason":null,"ageMs":79010}
+2026-09-29T00:24:25.609256160Z {"event":"edge_worker_ended","functionName":"activity","workerKey":"5f3c9d22-b297-448e-b5fe-3caef0b6b050","reason":null,"ageMs":79009}

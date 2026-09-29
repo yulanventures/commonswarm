@@ -1,0 +1,5 @@
+stack_release=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+migration_03_ledger_and_catalog=true
+migration_03_functional=true
+backup_restore_helpers_live=true
+backup_restore_timers_active=true

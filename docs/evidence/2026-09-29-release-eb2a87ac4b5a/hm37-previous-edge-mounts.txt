@@ -1,0 +1,7 @@
+/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/src | /var/src
+/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/supabase/functions | /home/deno/functions-source
+/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/main | /home/deno/main
+/var/lib/docker/volumes/commonswarm-edge_edge-runtime-cache/_data | /root/.cache/deno
+/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/bootstrap.sh | /home/deno/deploy/bootstrap.sh
+/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/h0-deno.json | /home/deno/deploy/h0-deno.json
+

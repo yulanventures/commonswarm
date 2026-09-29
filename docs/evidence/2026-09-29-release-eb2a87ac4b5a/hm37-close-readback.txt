@@ -1,0 +1,14 @@
+window_result=ABORTED_ROLLED_BACK
+failure=staging H0 positive control returned 403; expected 200
+edge_current=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+edge_health=healthy
+migration_20260928000004_ledger=0
+migration_20260928000004_forward_catalog=f
+migration_20260928000004_rollback_catalog=t
+hm6_part_a=PASS
+hm6_part_b=PASS
+temporary_principals_created=0
+active_unexpired_agent_tokens=0
+caddy_changed=false
+oauth_image_changed=false
+site_changed=false

@@ -1,0 +1,30 @@
+{
+  "pass": true,
+  "lane_2": {
+    "migration_02_ledger_count": 1,
+    "catalog": true,
+    "functional": true
+  },
+  "hm6_part_a": {
+    "migration_03_applied": true,
+    "migration_03_hash_matches": true,
+    "catalog": true,
+    "functional": true,
+    "helpers_live": true
+  },
+  "hm6_part_b": {
+    "oauth_release": "826db6a34f235064a3a03c57377d8e32a35d2f05",
+    "discovery": true,
+    "jwks": true,
+    "public_authorization": false
+  },
+  "previous_edge": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+  "previous_edge_identity": true,
+  "previous_edge_mounts": true,
+  "mcp_public_enabled": false,
+  "pending_versions": [
+    "20260928000004"
+  ],
+  "stack_runtime_identical": true,
+  "guarded_stack_switch": false
+}

@@ -1,0 +1,14 @@
+{
+  "pass": false,
+  "mode": "gateway",
+  "failure": {
+    "base": "https://edge-staging.commonswarm.com",
+    "method": "GET",
+    "path": "/functions/v1/h0/agent-doc/smoke",
+    "expected_status": 200,
+    "actual_status": 403,
+    "reason": "staging positive control failed before MCP route probes"
+  },
+  "production_api_not_run": true,
+  "rollback_triggered": true
+}

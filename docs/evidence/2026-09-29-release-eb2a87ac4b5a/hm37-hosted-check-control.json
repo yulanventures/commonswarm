@@ -1,0 +1,6 @@
+{
+  "pass": false,
+  "not_run": true,
+  "temporary_hosted_seat_created": false,
+  "reason": "window aborted and rolled back before hosted control staging"
+}

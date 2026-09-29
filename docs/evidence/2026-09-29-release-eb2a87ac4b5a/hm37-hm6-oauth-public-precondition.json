@@ -1,0 +1,30 @@
+{
+  "pass": true,
+  "results": [
+    {
+      "method": "GET",
+      "path": "/.well-known/oauth-authorization-server",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/.well-known/openid-configuration",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/jwks",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/authorize",
+      "status": 503
+    },
+    {
+      "method": "POST",
+      "path": "/token",
+      "status": 503
+    }
+  ]
+}

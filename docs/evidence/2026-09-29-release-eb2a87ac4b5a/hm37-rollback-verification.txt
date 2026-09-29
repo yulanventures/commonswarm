@@ -1,0 +1,6 @@
+migration=20260928000004
+ledger=0
+forward_catalog=f
+rollback_catalog=t
+edge=72c57e0d76d0aa86fe4f811a2cf51499919fed20
+edge_health=healthy
