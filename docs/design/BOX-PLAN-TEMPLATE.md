@@ -14,6 +14,12 @@ is exactly one of these markers:
 - `# readonly: no` changes box, database, container, Caddy, release, DNS, or
   production state. Failure stops the window and invokes the plan's rollback.
 
+A release-directory verifier may accept only named box-only files whose mode
+and SHA-256 are derived from the same source the runbook copies; every other
+path or metadata difference stops. Every other window artifact is removed by
+that window's close/rollback or has an approved-window-ID name, and no step may
+list, glob, or select a `<name>.closed-window-<id>` leftover.
+
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either
 block can run alone. Do not split a mutating block merely because it also reads.

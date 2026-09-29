@@ -28,7 +28,10 @@ stops only that block, not the root shell. Values needed by another block live
 in root-only files, never only in shell memory. On every stop, refusal, or abort,
 run the "Abort cleanup" block at the end of section 1 before closing the
 window; it restarts the edge recycle and backup/restore timers when `window.env`
-says this window stopped them.
+says this window stopped them. After curated copy-back, every success or abort
+runs `runbook-60`, then `runbook-61`, then Mac `runbook-12`; only that sequence
+closes the window and makes its active fixed-name state unavailable to the next
+window.
 
 ## Site release
 
@@ -72,6 +75,33 @@ editing the plan. Never revoke and reuse a principal name across runs. The
 non-secret release evidence `window-principal-suffix.txt` records the suffix
 used.
 
+The same approved start defines `WINDOW_ID` as `YYYYMMDDTHHMMSSZ`. Every
+window artifact is either removed by that window's close/rollback or is moved
+or created under a name containing this ID. A closed proof directory has the
+exact name `<sha>.closed-window-<window-id>`; steps address the active exact-SHA
+name only and must never list, glob, or select a `*.closed-window-*` path.
+
+The release-directory verifier permits only archive entries, `RELEASE_SHA`,
+and the known edge-only `deploy/edge-runtime/compose.override.yaml`. It derives
+that file's expected SHA-256 and mode from the exact previous-release source
+that `runbook-31` copies. Its evidence line records the relative path, digest,
+and `accepted known box-only file`; every unknown path or metadata, type,
+ownership, symlink, mode, target, or content mismatch remains a stop.
+
+#### Window artifact inventory
+
+| Path or object | Class | Created by | Removed or accepted by |
+|---|---|---|---|
+| `/home/commonswarm/{edge,stack}/releases/<sha>` and `RELEASE_SHA` | A: archive plus accepted box-only file | `1-apply-release-directories`; override added by `runbook-31` | Same verifier; only the source-derived edge override may be extra |
+| Active `/home/commonswarm/stack/release-proofs/<sha>` including `window.env`, timer markers, copy-back list, journals/evidence and checksums | B: per-window name on close | `runbook-03`, `1-apply-release-directories`, later proof steps | `runbook-61` moves it to `<sha>.closed-window-<window-id>` after copy-back and transient cleanup |
+| `docs/evidence/<day>-release-<short-sha>-<window-id>/` and its manifest/log/archive records | B: per-window name | `runbook-02`, `runbook-07`, copy-back | Retained by its exact per-window name |
+| Mac `/tmp/commonswarm-<sha>-<window-id>.tar`, `/tmp/commonswarm-release-proofs-<sha>-<window-id>.tar`, and `$HOME/.commonswarm-release-window.env` | B: removed by close/rollback | `runbook-02`, `runbook-08` | `runbook-12` |
+| Box `/tmp/commonswarm-release.tar` and `/tmp/commonswarm-release-proofs.tar` | B: removed by close/rollback | `1-upload-release-archive`, `runbook-08` | `runbook-60` |
+| `/run/commonswarm-release-<sha>-{service.conf,pass,apply.sql,session.sh}` | B: removed by close/rollback | `runbook-17` | `runbook-60` |
+| `mktemp` router, Caddy-drift, boundary-read and boundary-probe paths | B: removed by owning block | `runbook-04`, Caddy drift steps, item plan probes | Each block's guarded `trap` |
+| Caddy `*.tmp.<sha>` candidates and stack unit-before directory inside the active proof directory | B: removed/moved or per-window on close | Caddy/guarded-stack steps | Atomic move/rollback; proof-directory close by `runbook-61` |
+| HM37 Mac input root, box control root/journal/cache, and `/run/commonswarm-hm37-<window-id>` staging | B: per-window name | HM37 input/stage/transfer steps | Retained or removed only under the exact approved `WINDOW_ID`; the next window uses a different exact name |
+
 ### Preflight — CSwarmDevLead, HezLead, then Anvil
 
 1. CSwarmDevLead names one full 40-character `<sha>`, its reviewed PR, the
@@ -85,7 +115,7 @@ used.
 3. Anvil runs these commands on the Mac mini from this repository. They prove
    the archive came from the GitHub remote. The lead must have already written
    `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
-   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>/`). `git archive` reads tracked
+   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>-<window-id>/`). `git archive` reads tracked
    Git objects and has no `--no-xattrs` option; Mac `tar` commands below use
    both `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
@@ -94,6 +124,7 @@ used.
 # readonly: no
 rm -f "$HOME/.commonswarm-release-window.env"
 SHA='<sha>'
+WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
 (
   set -euo pipefail
   check() {
@@ -107,6 +138,10 @@ SHA='<sha>'
     fi
   }
   check 'SHA length' test "${#SHA}" -eq 40
+  case "$WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) false ;;
+  esac
   check 'origin URL' test "$(git remote get-url origin)" = 'https://github.com/yulanventures/commonswarm.git'
   check 'origin/main fetch' git fetch origin main
   check 'exact commit' test "$(git rev-parse "${SHA}^{commit}")" = "$SHA"
@@ -114,9 +149,9 @@ SHA='<sha>'
 
   SHORT_SHA="$(git rev-parse --short=12 "$SHA")"
   RUN_DAY="$(date -u +%F)"
-  EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}"
+  EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
   RUN_LOG="$EVIDENCE_DIR/run.log"
-  ARCHIVE="/tmp/commonswarm-${SHA}.tar"
+  ARCHIVE="/tmp/commonswarm-${SHA}-${WINDOW_ID}.tar"
   GATE_EVIDENCE="$EVIDENCE_DIR/gate-evidence.txt"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
   chmod 0700 "$EVIDENCE_DIR"
@@ -132,8 +167,8 @@ SHA='<sha>'
   check 'archive commit id' test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
 
   # Written only after every check passed, so a failed preflight leaves no file.
-  ( umask 077; printf 'SHA=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
-      "$SHA" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
+  ( umask 077; printf 'SHA=%q\nWINDOW_ID=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\n' \
+      "$SHA" "$WINDOW_ID" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" >"$HOME/.commonswarm-release-window.env" )
   chmod 0600 "$HOME/.commonswarm-release-window.env"
   printf 'window file written\n'
 )
@@ -170,6 +205,7 @@ initial manifest is built only from the explicit arrays below, never from
 (
   set -euo pipefail
   SHA='<sha>'
+  WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
   KIND_LIST='<edge|stack|edge stack>'
   H0_LEDGER_BACKFILL='<yes-or-no>'
   GUARDED_STACK_SWITCH='<yes-or-no>'
@@ -195,6 +231,10 @@ initial manifest is built only from the explicit arrays below, never from
   )
 
   test "${#SHA}" -eq 40
+  case "$WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) false ;;
+  esac
   case " $KIND_LIST " in
     *' edge '*|*' stack '*) ;;
     *) false ;;
@@ -211,6 +251,7 @@ initial manifest is built only from the explicit arrays below, never from
       COPY_BACK_FILES+=(
         edge.SHA256SUMS
         edge.release-dir-state.txt
+        known-box-only-files.txt
         edge-with-override.SHA256SUMS
         required-edge-env.json
         edge-env-source-check.txt
@@ -460,6 +501,7 @@ window state:
   KIND_LIST='<edge|stack|edge stack>'
   WINDOW_START_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
   WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  EXPECTED_WINDOW_ID='<approved-YYYYMMDDTHHMMSSZ>'
   ARCHIVE=/tmp/commonswarm-release.tar
   EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -483,6 +525,8 @@ window state:
     esac
     date -u -d "$T" +%s >/dev/null
   done
+  WINDOW_ID="$(date -u -d "$WINDOW_START_UTC" +%Y%m%dT%H%M%SZ)"
+  test "$WINDOW_ID" = "$EXPECTED_WINDOW_ID"
   WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
   RECYCLE_TIMER_STOPPED=0
   BACKUP_TIMERS_STOPPED=0
@@ -493,17 +537,26 @@ window state:
   RELEASE_GROUP=commonswarm
   PROOF_OWNER=root
   PROOF_GROUP=root
-  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
+  for VALUE in "$SHA" "$KIND_LIST" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" "$WINDOW_PRINCIPAL_SUFFIX" "$NEW_EDGE" "$NEW_STACK" "$PREVIOUS_EDGE" "$PREVIOUS_STACK" "$RECYCLE_TIMER_STOPPED" "$BACKUP_TIMERS_STOPPED"; do case "$VALUE" in *"'"*) false ;; esac; done
 
   install -d -m 0700 -o root -g root "$PROOF_DIR"
   sha256sum "$ARCHIVE" >"$PROOF_DIR/box-archive.sha256"
   BOX_ARCHIVE_LINE="$(cat "$PROOF_DIR/box-archive.sha256")"
   test "${BOX_ARCHIVE_LINE%% *}" = "$EXPECTED_ARCHIVE_SHA256"
 
+  install -m 0600 -o "$PROOF_OWNER" -g "$PROOF_GROUP" /dev/null \
+    "$PROOF_DIR/known-box-only-files.txt"
+
   prepare_release_directory() {
     KIND="$1"
     RELEASE_DIR="$2"
     RELEASE_MODE="$3"
+    KNOWN_BOX_ONLY_SOURCE=''
+    if [ "$KIND" = edge ]; then
+      KNOWN_BOX_ONLY_SOURCE="$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml"
+      test -f "$KNOWN_BOX_ONLY_SOURCE"
+      test ! -L "$KNOWN_BOX_ONLY_SOURCE"
+    fi
     if [ ! -e "$RELEASE_DIR" ] && [ ! -L "$RELEASE_DIR" ]; then
       RELEASE_DIR_RESULT=created
       install -d -m "$RELEASE_MODE" -o "$RELEASE_OWNER" -g "$RELEASE_GROUP" "$RELEASE_DIR"
@@ -518,7 +571,8 @@ window state:
       RELEASE_DIR_RESULT=reused
     fi
 
-    export ARCHIVE RELEASE_DIR RELEASE_MODE SHA RELEASE_OWNER RELEASE_GROUP
+    export ARCHIVE RELEASE_DIR RELEASE_MODE SHA RELEASE_OWNER RELEASE_GROUP KIND \
+      KNOWN_BOX_ONLY_SOURCE PROOF_DIR
     python3 - <<'PY'
 import hashlib
 import os
@@ -590,6 +644,29 @@ expected["RELEASE_SHA"] = (
     None,
 )
 
+known_box_only = {}
+known_source = os.environ["KNOWN_BOX_ONLY_SOURCE"]
+if os.environ["KIND"] == "edge":
+    known_relative = "deploy/edge-runtime/compose.override.yaml"
+    try:
+        source_stat = os.lstat(known_source)
+    except FileNotFoundError:
+        stop(f"known box-only source is missing: {known_source}")
+    if not stat.S_ISREG(source_stat.st_mode):
+        stop(f"known box-only source is not a regular file: {known_source}")
+    source_hash = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    source_descriptor = os.open(known_source, flags)
+    with os.fdopen(source_descriptor, "rb") as source_file:
+        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+            source_hash.update(chunk)
+    known_box_only[known_relative] = (
+        "file",
+        stat.S_IMODE(source_stat.st_mode),
+        source_hash.hexdigest(),
+        None,
+    )
+
 try:
     root_stat = os.lstat(release_dir)
 except FileNotFoundError:
@@ -625,12 +702,16 @@ def scan(directory, relative_parent=""):
 
 scan(release_dir)
 missing = sorted(set(expected) - set(actual), key=os.fsencode)
-extra = sorted(set(actual) - set(expected), key=os.fsencode)
-if len(expected) != len(actual) or missing or extra:
+extra = set(actual) - set(expected)
+unknown_extra = sorted(extra - set(known_box_only), key=os.fsencode)
+accepted_box_only = sorted(extra & set(known_box_only), key=os.fsencode)
+if missing or unknown_extra:
     stop(
         f"path inventory differs: expected_count={len(expected)} "
-        f"actual_count={len(actual)} missing={missing!r} extra={extra!r}"
+        f"actual_count={len(actual)} missing={missing!r} extra={unknown_extra!r}"
     )
+for relative in accepted_box_only:
+    expected[relative] = known_box_only[relative]
 
 for relative in sorted(expected, key=os.fsencode):
     expected_kind, expected_mode, expected_digest, expected_target = expected[relative]
@@ -664,6 +745,11 @@ for relative in sorted(expected, key=os.fsencode):
     elif actual_kind == "symlink":
         if target != expected_target:
             stop(f"symlink target differs: {relative}")
+
+with open(os.path.join(os.environ["PROOF_DIR"], "known-box-only-files.txt"), "a", encoding="utf-8") as evidence:
+    for relative in accepted_box_only:
+        digest = expected[relative][2]
+        evidence.write(f"{relative} sha256={digest} accepted known box-only file\n")
 
 print(
     f"release directory verified: entries={len(actual)} "
@@ -699,6 +785,7 @@ PY
     printf "%s='%s'\n" KIND_LIST "$KIND_LIST"
     printf "%s='%s'\n" WINDOW_START_UTC "$WINDOW_START_UTC"
     printf "%s='%s'\n" WINDOW_END_UTC "$WINDOW_END_UTC"
+    printf "%s='%s'\n" WINDOW_ID "$WINDOW_ID"
     printf "%s='%s'\n" WINDOW_PRINCIPAL_SUFFIX "$WINDOW_PRINCIPAL_SUFFIX"
     printf "%s='%s'\n" NEW_EDGE "$NEW_EDGE"
     printf "%s='%s'\n" NEW_STACK "$NEW_STACK"
@@ -712,7 +799,7 @@ PY
   } >"$WINDOW_ENV"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/window-principal-suffix.txt"
   printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
-  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR"/*.release-dir-state.txt "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt"
+  chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR"/*.release-dir-state.txt "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt" "$PROOF_DIR/known-box-only-files.txt"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
   printf 'PREVIOUS_EDGE=%s\nPREVIOUS_STACK=%s\n' "$PREVIOUS_EDGE" "$PREVIOUS_STACK" \
     >>"$PROOF_DIR/box-run.log"
@@ -750,7 +837,7 @@ Mac mini:
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = '<sha>'
-  PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}.tar"
+  PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   test -s "$PROOF_LIST"
   (cd "$EVIDENCE_DIR" && COPYFILE_DISABLE=1 tar --no-xattrs -cf "$PROOF_ARCHIVE" -T "$PROOF_LIST")
@@ -892,7 +979,12 @@ distinct.
 ```sh
 # step: runbook-12
 # readonly: no
-rm -f "$HOME/.commonswarm-release-window.env"
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  rm -f "$ARCHIVE" "/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
+  rm -f "$HOME/.commonswarm-release-window.env"
+)
 ```
 
 ### Abort cleanup — Anvil runs this on every stop, refusal, or abort
@@ -1749,6 +1841,12 @@ approved times overlap a protected interval.
   cp -a "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" \
     "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml"
   chown commonswarm:commonswarm "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml"
+  OVERRIDE_SHA256="$(sha256sum "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" | awk '{print $1}')"
+  test "$(sha256sum "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml" | awk '{print $1}')" = "$OVERRIDE_SHA256"
+  BOX_ONLY_LINE="deploy/edge-runtime/compose.override.yaml sha256=${OVERRIDE_SHA256} accepted known box-only file"
+  if ! grep -qFx "$BOX_ONLY_LINE" "$PROOF_DIR/known-box-only-files.txt"; then
+    printf '%s\n' "$BOX_ONLY_LINE" >>"$PROOF_DIR/known-box-only-files.txt"
+  fi
   (cd "$NEW_EDGE" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) \
     >"$PROOF_DIR/edge-with-override.SHA256SUMS"
   chmod 0600 "$PROOF_DIR/edge-with-override.SHA256SUMS"
@@ -3365,7 +3463,7 @@ full restore, delete a release, prune Docker, or point anything back to hosted
 Supabase, Railway, or Vercel.
 
 After either a successful close or an abort, remove the root-only transient
-database files. This does not remove release evidence:
+database files and upload archives. This does not remove release evidence:
 
 ```sh
 # step: runbook-60
@@ -3377,7 +3475,33 @@ database files. This does not remove release evidence:
     "/run/commonswarm-release-${SHA}-service.conf" \
     "/run/commonswarm-release-${SHA}-pass" \
     "/run/commonswarm-release-${SHA}-apply.sql" \
-    "/run/commonswarm-release-${SHA}-session.sh"
+    "/run/commonswarm-release-${SHA}-session.sh" \
+    /tmp/commonswarm-release.tar \
+    /tmp/commonswarm-release-proofs.tar
+)
+```
+
+After copy-back and `runbook-60`, close the active proof directory by its exact
+name. A prior closed directory is never removed, listed, globbed, or selected;
+an existing destination is a stop for HezLead.
+
+```sh
+# step: runbook-61
+# readonly: no
+(
+  set -euo pipefail
+  PROOF_DIR='/home/commonswarm/stack/release-proofs/<sha>'
+  . "$PROOF_DIR/window.env"
+  case "$WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) false ;;
+  esac
+  CLOSED_PROOF_DIR="${PROOF_DIR}.closed-window-${WINDOW_ID}"
+  test ! -e "$CLOSED_PROOF_DIR"
+  test ! -L "$CLOSED_PROOF_DIR"
+  mv -- "$PROOF_DIR" "$CLOSED_PROOF_DIR"
+  test -d "$CLOSED_PROOF_DIR"
+  test ! -e "$PROOF_DIR"
 )
 ```
 

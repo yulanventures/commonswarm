@@ -596,11 +596,9 @@ Test source presence is not a passing result. Follow repository gate-wrapper and
 
 Use runbook section 1’s `1-apply-release-directories` verifier. It supports a missing directory or an existing **same-SHA** directory.
 
-Reuse requires matching the full release identity, complete path inventory/count, file hashes, entry types, symlink targets/containment, ownership and modes. It does not extract over, delete or repair an existing directory. Any mismatch stops the window.
+Reuse requires matching the full release identity, complete path inventory/count, file hashes, entry types, symlink targets/containment, ownership and modes. The only permitted extra is `deploy/edge-runtime/compose.override.yaml`, and the verifier derives its expected mode and SHA-256 from the exact previous-release source that `runbook-31` copies and records `accepted known box-only file`. Any unknown, missing, changed or metadata-mismatched entry stops the window; the verifier does not extract over, delete or repair an existing directory.
 
-Record `EDGE_RELEASE_DIR_STATE`, `STACK_RELEASE_DIR_STATE` and aggregate `RELEASE_DIR_STATE` truthfully as created/reused/mixed where applicable. Reconcile existing window journals and timer markers before a rerun; directory reuse is not permission to discard prior cleanup obligations.
-
-An edge directory already containing an added box-only override is not an untouched archive directory. If the verifier rejects it, stop for HezLead; do not remove the extra file to force acceptance.
+Record `EDGE_RELEASE_DIR_STATE`, `STACK_RELEASE_DIR_STATE` and aggregate `RELEASE_DIR_STATE` truthfully as created/reused/mixed where applicable. On every close or rollback, follow copy-back with `runbook-60`, `runbook-61`, and `runbook-12`; proof state becomes `<sha>.closed-window-<window-id>`, and Mac/temp state is removed. A rerun uses a new approved `WINDOW_ID`; every step addresses exact active or per-window names and must never list, glob, or select a `.closed-window-<id>` leftover.
 
 After preparation, compare recorded `PREVIOUS_STACK` against `NEW_STACK` for the three runbook runtime paths. The source comparison with `ad964ed1` is empty, but actual live equality is **not established**. Any runtime difference, missing path or comparison error stops this migration-only stack plan.
 
@@ -622,6 +620,7 @@ The reviewed hosted-control artifact in section 9 is an **opening gate**, not wo
 ## 5. Names, credentials and backup gate
 
 The box computes `WINDOW_PRINCIPAL_SUFFIX` once from approved `WINDOW_START_UTC` and persists it in `window.env` and `window-principal-suffix.txt`.
+The same file carries `WINDOW_ID=YYYYMMDDTHHMMSSZ`; HM37 protected input, staging, control, journal and cache paths include that exact ID.
 
 Use:
 
@@ -1212,7 +1211,7 @@ the access token only in the private file.
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  INPUT_ROOT="$HOME/.config/cswarm/box-hm37-20260928"
+  INPUT_ROOT="$HOME/.config/cswarm/box-hm37-${WINDOW_ID}"
   mkdir -m 0700 "$INPUT_ROOT"
   test ! -e "$INPUT_ROOT/human-session.json"
   cat >"$INPUT_ROOT/write-human-session.ts" <<'TS'
@@ -1263,7 +1262,10 @@ and not copied as evidence.
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
+  . "$PROOF_DIR/window.env"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
+  STAGING_ROOT="/run/commonswarm-hm37-${WINDOW_ID}"
   HARNESS="$CONTROL_ROOT/hm37-open-ack-control.ts"
   DENO_CONFIG="$CONTROL_ROOT/hm37-open-ack-deno.json"
   test "$(cat "$RELEASE_ROOT/RELEASE_SHA")" = "$SHA"
@@ -1273,9 +1275,9 @@ and not copied as evidence.
   test "$(stat -c %U /usr/local/bin/deno)" = root
   test ! -e "$CONTROL_ROOT"
   install -d -m 0700 "$CONTROL_ROOT" "$CONTROL_ROOT/journal" "$CONTROL_ROOT/deno-cache"
-  install -m 0600 /run/commonswarm-hm37/hm37-open-ack-control.ts "$HARNESS"
-  install -m 0600 /run/commonswarm-hm37/hm37-open-ack-deno.json "$DENO_CONFIG"
-  install -m 0600 /run/commonswarm-hm37/human-session.json "$CONTROL_ROOT/human-session.json"
+  install -m 0600 "$STAGING_ROOT/hm37-open-ack-control.ts" "$HARNESS"
+  install -m 0600 "$STAGING_ROOT/hm37-open-ack-deno.json" "$DENO_CONFIG"
+  install -m 0600 "$STAGING_ROOT/human-session.json" "$CONTROL_ROOT/human-session.json"
   test "$(sha256sum "$HARNESS" | awk '{print $1}')" = dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
@@ -1331,9 +1333,9 @@ never copied.
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
   case "$WINDOW_PRINCIPAL_SUFFIX" in
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *) false ;;
@@ -1369,9 +1371,9 @@ idempotent and still verifies complete revocation before returning zero.
   umask 077
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   RELEASE_ROOT="/home/commonswarm/edge/releases/$SHA"
-  CONTROL_ROOT="/home/commonswarm/edge/controls/$SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
+  CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
   JOURNAL="$CONTROL_ROOT/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json"
   test "$(stat -c %a "$JOURNAL")" = 600
   set -a
@@ -1674,7 +1676,8 @@ On success, refusal, failure or abort:
 3. Remove transient database-session and protected smoke files when no longer needed.
 4. Preserve immutable releases and private diagnostics.
 5. Copy approved evidence through the manifest.
-6. Remove Mac window state only when HezLead closes the window.
+6. Run `runbook-60`, then `runbook-61`, so transient files are removed and the active proof directory becomes the exact per-window closed name.
+7. Run Mac `runbook-12` only when HezLead closes the window.
 
 Successful closure must explicitly establish:
 

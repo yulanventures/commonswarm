@@ -67,7 +67,8 @@ For subsequent blocks, Anvil supplies these non-secret inputs:
 
 - `SITE_RELEASE_REPO`: absolute path to the checkout whose `HEAD` is the exact release SHA.
 - `SITE_BASE_SHA`: full SHA resolved from the measured current site release.
-- `SITE_EVIDENCE`: absolute, protected evidence directory for this execution, outside the release checkout.
+- `SITE_WINDOW_ID`: approved `YYYYMMDDTHHMMSSZ` identifier for this execution.
+- `SITE_EVIDENCE`: absolute, protected evidence directory for this execution, outside the release checkout, whose basename ends in `-$SITE_WINDOW_ID`.
 
 Do not change a shared checkout to satisfy these inputs. Prepare a separate checkout if necessary.
 
@@ -78,8 +79,14 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
   : "${SITE_BASE_SHA:?Resolve the live site source to a full SHA}"
+  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
   : "${SITE_EVIDENCE:?Set the protected evidence directory}"
   case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) exit 1 ;;
+  esac
+  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
   cd "$SITE_RELEASE_REPO"
   target=8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$(git rev-parse HEAD)" = "$target"
@@ -371,8 +378,14 @@ After all holds are resolved, HezLead’s execution approval must name the exact
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the approved exact-release checkout}"
+  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
   : "${SITE_EVIDENCE:?Set the protected evidence directory}"
   case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) exit 1 ;;
+  esac
+  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
   cd "$SITE_RELEASE_REPO"
   target=8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$(git rev-parse HEAD)" = "$target"
@@ -568,7 +581,13 @@ Before invoking the block, `previous.release` must identify the measured previou
 # readonly: no
 (
   set -euo pipefail
+  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
   : "${SITE_EVIDENCE:?Set the evidence directory for this execution}"
+  case "$SITE_WINDOW_ID" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+    *) exit 1 ;;
+  esac
+  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) exit 1 ;; esac
   previous=$(cat "$SITE_EVIDENCE/previous.release")
   failed=$(cat "$SITE_EVIDENCE/after.release")
   for candidate in "$previous" "$failed"; do
@@ -583,19 +602,21 @@ Before invoking the block, `previous.release` must identify the measured previou
   test "$previous" != "$failed"
 
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 \
-    /bin/bash -s -- "$previous" "$failed" <<'BOX'
+    /bin/bash -s -- "$previous" "$failed" "$SITE_WINDOW_ID" <<'BOX'
 set -euo pipefail
 previous=$1
 failed=$2
+window_id=$3
 root=/srv/commonswarm/site
+next="$root/current.next.$window_id"
 test "$(readlink -f "$previous")" = "$previous"
 test "$(readlink -f "$failed")" = "$failed"
 test -f "$previous/app/index.html"
 test "$(readlink -f "$root/current")" = "$failed"
-test ! -e "$root/current.next"
-test ! -L "$root/current.next"
-ln -s "$previous" "$root/current.next"
-mv -Tf "$root/current.next" "$root/current"
+test ! -e "$next"
+test ! -L "$next"
+ln -s "$previous" "$next"
+mv -Tf "$next" "$root/current"
 test "$(readlink -f "$root/current")" = "$previous"
 date -u '+rollback_at=%Y-%m-%dT%H:%M:%SZ'
 printf 'restored_release=%s\n' "$previous"
