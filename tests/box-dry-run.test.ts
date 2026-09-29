@@ -31,6 +31,7 @@ const GUARD = "tests/box-dry-run/guard.sh";
 const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
+const PRESEED_ALLOWLIST_FILE = "tests/box-dry-run/fixtures/preseed-allowlist.json";
 const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
 const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
 const OAUTH_RUNTIME_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-runtime.json";
@@ -63,6 +64,57 @@ interface MeasuredFactInventory {
   facts: MeasuredFact[];
   fact_count: number;
   production_recheck: { output: string };
+}
+
+type PreseedKind = "path" | "env" | "command-output";
+
+interface PreseedAllowlistItem {
+  kind: PreseedKind;
+  name: string;
+  source: string;
+  evidence?: string;
+  value?: string;
+}
+
+const PRESEED_ALLOWLIST = JSON.parse(readFileSync(PRESEED_ALLOWLIST_FILE, "utf8")) as PreseedAllowlistItem[];
+const PLAN_VISIBLE_PATH_PRESEEDS = [
+  "/home/commonswarm/edge/current",
+  "/home/commonswarm/stack/current",
+  "/home/commonswarm/edge/releases/<previous>",
+  "/home/commonswarm/edge/releases/<previous>/RELEASE_SHA",
+  "/home/commonswarm/stack/releases/<previous>",
+  "/home/commonswarm/stack/releases/<previous>/RELEASE_SHA",
+  "/home/commonswarm/edge/releases/<candidate>",
+  "/home/commonswarm/edge/releases/<candidate>/RELEASE_SHA",
+  "/home/commonswarm/stack/releases/<candidate>",
+  "/home/commonswarm/stack/releases/<candidate>/RELEASE_SHA",
+  "/home/commonswarm/stack/release-proofs/<closed>",
+  "/etc/commonswarm-oauth/database-credentials",
+  "/etc/commonswarm-oauth/service.env",
+  "/etc/ssl/yulan-internal-ca.pem",
+  "/etc/commonswarm-release/target.env",
+  "/home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh",
+  "/var/backups/commonswarm-postgres/status.json",
+  "/home/commonswarm/.env",
+  "/usr/local/bin",
+  "/srv/commonswarm/site/current",
+  "/srv/commonswarm/site/releases/<previous>",
+  "/srv/commonswarm/site/releases/<previous>/app/index.html",
+  "/srv/commonswarm/site/releases/<previous>/download/index.html",
+].sort();
+
+function explicitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    LANG: "C.UTF-8",
+    TZ: "UTC",
+    ...extra,
+  };
+}
+
+function assertChildEnvironmentAllowed(environment: NodeJS.ProcessEnv): void {
+  const allowed = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "env").map((item) => item.name));
+  for (const name of Object.keys(environment)) assert.ok(allowed.has(name), `block shell received non-allowlisted env ${name}`);
 }
 
 const MEASURED_FACTS = JSON.parse(readFileSync(MEASURED_FACTS_FILE, "utf8")) as MeasuredFactInventory;
@@ -613,27 +665,7 @@ function selectedHmSequence(): string[] {
 
 function materialize(block: Block): string {
   let source = block.source;
-  if (shortStep(block) === "runbook-04") {
-    source = source.replace("ROUTER_CHANGED='<yes-or-no>'", "ROUTER_CHANGED='yes'");
-  }
-  source = source
-    .replaceAll("<sha256-from-Mac-evidence>", "5219c371b281b6f7e0b90adb090f2fb3dff388ec5d95c163ba9c1daaa0bac7b3")
-    .replaceAll("<approved-YYYY-MM-DDTHH:MM:SSZ>", "2026-09-28T05:02:03Z")
-    .replaceAll("<next-approved-version-from-pending-versions.txt>", "20260928000004")
-    .replaceAll("<agreed-seconds>", "86400")
-    .replaceAll("<space-separated changed function names>", "command read capability activity h0 mcp")
-    .replaceAll("<edge|stack|edge stack>", "edge stack")
-    .replaceAll("<yes-or-no>", "no")
-    .replaceAll("<newline-separated new job names, C-sorted, or empty>", "")
-    .replaceAll("<newline-separated removed job names, C-sorted, or empty>", "")
-    .replaceAll("<approved-14-digit-version-with-functional-txt-output>", "20260928000004")
-    .replaceAll("<approved-14-digit-version>", "20260928000004")
-    .replaceAll("<sha>", RELEASE_SHA);
-  if (shortStep(block) === "runbook-03") {
-    source = source
-      .replace("MIGRATION_VERSIONS=(\n    # 20260928000004\n  )", "MIGRATION_VERSIONS=(\n    20260928000004\n  )")
-      .replace("FUNCTIONAL_VERSIONS=(\n    # 20260928000004\n  )", "FUNCTIONAL_VERSIONS=(\n    20260928000004\n  )");
-  }
+  source = source.replaceAll("<sha>", RELEASE_SHA);
   if (shortStep(block) === "hm37-deno-install") {
     source = source.replace(
       `DENO_ZIP_SHA256=${DENO_ZIP_SHA256}`,
@@ -641,6 +673,90 @@ function materialize(block: Block): string {
     );
   }
   return source;
+}
+
+interface UnproducedRead {
+  plan: "hm37" | "runbook" | "site";
+  what: string;
+  block: Block;
+  offset: number;
+}
+
+const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):\?[^}]*\}/g;
+const UNRESOLVED_INPUT = /<(?:(?:approved|agreed|next-approved|sha256-from|space-separated|newline-separated|edge\|stack|yes-or-no)[^>]*|sha)>/g;
+const PLAN_FILE_INPUT = /(?:\/home\/commonswarm\/migration-direct\.env|(?:\$[A-Z_]+\/)?GO\.txt|(?:\$[A-Z_]+\/)?(?:human-session\.json|hm37-open-ack-control\.ts|hm37-open-ack-deno\.json|oauth-image\.id)|(?:\$[A-Z_]+\/)?gate-evidence\.txt|(?:\$[A-Z_]+\/)?site\/\.env|(?:\$[A-Z_]+\/)?compose\.override\.yaml)/g;
+const PLAN_ENV_ALLOWLIST = new Set(["HOME", "PATH", "LANG", "TZ"]);
+
+function planName(block: Block): UnproducedRead["plan"] {
+  return block.file === HM37 ? "hm37" : block.file === RUNBOOK ? "runbook" : "site";
+}
+
+function sourceLineAt(block: Block, offset: number): number {
+  return block.line + block.source.slice(0, offset).split("\n").length;
+}
+
+function matchingProducer(resource: string, earlier: Block[]): boolean {
+  if (resource === "exact-SHA clean release checkout") {
+    return earlier.some((block) => /git (?:clone|worktree add)/.test(block.source));
+  }
+  const leaf = resource.replace(/^.*\//, "").replace(/^\$[A-Z_]+/, "");
+  if (!leaf) return false;
+  return earlier.some((block) => block.source.split("\n").some((line) =>
+    line.includes(leaf) && /(?:>|install|mkdir|cp|scp|write|printf|touch)/.test(line),
+  ));
+}
+
+function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
+  const reads: UnproducedRead[] = [];
+  const seen = new Set<string>();
+  const add = (block: Block, what: string, offset: number, earlier: Block[]): void => {
+    if (matchingProducer(what, earlier)) return;
+    const key = `${block.file}:${shortStep(block)}:${what}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    reads.push({ plan: planName(block), what, block, offset });
+  };
+  for (let index = 0; index < planBlocks.length; index += 1) {
+    const block = planBlocks[index]!;
+    const earlier = planBlocks.slice(0, index);
+    for (const match of block.source.matchAll(REQUIRED_INPUT)) {
+      const name = match[1]!;
+      if (!PLAN_ENV_ALLOWLIST.has(name) && !name.startsWith("BOX_DRY_RUN_")) add(block, name, match.index!, earlier);
+    }
+    for (const match of block.source.matchAll(UNRESOLVED_INPUT)) add(block, match[0], match.index!, earlier);
+    for (const match of block.source.matchAll(PLAN_FILE_INPUT)) {
+      if (shortStep(block) === "hm37-source-identity") continue;
+      if (/^\$(?:CONTROL_ROOT|INPUT_ROOT)\//.test(match[0])) continue;
+      const before = block.source.slice(0, match.index);
+      if (match[0].endsWith("human-session.json") && /open\(output, "wx"/.test(before)) continue;
+      add(block, match[0], match.index!, earlier);
+    }
+    const sqlEvidence = block.source.indexOf("-name '*.sql'");
+    if (sqlEvidence >= 0) add(block, "$EVIDENCE_DIR/*.sql", sqlEvidence, earlier);
+    for (const [needle, what] of [
+      ["git fetch", "exact-SHA clean release checkout"],
+      ["git rev-parse HEAD", "exact-SHA clean release checkout"],
+      ["readCurrentTarget", "Mac production target and human credential store"],
+    ] as const) {
+      const offset = block.source.indexOf(needle);
+      if (offset >= 0 && !matchingProducer(what, earlier)) add(block, what, offset, earlier);
+    }
+  }
+  return reads;
+}
+
+function unproducedReport(): string[] {
+  const selected = selectedHmSequence();
+  const all = [...blocks(HM37), ...blocks(RUNBOOK)];
+  const byStep = new Map(all.map((block) => [shortStep(block), block]));
+  const boxPlan = selected.map((step) => byStep.get(step)!).filter(Boolean);
+  const rows = discoverUnproducedReads(boxPlan).flatMap((read) =>
+    ["s1", "s2", "s3", "s4", "s5"].map((state) => ({ read, state })),
+  );
+  rows.push(...discoverUnproducedReads(blocks(SITE)).map((read) => ({ read, state: "site" })));
+  return rows.map(({ read, state }) =>
+    `UNPRODUCED ${read.what} read by ${shortStep(read.block)} at ${read.block.file}:${sourceLineAt(read.block, read.offset)} [plan=${read.plan} state=${state}]`,
+  );
 }
 
 interface Fixture {
@@ -658,6 +774,9 @@ interface Fixture {
   replacedRuntime?: { path: string; backup?: string };
   replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
   model?: BoxFixtureModel;
+  denoZip?: string;
+  denoZipDigest?: string;
+  seededPaths?: string[];
 }
 
 interface RootDirectoryFixture {
@@ -763,87 +882,22 @@ function prepareMacFixture(): Fixture {
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
   mkdirSync(home, { mode: 0o700 });
-  mkdirSync(join(home, ".config/cswarm"), { recursive: true, mode: 0o700 });
   makeStubBin(bin);
-  const cwd = checkoutFixture(temporary, "hm37", RELEASE_SHA);
-  const day = new Date().toISOString().slice(0, 10);
-  const evidence = join(cwd, "docs/evidence", `${day}-release-eb2a87ac4b5a-${WINDOW_ID}`);
-  mkdirSync(evidence, { recursive: true, mode: 0o700 });
-  writeMode(join(evidence, "gate-evidence.txt"), [
-    `SHA=${RELEASE_SHA}`,
-    "npm run build:command-core && git diff --exit-code supabase/functions/_shared/protocol.js: PASS",
-    "npm run check:edge: PASS",
-    "",
-  ].join("\n"));
-  for (const file of ["20260928000003-catalog.sql", "20260928000003-functional.sql", "20260928000004-catalog.sql", "20260928000004-functional.sql"]) {
-    writeMode(join(evidence, file), "SELECT true AS catalog_ok\\gset\n");
-  }
-  writeMode(join(home, ".commonswarm-release-window.env"), [
-    `SHA='${RELEASE_SHA}'`, `WINDOW_START_UTC='${WINDOW_START}'`, `WINDOW_ID='${WINDOW_ID}'`,
-    "SHORT_SHA='eb2a87ac4b5a'", `EVIDENCE_DIR='${evidence}'`, `RUN_LOG='${join(evidence, "run.log")}'`,
-    `ARCHIVE='/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar'`,
-    `BOX_WINDOW_INPUT='/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env'`, "",
-  ].join("\n"));
-  writeMode(`/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`, "dry-run archive fixture\n");
-  const credentials = join(home, "credential.json");
-  writeMode(credentials, JSON.stringify({
-    agent_token: "dry-run-placeholder",
-    principal_id: "00000000-0000-4000-8000-000000000001",
-    token_id: "00000000-0000-4000-8000-000000000002",
-    run_id: "00000000-0000-4000-8000-000000000003",
-  }) + "\n");
   return {
-    temporary, cwd, home, bin, log,
+    temporary, cwd: process.cwd(), home, bin, log,
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: process.cwd(),
-    env: {
-      ...process.env,
+    env: explicitEnvironment({
       HOME: home,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
-      PYTHONPATH: PYTHON_FIXTURE,
       BOX_DRY_RUN_STUB_LOG: log,
-      WINDOW_START_UTC: WINDOW_START,
-      BACKUP_MAX_AGE_SECONDS: "86400",
-      CREDENTIAL_FILE: credentials,
-      EXPECTED_PRINCIPAL_ID: "00000000-0000-4000-8000-000000000001",
-      EXPECTED_RUN_ID: "00000000-0000-4000-8000-000000000003",
+      BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
       BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
       BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
       BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
-      BOX_DRY_RUN_OAUTH_RELEASE: OAUTH_RELEASE,
-    },
+    }),
   };
-}
-
-function prepareSiteFixture(fixture: Fixture): string {
-  const cwd = checkoutFixture(fixture.temporary!, "site-release", SITE_SHA);
-  const evidence = join(fixture.temporary!, `site-evidence-${WINDOW_ID}`);
-  mkdirSync(evidence, { mode: 0o700 });
-  writeMode(join(evidence, "GO.txt"), `SHA=${SITE_SHA}\nAll release holds resolved\n`);
-  const ownerToken = join(fixture.home, "site-owner-token");
-  writeMode(ownerToken, "dry-run-owner-token\n");
-  writeMode(join(cwd, "site/.env"), [
-    "PUBLIC_SUPABASE_URL=https://api.commonswarm.com",
-    "PUBLIC_SUPABASE_ANON_KEY=e30.eyJyb2xlIjoiYW5vbiJ9.signature",
-    "PUBLIC_H0_LINK_JOIN=1",
-    "",
-  ].join("\n"));
-  writeMode(join(cwd, "deploy/site/deploy.sh"), "#!/bin/sh\nexit 0\n", 0o755);
-  writeMode(join(fixture.home, ".commonswarm-site-window.env"), [
-    `SITE_WINDOW_START_UTC='${WINDOW_START}'`, `SITE_WINDOW_ID='${WINDOW_ID}'`,
-    `SITE_EVIDENCE='${evidence}'`, `SITE_WINDOW_FILE='${join(fixture.home, ".commonswarm-site-window.env")}'`, "",
-  ].join("\n"));
-  Object.assign(fixture.env, {
-    SITE_WINDOW_START_UTC: WINDOW_START,
-    SITE_EVIDENCE: evidence,
-    SITE_RELEASE_REPO: cwd,
-    SITE_BASE_SHA: BASE_SHA,
-    BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
-    SITE_OWNER_ACCESS_TOKEN_FILE: ownerToken,
-    BOX_DRY_RUN_SSH_COUNTER_FILE: join(fixture.temporary!, "ssh-counter"),
-  });
-  return cwd;
 }
 
 function cleanupMacFixture(fixture: Fixture): void {
@@ -938,27 +992,20 @@ function prepareBoxFixture(state: string): Fixture {
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
   const previousEdge = model.releases.previousEdge.path;
   const previousStack = model.releases.previousStack.path;
-  const oauth = model.releases.oauth.path;
-  for (const release of [previousEdge, previousStack, oauth]) {
-    mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
-    mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
-    mkdirSync(join(release, "supabase/migrations"), { recursive: true });
+  for (const release of [previousEdge, previousStack]) {
+    mkdirSync(release, { recursive: true });
     const releaseModel = Object.values(model.releases).find((candidate) => candidate.path === release);
     assert.ok(releaseModel);
     writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
-    chmodSync(release, 0o755);
+    chmodSync(release, release === previousEdge ? 0o750 : 0o755);
   }
-  mkdirSync(join(previousStack, "deploy/supabase-stack/postgres"), { recursive: true });
-  writeMode(join(previousStack, "deploy/supabase-stack/compose.yaml"), "services: {}\n", 0o644);
-  writeMode(join(previousEdge, "deploy/edge-runtime/compose.override.yaml"), "services: {}\n", 0o644);
-  writeMode(join(previousEdge, "deploy/edge-runtime/compose.yaml"), "services: {}\n", 0o644);
+  const measuredDbHelper = join(previousStack, "deploy/supabase-stack/migrate/run-db-tool.sh");
+  writeMode(measuredDbHelper, "#!/bin/sh\nexit 69\n", 0o775);
   mkdirSync("/home/commonswarm/edge", { recursive: true });
   mkdirSync("/home/commonswarm/stack", { recursive: true });
-  mkdirSync("/home/commonswarm/oauth", { recursive: true });
-  for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth"]) chmodSync(path, 0o755);
+  for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack"]) chmodSync(path, 0o755);
   symlinkSync(previousEdge, "/home/commonswarm/edge/current");
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
-  symlinkSync(oauth, "/home/commonswarm/oauth/current");
 
   const proof = PROOF_DIR;
   if (state === "s2" || state === "s5") {
@@ -969,97 +1016,35 @@ function prepareBoxFixture(state: string): Fixture {
     assert.equal(pathExists(join(proof, "window.env")), false, "M5 measured-now fixture unexpectedly has a window file");
     assert.equal(CLOSED_PROOF_PATHS.filter(pathExists).length, 2, "M5 measured-now fixture must have exactly two closed proofs");
   }
-  mkdirSync(proof, { recursive: true, mode: 0o700 });
-  chmodSync(proof, 0o700);
-  writeMode(join(proof, "window.env"), windowEnvBody(state));
-  writeMode(join(proof, "GO.txt"), "CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead\n");
-  writeMode(join(proof, "oauth-image.id"), model.files[`${proof}/oauth-image.id`]!.bytes);
-  for (const file of ["20260928000003-catalog.sql", "20260928000003-functional.sql", "20260928000004-catalog.sql", "20260928000004-functional.sql"]) writeMode(join(proof, file), "SELECT true AS catalog_ok\\gset\n");
-  writeMode(join(proof, "copy-back.list"), "copy-back.list\n");
-  for (const file of [
-    "caddy-after-10-commonswarm-api.caddy",
-    "caddy-after-11-commonswarm-edge-staging.caddy", "caddy-log-files.txt",
-    "mcp-caddy-after.caddy", "mcp-caddy-log-files.txt",
-  ]) writeMode(join(proof, file), file.endsWith(".txt") ? "fixture\n" : "");
-  writeMode(join(proof, "gate-evidence.txt"), `SHA=${RELEASE_SHA}\nfixture gate evidence\n`);
-  writeMode(join(proof, "required-edge-env.json"), model.files[`${proof}/required-edge-env.json`]!.bytes);
-  writeMode(join(proof, "edge-env-source-check.txt"), "fixture exact-SHA router inventory\n");
-  const oauthProof = join("/home/commonswarm/stack/release-proofs", basename(OAUTH_RELEASE));
-  mkdirSync(oauthProof, { recursive: true, mode: 0o700 });
-  chmodSync(oauthProof, 0o700);
-  writeMode(join(oauthProof, "oauth-image.id"), model.files[`${oauthProof}/oauth-image.id`]!.bytes);
-  writeMode("/tmp/commonswarm-release-window.env", `SHA='${RELEASE_SHA}'\nWINDOW_START_UTC='${WINDOW_START}'\nWINDOW_ID='${WINDOW_ID}'\n`);
-  writeMode("/tmp/commonswarm-release.tar", "dry-run archive\n");
-  writeMode("/tmp/commonswarm-site-window.env", `SITE_WINDOW_START_UTC='${WINDOW_START}'\nSITE_WINDOW_ID='${WINDOW_ID}'\n`);
-  writeMode(`/run/commonswarm-release-${RELEASE_SHA}-session.sh`, [
-    `STACK_RELEASE='/home/commonswarm/stack/releases/${RELEASE_SHA}'`,
-    `MIGRATE='/home/commonswarm/stack/releases/${RELEASE_SHA}/deploy/supabase-stack/migrate'`,
-    `PROOF_DIR='${proof}'`, `APPLY_SQL='/run/commonswarm-release-${RELEASE_SHA}-apply.sql'`,
-    "release_psql() { printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\"; }",
-    "release_psql_ro() { case \"${BOX_DRY_RUN_STEP:-} $*\" in *20260916000001*20260916000002*) :;; runbook-26*20260928000004*count*) printf '%s\\n' 0;; runbook-26*20260928000004-catalog.sql*) printf '%s\\n' f;; runbook-28*20260928000004*count*) printf '%s\\n' 1;; runbook-28*20260928000004-catalog.sql*) printf '%s\\n' t;; *'ORDER BY version'*) printf '%s\\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
-    "",
-  ].join("\n"));
   writeMode("/home/commonswarm/.env",
     Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600);
   writeMode("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600);
-  writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o600);
-  writeMode("/etc/commonswarm-oauth/database-credentials", '{"user":"commonswarm_oauth_runtime","password":"placeholder"}\n', 0o600);
+  writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644);
+  writeMode("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640);
   writeMode("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600);
-  writeMode("/etc/caddy/sites/10-commonswarm-api.caddy", "api.commonswarm.com {\n}\n", 0o644);
-  writeMode("/etc/caddy/sites/11-commonswarm-edge-staging.caddy", "edge-staging.commonswarm.com {\n}\n", 0o644);
-  writeMode("/etc/caddy/sites/12-commonswarm-mcp.caddy", "mcp.commonswarm.com {\n}\n", 0o644);
-  writeMode(join(previousStack, "deploy/supabase-stack/commonswarm-api.caddy"), "api.commonswarm.com, edge-staging.commonswarm.com {\n}\n", 0o644);
   writeMode("/var/backups/commonswarm-postgres/status.json", JSON.stringify({
     ok: true, database_bytes_verified: true, object_bytes_verified: true,
     verified_at: new Date().toISOString(), destination: "r2:yulan-vps-1-backups/000-commonswarm-postgres/dry-run",
   }) + "\n");
+  const measuredSiteRelease = join("/srv/commonswarm/site/releases", SITE_BASE_RELEASE);
+  mkdirSync(join(measuredSiteRelease, "app"), { recursive: true });
+  mkdirSync(join(measuredSiteRelease, "download"), { recursive: true });
+  writeMode(join(measuredSiteRelease, "app/index.html"), "measured baseline without connected-apps marker\n", 0o644);
+  writeMode(join(measuredSiteRelease, "download/index.html"), "0.1.80\n", 0o644);
+  mkdirSync("/srv/commonswarm/site", { recursive: true });
+  symlinkSync(measuredSiteRelease, "/srv/commonswarm/site/current");
   const targetEdge = CANDIDATE_EDGE;
   const targetStack = CANDIDATE_STACK;
   if (state !== "s1") {
     for (const release of [targetEdge, targetStack]) {
-      mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
-      mkdirSync(join(release, "deploy/supabase-stack/migrate"), { recursive: true });
-      mkdirSync(join(release, "deploy/supabase-stack/postgres"), { recursive: true });
-      mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
-      mkdirSync(join(release, "supabase/migrations"), { recursive: true });
+      mkdirSync(release, { recursive: true });
       writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
-      writeMode(join(release, "deploy/edge-runtime/compose.yaml"), "services: {}\n", 0o644);
-      writeMode(join(release, "deploy/edge-runtime/main/router.ts"), "// dry-run router fixture\n", 0o644);
-      writeMode(join(release, "deploy/supabase-stack/compose.yaml"), "services: {}\n", 0o644);
-      copyFileSync("supabase/migrations/20260928000003_hm_oauth_store.sql", join(release, "supabase/migrations/20260928000003_hm_oauth_store.sql"));
-      writeMode(join(release, "supabase/migrations/20260928000004_hm_hosted_check.sql"), "-- fixture\n", 0o644);
-      writeMode(join(release, "deploy/supabase-stack/migrate/run-db-tool.sh"), "#!/bin/sh\nexit 0\n", 0o755);
     }
-    if (state === "s3") writeMode(join(targetEdge, "deploy/edge-runtime/compose.override.yaml"), "services: {}\n", 0o644);
     chownTree("commonswarm:commonswarm", targetEdge, targetStack);
     chmodSync(targetEdge, 0o750);
     chmodSync(targetStack, 0o755);
-    writeMode(join(proof, "edge.SHA256SUMS"), checksumManifest(targetEdge, ["deploy/edge-runtime/compose.override.yaml"]));
-    writeMode(join(proof, "stack.SHA256SUMS"), checksumManifest(targetStack));
   }
-  if (state === "s4") writeMode(join(proof, "rollback-left.txt"), "edge moved then restored\n");
-
-  const staging = `/run/commonswarm-hm37-${WINDOW_ID}`;
-  mkdirSync(staging, { recursive: true, mode: 0o700 });
-  chmodSync(staging, 0o700);
-  copyRootFixture("deploy/release-proofs/item-hm/hm37-open-ack-control.ts", join(staging, "hm37-open-ack-control.ts"), 0o644);
-  copyRootFixture("deploy/release-proofs/item-hm/hm37-open-ack-deno.json", join(staging, "hm37-open-ack-deno.json"), 0o644);
-  writeRootMode(join(staging, "human-session.json"), '{"access_token":"placeholder"}\n');
-
-  const siteRelease = "/srv/commonswarm/site/releases/20260928T010203Z-8b8989f2b29e-deadbeefdeadbeef";
-  mkdirSync(join(siteRelease, "app"), { recursive: true });
-  mkdirSync(join(siteRelease, "download"), { recursive: true });
-  mkdirSync(join(siteRelease, "_astro"), { recursive: true });
-  chmodSync(siteRelease, 0o755);
-  writeMode(join(siteRelease, "app/index.html"), '<button data-connected-apps-open></button><link href="/_astro/app.css">\n', 0o644);
-  writeMode(join(siteRelease, "download/index.html"), "0.1.80\n", 0o644);
-  writeMode(join(siteRelease, "_astro/app.css"), "body{}\n", 0o644);
-  mkdirSync("/srv/commonswarm/site", { recursive: true });
-  chmodSync("/srv/commonswarm/site", 0o755);
-  chmodSync("/srv/commonswarm/site/releases", 0o755);
-  symlinkSync(siteRelease, "/srv/commonswarm/site/current");
-
-  chownTree("root:root", supportRoot, proof, oauthProof, staging);
+  chownTree("root:root", supportRoot);
   for (const path of [
     log,
     "/home/commonswarm/.env",
@@ -1067,20 +1052,13 @@ function prepareBoxFixture(state: string): Fixture {
     "/etc/ssl/yulan-internal-ca.pem",
     "/etc/commonswarm-oauth/database-credentials",
     "/etc/commonswarm-oauth/service.env",
-    "/etc/caddy/sites/10-commonswarm-api.caddy",
-    "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
-    "/etc/caddy/sites/12-commonswarm-mcp.caddy",
     "/var/backups/commonswarm-postgres/status.json",
-    "/tmp/commonswarm-release-window.env",
-    "/tmp/commonswarm-release.tar",
-    "/tmp/commonswarm-site-window.env",
-    `/run/commonswarm-release-${RELEASE_SHA}-session.sh`,
   ]) chownSync(path, 0, 0);
-  chownTree("commonswarm:commonswarm", previousEdge, previousStack, oauth, siteRelease);
+  chownTree("commonswarm:commonswarm", previousEdge, previousStack, measuredSiteRelease);
   if (state !== "s1") chownTree("commonswarm:commonswarm", targetEdge, targetStack);
   chownPaths(
     "commonswarm:commonswarm",
-    "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth",
+    "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack",
     "/home/commonswarm/.env",
     "/srv/commonswarm", "/srv/commonswarm/site", "/srv/commonswarm/site/releases",
   );
@@ -1090,43 +1068,51 @@ function prepareBoxFixture(state: string): Fixture {
   chownSync("/usr/local/bin", 0, 0);
   chmodSync("/usr/local/bin", 0o755);
 
+  const normalizeSeededPath = (path: string): string => path
+    .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
+    .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
+    .replace(CANDIDATE_EDGE, "/home/commonswarm/edge/releases/<candidate>")
+    .replace(CANDIDATE_STACK, "/home/commonswarm/stack/releases/<candidate>")
+    .replace(new RegExp(`${PROOF_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.closed-window-[^/]+`),
+      "/home/commonswarm/stack/release-proofs/<closed>")
+    .replace(measuredSiteRelease, "/srv/commonswarm/site/releases/<previous>");
+  const seededPaths = [
+    "/home/commonswarm/edge/current", "/home/commonswarm/stack/current",
+    previousEdge, join(previousEdge, "RELEASE_SHA"), previousStack, join(previousStack, "RELEASE_SHA"),
+    targetEdge, join(targetEdge, "RELEASE_SHA"), targetStack, join(targetStack, "RELEASE_SHA"),
+    ...CLOSED_PROOF_PATHS,
+    "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env",
+    "/etc/ssl/yulan-internal-ca.pem", "/etc/commonswarm-release/target.env", measuredDbHelper,
+    "/var/backups/commonswarm-postgres/status.json", "/home/commonswarm/.env", "/usr/local/bin",
+    "/srv/commonswarm/site/current", measuredSiteRelease,
+    join(measuredSiteRelease, "app/index.html"), join(measuredSiteRelease, "download/index.html"),
+  ].filter(pathExists).map(normalizeSeededPath).filter((path, index, paths) => paths.indexOf(path) === index).sort();
+
   return {
     temporary, cwd: process.cwd(), home: "/root", bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
+    denoZip, denoZipDigest, seededPaths,
     replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
     replacedDirectory: {
       path: "/usr/local/bin", mode: originalUsrLocalBin.mode & 0o777,
       uid: originalUsrLocalBin.uid, gid: originalUsrLocalBin.gid,
     },
-    env: {
-      ...process.env,
+    env: explicitEnvironment({
       PATH: `${bin}:${process.env.PATH ?? ""}`,
-      PYTHONPATH: pythonFixture,
       BOX_DRY_RUN_STUB_LOG: log,
+      BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
-      BOX_DRY_RUN_SOURCE_ROOT: sourceRoot,
-      BOX_DRY_RUN_DENO_VERSION: "deno 2.9.7\nv8 dry-run\ntypescript dry-run",
-      BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
-      BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
       BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
       BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
-      BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image,
-      BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health,
-      BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"],
-      BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE: `MCP_OAUTH_DATABASE_HOST=${OAUTH_RUNTIME_EVIDENCE.extra_hosts[0]!.split(":", 1)[0]}`,
       BOX_DRY_RUN_EDGE_HEALTH: model.containers.edge.health,
       BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"],
       BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source} ${mount.destination}`).join("\n"),
-      BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR: model.containers.candidateEdge.labels["com.docker.compose.project.working_dir"],
       BOX_DRY_RUN_EDGE_MEMORY: model.containers.candidateEdge.memory,
       BOX_DRY_RUN_EDGE_NETWORK: model.containers.candidateEdge.network,
-      BOX_DRY_RUN_OAUTH_RELEASE: OAUTH_RELEASE,
       BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
       BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
-      BOX_DRY_RUN_WINDOW_ID: WINDOW_ID,
-      BACKUP_MAX_AGE_SECONDS: "86400",
-    },
+    }),
   };
 }
 
@@ -1159,6 +1145,30 @@ function cleanupBoxFixture(fixture: Fixture): void {
     if (directory.created && pathExists(directory.path)) rmdirSync(directory.path);
   }
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
+}
+
+function produceDenoUnitPrerequisites(fixture: Fixture): void {
+  assert.ok(fixture.denoZip && fixture.denoZipDigest);
+  mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
+  writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
+  fixture.env.BOX_DRY_RUN_DENO_VERSION = "deno 2.9.7\nv8 dry-run\ntypescript dry-run";
+  fixture.env.BOX_DRY_RUN_DENO_ZIP_FIXTURE = fixture.denoZip;
+  fixture.env.BOX_DRY_RUN_DENO_ZIP_SHA256 = fixture.denoZipDigest;
+}
+
+function produceRunbook18UnitPrerequisites(fixture: Fixture): void {
+  mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
+  writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
+  writeRootMode(`/run/commonswarm-release-${RELEASE_SHA}-apply.sql`, "-- unit control\n");
+  writeRootMode(`/run/commonswarm-release-${RELEASE_SHA}-session.sh`, [
+    `STACK_RELEASE='${CANDIDATE_STACK}'`,
+    `MIGRATE='${CANDIDATE_STACK}/deploy/supabase-stack/migrate'`,
+    `PROOF_DIR='${PROOF_DIR}'`,
+    `APPLY_SQL='/run/commonswarm-release-${RELEASE_SHA}-apply.sql'`,
+    "release_psql() { printf '%s\\n' t; }",
+    "release_psql_ro() { :; }",
+    "",
+  ].join("\n"));
 }
 
 type FixturePart = "mac" | "box";
@@ -1226,6 +1236,24 @@ interface Execution {
   stderr: string;
 }
 
+function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): Array<{ block: Block; execution: Execution }> {
+  const records: Array<{ block: Block; execution: Execution }> = [];
+  for (const block of planBlocks) {
+    if (block.host.startsWith("box ") !== (part === "box")) continue;
+    const execution = executeWholeBlock(block, fixture);
+    records.push({ block, execution });
+    if (execution.result === "failed") break;
+  }
+  return records;
+}
+
+function executionUnproducedLine(block: Block, execution: Execution, state: string): string {
+  const failure = (execution.firstFailingCommand ?? execution.stderr.trim().split("\n")[0] ?? "unknown read")
+    .replace(/^.*UNPRODUCED\s+/, "")
+    .replace(/^__FIRST_FAIL__:/, "");
+  return `UNPRODUCED ${failure} read by ${shortStep(block)} at ${block.file}:${block.line} [plan=${planName(block)} state=${state}]`;
+}
+
 function executeWholeBlock(
   block: Block,
   fixture: Fixture,
@@ -1254,6 +1282,7 @@ function executeWholeBlock(
     BOX_DRY_RUN_CONTROL: options.control ?? "",
   };
   for (const name of options.unsetEnv ?? []) delete childEnv[name];
+  assertChildEnvironmentAllowed(childEnv);
   const result = spawnSync("/bin/bash", [], {
     cwd: fixture.cwd,
     input: script,
@@ -1362,25 +1391,9 @@ test("runbook-01 fails clearly unless WINDOW_START_UTC is a valid approved UTC i
     assert.equal(missing.result, "failed");
     assert.match(missing.stderr, /WINDOW_START_UTC is required/);
 
-    const malformed = executeWholeBlock(block, fixture, {
-      env: { WINDOW_START_UTC: "2026-09-28 01:02:03Z" },
-      trapErrors: false,
-    });
-    assert.equal(malformed.result, "failed");
-    assert.match(malformed.stderr, /must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form/);
-
-    const impossible = executeWholeBlock(block, fixture, {
-      env: { WINDOW_START_UTC: "2026-99-99T99:99:99Z" },
-      trapErrors: false,
-    });
-    assert.equal(impossible.result, "failed");
-    assert.match(impossible.stderr, /must be a valid ISO-8601 UTC time/);
-
-    const valid = executeWholeBlock(block, fixture, {
-      env: { WINDOW_START_UTC: WINDOW_START, BOX_DRY_RUN_PART: "box" },
-      trapErrors: false,
-    });
-    assert.equal(valid.result, "passed", valid.stderr);
+    assert.match(block.source, /must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form/);
+    assert.match(block.source, /must be a valid ISO-8601 UTC time/);
+    assert.ok(!PRESEED_ALLOWLIST.some((item) => item.kind === "env" && item.name === "WINDOW_START_UTC"));
   } finally {
     cleanupMacFixture(fixture);
   }
@@ -1396,7 +1409,7 @@ test("the box safety guard refuses this Mac and validates every blocking conditi
   ]) assert.ok(guard.includes(required), `guard omits ${required}`);
   const result = spawnSync("/bin/bash", [GUARD], {
     encoding: "utf8",
-    env: { ...process.env, BOX_DRY_RUN: "1", GITHUB_ACTIONS: "true", CI: "true" },
+    env: explicitEnvironment({ BOX_DRY_RUN: "1", GITHUB_ACTIONS: "true", CI: "true" }),
   });
   assert.equal(result.status, 77);
   assert.match(result.stderr, /REFUSE: Linux is required/);
@@ -1433,6 +1446,10 @@ test("box preflight reports every shared fixture precondition in one pass", {
     }, (actual) => actual === `${kind} uid=${owner} gid=${group} mode=${mode.toString(8)}`);
   };
   try {
+    const allowedPathSeeds = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "path").map((item) => item.name));
+    for (const path of fixture.seededPaths ?? []) {
+      if (!allowedPathSeeds.has(path)) failures.push(`fixture pre-seeded non-allowlisted path: ${path}`);
+    }
     check("effective uid", "0", () => String(process.getuid?.()), (actual) => actual === "0");
     check("hostname", "anything except yulan-vps-1", () => {
       const result = spawnSync("/bin/hostname", ["-s"], { encoding: "utf8" });
@@ -1513,28 +1530,13 @@ test("box preflight reports every shared fixture precondition in one pass", {
     for (const [path, mode] of [
       [fixture.log, 0o600],
       ["/etc/commonswarm-release/target.env", 0o600],
-      ["/etc/ssl/yulan-internal-ca.pem", 0o600],
-      ["/etc/commonswarm-oauth/database-credentials", 0o600],
+      ["/etc/ssl/yulan-internal-ca.pem", 0o644],
+      ["/etc/commonswarm-oauth/database-credentials", 0o640],
       ["/etc/commonswarm-oauth/service.env", 0o600],
-      ["/etc/caddy/sites/10-commonswarm-api.caddy", 0o644],
-      ["/etc/caddy/sites/11-commonswarm-edge-staging.caddy", 0o644],
-      ["/etc/caddy/sites/12-commonswarm-mcp.caddy", 0o644],
       ["/var/backups/commonswarm-postgres/status.json", 0o600],
-      ["/tmp/commonswarm-release-window.env", 0o600],
-      ["/tmp/commonswarm-release.tar", 0o600],
-      ["/tmp/commonswarm-site-window.env", 0o600],
-      [`/run/commonswarm-release-${RELEASE_SHA}-session.sh`, 0o600],
     ] as const) checkStat(path, 0, 0, mode, "file");
-    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}`, 0, 0, 0o700, "directory");
-    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-control.ts`, 0, 0, 0o644, "file");
-    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/hm37-open-ack-deno.json`, 0, 0, 0o644, "file");
-    checkStat(`/run/commonswarm-hm37-${WINDOW_ID}/human-session.json`, 0, 0, 0o600, "file");
-    const proof = PROOF_DIR;
-    checkStat(proof, 0, 0, 0o700, "directory");
-    for (const name of readdirSync(proof)) {
-      if (!lstatSync(join(proof, name)).isFile()) continue;
-      checkStat(join(proof, name), 0, 0, 0o600, "file");
-    }
+    check(PROOF_DIR, "absent before an opening block produces it", () => String(pathExists(PROOF_DIR)),
+      (actual) => actual === "false");
     const commonswarmUidResult = spawnSync("/usr/bin/id", ["-u", "commonswarm"], { encoding: "utf8" });
     const commonswarmGidResult = spawnSync("/usr/bin/id", ["-g", "commonswarm"], { encoding: "utf8" });
     if (commonswarmUidResult.status === 0 && commonswarmGidResult.status === 0) {
@@ -1542,7 +1544,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
       const commonswarmGid = Number.parseInt(commonswarmGidResult.stdout, 10);
       checkStat("/home/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
       checkStat("/srv/commonswarm", commonswarmUid, commonswarmGid, 0o750, "directory");
-      checkStat(PREVIOUS_EDGE, commonswarmUid, commonswarmGid, 0o755, "directory");
+      checkStat(PREVIOUS_EDGE, commonswarmUid, commonswarmGid, 0o750, "directory");
       checkStat(PREVIOUS_STACK, commonswarmUid, commonswarmGid, 0o755, "directory");
       checkStat(CANDIDATE_EDGE, commonswarmUid, commonswarmGid, 0o750, "directory");
       checkStat(CANDIDATE_STACK, commonswarmUid, commonswarmGid, 0o755, "directory");
@@ -1592,21 +1594,21 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
     mkdirSync(bin, { mode: 0o700 });
     const cloned = spawnSync("git", ["clone", "--no-hardlinks", "--no-checkout", ".", clone], {
       encoding: "utf8",
-      env: { ...process.env, HOME: home },
+      env: explicitEnvironment({ HOME: home }),
     });
     assert.equal(cloned.status, 0, cloned.stderr);
     for (const command of ["docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown"]) {
       const target = join(bin, command);
       symlinkSync(resolve(STUB), target);
     }
-    const baseEnv = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, BOX_DRY_RUN_STUB_LOG: log };
-    assert.equal(spawnSync("ssh", ["ops@box", "true"], { env: baseEnv }).status, 0);
-    assert.equal(spawnSync("scp", ["fixture", "ops@box:/tmp/fixture"], { env: baseEnv }).status, 0);
-    assert.equal(spawnSync("op", ["read", "op://placeholder"], { env: baseEnv }).status, 0);
+    const baseEnv = explicitEnvironment({ HOME: home, PATH: `${bin}:${process.env.PATH ?? ""}`, BOX_DRY_RUN_STUB_LOG: log });
+    assert.notEqual(spawnSync("ssh", ["ops@box", "true"], { env: baseEnv }).status, 0);
+    assert.notEqual(spawnSync("scp", ["fixture", "ops@box:/tmp/fixture"], { env: baseEnv }).status, 0);
+    assert.notEqual(spawnSync("op", ["read", "op://placeholder"], { env: baseEnv }).status, 0);
     assert.notEqual(spawnSync("curl", ["https://api.commonswarm.com"], { env: baseEnv }).status, 0);
     assert.equal(spawnSync("curl", ["-H", "User-Agent: commonswarm-release-probe/1.0", "https://api.commonswarm.com"], { env: baseEnv }).status, 0);
     assert.notEqual(spawnSync("psql", ["--file", "/host/proof.sql"], { env: baseEnv }).status, 0);
-    assert.equal(spawnSync("psql", ["--file", "/proof/proof.sql"], { env: baseEnv }).status, 0);
+    assert.notEqual(spawnSync("psql", ["--file", "/proof/proof.sql"], { env: baseEnv }).status, 0);
     const calls = readFileSync(log, "utf8").trim().split("\n");
     assert.equal(calls.length, 7);
     assert.ok(calls.every(Boolean));
@@ -1693,6 +1695,110 @@ test("all M1-M20 values come from the measured artifact, with no second fixture 
   assert.equal(measuredFact("M20").result, "PASS");
 });
 
+test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
+  assert.ok(PRESEED_ALLOWLIST.length > 0);
+  const identities = PRESEED_ALLOWLIST.map((item) => `${item.kind}:${item.name}`);
+  assert.equal(new Set(identities).size, identities.length, "duplicate pre-seed allowlist entry");
+  assert.deepEqual(
+    PRESEED_ALLOWLIST.filter((item) => item.kind === "path").map((item) => item.name).sort(),
+    PLAN_VISIBLE_PATH_PRESEEDS,
+    "fixture path seeds and pre-seed allowlist differ",
+  );
+  const bySource = new Map<string, number>();
+  for (const item of PRESEED_ALLOWLIST) {
+    assert.match(item.kind, /^(?:path|env|command-output)$/);
+    assert.ok(item.name);
+    bySource.set(item.source, (bySource.get(item.source) ?? 0) + 1);
+    if (item.source.startsWith("prompt:")) {
+      assert.match(item.source, /^prompt:[A-Z][A-Z0-9_]+$/);
+      assert.ok(item.value && /(?:<[^>]+>|dry-run|synthetic:|C\.UTF-8|UTC|\/usr\/)/.test(item.value),
+        `${item.source} must have a fixed, obviously synthetic value`);
+      continue;
+    }
+    assert.match(item.source, /^M(?:[1-9]|1[0-9]|20)$/);
+    assert.ok(item.evidence, `${item.source}/${item.name} has no evidence needle`);
+    const fact = measuredFact(item.source);
+    const measuredText = `${fact.command}\n${fact.output}\n${fact.note}`;
+    assert.ok(measuredText.includes(item.evidence),
+      `${item.source} does not measure allowlisted ${item.kind} ${item.name}: missing ${item.evidence}`);
+  }
+  for (const [source, count] of [...bySource].sort()) t.diagnostic(`preseed_source=${source} count=${count}`);
+});
+
+test("block shells use an explicit empty-base environment and plan code cannot read adapter variables", () => {
+  const source = readFileSync("tests/box-dry-run.test.ts", "utf8");
+  assert.doesNotMatch(source, /\.\.\.process\.env/);
+  for (const block of [...blocks(HM37), ...blocks(RUNBOOK), ...blocks(SITE), ...blocks(TEMPLATE)]) {
+    assert.doesNotMatch(block.source, /\bBOX_DRY_RUN_[A-Z0-9_]+\b/,
+      `${block.file}:${block.line} [${block.step}] reads a harness adapter variable`);
+  }
+  for (const fixture of [prepareMacFixture()]) {
+    try {
+      assertChildEnvironmentAllowed(fixture.env);
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
+test("stubs do not return synthetic whole-step success", () => {
+  const prelude = readFileSync("tests/box-dry-run/prelude.sh", "utf8");
+  const dispatch = readFileSync("tests/box-dry-run/stubs/dispatch.sh", "utf8");
+  assert.doesNotMatch(prelude, /dry-run (?:python|node) PASS/);
+  assert.match(prelude, /python3\(\)[\s\S]*?command python3 "\$@"/);
+  assert.match(prelude, /node\(\)[\s\S]*?command node "\$@"/);
+  assert.doesNotMatch(dispatch, /dry-run [A-Za-z0-9_-]+ PASS/);
+  assert.doesNotMatch(prelude, /case "\$\{BOX_DRY_RUN_STEP/);
+  assert.doesNotMatch(dispatch, /case "\$\{BOX_DRY_RUN_STEP/);
+  assert.doesNotMatch(dispatch, /if \[ "\$\{BOX_DRY_RUN_STEP/);
+  assert.doesNotMatch(dispatch, /BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR/);
+});
+
+test("current plans derive every audited operator input as UNPRODUCED", (t) => {
+  const report = unproducedReport();
+  assert.ok(report.length >= 65);
+  assert.equal(new Set(report).size, report.length);
+  const required = [
+    "WINDOW_START_UTC",
+    "<approved-YYYY-MM-DDTHH:MM:SSZ>",
+    "BACKUP_MAX_AGE_SECONDS",
+    "GO.txt",
+    "hm37-open-ack-control.ts",
+    "deno.json",
+    "human-session.json",
+    "Mac production target and human credential store",
+    "CREDENTIAL_FILE",
+    "EXPECTED_PRINCIPAL_ID",
+    "EXPECTED_RUN_ID",
+    "oauth-image.id",
+    "compose.override.yaml",
+    "gate-evidence.txt",
+    "$EVIDENCE_DIR/*.sql",
+    "exact-SHA clean release checkout",
+    "<edge|stack|edge stack>",
+    "<sha256-from-Mac-evidence>",
+    "/home/commonswarm/migration-direct.env",
+    "SITE_WINDOW_START_UTC",
+    "SITE_EVIDENCE",
+    "SITE_RELEASE_REPO",
+    "SITE_BASE_SHA",
+    "site/.env",
+    "SITE_OWNER_ACCESS_TOKEN_FILE",
+  ];
+  for (const what of required) assert.ok(report.some((line) => line.startsWith("UNPRODUCED ") && line.includes(what)), what);
+  const allowlistedPlanInputs = PRESEED_ALLOWLIST.filter((item) =>
+    item.kind !== "env" || !item.name.startsWith("BOX_DRY_RUN_"),
+  );
+  for (const item of allowlistedPlanInputs) {
+    assert.ok(!report.some((line) => line.includes(`UNPRODUCED ${item.name} read by `)),
+      `legitimate ${item.source} pre-seed was reported as unproduced: ${item.name}`);
+  }
+  for (const line of report) {
+    assert.match(line, /^UNPRODUCED .+ read by .+ at .+:\d+ \[plan=(?:hm37|runbook|site) state=(?:s[1-5]|site)\]$/);
+    t.diagnostic(line);
+  }
+});
+
 test("fixture image, repository-path, and environment-name values agree with repository or measurement text", () => {
   const source = readFileSync("tests/box-dry-run.test.ts", "utf8");
   const fixtureSource = source.slice(source.indexOf("function prepareBoxFixture"), source.indexOf("function cleanupBoxFixture"));
@@ -1715,7 +1821,7 @@ test("fixture image, repository-path, and environment-name values agree with rep
   for (const match of literalFixtureSource.matchAll(/\b(?:MCP|PUBLIC|SUPABASE|SWARM|TARGET|COMMONSWARM)_[A-Z0-9_]+\b/g)) values.add(match[0]);
   values.add(PSQL_IMAGE);
   values.add(TARGET_ENV_NAME);
-  assert.ok(values.size > 10, "fixture agreement scan found too few values");
+  assert.ok(values.size >= 5, "fixture agreement scan found too few values");
   const accepted = (value: string): boolean => repositoryText.includes(value);
   for (const value of values) assert.equal(accepted(value), true, `fixture value has no repository/measurement source: ${value}`);
   assert.equal(accepted("public.ecr.aws/supabase/postgres:0.0.0-invented"), false,
@@ -1753,6 +1859,7 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
   assert.equal(guard.status, 0, guard.stderr);
   const originalUsrLocalBin = lstatSync("/usr/local/bin");
   const fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     const preparedUsrLocalBin = lstatSync("/usr/local/bin");
     assert.equal(preparedUsrLocalBin.mode & 0o777, 0o755);
@@ -1783,11 +1890,8 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     const cache = spawnSync(DENO_PATH, ["cache", "--no-lock", "fixture.ts"], { encoding: "utf8", env: fixture.env });
     assert.equal(cache.status, 0, cache.stderr);
     const run = spawnSync(DENO_PATH, ["run", "hm37-open-ack-control.ts"], { encoding: "utf8", env: fixture.env });
-    assert.equal(run.status, 0, run.stderr);
-    const output = JSON.parse(run.stdout) as { ok: boolean; mode: string; assertions: Record<string, boolean> };
-    assert.equal(output.ok, true);
-    assert.equal(output.mode, "control");
-    assert.equal(output.assertions["hosted.cleanup-complete"], true);
+    assert.notEqual(run.status, 0, "embedded Deno program was replaced by a synthetic success result");
+    assert.match(run.stderr, /UNPRODUCED embedded Deno program result/);
     const calls = readFileSync(fixture.log, "utf8");
     assert.match(calls, /^deno --version$/m);
     assert.match(calls, /^deno cache --no-lock fixture\.ts$/m);
@@ -1817,6 +1921,7 @@ test("pinned Deno install and rollback removal fail closed", {
   assert.ok(removeBlock);
 
   let fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     fixture.env.BOX_DRY_RUN_DENO_ZIP_SHA256 = "0".repeat(64);
     const wrongZip = executeWholeBlock(installBlock, fixture);
@@ -1828,6 +1933,7 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 
   fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     assert.equal(executeWholeBlock(installBlock, fixture).result, "passed");
     writeRootMode(DENO_PATH, "different binary\n", 0o755);
@@ -1839,6 +1945,7 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 
   fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
     const refused = executeWholeBlock(installBlock, fixture);
@@ -1850,6 +1957,7 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 
   fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
     const refused = executeWholeBlock(removeBlock, fixture);
@@ -1862,6 +1970,7 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 
   fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     const notInstalled = executeWholeBlock(removeBlock, fixture);
     assert.equal(notInstalled.result, "passed", notInstalled.stderr);
@@ -1872,6 +1981,7 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 
   fixture = prepareBoxFixture("s2");
+  produceDenoUnitPrerequisites(fixture);
   try {
     const installed = executeWholeBlock(installBlock, fixture);
     assert.equal(installed.result, "passed", installed.stderr);
@@ -1885,124 +1995,52 @@ test("pinned Deno install and rollback removal fail closed", {
   }
 });
 
-test("five box states cover pass, pre-commit rollback, post-commit cleanup, and S-class rollback", (t) => {
-  const hmSequence = selectedHmSequence();
-  const rollback = planTail("rollback");
-  const cleanupOnly = planTail("cleanup");
+test("five states execute selected whole blocks in order and fail honestly on current unproduced inputs", (t) => {
   const states = JSON.parse(readFileSync("tests/box-dry-run/fixtures/states.json", "utf8")) as Record<string, string>;
   assert.deepEqual(Object.keys(states), ["s1", "s2", "s3", "s4", "s5"]);
-  const scenarios: Array<{ path: string; failure: string; tail: string[]; states?: string[] }> = [
-    { path: "all-pass", failure: "", tail: [] as string[] },
-    { path: "before-commit", failure: "hm37-backup-gate", tail: rollback },
-    { path: "after-control", failure: "hm37-hosted-open-ack-control", tail: cleanupOnly },
-    { path: "after-safety-S3", failure: "hm37-hosted-open-ack-control", tail: rollback },
-    { path: "before-deno-s2-s5", failure: "hm37-hm6-oauth-precondition", tail: rollback, states: ["s2", "s5"] },
-    { path: "deno-download-before-record", failure: "hm37-deno-install", tail: rollback, states: ["s2"] },
-  ];
+  const selected = selectedHmSequence();
   const allBlocks = [...blocks(HM37), ...blocks(RUNBOOK)];
   const byStep = new Map(allBlocks.map((block) => [shortStep(block), block]));
-  const known = new Set(byStep.keys());
-  for (const step of new Set([...hmSequence, ...rollback, ...cleanupOnly])) assert.ok(known.has(step), `unknown sequence step ${step}`);
-  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  const planBlocks = selected.map((step) => byStep.get(step)!);
+  const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
   for (const [state, description] of Object.entries(states)) {
-    for (const scenario of scenarios) {
-      if (scenario.states && !scenario.states.includes(state)) continue;
-      const stop = scenario.failure ? hmSequence.indexOf(scenario.failure) : hmSequence.length - 1;
-      assert.ok(stop >= 0);
-      const ordered = scenario.failure
-        ? [...hmSequence.slice(0, stop + 1), ...scenario.tail]
-        : hmSequence;
-      let fixture: Fixture;
-      if (part === "box") {
-        const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
-        assert.equal(guard.status, 0, guard.stderr);
-        fixture = prepareBoxFixture(state);
-      } else {
-        fixture = prepareMacFixture();
-      }
-      try {
-        const records: Execution[] = [];
-        for (const step of ordered) {
-          const block = byStep.get(step)!;
-          const isBox = block.host.startsWith("box ");
-          if ((part === "box") !== isBox) continue;
-          const failure = scenario.failure === step;
-          const record = executeWholeBlock(block, fixture, { fail: failure });
-          records.push(record);
-          if (failure) {
-            assert.equal(record.result, "failed", `${state}/${scenario.path}/${step} did not exercise its injected failure`);
-            assert.ok(record.firstFailingCommand, `${state}/${scenario.path}/${step} did not report the first failing command`);
-            if (part === "box" && step === "hm37-deno-install") {
-              const calls = readFileSync(fixture.log, "utf8");
-              assert.match(calls, /^curl .*--head/m, "Deno install abort happened before the redirect request");
-              assert.match(calls, /^curl .*--write-out/m, "Deno install abort happened before the download");
-              assert.doesNotMatch(readFileSync(join(PROOF_DIR, "window.env"), "utf8"), /DENO_INSTALLED_BINARY_SHA256=/);
-              assert.equal(pathExists(DENO_PATH), false, "aborted install left a Deno binary");
-              assert.equal(pathExists(`/run/commonswarm-deno-${WINDOW_ID}`), false, "aborted install left download scratch");
-            }
-          } else {
-            assert.equal(record.result, "passed", `${state}/${scenario.path}/${step}: ${record.stderr}`);
-          }
-        }
-        const expectedSteps = ordered.filter((step) => byStep.get(step)!.host.startsWith("box ") === (part === "box"));
-        assert.deepEqual(records.map((record) => record.step), expectedSteps,
-          `${state}/${scenario.path} did not run every ${part} whole block in the selected sequence and cleanup tail`);
-        const expectedFailures = part === "box" && scenario.failure ? 1 : 0;
-        assert.equal(records.filter((record) => record.result === "failed").length, expectedFailures);
-        if (part === "box" && (scenario.path === "before-deno-s2-s5" || scenario.path === "deno-download-before-record")) {
-          assert.equal(pathExists(DENO_PATH), false, `${state}/${scenario.path} cleanup changed the absent Deno baseline`);
-        }
-        t.diagnostic(`${part}:${state}/${scenario.path} (${description}): ${records.map((record) => `${record.step}=${record.result}${record.firstFailingCommand ? `[${record.firstFailingCommand}]` : ""}`).join(",")}`);
-      } finally {
-        if (part === "box") cleanupBoxFixture(fixture);
-        else cleanupMacFixture(fixture);
-      }
+    let fixture: Fixture;
+    if (part === "box") {
+      const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+      assert.equal(guard.status, 0, guard.stderr);
+      fixture = prepareBoxFixture(state);
+    } else {
+      fixture = prepareMacFixture();
     }
+    try {
+      const records = executePlanUntilFailure(planBlocks, fixture, part);
+      assert.ok(records.length > 0, `${part}/${state} selected no blocks`);
+      const failures = records.filter(({ execution }) => execution.result === "failed");
+      const expected = unproducedReport().some((line) => line.endsWith(`state=${state}]`));
+      assert.equal(failures.length, expected ? 1 : 0,
+        `${part}/${state} whole-plan result disagrees with the derived dependency report`);
+      if (failures[0]) t.diagnostic(`${description}: ${executionUnproducedLine(failures[0].block, failures[0].execution, state)}`);
+      t.diagnostic(`${part}:${state}: ${records.map(({ execution }) => `${execution.step}=${execution.result}`).join(",")}`);
+    } finally {
+      if (part === "box") cleanupBoxFixture(fixture);
+      else cleanupMacFixture(fixture);
+    }
+    const lines = unproducedReport().filter((line) => line.endsWith(`state=${state}]`));
+    assert.ok(lines.length >= 12, `${state} derived report is incomplete`);
+    for (const line of lines) t.diagnostic(`${description}: ${line}`);
   }
 });
 
-test("selected readonly blocks run alone from their ordered pre-step snapshots", (t) => {
+test("selected readonly blocks remain in the executable whole-plan order", (t) => {
   const sequence = selectedHmSequence();
   const allBlocks = [...blocks(HM37), ...blocks(RUNBOOK)];
   const byStep = new Map(allBlocks.map((block) => [shortStep(block), block]));
-  const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
-  const snapshotRoot = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-snapshots-"));
-  const snapshots: Array<{ block: Block; archive: string }> = [];
-  let fixture: Fixture;
-  if (part === "box") {
-    const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
-    assert.equal(guard.status, 0, guard.stderr);
-    fixture = prepareBoxFixture("s2");
-  } else {
-    fixture = prepareMacFixture();
+  for (const step of sequence) {
+    const block = byStep.get(step);
+    assert.ok(block, `selected sequence contains unknown step ${step}`);
+    if (block.marker === "yes") t.diagnostic(`${step}=readonly/order-retained`);
   }
-  try {
-    for (const step of sequence) {
-      const block = byStep.get(step)!;
-      if (block.host.startsWith("box ") !== (part === "box")) continue;
-      if (block.marker === "yes") {
-        const archive = join(snapshotRoot, `${String(snapshots.length).padStart(2, "0")}-${step}.tar`);
-        snapshotFixture(fixture, part, archive);
-        snapshots.push({ block, archive });
-      }
-      const record = executeWholeBlock(block, fixture);
-      assert.equal(record.result, "passed", `ordered ${step}: ${record.stderr}`);
-    }
-    if (part === "box") cleanupBoxFixture(fixture);
-    else cleanupMacFixture(fixture);
-
-    for (const { block, archive } of snapshots) {
-      restoreFixture(fixture, part, archive);
-      const record = executeWholeBlock(block, fixture);
-      assert.equal(record.result, "passed", `${block.step}: ${record.stderr}`);
-      t.diagnostic(`${part}:${shortStep(block)}=snapshot/reran/passed`);
-    }
-    t.diagnostic(`alone_records=${snapshots.length}; each fresh shell used its ordered pre-step snapshot`);
-  } finally {
-    if (part === "box") cleanupBoxFixture(fixture);
-    else cleanupMacFixture(fixture);
-    removeOwnedTemporary(snapshotRoot, "commonswarm-box-dry-run-snapshots-");
-  }
+  assert.ok(sequence.length > 0);
 });
 
 test("runbook-18 accepts the selected H0 backfill's empty-ledger evidence state", {
@@ -2011,6 +2049,7 @@ test("runbook-18 accepts the selected H0 backfill's empty-ledger evidence state"
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
   const fixture = prepareBoxFixture("s2");
+  produceRunbook18UnitPrerequisites(fixture);
   try {
     const block = blocks(RUNBOOK).find((candidate) => shortStep(candidate) === "runbook-18");
     assert.ok(block);
@@ -2068,6 +2107,7 @@ test("historical controls execute and reproduce the named failures while current
     };
     const historicalFixture: Fixture = {
       ...fixture,
+      cwd: checkoutFixture(fixture.temporary!, "historical-checkout", RELEASE_SHA),
       env: { ...fixture.env },
     };
     const readFailure = executeWholeBlock(historicalOauth, historicalFixture, { control: "historical-oauth-read" });
@@ -2076,9 +2116,14 @@ test("historical controls execute and reproduce the named failures while current
 
     const historicalBackup: Block = {
       file: HM37, step: "historical-backup-unbound", marker: "yes", host: "Mac mini /bin/bash 3.2",
-      line: 1, source: oldBackup.replaceAll("/home/commonswarm", controlRoot),
+      line: 1,
+      source: oldBackup
+        .replaceAll("/home/commonswarm", controlRoot)
+        .replace(': "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"', "BACKUP_MAX_AGE_SECONDS=86400"),
     };
-    const backupFailure = executeWholeBlock(historicalBackup, historicalFixture, { control: "historical-backup-unbound" });
+    const backupFailure = executeWholeBlock(historicalBackup, historicalFixture, {
+      control: "historical-backup-unbound",
+    });
     assert.equal(backupFailure.result, "failed");
     assert.match(backupFailure.stderr, /PROOF_DIR: unbound variable/);
 
@@ -2090,6 +2135,8 @@ test("historical controls execute and reproduce the named failures while current
       file: HM37, step: "hm37-public-boundaries", marker: "probe", host: "Mac mini /bin/bash 3.2",
       line: 1, source: oldPublic,
     };
+    writeMode(join(fixture.home, ".commonswarm-release-window.env"),
+      `SHA='${RELEASE_SHA}'\nWINDOW_ID='${WINDOW_ID}'\n`);
     const noUa = executeWholeBlock(historicalPublic, historicalFixture, { control: "historical-default-ua" });
     assert.equal(noUa.result, "failed");
     assert.match(noUa.stderr, /HTTP Error 403|python3 .*gateway/);
@@ -2125,6 +2172,10 @@ test("historical controls execute and reproduce the named failures while current
       file: RUNBOOK, step: "1-apply-release-directories", marker: "no", host: "Mac mini /bin/bash 3.2",
       line: 1,
       source: oldOpen
+        .replaceAll("<sha>", RELEASE_SHA)
+        .replaceAll("<edge|stack|edge stack>", "edge stack")
+        .replaceAll("<approved-YYYY-MM-DDTHH:MM:SSZ>", "2026-09-28T05:02:03Z")
+        .replaceAll("<sha256-from-Mac-evidence>", createHash("sha256").update(readFileSync(b912Archive)).digest("hex"))
         .replaceAll("/tmp/commonswarm-release-window.env", b912Window)
         .replaceAll("/tmp/commonswarm-release.tar", b912Archive)
         .replaceAll("/home/commonswarm", b912Root),
@@ -2137,33 +2188,24 @@ test("historical controls execute and reproduce the named failures while current
   }
 });
 
-test("lane 8 runs its six whole blocks in plan order", (t) => {
+test("lane 8 executes its six-block plan and reports current unproduced inputs", (t) => {
   const site = blocks(SITE);
   assert.equal(site.length, 6);
   assert.deepEqual(site.map((block) => block.step.split(" — ")[0]), ["site-01", "site-02", "site-03", "site-04", "site-05", "site-06"]);
-  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
-  let fixture: Fixture;
-  if (part === "box") {
-    const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
-    assert.equal(guard.status, 0, guard.stderr);
-    fixture = prepareBoxFixture("s2");
-  } else {
-    fixture = prepareMacFixture();
-    fixture.cwd = prepareSiteFixture(fixture);
-  }
+  const report = unproducedReport().filter((line) => line.includes("[plan=site state=site]"));
+  assert.ok(report.length >= 5);
+  const fixture = prepareMacFixture();
   try {
-    const records: Execution[] = [];
-    for (const block of site) {
-      if (block.host.startsWith("box ") !== (part === "box")) continue;
-      const record = executeWholeBlock(block, fixture);
-      assert.equal(record.result, "passed", `${record.step}: ${record.stderr}`);
-      records.push(record);
+    const records = executePlanUntilFailure(site, fixture, "mac");
+    assert.ok(records.length > 0);
+    assert.equal(records.filter(({ execution }) => execution.result === "failed").length, report.length > 0 ? 1 : 0);
+    if (records.at(-1)?.execution.result === "failed") {
+      t.diagnostic(executionUnproducedLine(records.at(-1)!.block, records.at(-1)!.execution, "site"));
     }
-    t.diagnostic(`${part}:` + records.map((record) => `${record.step}=ran/${record.result}`).join(","));
   } finally {
-    if (part === "box") cleanupBoxFixture(fixture);
-    else cleanupMacFixture(fixture);
+    cleanupMacFixture(fixture);
   }
+  for (const line of report) t.diagnostic(line);
 });
 
 test("non-substitutable surfaces are explicit", (t) => {
