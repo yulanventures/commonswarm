@@ -499,7 +499,9 @@ both release directories, compare them on the box before deciding:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   for RUNTIME_PATH in compose.yaml postgres backup; do
     if diff -qr \
       "$PREVIOUS_STACK/deploy/supabase-stack/$RUNTIME_PATH" \
@@ -581,8 +583,9 @@ window state:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
+  : "${RELEASE_SHA:?named release SHA required}"
   . /tmp/commonswarm-release-window.env
-  test "$SHA" = '<sha>'
+  test "$SHA" = "$RELEASE_SHA"
   : "${WINDOW_END_UTC:?load the box-clock-derived window end from the open receipt}"
   ARCHIVE=/tmp/commonswarm-release.tar
   : "${KIND_LIST:?resolved item input missing}"
@@ -900,8 +903,9 @@ inventory. HezLead reviews this exact list for secrets before transfer:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  test "$SHA" = "$RELEASE_SHA"
   test -d "$EVIDENCE_DIR"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   (cd "$EVIDENCE_DIR" && find . -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort) >"$PROOF_LIST"
@@ -920,8 +924,9 @@ Mac mini:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_ARCHIVE="/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
   PROOF_LIST="$EVIDENCE_DIR/proof-transfer.list"
   test -s "$PROOF_LIST"
@@ -939,7 +944,9 @@ HezLead confirms their list contains no secret:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   tar -xf /tmp/commonswarm-release-proofs.tar -C "$PROOF_DIR"
   find "$PROOF_DIR" -type f -name '._*' -delete
@@ -960,7 +967,9 @@ HezLead confirms their list contains no secret:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   for KIND in $KIND_LIST; do
     if [ "$KIND" = edge ]; then RELEASE_DIR="$NEW_EDGE"; else RELEASE_DIR="$NEW_STACK"; fi
@@ -1185,7 +1194,9 @@ Then use the repository identity gate against the exact stack release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   MIGRATE="$NEW_STACK/deploy/supabase-stack/migrate"
   ARTIFACT_DIR="/home/commonswarm/stack/release-proofs/${SHA}/database"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
@@ -1217,7 +1228,9 @@ all other file arguments.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   STACK_RELEASE="$NEW_STACK"
   MIGRATE="$STACK_RELEASE/deploy/supabase-stack/migrate"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -1360,7 +1373,9 @@ H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
@@ -1397,7 +1412,9 @@ release checksum manifest before using its verifier.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   cat >"$APPLY_SQL" <<'SQL'
 BEGIN;
@@ -1443,7 +1460,9 @@ column rolls the transaction back.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -Atq --command \
     "SELECT version FROM supabase_migrations.schema_migrations WHERE version IN ('20260916000001','20260916000002') ORDER BY version;" \
@@ -1511,7 +1530,9 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   BACKUP_MAX_AGE_SECONDS='<agreed-seconds>'
   BACKUP_STATUS=/var/backups/commonswarm-postgres/status.json
   BACKUP_WAIT_MAX_SECONDS=14400
@@ -1562,7 +1583,9 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   BACKUP_WAIT_MAX_SECONDS=14400
   BACKUP_WAIT_DEADLINE=$(( $(date +%s) + BACKUP_WAIT_MAX_SECONDS ))
   systemctl start commonswarm-postgres-backup.service
@@ -1599,7 +1622,9 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   find "$STACK_RELEASE/supabase/migrations" -maxdepth 1 -type f -name '*.sql' -print \
     | LC_ALL=C sort | tee "$PROOF_DIR/migration-files.txt"
@@ -1621,7 +1646,9 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -Atq --command \
     "SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;" \
@@ -1641,7 +1668,9 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
     >"$PROOF_DIR/cron-before.txt"
@@ -1659,7 +1688,9 @@ proceed merely because the service command returned.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   IFS= read -r VERSION <"$PROOF_DIR/pending-versions.txt" || [ -n "$VERSION" ]
   test "$(wc -l <"$PROOF_DIR/pending-versions.txt" | tr -d ' ')" -eq 1
@@ -1737,7 +1768,9 @@ missing, false, or malformed values. Any failure rolls the transaction back.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   . "$PROOF_DIR/current-migration.env"
   test -n "$VERSION"
@@ -1804,7 +1837,9 @@ transaction.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   . "$PROOF_DIR/current-migration.env"
   LEDGER_AFTER="$(release_psql_ro -Atq --command \
@@ -1857,7 +1892,9 @@ name per line; empty when none). The lead supplies both lists with the release; 
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   . "$PROOF_DIR/item-resolved-inputs.env"
   test "$EXPECTED_NEW_CRON_JOBS" = none
@@ -1912,7 +1949,9 @@ timer and start it after verification.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
     case "$T" in
@@ -1955,7 +1994,9 @@ approved times overlap a protected interval.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -n "$PREVIOUS_EDGE"
   test -f "$NEW_EDGE/deploy/edge-runtime/compose.yaml"
@@ -2046,7 +2087,9 @@ URL alias satisfies the database requirement. The check never prints a value.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -n "$PREVIOUS_EDGE"
 
@@ -2091,7 +2134,9 @@ runtime cannot reach `db.commonswarm.internal`.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   deadline=$(( $(date +%s) + 180 ))
   while [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' commonswarm-edge-edge-runtime-1)" != healthy ]; do
@@ -2132,7 +2177,9 @@ the box:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   HEADERS="$PROOF_DIR/h0-note-unauth.headers"
   STATUS="$(curl -sS -D "$HEADERS" -o "$PROOF_DIR/h0-note-unauth.json" -w '%{http_code}' \
@@ -2179,7 +2226,9 @@ both loopback and staging probes finish, capture the log window that began at
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   docker logs --since "$(cat "$PROOF_DIR/edge-probe-start.txt")" commonswarm-edge-edge-runtime-1 \
     >"$PROOF_DIR/edge-probe-window.log" 2>&1
@@ -2340,7 +2389,9 @@ successful release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
@@ -2358,7 +2409,9 @@ successful release:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   test -n "$PREVIOUS_EDGE"
 
@@ -2409,7 +2462,9 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
@@ -2431,8 +2486,9 @@ statement from the Git object on the Mac mini. No operator types a version:
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  : "${RELEASE_SHA:?named release SHA required}"
   . "$HOME/.commonswarm-release-window.env"
-  test "$SHA" = '<sha>'
+  test "$SHA" = "$RELEASE_SHA"
   scripts/current-client-build-sql.sh "$SHA" \
     >"$EVIDENCE_DIR/current-client-build.sql"
   chmod 0600 "$EVIDENCE_DIR/current-client-build.sql"
@@ -2449,7 +2505,9 @@ section 5 and apply the statement only through the write helper:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   COMMONSWARM_MIGRATION_ENV_FILE=/etc/commonswarm-release/target.env \
     "$MIGRATE/run-db-tool.sh" assert-database-identity.sh "$PROOF_DIR/database" target
@@ -2477,7 +2535,9 @@ section 5 and Tom's explicit approval before pull or recreate.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
   test -n "$PREVIOUS_STACK"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" config -q
@@ -2494,7 +2554,9 @@ For an edge image bump, first carry and validate the box override as in section
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   cd "$NEW_EDGE/deploy/edge-runtime"
   sudo -u commonswarm env \
     COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net \
@@ -2537,7 +2599,9 @@ the installed unit copies saved before the forward switch.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   UNITS_BEFORE="$PROOF_DIR/units-before"
   STACK_SWITCH_DIRECTION='<apply-or-rollback>'
@@ -2661,7 +2725,9 @@ time**. Do not issue a full-stack `up` for an image-only release.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
   STACK_SERVICE='<stack-service>'
@@ -2709,7 +2775,9 @@ time**. Do not issue a full-stack `up` for an image-only release.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   STACK_PROJECT="$NEW_STACK/deploy/supabase-stack"
   docker compose -p commonswarm-supabase-stack --project-directory "$STACK_PROJECT" ps '<stack-service>'
   test "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' '<container-name>')" = healthy
@@ -2729,7 +2797,9 @@ applicable:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   curl -fsS http://127.0.0.1:18001/health
   curl -fsS http://127.0.0.1:18004/status
   curl -fsS --head -H 'Host: realtime-dev' http://127.0.0.1:18003/api/ping
@@ -2751,7 +2821,9 @@ probe supplied by the lead. Put authorization only in the root-owned
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   for CONTAINER in commonswarm-gotrue commonswarm-postgrest commonswarm-realtime commonswarm-storage-api; do
     deadline=$(( $(date +%s) + 180 ))
     while [ "$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CONTAINER")" != healthy ]; do
@@ -2777,7 +2849,9 @@ the only reverse symlink switch and restores the saved installed units.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   STACK_SERVICE='<stack-service>'
   case "$STACK_SERVICE" in
@@ -2836,7 +2910,9 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   test -n "$PREVIOUS_STACK"
   test -f "$NEW_STACK/deploy/supabase-stack/backup/commonswarm-postgres-backup.service"
   test -f "$NEW_STACK/deploy/supabase-stack/backup/commonswarm-postgres-backup.timer"
@@ -2867,7 +2943,9 @@ and record:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   systemctl show commonswarm-postgres-backup.service -p Result --value
   python3 -m json.tool /var/backups/commonswarm-postgres/status.json \
     >"/home/commonswarm/stack/release-proofs/${SHA}/backup-status.json"
@@ -2920,7 +2998,9 @@ releases compare each installed file to its own previous-release source.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   SITE_DIR=/etc/caddy/sites
@@ -2974,7 +3054,9 @@ configuration until that rollback completes.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   CADDY_MODE='<live-or-maintenance>'
   case "$CADDY_MODE" in
     live)
@@ -3088,7 +3170,9 @@ configuration until that rollback completes.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   cmp -s "$PROOF_DIR/caddy-after-10-commonswarm-api.caddy" \
     /etc/caddy/sites/10-commonswarm-api.caddy
@@ -3115,7 +3199,9 @@ preflight backups, validates once, and reloads once.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   SITE_DIR=/etc/caddy/sites
   API_SITE="$SITE_DIR/10-commonswarm-api.caddy"
@@ -3235,7 +3321,9 @@ a stop.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   : "${MCP_CADDY_SITE:?approved MCP Caddy site path missing}"
   case "$MCP_CADDY_SITE" in /etc/caddy/sites/*.caddy) ;; *) false ;; esac
@@ -3270,7 +3358,9 @@ runs once only after both checks pass.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   MCP_SOURCE="$NEW_STACK/deploy/supabase-stack/commonswarm-mcp.caddy"
   MCP_BEFORE="$PROOF_DIR/mcp-caddy-before.caddy"
@@ -3391,7 +3481,9 @@ PY
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   cmp -s "$PROOF_DIR/mcp-caddy-after.caddy" "$MCP_CADDY_SITE"
   test -s "$PROOF_DIR/mcp-caddy-log-files.txt"
@@ -3416,7 +3508,9 @@ the one validation and one reload.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   MCP_BEFORE="$PROOF_DIR/mcp-caddy-before.caddy"
   MCP_BEFORE_STATE="$PROOF_DIR/mcp-caddy-before-state.txt"
@@ -3640,7 +3734,9 @@ database files and upload archives. This does not remove release evidence:
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   rm -f \
     "/run/commonswarm-release-${SHA}-service.conf" \
     "/run/commonswarm-release-${SHA}-pass" \
@@ -3662,8 +3758,10 @@ an existing destination is a stop for HezLead.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  PROOF_DIR='/home/commonswarm/stack/release-proofs/<sha>'
+  : "${RELEASE_SHA:?named release SHA required}"
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
   . "$PROOF_DIR/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   case "$WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
     *) false ;;

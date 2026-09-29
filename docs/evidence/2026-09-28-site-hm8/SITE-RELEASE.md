@@ -35,6 +35,7 @@ by an absolute path and is read without printing it.
 | `SITE_RELEASE_REPO` | Anvil, isolated checkout destination | absolute task-owned empty directory before `site-00-source-checkout` |
 | `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute task-owned empty mode-`0700` directory before `site-01` |
 | `SITE_BUILD_ENV_OP_REFERENCE` | HezLead/Anvil, approved 1Password document reference | `op://Yulan Ventures Infra/ITEM/FIELD` with nonempty item and field segments; no credential value |
+| `OP_SERVICE_ACCOUNT_TOKEN_FILE` | Anvil, existing protected 1Password service-account token file | absolute regular non-symlink mode-`0600` file; never a credential value in the prompt |
 
 ```prompt-inputs
 {"name":"HM37_A_CLOSE_RECEIPT","format":"abs-file:hm37-a-close-receipt","supplier":"Anvil","meaning":"Protected successful Window A close receipt."}
@@ -46,6 +47,7 @@ by an absolute path and is read without printing it.
 {"name":"SITE_RELEASE_REPO","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned empty directory used for the exact-SHA checkout."}
 {"name":"SITE_EVIDENCE","format":"abs-dir","supplier":"Anvil","meaning":"Task-owned protected evidence directory."}
 {"name":"SITE_BUILD_ENV_OP_REFERENCE","format":"literal:op://Yulan Ventures Infra/CommonSwarm Site/public-build-env","supplier":"HezLead and Anvil","meaning":"Approved 1Password document reference; never a credential value."}
+{"name":"OP_SERVICE_ACCOUNT_TOKEN_FILE","format":"abs-file:op-service-account-token","supplier":"Anvil","meaning":"Protected token file used by the noninteractive 1Password service-account workflow."}
 ```
 The WINDOW A close receipt contains these exact public lines:
 
@@ -101,6 +103,7 @@ and derives the ID. Nobody types a time or ID.
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
+  : "${OP_SERVICE_ACCOUNT_TOKEN_FILE:?named input missing}"
   test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
   for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE"; do
@@ -114,9 +117,9 @@ and derives the ID. Nobody types a time or ID.
   test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
   case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
   case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
-  SITE_BUILD_ENV_SOURCE="$SITE_EVIDENCE/site-build.env"
-  test "${SITE_BUILD_ENV_SOURCE%/*}" = "$SITE_EVIDENCE"
-  test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
+  case "$OP_SERVICE_ACCOUNT_TOKEN_FILE" in /*) ;; *) exit 1 ;; esac
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
   for expected in \
     release_sha=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 \
     edge_live=true edge_dark=true prep_seats_revoked=true \
@@ -199,7 +202,7 @@ PY
     printf 'SITE_RELEASE_SHA=%q\n' "$SITE_RELEASE_SHA"
     printf 'SITE_BASE_SHA=%q\n' "$SITE_BASE_SHA"
     printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
-    printf 'SITE_BUILD_ENV_SOURCE=%q\n' "$SITE_BUILD_ENV_SOURCE"
+    printf 'OP_SERVICE_ACCOUNT_TOKEN_FILE=%q\n' "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
     printf 'HM37_A_CLOSE_RECEIPT=%q\n' "$HM37_A_CLOSE_RECEIPT"
   } >"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
@@ -234,6 +237,15 @@ PY
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
   cd "$SITE_RELEASE_REPO"
+  test -z "${OP_SERVICE_ACCOUNT_TOKEN+x}"
+  test -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}"
+  if compgen -A variable OP_SESSION_ >/dev/null; then exit 1; fi
+  test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
+  test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
+  SITE_BUILD_ENV_TEMP="$(mktemp -d /tmp/commonswarm-site-build-env.XXXXXX)"
+  case "$SITE_BUILD_ENV_TEMP" in /tmp/commonswarm-site-build-env.??????) ;; *) exit 1 ;; esac
+  trap 'status=$?; find "$SITE_BUILD_ENV_TEMP" -depth -delete; exit "$status"' EXIT
+  SITE_BUILD_ENV_SOURCE="$SITE_BUILD_ENV_TEMP/site-build.env"
   test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
   op read "$SITE_BUILD_ENV_OP_REFERENCE" --out-file "$SITE_BUILD_ENV_SOURCE"
   chmod 0600 "$SITE_BUILD_ENV_SOURCE"
@@ -265,8 +277,9 @@ if (payload.role !== "anon") process.exit(1);
 console.log("BUILD_ENV=PASS url=https://api.commonswarm.com role=anon h0=1");
 NODE
   chmod 0600 "$SITE_EVIDENCE/site-00-build-env.txt"
-  rm -f "$SITE_BUILD_ENV_SOURCE"
-  test ! -e "$SITE_BUILD_ENV_SOURCE"
+  find "$SITE_BUILD_ENV_TEMP" -depth -delete
+  test ! -e "$SITE_BUILD_ENV_TEMP"
+  trap - EXIT
 )
 ```
 
@@ -292,7 +305,10 @@ positive controls.
   git diff --exit-code HEAD -- site deploy/site tests/p1-cli/site-deletion-safety.test.ts
   git show "$SITE_RELEASE_SHA:deploy/site/deploy.sh" | grep -q guarded_delete
   git show "$SITE_RELEASE_SHA:deploy/site/finalize-release.sh" | grep -q guarded_delete
-  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | grep -q 'positive control'
+  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
+    grep -q 'deletes valid temporary paths'
+  git show "$SITE_RELEASE_SHA:tests/p1-cli/site-deletion-safety.test.ts" | \
+    grep -q 'with a valid-delete control'
   umask 077
   git log --format='%H %s' "$SITE_BASE_SHA..$SITE_RELEASE_SHA" -- site/ \
     >"$SITE_EVIDENCE/site-02-commits.txt"
@@ -1034,7 +1050,7 @@ PY
 | P2-K1-04 | Removed: no browser bearer is exported; controls use the existing site session in Anvil's dedicated Chrome directory. |
 | P2-K2-01 | `site-01` creates the protected evidence directory. |
 | P2-K2-02 | `site-00-source-checkout` creates detached exact-SHA source. |
-| P2-K2-03 | Named `SITE_BUILD_ENV_OP_REFERENCE` and staging path; `site-00-build-env` creates, installs, validates, and removes the protected staging file. |
+| P2-K2-03 | Named `SITE_BUILD_ENV_OP_REFERENCE` and service-account token-file path; `site-00-build-env` creates a private temporary directory, reads with `op read --out-file`, installs and validates the build file, then removes the whole temporary directory. |
 | P2-K2-04 | Browser preflight reads only `user.id` from the persisted site session and never writes a token. |
 | P2-K2-05 | Named `HM37_A_CLOSE_RECEIPT`; `site-00-a-close-ingest` validates/copies the sole A-to-lane-8 handoff. |
 | P2-K2-06 | `site-03-go-record` writes bounded `GO.txt`. |
@@ -1066,7 +1082,7 @@ PY
 | P2-K6 | Empty by audit. |
 | Pre-seed: start/evidence | `site-01` measures time and creates the named destination. |
 | Pre-seed: checkout/base | Named checkout/base; source and `site-02` prove them. |
-| Pre-seed: `site/.env` | Named 1Password reference/output path; build-env step creates, installs, proves, and clears staging. |
+| Pre-seed: `site/.env` | Named 1Password reference and protected service-account token-file path; the build-env step produces its own temporary output path, installs and proves `site/.env`, and clears the temporary directory. |
 | Pre-seed: browser session | K4-8/K4-9 measured the retained dedicated Chrome directory; the live block revalidates it and exports no token. |
 | Pre-seed: `GO.txt` | GO step produces it from approver, plan commit, release SHA and prompt number. |
 

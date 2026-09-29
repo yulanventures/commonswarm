@@ -28,7 +28,7 @@ contents remain private.
 | `HUMAN_SESSION_SOURCE` | Anvil | Absolute path to the protected mode-0600 human-session JSON. |
 | `HARNESS_SOURCE` | Anvil | Absolute path to the reviewed `hm37-open-ack-control.ts`. |
 | `IMPORT_MAP_SOURCE` | Anvil | Absolute path to the reviewed `hm37-open-ack-deno.json`. |
-| `SCHEMA_ROLLBACK_APPROVAL` | HezLead, rollback only | Exact `yes`, tied to this window ID and a verified previous-edge readback. |
+| `SCHEMA_ROLLBACK_APPROVAL` | HezLead, pre-given rollback permission | Exact `yes` or `no`; `yes` permits only the reserve block's own previous-edge, zero-history, and guarded-inverse checks. |
 
 The Anvil prompt supplies these values. The file inputs are protected paths;
 their contents are not prompt text and are never printed.
@@ -44,7 +44,7 @@ their contents are not prompt text and are never printed.
 {"name":"HUMAN_SESSION_SOURCE","format":"abs-file:human-session","supplier":"Anvil","meaning":"Protected human-session JSON staged for the hosted control."}
 {"name":"HARNESS_SOURCE","format":"abs-file:harness-source","supplier":"Anvil","meaning":"Reviewed hosted-control harness source file."}
 {"name":"IMPORT_MAP_SOURCE","format":"abs-file:import-map-source","supplier":"Anvil","meaning":"Reviewed Deno import-map source file."}
-{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Window-bound decision for the reserved schema rollback."}
+{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Pre-given permission to attempt the reserved rollback; the block still requires its own previous-edge and empty-history proof."}
 ```
 
 The approved failure map is static: hosted cleanup assertion S2, hosted
@@ -777,9 +777,11 @@ PY
 
 For `full-rollback`, execute complete `runbook-42` to restore
 `72c57e0d76d0aa86fe4f811a2cf51499919fed20`, verify it healthy and DARK, then
-run the reserved schema block only if `SCHEMA_ROLLBACK_APPROVAL=yes` and its
-own cursor/batch counts are zero. A nonempty count is STOP: do not run the
-schema inverse; record and report it. `cleanup-only` leaves
+run the reserved schema block only if the pre-given
+`SCHEMA_ROLLBACK_APPROVAL=yes`. That input authorizes only an attempt: the
+block independently verifies the previous edge and its own cursor/batch counts.
+A nonempty count is STOP whatever the input says: do not run the schema
+inverse; record and report it. `cleanup-only` leaves
 `eb2a87ac…` live and DARK. This is the block-owned action map; no HezLead
 classification is requested during B.
 
@@ -902,9 +904,32 @@ readback is STOP and report; it never produces a success-shaped receipt.
   EVIDENCE_DIR="$PWD/docs/evidence/$(date -u +%F)-release-${RELEASE_SHA:0:12}-${WINDOW_ID}"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
   FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'
-  ssh ops@100.115.66.74 \
-    "sudo -n -i tar -C /home/commonswarm/stack/release-proofs/$RELEASE_SHA -cf - $FILES" \
-    | env COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
+  COPYBACK_TEMP="$(mktemp -d /tmp/commonswarm-hm37b-copyback.XXXXXX)"
+  case "$COPYBACK_TEMP" in /tmp/commonswarm-hm37b-copyback.??????) ;; *) false ;; esac
+  trap 'status=$?; find "$COPYBACK_TEMP" -depth -delete; exit "$status"' EXIT
+  COPYBACK_ARCHIVE="$COPYBACK_TEMP/evidence.tar"
+  test ! -e "$COPYBACK_ARCHIVE"
+  ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$RELEASE_SHA'" \
+    >"$COPYBACK_ARCHIVE" <<'BOX'
+(
+  set -euo pipefail
+  RELEASE_SHA="$1"
+  case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#RELEASE_SHA}" -eq 40
+  PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
+  FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'
+  for FILE in $FILES; do
+    case "$FILE" in */*|.*|'') false ;; esac
+    test -f "$PROOF_DIR/$FILE"
+    test ! -L "$PROOF_DIR/$FILE"
+  done
+  tar -C "$PROOF_DIR" -cf - $FILES
+)
+BOX
+  test -s "$COPYBACK_ARCHIVE"
+  test "$(env COPYFILE_DISABLE=1 tar --no-xattrs -tf "$COPYBACK_ARCHIVE" | LC_ALL=C sort)" = \
+    "$(printf '%s\n' $FILES | LC_ALL=C sort)"
+  env COPYFILE_DISABLE=1 tar --no-xattrs -xf "$COPYBACK_ARCHIVE" -C "$EVIDENCE_DIR"
   for FILE in $FILES; do
     test -f "$EVIDENCE_DIR/$FILE"
     chmod 0600 "$EVIDENCE_DIR/$FILE"
@@ -912,6 +937,9 @@ readback is STOP and report; it never produces a success-shaped receipt.
   (cd "$EVIDENCE_DIR" && shasum -a 256 $FILES) \
     >"$EVIDENCE_DIR/hm37b-copyback.sha256"
   chmod 0600 "$EVIDENCE_DIR/hm37b-copyback.sha256"
+  find "$COPYBACK_TEMP" -depth -delete
+  test ! -e "$COPYBACK_TEMP"
+  trap - EXIT
 )
 ```
 

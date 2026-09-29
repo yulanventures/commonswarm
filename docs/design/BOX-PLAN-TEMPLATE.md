@@ -50,6 +50,22 @@ path, each dependent window, and every browser branch in whole-block order.
 separate non-substitutable list for live database, container, HTTP, browser, and
 CLI behavior that a dry run cannot prove.
 
+Every prompt-input table names the value's format, supplier, and meaning. A
+HezLead-supplied input must be a fact HezLead can write before execution: a SHA,
+a literal, or a path Anvil has already produced. A timestamp, window ID, output
+path, receipt, or other value that only Anvil can produce during the run is
+produced by a marked block and consumed from its guarded state, not requested
+from HezLead. A pre-given rollback approval authorizes only an attempt; the
+rollback block still verifies every live-state and durable-history guard and
+stops before rollback when any guard fails.
+
+An `op://` prompt input is a reference, not a secret. Read it only through the
+noninteractive service-account token-file workflow, never a desktop-app session.
+Use `op read "$REFERENCE" --out-file "$OUTPUT"` with `$OUTPUT` inside a
+mode-`0700` `mktemp -d` directory, keep the output mode `0600`, and remove that
+directory in the same block on success or failure. Never send the retrieved
+value to the terminal, argv, environment, or evidence.
+
 For split windows, persist exactly one receipt at each handoff. The consuming
 open block validates the receipt before any change; no second file, inherited
 variable, profile discovery, or operator branch choice may carry cross-window

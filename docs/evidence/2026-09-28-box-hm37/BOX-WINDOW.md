@@ -340,7 +340,7 @@ Credential values are never prompt inputs.
 | `FUNCTIONAL_VERSIONS` | HezLead | Exact string `20260928000004`. |
 | `EXPECTED_NEW_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty addition list. |
 | `EXPECTED_REMOVED_CRON_JOBS` | HezLead | Exact sentinel `none`, meaning the reviewed empty removal list. |
-| `SCHEMA_ROLLBACK_APPROVAL` | HezLead, rollback only | Exact `yes`, tied to this window ID and a verified previous-edge readback. |
+| `SCHEMA_ROLLBACK_APPROVAL` | HezLead, pre-given rollback permission | Exact `yes` or `no`; `yes` permits only the reserve block's own previous-edge, zero-history, and guarded-inverse checks. |
 
 The Anvil prompt supplies these values. Paths identify protected files or
 task-owned directories; no credential value is present in the prompt.
@@ -367,7 +367,7 @@ task-owned directories; no credential value is present in the prompt.
 {"name":"FUNCTIONAL_VERSIONS","format":"literal:20260928000004","supplier":"HezLead","meaning":"Approved migration version requiring a functional proof."}
 {"name":"EXPECTED_NEW_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-addition list."}
 {"name":"EXPECTED_REMOVED_CRON_JOBS","format":"literal:none","supplier":"HezLead","meaning":"Sentinel for the reviewed empty cron-removal list."}
-{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Window-bound decision for the reserved schema rollback."}
+{"name":"SCHEMA_ROLLBACK_APPROVAL","format":"enum:yes|no","supplier":"HezLead","meaning":"Pre-given permission to attempt the reserved rollback; the block still requires its own previous-edge and empty-history proof."}
 ```
 
 ```sh
@@ -453,11 +453,13 @@ BOX
     *) false ;;
   esac
 
-  # PREP_RECEIPT_PATH is the only PREP-to-A handoff.  Read only the bounded
-  # receipt fields, then independently authenticate every profile.  The
-  # legacy seat-b profile/principal is an explicit refusal, not a fallback.
-  PREP_SEATS="/tmp/hm37a-prep-seats-${RELEASE_SHA}.json"
-  test ! -e "$PREP_SEATS"
+  # PREP_RECEIPT_PATH is the only PREP-to-A handoff. Read its bounded receipt
+  # fields here; hm37a-directed-check-old authenticates all three profiles
+  # before the release changes. The legacy seat-b profile/principal is an
+  # explicit refusal, not a fallback.
+  PREP_SEATS="$(mktemp /tmp/hm37a-prep-seats.XXXXXX)"
+  case "$PREP_SEATS" in /tmp/hm37a-prep-seats.??????) ;; *) false ;; esac
+  trap 'status=$?; rm -f -- "$PREP_SEATS"; exit "$status"' EXIT
   jq -e \
     --arg workspace c2ea0541-f56d-4c73-bf71-56c5405c4934 \
     '.schema == 1 and .prep_result == "yes" and
@@ -470,13 +472,13 @@ BOX
      all(.seats[];
        (.principal_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
        .principal_id != "cee27f94-4231-4a02-934d-5bf08d73ed75" and
-       (.profile_path | startswith("/Users/yulanbot/anvil-work/hm37-prep/")) and
+       (.profile_path | type == "string" and startswith("/")) and
        (.profile_path | contains("/uat-20260927/seat-b/") | not) and
        .directory_mode == "0700" and .files_mode == "0600" and
        (.token_expires_at | type == "string"))' \
     "$PREP_RECEIPT_PATH" >/dev/null
   python3 - "$PREP_RECEIPT_PATH" "$WINDOW_END_UTC" "$PREP_SEATS" <<'PY'
-import datetime, json, os, pathlib, subprocess, sys
+import datetime, json, os, pathlib, sys
 receipt_path, window_end_text, output_path = sys.argv[1:]
 receipt = json.load(open(receipt_path, encoding="utf-8"))
 window_end = datetime.datetime.fromisoformat(window_end_text.replace("Z", "+00:00"))
@@ -484,16 +486,7 @@ rows = []
 for seat in receipt["seats"]:
     expiry = datetime.datetime.fromisoformat(seat["token_expires_at"].replace("Z", "+00:00"))
     assert expiry > window_end
-    profile = pathlib.Path(seat["profile_path"])
-    info = profile.lstat()
-    assert profile.is_file() and not profile.is_symlink()
-    assert info.st_mode & 0o777 == 0o600
-    value = json.loads(subprocess.check_output(
-        ["cswarm", "whoami", "--profile", str(profile), "--json"], text=True))
-    assert value["credential_valid"] is True
-    assert value["workspace_id"] == receipt["workspace_id"]
-    assert value["principal_id"] == seat["principal_id"]
-    rows.append({"role": seat["role"], "profile_path": str(profile),
+    rows.append({"role": seat["role"], "profile_path": seat["profile_path"],
                  "principal_id": seat["principal_id"],
                  "token_expires_at": seat["token_expires_at"]})
 assert len({row["principal_id"] for row in rows}) == 3
@@ -511,6 +504,7 @@ PY
     "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" \
     "$PREP_RECEIPT_PATH" "$PREP_SEATS" "$RELEASE_REPO" >"$OPEN_RECEIPT"
   chmod 0600 "$OPEN_RECEIPT"
+  trap - EXIT
 )
 ```
 
@@ -2254,8 +2248,12 @@ removes Mac scratch only after that renamed directory is verified.
   set -euo pipefail
   : "${RELEASE_SHA:?named release SHA required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$OPEN_RECEIPT"
+  test ! -L "$OPEN_RECEIPT"
+  . "$OPEN_RECEIPT"
   for FILE in \
-    "/tmp/hm37a-prep-seats-${RELEASE_SHA}.json" \
+    "$PREP_SEATS" \
     "/tmp/hm37a-prep-seat-inventory-${RELEASE_SHA}.json" \
     "/tmp/hm37a-prep-cleanup-${RELEASE_SHA}.json" \
     "/tmp/hm37a-directed-check-${RELEASE_SHA}.py"; do
@@ -2263,7 +2261,6 @@ removes Mac scratch only after that renamed directory is verified.
     rm -f -- "$FILE"
     test ! -e "$FILE"
   done
-  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
   rm -f -- "$OPEN_RECEIPT"
   test ! -e "$OPEN_RECEIPT"
 )
@@ -2290,7 +2287,14 @@ Then:
 
 Do not roll back HM2 or HM6. Do not change Caddy.
 
-The SQL reserve refuses any cursor or batch history. After a successful hosted control, this refusal is expected. Retain the schema unless a separately reviewed data-loss decision and recovery plan authorize removal. Never delete rows to satisfy the guard.
+`SCHEMA_ROLLBACK_APPROVAL=yes` may be supplied before the window, but it
+authorizes only an attempt. The reserve block independently verifies the
+restored previous edge and refuses any durable cursor or batch history before
+it writes the inverse. After a successful hosted control, this refusal is
+expected. Whatever the prompt input says, nonempty history is STOP with no
+schema rollback. Retain the schema unless a separately reviewed data-loss
+decision and recovery plan authorize removal. Never delete rows to satisfy
+the guard.
 
 The inverse below is verbatim from the hashed rollback file.
 
