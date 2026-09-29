@@ -105,6 +105,7 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 
 ```sh
 # step: hm37-source-identity
+# readonly: yes
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
@@ -298,6 +299,7 @@ Migration `20260928000003` must have exactly one ledger row, and its corrected c
 
 ```sh
 # step: hm37-hm6-schema-helpers-precondition
+# readonly: no
 # Runs on the box over ssh, as Anvil in a root Bash shell, after runbook sections 1–3 and proof transfer; production checks are read only.
 (
   set -euo pipefail
@@ -349,6 +351,7 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
 
 ```sh
 # step: hm37-hm6-oauth-precondition
+# readonly: yes
 # Runs on the box over ssh, as Anvil in a root Bash shell; all production checks are read only.
 (
   set -euo pipefail
@@ -392,39 +395,33 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
 
   python3 - https://mcp.commonswarm.com \
     >"$PROOF_DIR/hm37-hm6-oauth-public-precondition.json" <<'PY'
-import json, sys, urllib.error, urllib.request
+import json, sys, urllib.request
 
 base = sys.argv[1]
+results = []
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 opener = urllib.request.build_opener(NoRedirect())
-results = []
 
-def request(path, method="GET", body=None, status=200):
-    data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(
-        base + path, data=data, method=method,
-        headers={"Content-Type": "application/json"})
-    try:
-        response = opener.open(req, timeout=30)
-    except urllib.error.HTTPError as error:
-        response = error
+def request(path):
+    req = urllib.request.Request(base + path)
+    response = opener.open(req, timeout=30)
     with response:
         raw = response.read(131073)
         actual_status = response.code
         content_type = response.headers.get("Content-Type", "")
-    assert actual_status == status, (method, path, actual_status)
+    assert actual_status == 200, (path, actual_status)
     assert len(raw) <= 131072
     media_type = content_type.split(";", 1)[0].strip().lower()
     if path == "/jwks":
-        assert media_type in ("application/jwk-set+json", "application/json")
+        assert media_type == "application/jwk-set+json"
     else:
         assert media_type == "application/json"
     value = json.loads(raw)
-    results.append({"method": method, "path": path, "status": actual_status})
+    results.append({"method": "GET", "path": path, "status": actual_status})
     return value
 
 for path in (
@@ -447,12 +444,61 @@ for key in keys:
     assert isinstance(key.get("y"), str) and key["y"]
     assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
 
-for method, path, body in (
-    ("GET", "/authorize", None),
-    ("POST", "/token", {}),
-):
-    response = request(path, method, body, 503)
-    assert response.get("error") == "authorization_service_disabled"
+print(json.dumps({"pass": True, "results": results}, indent=2))
+PY
+)
+```
+
+Run the refusal checks separately with the same shell options, environment and
+working directory. The unauthenticated request carries no real principal,
+resource ID, credential, Authorization header or Cookie header.
+
+```sh
+# step: hm37-hm6-oauth-refusal-probe
+# readonly: probe
+# Runs on the box over ssh, as Anvil in a root Bash shell; every request must refuse.
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  python3 - https://mcp.commonswarm.com \
+    >"$PROOF_DIR/hm37-hm6-oauth-refusals.json" <<'PY'
+import json, sys, urllib.error, urllib.request
+
+base = sys.argv[1]
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect())
+results = []
+
+def request(path, method, body, status):
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(
+        base + path, data=data, method=method,
+        headers={"Content-Type": "application/json"})
+    try:
+        response = opener.open(req, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        raw = response.read(131073)
+        actual_status = response.code
+        content_type = response.headers.get("Content-Type", "")
+    assert actual_status == status, (method, path, actual_status)
+    assert len(raw) <= 131072
+    assert content_type.split(";", 1)[0].strip().lower() == "application/json"
+    value = json.loads(raw)
+    results.append({"method": method, "path": path, "status": actual_status})
+    return value
+
+response = request("/authorize", "GET", None, 503)
+assert response.get("error") == "authorization_service_disabled"
+response = request("/token", "POST", {}, 503)
+assert response.get("error") == "authorization_service_disabled"
 
 print(json.dumps({"pass": True, "results": results}, indent=2))
 PY
@@ -538,6 +584,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
 
 ```sh
 # step: hm37-read-window-suffix
+# readonly: yes
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # The ssh subprocess reads state on the box as root.
 (
@@ -577,6 +624,7 @@ Wait for the existing backup service **before** reading status. Active, activati
 
 ```sh
 # step: hm37-backup-gate
+# readonly: yes
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -659,6 +707,7 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
 
 ```sh
 # step: hm37-functional-section5
+# readonly: no
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -760,8 +809,97 @@ Derive the list from `PUBLIC_HOSTED_ONLY_COMMANDS` in the release’s `src/proto
 
 `handlePostRequest()` refuses hosted-only commands and claimed hosted context before command-ID validation, bearer classification or GoTrue. Require unauthenticated 403 `{"error":"forbidden"}`, paired with ordinary malformed-command 400 and missing-bearer mint 401 controls.
 
+Run the successful public reads separately from every refusal probe. Both blocks
+repeat their Mac and box execution context so either can run alone.
+
+```sh
+# step: hm37-public-boundary-reads
+# readonly: yes
+# Runs on the Mac mini as Anvil, under /bin/bash 3.2.
+# Its ssh subprocess runs only the gateway loopback read on the box as root.
+(
+  set -euo pipefail
+  umask 077
+  . "$HOME/.commonswarm-release-window.env"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test "$(git rev-parse HEAD)" = "$SHA"
+  git diff --exit-code "$SHA" -- src/protocol/hosted-authority.ts
+  READS="$(mktemp /tmp/hm37-boundary-reads.XXXXXX)"
+  case "$READS" in /tmp/hm37-boundary-reads.??????) ;; *) false ;; esac
+  trap 'rm -f -- "$READS"' EXIT
+
+  cat >"$READS" <<'PY'
+import json, sys, urllib.request
+
+results = []
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect())
+
+def read(base, path, media_type):
+    request = urllib.request.Request(base + path)
+    with opener.open(request, timeout=30) as response:
+        status = response.code
+        actual_media_type = response.headers.get(
+            "Content-Type", "").split(";", 1)[0].strip().lower()
+        raw = response.read(131073)
+    assert status == 200, (base, path, status)
+    assert actual_media_type == media_type, (base, path, actual_media_type)
+    assert len(raw) <= 131072
+    value = json.loads(raw)
+    results.append({"base": base, "method": "GET", "path": path, "status": status})
+    return value
+
+mode = sys.argv[1]
+assert mode in ("gateway", "mcp")
+for base in sys.argv[2:]:
+    if mode == "gateway":
+        read(base, "/functions/v1/h0/agent-doc/smoke", "application/json")
+    else:
+        for path in (
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+        ):
+            document = read(base, path, "application/json")
+            assert document["issuer"] == base
+            assert document["authorization_endpoint"] == base + "/authorize"
+            assert document["token_endpoint"] == base + "/token"
+            assert document["jwks_uri"] == base + "/jwks"
+        jwks = read(base, "/jwks", "application/jwk-set+json")
+        keys = jwks.get("keys")
+        assert isinstance(keys, list) and keys
+        for key in keys:
+            assert isinstance(key, dict)
+            assert key.get("kty") == "EC" and key.get("crv") == "P-256"
+            assert key.get("alg") == "ES256"
+            assert isinstance(key.get("kid"), str) and key["kid"]
+            assert isinstance(key.get("x"), str) and key["x"]
+            assert isinstance(key.get("y"), str) and key["y"]
+            assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
+
+print(json.dumps({"mode": mode, "results": results}, indent=2))
+PY
+
+  ssh ops@100.115.66.74 \
+    'sudo -n -i python3 - gateway http://127.0.0.1:9000' \
+    <"$READS" >"$EVIDENCE_DIR/hm37-loopback-reads.json"
+
+  python3 "$READS" gateway \
+    https://edge-staging.commonswarm.com \
+    https://api.commonswarm.com \
+    >"$EVIDENCE_DIR/hm37-public-reads.json"
+
+  python3 "$READS" mcp https://mcp.commonswarm.com \
+    >"$EVIDENCE_DIR/hm37-mcp-hostname-reads.json"
+)
+```
+
 ```sh
 # step: hm37-public-boundaries
+# readonly: probe
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # Its ssh subprocess runs only the gateway loopback probes on the box as root.
 (
@@ -818,10 +956,7 @@ def probe(base, method, path, body, expected_status, expected_body=None):
     assert status == expected_status, (base, method, path, status)
     assert len(raw) <= 131072
     media_type = content_type.split(";", 1)[0].strip().lower()
-    if path == "/jwks":
-        assert media_type in ("application/jwk-set+json", "application/json")
-    else:
-        assert media_type == "application/json"
+    assert media_type == "application/json"
     if method == "HEAD":
         assert raw == b""
         parsed = None
@@ -839,7 +974,6 @@ mode = sys.argv[1]
 assert mode in ("gateway", "mcp")
 for base in sys.argv[2:]:
     if mode == "gateway":
-        probe(base, "GET", "/functions/v1/h0/agent-doc/smoke", None, 200)
         probe(base, "POST", "/functions/v1/command",
               {}, 400, {"error": "invalid_request"})
         for kind in KINDS:
@@ -855,31 +989,10 @@ for base in sys.argv[2:]:
             "/functions/v1/mcp/.well-known/oauth-protected-resource/mcp",
         )
     else:
-        for path in (
-            "/.well-known/oauth-authorization-server",
-            "/.well-known/openid-configuration",
-        ):
-            document = probe(base, "GET", path, None, 200)
-            assert document["issuer"] == base
-            assert document["authorization_endpoint"] == base + "/authorize"
-            assert document["token_endpoint"] == base + "/token"
-            assert document["jwks_uri"] == base + "/jwks"
-        jwks = probe(base, "GET", "/jwks", None, 200)
-        keys = jwks.get("keys")
-        assert isinstance(keys, list) and keys
-        for key in keys:
-            assert isinstance(key, dict)
-            assert key.get("kty") == "EC" and key.get("crv") == "P-256"
-            assert key.get("alg") == "ES256"
-            assert isinstance(key.get("kid"), str) and key["kid"]
-            assert isinstance(key.get("x"), str) and key["x"]
-            assert isinstance(key.get("y"), str) and key["y"]
-            assert not {"d", "p", "q", "dp", "dq", "qi", "oth", "k"} & key.keys()
-        for method, path, body in (
-            ("GET", "/authorize", None), ("POST", "/token", {}),
-        ):
-            result = probe(base, method, path, body, 503)
-            assert result.get("error") == "authorization_service_disabled"
+        result = probe(base, "GET", "/authorize", None, 503)
+        assert result.get("error") == "authorization_service_disabled"
+        result = probe(base, "POST", "/token", {}, 503)
+        assert result.get("error") == "authorization_service_disabled"
         paths = ("/mcp", "/.well-known/oauth-protected-resource/mcp")
 
     for path in paths:
@@ -956,6 +1069,7 @@ the access token only in the private file.
 
 ```sh
 # step: hm37-hosted-human-session-input
+# readonly: no
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
 (
   set -euo pipefail
@@ -1006,6 +1120,7 @@ and not copied as evidence.
 
 ```sh
 # step: hm37-hosted-control-stage
+# readonly: no
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
 (
   set -euo pipefail
@@ -1073,6 +1188,7 @@ never copied.
 
 ```sh
 # step: hm37-hosted-open-ack-control
+# readonly: no
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
 (
   set -euo pipefail
@@ -1110,6 +1226,7 @@ idempotent and still verifies complete revocation before returning zero.
 
 ```sh
 # step: hm37-hosted-control-cleanup-only
+# readonly: no
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
 (
   set -euo pipefail
@@ -1203,6 +1320,7 @@ Use isolated mode-0700 directories and mode-0600 credential, connection and prof
 
 ```sh
 # step: hm37-validate-local-credential
+# readonly: yes
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 (
   set -euo pipefail
@@ -1281,6 +1399,7 @@ The inverse below is verbatim from the hashed rollback file.
 
 ```sh
 # step: hm37-reserve-schema-rollback
+# readonly: no
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
@@ -1373,10 +1492,14 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `hm37-hm6-migration-03-functional.txt`
 - `hm37-hm6-oauth-runtime.txt`
 - `hm37-hm6-oauth-public-precondition.json`
+- `hm37-hm6-oauth-refusals.json`
 - `hm37-prerequisites.json`
 - `hm37-stack-runtime-review.txt`
 - `hm37-backup-gate.txt`
 - `hm37-worker-boundary.txt`
+- `hm37-loopback-reads.json`
+- `hm37-public-reads.json`
+- `hm37-mcp-hostname-reads.json`
 - `hm37-loopback-boundaries.json`
 - `hm37-public-boundaries.json`
 - `hm37-mcp-hostname-boundaries.json`

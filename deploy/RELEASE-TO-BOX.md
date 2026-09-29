@@ -63,6 +63,7 @@ every minting step. The box's GNU `date` computes it once from the approved
 
 ```sh
 # step: runbook-01
+# readonly: yes
 WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
 ```
 
@@ -90,6 +91,7 @@ used.
 
 ```sh
 # step: runbook-02
+# readonly: no
 rm -f "$HOME/.commonswarm-release-window.env"
 SHA='<sha>'
 (
@@ -164,6 +166,7 @@ initial manifest is built only from the explicit arrays below, never from
 
 ```sh
 # step: runbook-03
+# readonly: yes
 (
   set -euo pipefail
   SHA='<sha>'
@@ -308,6 +311,7 @@ the dark `mcp` name:
 
 ```sh
 # step: runbook-04
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -373,6 +377,7 @@ both release directories, compare them on the box before deciding:
 
 ```sh
 # step: runbook-05
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -424,6 +429,7 @@ block reads them from `window.env`.
 
 ```sh
 # step: 1-upload-release-archive
+# readonly: no
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -437,6 +443,7 @@ Open a root shell on the box:
 
 ```sh
 # step: 1-open-root-shell
+# readonly: yes
 ssh ops@100.115.66.74
 sudo -n -i
 ```
@@ -446,6 +453,7 @@ window state:
 
 ```sh
 # step: 1-apply-release-directories
+# readonly: no
 (
   set -euo pipefail
   SHA='<sha>'
@@ -718,6 +726,7 @@ inventory. HezLead reviews this exact list for secrets before transfer:
 
 ```sh
 # step: runbook-07
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -736,6 +745,7 @@ Mac mini:
 
 ```sh
 # step: runbook-08
+# readonly: no
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -753,6 +763,7 @@ HezLead confirms their list contains no secret:
 
 ```sh
 # step: runbook-09
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -772,6 +783,7 @@ HezLead confirms their list contains no secret:
 
 ```sh
 # step: runbook-10
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -816,6 +828,7 @@ reports each one.
 
 ```sh
 # step: runbook-11
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -878,6 +891,7 @@ distinct.
 
 ```sh
 # step: runbook-12
+# readonly: no
 rm -f "$HOME/.commonswarm-release-window.env"
 ```
 
@@ -888,6 +902,7 @@ hide the failing block's evidence.
 
 ```sh
 # step: runbook-13
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -925,6 +940,7 @@ the value, create a target-only file with exactly one assignment,
 
 ```sh
 # step: runbook-14
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -949,6 +965,7 @@ This checks names and shape without printing the URL.
 
 ```sh
 # step: runbook-15
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -968,6 +985,7 @@ Then use the repository identity gate against the exact stack release:
 
 ```sh
 # step: runbook-16
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -995,6 +1013,7 @@ read-only transactions with `PGOPTIONS`.
 
 ```sh
 # step: runbook-17
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1078,6 +1097,7 @@ H0 objects were applied by `apply-h0-upgrade.sh` without ledger rows.
 
 ```sh
 # step: runbook-18
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1113,6 +1133,7 @@ release checksum manifest before using its verifier.
 
 ```sh
 # step: runbook-19
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1157,6 +1178,7 @@ column rolls the transaction back.
 
 ```sh
 # step: runbook-20
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1223,6 +1245,7 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
 
 ```sh
 # step: runbook-21
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1272,6 +1295,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-22
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1307,6 +1331,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-23
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1327,6 +1352,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-24
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1345,6 +1371,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-25
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1361,6 +1388,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-26
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1433,6 +1461,7 @@ missing, false, or malformed values. Any failure rolls the transaction back.
 
 ```sh
 # step: runbook-27
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1498,6 +1527,7 @@ transaction.
 
 ```sh
 # step: runbook-28
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1549,6 +1579,7 @@ name per line; empty when none). The lead supplies both lists with the release; 
 
 ```sh
 # step: runbook-29
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1599,6 +1630,7 @@ timer and start it after verification.
 
 ```sh
 # step: runbook-30
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1640,6 +1672,7 @@ approved times overlap a protected interval.
 
 ```sh
 # step: runbook-31
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1717,6 +1750,7 @@ URL alias satisfies the database requirement. The check never prints a value.
 
 ```sh
 # step: runbook-32
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1760,6 +1794,7 @@ runtime cannot reach `db.commonswarm.internal`.
 
 ```sh
 # step: runbook-33
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1798,6 +1833,7 @@ the box:
 
 ```sh
 # step: runbook-34
+# readonly: probe
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1820,6 +1856,7 @@ both loopback and staging probes finish, capture the log window that began at
 
 ```sh
 # step: runbook-35
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1843,6 +1880,7 @@ Anvil runs the proof and saves its output as section 5 does:
 
 ```sh
 # step: runbook-36
+# readonly: no
 (
   set -euo pipefail
   SEED_NOTE_ID='<uuid-from-HezLead>'
@@ -1863,6 +1901,7 @@ of the last successful renew. Within three minutes of that renew, Anvil runs:
 
 ```sh
 # step: runbook-37
+# readonly: no
 (
   set -euo pipefail
   G2B_PRINCIPAL_ID='<uuid-from-the-renew-gate>'
@@ -1883,6 +1922,7 @@ reply, and author user ids, then run:
 
 ```sh
 # step: runbook-38
+# readonly: no
 (
   set -euo pipefail
   ITEM_G3C_WORKSPACE_ID='<workspace-uuid>'
@@ -1913,6 +1953,7 @@ outer transaction:
 
 ```sh
 # step: runbook-39
+# readonly: no
 (
   set -euo pipefail
   ITEM_G3D_PRINCIPAL_ID='<principal-uuid>'
@@ -1939,6 +1980,7 @@ settings, performs only reads, and has no outer transaction:
 
 ```sh
 # step: runbook-40
+# readonly: no
 (
   set -euo pipefail
   ITEM_T3_WORKSPACE_ID='<workspace-uuid>'
@@ -1968,6 +2010,7 @@ successful release:
 
 ```sh
 # step: runbook-41
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -1984,6 +2027,7 @@ successful release:
 
 ```sh
 # step: runbook-42
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2033,6 +2077,7 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
 
 ```sh
 # step: runbook-43
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2053,6 +2098,7 @@ statement from the Git object on the Mac mini. No operator types a version:
 
 ```sh
 # step: runbook-44
+# readonly: yes
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
@@ -2069,6 +2115,7 @@ section 5 and apply the statement only through the write helper:
 
 ```sh
 # step: runbook-45
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2095,6 +2142,7 @@ section 5 and Tom's explicit approval before pull or recreate.
 
 ```sh
 # step: runbook-46
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2110,6 +2158,7 @@ For an edge image bump, first carry and validate the box override as in section
 
 ```sh
 # step: runbook-47
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2151,6 +2200,7 @@ the installed unit copies saved before the forward switch.
 
 ```sh
 # step: runbook-48
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2273,6 +2323,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 
 ```sh
 # step: runbook-49
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2319,6 +2370,7 @@ time**. Do not issue a full-stack `up` for an image-only release.
 
 ```sh
 # step: runbook-50
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2337,6 +2389,7 @@ applicable:
 
 ```sh
 # step: runbook-51
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2357,6 +2410,7 @@ probe supplied by the lead. Put authorization only in the root-owned
 
 ```sh
 # step: runbook-52
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2381,6 +2435,7 @@ the only reverse symlink switch and restores the saved installed units.
 
 ```sh
 # step: runbook-53
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2438,6 +2493,7 @@ because the units execute helpers through `/home/commonswarm/stack/current`.
 
 ```sh
 # step: runbook-54
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2467,6 +2523,7 @@ and record:
 
 ```sh
 # step: runbook-55
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2518,6 +2575,7 @@ releases compare each installed file to its own previous-release source.
 
 ```sh
 # step: runbook-56
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2570,6 +2628,7 @@ configuration until that rollback completes.
 
 ```sh
 # step: runbook-57
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2682,6 +2741,7 @@ configuration until that rollback completes.
 
 ```sh
 # step: runbook-58
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2707,6 +2767,7 @@ preflight backups, validates once, and reloads once.
 
 ```sh
 # step: runbook-59
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2825,6 +2886,7 @@ a stop.
 
 ```sh
 # step: runbook-mcp-caddy-preflight
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2858,6 +2920,7 @@ runs once only after both checks pass.
 
 ```sh
 # step: runbook-mcp-caddy-apply
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -2977,6 +3040,7 @@ PY
 
 ```sh
 # step: runbook-mcp-caddy-verify
+# readonly: yes
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3000,6 +3064,7 @@ the one validation and one reload.
 
 ```sh
 # step: runbook-mcp-caddy-rollback
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
@@ -3222,6 +3287,7 @@ database files. This does not remove release evidence:
 
 ```sh
 # step: runbook-60
+# readonly: no
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env

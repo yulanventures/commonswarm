@@ -35,6 +35,7 @@ The September 27 `0.1.78`, `0.1.79` and `0.1.80` release notes do not establish 
 
 ```sh
 # step: site-01 — Mac mini /bin/bash 3.2; Anvil; read-only commands on the box
+# readonly: yes
 (
   set -euo pipefail
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
@@ -68,6 +69,7 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
 
 ```sh
 # step: site-02 — Mac mini /bin/bash 3.2; Anvil; measured source reconciliation
+# readonly: yes
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
@@ -261,6 +263,7 @@ The signed-in checks use Anvil’s real Chrome and the dedicated test account be
 
 ```sh
 # step: site-03 — Mac mini /bin/bash 3.2; Anvil; read-only environment validation
+# readonly: yes
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
@@ -360,6 +363,7 @@ After all holds are resolved, HezLead’s execution approval must name the exact
 
 ```sh
 # step: site-04 — Mac mini /bin/bash 3.2; Anvil; production deployment after all holds close
+# readonly: no
 (
   set -euo pipefail
   : "${SITE_RELEASE_REPO:?Set the approved exact-release checkout}"
@@ -418,6 +422,7 @@ Use the release directory’s SHA prefix **plus the actual `/app` hash and refer
 
 ```sh
 # step: site-05 — box /bin/bash; Anvil as commonswarm; read-only public delivery control
+# readonly: yes
 (
   set -euo pipefail
   python3 - <<'PY'
@@ -522,6 +527,7 @@ Before invoking the block, `previous.release` must identify the measured previou
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; atomic rollback on the box
+# readonly: no
 (
   set -euo pipefail
   : "${SITE_EVIDENCE:?Set the evidence directory for this execution}"
