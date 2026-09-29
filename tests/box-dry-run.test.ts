@@ -361,6 +361,7 @@ assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
   "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
+  "browser-harness", "cp", "readlink",
 ];
 
 function measuredProductionMatch(pattern: RegExp): string {
@@ -844,6 +845,19 @@ function stepSource(markdown: string, step: string): string {
   return match[0];
 }
 
+function assertRunbook03NamedShaWindowPath(markdown: string): void {
+  const source = stepSource(markdown, "runbook-03");
+  assert.match(source, /: "\$\{RELEASE_SHA:\?named release SHA required\}"/);
+  assert.match(source, /\. "\/home\/commonswarm\/stack\/release-proofs\/\$\{RELEASE_SHA\}\/window\.env"/);
+  assert.doesNotMatch(source, /\/release-proofs\/<sha>\/window\.env/);
+}
+
+function browserProgram(block: Block): string {
+  const match = /browser-harness[^\n]*<<'PY'\n([\s\S]*?)\nPY/.exec(block.source);
+  assert.ok(match, `${block.step}: missing browser-harness stdin Python program`);
+  return match[1]!;
+}
+
 function removeOwnedTemporary(path: string, prefix: string): void {
   const resolved = resolve(path);
   assert.equal(dirname(resolved), resolve(tmpdir()));
@@ -1282,30 +1296,52 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
   const promptRoot = join(temporary, "prompt-inputs");
+  const copybackEvidence = join(temporary, "copyback-evidence");
   const opServiceAccountTokenFile = join(promptRoot, "op-service-account-token");
   mkdirSync(home, { mode: 0o700 });
   mkdirSync(promptRoot, { mode: 0o700 });
+  mkdirSync(copybackEvidence, { mode: 0o700 });
+  for (const name of [
+    "hm37-worker-boundary.txt",
+    "hm37-hosted-control-inputs.txt",
+    "hm37-hosted-check-control.json",
+    "hm37-revocation-readback.json",
+    "hm37-close-readback.txt",
+  ]) copyFileSync(join("docs/evidence/2026-09-29-release-eb2a87ac4b5a", name), join(copybackEvidence, name));
   writeFileSync(opServiceAccountTokenFile, promptSchemaContent("op-service-account-token"), { mode: 0o600 });
   chmodSync(opServiceAccountTokenFile, 0o600);
   makeStubBin(bin);
+  const env = explicitEnvironment({
+    ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
+    HOME: home,
+    PATH: `${bin}:${process.env.PATH ?? ""}`,
+    BOX_DRY_RUN_PART: "mac",
+    BOX_DRY_RUN_STUB_LOG: log,
+    BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
+    BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: opServiceAccountTokenFile,
+    BOX_DRY_RUN_COPYBACK_EVIDENCE_DIR: copybackEvidence,
+    BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
+    BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
+    BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
+    BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
+    BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
+  });
+  if (env.PREP_RECEIPT_PATH) {
+    const prep = JSON.parse(readFileSync(env.PREP_RECEIPT_PATH, "utf8")) as {
+      workspace_id: string;
+      seats: Array<{ principal_id: string }>;
+    };
+    const state = `${log}.cswarm-state`;
+    mkdirSync(state, { mode: 0o700 });
+    writeFileSync(join(state, "principals.tsv"), prep.seats.map((seat) =>
+      `${prep.workspace_id}\t${seat.principal_id}\tfalse\n`).join(""), { mode: 0o600 });
+  }
   return {
     temporary, cwd: checkout, home, bin, log,
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: checkout,
-    env: explicitEnvironment({
-      ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
-      HOME: home,
-      PATH: `${bin}:${process.env.PATH ?? ""}`,
-      BOX_DRY_RUN_PART: "mac",
-      BOX_DRY_RUN_STUB_LOG: log,
-      BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
-      BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: opServiceAccountTokenFile,
-      BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
-      BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
-      BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
-      BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
-    }),
+    env,
     promptInputs: declaredPromptInputs,
   };
 }
@@ -1315,11 +1351,38 @@ function cleanupMacFixture(fixture: Fixture): void {
     `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`,
     `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env`,
     `/tmp/commonswarm-release-proofs-${RELEASE_SHA}-${WINDOW_ID}.tar`,
+    `/tmp/commonswarm-release-open-${RELEASE_SHA}.env`,
     `/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env`,
     "/tmp/commonswarm-hm37b-open.env",
     "/tmp/commonswarm-site-window.env",
   ]) rmSync(path, { force: true });
   removeOwnedTemporary(fixture.temporary!, "commonswarm-box-dry-run-mac-");
+}
+
+function seedHm37bCopybackReceipt(fixture: Fixture): void {
+  writeMode(`/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env`, [
+    `SHA='${RELEASE_SHA}'`, `WINDOW_START_UTC='${WINDOW_START}'`,
+    "WINDOW_END_UTC='2026-09-28T05:02:03Z'", `WINDOW_ID='${WINDOW_ID}'`,
+    "WINDOW_PRINCIPAL_SUFFIX='010203'", "BACKUP_MAX_AGE_SECONDS='86400'", "",
+  ].join("\n"));
+  fixture.env.RELEASE_SHA = RELEASE_SHA;
+}
+
+function runBrowserProgram(fixture: Fixture, block: Block, userId?: string) {
+  const evidence = join(fixture.temporary!, "browser-evidence");
+  mkdirSync(evidence, { recursive: true, mode: 0o700 });
+  return spawnSync("browser-harness", [], {
+    encoding: "utf8",
+    input: browserProgram(block),
+    env: {
+      ...fixture.env,
+      SITE_EVIDENCE: evidence,
+      CLI_USER_ID: "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+      BU_CDP_URL: "http://127.0.0.1:9335",
+      BH_TAB_MARKER: "0",
+      ...(userId ? { BOX_DRY_RUN_BROWSER_USER_ID: userId } : {}),
+    },
+  });
 }
 
 interface CheckoutSnapshot {
@@ -1826,7 +1889,7 @@ test("window IDs are derived once and later read from persisted files", () => {
   assert.match(open, /\.commonswarm-release-window\.env/);
   assert.match(open, /BOX_WINDOW_INPUT/);
   assert.match(stepSource(runbook, "1-apply-release-directories"), /\. \/tmp\/commonswarm-release-window\.env/);
-  assert.match(stepSource(runbook, "runbook-03"), /\. \/home\/commonswarm\/stack\/release-proofs\/<sha>\/window\.env/);
+  assertRunbook03NamedShaWindowPath(runbook);
   const siteOpen = blocks(SITE).find((block) => shortStep(block) === "site-01")?.source;
   assert.ok(siteOpen);
   assert.match(siteOpen, /SITE_WINDOW_ID=\$\(printf '%s' "\$start" \| tr -d ':-'\)/);
@@ -2655,6 +2718,99 @@ test("controls: a measured basename under a different directory remains UNPRODUC
     `unmeasured compose override was accepted:\n${report.map((read) => read.what).join("\n")}`);
 });
 
+test("controls: runbook-03 with a literal <sha> window.env path fails the runbook-03 check", () => {
+  const current = readFileSync(RUNBOOK, "utf8");
+  const named = current
+    .replace("  . /home/commonswarm/stack/release-proofs/<sha>/window.env", [
+      '  : "${RELEASE_SHA:?named release SHA required}"',
+      '  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
+    ].join("\n"))
+    .replace("  test \"$SHA\" = '<sha>'", '  test "$SHA" = "$RELEASE_SHA"');
+  assert.doesNotThrow(() => assertRunbook03NamedShaWindowPath(named));
+  const regressed = named.replace(
+    '  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
+    "  . /home/commonswarm/stack/release-proofs/<sha>/window.env",
+  );
+  assert.throws(() => assertRunbook03NamedShaWindowPath(regressed), /release-proofs/);
+});
+
+test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", () => {
+  const block = blocks(HM37B).find((candidate) => shortStep(candidate) === "hm37b-copyback");
+  assert.ok(block);
+  const fixture = prepareMacFixture([block]);
+  seedHm37bCopybackReceipt(fixture);
+  try {
+    const positive = executeWholeBlock(block, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    for (const variant of ["missing", "extra"]) {
+      const negative = executeWholeBlock(block, fixture, {
+        env: { BOX_DRY_RUN_COPYBACK_ARCHIVE_VARIANT: variant },
+      });
+      assert.equal(negative.result, "failed", `${variant} archive unexpectedly passed`);
+      assert.match(negative.firstFailingCommand ?? negative.stderr, /tar --no-xattrs -tf|printf '%s\\n' \$FILES/);
+    }
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: an ssh remote script that the fixture box root cannot satisfy fails", () => {
+  const fixture = prepareMacFixture();
+  const command = `sudo -n -i /bin/bash -s -- '${RELEASE_SHA}'`;
+  const run = (input: string) => spawnSync("ssh", ["ops@100.115.66.74", command], {
+    encoding: "utf8", input, env: fixture.env,
+  });
+  try {
+    const positive = run(`set -euo pipefail\ntest -f /home/commonswarm/stack/release-proofs/${RELEASE_SHA}/hm37-close-readback.txt\ntar -C /home/commonswarm/stack/release-proofs/${RELEASE_SHA} -cf - hm37-close-readback.txt\n`);
+    assert.equal(positive.status, 0, positive.stderr);
+    assert.ok(positive.stdout.length > 0, "satisfied remote script returned no tar stream");
+
+    const missing = run(`set -euo pipefail\ntest -f /home/commonswarm/stack/release-proofs/${RELEASE_SHA}/not-produced.txt\n`);
+    assert.notEqual(missing.status, 0);
+    const unhandled = run("set -euo pipefail\nunreviewed-box-command\n");
+    assert.notEqual(unhandled.status, 0);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: browser-harness refuses an unreviewed call shape", () => {
+  const block = blocks(SITE).find((candidate) => shortStep(candidate) === "site-03-browser-session-preflight");
+  assert.ok(block);
+  const fixture = prepareMacFixture([block]);
+  try {
+    const positive = runBrowserProgram(fixture, block);
+    assert.equal(positive.status, 0, positive.stderr);
+    const refused = spawnSync("browser-harness", ["--unreviewed"], {
+      encoding: "utf8", input: browserProgram(block),
+      env: { ...fixture.env, BU_CDP_URL: "http://127.0.0.1:9335", BH_TAB_MARKER: "0" },
+    });
+    assert.equal(refused.status, 69);
+    assert.match(refused.stderr, /^unhandled dry-run stub: browser-harness --unreviewed$/m);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: a browser fixture with a different user id fails site-03", () => {
+  const block = blocks(SITE).find((candidate) => shortStep(candidate) === "site-03-browser-session-preflight");
+  assert.ok(block);
+  const fixture = prepareMacFixture([block]);
+  try {
+    const positive = runBrowserProgram(fixture, block);
+    assert.equal(positive.status, 0, positive.stderr);
+    const evidence = join(fixture.temporary!, "browser-evidence", "site-03-browser-preflight.json");
+    assert.equal(JSON.parse(readFileSync(evidence, "utf8")).web_user_id,
+      "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc");
+    rmSync(evidence);
+    const wrongUser = runBrowserProgram(fixture, block, "00000000-0000-4000-8000-000000000001");
+    assert.notEqual(wrongUser.status, 0);
+    assert.equal(existsSync(evidence), false, "wrong-user browser fixture wrote passing site-03 evidence");
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("controls: a block that exits non-zero is reported as failed, never as passed", () => {
   const fixture = prepareMacFixture();
   try {
@@ -3195,6 +3351,10 @@ test("non-substitutable surfaces are explicit", (t) => {
   const items = JSON.parse(readFileSync("tests/box-dry-run/fixtures/non-substitutable.json", "utf8")) as Array<{ surface: string; reason: string }>;
   assert.ok(items.length >= 6);
   assert.ok(items.every((item) => item.surface && item.reason));
+  assert.deepEqual(items.find((item) => item.surface === "browser-harness"), {
+    surface: "browser-harness",
+    reason: "the dry run cannot prove a real browser session; Anvil proves it live.",
+  });
   for (const item of items) t.diagnostic(`${item.surface}: ${item.reason}`);
 });
 

@@ -23,6 +23,161 @@ unhandled_stub() {
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
 stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
 
+box_fixture_root() {
+  mkdir -p "$stub_state_dir"
+  resolved_stub_state_dir=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$stub_state_dir")
+  fixture_root_file="$stub_state_dir/ssh-fixture-root"
+  if [ -f "$fixture_root_file" ]; then
+    fixture_root=$(cat "$fixture_root_file")
+  else
+    fixture_root=$(mktemp -d "$stub_state_dir/ssh-box.XXXXXX")
+    fixture_root=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$fixture_root")
+    printf '%s\n' "$fixture_root" >"$fixture_root_file"
+  fi
+  case "$fixture_root" in
+    "$resolved_stub_state_dir"/ssh-box.??????) ;;
+    *) printf 'refusing unsafe fixture root: %s\n' "$fixture_root" >&2; exit 70 ;;
+  esac
+  printf '%s\n' "$fixture_root"
+}
+
+seed_box_fixture() {
+  fixture_root=$(box_fixture_root)
+  fixture_sha=${BOX_DRY_RUN_RELEASE_SHA:?fixture release SHA required}
+  case "$fixture_sha" in *[!0-9a-f]*|'') fail_unproduced 'ssh fixture release SHA' ;; esac
+  [ "${#fixture_sha}" -eq 40 ] || fail_unproduced 'ssh fixture release SHA'
+  fixture_proof="$fixture_root/home/commonswarm/stack/release-proofs/$fixture_sha"
+  mkdir -p "$fixture_proof"
+
+  # Each fixture is copied byte-for-byte from its committed execution evidence:
+  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-worker-boundary.txt
+  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-control-inputs.txt
+  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json
+  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-revocation-readback.json
+  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt
+  fixture_evidence=${BOX_DRY_RUN_COPYBACK_EVIDENCE_DIR:?copy-back evidence fixture required}
+  for fixture_member in \
+    hm37-worker-boundary.txt \
+    hm37-hosted-control-inputs.txt \
+    hm37-hosted-check-control.json \
+    hm37-revocation-readback.json \
+    hm37-close-readback.txt; do
+    [ -f "$fixture_evidence/$fixture_member" ] || fail_unproduced 'ssh fixture evidence'
+    if [ ! -e "$fixture_proof/$fixture_member" ]; then
+      /bin/cp "$fixture_evidence/$fixture_member" "$fixture_proof/$fixture_member"
+      chmod 0600 "$fixture_proof/$fixture_member"
+    fi
+  done
+
+  # M15 in docs/evidence/2026-09-29-box-facts/box-facts-measured.json
+  # records the current site release. The committed site release evidence at
+  # docs/evidence/2026-09-27-release-9b085c823523 carries the app/download tree
+  # shape copied by site-03-pin-previous.
+  fixture_site_root="$fixture_root/srv/commonswarm/site"
+  fixture_site_release="$fixture_site_root/releases/${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}"
+  if [ ! -e "$fixture_site_root/current" ] && [ ! -L "$fixture_site_root/current" ]; then
+    mkdir -p "$fixture_site_release/app" "$fixture_site_release/download"
+    printf '%s\n' 'dry-run measured app entry' >"$fixture_site_release/app/index.html"
+    printf '%s\n' 'dry-run measured download entry' >"$fixture_site_release/download/index.html"
+    ln -s "$fixture_site_release" "$fixture_site_root/current"
+  fi
+
+  printf '%s\n' "$fixture_root"
+}
+
+run_box_fixture_script() {
+  remote_input=$1
+  shift
+  remote_arguments=()
+  remote_shell_command=
+  if [ "$#" -eq 1 ]; then
+    remote_shell_command=$1
+  else
+    [ "$#" -ge 4 ] && [ "$1" = /bin/bash ] && [ "$2" = -s ] && [ "$3" = -- ] || \
+      fail_unproduced 'ssh remote shell output'
+    shift 3
+    [ "$#" -gt 0 ] || fail_unproduced 'ssh remote shell argument'
+    remote_arguments=("$@")
+  fi
+
+  fixture_root=$(seed_box_fixture)
+  fixture_sha=${BOX_DRY_RUN_RELEASE_SHA:?fixture release SHA required}
+  fixture_proof="$fixture_root/home/commonswarm/stack/release-proofs/$fixture_sha"
+  if [ -n "$remote_shell_command" ]; then
+    parsed_arguments="$fixture_root/remote-arguments"
+    if ! /usr/bin/python3 - "$remote_shell_command" >"$parsed_arguments" <<'PY'
+import shlex, sys
+parts = shlex.split(sys.argv[1])
+if parts[:6] != ["sudo", "-n", "-i", "/bin/bash", "-s", "--"] or len(parts) < 7:
+    raise SystemExit(1)
+for value in parts[6:]:
+    if "\n" in value or "\r" in value:
+        raise SystemExit(1)
+    print(value)
+PY
+    then
+      fail_unproduced 'ssh remote shell output'
+    fi
+    while IFS= read -r remote_argument || [ -n "$remote_argument" ]; do
+      [ -n "$remote_argument" ] || fail_unproduced 'ssh remote shell argument'
+      remote_arguments+=("$remote_argument")
+    done <"$parsed_arguments"
+    [ "${#remote_arguments[@]}" -gt 0 ] || fail_unproduced 'ssh remote shell argument'
+  fi
+
+  remote_script="$fixture_root/remote-script.sh"
+  printf '%s\n' "$remote_input" | sed \
+    -e "s|/tmp/|$fixture_root/tmp/|g" \
+    -e "s|/run/|$fixture_root/run/|g" \
+    -e "s|/etc/|$fixture_root/etc/|g" \
+    -e "s|/home/commonswarm|$fixture_root/home/commonswarm|g" \
+    -e "s|/srv/commonswarm|$fixture_root/srv/commonswarm|g" \
+    >"$remote_script"
+  chmod 0700 "$remote_script"
+  remote_output="$fixture_root/remote-output"
+  for argument_index in "${!remote_arguments[@]}"; do
+    case "${remote_arguments[$argument_index]}" in
+      /srv/commonswarm/*)
+        remote_arguments[$argument_index]="$fixture_root${remote_arguments[$argument_index]}"
+        ;;
+      /home/commonswarm/*)
+        remote_arguments[$argument_index]="$fixture_root${remote_arguments[$argument_index]}"
+        ;;
+    esac
+  done
+  (
+    cd "$fixture_root"
+    env PATH="${0%/*}:/usr/bin:/bin" BOX_DRY_RUN_PART=box \
+      /bin/bash "$remote_script" "${remote_arguments[@]}" >"$remote_output"
+  )
+
+  archive_output=no
+  if /usr/bin/tar -tf "$remote_output" >/dev/null 2>&1; then archive_output=yes; fi
+  case "${BOX_DRY_RUN_COPYBACK_ARCHIVE_VARIANT:-exact}" in
+    exact) ;;
+    missing)
+        [ "$archive_output" = yes ] || unhandled_stub
+        /usr/bin/tar -C "$fixture_proof" -cf "$remote_output" \
+          hm37-worker-boundary.txt hm37-hosted-control-inputs.txt \
+          hm37-hosted-check-control.json hm37-revocation-readback.json
+        ;;
+    extra)
+        [ "$archive_output" = yes ] || unhandled_stub
+        printf '%s\n' 'unexpected fixture member' >"$fixture_proof/unexpected.txt"
+        /usr/bin/tar -C "$fixture_proof" -cf "$remote_output" \
+          hm37-worker-boundary.txt hm37-hosted-control-inputs.txt \
+          hm37-hosted-check-control.json hm37-revocation-readback.json \
+          hm37-close-readback.txt unexpected.txt
+        ;;
+    *) unhandled_stub ;;
+  esac
+  if [ "$archive_output" = yes ]; then
+    cat "$remote_output"
+  else
+    sed "s|$fixture_root||g" "$remote_output"
+  fi
+}
+
 # These inventories are checked against every executable plan block by
 # tests/box-dry-run.test.ts. Keep the dispatch cases and these declarations in
 # lockstep; a plan cannot acquire a new external operation by falling through.
@@ -113,7 +268,7 @@ case "$name" in
               /tmp/hm37-worker-boundary.txt \
               /tmp/hm37-hosted-control-inputs.txt
             ;;
-          *) fail_unproduced 'ssh remote shell output' ;;
+          *) run_box_fixture_script "$remote_input" "$@" ;;
         esac
         ;;
       *'readlink -f /home/commonswarm/edge/current'*)
@@ -176,6 +331,23 @@ case "$name" in
       printf 'scp-transfer source_sha256=%s target_user=%q target_host=%q target_path=%q\n' \
         "$source_sha256" "$target_user" "$target_host" "$target_path"
     } >>"$BOX_DRY_RUN_STUB_LOG"
+    ;;
+  cp)
+    cp_arguments=()
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --reflink=auto) ;;
+        *) cp_arguments+=("$1") ;;
+      esac
+      shift
+    done
+    exec /bin/cp "${cp_arguments[@]}"
+    ;;
+  readlink)
+    if [ "$#" -eq 2 ] && [ "$1" = -f ]; then
+      exec /usr/bin/python3 -c 'import os,sys; value=os.path.realpath(sys.argv[1]); print("/tmp/"+value.removeprefix("/private/tmp/") if value.startswith("/private/tmp/") else value)' "$2"
+    fi
+    exec /usr/bin/readlink "$@"
     ;;
   chown|caddy)
     printf 'UNPRODUCED %s result\n' "$name" >&2
@@ -575,7 +747,15 @@ case "$name" in
     exec /usr/bin/env PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 "$@"
     ;;
   tar)
-    exec /usr/bin/tar "$@"
+    tar_arguments=()
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --no-xattrs) ;;
+        *) tar_arguments+=("$1") ;;
+      esac
+      shift
+    done
+    exec /usr/bin/tar "${tar_arguments[@]}"
     ;;
   deno)
     if [ -n "${BOX_DRY_RUN_FAIL_STEP:-}" ] && [ "${BOX_DRY_RUN_FAIL_STEP}" = "${BOX_DRY_RUN_STEP:-}" ]; then
@@ -597,6 +777,96 @@ typescript 5.8.3}" ;;
     esac
     ;;
   sleep)
+    ;;
+  browser-harness)
+    [ "$#" -eq 0 ] || unhandled_stub
+    browser_program=$(cat)
+    [ -n "$browser_program" ] || unhandled_stub
+    [ "${BH_TAB_MARKER:-}" = 0 ] || unhandled_stub
+    case "${BU_CDP_URL:-}" in http://127.0.0.1:9335) ;; *) unhandled_stub ;; esac
+    # Browser state shapes are grounded in the committed 2026-09-26/27 controls:
+    # ./docs/evidence/2026-09-26-item-cp/CP1-LANDING.md:22-29 records the
+    # Ridgeio production sign-in, and
+    # ./docs/evidence/2026-09-27-prod-controls/RUN/00-human-session.json:1-18
+    # records the user, owner label, and Cold Agent Test workspace. The retained
+    # starting-workspace shape is K4-8 in box-facts-measured.json:521-533.
+    {
+      cat <<'PY'
+import os, pathlib, urllib.parse
+
+_fixture_user = os.environ.get("BOX_DRY_RUN_BROWSER_USER_ID", "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc")
+_fixture_start = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+_fixture_control = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+_fixture_selected = _fixture_start
+_fixture_width = 1280
+_fixture_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+def new_tab(url):
+    return {"url": url}
+
+def wait_for_load():
+    return None
+
+def goto_url(url):
+    global _fixture_selected
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    if query.get("w"):
+        _fixture_selected = query["w"][0]
+    return {"url": url}
+
+def cdp(method, **kwargs):
+    global _fixture_width
+    if method == "Emulation.setDeviceMetricsOverride":
+        _fixture_width = kwargs["width"]
+    if method == "Page.captureScreenshot":
+        return {"data": _fixture_png}
+    return {}
+
+def js(source):
+    global _fixture_selected
+    if "two-factor|2fa|verification code|keychain" in source:
+        return False
+    if "data-workspace-id=\"c2ea0541-f56d-4c73-bf71-56c5405c4934\"" in source:
+        _fixture_selected = _fixture_control
+        return True
+    if "data-workspace-id=\"292be0f9-ca5d-43ed-a6f7-31354fe7fe56\"" in source:
+        _fixture_selected = _fixture_start
+        return True
+    if "return {userId, selectedWorkspace" in source:
+        return {"userId": _fixture_user, "selectedWorkspace": _fixture_selected,
+                "workspaceIds": [_fixture_start, _fixture_control], "display": "Ridgeio", "signedOut": False}
+    if "return {userId,workspaceId" in source:
+        return {"userId": _fixture_user, "workspaceId": _fixture_selected, "workspaceCount": 2,
+                "display": "Ridgeio", "signedOut": False, "connectedSurface": True,
+                "connectedCreateAction": False, "errors": []}
+    if "feed:!!document.querySelector" in source:
+        return {"feed": True, "roster": True, "localSeat": True, "h0": True, "workspaceError": False}
+    if "performance.getEntriesByType('resource')" in source:
+        public = pathlib.Path(os.environ["SITE_EVIDENCE"]) / "site-05-public.txt"
+        return [line.split(" ", 1)[1] for line in public.read_text().splitlines() if line.startswith("asset_sha256=")]
+    if "data-connected-apps-list" in source:
+        return "No apps are connected to this account."
+    if "data-connected-apps-status" in source:
+        return "Nothing was changed"
+    if "data-connected-apps-retry" in source:
+        return False
+    if "data-connected-apps-dialog" in source and "getBoundingClientRect" in source:
+        return {"x": 0, "y": 0, "width": 280, "height": 200, "scale": 1}
+    if "railHeight" in source and "scrollWidth" in source:
+        return {"innerWidth": _fixture_width, "scrollWidth": _fixture_width, "railHeight": 64,
+                "controls": [{"top": 8, "bottom": 48, "left": 8, "right": 48},
+                             {"top": 8, "bottom": 48, "left": 56, "right": 96},
+                             {"top": 8, "bottom": 48, "left": 104, "right": 144}]}
+    if "[aria-checked=\"true\"]" in source:
+        return _fixture_selected
+    if "data-rail-account" in source:
+        return "Ridgeio"
+    if "data-panel=\"auth\"" in source:
+        return False
+    return True
+PY
+      printf '%s\n' "$browser_program"
+    } | /usr/bin/env PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 -
     ;;
   cswarm)
     mkdir -p "$cswarm_state_dir"
