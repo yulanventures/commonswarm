@@ -55,6 +55,7 @@ release_psql() {
 
 release_psql_ro() {
   case " $* " in
+    *"20260916000001"*"20260916000002"*) : ;;
     *"20260928000004"*"count"*) printf '%s\n' 0 ;;
     *"20260928000004-catalog.sql"*) printf '%s\n' f ;;
     *"ORDER BY version"*)

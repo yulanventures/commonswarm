@@ -669,15 +669,39 @@ Historical HM2 run 4 records migration 02 applied, edge health with memory `2147
 | `KIND_LIST` | `edge stack` |
 | `MIGRATION_VERSIONS` | `20260928000004` only |
 | `FUNCTIONAL_VERSIONS` | `20260928000004` |
-| `H0_LEDGER_BACKFILL` | `no` |
-| `GUARDED_STACK_SWITCH` | `no`, contingent on actual runtime comparison |
-| `BACKUP_STATUS_PROOF` | `no`; the section 5 backup gate still applies |
+| `H0_LEDGER_BACKFILL` | `no`; skip `runbook-18`, `runbook-19` and `runbook-20` |
+| `GUARDED_STACK_SWITCH` | `no`; skip `runbook-48`, contingent on actual runtime comparison |
+| `BACKUP_STATUS_PROOF` | `no`; skip `runbook-54` and `runbook-55`; the section 5 backup gate still applies |
 | `API_CADDY_PAIR` | `no`; skip runbook steps `runbook-56` through `runbook-59` and their pair artifacts |
 | `MCP_CADDY_RELEASE` | `no`; skip every `runbook-mcp-caddy-*` step and artifact |
 | `CHANGED_FUNCTIONS` | `command mcp` |
 | `ROUTER_CHANGED` | `yes` |
 | `ADDITIONAL_REQUIRED_ENV_NAMES` | Empty |
 | Expected cron additions/removals | Both empty |
+
+The successful path uses this exact whole-block order after applying the input
+table and the runbook's switch-to-step mapping:
+
+```text
+hm37-source-identity runbook-02 runbook-04 1-upload-release-archive
+1-open-root-shell 1-apply-release-directories runbook-03 runbook-05
+runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
+runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
+hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
+hm37-current-window-state hm37-read-window-suffix
+hm37-hosted-human-session-input hm37-hosted-control-stage hm37-backup-gate
+runbook-23 runbook-24 runbook-25 runbook-26 runbook-27 runbook-28
+hm37-functional-section5 runbook-29 runbook-30 runbook-31 runbook-32
+runbook-33 runbook-34 hm37-public-boundary-reads hm37-public-boundaries
+runbook-35 hm37-hosted-open-ack-control hm37-validate-local-credential
+runbook-13 runbook-11 runbook-60 runbook-61 runbook-12
+```
+
+The pre-COMMIT-POINT and S1–S5 rollback tail is
+`hm37-reserve-schema-rollback`, `runbook-42`, `runbook-13`, `runbook-11`,
+`runbook-60`, `runbook-61`, `runbook-12`, in that order. A post-COMMIT-POINT
+`control` failure instead uses `hm37-hosted-control-cleanup-only`, `runbook-13`,
+`runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`, in that order.
 
 Window start/end and positive integer `BACKUP_MAX_AGE_SECONDS` require HezLead’s approval and durable root-only recording. Their values are **not established**.
 

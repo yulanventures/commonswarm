@@ -1,18 +1,22 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
@@ -87,8 +91,65 @@ function shortStep(block: Block): string {
   return block.step.split(" — ")[0] ?? block.step;
 }
 
-function materialize(source: string): string {
-  return source
+function planStepOrder(): string[] {
+  const markdown = readFileSync(HM37, "utf8");
+  const match = /The successful path uses this exact whole-block order[\s\S]*?^```text\n([\s\S]*?)^```$/m.exec(markdown);
+  assert.ok(match, "HM37 plan is missing the successful-path step order");
+  return match[1]!.trim().split(/\s+/);
+}
+
+function planTail(kind: "rollback" | "cleanup"): string[] {
+  const markdown = readFileSync(HM37, "utf8");
+  const expression = kind === "rollback"
+    ? /The pre-COMMIT-POINT and S1–S5 rollback tail is\n([\s\S]*?), in that order\./
+    : /A post-COMMIT-POINT\n`control` failure instead uses ([\s\S]*?), in that order\./;
+  const match = expression.exec(markdown);
+  assert.ok(match, `HM37 plan is missing the ${kind} tail`);
+  return [...match[1]!.matchAll(/`([^`]+)`/g)].map((item) => item[1]!);
+}
+
+function planInput(name: string): string {
+  const markdown = readFileSync(HM37, "utf8");
+  const row = markdown.split("\n").find((line) => line.startsWith(`| \`${name}\` |`));
+  const match = /\| `[^`]+` \| `([^`]+)`/.exec(row ?? "");
+  assert.ok(match, `HM37 plan is missing input ${name}`);
+  return match[1]!;
+}
+
+function switchStepGroups(): Map<string, string[]> {
+  const markdown = readFileSync(RUNBOOK, "utf8");
+  const start = markdown.indexOf("| Switch | Whole-block step group |");
+  const end = markdown.indexOf("\n\nAdd exact relative paths", start);
+  assert.ok(start >= 0 && end > start, "runbook is missing the switch-to-step mapping");
+  const groups = new Map<string, string[]>();
+  for (const line of markdown.slice(start, end).split("\n").slice(2)) {
+    const cells = line.split("|").map((cell) => cell.trim()).filter(Boolean);
+    if (cells.length !== 2) continue;
+    const input = /`([^`]+)`/.exec(cells[0]!)?.[1];
+    const steps = [...cells[1]!.matchAll(/`([^`]+)`/g)].map((item) => item[1]!);
+    if (input) groups.set(input, steps);
+  }
+  assert.equal(groups.size, 5);
+  return groups;
+}
+
+function selectedHmSequence(): string[] {
+  let selected = planStepOrder();
+  for (const [input, steps] of switchStepGroups()) {
+    const value = planInput(input);
+    assert.match(value, /^(?:yes|no)$/);
+    if (value === "no") selected = selected.filter((step) => !steps.includes(step));
+    else for (const step of steps) assert.ok(selected.includes(step), `${input}=yes omits ${step}`);
+  }
+  return selected;
+}
+
+function materialize(block: Block): string {
+  let source = block.source;
+  if (shortStep(block) === "runbook-04") {
+    source = source.replace("ROUTER_CHANGED='<yes-or-no>'", "ROUTER_CHANGED='yes'");
+  }
+  source = source
     .replaceAll("<sha256-from-Mac-evidence>", "5219c371b281b6f7e0b90adb090f2fb3dff388ec5d95c163ba9c1daaa0bac7b3")
     .replaceAll("<approved-YYYY-MM-DDTHH:MM:SSZ>", "2026-09-28T05:02:03Z")
     .replaceAll("<next-approved-version-from-pending-versions.txt>", "20260928000004")
@@ -99,6 +160,12 @@ function materialize(source: string): string {
     .replaceAll("<approved-14-digit-version-with-functional-txt-output>", "20260928000004")
     .replaceAll("<approved-14-digit-version>", "20260928000004")
     .replaceAll("<sha>", RELEASE_SHA);
+  if (shortStep(block) === "runbook-03") {
+    source = source
+      .replace("MIGRATION_VERSIONS=(\n    # 20260928000004\n  )", "MIGRATION_VERSIONS=(\n    20260928000004\n  )")
+      .replace("FUNCTIONAL_VERSIONS=(\n    # 20260928000004\n  )", "FUNCTIONAL_VERSIONS=(\n    20260928000004\n  )");
+  }
+  return source;
 }
 
 interface Fixture {
@@ -126,6 +193,26 @@ function writeMode(filename: string, body: string, mode = 0o600): void {
   mkdirSync(dirname(filename), { recursive: true });
   writeFileSync(filename, body, { mode });
   chmodSync(filename, mode);
+}
+
+function checksumManifest(root: string, excluded: string[] = []): string {
+  const files: string[] = [];
+  const visit = (directory: string): void => {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      const stat = lstatSync(path);
+      if (stat.isDirectory()) visit(path);
+      else if (stat.isFile()) {
+        const file = relative(root, path);
+        if (!excluded.includes(file)) files.push(file);
+      }
+    }
+  };
+  visit(root);
+  return files.sort().map((file) => {
+    const digest = createHash("sha256").update(readFileSync(join(root, file))).digest("hex");
+    return `${digest}  ./${file}`;
+  }).join("\n") + "\n";
 }
 
 function checkoutFixture(parent: string, name: string, sha: string): string {
@@ -291,10 +378,18 @@ function prepareBoxFixture(state: string): Fixture {
   for (const file of ["20260928000003-catalog.sql", "20260928000003-functional.sql", "20260928000004-catalog.sql", "20260928000004-functional.sql"]) writeMode(join(proof, file), "SELECT true AS catalog_ok\\gset\n");
   writeMode(join(proof, "copy-back.list"), "copy-back.list\n");
   for (const file of [
-    "edge.SHA256SUMS", "stack.SHA256SUMS", "caddy-after-10-commonswarm-api.caddy",
+    "caddy-after-10-commonswarm-api.caddy",
     "caddy-after-11-commonswarm-edge-staging.caddy", "caddy-log-files.txt",
     "mcp-caddy-after.caddy", "mcp-caddy-log-files.txt",
   ]) writeMode(join(proof, file), file.endsWith(".txt") ? "fixture\n" : "");
+  writeMode(join(proof, "gate-evidence.txt"), `SHA=${RELEASE_SHA}\nfixture gate evidence\n`);
+  writeMode(join(proof, "required-edge-env.json"), JSON.stringify({
+    required: [
+      "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL",
+      "SWARM_DATABASE_URL|SUPABASE_DB_URL", "SWARM_SELF_SERVE",
+    ], optional: [],
+  }) + "\n");
+  writeMode(join(proof, "edge-env-source-check.txt"), "fixture exact-SHA router inventory\n");
   const oauthProof = "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05";
   mkdirSync(oauthProof, { recursive: true, mode: 0o700 });
   writeMode(join(oauthProof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
@@ -306,10 +401,18 @@ function prepareBoxFixture(state: string): Fixture {
     `MIGRATE='/home/commonswarm/stack/releases/${RELEASE_SHA}/deploy/supabase-stack/migrate'`,
     `PROOF_DIR='${proof}'`, `APPLY_SQL='/run/commonswarm-release-${RELEASE_SHA}-apply.sql'`,
     "release_psql() { printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\"; }",
-    "release_psql_ro() { case \" $* \" in *20260928000004*count*) printf '%s\\n' 0;; *20260928000004-catalog.sql*) printf '%s\\n' f;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
+    "release_psql_ro() { case \" $* \" in *20260916000001*20260916000002*) :;; *20260928000004*count*) printf '%s\\n' 0;; *20260928000004-catalog.sql*) printf '%s\\n' f;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
     "",
   ].join("\n"));
-  writeMode("/home/commonswarm/.env", "SWARM_ENV=production\n", 0o600);
+  writeMode("/home/commonswarm/.env", [
+    "SWARM_ENV=production",
+    "SWARM_DATABASE_URL=postgres://placeholder",
+    "SWARM_SELF_SERVE=1",
+    "SUPABASE_URL=http://kong:8000",
+    "SUPABASE_ANON_KEY=fixture-anon-key",
+    "SUPABASE_SERVICE_ROLE_KEY=fixture-service-role-key",
+    "",
+  ].join("\n"), 0o600);
   writeMode("/etc/commonswarm-release/target.env", "TARGET_DATABASE_URL=postgres://placeholder\n", 0o600);
   writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o600);
   writeMode("/etc/commonswarm-oauth/database-credentials", '{"user":"commonswarm_oauth_runtime","password":"placeholder"}\n', 0o600);
@@ -332,17 +435,21 @@ function prepareBoxFixture(state: string): Fixture {
       mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
       mkdirSync(join(release, "supabase/migrations"), { recursive: true });
       writeMode(join(release, "RELEASE_SHA"), `${RELEASE_SHA}\n`, 0o644);
+      writeMode(join(release, "deploy/edge-runtime/compose.yaml"), "services: {}\n", 0o644);
+      writeMode(join(release, "deploy/edge-runtime/main/router.ts"), "// dry-run router fixture\n", 0o644);
       writeMode(join(release, "deploy/supabase-stack/compose.yaml"), "services: {}\n", 0o644);
       copyFileSync("supabase/migrations/20260928000003_hm_oauth_store.sql", join(release, "supabase/migrations/20260928000003_hm_oauth_store.sql"));
       writeMode(join(release, "supabase/migrations/20260928000004_hm_hosted_check.sql"), "-- fixture\n", 0o644);
       writeMode(join(release, "deploy/supabase-stack/migrate/run-db-tool.sh"), "#!/bin/sh\nexit 0\n", 0o755);
     }
+    if (state === "s3") writeMode(join(targetEdge, "deploy/edge-runtime/compose.override.yaml"), "services: {}\n", 0o644);
     const owned = spawnSync("/usr/bin/chown", ["-R", "commonswarm:commonswarm", targetEdge, targetStack], { encoding: "utf8" });
     assert.equal(owned.status, 0, owned.stderr);
     chmodSync(targetEdge, 0o750);
     chmodSync(targetStack, 0o755);
+    writeMode(join(proof, "edge.SHA256SUMS"), checksumManifest(targetEdge, ["deploy/edge-runtime/compose.override.yaml"]));
+    writeMode(join(proof, "stack.SHA256SUMS"), checksumManifest(targetStack));
   }
-  if (state === "s3") writeMode(join(targetEdge, "deploy/edge-runtime/compose.override.yaml"), "services: {}\n", 0o644);
   if (state === "s2" || state === "s5") {
     for (const suffix of ["001030", "021020"]) mkdirSync(`${proof}.closed-window-${suffix}`, { recursive: true });
   }
@@ -398,6 +505,56 @@ function cleanupBoxFixture(fixture: Fixture): void {
   removeOwnedTemporary(fixture.temporary!, `commonswarm-box-dry-run-`);
 }
 
+type FixturePart = "mac" | "box";
+
+function persistedFixturePaths(fixture: Fixture, part: FixturePart): string[] {
+  if (part === "mac") {
+    return [
+      fixture.temporary!,
+      `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`,
+      `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env`,
+      `/tmp/commonswarm-release-proofs-${RELEASE_SHA}-${WINDOW_ID}.tar`,
+    ].filter(existsSync);
+  }
+  const paths = [
+    fixture.temporary!,
+    "/home/commonswarm",
+    "/srv/commonswarm",
+    "/etc/commonswarm-release/target.env",
+    "/etc/ssl/yulan-internal-ca.pem",
+    "/etc/commonswarm-oauth/database-credentials",
+    "/etc/commonswarm-oauth/service.env",
+    "/etc/caddy/sites/10-commonswarm-api.caddy",
+    "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
+    "/etc/caddy/sites/12-commonswarm-mcp.caddy",
+    "/var/backups/commonswarm-postgres/status.json",
+    "/tmp/commonswarm-release-window.env",
+    "/tmp/commonswarm-release.tar",
+    "/tmp/commonswarm-release-proofs.tar",
+    "/tmp/commonswarm-site-window.env",
+    `/run/commonswarm-release-${RELEASE_SHA}-session.sh`,
+    `/run/commonswarm-release-${RELEASE_SHA}-apply.sql`,
+    `/run/commonswarm-hm37-${WINDOW_ID}`,
+  ];
+  if (fixture.env.BOX_DRY_RUN_CREATED_DENO_STUB === "1") paths.push("/usr/local/bin/deno");
+  return paths.filter(existsSync);
+}
+
+function snapshotFixture(fixture: Fixture, part: FixturePart, archive: string): void {
+  const paths = persistedFixturePaths(fixture, part)
+    .map((path) => (part === "mac" ? realpathSync(path) : resolve(path)).slice(1));
+  assert.ok(paths.length > 0);
+  const result = spawnSync("/usr/bin/tar", ["-cpf", archive, "-C", "/", ...paths], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+}
+
+function restoreFixture(fixture: Fixture, part: FixturePart, archive: string): void {
+  if (part === "box") cleanupBoxFixture(fixture);
+  else cleanupMacFixture(fixture);
+  const result = spawnSync("/usr/bin/tar", ["-xpf", archive, "-C", "/"], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+}
+
 interface Execution {
   step: string;
   result: "passed" | "failed";
@@ -407,7 +564,7 @@ interface Execution {
 
 function executeWholeBlock(block: Block, fixture: Fixture, options: { fail?: boolean; control?: string } = {}): Execution {
   const step = shortStep(block);
-  const body = materialize(block.source);
+  const body = materialize(block);
   const script = [
     "set -E", `source ${JSON.stringify(PRELUDE)}`,
     "trap 'block_status=$?; printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\"' ERR",
@@ -565,116 +722,139 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
   }
 });
 
-const HM_SEQUENCE = [
-  "hm37-source-identity", "runbook-02", "runbook-04", "1-upload-release-archive",
-  "1-open-root-shell", "1-apply-release-directories", "runbook-03", "runbook-05",
-  "runbook-07", "runbook-08", "runbook-09", "runbook-10", "runbook-11",
-  "runbook-13", "runbook-14", "runbook-15", "runbook-16", "runbook-17",
-  "runbook-18", "runbook-19", "runbook-20", "hm37-hm6-schema-helpers-precondition",
-  "hm37-hm6-oauth-precondition", "hm37-hm6-oauth-refusal-probe",
-  "hm37-current-window-state", "hm37-read-window-suffix", "hm37-backup-gate",
-  "runbook-23", "runbook-24", "runbook-25", "runbook-26", "runbook-27",
-  "runbook-28", "runbook-29", "hm37-functional-section5", "runbook-30",
-  "runbook-31", "runbook-32", "runbook-33", "hm37-public-boundary-reads",
-  "hm37-public-boundaries", "hm37-hosted-human-session-input",
-  "hm37-hosted-control-stage", "hm37-hosted-open-ack-control",
-  "hm37-validate-local-credential", "runbook-60", "runbook-61", "runbook-12",
-];
-const ROLLBACK = ["hm37-reserve-schema-rollback", "runbook-42", "runbook-60", "runbook-61", "runbook-12"];
-const CLEANUP_ONLY = ["hm37-hosted-control-cleanup-only", "runbook-60", "runbook-61", "runbook-12"];
+test("HM37 switch inputs select the plan's exact successful-path steps", () => {
+  const selected = selectedHmSequence();
+  assert.ok(selected.length > 0);
+  assert.equal(new Set(selected).size, selected.length, "successful-path order contains a duplicate step");
+  for (const [input, steps] of switchStepGroups()) {
+    const present = steps.filter((step) => selected.includes(step));
+    assert.deepEqual(present, planInput(input) === "yes" ? steps : [], `${input} selected the wrong steps`);
+  }
+  assert.deepEqual(selected.slice(-6), [
+    "hm37-validate-local-credential", "runbook-13", "runbook-11",
+    "runbook-60", "runbook-61", "runbook-12",
+  ]);
+});
 
 test("five box states cover pass, pre-commit rollback, post-commit cleanup, and S-class rollback", (t) => {
+  const hmSequence = selectedHmSequence();
+  const rollback = planTail("rollback");
+  const cleanupOnly = planTail("cleanup");
   const states = JSON.parse(readFileSync("tests/box-dry-run/fixtures/states.json", "utf8")) as Record<string, string>;
   assert.deepEqual(Object.keys(states), ["s1", "s2", "s3", "s4", "s5"]);
   const scenarios = [
     { path: "all-pass", failure: "", tail: [] as string[] },
-    { path: "before-commit", failure: "hm37-backup-gate", tail: ROLLBACK },
-    { path: "after-control", failure: "hm37-hosted-open-ack-control", tail: CLEANUP_ONLY },
-    { path: "after-safety-S3", failure: "hm37-hosted-open-ack-control", tail: ROLLBACK },
+    { path: "before-commit", failure: "hm37-backup-gate", tail: rollback },
+    { path: "after-control", failure: "hm37-hosted-open-ack-control", tail: cleanupOnly },
+    { path: "after-safety-S3", failure: "hm37-hosted-open-ack-control", tail: rollback },
   ];
   const allBlocks = [...blocks(HM37), ...blocks(RUNBOOK)];
   const byStep = new Map(allBlocks.map((block) => [shortStep(block), block]));
   const known = new Set(byStep.keys());
-  for (const step of new Set([...HM_SEQUENCE, ...ROLLBACK, ...CLEANUP_ONLY])) assert.ok(known.has(step), `unknown sequence step ${step}`);
+  for (const step of new Set([...hmSequence, ...rollback, ...cleanupOnly])) assert.ok(known.has(step), `unknown sequence step ${step}`);
   const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
-  const macFixture = part === "mac" ? prepareMacFixture() : undefined;
-  try {
-    for (const [state, description] of Object.entries(states)) {
-      for (const scenario of scenarios) {
-        const stop = scenario.failure ? HM_SEQUENCE.indexOf(scenario.failure) : HM_SEQUENCE.length - 1;
-        assert.ok(stop >= 0);
-        const ordered = scenario.failure
-          ? [...HM_SEQUENCE.slice(0, stop + 1), ...scenario.tail]
-          : HM_SEQUENCE;
-        let fixture: Fixture;
-        if (part === "box") {
-          const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
-          assert.equal(guard.status, 0, guard.stderr);
-          fixture = prepareBoxFixture(state);
-        } else {
-          fixture = macFixture!;
-          writeFileSync(fixture.log, "");
-          rmSync(join(fixture.home, `.config/cswarm/box-hm37-${WINDOW_ID}`), { recursive: true, force: true });
-        }
-        try {
-          const records: Execution[] = [];
-          for (const step of ordered) {
-            const block = byStep.get(step)!;
-            const isBox = block.host.startsWith("box ");
-            if ((part === "box") !== isBox) continue;
-            const failure = scenario.failure === step;
-            const record = executeWholeBlock(block, fixture, { fail: failure });
-            records.push(record);
-            if (failure) {
-              assert.equal(record.result, "failed", `${state}/${scenario.path}/${step} did not exercise its injected failure`);
-              assert.ok(record.firstFailingCommand, `${state}/${scenario.path}/${step} did not report the first failing command`);
-            } else {
-              assert.equal(record.result, "passed", `${state}/${scenario.path}/${step}: ${record.stderr}`);
-            }
-          }
-          const expectedFailures = part === "box" && scenario.failure ? 1 : 0;
-          assert.equal(records.filter((record) => record.result === "failed").length, expectedFailures);
-          t.diagnostic(`${part}:${state}/${scenario.path} (${description}): ${records.map((record) => `${record.step}=${record.result}${record.firstFailingCommand ? `[${record.firstFailingCommand}]` : ""}`).join(",")}`);
-        } finally {
-          if (part === "box") cleanupBoxFixture(fixture);
-        }
-      }
-    }
-  } finally {
-    if (macFixture) cleanupMacFixture(macFixture);
-  }
-});
-
-test("all readonly blocks have an isolated-shell dry-run record", (t) => {
-  const readonly = [HM37, RUNBOOK, SITE].flatMap(blocks).filter((block) => block.marker === "yes");
-  assert.ok(readonly.length > 0);
-  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
-  const selected = readonly.filter((block) => block.host.startsWith("box ") === (part === "box"));
-  const shared = part === "mac" ? prepareMacFixture() : undefined;
-  if (shared) prepareSiteFixture(shared);
-  try {
-    for (const block of selected) {
+  for (const [state, description] of Object.entries(states)) {
+    for (const scenario of scenarios) {
+      const stop = scenario.failure ? hmSequence.indexOf(scenario.failure) : hmSequence.length - 1;
+      assert.ok(stop >= 0);
+      const ordered = scenario.failure
+        ? [...hmSequence.slice(0, stop + 1), ...scenario.tail]
+        : hmSequence;
       let fixture: Fixture;
       if (part === "box") {
         const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
         assert.equal(guard.status, 0, guard.stderr);
-        fixture = prepareBoxFixture("s2");
+        fixture = prepareBoxFixture(state);
       } else {
-        fixture = shared!;
-        fixture.cwd = shortStep(block).startsWith("site-") ? join(fixture.temporary!, "site-release") : join(fixture.temporary!, "hm37");
+        fixture = prepareMacFixture();
       }
       try {
-        const record = executeWholeBlock(block, fixture);
-        assert.equal(record.result, "passed", `${block.step}: ${record.stderr}`);
-        t.diagnostic(`${part}:${shortStep(block)}=ran/passed`);
+        const records: Execution[] = [];
+        for (const step of ordered) {
+          const block = byStep.get(step)!;
+          const isBox = block.host.startsWith("box ");
+          if ((part === "box") !== isBox) continue;
+          const failure = scenario.failure === step;
+          const record = executeWholeBlock(block, fixture, { fail: failure });
+          records.push(record);
+          if (failure) {
+            assert.equal(record.result, "failed", `${state}/${scenario.path}/${step} did not exercise its injected failure`);
+            assert.ok(record.firstFailingCommand, `${state}/${scenario.path}/${step} did not report the first failing command`);
+          } else {
+            assert.equal(record.result, "passed", `${state}/${scenario.path}/${step}: ${record.stderr}`);
+          }
+        }
+        const expectedFailures = part === "box" && scenario.failure ? 1 : 0;
+        assert.equal(records.filter((record) => record.result === "failed").length, expectedFailures);
+        t.diagnostic(`${part}:${state}/${scenario.path} (${description}): ${records.map((record) => `${record.step}=${record.result}${record.firstFailingCommand ? `[${record.firstFailingCommand}]` : ""}`).join(",")}`);
       } finally {
         if (part === "box") cleanupBoxFixture(fixture);
+        else cleanupMacFixture(fixture);
       }
     }
-  } finally {
-    if (shared) cleanupMacFixture(shared);
   }
-  t.diagnostic(`alone_records=${selected.length}; fresh shell and persisted window file per record`);
+});
+
+test("selected readonly blocks run alone from their ordered pre-step snapshots", (t) => {
+  const sequence = selectedHmSequence();
+  const allBlocks = [...blocks(HM37), ...blocks(RUNBOOK)];
+  const byStep = new Map(allBlocks.map((block) => [shortStep(block), block]));
+  const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  const snapshotRoot = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-snapshots-"));
+  const snapshots: Array<{ block: Block; archive: string }> = [];
+  let fixture: Fixture;
+  if (part === "box") {
+    const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+    assert.equal(guard.status, 0, guard.stderr);
+    fixture = prepareBoxFixture("s2");
+  } else {
+    fixture = prepareMacFixture();
+  }
+  try {
+    for (const step of sequence) {
+      const block = byStep.get(step)!;
+      if (block.host.startsWith("box ") !== (part === "box")) continue;
+      if (block.marker === "yes") {
+        const archive = join(snapshotRoot, `${String(snapshots.length).padStart(2, "0")}-${step}.tar`);
+        snapshotFixture(fixture, part, archive);
+        snapshots.push({ block, archive });
+      }
+      const record = executeWholeBlock(block, fixture);
+      assert.equal(record.result, "passed", `ordered ${step}: ${record.stderr}`);
+    }
+    if (part === "box") cleanupBoxFixture(fixture);
+    else cleanupMacFixture(fixture);
+
+    for (const { block, archive } of snapshots) {
+      restoreFixture(fixture, part, archive);
+      const record = executeWholeBlock(block, fixture);
+      assert.equal(record.result, "passed", `${block.step}: ${record.stderr}`);
+      t.diagnostic(`${part}:${shortStep(block)}=snapshot/reran/passed`);
+    }
+    t.diagnostic(`alone_records=${snapshots.length}; each fresh shell used its ordered pre-step snapshot`);
+  } finally {
+    if (part === "box") cleanupBoxFixture(fixture);
+    else cleanupMacFixture(fixture);
+    removeOwnedTemporary(snapshotRoot, "commonswarm-box-dry-run-snapshots-");
+  }
+});
+
+test("runbook-18 accepts the selected H0 backfill's empty-ledger evidence state", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box",
+}, () => {
+  const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+  assert.equal(guard.status, 0, guard.stderr);
+  const fixture = prepareBoxFixture("s2");
+  try {
+    const block = blocks(RUNBOOK).find((candidate) => shortStep(candidate) === "runbook-18");
+    assert.ok(block);
+    const record = executeWholeBlock(block, fixture);
+    assert.equal(record.result, "passed", record.stderr);
+    const ledger = `/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/h0-ledger-before.txt`;
+    assert.equal(readFileSync(ledger, "utf8"), "");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
 });
 
 test("historical controls execute and reproduce the named failures while current text fixes them", () => {

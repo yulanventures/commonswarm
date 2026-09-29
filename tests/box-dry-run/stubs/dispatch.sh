@@ -98,6 +98,22 @@ case "$name" in
     esac
     ;;
   curl)
+    if [ "${BOX_DRY_RUN_STEP:-}" = runbook-34 ]; then
+      headers=''
+      body=''
+      previous=''
+      for argument in "$@"; do
+        case "$previous" in
+          -D) headers=$argument ;;
+          -o) body=$argument ;;
+        esac
+        previous=$argument
+      done
+      [ -z "$headers" ] || printf '%s\n' 'HTTP/1.1 401 Unauthorized' 'content-type: application/json' >"$headers"
+      [ -z "$body" ] || printf '%s\n' '{"error":"unauthorized"}' >"$body"
+      printf '%s' 401
+      exit 0
+    fi
     case " $* " in
       *'127.0.0.1:'*) printf '%s\n' '{"status":"ok"}'; exit 0 ;;
     esac
@@ -150,6 +166,7 @@ case "$name" in
             "$destination/supabase/functions/command" \
             "$destination/supabase/functions/_shared"
           printf '%s\n' 'services: {}' >"$destination/deploy/edge-runtime/compose.yaml"
+          printf '%s\n' '// dry-run router fixture' >"$destination/deploy/edge-runtime/main/router.ts"
           printf '%s\n' 'services: {}' >"$destination/deploy/supabase-stack/compose.yaml"
           printf '%s\n' '#!/bin/sh' 'exit 0' >"$destination/deploy/supabase-stack/migrate/run-db-tool.sh"
           chmod 0755 "$destination/deploy/supabase-stack/migrate/run-db-tool.sh"

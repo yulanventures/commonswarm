@@ -205,6 +205,18 @@ proof produces a `.txt` file during this window. Set the five named switches
 when the window includes the section 4 H0 ledger backfill, the guarded stack
 switch, the section 8 backup-status proof, the section 9 API Caddy pair, or the
 section 9 MCP Caddy site.
+
+The five switches select whole runbook blocks. `yes` includes the named group;
+`no` skips every step in that group:
+
+| Switch | Whole-block step group |
+|---|---|
+| `H0_LEDGER_BACKFILL` | `runbook-18`, `runbook-19`, `runbook-20` |
+| `GUARDED_STACK_SWITCH` | `runbook-48` |
+| `BACKUP_STATUS_PROOF` | `runbook-54`, `runbook-55` |
+| `API_CADDY_PAIR` | `runbook-56`, `runbook-57`, `runbook-58`, `runbook-59` |
+| `MCP_CADDY_RELEASE` | `runbook-mcp-caddy-preflight`, `runbook-mcp-caddy-apply`, `runbook-mcp-caddy-verify`, `runbook-mcp-caddy-rollback` |
+
 Add exact relative paths from the item's box plan to `ITEM_COPY_BACK_FILES`; this is the only place to append
 item-specific evidence. Do not add `run.log`, `box-run.log`, `window.env`, any
 other `*.log`, any `*.err` file (the copy-back block handles those), or anything
