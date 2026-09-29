@@ -1238,7 +1238,12 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
   const home = join(temporary, "child-home");
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
+  const promptRoot = join(temporary, "prompt-inputs");
+  const opServiceAccountTokenFile = join(promptRoot, "op-service-account-token");
   mkdirSync(home, { mode: 0o700 });
+  mkdirSync(promptRoot, { mode: 0o700 });
+  writeFileSync(opServiceAccountTokenFile, promptSchemaContent("op-service-account-token"), { mode: 0o600 });
+  chmodSync(opServiceAccountTokenFile, 0o600);
   makeStubBin(bin);
   return {
     temporary, cwd: checkout, home, bin, log,
@@ -1252,6 +1257,7 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_PART: "mac",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
+      BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: opServiceAccountTokenFile,
       BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
       BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
       BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
@@ -2029,6 +2035,94 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
   }
 });
 
+test("scp and op stubs enforce transfer and protected-output boundaries", () => {
+  const fixture = prepareMacFixture();
+  const source = join(fixture.temporary!, "scp-source.txt");
+  const target = `/tmp/commonswarm-scp-control-${process.pid}`;
+  const outputDirectory = join(fixture.temporary!, "op-output");
+  const output = join(outputDirectory, "site-build.env");
+  writeMode(source, "recorded transfer bytes\n", 0o600);
+  mkdirSync(outputDirectory, { mode: 0o700 });
+  try {
+    const acceptedEnv = process.env.BOX_DRY_RUN_PART === "box"
+      ? { ...fixture.env, BOX_DRY_RUN_PART: "box" }
+      : fixture.env;
+    const accepted = spawnSync("scp", [source, `ops@100.115.66.74:${target}`], {
+      encoding: "utf8", env: acceptedEnv,
+    });
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(readFileSync(target, "utf8"), "recorded transfer bytes\n");
+    const targetStat = lstatSync(target);
+    assert.equal(targetStat.isFile(), true);
+    assert.equal(targetStat.mode & 0o777, 0o600);
+    if (process.env.BOX_DRY_RUN_PART === "box") {
+      assert.equal(targetStat.uid, Number.parseInt(spawnSync("/usr/bin/id", ["-u", "ops"], { encoding: "utf8" }).stdout, 10));
+      assert.equal(targetStat.gid, Number.parseInt(spawnSync("/usr/bin/id", ["-g", "ops"], { encoding: "utf8" }).stdout, 10));
+    }
+    const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+    assert.match(readFileSync(fixture.log, "utf8"), new RegExp(
+      `^scp-transfer source_sha256=${digest} target_user=ops target_host=100\\.115\\.66\\.74 target_path=${target}$`, "m",
+    ));
+
+    const wrongHost = spawnSync("scp", [source, "ops@192.0.2.1:/tmp/rejected"], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(wrongHost.status, 69);
+    const missingSource = spawnSync("scp", [join(fixture.temporary!, "missing"), "ops@100.115.66.74:/tmp/rejected"], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(missingSource.status, 69);
+    const directorySource = spawnSync("scp", [outputDirectory, "ops@100.115.66.74:/tmp/rejected"], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(directorySource.status, 69);
+
+    const stdoutRead = spawnSync("op", ["read", "op://Vault/Item/Field"], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(stdoutRead.status, 69);
+    const otherCommand = spawnSync("op", ["item", "get", "Item"], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(otherCommand.status, 69);
+    const desktopSession = spawnSync("op", ["read", "op://Vault/Item/Field", "--out-file", output], {
+      encoding: "utf8", env: { ...fixture.env, OP_SESSION_DRY_RUN: "desktop-session" },
+    });
+    assert.equal(desktopSession.status, 69);
+    const withoutTokenFile = { ...fixture.env };
+    delete withoutTokenFile.BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE;
+    const missingToken = spawnSync("op", ["read", "op://Vault/Item/Field", "--out-file", output], {
+      encoding: "utf8", env: withoutTokenFile,
+    });
+    assert.equal(missingToken.status, 69);
+    const inheritedToken = spawnSync("op", ["read", "op://Vault/Item/Field", "--out-file", output], {
+      encoding: "utf8", env: { ...fixture.env, OP_SERVICE_ACCOUNT_TOKEN: "forbidden-direct-token" },
+    });
+    assert.equal(inheritedToken.status, 69);
+    const tokenFile = fixture.env.BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE!;
+    chmodSync(tokenFile, 0o644);
+    const exposedTokenFile = spawnSync("op", ["read", "op://Vault/Item/Field", "--out-file", output], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(exposedTokenFile.status, 69);
+    chmodSync(tokenFile, 0o600);
+
+    const protectedRead = spawnSync("op", ["read", "op://Vault/Item/Field", "--out-file", output], {
+      encoding: "utf8", env: fixture.env,
+    });
+    assert.equal(protectedRead.status, 0, protectedRead.stderr);
+    assert.equal(protectedRead.stdout, "");
+    assert.equal(protectedRead.stderr, "");
+    const outputStat = lstatSync(output);
+    assert.equal(outputStat.isFile(), true);
+    assert.equal(outputStat.mode & 0o777, 0o600);
+    assert.match(readFileSync(output, "utf8"), /^PUBLIC_SUPABASE_URL=https:\/\/api\.commonswarm\.com$/m);
+  } finally {
+    rmSync(target, { force: true });
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("HM37 switch inputs select the plan's exact successful-path steps", () => {
   const selected = selectedHmSequence();
   assert.ok(selected.length > 0);
@@ -2226,7 +2320,7 @@ test("K4 static seeds retain the measured bytes and proof-parent layout", {
 test("prompt-input tables are strict and synthetic values follow their declared formats", (t) => {
   const requiredSchemas = [
     "gate-receipt", "sql-proof-root", "prep-receipt", "hm37-a-close-receipt",
-    "human-login-preflight", "human-session", "harness-source", "import-map-source",
+    "human-login-preflight", "human-session", "harness-source", "import-map-source", "op-service-account-token",
   ];
   for (const schemaId of requiredSchemas) assert.ok(promptSchemaContent(schemaId).length > 0, `${schemaId} schema is empty`);
   assert.equal(createHash("sha256").update(promptSchemaContent("harness-source")).digest("hex"),

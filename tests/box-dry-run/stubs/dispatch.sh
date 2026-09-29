@@ -66,6 +66,29 @@ case "$name" in
             # state is exercised in the box half; the Mac half only verifies
             # that the reviewed remote command is accepted by the transport.
             ;;
+          *'install -m 0600 -o root -g root /tmp/hm37-open-ack-control.ts'*'hm37-hosted-control-inputs.txt'*)
+            # Verify the five transferred inputs before accepting the remote
+            # installation boundary. Box-mode controls verify remote owner and
+            # mode separately on the actual target path.
+            for transferred in \
+              /tmp/hm37-open-ack-control.ts \
+              /tmp/hm37-open-ack-deno.json \
+              /tmp/hm37-human-session.json \
+              /tmp/hm37-worker-boundary.txt \
+              /tmp/hm37-hosted-control-inputs.txt; do
+              [ -f "$transferred" ] && [ ! -L "$transferred" ] || fail_unproduced 'scp transferred input'
+            done
+            test "$(shasum -a 256 /tmp/hm37-open-ack-control.ts | awk '{print $1}')" = \
+              dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
+            test "$(shasum -a 256 /tmp/hm37-open-ack-deno.json | awk '{print $1}')" = \
+              f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
+            rm -f \
+              /tmp/hm37-open-ack-control.ts \
+              /tmp/hm37-open-ack-deno.json \
+              /tmp/hm37-human-session.json \
+              /tmp/hm37-worker-boundary.txt \
+              /tmp/hm37-hosted-control-inputs.txt
+            ;;
           *) fail_unproduced 'ssh remote shell output' ;;
         esac
         ;;
@@ -81,18 +104,54 @@ case "$name" in
         # M15 in box-facts-measured.json records the live site release.
         printf '/srv/commonswarm/site/releases/%s\n' "${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}"
         ;;
+      *'install -d -m 0700 -o root -g root '*'/run/commonswarm-hm37-'*)
+        # The Mac half verifies this transport request. The box half owns the
+        # real root-shaped fixture and executes the box blocks there.
+        ;;
+      'umask 077; : > /tmp/hm37-open-ack-control.ts'|\
+      'umask 077; : > /tmp/hm37-open-ack-deno.json'|\
+      'umask 077; : > /tmp/hm37-human-session.json')
+        target_path=${remote_command##* > }
+        : >"$target_path"
+        chmod 0600 "$target_path"
+        ;;
       *'test '*'/srv/commonswarm/site/'*) ;;
       *) fail_unproduced 'ssh output' ;;
     esac
     ;;
   scp)
     [ "$#" -eq 2 ] || fail_unproduced 'scp flags'
-    case "$2" in
-      ops@100.115.66.74:/tmp/*|commonswarm@yulan-vps-1:/tmp/*)
-        cp "$1" "${2#*:}"
-        ;;
+    source_path=$1
+    destination=$2
+    [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail_unproduced 'scp regular source file'
+    case "$destination" in
+      ops@100.115.66.74:/tmp/*|commonswarm@100.115.66.74:/tmp/*) ;;
+      # Lane 8 carries this measured Tailscale hostname in its existing plan.
+      commonswarm@yulan-vps-1:/tmp/*) ;;
       *) fail_unproduced 'scp target' ;;
     esac
+    remote=${destination%%:*}
+    target_path=${destination#*:}
+    target_user=${remote%@*}
+    target_host=${remote#*@}
+    case "$target_path" in
+      /tmp/*/../*|/tmp/../*|*'\n'*) fail_unproduced 'scp target path' ;;
+    esac
+    [ ! -L "$target_path" ] || fail_unproduced 'scp symlink target'
+    if command -v shasum >/dev/null 2>&1; then
+      source_sha256=$(shasum -a 256 "$source_path" | awk '{print $1}')
+    else
+      source_sha256=$(sha256sum "$source_path" | awk '{print $1}')
+    fi
+    cp "$source_path" "$target_path"
+    chmod 0600 "$target_path"
+    if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
+      /usr/bin/chown "$target_user:$target_user" "$target_path"
+    fi
+    {
+      printf 'scp-transfer source_sha256=%s target_user=%q target_host=%q target_path=%q\n' \
+        "$source_sha256" "$target_user" "$target_host" "$target_path"
+    } >>"$BOX_DRY_RUN_STUB_LOG"
     ;;
   chown|caddy)
     printf 'UNPRODUCED %s result\n' "$name" >&2
@@ -110,8 +169,36 @@ case "$name" in
     [ "$#" -eq 0 ] || exec "$@"
     ;;
   op)
-    printf '%s\n' 'UNPRODUCED credential input' >&2
-    exit 69
+    # A real token is never part of the harness. The synthetic token reaches
+    # only this process from a protected file, matching the service-account
+    # boundary without putting it in the plan shell, argv, logs, or output.
+    [ -z "${OP_SERVICE_ACCOUNT_TOKEN+x}" ] || exit 69
+    if /usr/bin/env | /usr/bin/grep -q '^OP_SESSION_'; then exit 69; fi
+    [ -z "${OP_BIOMETRIC_UNLOCK_ENABLED:-}" ] || exit 69
+    token_file=${BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE:-}
+    [ -n "$token_file" ] && [ -f "$token_file" ] && [ ! -L "$token_file" ] || exit 69
+    case "$(uname -s)" in
+      Darwin) token_mode=$(stat -f '%Lp' "$token_file") ;;
+      Linux) token_mode=$(stat -c '%a' "$token_file") ;;
+      *) exit 69 ;;
+    esac
+    [ "$token_mode" = 600 ] || exit 69
+    OP_SERVICE_ACCOUNT_TOKEN=$(cat "$token_file")
+    export OP_SERVICE_ACCOUNT_TOKEN
+    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || exit 69
+    [ "$#" -eq 4 ] && [ "$1" = read ] && [ "$3" = --out-file ] || exit 69
+    reference=$2
+    output=$4
+    case "$reference" in op://?*/?*/?*) ;; *) exit 69 ;; esac
+    output_parent=${output%/*}
+    [ -n "$output" ] && [ "$output_parent" != "$output" ] && \
+      [ -d "$output_parent" ] && [ ! -L "$output_parent" ] && [ ! -L "$output" ] || exit 69
+    umask 077
+    printf '%s\n' \
+      'PUBLIC_SUPABASE_URL=https://api.commonswarm.com' \
+      'PUBLIC_SUPABASE_ANON_KEY=e30.eyJyb2xlIjoiYW5vbiJ9.dry-run-public-signature' \
+      'PUBLIC_H0_LINK_JOIN=1' >"$output"
+    chmod 0600 "$output"
     ;;
   systemctl)
     case " $* " in
