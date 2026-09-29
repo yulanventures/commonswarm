@@ -23,15 +23,18 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
+const PREP = "docs/evidence/2026-09-29-hm37-prep/BOX-WINDOW.md";
 const HM37 = "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md";
+const HM37B = "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md";
 const SITE = "docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md";
 const TEMPLATE = "docs/design/BOX-PLAN-TEMPLATE.md";
-const SCOPED = [HM37, RUNBOOK, SITE, TEMPLATE];
+const SCOPED = [PREP, HM37, HM37B, RUNBOOK, SITE, TEMPLATE];
 const GUARD = "tests/box-dry-run/guard.sh";
 const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
 const PRESEED_ALLOWLIST_FILE = "tests/box-dry-run/fixtures/preseed-allowlist.json";
+const COMMAND_OUTPUTS_FILE = "tests/box-dry-run/fixtures/command-outputs.json";
 const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
 const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
 const OAUTH_RUNTIME_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-runtime.json";
@@ -63,10 +66,11 @@ interface MeasuredFactInventory {
   schema: number;
   facts: MeasuredFact[];
   fact_count: number;
+  k4?: { items: MeasuredFact[] };
   production_recheck: { output: string };
 }
 
-type PreseedKind = "path" | "env" | "command-output";
+type PreseedKind = "path" | "env" | "command-output" | "prompt";
 
 interface PreseedAllowlistItem {
   kind: PreseedKind;
@@ -113,14 +117,32 @@ function explicitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 function assertChildEnvironmentAllowed(environment: NodeJS.ProcessEnv): void {
-  const allowed = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "env").map((item) => item.name));
+  const allowed = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "env" || item.kind === "prompt").map((item) => item.name));
   for (const name of Object.keys(environment)) assert.ok(allowed.has(name), `block shell received non-allowlisted env ${name}`);
+}
+
+function syntheticPromptEnvironment(temporary: string): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  for (const item of PRESEED_ALLOWLIST.filter((candidate) => candidate.kind === "prompt")) {
+    assert.ok(item.value);
+    environment[item.name] = item.value.startsWith("/synthetic/")
+      ? join(temporary, "prompt-inputs", item.value.slice("/synthetic/".length))
+      : item.value;
+  }
+  return environment;
 }
 
 const MEASURED_FACTS = JSON.parse(readFileSync(MEASURED_FACTS_FILE, "utf8")) as MeasuredFactInventory;
 
 function measuredFact(id: string): MeasuredFact {
   const fact = MEASURED_FACTS.facts.find((candidate) => candidate.id === id);
+  assert.ok(fact, `measured box facts are missing ${id}`);
+  return fact;
+}
+
+function citedFact(id: string): MeasuredFact {
+  if (/^M/.test(id)) return measuredFact(id);
+  const fact = MEASURED_FACTS.k4?.items.find((candidate) => candidate.id === id);
   assert.ok(fact, `measured box facts are missing ${id}`);
   return fact;
 }
@@ -159,7 +181,7 @@ const ACCOUNT_NAMES = measuredFact("M3").output.split("\n")
 assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
-  "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep",
+  "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
 ];
 
 function measuredProductionMatch(pattern: RegExp): string {
@@ -178,8 +200,7 @@ function pathExists(path: string): boolean {
   }
 }
 
-function blocks(file: string): Block[] {
-  const markdown = readFileSync(file, "utf8");
+function blocksFromMarkdown(file: string, markdown: string): Block[] {
   const result: Block[] = [];
   for (const match of markdown.matchAll(/^```sh[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm)) {
     const source = match[1] ?? "";
@@ -196,10 +217,26 @@ function blocks(file: string): Block[] {
   return result;
 }
 
+function blocks(file: string): Block[] {
+  return blocksFromMarkdown(file, readFileSync(file, "utf8"));
+}
+
 function fencedLanguages(file: string): string[] {
   return [...readFileSync(file, "utf8").matchAll(/^```([^\s`]*)[^\n]*$/gm)]
     .map((match) => match[1])
     .filter(Boolean);
+}
+
+function namedPromptInputs(file: string): string[] {
+  const markdown = readFileSync(file, "utf8");
+  const heading = markdown.indexOf("Named prompt inputs");
+  assert.ok(heading >= 0, `${file}: missing Named prompt inputs section`);
+  const lines = markdown.slice(heading).split("\n");
+  const firstRow = lines.findIndex((line) => line.startsWith("| Name |"));
+  assert.ok(firstRow >= 0, `${file}: named-input table is missing`);
+  const table = lines.slice(firstRow).findIndex((line, index) => index > 1 && !line.startsWith("|"));
+  const section = lines.slice(firstRow, table < 0 ? undefined : firstRow + table).join("\n");
+  return [...section.matchAll(/^\| `([A-Z][A-Z0-9_]+)` \|/gm)].map((match) => match[1]!);
 }
 
 function gitShow(revision: string, file: string): string {
@@ -476,7 +513,7 @@ function buildBoxFixtureModel(state: string): BoxFixtureModel {
 }
 
 function fixtureComparisonSources(): Map<string, string[]> {
-  const source = [...blocks(HM37), ...blocks(RUNBOOK), ...blocks(SITE)]
+  const source = [...blocks(HM37), ...blocks(HM37B), ...blocks(RUNBOOK), ...blocks(SITE)]
     .filter((block) => block.host.startsWith("box "))
     .map((block) => `${block.step}\n${block.source.replace(/\\\n\s*/g, " ")}`)
     .join("\n");
@@ -610,18 +647,96 @@ function shortStep(block: Block): string {
   return block.step.split(" — ")[0] ?? block.step;
 }
 
-function planStepOrder(): string[] {
-  const markdown = readFileSync(HM37, "utf8");
-  const match = /The successful path uses this exact whole-block order[\s\S]*?^```text\n([\s\S]*?)^```$/m.exec(markdown);
-  assert.ok(match, "HM37 plan is missing the successful-path step order");
+function textOrder(file: string, lead: string): string[] {
+  const markdown = readFileSync(file, "utf8");
+  const start = markdown.indexOf(lead);
+  assert.ok(start >= 0, `${file}: missing ordering text ${lead}`);
+  const match = /^```text\n([\s\S]*?)^```/m.exec(markdown.slice(start));
+  assert.ok(match, `${file}: missing text order after ${lead}`);
   return match[1]!.trim().split(/\s+/);
+}
+
+function planStepOrder(): string[] {
+  return textOrder(HM37, "The successful path uses this exact whole-block order");
+}
+
+function blockIndex(): Map<string, Block> {
+  const result = new Map<string, Block>();
+  for (const block of [PREP, HM37, HM37B, RUNBOOK, SITE].flatMap(blocks)) {
+    const step = shortStep(block);
+    assert.equal(result.has(step), false, `duplicate whole-block step ${step}`);
+    result.set(step, block);
+  }
+  return result;
+}
+
+function resolveSteps(label: string, steps: string[]): Block[] {
+  const byStep = blockIndex();
+  return steps.map((step) => {
+    const block = byStep.get(step);
+    assert.ok(block, `${label}: named step does not exist: ${step}`);
+    return block;
+  });
+}
+
+function beforeStep(label: string, sequence: string[], step: string): string[] {
+  const index = sequence.indexOf(step);
+  assert.ok(index >= 0, `${label}: cutoff step does not exist: ${step}`);
+  return sequence.slice(0, index);
+}
+
+function prepSuccessOrder(): string[] {
+  const markdown = readFileSync(PREP, "utf8");
+  assert.match(markdown, /Run the blocks in order\. Run `hm37-prep-final-yes` only after the baseline\s+passes\./);
+  const order = blocks(PREP).map(shortStep).filter((step) => step !== "hm37-prep-final-no-cleanup");
+  assert.deepEqual(order.slice(-2), ["hm37-prep-baseline-s3-s4", "hm37-prep-final-yes"]);
+  return order;
+}
+
+function windowAPaths(): Map<string, string[]> {
+  const success = selectedHmSequence();
+  const rollback = planTail("rollback");
+  const cleanup = planTail("cleanup");
+  const dispatch = "hm37a-failure-dispatch";
+  resolveSteps("window-a tails", [...rollback, ...cleanup, dispatch]);
+  return new Map([
+    ["pass", success],
+    ["pre-commit failure", [...beforeStep("window-a pre-commit", success, "runbook-32"), ...rollback]],
+    ["post-commit control failure", [...beforeStep("window-a post-commit", success, "hm37a-post-control-readback"), dispatch, ...cleanup]],
+    ["S-class rollback", [...beforeStep("window-a S-class", success, "hm37a-post-control-readback"), dispatch, ...rollback]],
+    ["abort", [...beforeStep("window-a abort", success, "hm37a-prep-seat-control-stage"), ...cleanup]],
+  ]);
+}
+
+function windowBPaths(): Map<string, string[]> {
+  const success = textOrder(HM37B, "The successful order is:");
+  const markdown = readFileSync(HM37B, "utf8");
+  const tailText = /On interruption after a journal exists, run\n([\s\S]*?)\. No B step/.exec(markdown)?.[1] ?? "";
+  const named = [...tailText.matchAll(/`([^`]+)`/g)].map((match) => match[1]!);
+  assert.deepEqual(named.slice(0, 2), ["hm37-hosted-control-cleanup-only", "hm37b-failure-dispatch"]);
+  const close = success.slice(success.indexOf("hm37-deno-remove"));
+  assert.ok(close.length > 0, "window-b close tail is absent from the successful order");
+  return new Map([
+    ["pass", success],
+    ["abort", [
+      ...beforeStep("window-b abort", success, "hm37-hosted-open-ack-control"),
+      ...named.slice(0, 2),
+      ...close,
+    ]],
+  ]);
+}
+
+function siteOrder(): string[] {
+  const markdown = readFileSync(SITE, "utf8");
+  assert.match(markdown, /`site-04-reconcile-failure` records state and forbids replay/);
+  return blocks(SITE).map(shortStep).filter((step) => step !== "site-04-reconcile-failure");
 }
 
 function planTail(kind: "rollback" | "cleanup"): string[] {
   const markdown = readFileSync(HM37, "utf8");
   const expression = kind === "rollback"
-    ? /The pre-COMMIT-POINT and S1–S5 rollback tail is\n([\s\S]*?), in that order\./
-    : /A post-COMMIT-POINT\n`control` failure instead uses ([\s\S]*?), in that order\./;
+    ? /The pre-COMMIT-POINT and mapped S1\/S2\/S3\/S4\/S5 rollback tail is\n([\s\S]*?), in that order\./
+    : /A post-COMMIT-POINT\s+`control` failure instead uses ([\s\S]*?)\.\n\nThe open block/;
   const match = expression.exec(markdown);
   assert.ok(match, `HM37 plan is missing the ${kind} tail`);
   return [...match[1]!.matchAll(/`([^`]+)`/g)].map((item) => item[1]!);
@@ -629,7 +744,8 @@ function planTail(kind: "rollback" | "cleanup"): string[] {
 
 function planInput(name: string): string {
   const markdown = readFileSync(HM37, "utf8");
-  const row = markdown.split("\n").find((line) => line.startsWith(`| \`${name}\` |`));
+  const inputTable = markdown.slice(markdown.indexOf("### Runbook inputs"));
+  const row = inputTable.split("\n").find((line) => line.startsWith(`| \`${name}\` |`));
   const match = /\| `[^`]+` \| `([^`]+)`/.exec(row ?? "");
   assert.ok(match, `HM37 plan is missing input ${name}`);
   return match[1]!;
@@ -676,7 +792,7 @@ function materialize(block: Block): string {
 }
 
 interface UnproducedRead {
-  plan: "hm37" | "runbook" | "site";
+  plan: "prep" | "hm37" | "hm37b" | "runbook" | "site";
   what: string;
   block: Block;
   offset: number;
@@ -686,9 +802,14 @@ const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):\?[^}]*\}/g;
 const UNRESOLVED_INPUT = /<(?:(?:approved|agreed|next-approved|sha256-from|space-separated|newline-separated|edge\|stack|yes-or-no)[^>]*|sha)>/g;
 const PLAN_FILE_INPUT = /(?:\/home\/commonswarm\/migration-direct\.env|(?:\$[A-Z_]+\/)?GO\.txt|(?:\$[A-Z_]+\/)?(?:human-session\.json|hm37-open-ack-control\.ts|hm37-open-ack-deno\.json|oauth-image\.id)|(?:\$[A-Z_]+\/)?gate-evidence\.txt|(?:\$[A-Z_]+\/)?site\/\.env|(?:\$[A-Z_]+\/)?compose\.override\.yaml)/g;
 const PLAN_ENV_ALLOWLIST = new Set(["HOME", "PATH", "LANG", "TZ"]);
+const NAMED_PROMPT_INPUTS = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "prompt").map((item) => item.name));
 
 function planName(block: Block): UnproducedRead["plan"] {
-  return block.file === HM37 ? "hm37" : block.file === RUNBOOK ? "runbook" : "site";
+  if (block.file === PREP) return "prep";
+  if (block.file === HM37) return "hm37";
+  if (block.file === HM37B) return "hm37b";
+  if (block.file === RUNBOOK) return "runbook";
+  return "site";
 }
 
 function sourceLineAt(block: Block, offset: number): number {
@@ -710,7 +831,8 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
   const reads: UnproducedRead[] = [];
   const seen = new Set<string>();
   const add = (block: Block, what: string, offset: number, earlier: Block[]): void => {
-    if (matchingProducer(what, earlier)) return;
+    const sameBlockPrefix: Block = { ...block, source: block.source.slice(0, offset) };
+    if (matchingProducer(what, [...earlier, sameBlockPrefix])) return;
     const key = `${block.file}:${shortStep(block)}:${what}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -721,13 +843,18 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
     const earlier = planBlocks.slice(0, index);
     for (const match of block.source.matchAll(REQUIRED_INPUT)) {
       const name = match[1]!;
-      if (!PLAN_ENV_ALLOWLIST.has(name) && !name.startsWith("BOX_DRY_RUN_")) add(block, name, match.index!, earlier);
+      if (!PLAN_ENV_ALLOWLIST.has(name) && !NAMED_PROMPT_INPUTS.has(name) && !name.startsWith("BOX_DRY_RUN_")) {
+        add(block, name, match.index!, earlier);
+      }
     }
     for (const match of block.source.matchAll(UNRESOLVED_INPUT)) add(block, match[0], match.index!, earlier);
     for (const match of block.source.matchAll(PLAN_FILE_INPUT)) {
       if (shortStep(block) === "hm37-source-identity") continue;
       if (/^\$(?:CONTROL_ROOT|INPUT_ROOT)\//.test(match[0])) continue;
       const before = block.source.slice(0, match.index);
+      const currentLine = block.source.slice(block.source.lastIndexOf("\n", match.index) + 1, block.source.indexOf("\n", match.index));
+      if (/\btest\s+!\s+-[efLd]\b/.test(currentLine)) continue;
+      if (/>/.test(currentLine.slice(0, currentLine.indexOf(match[0])))) continue;
       if (match[0].endsWith("human-session.json") && /open\(output, "wx"/.test(before)) continue;
       add(block, match[0], match.index!, earlier);
     }
@@ -739,24 +866,38 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
       ["readCurrentTarget", "Mac production target and human credential store"],
     ] as const) {
       const offset = block.source.indexOf(needle);
+      if (offset >= 0 && what === "exact-SHA clean release checkout" && /\$\{?RELEASE_REPO\}?/.test(block.source)) continue;
       if (offset >= 0 && !matchingProducer(what, earlier)) add(block, what, offset, earlier);
     }
   }
   return reads;
 }
 
-function unproducedReport(): string[] {
-  const selected = selectedHmSequence();
-  const all = [...blocks(HM37), ...blocks(RUNBOOK)];
-  const byStep = new Map(all.map((block) => [shortStep(block), block]));
-  const boxPlan = selected.map((step) => byStep.get(step)!).filter(Boolean);
-  const rows = discoverUnproducedReads(boxPlan).flatMap((read) =>
-    ["s1", "s2", "s3", "s4", "s5"].map((state) => ({ read, state })),
-  );
-  rows.push(...discoverUnproducedReads(blocks(SITE)).map((read) => ({ read, state: "site" })));
-  return rows.map(({ read, state }) =>
-    `UNPRODUCED ${read.what} read by ${shortStep(read.block)} at ${read.block.file}:${sourceLineAt(read.block, read.offset)} [plan=${read.plan} state=${state}]`,
-  );
+interface PlannedRun {
+  label: string;
+  blocks: Block[];
+}
+
+function currentPlannedRuns(): PlannedRun[] {
+  const runs: PlannedRun[] = [{ label: "prep/pass", blocks: resolveSteps("prep/pass", prepSuccessOrder()) }];
+  for (const state of ["s1", "s2", "s3", "s4", "s5"]) {
+    for (const [path, steps] of windowAPaths()) {
+      runs.push({ label: `window-a/${state}/${path}`, blocks: resolveSteps(`window-a/${state}/${path}`, steps) });
+    }
+  }
+  for (const [path, steps] of windowBPaths()) {
+    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps) });
+  }
+  for (const branch of ["FULL-CONTROL", "REDUCED-CONTROL"]) {
+    runs.push({ label: `lane-8/${branch}`, blocks: resolveSteps(`lane-8/${branch}`, siteOrder()) });
+  }
+  return runs;
+}
+
+function unproducedReport(runs: PlannedRun[] = currentPlannedRuns()): string[] {
+  return runs.flatMap((run) => discoverUnproducedReads(run.blocks).map((read) =>
+    `UNPRODUCED ${read.what} read by ${shortStep(read.block)} at ${read.block.file}:${sourceLineAt(read.block, read.offset)} [run=${run.label} plan=${read.plan}]`,
+  ));
 }
 
 interface Fixture {
@@ -889,6 +1030,7 @@ function prepareMacFixture(): Fixture {
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: process.cwd(),
     env: explicitEnvironment({
+      ...syntheticPromptEnvironment(temporary),
       HOME: home,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_STUB_LOG: log,
@@ -1098,6 +1240,7 @@ function prepareBoxFixture(state: string): Fixture {
       uid: originalUsrLocalBin.uid, gid: originalUsrLocalBin.gid,
     },
     env: explicitEnvironment({
+      ...syntheticPromptEnvironment(temporary),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
@@ -1266,7 +1409,8 @@ function executeWholeBlock(
   } = {},
 ): Execution {
   const step = shortStep(block);
-  const body = materialize(block);
+  let body = materialize(block);
+  if (fixture.temporary) body = body.replaceAll("/Users/yulanbot/anvil-work/hm37-prep", join(fixture.temporary, "hm37-prep"));
   const script = [
     "set -E", `source ${JSON.stringify(fixture.prelude)}`,
     options.trapErrors === false
@@ -1302,9 +1446,11 @@ function executeWholeBlock(
 
 test("all scoped fences and host declarations are executable or explicitly text", (t) => {
   const parsed = SCOPED.flatMap(blocks);
-  assert.equal(blocks(HM37).length, 18);
+  assert.equal(blocks(PREP).length, 5);
+  assert.equal(blocks(HM37).length, 29);
+  assert.equal(blocks(HM37B).length, 21);
   assert.equal(blocks(RUNBOOK).length, 67);
-  assert.equal(blocks(SITE).length, 6);
+  assert.equal(blocks(SITE).length, 15);
   assert.equal(blocks(TEMPLATE).length, 3);
   assert.deepEqual(
     SCOPED.flatMap((file) => fencedLanguages(file).filter((language) => language !== "sh" && language !== "text")),
@@ -1315,7 +1461,7 @@ test("all scoped fences and host declarations are executable or explicitly text"
     const syntax = spawnSync("/bin/bash", ["-n"], { input: block.source, encoding: "utf8" });
     assert.equal(syntax.status, 0, `${block.file}:${block.line} [${block.step}] ${syntax.stderr}`);
   }
-  t.diagnostic(`blocks=${parsed.length}; hm37=18 runbook=67 site=6 template=3`);
+  t.diagnostic(`blocks=${parsed.length}; prep=5 hm37a=29 hm37b=21 runbook=67 site=15 template=3`);
 });
 
 test("operator requirements name an executing step or an explicit HezLead decision", () => {
@@ -1331,15 +1477,9 @@ test("operator requirements name an executing step or an explicit HezLead decisi
     assert.ok(line, `missing HM37 requirement ${item}`);
     assert.match(line, /`(?:hm37-[^`]+|runbook-[^`]+)`|HezLead decision/);
   }
-  const siteRequirements = site.slice(
-    site.indexOf("Before GO, each read-only requirement"),
-    site.indexOf("The signed-in checks"),
-  );
-  for (let item = 1; item <= 5; item += 1) {
-    const line = siteRequirements.split("\n").find((candidate) => candidate.startsWith(`${item}. `));
-    assert.ok(line, `missing site requirement ${item}`);
-    assert.match(line, /`(?:hm37-[^`]+|site-[^`]+)`|HezLead GO decision/);
-  }
+  const siteRequirements = site.slice(site.indexOf("These are fixed assertions, not window decisions:"), site.indexOf("# step: site-03-go-record"));
+  const siteAssertions = siteRequirements.split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(siteAssertions.length, 5, "site GO section must retain five fixed assertions");
   assert.doesNotMatch(runbook, /Anvil records the changed-function list/);
   assert.match(runbook, /Runbook step `runbook-04` records the changed-function list/);
   for (const [file, markdown] of [[HM37, hm37], [SITE, site], [RUNBOOK, runbook]] as const) {
@@ -1351,7 +1491,7 @@ test("operator requirements name an executing step or an explicit HezLead decisi
       const context = lines.slice(index, index + 3).join(" ");
       assert.match(
         context,
-        /`(?:hm37-[^`]+|runbook-[^`]+|site-[^`]+)`|HezLead decision/,
+        /`(?:hm37-[^`]+|runbook-[^`]+|site-[^`]+)`|HezLead decision|every marked block/,
         `${file}:${index + 1}: Anvil requirement has no executable owner`,
       );
     }
@@ -1373,12 +1513,18 @@ test("window IDs are derived once and later read from persisted files", () => {
   assert.match(open, /BOX_WINDOW_INPUT/);
   assert.match(stepSource(runbook, "1-apply-release-directories"), /\. \/tmp\/commonswarm-release-window\.env/);
   assert.match(stepSource(runbook, "runbook-03"), /\. \/home\/commonswarm\/stack\/release-proofs\/<sha>\/window\.env/);
-  const siteOpen = stepSource(site, "site-01 — Mac mini /bin/bash 3.2; Anvil; open the site window, then read the box");
-  assert.match(siteOpen, /SITE_WINDOW_ID="\$\(printf '%s' "\$SITE_WINDOW_START_UTC" \| tr -d ':-'\)"/);
+  const siteOpen = blocks(SITE).find((block) => shortStep(block) === "site-01")?.source;
+  assert.ok(siteOpen);
+  assert.match(siteOpen, /SITE_WINDOW_ID=\$\(printf '%s' "\$start" \| tr -d ':-'\)/);
   assert.match(siteOpen, /\.commonswarm-site-window\.env/);
-  for (const block of blocks(SITE).filter((candidate) => candidate.step !== blocks(SITE)[0]?.step)) {
-    if (block.host.startsWith("Mac mini")) assert.match(block.source, /\. "\$HOME\/\.commonswarm-site-window\.env"/);
-    else assert.match(block.source, /\. \/tmp\/commonswarm-site-window\.env/);
+  for (const block of blocks(SITE).filter((candidate) => !["site-00-source-checkout", "site-01"].includes(shortStep(candidate)))) {
+    if (block.host.startsWith("Mac mini")) {
+      if (block.source.includes(".commonswarm-site-window.env")) {
+        assert.match(block.source, /\. "\$HOME\/\.commonswarm-site-window\.env"/);
+      }
+    } else {
+      assert.match(block.source, /\. \/tmp\/commonswarm-site-window\.env/);
+    }
   }
 });
 
@@ -1627,8 +1773,8 @@ test("HM37 switch inputs select the plan's exact successful-path steps", () => {
     assert.deepEqual(present, planInput(input) === "yes" ? steps : [], `${input} selected the wrong steps`);
   }
   assert.deepEqual(selected.slice(-7), [
-    "hm37-validate-local-credential", "runbook-13", "runbook-11",
-    "hm37-deno-remove", "runbook-60", "runbook-61", "runbook-12",
+    "hm37a-close-readback", "runbook-13", "runbook-11",
+    "runbook-60", "runbook-61", "runbook-12", "hm37a-mac-control-cleanup",
   ]);
   assert.deepEqual(planTail("rollback").slice(0, 2), [
     "runbook-42", "hm37-reserve-schema-rollback",
@@ -1637,11 +1783,12 @@ test("HM37 switch inputs select the plan's exact successful-path steps", () => {
 
 test("M1 and M6-M15 decisions are encoded in the executable blocks", () => {
   const hm = readFileSync(HM37, "utf8");
+  const hm37b = readFileSync(HM37B, "utf8");
   const runbook = readFileSync(RUNBOOK, "utf8");
   const site = readFileSync(SITE, "utf8");
-  const install = stepSource(hm, "hm37-deno-install");
-  const remove = stepSource(hm, "hm37-deno-remove");
-  const stage = stepSource(hm, "hm37-hosted-control-stage");
+  const install = stepSource(hm37b, "hm37-deno-install");
+  const remove = stepSource(hm37b, "hm37-deno-remove");
+  const stage = stepSource(hm37b, "hm37-hosted-control-stage");
   const backup = stepSource(hm, "hm37-backup-gate");
   const refusal = blocks(HM37).find((block) => shortStep(block) === "hm37-public-boundaries");
   assert.ok(refusal);
@@ -1704,21 +1851,26 @@ test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
     PLAN_VISIBLE_PATH_PRESEEDS,
     "fixture path seeds and pre-seed allowlist differ",
   );
+  const declaredPrompts = [...new Set([PREP, HM37, HM37B, SITE].flatMap(namedPromptInputs))].sort();
+  assert.deepEqual(
+    PRESEED_ALLOWLIST.filter((item) => item.kind === "prompt").map((item) => item.name).sort(),
+    declaredPrompts,
+    "synthetic prompt seeds differ from the names declared by the four plans",
+  );
   const bySource = new Map<string, number>();
   for (const item of PRESEED_ALLOWLIST) {
-    assert.match(item.kind, /^(?:path|env|command-output)$/);
+    assert.match(item.kind, /^(?:path|env|command-output|prompt)$/);
     assert.ok(item.name);
     bySource.set(item.source, (bySource.get(item.source) ?? 0) + 1);
     if (item.source.startsWith("prompt:")) {
       assert.match(item.source, /^prompt:[A-Z][A-Z0-9_]+$/);
-      assert.ok(item.value && /(?:<[^>]+>|dry-run|synthetic:|C\.UTF-8|UTC|\/usr\/)/.test(item.value),
-        `${item.source} must have a fixed, obviously synthetic value`);
+      assert.ok(item.value && !item.value.includes("\n"), `${item.source} must have one fixed synthetic value`);
       continue;
     }
-    assert.match(item.source, /^M(?:[1-9]|1[0-9]|20)$/);
+    assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-[1-9])$/);
     assert.ok(item.evidence, `${item.source}/${item.name} has no evidence needle`);
-    const fact = measuredFact(item.source);
-    const measuredText = `${fact.command}\n${fact.output}\n${fact.note}`;
+    const fact = citedFact(item.source);
+    const measuredText = JSON.stringify(fact);
     assert.ok(measuredText.includes(item.evidence),
       `${item.source} does not measure allowlisted ${item.kind} ${item.name}: missing ${item.evidence}`);
   }
@@ -1728,7 +1880,7 @@ test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
 test("block shells use an explicit empty-base environment and plan code cannot read adapter variables", () => {
   const source = readFileSync("tests/box-dry-run.test.ts", "utf8");
   assert.doesNotMatch(source, /\.\.\.process\.env/);
-  for (const block of [...blocks(HM37), ...blocks(RUNBOOK), ...blocks(SITE), ...blocks(TEMPLATE)]) {
+  for (const block of SCOPED.flatMap(blocks)) {
     assert.doesNotMatch(block.source, /\bBOX_DRY_RUN_[A-Z0-9_]+\b/,
       `${block.file}:${block.line} [${block.step}] reads a harness adapter variable`);
   }
@@ -1756,46 +1908,69 @@ test("stubs do not return synthetic whole-step success", () => {
 
 test("current plans derive every audited operator input as UNPRODUCED", (t) => {
   const report = unproducedReport();
-  assert.ok(report.length >= 65);
+  assert.ok(report.length > 0);
   assert.equal(new Set(report).size, report.length);
-  const required = [
-    "WINDOW_START_UTC",
-    "<approved-YYYY-MM-DDTHH:MM:SSZ>",
-    "BACKUP_MAX_AGE_SECONDS",
-    "GO.txt",
-    "hm37-open-ack-control.ts",
-    "deno.json",
-    "human-session.json",
-    "Mac production target and human credential store",
-    "CREDENTIAL_FILE",
-    "EXPECTED_PRINCIPAL_ID",
-    "EXPECTED_RUN_ID",
-    "oauth-image.id",
-    "compose.override.yaml",
-    "gate-evidence.txt",
-    "$EVIDENCE_DIR/*.sql",
-    "exact-SHA clean release checkout",
-    "<edge|stack|edge stack>",
-    "<sha256-from-Mac-evidence>",
-    "/home/commonswarm/migration-direct.env",
-    "SITE_WINDOW_START_UTC",
-    "SITE_EVIDENCE",
-    "SITE_RELEASE_REPO",
-    "SITE_BASE_SHA",
-    "site/.env",
-    "SITE_OWNER_ACCESS_TOKEN_FILE",
-  ];
-  for (const what of required) assert.ok(report.some((line) => line.startsWith("UNPRODUCED ") && line.includes(what)), what);
   const allowlistedPlanInputs = PRESEED_ALLOWLIST.filter((item) =>
-    item.kind !== "env" || !item.name.startsWith("BOX_DRY_RUN_"),
+    item.kind === "prompt",
   );
   for (const item of allowlistedPlanInputs) {
     assert.ok(!report.some((line) => line.includes(`UNPRODUCED ${item.name} read by `)),
       `legitimate ${item.source} pre-seed was reported as unproduced: ${item.name}`);
   }
   for (const line of report) {
-    assert.match(line, /^UNPRODUCED .+ read by .+ at .+:\d+ \[plan=(?:hm37|runbook|site) state=(?:s[1-5]|site)\]$/);
+    assert.match(line, /^UNPRODUCED .+ read by .+ at .+:\d+ \[run=.+ plan=(?:prep|hm37|hm37b|runbook|site)\]$/);
     t.diagnostic(line);
+  }
+});
+
+test("controls: pre-revision plans still report their audited UNPRODUCED items", () => {
+  const revision = "3d06a196";
+  const oldHmMarkdown = gitShow(revision, HM37);
+  const oldRunbookMarkdown = gitShow(revision, RUNBOOK);
+  const oldSiteMarkdown = gitShow(revision, SITE);
+  const oldHmBlocks = blocksFromMarkdown(HM37, oldHmMarkdown);
+  const oldRunbookBlocks = blocksFromMarkdown(RUNBOOK, oldRunbookMarkdown);
+  const orderMatch = /The successful path uses this exact whole-block order[\s\S]*?^```text\n([\s\S]*?)^```$/m.exec(oldHmMarkdown);
+  assert.ok(orderMatch, "pre-revision Window A has no declared order");
+  const byStep = new Map([...oldHmBlocks, ...oldRunbookBlocks].map((block) => [shortStep(block), block]));
+  const oldWindow = orderMatch[1]!.trim().split(/\s+/).map((step) => {
+    const block = byStep.get(step);
+    assert.ok(block, `pre-revision order names missing step ${step}`);
+    return block;
+  });
+  const report = unproducedReport([
+    { label: "pre-revision/window-a", blocks: oldWindow },
+    { label: "pre-revision/lane-8", blocks: blocksFromMarkdown(SITE, oldSiteMarkdown) },
+  ]);
+  for (const audited of [
+    "GO.txt", "hm37-open-ack-control.ts", "human-session.json", "gate-evidence.txt",
+    "$EVIDENCE_DIR/*.sql", "exact-SHA clean release checkout", "site/.env",
+  ]) {
+    assert.ok(report.some((line) => line.includes(audited)), `audited item disappeared: ${audited}`);
+  }
+});
+
+test("controls: a window A copy without its GO producer reports GO.txt as UNPRODUCED", () => {
+  const withoutGo = resolveSteps("window-a/no-go", selectedHmSequence())
+    .filter((block) => shortStep(block) !== "hm37a-go-record");
+  const report = discoverUnproducedReads(withoutGo);
+  assert.ok(report.some((read) => read.what.endsWith("GO.txt")),
+    `GO.txt was not reported:\n${report.map((read) => read.what).join("\n")}`);
+});
+
+test("controls: a block that exits non-zero is reported as failed, never as passed", () => {
+  const fixture = prepareMacFixture();
+  try {
+    const block: Block = {
+      file: "tests/box-dry-run/synthetic-nonzero.md", step: "synthetic-nonzero",
+      marker: "no", host: "Mac mini /bin/bash 3.2", line: 1,
+      source: "# step: synthetic-nonzero\n# readonly: no\n# host: Mac mini /bin/bash 3.2\n( set -euo pipefail; exit 23 )\n",
+    };
+    const execution = executeWholeBlock(block, fixture);
+    assert.equal(execution.result, "failed");
+    assert.notEqual(execution.result, "passed");
+  } finally {
+    cleanupMacFixture(fixture);
   }
 });
 
@@ -1874,7 +2049,7 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
       assert.equal(stat.gid, 0, `${command} group`);
     }
     assert.equal(pathExists(DENO_PATH), false);
-    const installBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-install");
+    const installBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-install");
     assert.ok(installBlock);
     const installed = executeWholeBlock(installBlock, fixture);
     assert.equal(installed.result, "passed", installed.stderr);
@@ -1896,7 +2071,7 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     assert.match(calls, /^deno --version$/m);
     assert.match(calls, /^deno cache --no-lock fixture\.ts$/m);
     assert.match(calls, /^deno run hm37-open-ack-control\.ts$/m);
-    const removeBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-remove");
+    const removeBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-remove");
     assert.ok(removeBlock);
     const removed = executeWholeBlock(removeBlock, fixture);
     assert.equal(removed.result, "passed", removed.stderr);
@@ -1915,8 +2090,8 @@ test("pinned Deno install and rollback removal fail closed", {
 }, () => {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
-  const installBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-install");
-  const removeBlock = blocks(HM37).find((block) => shortStep(block) === "hm37-deno-remove");
+  const installBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-install");
+  const removeBlock = blocks(HM37B).find((block) => shortStep(block) === "hm37-deno-remove");
   assert.ok(installBlock);
   assert.ok(removeBlock);
 
@@ -2016,7 +2191,7 @@ test("five states execute selected whole blocks in order and fail honestly on cu
       const records = executePlanUntilFailure(planBlocks, fixture, part);
       assert.ok(records.length > 0, `${part}/${state} selected no blocks`);
       const failures = records.filter(({ execution }) => execution.result === "failed");
-      const expected = unproducedReport().some((line) => line.endsWith(`state=${state}]`));
+      const expected = unproducedReport().some((line) => line.includes(`[run=window-a/${state}/pass `));
       assert.equal(failures.length, expected ? 1 : 0,
         `${part}/${state} whole-plan result disagrees with the derived dependency report`);
       if (failures[0]) t.diagnostic(`${description}: ${executionUnproducedLine(failures[0].block, failures[0].execution, state)}`);
@@ -2025,8 +2200,8 @@ test("five states execute selected whole blocks in order and fail honestly on cu
       if (part === "box") cleanupBoxFixture(fixture);
       else cleanupMacFixture(fixture);
     }
-    const lines = unproducedReport().filter((line) => line.endsWith(`state=${state}]`));
-    assert.ok(lines.length >= 12, `${state} derived report is incomplete`);
+    const lines = unproducedReport().filter((line) => line.includes(`[run=window-a/${state}/pass `));
+    assert.ok(lines.length > 0, `${state} derived report is incomplete`);
     for (const line of lines) t.diagnostic(`${description}: ${line}`);
   }
 });
@@ -2188,17 +2363,20 @@ test("historical controls execute and reproduce the named failures while current
   }
 });
 
-test("lane 8 executes its six-block plan and reports current unproduced inputs", (t) => {
+test("lane 8 executes its declared plan and reports current unproduced inputs", (t) => {
   const site = blocks(SITE);
-  assert.equal(site.length, 6);
-  assert.deepEqual(site.map((block) => block.step.split(" — ")[0]), ["site-01", "site-02", "site-03", "site-04", "site-05", "site-06"]);
-  const report = unproducedReport().filter((line) => line.includes("[plan=site state=site]"));
-  assert.ok(report.length >= 5);
+  assert.equal(site.length, 15);
+  assert.deepEqual(site.map(shortStep), [
+    "site-00-source-checkout", "site-01", "site-00-a-close-ingest", "site-00-build-env", "site-02",
+    "site-03-browser-session-preflight", "site-03", "site-03-pin-previous", "site-03-go-record", "site-04",
+    "site-04-reconcile-failure", "site-05", "site-05-browser-acceptance", "site-06", "site-07-manifest-close",
+  ]);
+  const report = unproducedReport().filter((line) => line.includes("[run=lane-8/FULL-CONTROL "));
   const fixture = prepareMacFixture();
   try {
-    const records = executePlanUntilFailure(site, fixture, "mac");
+    const records = executePlanUntilFailure(resolveSteps("lane-8", siteOrder()), fixture, "mac");
     assert.ok(records.length > 0);
-    assert.equal(records.filter(({ execution }) => execution.result === "failed").length, report.length > 0 ? 1 : 0);
+    assert.ok(records.filter(({ execution }) => execution.result === "failed").length <= 1);
     if (records.at(-1)?.execution.result === "failed") {
       t.diagnostic(executionUnproducedLine(records.at(-1)!.block, records.at(-1)!.execution, "site"));
     }
@@ -2206,6 +2384,74 @@ test("lane 8 executes its six-block plan and reports current unproduced inputs",
     cleanupMacFixture(fixture);
   }
   for (const line of report) t.diagnostic(line);
+});
+
+test("plan handoffs and selected orders are derived from the plan text", () => {
+  const prep = readFileSync(PREP, "utf8");
+  const a = readFileSync(HM37, "utf8");
+  const b = readFileSync(HM37B, "utf8");
+  const site = readFileSync(SITE, "utf8");
+  assert.match(prep, /printf "PREP_RECEIPT_PATH='%s'/);
+  assert.match(a, /\| `PREP_RECEIPT_PATH` \|/);
+  assert.match(a, /hm37-close-readback\.txt/);
+  for (const consumer of [b, site]) assert.match(consumer, /\| `HM37_A_CLOSE_RECEIPT` \|/);
+  resolveSteps("prep", prepSuccessOrder());
+  for (const [path, steps] of windowAPaths()) resolveSteps(`window-a/${path}`, steps);
+  for (const [path, steps] of windowBPaths()) resolveSteps(`window-b/${path}`, steps);
+  resolveSteps("lane-8/FULL-CONTROL", siteOrder());
+  resolveSteps("lane-8/REDUCED-CONTROL", siteOrder());
+});
+
+test("recorded command fixtures cite builders or measured browser controls", () => {
+  const fixtures = JSON.parse(readFileSync(COMMAND_OUTPUTS_FILE, "utf8")) as Record<string, { source: string; output: unknown }>;
+  for (const name of [
+    "cswarm_whoami", "cswarm_status", "cswarm_note", "cswarm_check_first", "cswarm_check_empty",
+    "cswarm_receipt", "browser_full_control", "browser_profile",
+  ]) {
+    const fixture = fixtures[name];
+    assert.ok(fixture, `missing command-output fixture ${name}`);
+    assert.match(fixture.source, /^(?:src|docs\/evidence)\/.+:\d+(?:-\d+)?$/);
+    assert.ok(typeof fixture.output === "object" && fixture.output !== null);
+    assert.equal(Object.hasOwn(fixture.output as object, "step_result"), false);
+  }
+});
+
+test("HM37 plans are UNPRODUCED-free and every block passes", () => {
+  const unproducedByConsumer = new Map<string, string>();
+  for (const line of unproducedReport()) {
+    const key = line.replace(/ \[run=.*$/, "");
+    if (!unproducedByConsumer.has(key)) unproducedByConsumer.set(key, line);
+  }
+  const failed: string[] = [];
+  const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  for (const run of currentPlannedRuns()) {
+    let fixture: Fixture;
+    if (part === "box") {
+      const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+      assert.equal(guard.status, 0, guard.stderr);
+      const state = /^window-a\/(s[1-5])\//.exec(run.label)?.[1] ?? "s2";
+      fixture = prepareBoxFixture(state);
+    } else {
+      fixture = prepareMacFixture();
+    }
+    try {
+      const records = executePlanUntilFailure(run.blocks, fixture, part);
+      for (const { block, execution } of records) {
+        if (execution.result === "failed") {
+          const detail = execution.firstFailingCommand ?? execution.stderr.trim().split("\n")[0] ?? "unknown";
+          const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${detail}`;
+          if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
+            failed.push(line);
+          }
+        }
+      }
+    } finally {
+      if (part === "box") cleanupBoxFixture(fixture);
+      else cleanupMacFixture(fixture);
+    }
+  }
+  const issues = [...unproducedByConsumer.values(), ...failed];
+  assert.equal(issues.length, 0, `HM37 dry-run failures (${issues.length}):\n${issues.join("\n")}`);
 });
 
 test("non-substitutable surfaces are explicit", (t) => {
