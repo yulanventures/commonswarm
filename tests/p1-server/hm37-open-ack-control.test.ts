@@ -6,6 +6,7 @@ import { randomBytes, randomInt, randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import postgres from "postgres";
 
@@ -138,6 +139,16 @@ function suffix(): string {
   return String(randomInt(100_000, 1_000_000));
 }
 
+function assertionsForPassedSteps(steps: string[]): Record<string, unknown> {
+  const source = `
+    import { assertionsForPassedSteps } from ${JSON.stringify(pathToFileURL(harness).href)};
+    console.log(JSON.stringify(assertionsForPassedSteps(${JSON.stringify(steps)})));
+  `;
+  return JSON.parse(execFileSync("deno", [
+    "eval", "--no-lock", "--config", denoConfig, source,
+  ], { cwd: releaseRoot, encoding: "utf8" })) as Record<string, unknown>;
+}
+
 function invoke(
   value: Fixture,
   windowSuffix: string,
@@ -230,6 +241,8 @@ test("HM37 harness proves all eleven observations and complete revocation", { ti
   assert.equal(observed.human_open_status, 403);
   assert.equal(observed.human_ack_status, 403);
   assert.equal(observed.request_user_agent, "commonswarm-release-probe/1.0");
+  assert.equal(result.output.assertions?.["hosted.seat-handle-alone-refusal"], true,
+    "seat-handle-alone-refusal step did not pass");
   for (const assertionId of [
     "hosted.concurrent-open-single-batch",
     "hosted.ack-a-commits-cursor",
@@ -237,7 +250,6 @@ test("HM37 harness proves all eleven observations and complete revocation", { ti
     "hosted.ack-b-empty-open",
     "hosted.public-unauthenticated-refusal",
     "hosted.public-human-bearer-refusal",
-    "hosted.seat-handle-alone-refusal",
     "hosted.visibility-confined",
     "hosted.migration-functional-proof",
     "hosted.cleanup-complete",
@@ -260,6 +272,12 @@ test("HM37 harness proves all eleven observations and complete revocation", { ti
   assert.equal(recovered.output.ok, true);
   assert.equal(recovered.output.mode, "cleanup-only");
   await cleanupFacts(recovered.output);
+});
+
+test("assertion output includes only assertions whose steps passed", () => {
+  const assertions = assertionsForPassedSteps(["public-open-ack-refusal"]);
+  assert.deepEqual(assertions, { "hosted.public-unauthenticated-refusal": true });
+  assert.equal(Object.hasOwn(assertions, "hosted.seat-handle-alone-refusal"), false);
 });
 
 test("missing protected input fails before creating authority or OAuth rows", async () => {
@@ -315,4 +333,19 @@ test("forced failure after seat creation still runs the full finally cleanup", {
   assert.deepEqual(authority, {
     seat_revoked: true, handle_revoked: true, principal_revoked: true, grant_revoked: true,
   });
+});
+
+test("forced seat-handle-alone failure reports S5 id and runs full cleanup", { timeout: 180_000 }, async () => {
+  const value = await fixture();
+  const result = invoke(value, suffix(), { failAfter: "seat-handle-alone-refusal" });
+  assert.notEqual(result.status, 0, failureMessage(result));
+  assert.equal(result.output.ok, false, failureMessage(result));
+  assert.equal(result.output.mode, "control", failureMessage(result));
+  assert.deepEqual(result.output.error, {
+    assertion_id: "hosted.seat-handle-alone-refusal",
+    step: "seat-handle-alone-refusal", code: "forced_test_failure", class: "HarnessFailure",
+  }, failureMessage(result));
+  assert.equal(result.output.assertions?.["hosted.seat-handle-alone-refusal"], undefined);
+  assert.equal(result.output.assertions?.["hosted.cleanup-complete"], true);
+  await cleanupFacts(result.output, failureMessage(result));
 });

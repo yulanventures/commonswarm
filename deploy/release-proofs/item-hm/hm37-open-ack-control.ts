@@ -129,6 +129,7 @@ interface ErrorFacts {
 const ASSERTION_IDS: Readonly<Record<string, string>> = {
   "public-open-ack-refusal": "hosted.public-unauthenticated-refusal",
   "public-human-open-ack-refusal": "hosted.public-human-bearer-refusal",
+  "seat-handle-alone-refusal": "hosted.seat-handle-alone-refusal",
   "batch-a-concurrent-open": "hosted.concurrent-open-single-batch",
   "batch-a-ack": "hosted.ack-a-commits-cursor",
   "batch-a-repeat-ack": "hosted.repeat-ack-idempotent",
@@ -151,6 +152,23 @@ const HOSTED_CONTROL_ASSERTIONS = [
 
 function assertionId(step: string): string {
   return ASSERTION_IDS[step] ?? `control.${step.toLowerCase().replace(/[^a-z0-9]+/gu, "-").replace(/^-+|-+$/gu, "")}`;
+}
+
+export function assertionsForPassedSteps(passedSteps: Iterable<string>): Record<string, true> {
+  const assertions: Record<string, true> = {};
+  for (const step of passedSteps) {
+    const id = ASSERTION_IDS[step];
+    if (id === undefined) throw new Error(`unmapped assertion step: ${step}`);
+    assertions[id] = true;
+  }
+  return assertions;
+}
+
+function requireHostedAssertionMappings(): void {
+  const mapped = new Set(Object.values(ASSERTION_IDS));
+  if (HOSTED_CONTROL_ASSERTIONS.some((id) => !mapped.has(id))) {
+    fail("hosted assertion mapping missing");
+  }
 }
 
 class HarnessFailure extends Error {
@@ -738,6 +756,7 @@ async function cleanup(
 }
 
 async function execute(): Promise<Record<string, Json>> {
+  requireHostedAssertionMappings();
   const args = parseArgs(Deno.args);
   await regularPrivateFile(args.humanSessionFile);
   await regularPrivateFile(args.oauthDatabaseConfigFile);
@@ -760,6 +779,7 @@ async function execute(): Promise<Record<string, Json>> {
   let runError: ErrorFacts | null = null;
   let observations: Record<string, Json> = {};
   let cleanupFacts: CleanupFacts | null = null;
+  const passedSteps = new Set<string>();
   try {
     if (args.cleanupOnly !== undefined) {
       step = "cleanup-journal-read";
@@ -876,6 +896,27 @@ async function execute(): Promise<Record<string, Json>> {
         fail("forced test failure");
       }
 
+      step = "seat-handle-alone-refusal";
+      const seatHandle = journal.seatHandle;
+      if (seatHandle === null) fail("seat handle missing");
+      const handleOnlyPublic = await publicCommand(runtime, null, managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "open_hosted_mcp_check_batch", seat: seatHandle },
+      ));
+      const handleOnlyHosted = await runtime.command.handleHostedCommand(managedInput(
+        journal.workspaceId, crypto.randomUUID(),
+        { kind: "open_hosted_mcp_check_batch", seat: seatHandle },
+      ), seatHandle);
+      if (handleOnlyPublic.status !== 403 || handleOnlyPublic.body.error !== "forbidden" ||
+          handleOnlyHosted.status !== 403 || handleOnlyHosted.body.error !== "forbidden") {
+        fail("seat handle authenticated without a capability");
+      }
+      if (Deno.env.get("SWARM_ENV") === "test" &&
+          Deno.env.get("HM37_TEST_FAIL_AFTER") === "seat-handle-alone-refusal") {
+        fail("forced test failure");
+      }
+      passedSteps.add(step);
+
       journal.signalAPlanned = true;
       await journalBefore(journalPath, journal, "post_signal_a");
       step = "signal-a-post";
@@ -906,6 +947,7 @@ async function execute(): Promise<Record<string, Json>> {
       if (JSON.stringify(idsOne) !== JSON.stringify(idsTwo) || !idsOne.includes(journal.signalAId)) {
         fail("concurrent open ordering mismatch");
       }
+      passedSteps.add(step);
       step = "hosted-visibility";
       const [visibility] = await proofDb.begin(async (tx) => {
         await setRole(tx, "swarm_command");
@@ -918,6 +960,7 @@ async function execute(): Promise<Record<string, Json>> {
       }) as unknown as Array<{ total: number; wrong_workspace: number; wrong_principal: number }>;
       if (!visibility || visibility.total !== idsOne.length || visibility.wrong_workspace !== 0 ||
           visibility.wrong_principal !== 0) fail("hosted visibility escaped principal or workspace");
+      passedSteps.add(step);
       const afterOpen = await snapshot(proofDb, journal);
       if (afterOpen.active_batches !== 1 || afterOpen.cursor !== null) fail("open persistence proof failed");
       const freshOpen = await requireStatus(await checkCall(runtime, journal, statusDb), 200, "fresh open");
@@ -970,6 +1013,7 @@ async function execute(): Promise<Record<string, Json>> {
       const afterPublic = await snapshot(proofDb, journal);
       if (publicOpen.status !== 403 || publicAck.status !== 403 ||
           JSON.stringify(beforePublic) !== JSON.stringify(afterPublic)) fail("public refusal proof failed");
+      passedSteps.add(step);
       step = "public-human-open-ack-refusal";
       const humanOpen = await publicCommand(runtime, token, managedInput(
         journal.workspaceId, crypto.randomUUID(),
@@ -982,6 +1026,7 @@ async function execute(): Promise<Record<string, Json>> {
       const afterHuman = await snapshot(proofDb, journal);
       if (humanOpen.status !== 403 || humanAck.status !== 403 ||
           JSON.stringify(beforePublic) !== JSON.stringify(afterHuman)) fail("human bearer hosted-command refusal failed");
+      passedSteps.add(step);
 
       await journalBefore(journalPath, journal, "ack_batch_a_and_open_batch_b");
       step = "batch-a-ack";
@@ -997,6 +1042,7 @@ async function execute(): Promise<Record<string, Json>> {
       const factsAfterAckA = await batchFacts(proofDb, journal, batchA);
       if (JSON.stringify(afterAckA.cursor) !== JSON.stringify(factsA.terminal) ||
           factsAfterAckA.acknowledgedAt === null || factsAfterAckA.active !== 1) fail("ACK A proof failed");
+      passedSteps.add(step);
 
       step = "batch-a-repeat-ack";
       const repeatAckA = await requireStatus(await checkCall(runtime, journal, statusDb, batchA), 200, "repeat ACK A");
@@ -1004,6 +1050,7 @@ async function execute(): Promise<Record<string, Json>> {
       const factsAfterRepeat = await batchFacts(proofDb, journal, batchA);
       if (batchIdIn(repeatAckA) !== batchB || JSON.stringify(afterRepeat) !== JSON.stringify(afterAckA) ||
           factsAfterRepeat.acknowledgedAt !== factsAfterAckA.acknowledgedAt) fail("repeat ACK changed state");
+      passedSteps.add(step);
 
       step = "batch-b-ack";
       const ackB = await requireStatus(await checkCall(runtime, journal, statusDb, batchB), 200, "ACK B");
@@ -1016,8 +1063,10 @@ async function execute(): Promise<Record<string, Json>> {
           afterAckB.active_batches !== 0 || afterAckB.total_batches !== 2) {
         fail("ACK B cursor proof failed");
       }
+      passedSteps.add(step);
       step = "migration-functional-proof";
       if (!await runFunctionalProof(proofDb, runtime.functionalSql)) fail("migration functional proof failed");
+      passedSteps.add(step);
       step = "forced-after-observations";
       if (Deno.env.get("SWARM_ENV") === "test" && Deno.env.get("HM37_TEST_FAIL_AFTER") === "observations") {
         fail("forced test failure");
@@ -1051,6 +1100,7 @@ async function execute(): Promise<Record<string, Json>> {
     try {
       if (typeof journalPath! === "string" && typeof journal! === "object") {
         cleanupFacts = await cleanup(runtime, journalPath, journal, identity, statusDb, proofDb, oauthDb);
+        passedSteps.add("cleanup");
       }
     } catch (error) {
       runError ??= errorFacts("cleanup", error);
@@ -1085,12 +1135,7 @@ async function execute(): Promise<Record<string, Json>> {
     seat_id: journal!.seatId,
     principal_id: journal!.principalId,
     observations,
-    assertions: Object.fromEntries([
-      ...(runError === null && args.cleanupOnly === undefined
-        ? HOSTED_CONTROL_ASSERTIONS.map((id) => [id, true] as const)
-        : []),
-      ["hosted.cleanup-complete", true],
-    ]),
+    assertions: assertionsForPassedSteps(passedSteps),
     cleanup: {
       seat_revoked: cleanupFacts.seatRevoked,
       handle_revoked: cleanupFacts.handleRevoked,
@@ -1110,13 +1155,15 @@ async function execute(): Promise<Record<string, Json>> {
   return output;
 }
 
-try {
-  console.log(JSON.stringify(await execute()));
-} catch (error) {
-  Deno.exitCode = 1;
-  console.log(JSON.stringify({
-    ok: false,
-    assertions: { failed_closed_before_creation: true },
-    error: errorFacts("startup", error),
-  }));
+if (import.meta.main) {
+  try {
+    console.log(JSON.stringify(await execute()));
+  } catch (error) {
+    Deno.exitCode = 1;
+    console.log(JSON.stringify({
+      ok: false,
+      assertions: { failed_closed_before_creation: true },
+      error: errorFacts("startup", error),
+    }));
+  }
 }

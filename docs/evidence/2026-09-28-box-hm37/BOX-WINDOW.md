@@ -1163,7 +1163,7 @@ The hosted harness's JSON `error` object contains `assertion_id`, `step`, `code`
 The executable control is
 `deploy/release-proofs/item-hm/hm37-open-ack-control.ts`, with Deno import map
 `deploy/release-proofs/item-hm/hm37-open-ack-deno.json`. The committed harness
-SHA-256 is `06f7f796198bcdbffd2248eaf129aeec163e890e97e7c1d286a3a67449cbf94c`; the import-map SHA-256 is
+SHA-256 is `dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013`; the import-map SHA-256 is
 `f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b`. Anvil recomputes both from the accepted
 commit before staging and records the accepted commit, hashes and independent
 review in `hm37-hosted-control-inputs.txt`. A mismatch stops before migration
@@ -1276,7 +1276,7 @@ and not copied as evidence.
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-control.ts "$HARNESS"
   install -m 0600 /run/commonswarm-hm37/hm37-open-ack-deno.json "$DENO_CONFIG"
   install -m 0600 /run/commonswarm-hm37/human-session.json "$CONTROL_ROOT/human-session.json"
-  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = 06f7f796198bcdbffd2248eaf129aeec163e890e97e7c1d286a3a67449cbf94c
+  test "$(sha256sum "$HARNESS" | awk '{print $1}')" = dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
   test "$(sha256sum "$DENO_CONFIG" | awk '{print $1}')" = f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
   python3 - "$CONTROL_ROOT/oauth-database.json" <<'PY'
 import json, os, pathlib, sys
