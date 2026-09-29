@@ -68,7 +68,28 @@ every minting step. The box's GNU `date` computes it once from the approved
 # step: runbook-01
 # readonly: yes
 # host: box /bin/bash 5.2 as root
-WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+if [ -z "${WINDOW_START_UTC:-}" ]; then
+  printf 'STOP: WINDOW_START_UTC is required (HezLead-approved YYYY-MM-DDTHH:MM:SSZ)\n' >&2
+  false
+else
+  case "$WINDOW_START_UTC" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z)
+      WINDOW_START_EPOCH="$(date -u -d "$WINDOW_START_UTC" +%s 2>/dev/null || printf invalid)"
+      case "$WINDOW_START_EPOCH" in
+        (*[!0-9]*|'')
+          unset WINDOW_START_EPOCH
+          printf 'STOP: WINDOW_START_UTC must be a valid ISO-8601 UTC time\n' >&2
+          false
+          ;;
+        (*)
+          unset WINDOW_START_EPOCH
+          WINDOW_PRINCIPAL_SUFFIX="$(date -u -d "$WINDOW_START_UTC" +%H%M%S)"
+          ;;
+      esac
+      ;;
+    *) printf 'STOP: WINDOW_START_UTC must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form\n' >&2; false ;;
+  esac
+fi
 ```
 
 On a re-run, set a new window start and use the resulting fresh names without

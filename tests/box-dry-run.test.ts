@@ -1226,24 +1226,39 @@ interface Execution {
   stderr: string;
 }
 
-function executeWholeBlock(block: Block, fixture: Fixture, options: { fail?: boolean; control?: string } = {}): Execution {
+function executeWholeBlock(
+  block: Block,
+  fixture: Fixture,
+  options: {
+    fail?: boolean;
+    control?: string;
+    env?: NodeJS.ProcessEnv;
+    unsetEnv?: string[];
+    trapErrors?: boolean;
+  } = {},
+): Execution {
   const step = shortStep(block);
   const body = materialize(block);
   const script = [
     "set -E", `source ${JSON.stringify(fixture.prelude)}`,
-    "trap 'block_status=$?; printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\"' ERR",
+    options.trapErrors === false
+      ? "trap - ERR"
+      : "trap 'block_status=$?; printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\"' ERR",
     body,
   ].join("\n");
+  const childEnv: NodeJS.ProcessEnv = {
+    ...fixture.env,
+    ...options.env,
+    BOX_DRY_RUN_STEP: step,
+    BOX_DRY_RUN_FAIL_STEP: options.fail ? step : "",
+    BOX_DRY_RUN_CONTROL: options.control ?? "",
+  };
+  for (const name of options.unsetEnv ?? []) delete childEnv[name];
   const result = spawnSync("/bin/bash", [], {
     cwd: fixture.cwd,
     input: script,
     encoding: "utf8",
-    env: {
-      ...fixture.env,
-      BOX_DRY_RUN_STEP: step,
-      BOX_DRY_RUN_FAIL_STEP: options.fail ? step : "",
-      BOX_DRY_RUN_CONTROL: options.control ?? "",
-    },
+    env: childEnv,
     timeout: 120_000,
   });
   const stderr = result.stderr ?? "";
@@ -1320,6 +1335,10 @@ test("window IDs are derived once and later read from persisted files", () => {
   assert.doesNotMatch(runbook, /WINDOW_ID='<approved|EXPECTED_WINDOW_ID/);
   assert.doesNotMatch(site, /SITE_WINDOW_ID:\?Set the approved|approved `YYYYMMDDTHHMMSSZ` identifier/);
   const open = stepSource(runbook, "runbook-02");
+  const suffix = stepSource(runbook, "runbook-01");
+  assert.match(suffix, /WINDOW_START_UTC is required/);
+  assert.match(suffix, /WINDOW_START_UTC must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form/);
+  assert.match(suffix, /date -u -d "\$WINDOW_START_UTC" \+%s/);
   assert.match(open, /WINDOW_ID="\$\(printf '%s' "\$WINDOW_START_UTC" \| tr -d ':-'\)"/);
   assert.match(open, /\.commonswarm-release-window\.env/);
   assert.match(open, /BOX_WINDOW_INPUT/);
@@ -1331,6 +1350,39 @@ test("window IDs are derived once and later read from persisted files", () => {
   for (const block of blocks(SITE).filter((candidate) => candidate.step !== blocks(SITE)[0]?.step)) {
     if (block.host.startsWith("Mac mini")) assert.match(block.source, /\. "\$HOME\/\.commonswarm-site-window\.env"/);
     else assert.match(block.source, /\. \/tmp\/commonswarm-site-window\.env/);
+  }
+});
+
+test("runbook-01 fails clearly unless WINDOW_START_UTC is a valid approved UTC input", () => {
+  const block = blocks(RUNBOOK).find((candidate) => shortStep(candidate) === "runbook-01");
+  assert.ok(block);
+  const fixture = prepareMacFixture();
+  try {
+    const missing = executeWholeBlock(block, fixture, { unsetEnv: ["WINDOW_START_UTC"], trapErrors: false });
+    assert.equal(missing.result, "failed");
+    assert.match(missing.stderr, /WINDOW_START_UTC is required/);
+
+    const malformed = executeWholeBlock(block, fixture, {
+      env: { WINDOW_START_UTC: "2026-09-28 01:02:03Z" },
+      trapErrors: false,
+    });
+    assert.equal(malformed.result, "failed");
+    assert.match(malformed.stderr, /must be an ISO-8601 UTC time in YYYY-MM-DDTHH:MM:SSZ form/);
+
+    const impossible = executeWholeBlock(block, fixture, {
+      env: { WINDOW_START_UTC: "2026-99-99T99:99:99Z" },
+      trapErrors: false,
+    });
+    assert.equal(impossible.result, "failed");
+    assert.match(impossible.stderr, /must be a valid ISO-8601 UTC time/);
+
+    const valid = executeWholeBlock(block, fixture, {
+      env: { WINDOW_START_UTC: WINDOW_START, BOX_DRY_RUN_PART: "box" },
+      trapErrors: false,
+    });
+    assert.equal(valid.result, "passed", valid.stderr);
+  } finally {
+    cleanupMacFixture(fixture);
   }
 });
 
@@ -1799,6 +1851,28 @@ test("pinned Deno install and rollback removal fail closed", {
 
   fixture = prepareBoxFixture("s2");
   try {
+    writeRootMode(DENO_PATH, "pre-existing unknown binary\n", 0o755);
+    const refused = executeWholeBlock(removeBlock, fixture);
+    assert.equal(refused.result, "failed");
+    assert.match(refused.stderr, /refusing to remove an unknown file/);
+    assert.equal(readFileSync(DENO_PATH, "utf8"), "pre-existing unknown binary\n",
+      "removal without a recorded digest changed an unknown Deno file");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+
+  fixture = prepareBoxFixture("s2");
+  try {
+    const notInstalled = executeWholeBlock(removeBlock, fixture);
+    assert.equal(notInstalled.result, "passed", notInstalled.stderr);
+    assert.equal(pathExists(DENO_PATH), false);
+    assert.match(readFileSync(join(PROOF_DIR, "window.env"), "utf8"), /^deno_remove=not-installed$/m);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+
+  fixture = prepareBoxFixture("s2");
+  try {
     const installed = executeWholeBlock(installBlock, fixture);
     assert.equal(installed.result, "passed", installed.stderr);
     const removed = executeWholeBlock(removeBlock, fixture);
@@ -1817,11 +1891,13 @@ test("five box states cover pass, pre-commit rollback, post-commit cleanup, and 
   const cleanupOnly = planTail("cleanup");
   const states = JSON.parse(readFileSync("tests/box-dry-run/fixtures/states.json", "utf8")) as Record<string, string>;
   assert.deepEqual(Object.keys(states), ["s1", "s2", "s3", "s4", "s5"]);
-  const scenarios = [
+  const scenarios: Array<{ path: string; failure: string; tail: string[]; states?: string[] }> = [
     { path: "all-pass", failure: "", tail: [] as string[] },
     { path: "before-commit", failure: "hm37-backup-gate", tail: rollback },
     { path: "after-control", failure: "hm37-hosted-open-ack-control", tail: cleanupOnly },
     { path: "after-safety-S3", failure: "hm37-hosted-open-ack-control", tail: rollback },
+    { path: "before-deno-s2-s5", failure: "hm37-hm6-oauth-precondition", tail: rollback, states: ["s2", "s5"] },
+    { path: "deno-download-before-record", failure: "hm37-deno-install", tail: rollback, states: ["s2"] },
   ];
   const allBlocks = [...blocks(HM37), ...blocks(RUNBOOK)];
   const byStep = new Map(allBlocks.map((block) => [shortStep(block), block]));
@@ -1830,6 +1906,7 @@ test("five box states cover pass, pre-commit rollback, post-commit cleanup, and 
   const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
   for (const [state, description] of Object.entries(states)) {
     for (const scenario of scenarios) {
+      if (scenario.states && !scenario.states.includes(state)) continue;
       const stop = scenario.failure ? hmSequence.indexOf(scenario.failure) : hmSequence.length - 1;
       assert.ok(stop >= 0);
       const ordered = scenario.failure
@@ -1855,12 +1932,26 @@ test("five box states cover pass, pre-commit rollback, post-commit cleanup, and 
           if (failure) {
             assert.equal(record.result, "failed", `${state}/${scenario.path}/${step} did not exercise its injected failure`);
             assert.ok(record.firstFailingCommand, `${state}/${scenario.path}/${step} did not report the first failing command`);
+            if (part === "box" && step === "hm37-deno-install") {
+              const calls = readFileSync(fixture.log, "utf8");
+              assert.match(calls, /^curl .*--head/m, "Deno install abort happened before the redirect request");
+              assert.match(calls, /^curl .*--write-out/m, "Deno install abort happened before the download");
+              assert.doesNotMatch(readFileSync(join(PROOF_DIR, "window.env"), "utf8"), /DENO_INSTALLED_BINARY_SHA256=/);
+              assert.equal(pathExists(DENO_PATH), false, "aborted install left a Deno binary");
+              assert.equal(pathExists(`/run/commonswarm-deno-${WINDOW_ID}`), false, "aborted install left download scratch");
+            }
           } else {
             assert.equal(record.result, "passed", `${state}/${scenario.path}/${step}: ${record.stderr}`);
           }
         }
+        const expectedSteps = ordered.filter((step) => byStep.get(step)!.host.startsWith("box ") === (part === "box"));
+        assert.deepEqual(records.map((record) => record.step), expectedSteps,
+          `${state}/${scenario.path} did not run every ${part} whole block in the selected sequence and cleanup tail`);
         const expectedFailures = part === "box" && scenario.failure ? 1 : 0;
         assert.equal(records.filter((record) => record.result === "failed").length, expectedFailures);
+        if (part === "box" && (scenario.path === "before-deno-s2-s5" || scenario.path === "deno-download-before-record")) {
+          assert.equal(pathExists(DENO_PATH), false, `${state}/${scenario.path} cleanup changed the absent Deno baseline`);
+        }
         t.diagnostic(`${part}:${state}/${scenario.path} (${description}): ${records.map((record) => `${record.step}=${record.result}${record.firstFailingCommand ? `[${record.firstFailingCommand}]` : ""}`).join(",")}`);
       } finally {
         if (part === "box") cleanupBoxFixture(fixture);

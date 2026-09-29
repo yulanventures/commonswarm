@@ -1668,13 +1668,27 @@ baseline. An unknown or changed file is never removed.
     "/home/commonswarm/edge/controls/${SHA}-"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z/deno-cache) ;;
     *) false ;;
   esac
-  : "${DENO_INSTALLED_BINARY_SHA256:?recorded installed Deno sha256 required}"
-  case "$DENO_INSTALLED_BINARY_SHA256" in (*[!0-9a-f]*|'') false ;; esac
-  test "${#DENO_INSTALLED_BINARY_SHA256}" -eq 64
+  RECORDED_DENO_SHA256=${DENO_INSTALLED_BINARY_SHA256:-}
+  if [ -z "$RECORDED_DENO_SHA256" ]; then
+    if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
+      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown file\n' \
+        "$DENO_PATH" >&2
+      exit 1
+    fi
+    if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
+      printf 'STOP: %s exists but window.env has no installed Deno sha256; refusing to remove an unknown path\n' \
+        "$DENO_DIR" >&2
+      exit 1
+    fi
+    printf 'deno_remove=not-installed\n' >>"$PROOF_DIR/window.env"
+    exit 0
+  fi
+  case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
+  test "${#RECORDED_DENO_SHA256}" -eq 64
   if [ -e "$DENO_PATH" ] || [ -L "$DENO_PATH" ]; then
     test -f "$DENO_PATH"
     test ! -L "$DENO_PATH"
-    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$DENO_INSTALLED_BINARY_SHA256"
+    test "$(sha256sum "$DENO_PATH" | awk '{print $1}')" = "$RECORDED_DENO_SHA256"
     rm -f -- "$DENO_PATH"
   fi
   test ! -e "$DENO_PATH"
