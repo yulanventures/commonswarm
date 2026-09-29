@@ -1,0 +1,66 @@
+{
+  "cswarm_whoami": {
+    "source": "src/cli.ts:2546-2577",
+    "output": {
+      "credential_valid": true,
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "principal_id": "10000000-0000-4000-8000-000000000001"
+    }
+  },
+  "cswarm_status": {
+    "source": "src/cli.ts:2113-2130",
+    "output": {
+      "identity": { "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc" },
+      "selected_project": { "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934" },
+      "warnings": [],
+      "agents": [
+        { "principal_id": "10000000-0000-4000-8000-000000000001", "revoked": true }
+      ]
+    }
+  },
+  "cswarm_note": {
+    "source": "src/cli.ts:10352-10357",
+    "output": {
+      "signal": {
+        "id": "20000000-0000-4000-8000-000000000001",
+        "body": "20260929T010203Z"
+      }
+    }
+  },
+  "cswarm_check_first": {
+    "source": "src/cloud/agent-check.ts:318-426",
+    "output": {
+      "checked": true,
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "messages": [
+        {
+          "id": "20000000-0000-4000-8000-000000000001",
+          "body": "20260929T010203Z"
+        }
+      ]
+    }
+  },
+  "cswarm_check_empty": {
+    "source": "src/cloud/agent-check.ts:397-426",
+    "output": {
+      "checked": true,
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "messages": []
+    }
+  },
+  "cswarm_receipt": {
+    "source": "src/cloud/receipts.ts:274-305",
+    "output": {
+      "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+      "signal_id": "20000000-0000-4000-8000-000000000001",
+      "receipts": [
+        {
+          "recipient_agent_principal_id": "10000000-0000-4000-8000-000000000002",
+          "state": "observed",
+          "outcome": "observed",
+          "acked_at": "2026-09-29T01:03:00Z"
+        }
+      ]
+    }
+  }
+}

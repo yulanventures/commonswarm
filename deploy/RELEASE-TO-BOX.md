@@ -59,6 +59,22 @@ A site release that depends on a server change follows that server's window.
 
 ### Window plan rules
 
+When a release is split across PREP, Window A, Window B, and a dependent site
+lane, handoffs are receipts, never inherited shell state. PREP emits one
+`PREP_RECEIPT_PATH`; Window A authenticates every receipt-bound seat before its
+first change and owns revocation, zero-active-token readback, and guarded seat
+directory removal on every ending. Window A's close receipt is the only input
+that may unlock Window B or the dependent site lane. A dry run executes the
+selected whole blocks in their documented order from an empty environment and
+must report no `UNPRODUCED` dependency.
+
+Browser release controls use the operator seat's named retained browser
+directory when the item plan specifies one. They must record the starting
+workspace, switch through the product's workspace switcher, assert the control
+workspace before every action, remain view-only, and restore the starting
+workspace. Sign-in failure or an interactive security prompt selects the
+plan's reduced branch automatically; it is not a prompt choice.
+
 Every window plan that mints a control, seed, or proof principal must append the
 per-run `WINDOW_PRINCIPAL_SUFFIX` to every such name and use that one value in
 every minting step. The box's GNU `date` computes it once from the approved

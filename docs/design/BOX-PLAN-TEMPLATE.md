@@ -41,6 +41,21 @@ checks every fixture string that names a container image, repository path, or
 environment name against repository text or the measurement artifact, and
 must reject a same-shaped invented value.
 
+The honest dry run starts every block shell from an empty environment and may
+pre-seed only cited measured facts or named prompt inputs with fixed synthetic
+values. Stubs return command outputs in measured or source-defined JSON shapes;
+they never return a step result. Execute PREP, every main-window state and exit
+path, each dependent window, and every browser branch in whole-block order.
+`UNPRODUCED` is a dependency defect and the report must be empty. Keep a
+separate non-substitutable list for live database, container, HTTP, browser, and
+CLI behavior that a dry run cannot prove.
+
+For split windows, persist exactly one receipt at each handoff. The consuming
+open block validates the receipt before any change; no second file, inherited
+variable, profile discovery, or operator branch choice may carry cross-window
+state. Cleanup that owns temporary principals runs on success, rollback,
+pre-commit failure, post-commit control failure, and abort.
+
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either
 block can run alone. Do not split a mutating block merely because it also reads.

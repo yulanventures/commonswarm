@@ -1,5 +1,7 @@
 # HM37 Window A pre-window preparation
 
+## Named prompt inputs
+
 This is a preparation plan, not a release or deployment plan. Anvil runs it on
 the Mac mini before HM37 Window A. It exercises the currently live edge release
 `72c57e0d76d0aa86fe4f811a2cf51499919fed20` through the normal `cswarm` CLI.
@@ -8,9 +10,11 @@ run `hm37-prep-final-no-cleanup`; do not start Window A.
 
 The only prompt inputs for this preparation are:
 
-- `APPROVER`, which must be exactly `HezLead`;
-- `PLAN_COMMIT`, which must be exactly 40 hexadecimal characters; and
-- `PROMPT_NUMBER`, which must be a positive decimal integer.
+| Name | Supplier and meaning | Exact format and expected value |
+|---|---|---|
+| `APPROVER` | HezLead, approval identity | Exact string `HezLead`. |
+| `PLAN_COMMIT` | HezLead/Anvil, reviewed PREP plan | Exactly 40 hexadecimal characters. |
+| `PROMPT_NUMBER` | HezLead, approval record | Positive decimal integer. |
 
 No path, identifier, seat name, timestamp, or cleanup target is chosen by the
 operator. `hm37-prep-open` derives `PREP_ID` from the Mac clock in UTC as

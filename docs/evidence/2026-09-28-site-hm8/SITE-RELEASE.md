@@ -26,8 +26,7 @@ by an absolute path and is read without printing it.
 
 | Name | Supplier and meaning | Exact format |
 |---|---|---|
-| `GATE_HM37_A_LIVE` | HezLead, from WINDOW A close receipt | `yes` |
-| `SITE_GATE_RECEIPT_PATH` | Anvil, reviewed WINDOW A/site-gate receipt | absolute regular non-symlink file, mode `0600` |
+| `HM37_A_CLOSE_RECEIPT` | Anvil, produced only by WINDOW A | absolute regular non-symlink mode-`0600` WINDOW A close receipt; the only A-to-lane-8 handoff |
 | `SITE_APPROVER` | HezLead | `HezLead` |
 | `SITE_PLAN_COMMIT` | HezLead, reviewed plan commit | 40 lowercase hex characters |
 | `SITE_RELEASE_SHA` | HezLead/Anvil, reviewed release | `8b8989f2b29e440a317a2cdedf11195901c8342c` |
@@ -37,27 +36,15 @@ by an absolute path and is read without printing it.
 | `SITE_EVIDENCE` | Anvil, protected evidence destination | absolute, absent before `site-01` |
 | `SITE_BUILD_ENV_OP_REFERENCE` | HezLead/Anvil, approved 1Password document reference | `op://Yulan Ventures Infra/ITEM/FIELD` with nonempty item and field segments; no credential value |
 | `SITE_BUILD_ENV_SOURCE` | Anvil, protected staging output path | absolute path directly under `SITE_EVIDENCE`, absent before `site-00-build-env` |
-| `SITE_OWNER_ACCESS_TOKEN_FILE` | Anvil, browser-token output path | absolute path directly under `SITE_EVIDENCE`; never a token value |
-| `SITE_BROWSER_SIGNIN` | Anvil, measured before the window | `available` or `unavailable` |
-
-`SITE_BROWSER_SIGNIN=available` means the Cold Agent Test owner can use Anvil's
-1Password service account to complete an offered `/app` magic-link, Google, or
-GitHub sign-in without a keychain dialog, 2FA/TOTP prompt, or mailbox access.
-Any such condition makes the pre-window measurement `unavailable`; the branch
-is not reconsidered in the window. There is no password form or CLI-to-browser
-handoff.
-
-The gate receipt contains these exact public lines plus its bounded gate list:
+The WINDOW A close receipt contains these exact public lines:
 
 ```text
-HM37_WINDOW=A
-HM37_RELEASE_SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-HM37_EDGE_LIVE=yes
-HM37_MCP_DARK=yes
-HM37_CLOSED=yes
-SITE_RELEASE_SHA=8b8989f2b29e440a317a2cdedf11195901c8342c
-SITE_GATES=PASS
-SITE_GATE_RUNNER=allowed-non-mini
+release_sha=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+edge_live=true
+edge_dark=true
+prep_seats_revoked=true
+prep_active_tokens=0
+close=PASS
 ```
 
 ## 2. Preparation and window open
@@ -96,39 +83,32 @@ and derives the ID. Nobody types a time or ID.
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
-  : "${GATE_HM37_A_LIVE:?named input missing}"
-  : "${SITE_GATE_RECEIPT_PATH:?named input missing}"
+  : "${HM37_A_CLOSE_RECEIPT:?named input missing}"
   : "${SITE_RELEASE_REPO:?named input missing}"
   : "${SITE_BASE_SHA:?named input missing}"
   : "${SITE_RELEASE_SHA:?named input missing}"
   : "${SITE_EVIDENCE:?named input missing}"
   : "${SITE_BUILD_ENV_OP_REFERENCE:?named input missing}"
   : "${SITE_BUILD_ENV_SOURCE:?named input missing}"
-  : "${SITE_OWNER_ACCESS_TOKEN_FILE:?named input missing}"
-  : "${SITE_BROWSER_SIGNIN:?named input missing}"
-  test "$GATE_HM37_A_LIVE" = yes
   test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
-  case "$SITE_BROWSER_SIGNIN" in available|unavailable) ;; *) exit 1 ;; esac
-  for input_path in "$SITE_GATE_RECEIPT_PATH" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE" \
-      "$SITE_BUILD_ENV_SOURCE" "$SITE_OWNER_ACCESS_TOKEN_FILE"; do
+  for input_path in "$HM37_A_CLOSE_RECEIPT" "$SITE_RELEASE_REPO" "$SITE_EVIDENCE" \
+      "$SITE_BUILD_ENV_SOURCE"; do
     case "$input_path" in /*) ;; *) exit 1 ;; esac
   done
   test ! -e "$SITE_EVIDENCE"
   test ! -e "$HOME/.commonswarm-site-window.env"
-  test "${SITE_OWNER_ACCESS_TOKEN_FILE%/*}" = "$SITE_EVIDENCE"
-  test -f "$SITE_GATE_RECEIPT_PATH" && test ! -L "$SITE_GATE_RECEIPT_PATH"
-  test "$(stat -f '%Lp' "$SITE_GATE_RECEIPT_PATH")" = 600
+  test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
+  test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
   case "$SITE_BUILD_ENV_OP_REFERENCE" in 'op://Yulan Ventures Infra/'?*/?*) ;; *) exit 1 ;; esac
   case "$SITE_BUILD_ENV_OP_REFERENCE" in *$'\n'*) exit 1 ;; esac
   test "${SITE_BUILD_ENV_SOURCE%/*}" = "$SITE_EVIDENCE"
   test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
-  for expected in HM37_WINDOW=A \
-    HM37_RELEASE_SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 \
-    HM37_EDGE_LIVE=yes HM37_MCP_DARK=yes HM37_CLOSED=yes \
-    SITE_RELEASE_SHA=8b8989f2b29e440a317a2cdedf11195901c8342c \
-    SITE_GATES=PASS SITE_GATE_RUNNER=allowed-non-mini; do
-    grep -qFx "$expected" "$SITE_GATE_RECEIPT_PATH"
+  for expected in \
+    release_sha=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 \
+    edge_live=true edge_dark=true prep_seats_revoked=true \
+    prep_active_tokens=0 close=PASS; do
+    grep -qFx "$expected" "$HM37_A_CLOSE_RECEIPT"
   done
   if pgrep -f '[d]eploy/site/deploy.sh|[f]inalize-release.sh' >/dev/null 2>&1; then
     printf '%s\n' 'STOP: another local site release process exists' >&2
@@ -209,9 +189,7 @@ PY
     printf 'SITE_BASE_SHA=%q\n' "$SITE_BASE_SHA"
     printf 'SITE_BUILD_ENV_OP_REFERENCE=%q\n' "$SITE_BUILD_ENV_OP_REFERENCE"
     printf 'SITE_BUILD_ENV_SOURCE=%q\n' "$SITE_BUILD_ENV_SOURCE"
-    printf 'SITE_OWNER_ACCESS_TOKEN_FILE=%q\n' "$SITE_OWNER_ACCESS_TOKEN_FILE"
-    printf 'SITE_BROWSER_SIGNIN=%q\n' "$SITE_BROWSER_SIGNIN"
-    printf 'SITE_GATE_RECEIPT_PATH=%q\n' "$SITE_GATE_RECEIPT_PATH"
+    printf 'HM37_A_CLOSE_RECEIPT=%q\n' "$HM37_A_CLOSE_RECEIPT"
   } >"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
   printf '%s\n' "$box_open" >"$SITE_EVIDENCE/site-01-open.txt"
@@ -223,17 +201,17 @@ PY
 ## 3. Produced inputs and pre-switch gates
 
 ```sh
-# step: site-00-gate-ingest — Mac mini /bin/bash 3.2; Anvil; copy bounded reviewed receipt
+# step: site-00-a-close-ingest — Mac mini /bin/bash 3.2; Anvil; copy WINDOW A close receipt
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  test -f "$SITE_GATE_RECEIPT_PATH" && test ! -L "$SITE_GATE_RECEIPT_PATH"
-  test "$(stat -f '%Lp' "$SITE_GATE_RECEIPT_PATH")" = 600
-  install -m 0600 "$SITE_GATE_RECEIPT_PATH" "$SITE_EVIDENCE/site-gate-receipt.txt"
-  test "$(shasum -a 256 "$SITE_GATE_RECEIPT_PATH" | awk '{print $1}')" = \
-    "$(shasum -a 256 "$SITE_EVIDENCE/site-gate-receipt.txt" | awk '{print $1}')"
+  test -f "$HM37_A_CLOSE_RECEIPT" && test ! -L "$HM37_A_CLOSE_RECEIPT"
+  test "$(stat -f '%Lp' "$HM37_A_CLOSE_RECEIPT")" = 600
+  install -m 0600 "$HM37_A_CLOSE_RECEIPT" "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
+  test "$(shasum -a 256 "$HM37_A_CLOSE_RECEIPT" | awk '{print $1}')" = \
+    "$(shasum -a 256 "$SITE_EVIDENCE/hm37-a-close-receipt.txt" | awk '{print $1}')"
 )
 ```
 
@@ -325,40 +303,48 @@ positive controls.
 )
 ```
 
-### Separate Chrome profile and owner input
+### Dedicated Anvil Chrome session
 
-The marked step starts a separate per-window Chrome user-data directory under
-`SITE_EVIDENCE` with `--password-store=basic`; it never attaches to Anvil's
-Ridgeio/Tom owner session. Full control waits for the pre-measured sign-in route
-and then asserts user `d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc`, the displayed
-account, and sole selected workspace
-`c2ea0541-f56d-4c73-bf71-56c5405c4934`. It writes the access token directly to
-the named `0600` file without printing it. A keychain, 2FA/TOTP, or mailbox
-requirement stops browser controls; the branch does not change.
+Browser controls use only Anvil's retained Chrome user-data directory
+`/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome`, started with
+`--password-store=basic`. They never create or copy another Chrome profile and
+never print a token or email. The site's client enables persisted sessions at
+`site/src/lib/commonswarm.ts:138-140`; the browser inspection finds that
+client's `sb-*-auth-token` key and returns only `user.id` from its parsed value.
+
+The first block compares that web user ID with the CLI human user ID and the
+fixed expected ID, asserts the displayed label `Ridgeio`, records the initially
+selected CICD workspace, and uses the normal workspace switcher to select Cold
+Agent Test. If the site is signed out, it may choose the GitHub button and use
+the existing Ridgeio GitHub session. A 2FA challenge, keychain dialog, or any
+failure to restore the session selects `REDUCED-CONTROL` automatically; there
+is no operator branch input. Neither branch signs out.
 
 ```sh
-# step: site-03-browser-owner-preflight — Mac mini /bin/bash 3.2; Anvil; isolated Chrome identity preflight
+# step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome identity and workspace preflight
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  profile="$SITE_EVIDENCE/chrome-profile-$SITE_WINDOW_ID"
-  test ! -e "$profile"
-  mkdir -m 0700 "$profile"
+  profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"
+  test -d "$profile"
+  test ! -L "$profile"
   chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
   test -x "$chrome"
-  "$chrome" --user-data-dir="$profile" --password-store=basic --remote-debugging-port=0 \
+  CLI_USER_ID="$(cswarm status \
+    --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -er '.identity.user_id')"
+  test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
+  chrome_port=9335
+  "$chrome" --user-data-dir="$profile" --password-store=basic --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
     >"$SITE_EVIDENCE/chrome-launch.log" 2>&1 &
   chrome_pid=$!
   port_file="$profile/DevToolsActivePort"
   tries=0
-  while test ! -s "$port_file"; do
+  while ! curl -fsS --max-time 1 "http://127.0.0.1:${chrome_port}/json/version" >/dev/null 2>&1; do
     tries=$((tries + 1)); test "$tries" -le 100; sleep 0.1
   done
-  IFS= read -r chrome_port <"$port_file" || [ -n "$chrome_port" ]
-  case "$chrome_port" in *[!0-9]*|'') exit 1 ;; esac
   endpoint="http://127.0.0.1:$chrome_port"
   {
     printf 'SITE_CHROME_PROFILE=%q\n' "$profile"
@@ -366,69 +352,72 @@ requirement stops browser controls; the branch does not change.
     printf 'SITE_CHROME_ENDPOINT=%q\n' "$endpoint"
   } >>"$SITE_WINDOW_FILE"
   chmod 0600 "$SITE_WINDOW_FILE"
-  export SITE_BROWSER_SIGNIN SITE_OWNER_ACCESS_TOKEN_FILE SITE_EVIDENCE
-  if test "$SITE_BROWSER_SIGNIN" = available; then
-    printf '%s\n' 'Complete the offered /app sign-in in isolated Chrome; do not use Tom/Ridgeio.'
-  fi
+  export CLI_USER_ID SITE_EVIDENCE
   BU_CDP_URL="$endpoint" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import json, os, pathlib, stat, time
+import json, os, pathlib, time
 expected_user = "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
-expected_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
-branch = os.environ["SITE_BROWSER_SIGNIN"]
-new_tab("https://commonswarm.com/app?w=" + expected_workspace)
+start_workspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+control_workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
+new_tab("https://commonswarm.com/app")
 wait_for_load()
 def state():
     return js("""(() => {
-      let auth=null;
+      let userId='';
       for (const key of Object.keys(localStorage)) {
         if (!key.startsWith('sb-') || !key.endsWith('-auth-token')) continue;
-        try { const value=JSON.parse(localStorage.getItem(key)); if(value?.access_token&&value?.user) auth=value; } catch {}
+        try { const value=JSON.parse(localStorage.getItem(key)); if(value?.user?.id) userId=value.user.id; } catch {}
       }
       const selected=document.querySelector('[data-workspace-list] [data-workspace-id][aria-checked="true"]');
       const workspaces=[...document.querySelectorAll('[data-workspace-list] [data-workspace-id]')];
-      return {auth, selectedWorkspace:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
+      return {userId, selectedWorkspace:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
         workspaceIds:workspaces.map(item=>item.dataset.workspaceId),
         display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
         signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden')};
     })()""")
-if branch == "available":
-    observed = None
-    for _ in range(600):
-        candidate = state()
-        if candidate and candidate.get("auth"):
-            observed = candidate; break
-        time.sleep(1)
-    if not observed: raise SystemExit(1)
-    auth = observed["auth"]
-    if auth["user"]["id"] != expected_user: raise SystemExit(1)
-    expected_display = (auth["user"].get("user_metadata") or {}).get("full_name") or auth["user"].get("email") or ""
-    if not expected_display or observed["display"] != expected_display: raise SystemExit(1)
-    if observed["selectedWorkspace"] != expected_workspace: raise SystemExit(1)
-    if observed["workspaceIds"] != [expected_workspace]: raise SystemExit(1)
-    token_file = pathlib.Path(os.environ["SITE_OWNER_ACCESS_TOKEN_FILE"])
-    token_file.open("x", encoding="utf-8").write(auth["access_token"] + "\n")
-    token_file.chmod(0o600)
-    if not stat.S_ISREG(token_file.stat().st_mode) or token_file.is_symlink(): raise SystemExit(1)
-    result={"branch":"FULL-CONTROL","user_id_match":True,"displayed_account_match":True,
-      "selected_workspace":expected_workspace,"workspace_count":1}
-else:
-    observed=state()
-    if observed.get("auth") or not observed.get("signedOut"): raise SystemExit(1)
-    result={"branch":"REDUCED-CONTROL","signed_out":True,
+observed=state()
+signin_attempted=False
+if observed.get("signedOut"):
+    signin_attempted=True
+    github=js("""(() => [...document.querySelectorAll('button,a')]
+      .find(node => node.textContent?.trim() === 'Sign in with GitHub')?.click() || false)()""")
+    if github:
+        for _ in range(120):
+            time.sleep(1); observed=state()
+            if observed.get("userId"): break
+challenge=js("/two-factor|2fa|verification code|keychain/i.test(document.body?.innerText||'')")
+if observed.get("signedOut") or challenge:
+    result={"branch":"REDUCED-CONTROL","signin_attempted":signin_attempted,
+      "reason":"signed-out-or-interactive-challenge",
       "signed_in_connected_apps_load":"NOT PROVED","signed_in_empty_state":"NOT PROVED",
-      "signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED"}
+      "signed_in_no_creation_action":"NOT PROVED","signed_in_console_clean":"NOT PROVED",
+      "mobile_320":"NOT PROVED","mobile_390":"NOT PROVED"}
+else:
+    if observed["display"] != "Ridgeio": raise SystemExit(1)
+    if observed["userId"] != expected_user or observed["userId"] != os.environ["CLI_USER_ID"]: raise SystemExit(1)
+    if observed["selectedWorkspace"] != start_workspace: raise SystemExit(1)
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    switched=js("""(() => { const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      if(!target)return false; target.click(); return true; })()""")
+    if not switched: raise SystemExit(1)
+    for _ in range(60):
+        time.sleep(.5); observed=state()
+        if observed.get("selectedWorkspace")==control_workspace: break
+    if observed.get("selectedWorkspace") != control_workspace: raise SystemExit(1)
+    result={"branch":"FULL-CONTROL","account_label":"Ridgeio",
+      "cli_user_id":expected_user,"web_user_id":expected_user,
+      "start_workspace_id":start_workspace,"control_workspace_id":control_workspace}
 path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
 )
 ```
 
-`site-03` validates the build environment and, only in full control, performs
-fresh authenticated owner reads with the exact site columns. Both row counts
-must be zero. No revoke is exercised.
+`site-03` validates the build environment and the automatically selected
+browser branch. No bearer is exported from Chrome and no revoke is exercised.
 
 ```sh
-# step: site-03 — Mac mini /bin/bash 3.2; Anvil; environment and empty owner-view validation
+# step: site-03 — Mac mini /bin/bash 3.2; Anvil; environment and browser-branch validation
 # readonly: yes
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
@@ -439,39 +428,11 @@ must be zero. No revoke is exercised.
   test -f site/.env && test ! -L site/.env
   test "$(stat -f '%Lp' site/.env)" = 600
   node deploy/site/validate-site-env.mjs site/.env </dev/null
-  if test "$SITE_BROWSER_SIGNIN" = unavailable; then
-    printf '%s\n' '{"branch":"REDUCED-CONTROL","owner_views":"NOT PROVED"}' \
-      >"$SITE_EVIDENCE/site-03-owner-views.json"
-    chmod 0600 "$SITE_EVIDENCE/site-03-owner-views.json"
-    exit 0
-  fi
-  test -f "$SITE_OWNER_ACCESS_TOKEN_FILE" && test ! -L "$SITE_OWNER_ACCESS_TOKEN_FILE"
-  test "$(stat -f '%Lp' "$SITE_OWNER_ACCESS_TOKEN_FILE")" = 600
-  python3 - "$SITE_OWNER_ACCESS_TOKEN_FILE" "$SITE_EVIDENCE/site-03-owner-views.json" <<'PY'
-import json, os, pathlib, urllib.parse, urllib.request, sys
-token=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").strip(); assert token
-values={}
-for raw in pathlib.Path("site/.env").read_text(encoding="utf-8").splitlines():
-    if "=" in raw:
-        name,value=raw.split("=",1); values[name]=value.strip().strip("\"'")
-base=values["PUBLIC_SUPABASE_URL"].rstrip("/"); anon=values["PUBLIC_SUPABASE_ANON_KEY"]
-queries={
- "connections":("hosted_mcp_connections","grant_id,client_id,home_workspace_id,selected_workspace_ids,state,revoked_at","created_at.desc"),
- "seats":("hosted_mcp_seats","seat_id,grant_id,workspace_id,principal_id,name,revoked_at","created_at.asc")}
-result={"branch":"FULL-CONTROL","user_agent":"commonswarm-release-probe/1.0","views":{}}
-for label,(view,columns,order) in queries.items():
-    query=urllib.parse.urlencode({"select":columns,"order":order})
-    request=urllib.request.Request(f"{base}/rest/v1/{view}?{query}",headers={
-      "Accept-Profile":"swarm_read","apikey":anon,"Authorization":"Bearer "+token,
-      "User-Agent":"commonswarm-release-probe/1.0"})
-    with urllib.request.urlopen(request,timeout=30) as response:
-        raw=response.read(1048577); assert response.status==200
-        assert response.headers.get_content_type()=="application/json"; assert len(raw)<=1048576
-    rows=json.loads(raw); assert isinstance(rows,list) and len(rows)==0
-    result["views"][label]={"status":200,"row_count":0,"media_type":"application/json"}
-output=pathlib.Path(sys.argv[2]); output.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8")
-os.chmod(output,0o600); print("OWNER_EMPTY_VIEWS=PASS user_agent=commonswarm-release-probe/1.0")
-PY
+  test -f "$SITE_EVIDENCE/site-03-browser-preflight.json"
+  test ! -L "$SITE_EVIDENCE/site-03-browser-preflight.json"
+  test "$(stat -f '%Lp' "$SITE_EVIDENCE/site-03-browser-preflight.json")" = 600
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
+  case "$branch" in FULL-CONTROL|REDUCED-CONTROL) ;; *) exit 1 ;; esac
 )
 ```
 
@@ -563,7 +524,7 @@ These are fixed assertions, not window decisions:
   case "$SITE_PROMPT_NUMBER" in ''|*[!0-9]*|0) exit 1 ;; esac
   test "$SITE_RELEASE_SHA" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   test "$SITE_BASE_SHA" = 9b085c82352390cf8f0fe515c02b3ccff423476a
-  grep -qFx 'SITE_GATES=PASS' "$SITE_EVIDENCE/site-gate-receipt.txt"
+  grep -qFx 'close=PASS' "$SITE_EVIDENCE/hm37-a-close-receipt.txt"
   grep -qFx 'PIN=PASS' "$SITE_EVIDENCE/site-03-pin.txt"
   grep -qFx 'DELETE_GUARDS=PASS' "$SITE_EVIDENCE/site-02-summary.txt"
   test -f "$SITE_EVIDENCE/site-03-browser-preflight.json"
@@ -574,7 +535,7 @@ These are fixed assertions, not window decisions:
       "$SITE_APPROVER" "$SITE_PLAN_COMMIT" "$SITE_RELEASE_SHA" "$SITE_BASE_SHA" "$SITE_PROMPT_NUMBER"
     printf '%s\n' 'HM37_WINDOW_A_LIVE=yes' 'HM37_MCP_DARK=yes'
     printf '%s\n' 'CONNECTED_APPS_EXPOSURE=accepted-empty-state-only' 'LIVE_REVOKE_CONTROL=HM37_WINDOW_B'
-    printf 'BROWSER_BRANCH=%s\n' "$SITE_BROWSER_SIGNIN"
+    jq -r '"BROWSER_BRANCH=" + .branch' "$SITE_EVIDENCE/site-03-browser-preflight.json"
     printf '%s\n' 'ROLLBACK_PIN=verified' 'All release holds resolved'
   } >"$SITE_EVIDENCE/GO.txt"
   chmod 0600 "$SITE_EVIDENCE/GO.txt"
@@ -746,22 +707,26 @@ Full control verifies the signed-in production page, exact owner/workspace,
 release assets, empty Connected apps, no creation action, clean console, and
 320px/390px one-row geometry. Reduced control stays signed out, proves the
 shipped bundle has the surface and no creation action, and records the four
-signed-in claims as `NOT PROVED`. The result records the branch. Failure rolls
-back automatically.
+signed-in claims as `NOT PROVED`. All actions are view-only: do not click a
+revoke control, create action, or Sign out. The full branch switches back to
+the recorded start workspace before it finishes. Failure rolls back
+automatically.
 
 ```sh
-# step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; isolated Chrome acceptance
+# step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome acceptance
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child only for automatic rollback
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  export SITE_BROWSER_SIGNIN SITE_EVIDENCE SITE_CHROME_ENDPOINT
+  export SITE_EVIDENCE SITE_CHROME_ENDPOINT
   set +e
   BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
 import base64,json,os,pathlib,re,time
 expected_user="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"; expected_workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
-evidence=pathlib.Path(os.environ["SITE_EVIDENCE"]); branch=os.environ["SITE_BROWSER_SIGNIN"]
+start_workspace="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
+branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
 cdp("Page.addScriptToEvaluateOnNewDocument",source="""
 window.__siteControlErrors=[];
 addEventListener('error',e=>window.__siteControlErrors.push(String(e.message||'error')));
@@ -772,11 +737,11 @@ console.error=(...args)=>{window.__siteControlErrors.push('console.error');origi
 goto_url("https://commonswarm.com/app?w="+expected_workspace); wait_for_load()
 def inspect():
     return js("""(() => {
-      let auth=null; for(const key of Object.keys(localStorage)){if(!key.startsWith('sb-')||!key.endsWith('-auth-token'))continue;
-      try{const value=JSON.parse(localStorage.getItem(key));if(value?.user)auth=value;}catch{}}
+      let userId=''; for(const key of Object.keys(localStorage)){if(!key.startsWith('sb-')||!key.endsWith('-auth-token'))continue;
+      try{const value=JSON.parse(localStorage.getItem(key));if(value?.user?.id)userId=value.user.id;}catch{}}
       const selected=document.querySelector('[data-workspace-list] [data-workspace-id][aria-checked="true"]');
       const dialog=document.querySelector('[data-connected-apps-dialog]');
-      return {userId:auth?.user?.id||'',workspaceId:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
+      return {userId,workspaceId:selected?.dataset.workspaceId||new URL(location.href).searchParams.get('w')||'',
       workspaceCount:document.querySelectorAll('[data-workspace-list] [data-workspace-id]').length,
       display:document.querySelector('[data-rail-account]')?.textContent?.trim()||'',
       signedOut:!document.querySelector('[data-panel="auth"]')?.hasAttribute('hidden'),
@@ -787,9 +752,9 @@ for _ in range(60):
     observed=inspect()
     if observed.get("signedOut") or observed.get("workspaceId"): break
     time.sleep(1)
-if branch=="available":
+if branch=="FULL-CONTROL":
     if observed["userId"]!=expected_user or observed["workspaceId"]!=expected_workspace: raise SystemExit(1)
-    if observed["workspaceCount"]!=1 or not observed["display"]: raise SystemExit(1)
+    if observed["display"]!="Ridgeio": raise SystemExit(1)
     workspace_state=js("""(() => ({
       feed:!!document.querySelector('[data-feed-list]'),
       roster:!!document.querySelector('[data-sidebar-participant-list]'),
@@ -807,6 +772,7 @@ if branch=="available":
         if match: asset_paths.append(match.group(1))
     loaded=js("performance.getEntriesByType('resource').map(entry => new URL(entry.name).pathname)")
     if not asset_paths or not all(path in loaded for path in asset_paths): raise SystemExit(1)
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
     js("document.querySelector('[data-user-menu-trigger]').click()")
     js("document.querySelector('[data-connected-apps-open]').click()")
     empty=""
@@ -817,6 +783,7 @@ if branch=="available":
         time.sleep(.5)
     if empty!="No apps are connected to this account.": raise SystemExit(1)
     if js("!document.querySelector('[data-connected-apps-retry]').hidden"): raise SystemExit(1)
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
     if inspect()["connectedCreateAction"] or inspect()["errors"]: raise SystemExit(1)
     dialog_clip=js("""(() => {const r=document.querySelector('[data-connected-apps-dialog]').getBoundingClientRect();
       return{x:r.x,y:r.y,width:r.width,height:r.height,scale:1};})()""")
@@ -839,7 +806,19 @@ if branch=="available":
         mobile_path=evidence/("site-05-mobile-%s.png"%width)
         mobile_path.write_bytes(base64.b64decode(mobile_png)); mobile_path.chmod(0o600)
     cdp("Emulation.clearDeviceMetricsOverride")
+    if inspect()["workspaceId"]!=expected_workspace: raise SystemExit(1)
+    js("document.querySelector('[data-connected-apps-close]').click()")
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    switched=js("""(() => { const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"]');
+      if(!target)return false; target.click(); return true; })()""")
+    if not switched: raise SystemExit(1)
+    for _ in range(60):
+        time.sleep(.5)
+        if inspect()["workspaceId"]==start_workspace: break
+    if inspect()["workspaceId"]!=start_workspace: raise SystemExit(1)
     result={"branch":"FULL-CONTROL","identity":"PASS","workspace":expected_workspace,
+      "start_workspace_id":start_workspace,"restored_workspace_id":start_workspace,
       "assets_loaded":"PASS","feed_roster_local_h0":"PASS","connected_apps_empty_state":"PASS",
       "connection_creation_action_absent":"PASS","console":"PASS","mobile_geometry":geometry,
       "screenshots":["site-05-connected-empty.png","site-05-mobile-320.png","site-05-mobile-390.png"]}
@@ -900,13 +879,35 @@ assert remote==local; print("ROLLBACK_PUBLIC_BYTES=PASS user_agent="+UA)
 PY
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-06-rollback-verify.txt"
-  export SITE_BROWSER_SIGNIN
+  export SITE_EVIDENCE
   BU_CDP_URL="$SITE_CHROME_ENDPOINT" BH_TAB_MARKER=0 browser-harness >/dev/null 2>/dev/null <<'PY'
-import os
+import json,os,pathlib,time
 workspace="c2ea0541-f56d-4c73-bf71-56c5405c4934"
-goto_url("https://commonswarm.com/app?w="+workspace); wait_for_load()
-if os.environ["SITE_BROWSER_SIGNIN"]=="available":
-    if js("new URL(location.href).searchParams.get('w')")!=workspace: raise SystemExit(1)
+start="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
+evidence=pathlib.Path(os.environ["SITE_EVIDENCE"])
+branch=json.loads((evidence/"site-03-browser-preflight.json").read_text(encoding="utf-8"))["branch"]
+goto_url("https://commonswarm.com/app"); wait_for_load()
+if branch=="FULL-CONTROL":
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    if not js("""(() => {const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="c2ea0541-f56d-4c73-bf71-56c5405c4934"]');
+      if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    for _ in range(60):
+        selected=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
+        if selected==workspace: break
+        time.sleep(.5)
+    if selected!=workspace: raise SystemExit(1)
+    # Workspace is asserted before this rollback-view control.
+    if js("document.querySelector('[data-rail-account]')?.textContent?.trim()")!="Ridgeio": raise SystemExit(1)
+    js("document.querySelector('[data-workspace-menu-trigger]').click()")
+    if not js("""(() => {const target=document.querySelector(
+      '[data-workspace-list] [data-workspace-id="292be0f9-ca5d-43ed-a6f7-31354fe7fe56"]');
+      if(!target)return false;target.click();return true})()"""): raise SystemExit(1)
+    for _ in range(60):
+        restored=js("document.querySelector('[data-workspace-list] [aria-checked=\"true\"]')?.dataset.workspaceId||''")
+        if restored==start: break
+        time.sleep(.5)
+    if restored!=start: raise SystemExit(1)
 else:
     if not js("!document.querySelector('[data-panel=\"auth\"]')?.hasAttribute('hidden')"): raise SystemExit(1)
 PY
@@ -919,7 +920,8 @@ Closure is mechanical. It rejects credentials, raw HTML, HAR content, email
 addresses, and private browser state. It records the browser branch. On success
 the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
-The Chrome profile, owner token, and `site/.env` are removed at close.
+The existing Chrome profile and its session are left open and signed in. The
+temporary build `site/.env` is removed at close.
 
 ```sh
 # step: site-07-manifest-close — Mac mini /bin/bash 3.2; Anvil; sanitize, release pin, and close
@@ -938,11 +940,11 @@ The Chrome profile, owner token, and `site/.env` are removed at close.
     grep -qFx 'PUBLIC_BYTES=PASS user_agent=commonswarm-release-probe/1.0' "$SITE_EVIDENCE/site-05-public.txt"
     test -f "$SITE_EVIDENCE/site-05-browser.json"; outcome=released
   fi
-  python3 - "$SITE_EVIDENCE" "$SITE_OWNER_ACCESS_TOKEN_FILE" <<'PY'
+  python3 - "$SITE_EVIDENCE" <<'PY'
 import hashlib,json,pathlib,re,stat,sys
-root=pathlib.Path(sys.argv[1]).resolve(); token=pathlib.Path(sys.argv[2]).resolve(); rows=[]
+root=pathlib.Path(sys.argv[1]).resolve(); rows=[]
 for path in sorted(root.rglob("*")):
-    if path==token or "chrome-profile-" in path.as_posix() or path.name=="chrome-launch.log" or path.is_dir(): continue
+    if path.name=="chrome-launch.log" or path.is_dir(): continue
     if path.is_symlink() or not path.is_file(): raise SystemExit(1)
     data=path.read_bytes()
     if path.suffix.lower() in {".html",".har"}: raise SystemExit(1)
@@ -983,26 +985,29 @@ rm -f /tmp/commonswarm-site-window.env
 printf 'pin_released=yes\noutcome=%s\n' "$outcome"
 BOX
   chmod 0600 "$SITE_EVIDENCE/site-07-pin-close.txt"
+  branch="$(jq -er '.branch' "$SITE_EVIDENCE/site-03-browser-preflight.json")"
   {
     printf 'CLOSED=yes\nOUTCOME=%s\n' "$outcome"
-    if test "$SITE_BROWSER_SIGNIN" = available; then printf 'BROWSER_BRANCH=FULL-CONTROL\n'
-    else printf 'BROWSER_BRANCH=REDUCED-CONTROL\n'; fi
+    printf 'BROWSER_BRANCH=%s\n' "$branch"
+    if test "$branch" = FULL-CONTROL; then
+      printf '%s\n' \
+        'BROWSER_START_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'BROWSER_CONTROL_WORKSPACE=c2ea0541-f56d-4c73-bf71-56c5405c4934' \
+        'BROWSER_RESTORED_WORKSPACE=292be0f9-ca5d-43ed-a6f7-31354fe7fe56' \
+        'NOT_PROVED=[]'
+    else
+      printf '%s\n' \
+        'NOT_PROVED=[signed-in Connected apps load; signed-in empty state; signed-in no-creation-action; signed-in console clean; 320px header; 390px header]'
+    fi
     printf 'MANIFEST_SHA256=%s\nPIN_RELEASED=yes\nCLOSED_AT=%s\n' \
       "$manifest_sha" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   } >"$SITE_EVIDENCE/CLOSE.txt"
   chmod 0600 "$SITE_EVIDENCE/CLOSE.txt"
-  kill "$SITE_CHROME_PID" >/dev/null 2>&1 || true
-  python3 - "$SITE_CHROME_PROFILE" "$SITE_EVIDENCE" "$SITE_OWNER_ACCESS_TOKEN_FILE" "$SITE_RELEASE_REPO/site/.env" <<'PY'
-import pathlib,shutil,sys
-profile=pathlib.Path(sys.argv[1]); evidence=pathlib.Path(sys.argv[2]).resolve(strict=True)
-token=pathlib.Path(sys.argv[3]); build_env=pathlib.Path(sys.argv[4])
-if token.exists():
-    assert token.is_file() and not token.is_symlink() and token.parent.resolve()==evidence; token.unlink()
+  python3 - "$SITE_RELEASE_REPO/site/.env" <<'PY'
+import pathlib,sys
+build_env=pathlib.Path(sys.argv[1])
 if build_env.exists(): assert build_env.is_file() and not build_env.is_symlink(); build_env.unlink()
-if profile.exists():
-    assert not profile.is_symlink() and profile.resolve().parent==evidence and profile.name.startswith("chrome-profile-")
-    shutil.rmtree(profile.resolve())
-assert not token.exists() and not build_env.exists() and not profile.exists()
+assert not build_env.exists()
 PY
   rm -f "$SITE_WINDOW_FILE"
 )
@@ -1015,31 +1020,31 @@ PY
 | P2-K1-01 | `site-01`: box-clock start, derived four-hour end and ID. |
 | P2-K1-02 | Named `SITE_EVIDENCE`; `site-01` creates/verifies `0700`. |
 | P2-K1-03 | Named `SITE_RELEASE_REPO`; `site-00-source-checkout` creates/verifies it. |
-| P2-K1-04 | Named `SITE_OWNER_ACCESS_TOKEN_FILE`; browser preflight produces it in full control. |
+| P2-K1-04 | Removed: no browser bearer is exported; controls use the existing site session in Anvil's dedicated Chrome directory. |
 | P2-K2-01 | `site-01` creates the protected evidence directory. |
 | P2-K2-02 | `site-00-source-checkout` creates detached exact-SHA source. |
 | P2-K2-03 | Named `SITE_BUILD_ENV_OP_REFERENCE` and staging path; `site-00-build-env` creates, installs, validates, and removes the protected staging file. |
-| P2-K2-04 | Browser preflight writes the token; close removes it. |
-| P2-K2-05 | Named `SITE_GATE_RECEIPT_PATH`; `site-00-gate-ingest` validates/copies it. |
+| P2-K2-04 | Browser preflight reads only `user.id` from the persisted site session and never writes a token. |
+| P2-K2-05 | Named `HM37_A_CLOSE_RECEIPT`; `site-00-a-close-ingest` validates/copies the sole A-to-lane-8 handoff. |
 | P2-K2-06 | `site-03-go-record` writes bounded `GO.txt`. |
 | P2-K2-07 | `site-03-pin-previous` creates/proves the retention-proof copy; close releases it. |
 | P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
-| P2-K2-09 | The two marked browser steps contain the isolated real-Chrome procedure. |
+| P2-K2-09 | The marked browser steps use only Anvil's dedicated retained Chrome directory and restore its starting workspace. |
 | P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
 | P2-K2-11 | `site-07-manifest-close` scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site-01` produces the evidence directory. |
 | P2-K3-02 | `site-00-source-checkout` produces the checkout. |
 | P2-K3-03 | `site-00-build-env` produces `site/.env`. |
-| P2-K3-04 | Browser preflight produces the full-branch token; reduced control marks claims `NOT PROVED`. |
-| P2-K3-05 | `site-00-gate-ingest` produces the exact-SHA receipt. |
+| P2-K3-04 | Browser preflight selects full or reduced control automatically; reduced control marks signed-in claims `NOT PROVED`. |
+| P2-K3-05 | `site-00-a-close-ingest` copies the Window A close receipt. |
 | P2-K3-06 | `site-03-go-record` produces `GO.txt`. |
 | P2-K3-07 | Pin step produces the rollback path consumed by rollback blocks. |
-| P2-K3-08 | Browser preflight proves isolated user/workspace or enforces reduced control. |
+| P2-K3-08 | Browser preflight proves Ridgeio and CLI/web user-ID equality, then switches through the normal workspace switcher or enforces reduced control. |
 | P2-K3-09 | Close produces and validates `manifest.json`. |
 | P2-K4-01 | `site-01` proves direct SSH identity and site-root write access. |
 | P2-K4-02 | `site-01` proves box Python/DNS/HTTPS, exact media types and required User-Agent. |
-| P2-K4-03 | Named `SITE_BROWSER_SIGNIN`; browser blocks enforce its branch. |
-| P2-K5-01 | Named `GATE_HM37_A_LIVE=yes` plus WINDOW A receipt; no WINDOW B wait. |
+| P2-K4-03 | Branch selection is automatic from the dedicated Chrome session; 2FA/keychain/sign-in failure selects reduced control. |
+| P2-K5-01 | Named `HM37_A_CLOSE_RECEIPT`; no WINDOW B wait. |
 | P2-K5-02 | Static Connected apps exposure acceptance in GO. |
 | P2-K5-03 | Live revoke moved to HM37 WINDOW B; lane 8 uses empty state only. |
 | P2-K5-04 | Static exact-SHA deletion-guard assertion in `site-02`. |
@@ -1051,7 +1056,7 @@ PY
 | Pre-seed: start/evidence | `site-01` measures time and creates the named destination. |
 | Pre-seed: checkout/base | Named checkout/base; source and `site-02` prove them. |
 | Pre-seed: `site/.env` | Named 1Password reference/output path; build-env step creates, installs, proves, and clears staging. |
-| Pre-seed: owner token | Named output; browser preflight produces it or reduced branch records `NOT PROVED`. |
+| Pre-seed: browser session | K4-8/K4-9 measured the retained dedicated Chrome directory; the live block revalidates it and exports no token. |
 | Pre-seed: `GO.txt` | GO step produces it from approver, plan commit, release SHA and prompt number. |
 
 ## 9. Recorded outcomes

@@ -325,7 +325,7 @@ Credential values are never prompt inputs.
 | `GATE_RECEIPT_PATH` | CSwarmDevLead/Anvil | Absolute path to the reviewed exact-SHA gate receipt. |
 | `PROOF_SQL_ROOT` | CSwarmDevLead/Anvil | Absolute directory containing exactly the eight reviewed SQL proof files. |
 | `RELEASE_REPO` | Anvil | Absolute path to the clean exact-SHA checkout. |
-| `COLD_AGENT_PROFILE_PATHS` | Anvil | Exactly three absolute existing-profile paths separated by literal newlines. |
+| `PREP_RECEIPT_PATH` | Anvil, from `hm37-prep-final-yes` | Absolute path printed by the PREP plan; a regular non-symlink mode-`0600` schema-1 JSON receipt for exactly three newly prepared seats. |
 | `KIND_LIST` | HezLead | Exact string `edge stack`. |
 | `H0_LEDGER_BACKFILL` | HezLead | Exact string `no`. |
 | `GUARDED_STACK_SWITCH` | HezLead | Exact string `no`. |
@@ -378,6 +378,7 @@ Credential values are never prompt inputs.
   : "${RELEASE_SHA:?named prompt input required}"
   : "${PROMPT_NUMBER:?named prompt input required}"
   : "${BACKUP_MAX_AGE_SECONDS:?named prompt input required}"
+  : "${PREP_RECEIPT_PATH:?PREP success receipt path required}"
   test "$APPROVER" = HezLead
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   case "$PLAN_COMMIT" in (*[!0-9a-f]*|'') false ;; esac
@@ -386,6 +387,10 @@ Credential values are never prompt inputs.
   test "$PROMPT_NUMBER" -gt 0
   case "$BACKUP_MAX_AGE_SECONDS" in (*[!0-9]*|'') false ;; esac
   test "$BACKUP_MAX_AGE_SECONDS" -gt 0
+  case "$PREP_RECEIPT_PATH" in /*) ;; *) false ;; esac
+  test -f "$PREP_RECEIPT_PATH"
+  test ! -L "$PREP_RECEIPT_PATH"
+  test "$(stat -f '%Lp' "$PREP_RECEIPT_PATH")" = 600
   CLOCK_SCRIPT="$(mktemp /tmp/hm37a-box-clock.XXXXXX)"
   case "$CLOCK_SCRIPT" in /tmp/hm37a-box-clock.??????) ;; *) false ;; esac
   trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
@@ -409,11 +414,64 @@ BOX
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
     *) false ;;
   esac
+
+  # PREP_RECEIPT_PATH is the only PREP-to-A handoff.  Read only the bounded
+  # receipt fields, then independently authenticate every profile.  The
+  # legacy seat-b profile/principal is an explicit refusal, not a fallback.
+  PREP_SEATS="/tmp/hm37a-prep-seats-${RELEASE_SHA}.json"
+  test ! -e "$PREP_SEATS"
+  jq -e \
+    --arg workspace c2ea0541-f56d-4c73-bf71-56c5405c4934 \
+    '.schema == 1 and .prep_result == "yes" and
+     .workspace_id == $workspace and .baseline_result == "pass" and
+     (.prep_id | type == "string" and test("^[0-9]{8}T[0-9]{6}Z$")) and
+     (.seats | type == "array" and length == 3) and
+     ([.seats[].role] | sort) == ["receiver", "sender", "third"] and
+     ([.seats[].principal_id] | unique | length) == 3 and
+     ([.seats[].profile_path] | unique | length) == 3 and
+     all(.seats[];
+       (.principal_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")) and
+       .principal_id != "cee27f94-4231-4a02-934d-5bf08d73ed75" and
+       (.profile_path | startswith("/Users/yulanbot/anvil-work/hm37-prep/")) and
+       (.profile_path | contains("/uat-20260927/seat-b/") | not) and
+       .directory_mode == "0700" and .files_mode == "0600" and
+       (.token_expires_at | type == "string"))' \
+    "$PREP_RECEIPT_PATH" >/dev/null
+  python3 - "$PREP_RECEIPT_PATH" "$WINDOW_END_UTC" "$PREP_SEATS" <<'PY'
+import datetime, json, os, pathlib, subprocess, sys
+receipt_path, window_end_text, output_path = sys.argv[1:]
+receipt = json.load(open(receipt_path, encoding="utf-8"))
+window_end = datetime.datetime.fromisoformat(window_end_text.replace("Z", "+00:00"))
+rows = []
+for seat in receipt["seats"]:
+    expiry = datetime.datetime.fromisoformat(seat["token_expires_at"].replace("Z", "+00:00"))
+    assert expiry > window_end
+    profile = pathlib.Path(seat["profile_path"])
+    info = profile.lstat()
+    assert profile.is_file() and not profile.is_symlink()
+    assert info.st_mode & 0o777 == 0o600
+    value = json.loads(subprocess.check_output(
+        ["cswarm", "whoami", "--profile", str(profile), "--json"], text=True))
+    assert value["credential_valid"] is True
+    assert value["workspace_id"] == receipt["workspace_id"]
+    assert value["principal_id"] == seat["principal_id"]
+    rows.append({"role": seat["role"], "profile_path": str(profile),
+                 "principal_id": seat["principal_id"],
+                 "token_expires_at": seat["token_expires_at"]})
+assert len({row["principal_id"] for row in rows}) == 3
+pathlib.Path(output_path).write_text(json.dumps({
+    "schema": 1, "prep_id": receipt["prep_id"],
+    "prep_directory": str(pathlib.Path(receipt_path).parent),
+    "workspace_id": receipt["workspace_id"], "seats": rows,
+}, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+os.chmod(output_path, 0o600)
+PY
   OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
   test ! -e "$OPEN_RECEIPT"
-  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\n' \
+  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\n' \
     "$RELEASE_SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
-    "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" >"$OPEN_RECEIPT"
+    "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" \
+    "$PREP_RECEIPT_PATH" "$PREP_SEATS" >"$OPEN_RECEIPT"
   chmod 0600 "$OPEN_RECEIPT"
 )
 ```
@@ -521,7 +579,8 @@ hm37-mcp-hostname-reads.json
 hm37-loopback-boundaries.json
 hm37-public-boundaries.json
 hm37-mcp-hostname-boundaries.json
-hm37a-existing-seats.json
+hm37a-prep-seat-inventory.json
+hm37a-prep-cleanup.json
 hm37a-local-control-old.json
 hm37a-local-control-new.json
 hm37-public-check-no-mutation.json
@@ -1034,7 +1093,7 @@ The successful path uses this exact whole-block order after applying the input
 table and the runbook's switch-to-step mapping:
 
 ```text
-hm37a-source-checkout hm37a-existing-seat-preflight hm37a-open-inputs
+hm37a-source-checkout hm37a-open-inputs hm37a-prep-seat-control-stage
 hm37a-gate-and-proof-ingest
 hm37-source-identity runbook-02 hm37a-resolved-inputs runbook-04
 hm37a-baseline-inventory 1-upload-release-archive runbook-05
@@ -1049,16 +1108,17 @@ runbook-23 runbook-24 runbook-25 runbook-26 runbook-27 runbook-28
 hm37-functional-section5 runbook-29 runbook-30 runbook-31 runbook-32
 runbook-33 runbook-34 hm37-public-boundary-reads hm37-public-boundaries
 runbook-35 hm37a-directed-check-new hm37a-local-evidence-transfer
-hm37a-post-control-readback hm37a-outgoing-log-review hm37a-close-readback
+hm37a-post-control-readback hm37a-prep-seat-cleanup
+hm37a-outgoing-log-review hm37a-close-readback
 runbook-13 runbook-11 runbook-60 runbook-61 runbook-12
 hm37a-mac-control-cleanup
 ```
 
-The pre-COMMIT-POINT and mapped S1/S3/S4/S5 rollback tail is
-`runbook-42`, `hm37-reserve-schema-rollback`, `runbook-13`, `runbook-11`,
+The pre-COMMIT-POINT and mapped S1/S2/S3/S4/S5 rollback tail is
+`runbook-42`, `hm37-reserve-schema-rollback`, `hm37a-prep-seat-cleanup`, `runbook-13`, `runbook-11`,
 `runbook-60`, `runbook-61`, `runbook-12`, in that order. The reserved
 schema block runs only with its named approval and its own zero-history proof.
-A post-COMMIT-POINT `control` failure instead uses `runbook-13`,
+A post-COMMIT-POINT `control` failure instead uses `hm37a-prep-seat-cleanup`, `runbook-13`,
 `runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`.
 
 The open block derives both times from the box clock. The positive
@@ -1088,10 +1148,10 @@ live equality; any difference, missing path or comparison error stops A.
 | 1 | Read-only prerequisites | Current HM2/HM6 state and previous paths |
 | 2 | Origin ancestry, exact archive and gates | Release identity, final plan and backup age |
 | 3 | Manifests, immutable directories, window state, inventory | Reuse/create results and stack comparison |
-| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; verify three existing Cold Agent Test profiles | Production target, pinned image identity, and old-edge S3/S4 control |
+| 4 | Runbook database identity/session; assert the pinned psql image is the running PostgreSQL image without pulling; authenticate the three receipt-bound PREP seats | Production target, pinned image identity, and old-edge S3/S4 control |
 | 5 | Close the no-network opening gate; backup gate, migration 04 and proofs | Schema before edge transition; no later package install, Docker pull, or dependency fetch |
 | 6 | Edge recreate, saved outgoing logs, route controls | Runtime health and darkness |
-| 7 | Reach the named COMMIT POINT; repeat the existing-seat S3/S4 control on the new edge | Block-owned assertion classification and behavior |
+| 7 | Reach the named COMMIT POINT; repeat the PREP-seat S3/S4 control on the new edge | Block-owned assertion classification and behavior |
 | 8 | Timer restoration, readbacks, copy-back and transient cleanup | Automatic closure after readbacks; Window B remains a separate later window |
 
 Window B owns every hosted harness, human-session and Deno operation.
@@ -1101,8 +1161,9 @@ Window B owns every hosted harness, human-session and Deno operation.
 The box computes `WINDOW_PRINCIPAL_SUFFIX` once from approved `WINDOW_START_UTC` and persists it in `window.env` and `window-principal-suffix.txt`.
 The same file carries `WINDOW_ID=YYYYMMDDTHHMMSSZ`; HM37 protected input, staging, control, journal and cache paths include that exact ID.
 
-Window A uses the suffix only in its signal marker and evidence names. It does
-not create, mint, rename, or revoke a principal.
+Window A uses `WINDOW_ID` itself as the exact signal body and uses the suffix
+only in evidence names. It does not create, mint, or rename a principal. Its
+mandatory S2 close tail revokes only the three receipt-bound PREP principals.
 
 A rerun uses a fresh approved start and unused names. Never reuse a revoked principal or resolve a collision by silently changing the suffix.
 
@@ -1659,53 +1720,36 @@ Before it, any changed-state failure follows edge-first rollback. After it,
 An unknown ID is cleanup-then-STOP for plan correction and never authorizes
 rollback.
 
-## 9. Existing-seat LOCAL S3/S4 control
+## 9. PREP-seat LOCAL S3/S4 control
 
-Window A has no hosted harness, human session, Deno installation, new local
-credential, or newly created principal. The named prompt input
-`COLD_AGENT_PROFILE_PATHS` contains exactly three absolute existing-profile
-paths separated by literal newlines. All three must belong to Cold Agent Test
-workspace `c2ea0541-f56d-4c73-bf71-56c5405c4934`.
+Window A has no hosted harness, Deno installation, or seat-creation step. It
+uses only the three short-lived seats authenticated from `PREP_RECEIPT_PATH` by
+the open block. The success receipt is the only PREP-to-A link. The legacy
+seat-b profile and principal are never read, changed, revoked, or deleted.
 
 ```sh
-# step: hm37a-existing-seat-preflight
+# step: hm37a-prep-seat-control-stage
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   umask 077
   : "${RELEASE_SHA:?named release SHA required}"
-  : "${COLD_AGENT_PROFILE_PATHS:?three newline-separated profile paths required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-  python3 - "$COLD_AGENT_PROFILE_PATHS" \
-    >"/tmp/hm37a-existing-seats-${RELEASE_SHA}.json" <<'PY'
-import json, pathlib, subprocess, sys
-workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
-paths = sys.argv[1].splitlines()
-assert len(paths) == 3 and len(set(paths)) == 3
-assert subprocess.check_output(["cswarm", "--version"], text=True).strip() == "cswarm 0.1.80"
-rows = []
-for path in paths:
-    assert path.startswith("/")
-    info = pathlib.Path(path).lstat()
-    assert info.is_file() and not info.is_symlink()
-    value = json.loads(subprocess.check_output(
-        ["cswarm", "whoami", "--profile", path, "--json"], text=True))
-    assert value["credential_valid"] is True
-    assert value["credential_metadata_match"] is True
-    assert value["workspace_id"] == workspace
-    rows.append({"profile_path": path, "principal_id": value["principal_id"],
-                 "display_name": value["display_name"], "workspace_id": workspace})
-assert len({row["principal_id"] for row in rows}) == 3
-print(json.dumps({"pass": True, "version": "cswarm 0.1.80",
-                  "profiles": rows}, indent=2))
-PY
-  chmod 0600 "/tmp/hm37a-existing-seats-${RELEASE_SHA}.json"
+  . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$PREP_SEATS"
+  test ! -L "$PREP_SEATS"
+  test "$(stat -f '%Lp' "$PREP_SEATS")" = 600
+  install -m 0600 "$PREP_SEATS" "/tmp/hm37a-prep-seat-inventory-${RELEASE_SHA}.json"
   cat >"/tmp/hm37a-directed-check-${RELEASE_SHA}.py" <<'PY'
 import json, pathlib, subprocess, sys
-inventory_path, window_id, phase, output_path = sys.argv[1:]
 workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
-paths = [row["profile_path"] for row in json.load(open(inventory_path))["profiles"]]
+inventory_path, window_id, phase, output_path = sys.argv[1:]
+inventory = json.load(open(inventory_path, encoding="utf-8"))
+assert inventory["workspace_id"] == workspace
+by_role = {row["role"]: row for row in inventory["seats"]}
+assert set(by_role) == {"sender", "receiver", "third"}
+paths = [by_role[role]["profile_path"] for role in ("sender", "receiver", "third")]
 current_id = "control.harness"
 def failure_hook(exc_type, exc, traceback):
     pathlib.Path(output_path).write_text(json.dumps({
@@ -1724,14 +1768,15 @@ def identities():
     values = [run("cswarm", "whoami", "--profile", path, "--json") for path in paths]
     assert all(value["workspace_id"] == workspace for value in values)
     assert all(value["credential_valid"] is True for value in values)
-    assert len({value["principal_id"] for value in values}) == 3
+    assert [value["principal_id"] for value in values] == [
+        by_role[role]["principal_id"] for role in ("sender", "receiver", "third")]
     return values
 ids = identities()
 current_id = "control.receiver-precheck-empty"
 pre = run("cswarm", "check", "--profile", paths[1], "--json")
 assert pre["workspace_id"] == workspace and pre["messages"] == []
-ids = identities()  # assert each workspace again immediately before the only write
-marker = "HM37A-" + window_id + "-" + phase
+ids = identities()  # assert all three workspace ids immediately before the only write
+marker = window_id
 sent = run("cswarm", "note", marker, "--profile", paths[0],
            "--to", ids[1]["principal_id"], "--json")
 signal_id = sent["signal"]["id"]
@@ -1778,12 +1823,12 @@ window before migration or edge change.
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  install -m 0600 "/tmp/hm37a-existing-seats-${SHA}.json" \
-    "$EVIDENCE_DIR/hm37a-existing-seats.json"
+  install -m 0600 "/tmp/hm37a-prep-seat-inventory-${SHA}.json" \
+    "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json"
   install -m 0600 "/tmp/hm37a-directed-check-${SHA}.py" \
     "$EVIDENCE_DIR/hm37a-directed-check.py"
   test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
-  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-existing-seats.json" "$WINDOW_ID" old     "$EVIDENCE_DIR/hm37a-local-control-old.json"
+  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" old     "$EVIDENCE_DIR/hm37a-local-control-old.json"
   chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-old.json"
 )
 ```
@@ -1800,7 +1845,7 @@ failure in this block selects full rollback.
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     "/home/commonswarm/edge/releases/$SHA"
-  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-existing-seats.json" "$WINDOW_ID" new     "$EVIDENCE_DIR/hm37a-local-control-new.json"
+  python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" new     "$EVIDENCE_DIR/hm37a-local-control-new.json"
   chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-new.json"
 )
 ```
@@ -1812,7 +1857,7 @@ failure in this block selects full rollback.
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  for FILE in hm37a-existing-seats.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+  for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
     test -f "$EVIDENCE_DIR/$FILE"
     test "$(stat -f %Lp "$EVIDENCE_DIR/$FILE")" = 600
     scp "$EVIDENCE_DIR/$FILE" ops@100.115.66.74:/tmp/"$FILE"
@@ -1820,7 +1865,7 @@ failure in this block selects full rollback.
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
 PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-for FILE in hm37a-existing-seats.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
   install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
   rm -f "/tmp/$FILE"
 done
@@ -1859,6 +1904,141 @@ print(json.dumps({"pass": True, "assertion_id":
                   "gateway.public-hosted-command-refusal"}, indent=2))
 PY
   chmod 0600 "$PROOF_DIR/hm37-local-control.json"     "$PROOF_DIR/hm37-functional-after-control.txt"     "$PROOF_DIR/hm37-public-check-no-mutation.json"
+)
+```
+
+Every successful close and every rollback, failure, or abort after
+`hm37a-open-inputs` runs the following S2 tail exactly once before the proof
+directory is closed. It uses the saved human session for revocation and status,
+then performs an independent read-only database query. A guarded-delete refusal
+does not broaden the delete target: it leaves the PREP directory in place and
+records that outcome for the operator.
+
+```sh
+# step: hm37a-prep-seat-cleanup
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
+(
+  set -euo pipefail
+  umask 077
+  : "${RELEASE_SHA:?named release SHA required}"
+  test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  EVIDENCE_DIR=
+  if [ -f "$HOME/.commonswarm-release-window.env" ]; then
+    . "$HOME/.commonswarm-release-window.env"
+  fi
+  test -f "$PREP_SEATS"
+  test ! -L "$PREP_SEATS"
+  WORKSPACE_ID="c2ea0541-f56d-4c73-bf71-56c5405c4934"
+  HUMAN_USER_ID="d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"
+  SENDER_ID="$(jq -er '.seats[] | select(.role == "sender") | .principal_id' "$PREP_SEATS")"
+  RECEIVER_ID="$(jq -er '.seats[] | select(.role == "receiver") | .principal_id' "$PREP_SEATS")"
+  THIRD_ID="$(jq -er '.seats[] | select(.role == "third") | .principal_id' "$PREP_SEATS")"
+  test "$SENDER_ID" != "$RECEIVER_ID"
+  test "$SENDER_ID" != "$THIRD_ID"
+  test "$RECEIVER_ID" != "$THIRD_ID"
+  for PRINCIPAL_ID in "$SENDER_ID" "$RECEIVER_ID" "$THIRD_ID"; do
+    case "$PRINCIPAL_ID" in
+      cee27f94-4231-4a02-934d-5bf08d73ed75) false ;;
+      ????????-????-4???-[89ab]???-????????????) ;;
+      *) false ;;
+    esac
+    cswarm principal revoke --workspace-id "$WORKSPACE_ID" \
+      --principal-id "$PRINCIPAL_ID" --json >/dev/null
+    STATUS_JSON="$(cswarm status --workspace-id "$WORKSPACE_ID" --json)"
+    printf '%s' "$STATUS_JSON" | jq -e \
+      --arg workspace "$WORKSPACE_ID" --arg user "$HUMAN_USER_ID" \
+      --arg id "$PRINCIPAL_ID" \
+      '.identity.user_id == $user and
+       .selected_project.workspace_id == $workspace and
+       ([.agents[] | select(.principal_id == $id and .revoked == true)] | length) == 1' \
+      >/dev/null
+  done
+
+  QUERY_SCRIPT="$(mktemp /tmp/hm37a-token-readback.XXXXXX)"
+  case "$QUERY_SCRIPT" in /tmp/hm37a-token-readback.??????) ;; *) false ;; esac
+  trap 'rm -f -- "$QUERY_SCRIPT"' EXIT
+  cat >"$QUERY_SCRIPT" <<'BOX'
+set -euo pipefail
+for value in "$@"; do
+  case "$value" in ????????-????-4???-[89ab]???-????????????) ;; *) exit 1 ;; esac
+done
+SQL="BEGIN READ ONLY;
+WITH expected(principal_id) AS (VALUES ('$1'::uuid), ('$2'::uuid), ('$3'::uuid))
+SELECT expected.principal_id::text || '=' || count(tokens.id)::text
+FROM expected
+LEFT JOIN swarm.agent_tokens AS tokens
+  ON tokens.agent_principal_id = expected.principal_id
+ AND tokens.revoked_at IS NULL
+ AND tokens.expires_at > now()
+GROUP BY expected.principal_id
+ORDER BY expected.principal_id;
+COMMIT;"
+printf '%s\n' "$SQL" | docker exec -i commonswarm-postgres sh -c \
+  'PGPASSWORD="$POSTGRES_PASSWORD" psql -X -v ON_ERROR_STOP=1 -Atq -U supabase_admin -d postgres'
+BOX
+  DB_COUNTS="$(ssh -o BatchMode=yes ops@100.115.66.74 \
+    "sudo -n -i /bin/bash -s -- '$SENDER_ID' '$RECEIVER_ID' '$THIRD_ID'" \
+    <"$QUERY_SCRIPT")"
+  rm -f -- "$QUERY_SCRIPT"
+  trap - EXIT
+  test "$(printf '%s\n' "$DB_COUNTS" | grep -Ec '^[0-9a-f-]{36}=0$')" -eq 3
+  for PRINCIPAL_ID in "$SENDER_ID" "$RECEIVER_ID" "$THIRD_ID"; do
+    test "$(printf '%s\n' "$DB_COUNTS" | grep -c "^${PRINCIPAL_ID}=0$")" -eq 1
+  done
+
+  PREP_DIR="$(jq -er '.prep_directory' "$PREP_SEATS")"
+  PREP_ROOT="/Users/yulanbot/anvil-work/hm37-prep"
+  PREP_ID="${PREP_DIR##*/}"
+  DELETE_RESULT=refused
+  DELETE_REASON=guard
+  RESOLVED_ROOT=
+  RESOLVED_PREP_DIR=
+  if [ -d "$PREP_ROOT" ] && [ ! -L "$PREP_ROOT" ]; then
+    RESOLVED_ROOT="$(cd "$PREP_ROOT" && pwd -P)"
+  fi
+  if [ -n "$RESOLVED_ROOT" ] && [ -d "$PREP_DIR" ] && [ ! -L "$PREP_DIR" ]; then
+    RESOLVED_PREP_DIR="$(cd "$PREP_DIR" && pwd -P)"
+  fi
+  ID_SHAPE_OK=no
+  case "$PREP_ID" in
+    20[0-9][0-9][0-1][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-5][0-9]Z) ID_SHAPE_OK=yes ;;
+  esac
+  if [ -n "$RESOLVED_PREP_DIR" ] && \
+     [ "$RESOLVED_PREP_DIR" != / ] && \
+     [ "$RESOLVED_PREP_DIR" != "$HOME" ] && \
+     [ "$RESOLVED_PREP_DIR" = "$RESOLVED_ROOT/$PREP_ID" ] && \
+     [ "${RESOLVED_PREP_DIR%/*}" = "$RESOLVED_ROOT" ] && \
+     [ "${RESOLVED_PREP_DIR##*/}" = "$PREP_ID" ] && \
+     [ "$ID_SHAPE_OK" = yes ]
+  then
+    if /bin/rm -R -- "$RESOLVED_PREP_DIR"; then
+      DELETE_RESULT=removed
+      DELETE_REASON=guarded-delete-complete
+    else
+      DELETE_RESULT=failed
+      DELETE_REASON=guarded-delete-error
+    fi
+  elif [ ! -e "$PREP_DIR" ]; then
+    DELETE_RESULT=absent
+    DELETE_REASON=already-absent
+  fi
+  CLEANUP_RECEIPT="/tmp/hm37a-prep-cleanup-${RELEASE_SHA}.json"
+  jq -n --arg workspace_id "$WORKSPACE_ID" \
+    --arg sender_id "$SENDER_ID" --arg receiver_id "$RECEIVER_ID" \
+    --arg third_id "$THIRD_ID" --arg delete_result "$DELETE_RESULT" \
+    --arg delete_reason "$DELETE_REASON" \
+    '{schema:1, workspace_id:$workspace_id,
+      principal_ids:[$sender_id,$receiver_id,$third_id],
+      revoked_readback:true, active_unexpired_token_count:0,
+      prep_directory:{result:$delete_result,reason:$delete_reason}}' \
+    >"$CLEANUP_RECEIPT"
+  chmod 0600 "$CLEANUP_RECEIPT"
+  if [ -n "${EVIDENCE_DIR:-}" ] && [ -d "$EVIDENCE_DIR" ]; then
+    install -m 0600 "$CLEANUP_RECEIPT" "$EVIDENCE_DIR/hm37a-prep-cleanup.json"
+  fi
+  test "$DELETE_RESULT" != failed
 )
 ```
 
@@ -1961,12 +2141,18 @@ copy-back manifest, records that disposition, and continues automatically.
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")" = 1
   test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t
   python3 - "$PROOF_DIR/hm37-local-control.json" \
+    "/tmp/hm37a-prep-cleanup-${SHA}.json" \
     >"$PROOF_DIR/hm37-revocation-readback.json" <<'PY'
 import json, sys
 control = json.load(open(sys.argv[1]))
+cleanup = json.load(open(sys.argv[2]))
 assert control["pass"] is True
-print(json.dumps({"pass": True, "temporary_authority_created": False,
-                  "existing_profiles_left_active": True}, indent=2))
+assert cleanup["revoked_readback"] is True
+assert cleanup["active_unexpired_token_count"] == 0
+assert len(cleanup["principal_ids"]) == 3
+print(json.dumps({"pass": True, "prep_seats_revoked": True,
+                  "active_unexpired_token_count": 0,
+                  "prep_directory": cleanup["prep_directory"]}, indent=2))
 PY
   printf '%s\n' \
     "release_sha=$SHA" \
@@ -1975,6 +2161,8 @@ PY
     'migration_04=true' \
     'local_old_control=true' \
     'local_new_control=true' \
+    'prep_seats_revoked=true' \
+    'prep_active_tokens=0' \
     'close=PASS' \
     >"$PROOF_DIR/hm37-close-readback.txt"
   chmod 0600 "$PROOF_DIR/hm37-revocation-readback.json" \
@@ -1996,7 +2184,9 @@ removes Mac scratch only after that renamed directory is verified.
   : "${RELEASE_SHA:?named release SHA required}"
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   for FILE in \
-    "/tmp/hm37a-existing-seats-${RELEASE_SHA}.json" \
+    "/tmp/hm37a-prep-seats-${RELEASE_SHA}.json" \
+    "/tmp/hm37a-prep-seat-inventory-${RELEASE_SHA}.json" \
+    "/tmp/hm37a-prep-cleanup-${RELEASE_SHA}.json" \
     "/tmp/hm37a-directed-check-${RELEASE_SHA}.py"; do
     case "$FILE" in /tmp/hm37a-*) ;; *) false ;; esac
     rm -f -- "$FILE"
@@ -2161,13 +2351,14 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `hm37-loopback-boundaries.json`
 - `hm37-public-boundaries.json`
 - `hm37-mcp-hostname-boundaries.json`
-- `hm37a-existing-seats.json`
+- `hm37a-prep-seat-inventory.json`
 - `hm37a-local-control-old.json`
 - `hm37a-local-control-new.json`
 - `hm37-public-check-no-mutation.json`
 - `hm37-functional-after-control.txt`
 - `hm37-local-control.json`
 - `hm37-revocation-readback.json`
+- `hm37a-prep-cleanup.json`
 - `hm37a-log-disposition.txt`
 - `hm37-close-readback.txt`
 
@@ -2192,9 +2383,9 @@ Follow the runbook’s empty/nonempty `.err` handling and review nonempty errors
 
 ### Every exit path
 
-On success, refusal, failure or abort:
+On success, refusal, failure or abort after the open block:
 
-1. Record that A created no temporary authority and left the three existing profiles active.
+1. Run `hm37a-prep-seat-cleanup`: revoke exactly the three receipt principals, prove each human status row has `revoked=true`, prove the read-only `swarm.agent_tokens` active/unexpired count is zero for each, and guardedly remove the PREP seat directory (or leave and record it when the guard refuses).
 2. Run runbook abort cleanup whenever durable window state exists; restore only timers this window stopped.
 3. Remove transient database-session and protected smoke files when no longer needed.
 4. Preserve immutable releases and private diagnostics.
@@ -2213,9 +2404,9 @@ Successful closure must explicitly establish:
 - No Caddy change occurred in this window.
 - Public MCP remains disabled on loopback, staging, API and MCP-hostname routes.
 - Public pre-auth refusal controls and their S1/S5 mapping passed.
-- The existing-seat directed control passed once on the old edge and once on the new edge.
+- The receipt-bound PREP-seat directed control passed once on the old edge and once on the new edge; each note body was exactly `WINDOW_ID`.
 - Each receiver saw one signal exactly once, then an empty read; its cursor advanced; the third seat did not see the marker.
-- A created no temporary principal, token, grant, family, seat, or human session.
+- A created no principal, token, grant, family, seat, or human session; its three PREP principals are revoked, have zero active unexpired tokens, and the legacy seat-b principal was untouched.
 - Outgoing-container capture disposition is recorded, timers restored, transient files removed and approved evidence copied.
 
 Hosted controls, public MCP activation, every Caddy or access-log change, and

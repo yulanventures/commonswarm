@@ -23,8 +23,7 @@ contents remain private.
 | `RELEASE_SHA` | HezLead/Anvil | Full lowercase 40-hex; exactly `eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`. |
 | `PROMPT_NUMBER` | HezLead | Positive decimal. |
 | `BACKUP_MAX_AGE_SECONDS` | HezLead | Positive decimal seconds; expected `86400`. |
-| `GATE_HM37_A_LIVE` | HezLead from A close | Exact string `yes`. |
-| `HM37_A_CLOSE_RECEIPT` | Anvil | Absolute path to the copied, mode-0600 A close receipt. |
+| `HM37_A_CLOSE_RECEIPT` | Anvil, produced only by Window A | Absolute path to Window A's copied, mode-`0600` close receipt; the only A-to-B handoff. |
 | `HUMAN_LOGIN_PREFLIGHT` | Anvil | Absolute path to the protected pre-window PASS/STOP receipt made with the 1Password service-account workflow. |
 | `HUMAN_SESSION_SOURCE` | Anvil | Absolute path to the protected mode-0600 human-session JSON. |
 | `HARNESS_SOURCE` | Anvil | Absolute path to the reviewed `hm37-open-ack-control.ts`. |
@@ -77,7 +76,6 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
   : "${RELEASE_SHA:?named prompt input required}"
   : "${PROMPT_NUMBER:?named prompt input required}"
   : "${BACKUP_MAX_AGE_SECONDS:?named prompt input required}"
-  : "${GATE_HM37_A_LIVE:?named prompt input required}"
   : "${HM37_A_CLOSE_RECEIPT:?absolute A close receipt required}"
   test "$APPROVER" = HezLead
   test "$RELEASE_SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
@@ -87,7 +85,6 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
   test "$PROMPT_NUMBER" -gt 0
   case "$BACKUP_MAX_AGE_SECONDS" in (*[!0-9]*|'') false ;; esac
   test "$BACKUP_MAX_AGE_SECONDS" -gt 0
-  test "$GATE_HM37_A_LIVE" = yes
   case "$HM37_A_CLOSE_RECEIPT" in /*) ;; *) false ;; esac
   test -f "$HM37_A_CLOSE_RECEIPT"
   test ! -L "$HM37_A_CLOSE_RECEIPT"
@@ -95,6 +92,8 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
   grep -qFx "release_sha=$RELEASE_SHA" "$HM37_A_CLOSE_RECEIPT"
   grep -qFx 'edge_live=true' "$HM37_A_CLOSE_RECEIPT"
   grep -qFx 'edge_dark=true' "$HM37_A_CLOSE_RECEIPT"
+  grep -qFx 'prep_seats_revoked=true' "$HM37_A_CLOSE_RECEIPT"
+  grep -qFx 'prep_active_tokens=0' "$HM37_A_CLOSE_RECEIPT"
   grep -qFx 'close=PASS' "$HM37_A_CLOSE_RECEIPT"
 
   CLOCK_SCRIPT="$(mktemp /tmp/hm37b-box-clock.XXXXXX)"
@@ -187,7 +186,7 @@ BOX
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
   . "$PROOF_DIR/window.env"
   test ! -e "$PROOF_DIR/GO.txt"
-  printf '%s\n'     "APPROVER=$APPROVER"     "PLAN_COMMIT=$PLAN_COMMIT"     "RELEASE_SHA=$RELEASE_SHA"     "PROMPT_NUMBER=$PROMPT_NUMBER"     'GATE_HM37_A_LIVE=yes'     >"$PROOF_DIR/GO.txt"
+  printf '%s\n'     "APPROVER=$APPROVER"     "PLAN_COMMIT=$PLAN_COMMIT"     "RELEASE_SHA=$RELEASE_SHA"     "PROMPT_NUMBER=$PROMPT_NUMBER"     'HM37_A_CLOSE_RECEIPT=accepted'     >"$PROOF_DIR/GO.txt"
   chown root:root "$PROOF_DIR/GO.txt"
   chmod 0600 "$PROOF_DIR/GO.txt"
 )
