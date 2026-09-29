@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
 const PREP = "docs/evidence/2026-09-29-hm37-prep/BOX-WINDOW.md";
@@ -34,6 +35,7 @@ const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
 const PRESEED_ALLOWLIST_FILE = "tests/box-dry-run/fixtures/preseed-allowlist.json";
+const PROMPT_FILE_SCHEMAS = "tests/box-dry-run/fixtures/prompt-file-schemas";
 const COMMAND_OUTPUTS_FILE = "tests/box-dry-run/fixtures/command-outputs.json";
 const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
 const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
@@ -70,14 +72,21 @@ interface MeasuredFactInventory {
   production_recheck: { output: string };
 }
 
-type PreseedKind = "path" | "env" | "command-output" | "prompt";
+type PreseedKind = "path" | "env" | "command-output";
 
 interface PreseedAllowlistItem {
   kind: PreseedKind;
   name: string;
   source: string;
   evidence?: string;
-  value?: string;
+}
+
+interface PromptInput {
+  name: string;
+  format: string;
+  supplier: string;
+  meaning: string;
+  plan: string;
 }
 
 const PRESEED_ALLOWLIST = JSON.parse(readFileSync(PRESEED_ALLOWLIST_FILE, "utf8")) as PreseedAllowlistItem[];
@@ -116,20 +125,154 @@ function explicitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   };
 }
 
-function assertChildEnvironmentAllowed(environment: NodeJS.ProcessEnv): void {
-  const allowed = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "env" || item.kind === "prompt").map((item) => item.name));
+function assertChildEnvironmentAllowed(environment: NodeJS.ProcessEnv, promptInputs: PromptInput[] = []): void {
+  const allowed = new Set([
+    ...PRESEED_ALLOWLIST.filter((item) => item.kind === "env").map((item) => item.name),
+    ...promptInputs.map((item) => item.name),
+  ]);
   for (const name of Object.keys(environment)) assert.ok(allowed.has(name), `block shell received non-allowlisted env ${name}`);
 }
 
-function syntheticPromptEnvironment(temporary: string): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
-  for (const item of PRESEED_ALLOWLIST.filter((candidate) => candidate.kind === "prompt")) {
-    assert.ok(item.value);
-    environment[item.name] = item.value.startsWith("/synthetic/")
-      ? join(temporary, "prompt-inputs", item.value.slice("/synthetic/".length))
-      : item.value;
+function assertPromptFormat(format: string, context: string, nested = false): void {
+  assert.ok(format && !format.includes("\n"), `${context}: invalid prompt format ${JSON.stringify(format)}`);
+  if (format.startsWith("literal:")) {
+    assert.ok(format.length > "literal:".length, `${context}: literal format requires text`);
+    return;
   }
-  return environment;
+  if (["sha40", "uuid", "decimal-positive", "iso-utc", "abs-dir"].includes(format)) return;
+  if (format.startsWith("enum:")) {
+    const values = format.slice("enum:".length).split("|");
+    assert.ok(values.length >= 2 && values.every(Boolean), `${context}: enum format requires at least two nonempty values`);
+    assert.equal(new Set(values).size, values.length, `${context}: enum format repeats a value`);
+    return;
+  }
+  if (format.startsWith("abs-file:")) {
+    assert.match(format.slice("abs-file:".length), /^[a-z0-9][a-z0-9-]*$/, `${context}: invalid prompt file schema id`);
+    return;
+  }
+  if (format.startsWith("list:") && !nested) {
+    assertPromptFormat(format.slice("list:".length), context, true);
+    return;
+  }
+  assert.fail(`${context}: unsupported prompt format ${format}`);
+}
+
+function promptInputsFromMarkdown(file: string, markdown: string): PromptInput[] {
+  const fences = [...markdown.matchAll(/^```prompt-inputs[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm)];
+  assert.ok(fences.length <= 1, `${file}: expected at most one prompt-inputs block, found ${fences.length}`);
+  if (fences.length === 0) return [];
+  const fence = fences[0]!;
+  const fenceLine = markdown.slice(0, fence.index).split(/\r?\n/).length;
+  const inputs: PromptInput[] = [];
+  for (const [offset, line] of (fence[1] ?? "").split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    const context = `${file}:${fenceLine + offset + 1}`;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      assert.fail(`${context}: malformed prompt-inputs JSON: ${(error as Error).message}`);
+    }
+    assert.ok(parsed && typeof parsed === "object" && !Array.isArray(parsed), `${context}: prompt input must be an object`);
+    const record = parsed as Record<string, unknown>;
+    assert.deepEqual(Object.keys(record).sort(), ["format", "meaning", "name", "supplier"],
+      `${context}: prompt input must contain exactly name, format, supplier, and meaning`);
+    for (const key of ["name", "format", "supplier", "meaning"] as const) {
+      assert.ok(typeof record[key] === "string" && record[key].trim().length > 0 && !record[key].includes("\n"),
+        `${context}: ${key} must be a nonempty one-line string`);
+    }
+    assert.match(record.name as string, /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$/, `${context}: name is not UPPER_SNAKE`);
+    assert.doesNotMatch(record.name as string, /^BOX_DRY_RUN_/, `${context}: plan cannot declare a harness adapter variable`);
+    assertPromptFormat(record.format as string, context);
+    inputs.push({
+      name: record.name as string,
+      format: record.format as string,
+      supplier: record.supplier as string,
+      meaning: record.meaning as string,
+      plan: file,
+    });
+  }
+  const names = inputs.map((input) => input.name);
+  assert.equal(new Set(names).size, names.length, `${file}: duplicate prompt input name`);
+  return inputs;
+}
+
+function promptInputs(file: string): PromptInput[] {
+  return promptInputsFromMarkdown(file, readFileSync(file, "utf8"));
+}
+
+function promptInputsForBlocks(planBlocks: Block[]): PromptInput[] {
+  const files = [...new Set(planBlocks.map((block) => block.file))];
+  const inputs = files.flatMap(promptInputs);
+  const names = inputs.map((input) => input.name);
+  assert.equal(new Set(names).size, names.length,
+    `planned run declares a prompt input more than once: ${names.filter((name, index) => names.indexOf(name) !== index).join(", ")}`);
+  return inputs;
+}
+
+function pinnedPromptValue(input: PromptInput): string | undefined {
+  const markdown = readFileSync(input.plan, "utf8");
+  const escaped = input.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const matches = [...markdown.matchAll(new RegExp(`test\\s+"\\$\\{?${escaped}\\}?"\\s+=\\s+(?:'([^'\\n]+)'|"([^"\\n]+)"|([^\\s;]+))`, "g"))]
+    .map((match) => match[1] ?? match[2] ?? match[3]!);
+  if (matches.length === 0) return undefined;
+  assert.equal(new Set(matches).size, 1, `${input.plan}: ${input.name} is pinned to conflicting literals`);
+  const value = matches[0]!;
+  if (input.format === "sha40") assert.match(value, /^[0-9a-f]{40}$/, `${input.plan}: ${input.name} pinned value is not sha40`);
+  if (input.format.startsWith("literal:")) {
+    assert.equal(value, input.format.slice("literal:".length), `${input.plan}: ${input.name} literal format disagrees with plan check`);
+  }
+  return value;
+}
+
+function promptSchemaContent(schemaId: string): string {
+  const path = join(PROMPT_FILE_SCHEMAS, `${schemaId}.json`);
+  assert.equal(existsSync(path), true, `missing prompt file schema ${schemaId}`);
+  const schema = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(schema).sort(), ["content", "encoding", "schema"],
+    `${path}: expected only schema, encoding, and content`);
+  assert.equal(schema.schema, 1, `${path}: unsupported schema version`);
+  assert.equal(typeof schema.content, "string", `${path}: content must be a string`);
+  assert.match(schema.encoding as string, /^(?:utf8|gzip-base64)$/, `${path}: unsupported content encoding`);
+  return schema.encoding === "utf8"
+    ? schema.content as string
+    : gunzipSync(Buffer.from(schema.content as string, "base64")).toString("utf8");
+}
+
+function syntheticPromptValue(input: PromptInput, temporary: string, item = 0): string {
+  const pinned = pinnedPromptValue(input);
+  if (pinned !== undefined && input.format === "sha40") return pinned;
+  const format = input.format;
+  if (format.startsWith("literal:")) return format.slice("literal:".length);
+  if (format === "sha40") return String(item + 1).repeat(40);
+  if (format === "uuid") return `${item + 1}1111111-1111-4111-8111-111111111111`;
+  if (format === "decimal-positive") return String(item + 1);
+  if (format.startsWith("enum:")) return format.slice("enum:".length).split("|")[0]!;
+  if (format === "iso-utc") return `2000-01-0${item + 1}T00:00:00Z`;
+  if (format.startsWith("list:")) {
+    const nested = { ...input, format: format.slice("list:".length) };
+    return [syntheticPromptValue(nested, temporary, 0), syntheticPromptValue(nested, temporary, 1)].join("\n");
+  }
+  const root = join(temporary, "prompt-inputs");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  chmodSync(root, 0o700);
+  const suffix = item === 0 ? "" : `-${item + 1}`;
+  const path = join(root, `${input.name.toLowerCase()}${suffix}`);
+  if (format === "abs-dir") {
+    mkdirSync(path, { mode: 0o700 });
+    chmodSync(path, 0o700);
+    return path;
+  }
+  if (format.startsWith("abs-file:")) {
+    writeFileSync(path, promptSchemaContent(format.slice("abs-file:".length)), { mode: 0o600 });
+    chmodSync(path, 0o600);
+    return path;
+  }
+  assert.fail(`unmaterialized prompt format ${format}`);
+}
+
+function syntheticPromptEnvironment(temporary: string, inputs: PromptInput[]): NodeJS.ProcessEnv {
+  return Object.fromEntries(inputs.map((input) => [input.name, syntheticPromptValue(input, temporary)]));
 }
 
 const MEASURED_FACTS = JSON.parse(readFileSync(MEASURED_FACTS_FILE, "utf8")) as MeasuredFactInventory;
@@ -225,18 +368,6 @@ function fencedLanguages(file: string): string[] {
   return [...readFileSync(file, "utf8").matchAll(/^```([^\s`]*)[^\n]*$/gm)]
     .map((match) => match[1])
     .filter(Boolean);
-}
-
-function namedPromptInputs(file: string): string[] {
-  const markdown = readFileSync(file, "utf8");
-  const heading = markdown.indexOf("Named prompt inputs");
-  assert.ok(heading >= 0, `${file}: missing Named prompt inputs section`);
-  const lines = markdown.slice(heading).split("\n");
-  const firstRow = lines.findIndex((line) => line.startsWith("| Name |"));
-  assert.ok(firstRow >= 0, `${file}: named-input table is missing`);
-  const table = lines.slice(firstRow).findIndex((line, index) => index > 1 && !line.startsWith("|"));
-  const section = lines.slice(firstRow, table < 0 ? undefined : firstRow + table).join("\n");
-  return [...section.matchAll(/^\| `([A-Z][A-Z0-9_]+)` \|/gm)].map((match) => match[1]!);
 }
 
 function gitShow(revision: string, file: string): string {
@@ -802,7 +933,6 @@ const REQUIRED_INPUT = /\$\{([A-Z][A-Z0-9_]+):\?[^}]*\}/g;
 const UNRESOLVED_INPUT = /<(?:(?:approved|agreed|next-approved|sha256-from|space-separated|newline-separated|edge\|stack|yes-or-no)[^>]*|sha)>/g;
 const PLAN_FILE_INPUT = /(?:\/home\/commonswarm\/migration-direct\.env|(?:\$[A-Z_]+\/)?GO\.txt|(?:\$[A-Z_]+\/)?(?:human-session\.json|hm37-open-ack-control\.ts|hm37-open-ack-deno\.json|oauth-image\.id)|(?:\$[A-Z_]+\/)?gate-evidence\.txt|(?:\$[A-Z_]+\/)?site\/\.env|(?:\$[A-Z_]+\/)?compose\.override\.yaml)/g;
 const PLAN_ENV_ALLOWLIST = new Set(["HOME", "PATH", "LANG", "TZ"]);
-const NAMED_PROMPT_INPUTS = new Set(PRESEED_ALLOWLIST.filter((item) => item.kind === "prompt").map((item) => item.name));
 
 function planName(block: Block): UnproducedRead["plan"] {
   if (block.file === PREP) return "prep";
@@ -830,6 +960,7 @@ function matchingProducer(resource: string, earlier: Block[]): boolean {
 function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
   const reads: UnproducedRead[] = [];
   const seen = new Set<string>();
+  const namedPromptInputs = new Set(promptInputsForBlocks(planBlocks).map((item) => item.name));
   const add = (block: Block, what: string, offset: number, earlier: Block[]): void => {
     const sameBlockPrefix: Block = { ...block, source: block.source.slice(0, offset) };
     if (matchingProducer(what, [...earlier, sameBlockPrefix])) return;
@@ -843,7 +974,7 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
     const earlier = planBlocks.slice(0, index);
     for (const match of block.source.matchAll(REQUIRED_INPUT)) {
       const name = match[1]!;
-      if (!PLAN_ENV_ALLOWLIST.has(name) && !NAMED_PROMPT_INPUTS.has(name) && !name.startsWith("BOX_DRY_RUN_")) {
+      if (!PLAN_ENV_ALLOWLIST.has(name) && !namedPromptInputs.has(name) && !name.startsWith("BOX_DRY_RUN_")) {
         add(block, name, match.index!, earlier);
       }
     }
@@ -918,6 +1049,7 @@ interface Fixture {
   denoZip?: string;
   denoZipDigest?: string;
   seededPaths?: string[];
+  promptInputs: PromptInput[];
 }
 
 interface RootDirectoryFixture {
@@ -1017,8 +1149,9 @@ function checkoutFixture(parent: string, name: string, sha: string): string {
   return checkout;
 }
 
-function prepareMacFixture(): Fixture {
+function prepareMacFixture(planBlocks: Block[] = []): Fixture {
   const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
+  const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const home = join(temporary, "child-home");
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
@@ -1030,7 +1163,7 @@ function prepareMacFixture(): Fixture {
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: process.cwd(),
     env: explicitEnvironment({
-      ...syntheticPromptEnvironment(temporary),
+      ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       HOME: home,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_STUB_LOG: log,
@@ -1039,6 +1172,7 @@ function prepareMacFixture(): Fixture {
       BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
       BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
     }),
+    promptInputs: declaredPromptInputs,
   };
 }
 
@@ -1069,8 +1203,9 @@ function windowEnvBody(state: string): string {
   ].join("\n");
 }
 
-function prepareBoxFixture(state: string): Fixture {
+function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
+  const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const model = buildBoxFixtureModel(state);
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
   chownSync(temporary, 0, 0);
@@ -1240,7 +1375,7 @@ function prepareBoxFixture(state: string): Fixture {
       uid: originalUsrLocalBin.uid, gid: originalUsrLocalBin.gid,
     },
     env: explicitEnvironment({
-      ...syntheticPromptEnvironment(temporary),
+      ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
@@ -1256,6 +1391,7 @@ function prepareBoxFixture(state: string): Fixture {
       BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
       BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
     }),
+    promptInputs: declaredPromptInputs,
   };
 }
 
@@ -1426,7 +1562,7 @@ function executeWholeBlock(
     BOX_DRY_RUN_CONTROL: options.control ?? "",
   };
   for (const name of options.unsetEnv ?? []) delete childEnv[name];
-  assertChildEnvironmentAllowed(childEnv);
+  assertChildEnvironmentAllowed(childEnv, fixture.promptInputs);
   const result = spawnSync("/bin/bash", [], {
     cwd: fixture.cwd,
     input: script,
@@ -1842,7 +1978,7 @@ test("all M1-M20 values come from the measured artifact, with no second fixture 
   assert.equal(measuredFact("M20").result, "PASS");
 });
 
-test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
+test("pre-seed allowlist contains only harness variables or cited measured facts", (t) => {
   assert.ok(PRESEED_ALLOWLIST.length > 0);
   const identities = PRESEED_ALLOWLIST.map((item) => `${item.kind}:${item.name}`);
   assert.equal(new Set(identities).size, identities.length, "duplicate pre-seed allowlist entry");
@@ -1851,20 +1987,14 @@ test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
     PLAN_VISIBLE_PATH_PRESEEDS,
     "fixture path seeds and pre-seed allowlist differ",
   );
-  const declaredPrompts = [...new Set([PREP, HM37, HM37B, SITE].flatMap(namedPromptInputs))].sort();
-  assert.deepEqual(
-    PRESEED_ALLOWLIST.filter((item) => item.kind === "prompt").map((item) => item.name).sort(),
-    declaredPrompts,
-    "synthetic prompt seeds differ from the names declared by the four plans",
-  );
   const bySource = new Map<string, number>();
   for (const item of PRESEED_ALLOWLIST) {
-    assert.match(item.kind, /^(?:path|env|command-output|prompt)$/);
+    assert.match(item.kind, /^(?:path|env|command-output)$/);
     assert.ok(item.name);
     bySource.set(item.source, (bySource.get(item.source) ?? 0) + 1);
-    if (item.source.startsWith("prompt:")) {
-      assert.match(item.source, /^prompt:[A-Z][A-Z0-9_]+$/);
-      assert.ok(item.value && !item.value.includes("\n"), `${item.source} must have one fixed synthetic value`);
+    if (item.source.startsWith("harness:")) {
+      assert.equal(item.kind, "env", `${item.source} may allow only a harness environment variable`);
+      assert.match(item.source, /^harness:[A-Z][A-Z0-9_]+$/);
       continue;
     }
     assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-[1-9])$/);
@@ -1875,6 +2005,76 @@ test("pre-seed allowlist is measured or a fixed named prompt input", (t) => {
       `${item.source} does not measure allowlisted ${item.kind} ${item.name}: missing ${item.evidence}`);
   }
   for (const [source, count] of [...bySource].sort()) t.diagnostic(`preseed_source=${source} count=${count}`);
+});
+
+test("prompt-input tables are strict and synthetic values follow their declared formats", (t) => {
+  const requiredSchemas = [
+    "gate-receipt", "sql-proof-root", "prep-receipt", "hm37-a-close-receipt",
+    "human-login-preflight", "human-session", "harness-source", "import-map-source",
+  ];
+  for (const schemaId of requiredSchemas) assert.ok(promptSchemaContent(schemaId).length > 0, `${schemaId} schema is empty`);
+  assert.equal(createHash("sha256").update(promptSchemaContent("harness-source")).digest("hex"),
+    "dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013");
+  assert.equal(createHash("sha256").update(promptSchemaContent("import-map-source")).digest("hex"),
+    "f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b");
+  const plans = [PREP, HM37, HM37B, RUNBOOK, SITE, TEMPLATE];
+  const declared = plans.flatMap(promptInputs);
+  for (const input of declared) {
+    if (input.format.startsWith("abs-file:")) promptSchemaContent(input.format.slice("abs-file:".length));
+    const pinned = pinnedPromptValue(input);
+    if (pinned !== undefined) {
+      const temporary = mkdtempSync(join(tmpdir(), "commonswarm-prompt-pin-"));
+      try {
+        assert.equal(syntheticPromptValue(input, temporary), pinned,
+          `${input.plan}: ${input.name} synthetic value does not honor its plan-pinned literal`);
+      } finally {
+        removeOwnedTemporary(temporary, "commonswarm-prompt-pin-");
+      }
+      t.diagnostic(`plan_pinned_prompt=${input.plan}:${input.name}`);
+    }
+  }
+  t.diagnostic(`declared_prompt_inputs=${declared.length}`);
+
+  const line = (name: string, format: string): string => JSON.stringify({
+    name, format, supplier: "fixture supplier", meaning: "fixture meaning",
+  });
+  const valid = promptInputsFromMarkdown("synthetic.md", [
+    "```prompt-inputs",
+    line("LITERAL", "literal:exact"), line("SHA", "sha40"), line("ID", "uuid"),
+    line("COUNT", "decimal-positive"), line("CHOICE", "enum:first|second"), line("WHEN", "iso-utc"),
+    line("SHAS", "list:sha40"), line("DIRECTORY", "abs-dir"), line("RECEIPT", "abs-file:gate-receipt"),
+    "```", "",
+  ].join("\n"));
+  assert.equal(valid.length, 9);
+  const temporary = mkdtempSync(join(tmpdir(), "commonswarm-prompt-format-"));
+  try {
+    const fixtureInputs = valid.map((input) => ({ ...input, plan: TEMPLATE }));
+    const environment = syntheticPromptEnvironment(temporary, fixtureInputs);
+    assert.equal(environment.LITERAL, "exact");
+    assert.match(environment.SHA!, /^[0-9a-f]{40}$/);
+    assert.match(environment.ID!, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.equal(environment.COUNT, "1");
+    assert.equal(environment.CHOICE, "first");
+    assert.equal(environment.WHEN, "2000-01-01T00:00:00Z");
+    assert.equal(environment.SHAS!.split("\n").length, 2);
+    assert.equal(lstatSync(environment.DIRECTORY!).mode & 0o777, 0o700);
+    assert.equal(lstatSync(environment.RECEIPT!).mode & 0o777, 0o600);
+    assert.equal(readFileSync(environment.RECEIPT!, "utf8"), promptSchemaContent("gate-receipt"));
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-prompt-format-");
+  }
+
+  assert.deepEqual(promptInputsFromMarkdown("none.md", "# no table\n"), []);
+  assert.throws(() => promptInputsFromMarkdown("duplicate.md", `\`\`\`prompt-inputs\n${line("DUP", "sha40")}\n${line("DUP", "uuid")}\n\`\`\`\n`),
+    /duplicate prompt input name/);
+  assert.throws(() => promptInputsFromMarkdown("adapter.md", `\`\`\`prompt-inputs\n${line("BOX_DRY_RUN_ESCAPE", "sha40")}\n\`\`\`\n`),
+    /cannot declare a harness adapter variable/);
+  assert.throws(() => promptInputsFromMarkdown("unknown.md", `\`\`\`prompt-inputs\n${line("BAD", "path")}\n\`\`\`\n`),
+    /unsupported prompt format/);
+  assert.throws(() => promptInputsFromMarkdown("malformed.md", "```prompt-inputs\n{not json}\n```\n"),
+    /malformed prompt-inputs JSON/);
+  assert.throws(() => promptInputsFromMarkdown("twice.md", "```prompt-inputs\n```\n```prompt-inputs\n```\n"),
+    /expected at most one prompt-inputs block/);
 });
 
 test("block shells use an explicit empty-base environment and plan code cannot read adapter variables", () => {
@@ -1906,16 +2106,12 @@ test("stubs do not return synthetic whole-step success", () => {
   assert.doesNotMatch(dispatch, /BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR/);
 });
 
-test("current plans derive every audited operator input as UNPRODUCED", (t) => {
+test("current plans report only undeclared operator inputs as UNPRODUCED", (t) => {
   const report = unproducedReport();
-  assert.ok(report.length > 0);
   assert.equal(new Set(report).size, report.length);
-  const allowlistedPlanInputs = PRESEED_ALLOWLIST.filter((item) =>
-    item.kind === "prompt",
-  );
-  for (const item of allowlistedPlanInputs) {
+  for (const item of [PREP, HM37, HM37B, RUNBOOK, SITE].flatMap(promptInputs)) {
     assert.ok(!report.some((line) => line.includes(`UNPRODUCED ${item.name} read by `)),
-      `legitimate ${item.source} pre-seed was reported as unproduced: ${item.name}`);
+      `declared prompt input was reported as unproduced: ${item.plan}:${item.name}`);
   }
   for (const line of report) {
     assert.match(line, /^UNPRODUCED .+ read by .+ at .+:\d+ \[run=.+ plan=(?:prep|hm37|hm37b|runbook|site)\]$/);
@@ -2183,9 +2379,9 @@ test("five states execute selected whole blocks in order and fail honestly on cu
     if (part === "box") {
       const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
       assert.equal(guard.status, 0, guard.stderr);
-      fixture = prepareBoxFixture(state);
+      fixture = prepareBoxFixture(state, planBlocks);
     } else {
-      fixture = prepareMacFixture();
+      fixture = prepareMacFixture(planBlocks);
     }
     try {
       const records = executePlanUntilFailure(planBlocks, fixture, part);
@@ -2201,7 +2397,6 @@ test("five states execute selected whole blocks in order and fail honestly on cu
       else cleanupMacFixture(fixture);
     }
     const lines = unproducedReport().filter((line) => line.includes(`[run=window-a/${state}/pass `));
-    assert.ok(lines.length > 0, `${state} derived report is incomplete`);
     for (const line of lines) t.diagnostic(`${description}: ${line}`);
   }
 });
@@ -2372,9 +2567,10 @@ test("lane 8 executes its declared plan and reports current unproduced inputs", 
     "site-04-reconcile-failure", "site-05", "site-05-browser-acceptance", "site-06", "site-07-manifest-close",
   ]);
   const report = unproducedReport().filter((line) => line.includes("[run=lane-8/FULL-CONTROL "));
-  const fixture = prepareMacFixture();
+  const laneBlocks = resolveSteps("lane-8", siteOrder());
+  const fixture = prepareMacFixture(laneBlocks);
   try {
-    const records = executePlanUntilFailure(resolveSteps("lane-8", siteOrder()), fixture, "mac");
+    const records = executePlanUntilFailure(laneBlocks, fixture, "mac");
     assert.ok(records.length > 0);
     assert.ok(records.filter(({ execution }) => execution.result === "failed").length <= 1);
     if (records.at(-1)?.execution.result === "failed") {
@@ -2430,9 +2626,9 @@ test("HM37 plans are UNPRODUCED-free and every block passes", () => {
       const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
       assert.equal(guard.status, 0, guard.stderr);
       const state = /^window-a\/(s[1-5])\//.exec(run.label)?.[1] ?? "s2";
-      fixture = prepareBoxFixture(state);
+      fixture = prepareBoxFixture(state, run.blocks);
     } else {
-      fixture = prepareMacFixture();
+      fixture = prepareMacFixture(run.blocks);
     }
     try {
       const records = executePlanUntilFailure(run.blocks, fixture, part);
