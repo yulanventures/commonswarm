@@ -1,0 +1,8 @@
+# HezLead 2026-09-22: the container was OOM-killed against 512m every 10-20 min (177 kills in 24 h, exit 137).
+# Raised to 2g (leak ~3.5 MiB/min after wall-clock early terminations) plus a 6-hourly graceful restart timer as a mitigation. Carry it into the repo; this file is lost on the next release.
+# NOTE: compose.yaml uses network_mode: ${COMMONSWARM_EDGE_NETWORK_MODE:-bridge}. Recreate with
+#   COMMONSWARM_EDGE_NETWORK_MODE=commonswarm-net docker compose -p commonswarm-edge up -d edge-runtime
+# or the container lands on the default bridge and cannot reach db.commonswarm.internal (172.31.0.10).
+services:
+  edge-runtime:
+    mem_limit: 2g
