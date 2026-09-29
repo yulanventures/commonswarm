@@ -14,6 +14,13 @@ is exactly one of these markers:
 - `# readonly: no` changes box, database, container, Caddy, release, DNS, or
   production state. Failure stops the window and invokes the plan's rollback.
 
+Its third line is `# host:` and names exactly one execution shell: Mac mini
+`/bin/bash` 3.2 or box `/bin/bash` 5.2, plus any ssh child on the other host.
+Every fenced block is either such a marked `sh` step or explicitly
+non-executable (`text`). Prose that requires Anvil to establish, verify, prove,
+record, or run something names the step ID that performs it. A judgment with no
+command is labeled explicitly as a HezLead decision.
+
 A release-directory verifier may accept only named box-only files whose mode
 and SHA-256 are derived from the same source the runbook copies; every other
 path or metadata difference stops. Every other window artifact is removed by
@@ -43,6 +50,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-read
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   PROOF_DIR="${PROOF_DIR:?proof directory required}"
@@ -54,6 +62,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-refusal-probe
 # readonly: probe
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   PROOF_DIR="${PROOF_DIR:?proof directory required}"
@@ -68,6 +77,7 @@ refuses every other `--file` value.
 ```sh
 # step: example-mutation
 # readonly: no
+# host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   systemctl restart example.service

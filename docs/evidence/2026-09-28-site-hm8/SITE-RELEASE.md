@@ -4,7 +4,9 @@
 **Intended evidence path:** `docs/evidence/2026-09-28-site-hm8/SITE-RELEASE.md`
 **Status:** Plan only. Deployment, live browser controls, approval and closure are **not established**.
 
-Anvil executes the release under HezLead’s direction. This review read repository files and Git history only; it ran no build, test, browser control or production command.
+Anvil executes `site-01` through `site-05` under HezLead’s direction. This
+review read repository files and Git history only; it ran no build, test,
+browser control or production command.
 
 This lane is the next operation in the same approved window: start `site-01` immediately after lanes 3+7 record successful controls and cleanup. A lanes-3+7 `CONTROLS=failed` disposition still stops the combined window as its plan requires. On success, do not insert another release, stop for a fresh plan review, or reuse stale HM37 evidence between the lanes; all site holds must be closed before the combined window opens.
 
@@ -35,13 +37,28 @@ The newest committed site deployment receipt found is [`2026-09-25-v0.1.77-relea
 
 The September 27 `0.1.78`, `0.1.79` and `0.1.80` release notes do not establish a later site deployment. A box-window plan containing a future site step is not deployment evidence.
 
-**The first operational step is therefore a read-only measurement of the live symlink.** Its resolved full source SHA is the release baseline; the measured inventory in site-02 governs approval. The precomputed inventory below is only an expectation if that baseline is `218cf921d07d56f2b937822bcf18feb9d3be0f53`.
+**The first operational step opens the site window from the approved start and then performs a read-only measurement of the live symlink.** Its resolved full source SHA is the release baseline; the measured inventory in site-02 governs approval. The precomputed inventory below is only an expectation if that baseline is `218cf921d07d56f2b937822bcf18feb9d3be0f53`.
 
 ```sh
-# step: site-01 — Mac mini /bin/bash 3.2; Anvil; read-only commands on the box
-# readonly: yes
+# step: site-01 — Mac mini /bin/bash 3.2; Anvil; open the site window, then read the box
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
+  : "${SITE_WINDOW_START_UTC:?Set the HezLead-approved UTC site window start}"
+  : "${SITE_EVIDENCE:?Set the protected site evidence directory}"
+  case "$SITE_WINDOW_START_UTC" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
+    *) false ;;
+  esac
+  SITE_WINDOW_ID="$(printf '%s' "$SITE_WINDOW_START_UTC" | tr -d ':-')"
+  case "$SITE_EVIDENCE" in /*) ;; *) false ;; esac
+  case "${SITE_EVIDENCE##*/}" in *-"$SITE_WINDOW_ID") ;; *) false ;; esac
+  SITE_WINDOW_FILE="$HOME/.commonswarm-site-window.env"
+  ( umask 077; printf 'SITE_WINDOW_START_UTC=%q\nSITE_WINDOW_ID=%q\nSITE_EVIDENCE=%q\nSITE_WINDOW_FILE=%q\n' \
+      "$SITE_WINDOW_START_UTC" "$SITE_WINDOW_ID" "$SITE_EVIDENCE" "$SITE_WINDOW_FILE" \
+      >"$SITE_WINDOW_FILE" )
+  chmod 0600 "$SITE_WINDOW_FILE"
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s <<'BOX'
 set -euo pipefail
 root=/srv/commonswarm/site
@@ -67,7 +84,8 @@ For subsequent blocks, Anvil supplies these non-secret inputs:
 
 - `SITE_RELEASE_REPO`: absolute path to the checkout whose `HEAD` is the exact release SHA.
 - `SITE_BASE_SHA`: full SHA resolved from the measured current site release.
-- `SITE_WINDOW_ID`: approved `YYYYMMDDTHHMMSSZ` identifier for this execution.
+- `SITE_WINDOW_START_UTC`: HezLead-approved UTC start in `YYYY-MM-DDTHH:MM:SSZ` form. `site-01` derives `SITE_WINDOW_ID` from it; the operator never types an ID.
+- `SITE_WINDOW_ID`: derived `YYYYMMDDTHHMMSSZ` identifier read from `$HOME/.commonswarm-site-window.env` after `site-01`.
 - `SITE_EVIDENCE`: absolute, protected evidence directory for this execution, outside the release checkout, whose basename ends in `-$SITE_WINDOW_ID`.
 
 Do not change a shared checkout to satisfy these inputs. Prepare a separate checkout if necessary.
@@ -75,12 +93,12 @@ Do not change a shared checkout to satisfy these inputs. Prepare a separate chec
 ```sh
 # step: site-02 — Mac mini /bin/bash 3.2; Anvil; measured source reconciliation
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
   : "${SITE_BASE_SHA:?Resolve the live site source to a full SHA}"
-  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
-  : "${SITE_EVIDENCE:?Set the protected evidence directory}"
   case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
   case "$SITE_WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
@@ -258,13 +276,13 @@ The two views filter by `owner_user_id = auth.uid()` and grant SELECT to `authen
 
 **Do not overstate the functional receipt:** its SQL reconciles existing authority state and can pass with no hosted grants. `hm2-local-control.json` exercises local seats. Neither establishes a live signed-in owner’s successful hosted-grant and hosted-seat revocation.
 
-Before GO, Anvil must attach read-only verification of:
+Before GO, each read-only requirement has an executable owner or an explicit decision owner:
 
-1. The active edge and its mounted source identity, including both revoke handlers.
-2. Migration `20260928000002` and both owner views, using the governing runbook’s read-only database procedure. Do not reapply migrations or rerun seed/mutation controls.
-3. Successful authenticated reads of both views for the dedicated test owner, through the public API. Use the same selected columns and ordering as `site/src/lib/connected-apps.ts`.
-4. Existing owner-scoped evidence that both revoke commands answer correctly, including committed deny-state readback. If no such evidence exists, record **not established** and hold that precondition for a separately authorized control. An empty view, OPTIONS response or unauthenticated refusal is not a positive revoke control.
-5. Current availability of roster transport columns, `agent_presence` and `agent_wake_path`.
+1. `hm37-current-window-state` verifies the active edge and mounted source identity. HezLead confirms from the exact release diff that the mounted source contains both revoke handlers.
+2. `hm37-current-window-state` verifies migration `20260928000002` and both owner views through the governing runbook’s read-only database procedure. Do not reapply migrations or rerun seed/mutation controls.
+3. `site-03` performs authenticated reads of both views for the dedicated test owner through the public API, with the same selected columns and ordering as `site/src/lib/connected-apps.ts`.
+4. Existing owner-scoped evidence that both revoke commands answer correctly, including committed deny-state readback, is explicitly a HezLead GO decision. If no such evidence exists, HezLead records **not established** and holds GO for a separately authorized control. An empty view, OPTIONS response or unauthenticated refusal is not a positive revoke control.
+5. `hm37-current-window-state` verifies current availability of roster transport columns, `agent_presence` and `agent_wake_path`.
 
 The signed-in checks use Anvil’s real Chrome and the dedicated test account below. Keep tokens in the browser; do not export HAR files, storage contents or authorization headers.
 
@@ -275,9 +293,12 @@ The signed-in checks use Anvil’s real Chrome and the dedicated test account be
 ```sh
 # step: site-03 — Mac mini /bin/bash 3.2; Anvil; read-only environment validation
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
   : "${SITE_RELEASE_REPO:?Set the exact-release checkout path}"
+  : "${SITE_OWNER_ACCESS_TOKEN_FILE:?Set the protected dedicated-owner access-token file}"
   cd "$SITE_RELEASE_REPO"
   test "$(git rev-parse HEAD)" = 8b8989f2b29e440a317a2cdedf11195901c8342c
   node --input-type=module <<'NODE'
@@ -328,10 +349,67 @@ for (const file of ["site/.env.local", "site/.env.production",
 console.log("PASS: runtime, environment permissions, URL, anon role and H0 setting");
 NODE
   node deploy/site/validate-site-env.mjs site/.env </dev/null
+  python3 - "$SITE_OWNER_ACCESS_TOKEN_FILE" "$SITE_EVIDENCE/site-03-owner-views.json" <<'PY'
+import json
+import os
+import pathlib
+import urllib.parse
+import urllib.request
+import sys
+
+token_file = pathlib.Path(sys.argv[1])
+evidence_file = pathlib.Path(sys.argv[2])
+assert token_file.is_file() and not token_file.is_symlink()
+assert token_file.stat().st_mode & 0o777 == 0o600
+token = token_file.read_text(encoding="utf-8").strip()
+assert token
+
+values = {}
+for line in pathlib.Path("site/.env").read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        name, value = line.split("=", 1)
+        values[name] = value.strip().strip("\"'")
+base = values["PUBLIC_SUPABASE_URL"].rstrip("/")
+anon = values["PUBLIC_SUPABASE_ANON_KEY"]
+queries = {
+    "connections": ("hosted_mcp_connections",
+        "grant_id,client_id,home_workspace_id,selected_workspace_ids,state,revoked_at",
+        "created_at.desc"),
+    "seats": ("hosted_mcp_seats",
+        "seat_id,grant_id,workspace_id,principal_id,name,revoked_at",
+        "created_at.asc"),
+}
+result = {"user_agent": "commonswarm-release-probe/1.0", "views": {}}
+for label, (view, columns, order) in queries.items():
+    query = urllib.parse.urlencode({"select": columns, "order": order})
+    request = urllib.request.Request(
+        f"{base}/rest/v1/{view}?{query}",
+        headers={
+            "Accept-Profile": "swarm_read",
+            "apikey": anon,
+            "Authorization": "Bearer " + token,
+            "User-Agent": "commonswarm-release-probe/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read(1048577)
+        assert response.status == 200
+        assert response.headers.get_content_type() == "application/json"
+        assert len(raw) <= 1048576
+    rows = json.loads(raw)
+    assert isinstance(rows, list)
+    result["views"][label] = {"status": 200, "row_count": len(rows)}
+evidence_file.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+os.chmod(evidence_file, 0o600)
+print("PASS: dedicated owner reads both connected-app views")
+PY
 )
 ```
 
-**Evidence:** exit statuses and PASS/FAIL labels only. JWT payload inspection does not validate its signature; successful API access supplies the separate operational check.
+**Evidence:** exit statuses, PASS/FAIL labels, and protected
+`site-03-owner-views.json`, which contains only response status and row counts.
+JWT payload inspection does not validate its signature; the two successful API
+reads supply the separate operational check without recording either token.
 
 ### Exact-SHA gates and operational holds
 
@@ -375,11 +453,11 @@ After all holds are resolved, HezLead’s execution approval must name the exact
 ```sh
 # step: site-04 — Mac mini /bin/bash 3.2; Anvil; production deployment after all holds close
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh children on box
 (
   set -euo pipefail
+  . "$HOME/.commonswarm-site-window.env"
   : "${SITE_RELEASE_REPO:?Set the approved exact-release checkout}"
-  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
-  : "${SITE_EVIDENCE:?Set the protected evidence directory}"
   case "$SITE_EVIDENCE" in /*) ;; *) exit 1 ;; esac
   case "$SITE_WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
@@ -422,6 +500,7 @@ After all holds are resolved, HezLead’s execution approval must name the exact
   cat "$SITE_EVIDENCE/after.release"
   test "${results[0]}" -eq 0
   test "${results[1]}" -eq 0
+  scp "$SITE_WINDOW_FILE" commonswarm@yulan-vps-1:/tmp/commonswarm-site-window.env
 )
 ```
 
@@ -440,8 +519,10 @@ Use the release directory’s SHA prefix **plus the actual `/app` hash and refer
 ```sh
 # step: site-05 — box /bin/bash; Anvil as commonswarm; read-only public delivery control
 # readonly: yes
+# host: box /bin/bash 5.2 as commonswarm
 (
   set -euo pipefail
+  . /tmp/commonswarm-site-window.env
   python3 - <<'PY'
 import hashlib
 import json
@@ -572,17 +653,19 @@ This window’s empty-state control does not exercise those mutations. Do not cr
 
 Rollback triggers include wrong build bytes, failed signed-in `/app`, owner-view errors, unexpected public connector activation, console failures attributable to the release, or broken mobile header geometry.
 
-HezLead directs rollback; Anvil executes it. Restore the measured previous site release only. Do not roll back HM2 schema or edge code, restart services, change Caddy, or change DNS.
+HezLead directs rollback; Anvil executes `site-06`. Restore the measured
+previous site release only. Do not roll back HM2 schema or edge code, restart
+services, change Caddy, or change DNS.
 
 Before invoking the block, `previous.release` must identify the measured previous directory and `after.release` the failed new directory. Their existence on the box is checked again. No recursive deletion is used.
 
 ```sh
 # step: site-06 — Mac mini /bin/bash 3.2; Anvil; atomic rollback on the box
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 (
   set -euo pipefail
-  : "${SITE_WINDOW_ID:?Set the approved site window ID}"
-  : "${SITE_EVIDENCE:?Set the evidence directory for this execution}"
+  . "$HOME/.commonswarm-site-window.env"
   case "$SITE_WINDOW_ID" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
     *) exit 1 ;;

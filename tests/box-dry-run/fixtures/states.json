@@ -1,0 +1,7 @@
+{
+  "s1": "edge and stack eb2a87ac release directories absent",
+  "s2": "both directories reusable; edge checksum-clean without override; two named closed proofs",
+  "s3": "edge directory reusable with the accepted source-derived override",
+  "s4": "rollback-left state from 229cc29e",
+  "s5": "two unrelated .closed-window-* leftovers"
+}

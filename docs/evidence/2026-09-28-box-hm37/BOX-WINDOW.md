@@ -6,7 +6,10 @@
 **Expected previous edge:** `72c57e0d76d0aa86fe4f811a2cf51499919fed20`
 **Status:** PLAN. Approval, exact-SHA gate results, current production prerequisites, execution and closure are **not established**.
 
-Anvil executes every operation, including Mac mini controls. HezLead approves the release identity, backup age, transitions, rollback and closure. CSwarmDevLead supplies reviewed inputs and reconciles evidence.
+Anvil executes only the named `hm37-*` and `runbook-*` steps, including Mac
+mini controls. HezLead approves the release identity, backup age, transitions,
+rollback and closure. CSwarmDevLead supplies reviewed inputs and reconciles
+evidence.
 
 This revision was prepared by read-only inspection of the release tree and local plan-validation tests. No product gate, production probe, migration, deployment or principal creation was performed.
 
@@ -106,6 +109,7 @@ Relative to v2’s release `e1faa08eb2b0dbfa6f6f1b0f9385b7659c36198d`, migration
 ```sh
 # step: hm37-source-identity
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the release checkout.
 (
   set -euo pipefail
@@ -309,6 +313,7 @@ Migration `20260928000003` must have exactly one ledger row, and its corrected c
 ```sh
 # step: hm37-hm6-schema-helpers-precondition
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell, after runbook sections 1–3 and proof transfer; production checks are read only.
 (
   set -euo pipefail
@@ -361,6 +366,7 @@ The live OAuth release directory and `oauth/current` must identify `826db6a34f23
 ```sh
 # step: hm37-hm6-oauth-precondition
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell; all production checks are read only.
 (
   set -euo pipefail
@@ -486,6 +492,7 @@ resource ID, credential, Authorization header or Cookie header.
 ```sh
 # step: hm37-hm6-oauth-refusal-probe
 # readonly: probe
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell; every request must refuse.
 (
   set -euo pipefail
@@ -556,15 +563,101 @@ PY
 
 The MCP-hostname probe deliberately keeps Python urllib's actual default User-Agent because non-browser reachability is the claim for `mcp.commonswarm.com`. The gateway public bases use `User-Agent: commonswarm-release-probe/1.0`; loopback may keep the urllib default. Every evidence row records which rule applied. Redirects and HTML challenges fail. HezLead accepts Part B only from this release-directory, image, effective-flag and endpoint evidence together.
 
-After both parts pass, Anvil must also establish:
+After both parts pass, the required checks have executable owners:
 
-1. Previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
-2. Migration 02 has exactly one ledger row; its catalog and functional proofs pass.
-3. The applied migration-03 file hash matches this document; a version-only ledger row cannot prove which bytes were applied.
-4. Effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
-5. Migration 04 has ledger count zero and catalog result false **without SQL error**.
-6. Complete migration reconciliation yields only `20260928000004` pending.
-7. Actual stack runtime comparison, timers, existing window state and concurrent operator activity have an accepted disposition.
+1. `hm37-current-window-state` proves the previous edge symlink, `RELEASE_SHA`, actual Compose working directory and mounted source all identify `72c57e0d76d0aa86fe4f811a2cf51499919fed20`.
+2. `hm37-current-window-state` proves migration 02 has exactly one ledger row and that its catalog and functional proofs pass. `hm37-hm6-schema-helpers-precondition` separately proves the migration-03 prerequisite.
+3. `hm37-current-window-state` proves the applied migration-03 file hash matches this document; a version-only ledger row cannot prove which bytes were applied.
+4. `hm37-hm6-oauth-precondition` proves effective `MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED` is not exactly `1`; `hm37-current-window-state` separately proves effective edge `SWARM_MCP_PUBLIC_ENABLED` is not exactly `1`.
+5. `hm37-current-window-state` proves migration 04 has ledger count zero and catalog result false **without SQL error**.
+6. `hm37-current-window-state` performs complete migration reconciliation and requires only `20260928000004` pending.
+7. `hm37-current-window-state` records actual stack runtime comparison, timers and exact active-window state. Concurrent-operator disposition is explicitly a HezLead decision recorded in `GO.txt`; the block requires that decision before it passes.
+
+```sh
+# step: hm37-current-window-state
+# readonly: no
+# host: box /bin/bash 5.2 as root
+(
+  set -euo pipefail
+  PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  . "$PROOF_DIR/window.env"
+  . "/run/commonswarm-release-${SHA}-session.sh"
+  test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  test -f "$PROOF_DIR/GO.txt"
+  grep -qFx 'CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead' "$PROOF_DIR/GO.txt"
+
+  EXPECTED_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  test "$(readlink -f /home/commonswarm/edge/current)" = "$EXPECTED_EDGE"
+  test "$(cat "$EXPECTED_EDGE/RELEASE_SHA")" = 72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  EDGE_CID="$(docker compose -p commonswarm-edge -f "$EXPECTED_EDGE/deploy/edge-runtime/compose.yaml" ps -q edge)"
+  test -n "$EDGE_CID"
+  test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$EDGE_CID")" = \
+    "$EXPECTED_EDGE/deploy/edge-runtime"
+  docker inspect --format '{{ range .Mounts }}{{ println .Source .Destination }}{{ end }}' "$EDGE_CID" \
+    | grep -qF "$EXPECTED_EDGE/deploy/edge-runtime/main /app/main"
+  docker exec "$EDGE_CID" deno eval \
+    'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+
+  cat >"$APPLY_SQL" <<'SQL'
+\i /work/deploy/release-proofs/item-hm/20260928000002-catalog.sql
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations
+   WHERE version = '20260928000002') = 1
+  AND :'catalog_ok'::boolean;
+SQL
+  test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
+  cat >"$APPLY_SQL" <<'SQL'
+\i /work/deploy/release-proofs/item-hm/20260928000002-functional.sql
+SQL
+  test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
+  test "$(release_psql_ro -Atq --command \
+    "SELECT to_regclass('swarm_read.agent_presence') IS NOT NULL
+      AND to_regclass('swarm_read.agent_wake_path') IS NOT NULL
+      AND (SELECT count(*) = 2 FROM information_schema.columns
+           WHERE table_schema = 'swarm_read' AND table_name = 'agent_principals'
+             AND column_name IN ('transport', 'turn_only'));" )" = t
+
+  test "$(sha256sum "$NEW_STACK/supabase/migrations/20260928000003_hm_oauth_store.sql" | awk '{print $1}')" = \
+    e6f6944154b01e7f80a366058754639700c81279cfec4eaff6fe601a6ad99638
+  LEDGER_04="$(release_psql_ro -Atq --command \
+    "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")"
+  test "$LEDGER_04" = 0
+  CATALOG_04="$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-catalog.sql")"
+  test "$CATALOG_04" = f
+
+  find "$NEW_STACK/supabase/migrations" -maxdepth 1 -type f -name '*.sql' -print \
+    | LC_ALL=C sort >"$PROOF_DIR/hm37-all-migration-files.txt"
+  release_psql_ro -Atq --command \
+    'SELECT version FROM supabase_migrations.schema_migrations ORDER BY version;' \
+    >"$PROOF_DIR/hm37-ledger-before.txt"
+  sed -E 's#.*/##; s/_.*//' "$PROOF_DIR/hm37-all-migration-files.txt" | LC_ALL=C sort \
+    | comm -23 - "$PROOF_DIR/hm37-ledger-before.txt" \
+    >"$PROOF_DIR/hm37-pending-before.txt"
+  test "$(cat "$PROOF_DIR/hm37-pending-before.txt")" = 20260928000004
+
+  for RUNTIME_PATH in compose.yaml postgres backup; do
+    diff -qr "$PREVIOUS_STACK/deploy/supabase-stack/$RUNTIME_PATH" \
+      "$NEW_STACK/deploy/supabase-stack/$RUNTIME_PATH"
+  done
+  systemctl is-active --quiet commonswarm-edge-recycle.timer
+  systemctl is-active --quiet commonswarm-postgres-backup.timer
+  systemctl is-active --quiet commonswarm-postgres-restore.timer
+  test -f "$PROOF_DIR/window.env"
+  printf '%s\n' \
+    "edge_release=$EXPECTED_EDGE" \
+    'edge_public_mcp_disabled=true' \
+    'migration_02_ledger_catalog_functional=true' \
+    'roster_transport_presence_wake=true' \
+    'migration_03_hash=true' \
+    "migration_04_ledger=$LEDGER_04" \
+    "migration_04_catalog=$CATALOG_04" \
+    'pending_versions=20260928000004' \
+    'stack_runtime_comparison=equal' \
+    'timers=active' \
+    'concurrent_operator_activity=accepted_by_HezLead' \
+    >"$PROOF_DIR/hm37-current-window-state.txt"
+)
+```
 
 Historical HM2 run 4 records migration 02 applied, edge health with memory `2147483648` and network `commonswarm-net`, active maintenance timers, released cswarm `0.1.80`, an observed delivery ACK and subsequent wake eligibility, and revoked temporary principals with zero active unexpired tokens. Recheck current state.
 
@@ -633,6 +726,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
 ```sh
 # step: hm37-read-window-suffix
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # The ssh subprocess reads state on the box as root.
 (
@@ -673,6 +767,7 @@ Wait for the existing backup service **before** reading status. Active, activati
 ```sh
 # step: hm37-backup-gate
 # readonly: yes
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -757,6 +852,7 @@ After commit require `ledger=1 catalog=t`. Migration 04 is not deferred by the r
 ```sh
 # step: hm37-functional-section5
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 (
   set -euo pipefail
@@ -864,6 +960,7 @@ repeat their Mac and box execution context so either can run alone.
 ```sh
 # step: hm37-public-boundary-reads
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # Its ssh subprocess runs only the gateway loopback read on the box as root.
 (
@@ -983,6 +1080,7 @@ PY
 ```sh
 # step: hm37-public-boundaries
 # readonly: probe
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 # Its ssh subprocess runs only the gateway loopback probes on the box as root.
 (
@@ -1172,11 +1270,11 @@ The harness runs with `/usr/local/bin/deno` on the box, not with
 `/usr/local/bin/edge-runtime` in the edge container. The pinned edge image
 contains the embedded edge-runtime server binary but no standalone Deno CLI;
 the box Deno runs against the exact release tree while receiving the same edge
-environment. Before approval, Anvil proves that `/usr/local/bin/deno` is a
-regular root-owned executable, records its `deno --version`, and pre-caches the
-pinned npm graph into the control directory. No dependency install or network
-fetch is allowed after this opening gate. The harness does not edit the release
-tree.
+environment. Before approval, Anvil runs `hm37-hosted-control-stage`, which
+proves that `/usr/local/bin/deno` is a regular root-owned executable, records
+its `deno --version`, and pre-caches the pinned npm graph into the control
+directory. No dependency install or network fetch is allowed after this
+opening gate. The harness does not edit the release tree.
 
 Protected inputs are exactly:
 
@@ -1205,6 +1303,7 @@ the access token only in the private file.
 ```sh
 # step: hm37-hosted-human-session-input
 # readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2, in the accepted harness checkout.
 (
   set -euo pipefail
@@ -1256,6 +1355,7 @@ and not copied as evidence.
 ```sh
 # step: hm37-hosted-control-stage
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after the accepted files arrive.
 (
   set -euo pipefail
@@ -1327,6 +1427,7 @@ never copied.
 ```sh
 # step: hm37-hosted-open-ack-control
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash; no container or service is restarted.
 (
   set -euo pipefail
@@ -1365,6 +1466,7 @@ idempotent and still verifies complete revocation before returning zero.
 ```sh
 # step: hm37-hosted-control-cleanup-only
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on yulan-vps-1 as Anvil under sudo -n -i bash after a lost shell or interrupted control.
 (
   set -euo pipefail
@@ -1459,6 +1561,7 @@ Use isolated mode-0700 directories and mode-0600 credential, connection and prof
 ```sh
 # step: hm37-validate-local-credential
 # readonly: yes
+# host: Mac mini /bin/bash 3.2 as Anvil
 # Runs on the Mac mini as Anvil, under /bin/bash 3.2.
 (
   set -euo pipefail
@@ -1538,6 +1641,7 @@ The inverse below is verbatim from the hashed rollback file.
 ```sh
 # step: hm37-reserve-schema-rollback
 # readonly: no
+# host: box /bin/bash 5.2 as root
 # Runs on the box over ssh, as Anvil in a root Bash shell.
 # RESERVED: requires HezLead's decision and verified previous-edge rollback.
 (
@@ -1615,7 +1719,7 @@ A failed forward transaction does not automatically require destructive rollback
 
 ## 12. Evidence, cleanup and closure
 
-Create the runbook’s explicit copy-back manifest before apply. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
+Run `runbook-03` immediately after `1-apply-release-directories` and before any database, service, timer, symlink, or Caddy mutation. It creates the explicit copy-back manifest from the persisted `window.env`. Standard entries cover archive identity, directory state, environment inventory, migration reconciliation, proofs, cron and edge artifacts.
 
 Add these exact item-relative paths without duplicating standard generated entries:
 
@@ -1631,6 +1735,10 @@ Add these exact item-relative paths without duplicating standard generated entri
 - `hm37-hm6-oauth-runtime.txt`
 - `hm37-hm6-oauth-public-precondition.json`
 - `hm37-hm6-oauth-refusals.json`
+- `hm37-all-migration-files.txt`
+- `hm37-ledger-before.txt`
+- `hm37-pending-before.txt`
+- `hm37-current-window-state.txt`
 - `hm37-prerequisites.json`
 - `hm37-stack-runtime-review.txt`
 - `hm37-backup-gate.txt`

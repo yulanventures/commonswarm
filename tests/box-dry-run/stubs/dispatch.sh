@@ -1,0 +1,189 @@
+#!/bin/bash
+set -euo pipefail
+
+name=${0##*/}
+: "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
+printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
+printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
+printf '\n' >>"$BOX_DRY_RUN_STUB_LOG"
+
+case "$name" in
+  ssh)
+    if [ "${BOX_DRY_RUN_EXEC_SSH:-0}" = 1 ]; then
+      /bin/bash -s -- "${@: -3}"
+      exit $?
+    fi
+    counter=${BOX_DRY_RUN_SSH_COUNTER_FILE:-}
+    count=0
+    if [ -n "$counter" ]; then
+      [ ! -f "$counter" ] || count=$(cat "$counter")
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$counter"
+    fi
+    case "${BOX_DRY_RUN_STEP:-}" in
+      hm37-read-window-suffix)
+        printf '%s\n' 'WINDOW_PRINCIPAL_SUFFIX=010203'
+        ;;
+      site-01*)
+        printf '%s\n' \
+          'measured_at=2026-09-28T01:02:03Z' \
+          'previous_release=/srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d' \
+          '0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d/app/index.html' \
+          '0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d/download/index.html'
+        ;;
+      site-04*)
+        if [ "$count" -le 2 ]; then
+          printf '%s\n' '/srv/commonswarm/site/releases/20260925T003349Z-218cf921d07d-3a154c81c821946d'
+        else
+          printf '%s\n' '/srv/commonswarm/site/releases/20260928T010203Z-8b8989f2b29e-deadbeefdeadbeef'
+        fi
+        ;;
+      *)
+        printf '%s\n' "${BOX_DRY_RUN_SSH_OUTPUT:-stubbed box response}"
+        ;;
+    esac
+    ;;
+  scp|chown|caddy)
+    ;;
+  sudo)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -u) shift 2 ;;
+        -n|-i) shift ;;
+        --) shift; break ;;
+        *) break ;;
+      esac
+    done
+    [ "$#" -eq 0 ] || exec "$@"
+    ;;
+  op)
+    printf '%s\n' 'op-placeholder-never-a-secret'
+    ;;
+  systemctl)
+    case " $* " in
+      *' is-active --quiet '*) ;;
+      *' is-active '*) printf '%s\n' inactive ;;
+      *' show '*) printf '%s\n' success ;;
+    esac
+    ;;
+  docker)
+    case " $* " in
+      *' ps -q '*) printf '%s\n' dry-run-container ;;
+      *' inspect '*'.Image'*) printf '%s\n' 'sha256:0000000000000000000000000000000000000000000000000000000000000000' ;;
+      *' inspect '*Health.Status*) printf '%s\n' healthy ;;
+      *' inspect '*State.Health*) printf '%s\n' healthy ;;
+      *' inspect '*HostConfig.Memory*) printf '%s\n' 2147483648 ;;
+      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' commonswarm-net ;;
+      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:-/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20}/deploy/edge-runtime/main /app/main" ;;
+      *' inspect '*working_dir*)
+        case "${BOX_DRY_RUN_STEP:-}" in
+          hm37-hm6-oauth-precondition) printf '%s\n' /home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth ;;
+          runbook-33) printf '%s\n' /home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922/deploy/edge-runtime ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:-/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20}/deploy/edge-runtime" ;;
+        esac
+        ;;
+      *' image inspect '*) printf '%s\n' 'sha256:0000000000000000000000000000000000000000000000000000000000000000' ;;
+      *' run '*)
+        case "${BOX_DRY_RUN_STEP:-} $* " in
+          runbook-26*'SELECT count('*20260928000004*) printf '%s\n' 0 ;;
+          runbook-26*) printf '%s\n' f ;;
+          runbook-28*'SELECT count('*20260928000004*) printf '%s\n' 1 ;;
+          runbook-28*) printf '%s\n' t ;;
+          *'/proof/20260928000004-catalog.sql'*) printf '%s\n' f ;;
+          *'ORDER BY version'*) printf '%s\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003 ;;
+          *'SELECT count('*20260928000004*) printf '%s\n' 0 ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}" ;;
+        esac
+        ;;
+    esac
+    ;;
+  curl)
+    case " $* " in
+      *'127.0.0.1:'*) printf '%s\n' '{"status":"ok"}'; exit 0 ;;
+    esac
+    explicit=0
+    for argument in "$@"; do
+      case "$argument" in
+        *User-Agent*|*user-agent*) explicit=1 ;;
+      esac
+    done
+    if [ "$explicit" -eq 1 ]; then
+      printf '%s\n' '{"stub":true,"status":200}'
+    else
+      printf '%s\n' 'error code: 1010'
+      exit 22
+    fi
+    ;;
+  psql)
+    previous=''
+    for argument in "$@"; do
+      if [ "$previous" = --file ]; then
+        case "$argument" in
+          /proof/*|/run/commonswarm-release-apply.sql) ;;
+          *) printf '%s\n' 'psql stub: --file must use the bind-mounted container path' >&2; exit 64 ;;
+        esac
+      fi
+      previous=$argument
+    done
+    printf '%s\n' t
+    ;;
+  tar)
+    # Archive creation/extraction is outside the state semantics exercised here.
+    # The call is still recorded; fixture builders provide the resulting trees.
+    case " $* " in
+      *' -xOf '*router.ts*) printf '%s\n' 'export const REQUIRED_MAIN_ENV=[]; export const COMMAND_TEST_HOOKS=new Set(); export const FUNCTION_ENV_NAMES={command:[],read:[],capability:[],activity:[],h0:[],mcp:[]};' ;;
+      *' -xf - '*) while IFS= read -r _line; do :; done ;;
+      *' -xf '*'-C '*)
+        destination=''
+        previous=''
+        for argument in "$@"; do
+          if [ "$previous" = -C ]; then destination=$argument; break; fi
+          previous=$argument
+        done
+        if [ -n "$destination" ]; then
+          mkdir -p "$destination/deploy/edge-runtime/main" \
+            "$destination/deploy/supabase-stack/migrate" \
+            "$destination/deploy/supabase-stack/backup" \
+            "$destination/deploy/supabase-stack/postgres" \
+            "$destination/supabase/migrations" \
+            "$destination/services/mcp-auth/src" \
+            "$destination/supabase/functions/command" \
+            "$destination/supabase/functions/_shared"
+          printf '%s\n' 'services: {}' >"$destination/deploy/edge-runtime/compose.yaml"
+          printf '%s\n' 'services: {}' >"$destination/deploy/supabase-stack/compose.yaml"
+          printf '%s\n' '#!/bin/sh' 'exit 0' >"$destination/deploy/supabase-stack/migrate/run-db-tool.sh"
+          chmod 0755 "$destination/deploy/supabase-stack/migrate/run-db-tool.sh"
+          if [ -n "${BOX_DRY_RUN_SOURCE_ROOT:-}" ]; then
+            cp "$BOX_DRY_RUN_SOURCE_ROOT/supabase/migrations/20260928000003_hm_oauth_store.sql" \
+              "$destination/supabase/migrations/20260928000003_hm_oauth_store.sql"
+          else
+            printf '%s\n' '-- fixture' >"$destination/supabase/migrations/20260928000003_hm_oauth_store.sql"
+          fi
+          printf '%s\n' '-- fixture' >"$destination/supabase/migrations/20260928000004_hm_hosted_check.sql"
+        fi
+        ;;
+    esac
+    ;;
+  deno)
+    if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = "${BOX_DRY_RUN_STEP:-}" ]; then
+      if [ "${BOX_DRY_RUN_STEP:-}" = hm37-hosted-open-ack-control ]; then
+        journal=/home/commonswarm/edge/controls/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-20260928T010203Z/journal/hm37-open-ack-010203.journal.json
+        mkdir -p "${journal%/*}"
+        printf '%s\n' '{}' >"$journal"
+        chmod 0600 "$journal"
+      fi
+      printf 'injected dry-run failure: %s\n' "$BOX_DRY_RUN_STEP" >&2
+      exit 41
+    fi
+    case " $* " in
+      *inventory.ts*) printf '%s\n' '{"required":["SUPABASE_URL"],"optional":[]}' ;;
+      *) printf '%s\n' 'dry-run deno PASS' ;;
+    esac
+    ;;
+  sleep)
+    ;;
+  *)
+    printf 'unhandled dry-run stub: %s\n' "$name" >&2
+    exit 69
+    ;;
+esac
