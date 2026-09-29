@@ -79,6 +79,7 @@ interface PreseedAllowlistItem {
   name: string;
   source: string;
   evidence?: string;
+  evidence_file?: string;
 }
 
 interface PromptInput {
@@ -114,6 +115,9 @@ const PLAN_VISIBLE_PATH_PRESEEDS = [
   "/srv/commonswarm/site/releases/<previous>",
   "/srv/commonswarm/site/releases/<previous>/app/index.html",
   "/srv/commonswarm/site/releases/<previous>/download/index.html",
+  "/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml",
+  "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id",
+  "/home/commonswarm/stack/release-proofs",
 ].sort();
 
 function explicitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
@@ -289,6 +293,37 @@ function citedFact(id: string): MeasuredFact {
   assert.ok(fact, `measured box facts are missing ${id}`);
   return fact;
 }
+
+const K4_10_COMPOSE_OVERRIDE_EVIDENCE = "docs/evidence/2026-09-29-box-facts/k4-10-compose.override.yaml";
+const K4_10_COMPOSE_OVERRIDE_PATH = "/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20/deploy/edge-runtime/compose.override.yaml";
+const K4_10_COMPOSE_OVERRIDE_SHA256 = "492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c";
+const K4_11_OAUTH_IMAGE_PATH = "/home/commonswarm/stack/release-proofs/826db6a34f235064a3a03c57377d8e32a35d2f05/oauth-image.id";
+const K4_11_OAUTH_IMAGE_BYTES = "sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a";
+const K4_11_OAUTH_IMAGE_SHA256 = "4d506fe4168980c14704b9f5b6e123663dbd1a32de1197da8084b1850c5e0383";
+const K4_12_STACK_PROOF_PARENT = "/home/commonswarm/stack/release-proofs";
+const K4_12_EDGE_PROOF_PARENT = "/home/commonswarm/edge/release-proofs";
+const K4_12_DIRECTORY_NAMES = [
+  "1200ebb19f56b3e154499ebb09963788d10e69ad",
+  "30ba33f9202138b3ec59b968b6282cf76d3dc7f3",
+  "38343e74cbd51ec1375317fb4770d2522ca09d0b",
+  "4ef0f3005a3981941512698a3e1e3e7641773f5b",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt1-abort-20260928T035302Z",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20-attempt2-abort-20260928T041514Z",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-108d6b89",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062737Z",
+  "72c57e0d76d0aa86fe4f811a2cf51499919fed20-diagnostic-rerun3-20260928T062815Z",
+  "826db6a34f235064a3a03c57377d8e32a35d2f05",
+  "9627cb37e697046d22ab02dd2b57bc56937afc14",
+  "9b085c82352390cf8f0fe515c02b3ccff423476a",
+  "9fa4217da9f6447e55fb8c6d577b8fd3997f926b",
+  "a54afaf696ff16b594fd91ae9a9c93c68398475a",
+  "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+  "d4677b0d1c86a6c7247d030a54a1122d6bfd5777",
+  "e7bb7a46b24e7bc794234416d43605bca52b55d4",
+  "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030",
+  "eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020",
+].sort();
 
 function measuredMatch(id: string, pattern: RegExp, field: "command" | "output" | "note" = "output"): string {
   const match = pattern.exec(measuredFact(id)[field]);
@@ -539,9 +574,7 @@ function buildBoxFixtureModel(state: string): BoxFixtureModel {
   for (const release of Object.values(releases)) {
     files[`${release.path}/RELEASE_SHA`] = { bytes: `${release.sha}\n`, owner: release.owner, group: release.group };
   }
-  const oauthProofDir = `/home/commonswarm/stack/release-proofs/${basename(OAUTH_RELEASE)}`;
-  files[`${PROOF_DIR}/oauth-image.id`] = { bytes: `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`, owner: "root", group: "root" };
-  files[`${oauthProofDir}/oauth-image.id`] = { bytes: `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`, owner: "root", group: "root" };
+  files[K4_11_OAUTH_IMAGE_PATH] = { bytes: K4_11_OAUTH_IMAGE_BYTES, owner: "root", group: "root" };
   files[`${PROOF_DIR}/required-edge-env.json`] = {
     bytes: JSON.stringify({ required: requiredEnvNames, optional: [] }) + "\n", owner: "root", group: "root",
   };
@@ -692,7 +725,7 @@ function boxFixturePairs(model: BoxFixtureModel): FixturePair[] {
     equal("current-symlink", target, release?.path ?? `<no release for ${link}>`);
   }
   equal("container-image", model.containers.oauth.image ?? "<missing>",
-    model.files[`/home/commonswarm/stack/release-proofs/${basename(OAUTH_RELEASE)}/oauth-image.id`]?.bytes.trim() ?? "<missing>");
+    model.files[K4_11_OAUTH_IMAGE_PATH]?.bytes ?? "<missing>");
   equal("helper-image", model.containers.postgres.image ?? "<missing>", model.imageIds[PSQL_IMAGE] ?? "<missing>");
   equal("working-dir", model.containers.oauth.labels["com.docker.compose.project.working_dir"] ?? "<missing>",
     `${model.releases.oauth.path}/deploy/mcp-auth`);
@@ -1283,6 +1316,15 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack"]) chmodSync(path, 0o755);
   symlinkSync(previousEdge, "/home/commonswarm/edge/current");
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
+  copyRootFixture(K4_10_COMPOSE_OVERRIDE_EVIDENCE, K4_10_COMPOSE_OVERRIDE_PATH, 0o644);
+
+  makeRootDirectory(K4_12_STACK_PROOF_PARENT, 0o755);
+  if (state === "s5") {
+    for (const name of K4_12_DIRECTORY_NAMES) makeRootDirectory(join(K4_12_STACK_PROOF_PARENT, name), 0o700);
+  } else {
+    makeRootDirectory(dirname(K4_11_OAUTH_IMAGE_PATH), 0o700);
+  }
+  writeRootMode(K4_11_OAUTH_IMAGE_PATH, K4_11_OAUTH_IMAGE_BYTES, 0o644);
 
   const proof = PROOF_DIR;
   if (state === "s2" || state === "s5") {
@@ -1345,19 +1387,23 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   chownSync("/usr/local/bin", 0, 0);
   chmodSync("/usr/local/bin", 0o755);
 
-  const normalizeSeededPath = (path: string): string => path
-    .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
-    .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
-    .replace(CANDIDATE_EDGE, "/home/commonswarm/edge/releases/<candidate>")
-    .replace(CANDIDATE_STACK, "/home/commonswarm/stack/releases/<candidate>")
-    .replace(new RegExp(`${PROOF_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.closed-window-[^/]+`),
-      "/home/commonswarm/stack/release-proofs/<closed>")
-    .replace(measuredSiteRelease, "/srv/commonswarm/site/releases/<previous>");
+  const normalizeSeededPath = (path: string): string => {
+    if ([K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT].includes(path)) return path;
+    return path
+      .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
+      .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
+      .replace(CANDIDATE_EDGE, "/home/commonswarm/edge/releases/<candidate>")
+      .replace(CANDIDATE_STACK, "/home/commonswarm/stack/releases/<candidate>")
+      .replace(new RegExp(`${PROOF_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.closed-window-[^/]+`),
+        "/home/commonswarm/stack/release-proofs/<closed>")
+      .replace(measuredSiteRelease, "/srv/commonswarm/site/releases/<previous>");
+  };
   const seededPaths = [
     "/home/commonswarm/edge/current", "/home/commonswarm/stack/current",
     previousEdge, join(previousEdge, "RELEASE_SHA"), previousStack, join(previousStack, "RELEASE_SHA"),
     targetEdge, join(targetEdge, "RELEASE_SHA"), targetStack, join(targetStack, "RELEASE_SHA"),
     ...CLOSED_PROOF_PATHS,
+    K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT,
     "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env",
     "/etc/ssl/yulan-internal-ca.pem", "/etc/commonswarm-release/target.env", measuredDbHelper,
     "/var/backups/commonswarm-postgres/status.json", "/home/commonswarm/.env", "/usr/local/bin",
@@ -1997,14 +2043,101 @@ test("pre-seed allowlist contains only harness variables or cited measured facts
       assert.match(item.source, /^harness:[A-Z][A-Z0-9_]+$/);
       continue;
     }
-    assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-[1-9])$/);
+    assert.match(item.source, /^(?:M(?:[1-9]|1[0-9]|20)|K4-(?:[1-9]|1[0-2]))$/);
     assert.ok(item.evidence, `${item.source}/${item.name} has no evidence needle`);
     const fact = citedFact(item.source);
     const measuredText = JSON.stringify(fact);
     assert.ok(measuredText.includes(item.evidence),
       `${item.source} does not measure allowlisted ${item.kind} ${item.name}: missing ${item.evidence}`);
+    if (["K4-10", "K4-11", "K4-12"].includes(item.source)) {
+      assert.ok(item.evidence_file, `${item.source}/${item.name} has no evidence file citation`);
+      assert.equal(existsSync(item.evidence_file), true, `${item.source}/${item.name} evidence file is missing`);
+    }
   }
   for (const [source, count] of [...bySource].sort()) t.diagnostic(`preseed_source=${source} count=${count}`);
+});
+
+test("K4 static seeds retain the measured bytes and proof-parent layout", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" || process.platform !== "linux",
+}, () => {
+  const k4_10 = (citedFact("K4-10") as MeasuredFact & { result?: Record<string, unknown> }).result;
+  assert.ok(k4_10 && typeof k4_10 === "object", "K4-10 has no structured result");
+  const k4_11 = citedFact("K4-11") as MeasuredFact & { files?: Array<Record<string, unknown>> };
+  const k4_12 = citedFact("K4-12") as MeasuredFact & {
+    parents?: Array<{ path: string; exists: boolean; directory_count: number; directories: Array<{ name: string }> }>;
+  };
+  assert.deepEqual(k4_10, {
+    path: K4_10_COMPOSE_OVERRIDE_PATH,
+    type: "regular file",
+    owner: "commonswarm:commonswarm",
+    mode: "644",
+    size: 648,
+    sha256: K4_10_COMPOSE_OVERRIDE_SHA256,
+    environment_sections: 0,
+    environment_values_present: false,
+    environment_key_names: [],
+  });
+  assert.equal(k4_11.files?.length, 1);
+  assert.deepEqual(k4_11.files?.[0], {
+    path: K4_11_OAUTH_IMAGE_PATH,
+    type: "regular file",
+    owner: "root:root",
+    mode: "644",
+    size: 71,
+    sha256: K4_11_OAUTH_IMAGE_SHA256,
+    last_byte_od: "   a",
+    last_byte: "a",
+    newline_terminated: false,
+    image_id: K4_11_OAUTH_IMAGE_BYTES,
+  });
+  assert.deepEqual(k4_12.parents?.map((parent) => parent.path), [K4_12_STACK_PROOF_PARENT, K4_12_EDGE_PROOF_PARENT]);
+  assert.equal(k4_12.parents?.[0]?.directory_count, 20);
+  assert.deepEqual(k4_12.parents?.[0]?.directories.map((directory) => directory.name).sort(), K4_12_DIRECTORY_NAMES);
+  assert.equal(k4_12.parents?.[1]?.exists, false);
+
+  const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
+  assert.equal(guard.status, 0, guard.stderr);
+  const fixture = prepareBoxFixture("s5");
+  try {
+    const composeBytes = readFileSync(K4_10_COMPOSE_OVERRIDE_PATH);
+    const composeStat = lstatSync(K4_10_COMPOSE_OVERRIDE_PATH);
+    assert.deepEqual(composeBytes, readFileSync(K4_10_COMPOSE_OVERRIDE_EVIDENCE));
+    assert.equal(composeStat.isFile(), true);
+    assert.equal(composeStat.mode & 0o777, 0o644);
+    assert.equal(composeStat.size, 648);
+    assert.equal(createHash("sha256").update(composeBytes).digest("hex"), K4_10_COMPOSE_OVERRIDE_SHA256);
+    const commonswarmUid = Number.parseInt(spawnSync("/usr/bin/id", ["-u", "commonswarm"], { encoding: "utf8" }).stdout, 10);
+    const commonswarmGid = Number.parseInt(spawnSync("/usr/bin/id", ["-g", "commonswarm"], { encoding: "utf8" }).stdout, 10);
+    assert.equal(composeStat.uid, commonswarmUid);
+    assert.equal(composeStat.gid, commonswarmGid);
+
+    const oauthBytes = readFileSync(K4_11_OAUTH_IMAGE_PATH);
+    const oauthStat = lstatSync(K4_11_OAUTH_IMAGE_PATH);
+    assert.equal(oauthStat.isFile(), true);
+    assert.equal(oauthStat.uid, 0);
+    assert.equal(oauthStat.gid, 0);
+    assert.equal(oauthStat.mode & 0o777, 0o644);
+    assert.equal(oauthStat.size, 71);
+    assert.equal(oauthBytes.toString("utf8"), K4_11_OAUTH_IMAGE_BYTES);
+    assert.notEqual(oauthBytes.at(-1), 0x0a);
+    assert.equal(createHash("sha256").update(oauthBytes).digest("hex"), K4_11_OAUTH_IMAGE_SHA256);
+
+    assert.deepEqual(readdirSync(K4_12_STACK_PROOF_PARENT).sort(), K4_12_DIRECTORY_NAMES);
+    for (const name of K4_12_DIRECTORY_NAMES) {
+      const stat = lstatSync(join(K4_12_STACK_PROOF_PARENT, name));
+      assert.equal(stat.isDirectory(), true, `${name} is not a directory`);
+      assert.equal(stat.uid, 0, `${name} owner`);
+      assert.equal(stat.gid, 0, `${name} group`);
+      assert.equal(stat.mode & 0o777, 0o700, `${name} mode`);
+    }
+    const oauthCopies = K4_12_DIRECTORY_NAMES
+      .map((name) => join(K4_12_STACK_PROOF_PARENT, name, "oauth-image.id"))
+      .filter(pathExists);
+    assert.deepEqual(oauthCopies, [K4_11_OAUTH_IMAGE_PATH]);
+    assert.equal(pathExists(K4_12_EDGE_PROOF_PARENT), false);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
 });
 
 test("prompt-input tables are strict and synthetic values follow their declared formats", (t) => {
