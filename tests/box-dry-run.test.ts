@@ -32,6 +32,8 @@ const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
 const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
+const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
+const OAUTH_RUNTIME_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-runtime.json";
 const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
 const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
@@ -154,6 +156,390 @@ function gitShow(revision: string, file: string): string {
   return result.stdout;
 }
 
+interface FixtureFileModel {
+  bytes: string;
+  owner: string;
+  group: string;
+}
+
+interface FixtureContainerModel {
+  image?: string;
+  health?: string;
+  memory?: string;
+  network?: string;
+  labels: Record<string, string>;
+  mounts: Array<{ source: string; destination: string }>;
+  envNames: string[];
+}
+
+interface BoxFixtureModel {
+  state: string;
+  initialState: {
+    candidateReleasesPresent: boolean;
+    closedProofDirs: string[];
+    rollbackMarkerPresent: boolean;
+  };
+  sha: string;
+  windowId: string;
+  proofDir: string;
+  closingProofDir: string;
+  releases: Record<string, { path: string; sha: string; owner: string; group: string }>;
+  symlinks: Record<string, string>;
+  files: Record<string, FixtureFileModel>;
+  checksumLists: Record<string, Record<string, string>>;
+  containers: Record<string, FixtureContainerModel>;
+  imageIds: Record<string, string>;
+  requiredEnvNames: string[];
+  presentEnvNames: string[];
+  envValues: Record<string, string>;
+  users: string[];
+  groups: string[];
+}
+
+interface FixturePair {
+  source: string;
+  category: string;
+  left: string;
+  right: string;
+  relation: "equal" | "member";
+}
+
+interface OauthImageEvidence {
+  release_sha: string;
+  local_image_id: string;
+}
+
+interface OauthRuntimeEvidence {
+  image: string;
+  health: string;
+  memory: number;
+  networks: Record<string, unknown>;
+  mounts: Array<{ Source: string; Destination: string }>;
+  extra_hosts: string[];
+}
+
+const OAUTH_IMAGE_EVIDENCE = JSON.parse(readFileSync(OAUTH_IMAGE_FILE, "utf8")) as OauthImageEvidence;
+const OAUTH_RUNTIME_EVIDENCE = JSON.parse(readFileSync(OAUTH_RUNTIME_FILE, "utf8")) as OauthRuntimeEvidence;
+
+function measuredFields(id: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const match of measuredFact(id).output.matchAll(/(?:^| )([a-z_]+)=([^\n ]+)/g)) result[match[1]!] = match[2]!;
+  return result;
+}
+
+function composeEnvironmentNames(revision: string, path: string): string[] {
+  const compose = gitShow(revision, path);
+  const environment = /\n    environment:\n([\s\S]*?)(?=\n    [a-z_]+:|\nnetworks:)/.exec(compose)?.[1] ?? "";
+  return [...environment.matchAll(/^      ([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]!).sort();
+}
+
+function requiredEdgeEnvNames(revision: string): string[] {
+  const router = gitShow(revision, "deploy/edge-runtime/main/router.ts");
+  const required = /export const REQUIRED_MAIN_ENV = \[([\s\S]*?)\] as const;/.exec(router)?.[1] ?? "";
+  const names = [...required.matchAll(/"([A-Z][A-Z0-9_]+)"/g)].map((match) => match[1]!);
+  assert.ok(names.length > 0, "exact-SHA router has no REQUIRED_MAIN_ENV names");
+  assert.match(router, /environment\("SWARM_DATABASE_URL"\).*environment\("SUPABASE_DB_URL"\)/s);
+  return [...names, "SWARM_DATABASE_URL|SUPABASE_DB_URL"].sort();
+}
+
+function planContainerLabels(project: string): { project: string; service: string } {
+  const source = [...blocks(HM37), ...blocks(RUNBOOK)].map((block) => block.source).join("\n");
+  const escaped = project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`label=com\\.docker\\.compose\\.project=(${escaped})[\\s\\S]{0,160}?label=com\\.docker\\.compose\\.service=([a-z0-9-]+)`).exec(source);
+  assert.ok(match, `plan has no Docker label selector for ${project}`);
+  return { project: match[1]!, service: match[2]! };
+}
+
+function composeServiceName(revision: string, path: string): string {
+  const service = /^services:\n  ([a-z0-9-]+):/m.exec(gitShow(revision, path))?.[1];
+  assert.ok(service, `${revision}:${path} has no first Compose service`);
+  return service;
+}
+
+function composeProjectName(revision: string, path: string): string {
+  const project = /^name: ([a-z0-9-]+)$/m.exec(gitShow(revision, path))?.[1];
+  assert.ok(project, `${revision}:${path} has no Compose project name`);
+  return project;
+}
+
+function planEdgeSelection(): { project: string; service: string } {
+  const source = blocks(HM37).map((block) => block.source).join("\n").replace(/\\\n\s*/g, " ");
+  const match = /docker compose -p ([a-z0-9-]+) -f "\$EXPECTED_EDGE[^\n]+ ps -q ([a-z0-9-]+)/.exec(source);
+  assert.ok(match, "HM37 plan has no previous-edge Compose selection");
+  return { project: match[1]!, service: match[2]! };
+}
+
+function composeBindMounts(revision: string, release: string): Array<{ source: string; destination: string }> {
+  const compose = gitShow(revision, "deploy/edge-runtime/compose.yaml");
+  const volumes = /\n    volumes:\n([\s\S]*?)(?=\n    [a-z_]+:|\nvolumes:)/.exec(compose)?.[1] ?? "";
+  return [...volumes.matchAll(/^      - ([^:\n]+):(\/[^:\n]+):ro$/gm)]
+    .map((match) => ({ source: resolve(release, "deploy/edge-runtime", match[1]!), destination: match[2]! }));
+}
+
+function buildBoxFixtureModel(state: string): BoxFixtureModel {
+  assert.ok(["s1", "s2", "s3", "s4", "s5"].includes(state), `unknown box fixture state ${state}`);
+  assert.equal(OAUTH_IMAGE_EVIDENCE.release_sha, basename(OAUTH_RELEASE));
+  assert.equal(OAUTH_RUNTIME_EVIDENCE.image, OAUTH_IMAGE_EVIDENCE.local_image_id);
+  const edge = measuredFields("M11");
+  const oauthWorkdir = measuredProductionMatch(/oauth_workdir=([^\n]+)/);
+  const oauthHost = OAUTH_RUNTIME_EVIDENCE.extra_hosts[0]?.split(":", 1)[0];
+  assert.ok(oauthHost);
+  const oauthEnvNames = composeEnvironmentNames(basename(OAUTH_RELEASE), "deploy/mcp-auth/compose.yaml");
+  assert.ok(oauthEnvNames.includes("MCP_OAUTH_DATABASE_HOST"));
+  const requiredEnvNames = requiredEdgeEnvNames(RELEASE_SHA);
+  const envValues = {
+    SWARM_ENV: "production",
+    SWARM_DATABASE_URL: "postgres://placeholder",
+    SWARM_SELF_SERVE: "1",
+    SUPABASE_URL: "http://kong:8000",
+    SUPABASE_ANON_KEY: "fixture-anon-key",
+    SUPABASE_SERVICE_ROLE_KEY: "fixture-service-role-key",
+  };
+  const presentEnvNames = Object.keys(envValues).sort();
+  const oauthComposePath = "deploy/mcp-auth/compose.yaml";
+  const postgresComposePath = "deploy/supabase-stack/compose.yaml";
+  const oauthLabels = {
+    project: composeProjectName(basename(OAUTH_RELEASE), oauthComposePath),
+    service: composeServiceName(basename(OAUTH_RELEASE), oauthComposePath),
+  };
+  const postgresLabels = {
+    project: composeProjectName(basename(PREVIOUS_STACK), postgresComposePath),
+    service: composeServiceName(basename(PREVIOUS_STACK), postgresComposePath),
+  };
+  const edgeSelection = planEdgeSelection();
+  const edgeService = composeServiceName(basename(PREVIOUS_EDGE), "deploy/edge-runtime/compose.yaml");
+  const releases = {
+    previousEdge: { path: PREVIOUS_EDGE, sha: basename(PREVIOUS_EDGE), owner: "commonswarm", group: "commonswarm" },
+    previousStack: { path: PREVIOUS_STACK, sha: basename(PREVIOUS_STACK), owner: "commonswarm", group: "commonswarm" },
+    oauth: { path: OAUTH_RELEASE, sha: OAUTH_IMAGE_EVIDENCE.release_sha, owner: "commonswarm", group: "commonswarm" },
+    candidateEdge: { path: CANDIDATE_EDGE, sha: RELEASE_SHA, owner: "commonswarm", group: "commonswarm" },
+    candidateStack: { path: CANDIDATE_STACK, sha: RELEASE_SHA, owner: "commonswarm", group: "commonswarm" },
+  };
+  const files: Record<string, FixtureFileModel> = {};
+  for (const release of Object.values(releases)) {
+    files[`${release.path}/RELEASE_SHA`] = { bytes: `${release.sha}\n`, owner: release.owner, group: release.group };
+  }
+  const oauthProofDir = `/home/commonswarm/stack/release-proofs/${basename(OAUTH_RELEASE)}`;
+  files[`${PROOF_DIR}/oauth-image.id`] = { bytes: `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`, owner: "root", group: "root" };
+  files[`${oauthProofDir}/oauth-image.id`] = { bytes: `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`, owner: "root", group: "root" };
+  files[`${PROOF_DIR}/required-edge-env.json`] = {
+    bytes: JSON.stringify({ required: requiredEnvNames, optional: [] }) + "\n", owner: "root", group: "root",
+  };
+  const virtualReleaseFiles: Record<string, string> = {
+    "RELEASE_SHA": `${RELEASE_SHA}\n`,
+    "deploy/edge-runtime/compose.yaml": "services: {}\n",
+    "deploy/edge-runtime/main/router.ts": "// dry-run router fixture\n",
+    "deploy/supabase-stack/compose.yaml": "services: {}\n",
+    "supabase/migrations/20260928000004_hm_hosted_check.sql": "-- fixture\n",
+  };
+  const checksumLists: Record<string, Record<string, string>> = {};
+  for (const kind of ["edge", "stack"]) {
+    const release = kind === "edge" ? releases.candidateEdge : releases.candidateStack;
+    for (const [path, bytes] of Object.entries(virtualReleaseFiles)) {
+      files[`${release.path}/${path}`] = { bytes, owner: release.owner, group: release.group };
+    }
+    checksumLists[kind] = Object.fromEntries(Object.entries(virtualReleaseFiles).map(([path, bytes]) => [
+      path, createHash("sha256").update(bytes).digest("hex"),
+    ]));
+  }
+  const accounts = measuredFact("M3").output.split("\n").filter(Boolean);
+  const users = accounts.filter((line) => line.split(":").length >= 7).map((line) => line.split(":", 1)[0]!);
+  const groups = accounts.filter((line) => line.split(":").length === 4).map((line) => line.split(":", 1)[0]!);
+  const edgeMeasuredMounts = (edge.mounts ?? "").split(";").filter(Boolean).map((entry) => {
+    const separator = entry.indexOf(":/");
+    assert.ok(separator > 0, `invalid M11 mount ${entry}`);
+    return { source: entry.slice(0, separator), destination: entry.slice(separator + 1) };
+  });
+  const edgeComposeMounts = composeBindMounts(basename(PREVIOUS_EDGE), PREVIOUS_EDGE);
+  for (const expected of edgeComposeMounts) {
+    assert.ok(edgeMeasuredMounts.some((actual) => actual.source === expected.source && actual.destination === expected.destination),
+      `M11 mount inventory omits ${expected.source}:${expected.destination}`);
+  }
+  return {
+    state,
+    initialState: {
+      candidateReleasesPresent: state !== "s1",
+      closedProofDirs: state === "s2" || state === "s5" ? [...CLOSED_PROOF_PATHS] : [],
+      rollbackMarkerPresent: state === "s4",
+    },
+    sha: RELEASE_SHA, windowId: WINDOW_ID, proofDir: PROOF_DIR,
+    closingProofDir: `${PROOF_DIR}.closed-window-${WINDOW_ID}`,
+    releases,
+    symlinks: {
+      "/home/commonswarm/edge/current": PREVIOUS_EDGE,
+      "/home/commonswarm/stack/current": PREVIOUS_STACK,
+      "/home/commonswarm/oauth/current": OAUTH_RELEASE,
+    },
+    files, checksumLists,
+    containers: {
+      oauth: {
+        image: OAUTH_RUNTIME_EVIDENCE.image,
+        health: OAUTH_RUNTIME_EVIDENCE.health,
+        memory: String(OAUTH_RUNTIME_EVIDENCE.memory),
+        network: Object.keys(OAUTH_RUNTIME_EVIDENCE.networks)[0],
+        labels: {
+          "com.docker.compose.project": oauthLabels.project,
+          "com.docker.compose.service": oauthLabels.service,
+          "com.docker.compose.project.working_dir": oauthWorkdir,
+        },
+        mounts: OAUTH_RUNTIME_EVIDENCE.mounts.map((mount) => ({ source: mount.Source, destination: mount.Destination })),
+        envNames: oauthEnvNames,
+      },
+      postgres: {
+        image: POSTGRES_IMAGE_ID,
+        labels: { "com.docker.compose.project": postgresLabels.project, "com.docker.compose.service": postgresLabels.service },
+        mounts: [], envNames: [],
+      },
+      edge: {
+        health: edge.health,
+        memory: edge.memory,
+        network: edge.network,
+        labels: {
+          "com.docker.compose.project": edgeSelection.project,
+          "com.docker.compose.service": edgeService,
+          "com.docker.compose.project.working_dir": edge.workdir,
+        },
+        mounts: edgeMeasuredMounts,
+        envNames: presentEnvNames,
+      },
+      candidateEdge: {
+        health: edge.health,
+        memory: edge.memory,
+        network: edge.network,
+        labels: {
+          "com.docker.compose.project": edgeSelection.project,
+          "com.docker.compose.service": edgeService,
+          "com.docker.compose.project.working_dir": `${CANDIDATE_EDGE}/deploy/edge-runtime`,
+        },
+        mounts: edgeMeasuredMounts.map((mount) => ({
+          source: mount.source.startsWith(PREVIOUS_EDGE) ? CANDIDATE_EDGE + mount.source.slice(PREVIOUS_EDGE.length) : mount.source,
+          destination: mount.destination,
+        })),
+        envNames: presentEnvNames,
+      },
+    },
+    imageIds: { [PSQL_IMAGE]: POSTGRES_IMAGE_ID },
+    requiredEnvNames, presentEnvNames, envValues, users, groups,
+  };
+}
+
+function fixtureComparisonSources(): Map<string, string[]> {
+  const source = [...blocks(HM37), ...blocks(RUNBOOK), ...blocks(SITE)]
+    .filter((block) => block.host.startsWith("box "))
+    .map((block) => `${block.step}\n${block.source.replace(/\\\n\s*/g, " ")}`)
+    .join("\n");
+  const families = new Map<string, RegExp>([
+    ["release-sha", /test "\$\(cat "?\$[^\n]*RELEASE_SHA"?\)" =/g],
+    ["current-symlink", /test "\$\(readlink -f \/home\/commonswarm\/(?:edge|stack|oauth)\/current\)" =/g],
+    ["container-image", /test "\$\(docker inspect --format '\{\{\.Image\}\}'/g],
+    ["working-dir", /test "\$\(docker inspect --format '\{\{ index \.Config\.Labels "com\.docker\.compose\.project\.working_dir" \}\}'/g],
+    ["container-health", /(?:test|while \[) "\$\(docker inspect --format '[^']*Health[^']*'/g],
+    ["mount-membership", /docker inspect --format '\{\{ range \.Mounts \}\}[^\n]*\| grep -qF/g],
+    ["container-selection", /docker ps -q\s+--filter label=com\.docker\.compose\.project=/g],
+    ["container-env-membership", /\.Config\.Env[^\n]*MCP_OAUTH_DATABASE_HOST/g],
+    ["memory", /test "\$\(docker inspect --format '\{\{\.HostConfig\.Memory\}\}'/g],
+    ["network", /test "\$\(docker inspect --format '\{\{\.HostConfig\.NetworkMode\}\}'/g],
+    ["helper-image", /docker image inspect --format '\{\{\.Id\}\}'/g],
+    ["checksum", /sha256sum --quiet --strict --check/g],
+    ["environment", /required = set\(inventory\['required'\]\)[\s\S]*?missing = sorted\(name for name in required if not values\.get\(name\)\)/g],
+    ["ownership", /(?:stat -c '%U:%G'|pwd\.getpwuid\(env_stat\.st_uid\)\.pw_name in)/g],
+    ["proof-name", /CLOSED_PROOF_DIR="\$\{PROOF_DIR\}\.closed-window-\$\{WINDOW_ID\}"/g],
+  ]);
+  const discovered = new Map<string, string[]>();
+  for (const [family, pattern] of families) {
+    const matches = [...source.matchAll(pattern)].map((match) => match[0]);
+    assert.ok(matches.length > 0, `plan comparison discovery found no ${family} source`);
+    discovered.set(family, matches);
+  }
+  return discovered;
+}
+
+function boxFixturePairs(model: BoxFixtureModel): FixturePair[] {
+  const sources = fixtureComparisonSources();
+  const source = (family: string): string => `${family}:${sources.get(family)?.[0]}`;
+  const pairs: FixturePair[] = [];
+  const equal = (category: string, left: string, right: string): void => {
+    pairs.push({ source: source(category), category, left, right, relation: "equal" });
+  };
+  const member = (category: string, left: string, right: string): void => {
+    pairs.push({ source: source(category), category, left, right, relation: "member" });
+  };
+  for (const release of Object.values(model.releases)) {
+    equal("release-sha", model.files[`${release.path}/RELEASE_SHA`]?.bytes.trim() ?? "<missing>", release.sha);
+  }
+  for (const [link, target] of Object.entries(model.symlinks)) {
+    const release = Object.values(model.releases).find((candidate) => candidate.path === target);
+    equal("current-symlink", target, release?.path ?? `<no release for ${link}>`);
+  }
+  equal("container-image", model.containers.oauth.image ?? "<missing>",
+    model.files[`/home/commonswarm/stack/release-proofs/${basename(OAUTH_RELEASE)}/oauth-image.id`]?.bytes.trim() ?? "<missing>");
+  equal("helper-image", model.containers.postgres.image ?? "<missing>", model.imageIds[PSQL_IMAGE] ?? "<missing>");
+  equal("working-dir", model.containers.oauth.labels["com.docker.compose.project.working_dir"] ?? "<missing>",
+    `${model.releases.oauth.path}/deploy/mcp-auth`);
+  equal("working-dir", model.containers.edge.labels["com.docker.compose.project.working_dir"] ?? "<missing>",
+    `${model.releases.previousEdge.path}/deploy/edge-runtime`);
+  equal("working-dir", model.containers.candidateEdge.labels["com.docker.compose.project.working_dir"] ?? "<missing>",
+    `${model.releases.candidateEdge.path}/deploy/edge-runtime`);
+  equal("container-health", model.containers.oauth.health ?? "<missing>", "healthy");
+  equal("container-health", model.containers.edge.health ?? "<missing>", "healthy");
+  equal("container-health", model.containers.candidateEdge.health ?? "<missing>", "healthy");
+  const selectedLabels = {
+    oauth: planContainerLabels("commonswarm-oauth"),
+    postgres: planContainerLabels("commonswarm-supabase-stack"),
+    edge: planEdgeSelection(),
+  };
+  for (const name of ["oauth", "postgres", "edge"] as const) {
+    equal("container-selection", model.containers[name].labels["com.docker.compose.project"] ?? "<missing>", selectedLabels[name].project);
+    equal("container-selection", model.containers[name].labels["com.docker.compose.service"] ?? "<missing>", selectedLabels[name].service);
+  }
+  const expectedEdgeMounts = composeBindMounts(basename(PREVIOUS_EDGE), PREVIOUS_EDGE);
+  for (const expected of expectedEdgeMounts) {
+    const actual = model.containers.edge.mounts.find((mount) => mount.destination === expected.destination);
+    equal("mount-membership", actual ? `${actual.source}:${actual.destination}` : "<missing>",
+      `${expected.source}:${expected.destination}`);
+  }
+  const oauthCompose = gitShow(basename(OAUTH_RELEASE), "deploy/mcp-auth/compose.yaml");
+  for (const mount of model.containers.oauth.mounts) {
+    const description = `${mount.source}:${mount.destination}`;
+    equal("mount-membership", description,
+      oauthCompose.includes(`source: ${mount.source}`) && oauthCompose.includes(`target: ${mount.destination}`) ? description : "<missing>");
+  }
+  const oauthComposeEnvNames = composeEnvironmentNames(basename(OAUTH_RELEASE), "deploy/mcp-auth/compose.yaml");
+  for (const name of model.containers.oauth.envNames) member("container-env-membership", name, oauthComposeEnvNames.join("\n"));
+  equal("memory", model.containers.candidateEdge.memory ?? "<missing>", String(EDGE_MEMORY));
+  equal("network", model.containers.candidateEdge.network ?? "<missing>", EDGE_NETWORK);
+  for (const [kind, manifest] of Object.entries(model.checksumLists)) {
+    for (const [path, digest] of Object.entries(manifest)) {
+      const release = kind === "edge" ? model.releases.candidateEdge : model.releases.candidateStack;
+      equal("checksum", digest, createHash("sha256").update(model.files[`${release.path}/${path}`]?.bytes ?? "<missing>").digest("hex"));
+    }
+  }
+  for (const required of model.requiredEnvNames) {
+    const candidates = required.split("|");
+    member("environment", required, candidates.some((name) => model.presentEnvNames.includes(name)) ? required : model.presentEnvNames.join(","));
+  }
+  for (const release of Object.values(model.releases)) {
+    member("ownership", release.owner, model.users.join("\n"));
+    member("ownership", release.group, model.groups.join("\n"));
+  }
+  equal("proof-name", basename(model.proofDir), model.sha);
+  equal("proof-name", basename(model.closingProofDir), `${model.sha}.closed-window-${model.windowId}`);
+  return pairs;
+}
+
+function fixturePairMismatches(model: BoxFixtureModel): string[] {
+  return boxFixturePairs(model).flatMap((pair) => {
+    const passes = pair.relation === "equal" ? pair.left === pair.right : pair.right.split("\n").includes(pair.left);
+    return passes ? [] : [`${pair.category}: ${pair.left} ${pair.relation} ${pair.right} [${pair.source}]`];
+  });
+}
+
+function assertBoxFixtureConsistency(model: BoxFixtureModel): void {
+  const mismatches = fixturePairMismatches(model);
+  assert.equal(mismatches.length, 0,
+    `${model.state} fixture mismatches (${mismatches.length}):\n${mismatches.join("\n")}`);
+}
+
 function stepSource(markdown: string, step: string): string {
   const escaped = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const match = new RegExp(`^# step: ${escaped}\\n[\\s\\S]*?(?=^\\x60\\x60\\x60$)`, "m").exec(markdown);
@@ -271,6 +657,7 @@ interface Fixture {
   rootDirectories?: RootDirectoryFixture[];
   replacedRuntime?: { path: string; backup?: string };
   replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
+  model?: BoxFixtureModel;
 }
 
 interface RootDirectoryFixture {
@@ -488,6 +875,7 @@ function windowEnvBody(state: string): string {
 
 function prepareBoxFixture(state: string): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
+  const model = buildBoxFixtureModel(state);
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
   chownSync(temporary, 0, 0);
   chmodSync(temporary, 0o700);
@@ -548,14 +936,16 @@ function prepareBoxFixture(state: string): Fixture {
   }
   assert.equal(pathExists(DENO_PATH), false, "M1 fixture baseline requires Deno absent");
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
-  const previousEdge = PREVIOUS_EDGE;
-  const previousStack = PREVIOUS_STACK;
-  const oauth = OAUTH_RELEASE;
+  const previousEdge = model.releases.previousEdge.path;
+  const previousStack = model.releases.previousStack.path;
+  const oauth = model.releases.oauth.path;
   for (const release of [previousEdge, previousStack, oauth]) {
     mkdirSync(join(release, "deploy/edge-runtime/main"), { recursive: true });
     mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
     mkdirSync(join(release, "supabase/migrations"), { recursive: true });
-    writeMode(join(release, "RELEASE_SHA"), `${basename(release)}\n`, 0o644);
+    const releaseModel = Object.values(model.releases).find((candidate) => candidate.path === release);
+    assert.ok(releaseModel);
+    writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
     chmodSync(release, 0o755);
   }
   mkdirSync(join(previousStack, "deploy/supabase-stack/postgres"), { recursive: true });
@@ -583,7 +973,7 @@ function prepareBoxFixture(state: string): Fixture {
   chmodSync(proof, 0o700);
   writeMode(join(proof, "window.env"), windowEnvBody(state));
   writeMode(join(proof, "GO.txt"), "CONCURRENT_OPERATOR_ACTIVITY=accepted by HezLead\n");
-  writeMode(join(proof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
+  writeMode(join(proof, "oauth-image.id"), model.files[`${proof}/oauth-image.id`]!.bytes);
   for (const file of ["20260928000003-catalog.sql", "20260928000003-functional.sql", "20260928000004-catalog.sql", "20260928000004-functional.sql"]) writeMode(join(proof, file), "SELECT true AS catalog_ok\\gset\n");
   writeMode(join(proof, "copy-back.list"), "copy-back.list\n");
   for (const file of [
@@ -592,17 +982,12 @@ function prepareBoxFixture(state: string): Fixture {
     "mcp-caddy-after.caddy", "mcp-caddy-log-files.txt",
   ]) writeMode(join(proof, file), file.endsWith(".txt") ? "fixture\n" : "");
   writeMode(join(proof, "gate-evidence.txt"), `SHA=${RELEASE_SHA}\nfixture gate evidence\n`);
-  writeMode(join(proof, "required-edge-env.json"), JSON.stringify({
-    required: [
-      "SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_URL",
-      "SWARM_DATABASE_URL|SUPABASE_DB_URL", "SWARM_SELF_SERVE",
-    ], optional: [],
-  }) + "\n");
+  writeMode(join(proof, "required-edge-env.json"), model.files[`${proof}/required-edge-env.json`]!.bytes);
   writeMode(join(proof, "edge-env-source-check.txt"), "fixture exact-SHA router inventory\n");
   const oauthProof = join("/home/commonswarm/stack/release-proofs", basename(OAUTH_RELEASE));
   mkdirSync(oauthProof, { recursive: true, mode: 0o700 });
   chmodSync(oauthProof, 0o700);
-  writeMode(join(oauthProof, "oauth-image.id"), `sha256:${"0".repeat(64)}`);
+  writeMode(join(oauthProof, "oauth-image.id"), model.files[`${oauthProof}/oauth-image.id`]!.bytes);
   writeMode("/tmp/commonswarm-release-window.env", `SHA='${RELEASE_SHA}'\nWINDOW_START_UTC='${WINDOW_START}'\nWINDOW_ID='${WINDOW_ID}'\n`);
   writeMode("/tmp/commonswarm-release.tar", "dry-run archive\n");
   writeMode("/tmp/commonswarm-site-window.env", `SITE_WINDOW_START_UTC='${WINDOW_START}'\nSITE_WINDOW_ID='${WINDOW_ID}'\n`);
@@ -614,15 +999,8 @@ function prepareBoxFixture(state: string): Fixture {
     "release_psql_ro() { case \"${BOX_DRY_RUN_STEP:-} $*\" in *20260916000001*20260916000002*) :;; runbook-26*20260928000004*count*) printf '%s\\n' 0;; runbook-26*20260928000004-catalog.sql*) printf '%s\\n' f;; runbook-28*20260928000004*count*) printf '%s\\n' 1;; runbook-28*20260928000004-catalog.sql*) printf '%s\\n' t;; *'ORDER BY version'*) printf '%s\\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003;; *) printf '%s\\n' \"${BOX_DRY_RUN_PSQL_RESULT:-t}\";; esac; }",
     "",
   ].join("\n"));
-  writeMode("/home/commonswarm/.env", [
-    "SWARM_ENV=production",
-    "SWARM_DATABASE_URL=postgres://placeholder",
-    "SWARM_SELF_SERVE=1",
-    "SUPABASE_URL=http://kong:8000",
-    "SUPABASE_ANON_KEY=fixture-anon-key",
-    "SUPABASE_SERVICE_ROLE_KEY=fixture-service-role-key",
-    "",
-  ].join("\n"), 0o600);
+  writeMode("/home/commonswarm/.env",
+    Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600);
   writeMode("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600);
   writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o600);
   writeMode("/etc/commonswarm-oauth/database-credentials", '{"user":"commonswarm_oauth_runtime","password":"placeholder"}\n', 0o600);
@@ -644,7 +1022,7 @@ function prepareBoxFixture(state: string): Fixture {
       mkdirSync(join(release, "deploy/supabase-stack/postgres"), { recursive: true });
       mkdirSync(join(release, "deploy/supabase-stack/backup"), { recursive: true });
       mkdirSync(join(release, "supabase/migrations"), { recursive: true });
-      writeMode(join(release, "RELEASE_SHA"), `${RELEASE_SHA}\n`, 0o644);
+      writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
       writeMode(join(release, "deploy/edge-runtime/compose.yaml"), "services: {}\n", 0o644);
       writeMode(join(release, "deploy/edge-runtime/main/router.ts"), "// dry-run router fixture\n", 0o644);
       writeMode(join(release, "deploy/supabase-stack/compose.yaml"), "services: {}\n", 0o644);
@@ -713,7 +1091,7 @@ function prepareBoxFixture(state: string): Fixture {
   chmodSync("/usr/local/bin", 0o755);
 
   return {
-    temporary, cwd: process.cwd(), home: "/root", bin, log,
+    temporary, cwd: process.cwd(), home: "/root", bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
     replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
     replacedDirectory: {
@@ -731,11 +1109,18 @@ function prepareBoxFixture(state: string): Fixture {
       BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
       BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
-      BOX_DRY_RUN_POSTGRES_IMAGE_ID: POSTGRES_IMAGE_ID,
+      BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
       BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
-      BOX_DRY_RUN_OAUTH_DATABASE_HOST_ENV_NAME: "MCP_OAUTH_DATABASE_HOST",
-      BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
-      BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
+      BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image,
+      BOX_DRY_RUN_OAUTH_HEALTH: model.containers.oauth.health,
+      BOX_DRY_RUN_OAUTH_WORKDIR: model.containers.oauth.labels["com.docker.compose.project.working_dir"],
+      BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE: `MCP_OAUTH_DATABASE_HOST=${OAUTH_RUNTIME_EVIDENCE.extra_hosts[0]!.split(":", 1)[0]}`,
+      BOX_DRY_RUN_EDGE_HEALTH: model.containers.edge.health,
+      BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"],
+      BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source} ${mount.destination}`).join("\n"),
+      BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR: model.containers.candidateEdge.labels["com.docker.compose.project.working_dir"],
+      BOX_DRY_RUN_EDGE_MEMORY: model.containers.candidateEdge.memory,
+      BOX_DRY_RUN_EDGE_NETWORK: model.containers.candidateEdge.network,
       BOX_DRY_RUN_OAUTH_RELEASE: OAUTH_RELEASE,
       BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
       BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
@@ -1283,6 +1668,30 @@ test("fixture image, repository-path, and environment-name values agree with rep
   for (const value of values) assert.equal(accepted(value), true, `fixture value has no repository/measurement source: ${value}`);
   assert.equal(accepted("public.ecr.aws/supabase/postgres:0.0.0-invented"), false,
     "invented image control unexpectedly passed");
+});
+
+test("every box fixture model is internally consistent with plan comparisons", (t) => {
+  const states = Object.keys(JSON.parse(readFileSync("tests/box-dry-run/fixtures/states.json", "utf8")) as Record<string, string>);
+  const sources = fixtureComparisonSources();
+  assert.equal(sources.size, 15, "fixture comparison family discovery changed");
+  let pairCount = 0;
+  for (const state of states) {
+    const model = buildBoxFixtureModel(state);
+    const pairs = boxFixturePairs(model);
+    if (pairCount === 0) pairCount = pairs.length;
+    assert.equal(pairs.length, pairCount, `${state} produced a different comparison pair list`);
+    assertBoxFixtureConsistency(model);
+  }
+  assert.ok(pairCount >= 40, `fixture consistency discovered only ${pairCount} pairs`);
+
+  const control = structuredClone(buildBoxFixtureModel("s2"));
+  control.containers.oauth.image = `sha256:${"f".repeat(64)}`;
+  const controlMismatches = fixturePairMismatches(control);
+  assert.equal(controlMismatches.length, 1,
+    `one-pair failing control did not report exactly one mismatch:\n${controlMismatches.join("\n")}`);
+  assert.match(controlMismatches[0]!, /^container-image:/);
+  assert.throws(() => assertBoxFixtureConsistency(control), /s2 fixture mismatches \(1\):\ncontainer-image:/);
+  t.diagnostic(`fixture_comparison_families=${sources.size}; pairs_per_state=${pairCount}; states=${states.length}; all_passed=true; failing_control=1_mismatch`);
 });
 
 test("box runtime stubs are regular root-owned executables and emit accepted Deno shapes", {

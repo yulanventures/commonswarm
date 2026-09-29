@@ -69,22 +69,38 @@ case "$name" in
     ;;
   docker)
     case " $* " in
-      *' ps -q '*) printf '%s\n' dry-run-container ;;
-      *' inspect '*'.Config.Env'*) printf '%s=%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_ENV_NAME:?OAuth host name required}" db.commonswarm.internal ;;
-      *' inspect '*'.Image'*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:-sha256:0000000000000000000000000000000000000000000000000000000000000000}" ;;
-      *' inspect '*Health.Status*) printf '%s\n' healthy ;;
-      *' inspect '*State.Health*) printf '%s\n' healthy ;;
-      *' inspect '*HostConfig.Memory*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MEMORY:?edge memory required}" ;;
-      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' "${BOX_DRY_RUN_EDGE_NETWORK:?edge network required}" ;;
-      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:?expected edge required}/deploy/edge-runtime/main /app/main" ;;
-      *' inspect '*working_dir*)
-        case "${BOX_DRY_RUN_STEP:-}" in
-          hm37-hm6-oauth-precondition) printf '%s/deploy/mcp-auth\n' "${BOX_DRY_RUN_OAUTH_RELEASE:?OAuth release required}" ;;
-          runbook-33) printf '%s/deploy/edge-runtime\n' "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}" ;;
-          *) printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:?expected edge required}/deploy/edge-runtime" ;;
+      *' ps -q '*)
+        case " $* " in
+          *'com.docker.compose.project=commonswarm-oauth'*) printf '%s\n' dry-run-oauth ;;
+          *'com.docker.compose.service=postgres'*) printf '%s\n' dry-run-postgres ;;
+          *) printf '%s\n' dry-run-edge ;;
         esac
         ;;
-      *' image inspect '*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:-sha256:0000000000000000000000000000000000000000000000000000000000000000}" ;;
+      *' inspect '*'.Config.Env'*) printf '%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE:?OAuth host line required}" ;;
+      *' inspect '*'.Image'*)
+        case "${@: -1}" in
+          dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_IMAGE:?OAuth image required}" ;;
+          dry-run-postgres) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
+        esac
+        ;;
+      *' inspect '*Health.Status*|*' inspect '*State.Health*)
+        case "${@: -1}" in
+          dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_HEALTH:?OAuth health required}" ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_EDGE_HEALTH:?edge health required}" ;;
+        esac
+        ;;
+      *' inspect '*HostConfig.Memory*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MEMORY:?edge memory required}" ;;
+      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' "${BOX_DRY_RUN_EDGE_NETWORK:?edge network required}" ;;
+      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MOUNTS:?edge mounts required}" ;;
+      *' inspect '*working_dir*)
+        case "${@: -1} ${BOX_DRY_RUN_STEP:-}" in
+          dry-run-oauth\ *) printf '%s\n' "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
+          *' runbook-33') printf '%s\n' "${BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR:?candidate edge workdir required}" ;;
+          *) printf '%s\n' "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}" ;;
+        esac
+        ;;
+      *' image inspect '*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
       *' run '*)
         case "${BOX_DRY_RUN_STEP:-} $* " in
           runbook-26*'SELECT count('*20260928000004*) printf '%s\n' 0 ;;

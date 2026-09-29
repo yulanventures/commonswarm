@@ -589,12 +589,12 @@ After both parts pass, the required checks have executable owners:
   EXPECTED_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
   test "$(readlink -f /home/commonswarm/edge/current)" = "$EXPECTED_EDGE"
   test "$(cat "$EXPECTED_EDGE/RELEASE_SHA")" = 72c57e0d76d0aa86fe4f811a2cf51499919fed20
-  EDGE_CID="$(docker compose -p commonswarm-edge -f "$EXPECTED_EDGE/deploy/edge-runtime/compose.yaml" ps -q edge)"
+  EDGE_CID="$(docker compose -p commonswarm-edge -f "$EXPECTED_EDGE/deploy/edge-runtime/compose.yaml" ps -q edge-runtime)"
   test -n "$EDGE_CID"
   test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$EDGE_CID")" = \
     "$EXPECTED_EDGE/deploy/edge-runtime"
   docker inspect --format '{{ range .Mounts }}{{ println .Source .Destination }}{{ end }}' "$EDGE_CID" \
-    | grep -qF "$EXPECTED_EDGE/deploy/edge-runtime/main /app/main"
+    | grep -qF "$EXPECTED_EDGE/deploy/edge-runtime/main /home/deno/main"
   docker exec "$EDGE_CID" deno eval \
     'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
 
