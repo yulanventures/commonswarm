@@ -40,6 +40,7 @@ const COMMAND_OUTPUTS_FILE = "tests/box-dry-run/fixtures/command-outputs.json";
 const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measured.json";
 const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
 const OAUTH_RUNTIME_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-runtime.json";
+const REAL_CHECKOUT = process.cwd();
 const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
 const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
@@ -1232,6 +1233,7 @@ function checkoutFixture(parent: string, name: string, sha: string): string {
 
 function prepareMacFixture(planBlocks: Block[] = []): Fixture {
   const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
+  const checkout = checkoutFixture(temporary, "checkout", "HEAD");
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const home = join(temporary, "child-home");
   const bin = join(temporary, "bin");
@@ -1239,10 +1241,10 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
   mkdirSync(home, { mode: 0o700 });
   makeStubBin(bin);
   return {
-    temporary, cwd: process.cwd(), home, bin, log,
+    temporary, cwd: checkout, home, bin, log,
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
-    sourceRoot: process.cwd(),
+    sourceRoot: checkout,
     env: explicitEnvironment({
       ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       HOME: home,
@@ -1269,6 +1271,31 @@ function cleanupMacFixture(fixture: Fixture): void {
     "/tmp/commonswarm-site-window.env",
   ]) rmSync(path, { force: true });
   removeOwnedTemporary(fixture.temporary!, "commonswarm-box-dry-run-mac-");
+}
+
+interface CheckoutSnapshot {
+  status: string;
+  evidenceMtimes: Array<{ path: string; mtimeMs: number }>;
+}
+
+function checkoutSnapshot(checkout: string): CheckoutSnapshot {
+  const status = spawnSync("git", ["status", "--porcelain"], { cwd: checkout, encoding: "utf8" });
+  assert.equal(status.status, 0, status.stderr);
+  const evidenceRoot = join(checkout, "docs/evidence");
+  const evidenceMtimes: CheckoutSnapshot["evidenceMtimes"] = [];
+  const visit = (path: string): void => {
+    const stat = lstatSync(path);
+    evidenceMtimes.push({ path: relative(evidenceRoot, path) || ".", mtimeMs: stat.mtimeMs });
+    if (stat.isDirectory()) {
+      for (const name of readdirSync(path).sort()) visit(join(path, name));
+    }
+  };
+  visit(evidenceRoot);
+  return { status: status.stdout, evidenceMtimes };
+}
+
+function assertCheckoutUnchanged(checkout: string, before: CheckoutSnapshot): void {
+  assert.deepEqual(checkoutSnapshot(checkout), before, "dry run changed the real checkout");
 }
 
 function windowEnvBody(state: string): string {
@@ -2368,6 +2395,46 @@ test("controls: a block that exits non-zero is reported as failed, never as pass
   } finally {
     cleanupMacFixture(fixture);
   }
+});
+
+test("controls: a dry run leaves the real checkout unchanged", async (t) => {
+  const before = checkoutSnapshot(REAL_CHECKOUT);
+  const labels = ["prep/pass", "window-a/s2/pass", "window-b/pass", "lane-8/FULL-CONTROL"];
+  const fourPlanRuns = currentPlannedRuns().filter((run) => labels.includes(run.label));
+  assert.deepEqual(fourPlanRuns.map((run) => run.label), labels);
+
+  for (const run of fourPlanRuns) {
+    const fixture = prepareMacFixture(run.blocks);
+    try {
+      executePlanUntilFailure(run.blocks, fixture, "mac");
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+  assertCheckoutUnchanged(REAL_CHECKOUT, before);
+
+  await t.test("failing sub-case detects a write under the real checkout", () => {
+    const fixture = prepareMacFixture();
+    const syntheticPath = join(REAL_CHECKOUT, "tests", `.box-dry-run-real-checkout-write-${process.pid}`);
+    assert.equal(existsSync(syntheticPath), false);
+    try {
+      const block: Block = {
+        file: "tests/box-dry-run/synthetic-real-checkout-write.md",
+        step: "synthetic-real-checkout-write",
+        marker: "no",
+        host: "Mac mini /bin/bash 3.2",
+        line: 1,
+        source: `# step: synthetic-real-checkout-write\n# readonly: no\n# host: Mac mini /bin/bash 3.2\nprintf 'synthetic write\\n' >${JSON.stringify(syntheticPath)}\n`,
+      };
+      const execution = executeWholeBlock(block, fixture);
+      assert.equal(execution.result, "passed", execution.stderr);
+      assert.throws(() => assertCheckoutUnchanged(REAL_CHECKOUT, before), /dry run changed the real checkout/);
+    } finally {
+      rmSync(syntheticPath, { force: true });
+      cleanupMacFixture(fixture);
+    }
+  });
+  assertCheckoutUnchanged(REAL_CHECKOUT, before);
 });
 
 test("fixture image, repository-path, and environment-name values agree with repository or measurement text", () => {
