@@ -400,6 +400,49 @@ function blocks(file: string): Block[] {
   return blocksFromMarkdown(file, readFileSync(file, "utf8"));
 }
 
+interface StubInventory {
+  systemctl: Set<string>;
+  docker: Set<string>;
+  sshOptions: Set<string>;
+}
+
+function stubInventory(dispatch = readFileSync(STUB, "utf8")): StubInventory {
+  const declared = (kind: "subcommands" | "options", command: string): Set<string> => {
+    const match = new RegExp(`^# plan-${kind}: ${command} (.+)$`, "m").exec(dispatch);
+    assert.ok(match, `stub is missing its ${command} ${kind} declaration`);
+    return new Set(match[1]!.trim().split(/\s+/));
+  };
+  return {
+    systemctl: declared("subcommands", "systemctl"),
+    docker: declared("subcommands", "docker"),
+    sshOptions: declared("options", "ssh"),
+  };
+}
+
+function missingStubOperations(planBlocks: Block[], inventory = stubInventory()): string[] {
+  const missing = new Set<string>();
+  for (const block of planBlocks) {
+    for (const match of block.source.matchAll(/\bsystemctl\s+([a-z][a-z-]*)/g)) {
+      if (!inventory.systemctl.has(match[1]!)) missing.add(`systemctl ${match[1]}`);
+    }
+    for (const match of block.source.matchAll(/\bdocker\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-]*))?/g)) {
+      const operation = match[1] === "image" && match[2] === "inspect" ? "image-inspect" : match[1]!;
+      if (!inventory.docker.has(operation)) missing.add(`docker ${operation.replace("-", " ")}`);
+    }
+    for (const invocation of block.source.matchAll(/\bssh\s+((?:(?:-o\s+\S+)\s*)*)/g)) {
+      for (const option of invocation[1]!.matchAll(/-o\s+(\S+)/g)) {
+        if (!inventory.sshOptions.has(option[1]!)) missing.add(`ssh -o ${option[1]}`);
+      }
+    }
+  }
+  return [...missing].sort();
+}
+
+function assertStubCoverage(planBlocks: Block[], inventory = stubInventory()): void {
+  const missing = missingStubOperations(planBlocks, inventory);
+  assert.equal(missing.length, 0, `plan operations missing from dry-run stub list:\n${missing.join("\n")}`);
+}
+
 function fencedLanguages(file: string): string[] {
   return [...readFileSync(file, "utf8").matchAll(/^```([^\s`]*)[^\n]*$/gm)]
     .map((match) => match[1])
@@ -2032,6 +2075,143 @@ test("Mac harness uses a temporary local clone and recorded command stubs only",
     assert.equal(existsSync(join(clone, ".git")), true);
   } finally {
     removeOwnedTemporary(temporary, "commonswarm-box-dry-run-mac-");
+  }
+});
+
+test("plan-used systemctl, docker, and ssh operations are explicitly listed by the stubs", () => {
+  const planBlocks = SCOPED.flatMap(blocks);
+  assertStubCoverage(planBlocks);
+  assert.throws(() => assertStubCoverage([
+    {
+      file: "synthetic-plan.md", step: "missing-docker-operation", marker: "no",
+      host: "box /bin/bash 5.2 as root", line: 1,
+      source: "# step: missing-docker-operation\n# readonly: no\n# host: box /bin/bash 5.2 as root\ndocker network create dry-run-control\n",
+    },
+  ]), /plan operations missing from dry-run stub list:\ndocker network/);
+});
+
+test("controls: unknown stub operations fail closed and accepted mutations change readback", () => {
+  const fixture = prepareMacFixture();
+  const run = (command: string, args: string[]) => spawnSync(command, args, {
+    encoding: "utf8", env: {
+      ...fixture.env,
+      BOX_DRY_RUN_EDGE_HEALTH: "healthy",
+      BOX_DRY_RUN_EDGE_WORKDIR: PREVIOUS_EDGE + "/deploy/edge-runtime",
+      BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
+      BOX_DRY_RUN_POSTGRES_IMAGE_ID: POSTGRES_IMAGE_ID,
+    },
+  });
+  try {
+    for (const [command, args] of [
+      ["systemctl", ["frobnicate", "commonswarm-edge-recycle.timer"]],
+      ["docker", ["network", "create", "dry-run-control"]],
+      ["ssh", ["--definitely-unknown", "ops@100.115.66.74", "readlink -f /home/commonswarm/edge/current"]],
+    ] as const) {
+      const rejected = run(command, [...args]);
+      assert.equal(rejected.status, 69, `${command} accepted an operation absent from its plan-derived list`);
+      assert.match(rejected.stderr, new RegExp(`^unhandled dry-run stub: ${command} `));
+    }
+
+    assert.equal(run("systemctl", ["stop", "commonswarm-edge-recycle.timer"]).status, 0);
+    const stopped = run("systemctl", ["is-active", "commonswarm-edge-recycle.timer"]);
+    assert.equal(stopped.status, 3);
+    assert.equal(stopped.stdout, "inactive\n");
+    assert.equal(run("systemctl", ["start", "commonswarm-edge-recycle.timer"]).status, 0);
+    const started = run("systemctl", ["is-active", "commonswarm-edge-recycle.timer"]);
+    assert.equal(started.status, 0, started.stderr);
+    assert.equal(started.stdout, "active\n");
+
+    const compose = run("docker", ["compose", "-p", "commonswarm-edge", "up", "-d", "edge-runtime"]);
+    assert.equal(compose.status, 0, compose.stderr);
+    const workdir = run("docker", ["inspect", "--format", "{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}", "dry-run-edge"]);
+    assert.equal(workdir.status, 0, workdir.stderr);
+    assert.equal(workdir.stdout, `${CANDIDATE_EDGE}/deploy/edge-runtime\n`);
+
+    const ssh = run("ssh", ["-o", "BatchMode=yes", "ops@100.115.66.74", "readlink -f /home/commonswarm/edge/current"]);
+    assert.equal(ssh.status, 0, ssh.stderr);
+    assert.equal(ssh.stdout, `${PREVIOUS_EDGE}\n`);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("cswarm stub enforces workspace and revocation while delivering each note once", () => {
+  const fixture = prepareMacFixture();
+  const workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934";
+  const otherWorkspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56";
+  const run = (args: string[]) => spawnSync("cswarm", args, { encoding: "utf8", env: fixture.env });
+  const create = (name: string, selectedWorkspace = workspace): string => {
+    const result = run(["principal", "create", "--workspace-id", selectedWorkspace, "--name", name, "--json"]);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).principal_id as string;
+  };
+  const profile = (name: string, principal: string, selectedWorkspace = workspace): string => {
+    const path = join(fixture.temporary!, `${name}.json`);
+    writeMode(path, JSON.stringify({
+      version: 1, url: "https://api.commonswarm.com", anon_key: "dry-run-anon-key",
+      workspace_id: selectedWorkspace, principal_id: principal,
+      credential_file: join(fixture.temporary!, `${name}-credential.json`),
+    }), 0o600);
+    return path;
+  };
+  const identityFailure = /^cswarm: The service did not confirm this agent and workspace\. No messages were shown\. Ask for the correct connection file\.\n$/;
+  try {
+    const sender = create("sender");
+    const receiver = create("receiver");
+    const third = create("third");
+    const other = create("other", otherWorkspace);
+    const senderProfile = profile("sender", sender);
+    const receiverProfile = profile("receiver", receiver);
+    const thirdProfile = profile("third", third);
+    const wrongWorkspaceProfile = profile("wrong-workspace", sender, otherWorkspace);
+
+    const note = run(["note", "one delivery", "--to", receiver, "--profile", senderProfile, "--json"]);
+    assert.equal(note.status, 0, note.stderr);
+    const signal = JSON.parse(note.stdout).signal.id as string;
+
+    const thirdCheck = run(["check", "--profile", thirdProfile, "--full", "--json"]);
+    assert.equal(thirdCheck.status, 0, thirdCheck.stderr);
+    assert.deepEqual(JSON.parse(thirdCheck.stdout).messages, []);
+    const first = run(["check", "--profile", receiverProfile, "--full", "--json"]);
+    assert.equal(first.status, 0, first.stderr);
+    assert.deepEqual(JSON.parse(first.stdout).messages, [{ id: signal, body: "one delivery" }]);
+    const second = run(["check", "--profile", receiverProfile, "--full", "--json"]);
+    assert.equal(second.status, 0, second.stderr);
+    assert.deepEqual(JSON.parse(second.stdout).messages, []);
+
+    for (const command of [
+      ["whoami", "--profile", wrongWorkspaceProfile, "--json"],
+      ["check", "--profile", wrongWorkspaceProfile, "--full", "--json"],
+      ["note", "wrong workspace", "--to", receiver, "--profile", wrongWorkspaceProfile, "--json"],
+      ["note", "cross workspace", "--to", other, "--profile", senderProfile, "--json"],
+    ]) {
+      const refused = run(command);
+      assert.equal(refused.status, 1);
+      assert.equal(refused.stdout, "");
+      assert.match(refused.stderr, identityFailure);
+    }
+
+    const revoke = run(["principal", "revoke", "--workspace-id", workspace, "--principal-id", receiver, "--json"]);
+    assert.equal(revoke.status, 0, revoke.stderr);
+    const status = run(["status", "--workspace-id", workspace, "--json"]);
+    assert.equal(status.status, 0, status.stderr);
+    assert.equal(JSON.parse(status.stdout).agents.find((agent: { principal_id: string }) => agent.principal_id === receiver)?.revoked, true);
+    for (const command of [
+      ["whoami", "--profile", receiverProfile, "--json"],
+      ["check", "--profile", receiverProfile, "--full", "--json"],
+    ]) {
+      const refused = run(command);
+      assert.equal(refused.status, 1);
+      assert.equal(refused.stdout, "");
+      assert.match(refused.stderr, identityFailure);
+    }
+    assert.equal(run(["principal", "revoke", "--workspace-id", workspace, "--principal-id", sender, "--json"]).status, 0);
+    const revokedNote = run(["note", "revoked sender", "--to", third, "--profile", senderProfile, "--json"]);
+    assert.equal(revokedNote.status, 1);
+    assert.equal(revokedNote.stdout, "");
+    assert.match(revokedNote.stderr, identityFailure);
+  } finally {
+    cleanupMacFixture(fixture);
   }
 });
 

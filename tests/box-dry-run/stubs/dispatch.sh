@@ -2,6 +2,7 @@
 set -euo pipefail
 
 name=${0##*/}
+original_argv=("$@")
 : "${BOX_DRY_RUN_STUB_LOG:?stub log required}"
 printf '%s' "$name" >>"$BOX_DRY_RUN_STUB_LOG"
 printf ' %q' "$@" >>"$BOX_DRY_RUN_STUB_LOG"
@@ -12,7 +13,24 @@ fail_unproduced() {
   exit 69
 }
 
+unhandled_stub() {
+  printf 'unhandled dry-run stub: %s' "$name" >&2
+  printf ' %q' "${original_argv[@]}" >&2
+  printf '\n' >&2
+  exit 69
+}
+
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
+stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
+
+# These inventories are checked against every executable plan block by
+# tests/box-dry-run.test.ts. Keep the dispatch cases and these declarations in
+# lockstep; a plan cannot acquire a new external operation by falling through.
+# plan-subcommands: systemctl daemon-reload is-active list-timers reload restart show start stop
+# plan-flags: systemctl --all --no-pager --property -p --quiet --value
+# plan-subcommands: docker compose exec image-inspect inspect logs ps run
+# plan-flags: docker --add-host --entrypoint --env -f --filter --format -i --network --no-deps -p --project-directory -q --rm --since --timestamps --volume -d
+# plan-options: ssh BatchMode=yes ConnectTimeout=10
 
 case "$name" in
   ssh)
@@ -25,9 +43,15 @@ case "$name" in
     fi
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        -o|-i|-p|-F|-J) [ "$#" -ge 2 ] || fail_unproduced 'ssh flags'; shift 2 ;;
+        -o)
+          [ "$#" -ge 2 ] || unhandled_stub
+          case "$2" in
+            BatchMode=yes|ConnectTimeout=10) shift 2 ;;
+            *) unhandled_stub ;;
+          esac
+          ;;
         --) shift; break ;;
-        -*) shift ;;
+        -*) unhandled_stub ;;
         *) ssh_host=$1; shift; break ;;
       esac
     done
@@ -201,55 +225,290 @@ case "$name" in
     chmod 0600 "$output"
     ;;
   systemctl)
-    case " $* " in
-      *' is-active --quiet '*) ;;
-      *' is-active '*) printf '%s\n' inactive ;;
-      *' show '*) printf '%s\n' success ;;
+    mkdir -p "$stub_state_dir/systemctl"
+    systemctl_command=${1:-}
+    [ -n "$systemctl_command" ] || unhandled_stub
+    shift
+    systemctl_state() {
+      # M9/M10 in box-facts-measured.json record inactive successful one-shot
+      # services and active enabled maintenance timers respectively.
+      unit=$1
+      state_file="$stub_state_dir/systemctl/${unit//\//_}"
+      if [ -f "$state_file" ]; then cat "$state_file"; return; fi
+      case "$unit" in
+        *.timer|caddy|caddy.service) printf '%s\n' active ;;
+        *.service) printf '%s\n' inactive ;;
+        *) printf '%s\n' inactive ;;
+      esac
+    }
+    systemctl_set_state() {
+      printf '%s\n' "$2" >"$stub_state_dir/systemctl/${1//\//_}"
+    }
+    case "$systemctl_command" in
+      is-active)
+        quiet=0
+        if [ "${1:-}" = --quiet ]; then quiet=1; shift; fi
+        [ "$#" -eq 1 ] || unhandled_stub
+        active_state=$(systemctl_state "$1")
+        [ "$quiet" -eq 1 ] || printf '%s\n' "$active_state"
+        [ "$active_state" = active ] || exit 3
+        ;;
+      start|stop|restart|reload)
+        [ "$#" -gt 0 ] || unhandled_stub
+        for unit in "$@"; do
+          case "$unit" in -*) unhandled_stub ;; esac
+          case "$systemctl_command:$unit" in
+            start:*.service) systemctl_set_state "$unit" inactive ;;
+            stop:*) systemctl_set_state "$unit" inactive ;;
+            reload:*) printf '%s\n' "$unit" >"$stub_state_dir/systemctl/last-reloaded" ;;
+            *) systemctl_set_state "$unit" active ;;
+          esac
+        done
+        ;;
+      daemon-reload)
+        [ "$#" -eq 0 ] || unhandled_stub
+        : >"$stub_state_dir/systemctl/daemon-reloaded"
+        ;;
+      list-timers)
+        all=0
+        units=()
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --all) all=1 ;;
+            -*) unhandled_stub ;;
+            *) units+=("$1") ;;
+          esac
+          shift
+        done
+        [ "${#units[@]}" -gt 0 ] || unhandled_stub
+        # Shape source: M10 in box-facts-measured.json:112-119.
+        for unit in "${units[@]}"; do
+          printf '%s %s loaded %s enabled\n' \
+            'Tue 2026-09-29 09:30:00 UTC' "$unit" "$(systemctl_state "$unit")"
+        done
+        ;;
+      show)
+        units=()
+        properties=()
+        value_only=0
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -p)
+              [ "$#" -ge 2 ] || unhandled_stub
+              properties+=("$2"); shift
+              ;;
+            --property=*) properties+=("${1#--property=}") ;;
+            --value) value_only=1 ;;
+            --no-pager) ;;
+            -*) unhandled_stub ;;
+            *) units+=("$1") ;;
+          esac
+          shift
+        done
+        [ "${#units[@]}" -gt 0 ] || unhandled_stub
+        if [ "$value_only" -eq 1 ]; then
+          [ "${#units[@]}" -eq 1 ] && [ "${#properties[@]}" -eq 1 ] || unhandled_stub
+          case "${properties[0]}" in
+            Result) printf '%s\n' success ;;
+            InactiveExitTimestampMonotonic)
+              count_file="$stub_state_dir/systemctl/service-start-count"
+              [ -f "$count_file" ] && cat "$count_file" || printf '%s\n' 100
+              ;;
+            NextElapseUSecRealtime) printf '%s\n' 'Tue 2026-09-29 09:30:00 UTC' ;;
+            *) unhandled_stub ;;
+          esac
+        else
+          # Shape source: M10 in box-facts-measured.json:112-119.
+          for unit in "${units[@]}"; do
+            printf 'Id=%s\nLoadState=loaded\nActiveState=%s\nUnitFileState=enabled\n\n' \
+              "$unit" "$(systemctl_state "$unit")"
+          done
+        fi
+        ;;
+      *) unhandled_stub ;;
     esac
+    if [ "$systemctl_command" = start ]; then
+      count_file="$stub_state_dir/systemctl/service-start-count"
+      current=100
+      [ ! -f "$count_file" ] || current=$(cat "$count_file")
+      printf '%s\n' "$((current + 100))" >"$count_file"
+    fi
     ;;
   docker)
-    case " $* " in
-      *' ps -q '*)
+    mkdir -p "$stub_state_dir/docker"
+    docker_command=${1:-}
+    [ -n "$docker_command" ] || unhandled_stub
+    shift
+    case "$docker_command" in
+      ps)
+        # Container identities/counts: M17 and production_recheck in
+        # box-facts-measured.json; OAuth identity: oauth-runtime.json.
+        quiet=0
+        filters=' '
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -q) quiet=1 ;;
+            --filter)
+              [ "$#" -ge 2 ] || unhandled_stub
+              filters="$filters$2 "; shift
+              ;;
+            *) unhandled_stub ;;
+          esac
+          shift
+        done
+        [ "$quiet" -eq 1 ] || unhandled_stub
         case " $* " in
+          *)
+            case "$filters" in
           *'com.docker.compose.project=commonswarm-oauth'*) printf '%s\n' dry-run-oauth ;;
           *'com.docker.compose.service=postgres'*) printf '%s\n' dry-run-postgres ;;
           *) printf '%s\n' dry-run-edge ;;
+            esac
         esac
         ;;
-      *' inspect '*'.Config.Env'*) printf '%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE:?OAuth host line required}" ;;
-      *' inspect '*'.Image'*)
-        case "${@: -1}" in
+      inspect)
+        # Edge inspect shapes: M11 in box-facts-measured.json. OAuth image,
+        # health, workdir, and env shapes: oauth-image.json/oauth-runtime.json
+        # plus HM37's exact Config.Env read.
+        [ "${1:-}" = --format ] && [ "$#" -ge 3 ] || unhandled_stub
+        format=$2; shift 2
+        [ "$#" -ge 1 ] || unhandled_stub
+        for target in "$@"; do case "$target" in -*) unhandled_stub ;; esac; done
+        target=${@: -1}
+        case "$format" in
+          *'.Config.Env'*) printf '%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE:?OAuth host line required}" ;;
+          *'.Image'*)
+        case "$target" in
           dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_IMAGE:?OAuth image required}" ;;
           dry-run-postgres) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
           *) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
         esac
-        ;;
-      *' inspect '*Health.Status*|*' inspect '*State.Health*)
-        case "${@: -1}" in
+          ;;
+          *Health.Status*|*State.Health*|*State.Status*)
+        case "$target" in
           dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_HEALTH:?OAuth health required}" ;;
           *) printf '%s\n' "${BOX_DRY_RUN_EDGE_HEALTH:?edge health required}" ;;
         esac
-        ;;
-      *' inspect '*HostConfig.Memory*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MEMORY:?edge memory required}" ;;
-      *' inspect '*HostConfig.NetworkMode*) printf '%s\n' "${BOX_DRY_RUN_EDGE_NETWORK:?edge network required}" ;;
-      *' inspect '*Mounts*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MOUNTS:?edge mounts required}" ;;
-      *' inspect '*working_dir*)
-        case "${@: -1}" in
+          ;;
+          *HostConfig.Memory*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MEMORY:?edge memory required}" ;;
+          *HostConfig.NetworkMode*) printf '%s\n' "${BOX_DRY_RUN_EDGE_NETWORK:?edge network required}" ;;
+          *Mounts*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MOUNTS:?edge mounts required}" ;;
+          *working_dir*)
+        case "$target" in
           dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
           *)
-            if grep -q '^docker compose .* up .*edge-runtime' "$BOX_DRY_RUN_STUB_LOG"; then
+            if [ -f "$stub_state_dir/docker/edge-runtime-up" ]; then
               printf '%s\n' "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}/deploy/edge-runtime"
             else
               printf '%s\n' "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}"
             fi
             ;;
         esac
+          ;;
+          *) unhandled_stub ;;
+        esac
         ;;
-      *' image inspect '*) printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}" ;;
-      *' run '*)
+      image)
+        # Image identity shape: M17 in box-facts-measured.json.
+        [ "${1:-}" = inspect ] || unhandled_stub
+        shift
+        [ "${1:-}" = --format ] && [ "$#" -eq 3 ] || unhandled_stub
+        printf '%s\n' "${BOX_DRY_RUN_POSTGRES_IMAGE_ID:?Postgres image required}"
+        ;;
+      run)
+        # The plans use only these Docker-run flags. The database result remains
+        # deliberately unproduced; accepting the invocation must not fake SQL.
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --rm) shift ;;
+            --network|--add-host|--env|--volume|--entrypoint)
+              [ "$#" -ge 2 ] || unhandled_stub; shift 2 ;;
+            -*) unhandled_stub ;;
+            *) break ;;
+          esac
+        done
+        [ "$#" -gt 0 ] || unhandled_stub
         printf '%s\n' 'UNPRODUCED database observation' >&2
         exit 69
         ;;
+      compose)
+        # Mutations and their silent shell-facing use are the exact runbook-32,
+        # runbook-42, runbook-49, and runbook-52 plan calls. The workdir
+        # readback after edge up uses the M11 shape above.
+        project=''; project_dir=''; compose_file=''
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            -p) [ "$#" -ge 2 ] || unhandled_stub; project=$2; shift 2 ;;
+            -f) [ "$#" -ge 2 ] || unhandled_stub; compose_file=$2; shift 2 ;;
+            --project-directory) [ "$#" -ge 2 ] || unhandled_stub; project_dir=$2; shift 2 ;;
+            *) break ;;
+          esac
+        done
+        compose_command=${1:-}; [ -n "$compose_command" ] || unhandled_stub; shift
+        case "$compose_command" in
+          config) [ "$#" -eq 1 ] && [ "$1" = -q ] || unhandled_stub ;;
+          pull)
+            [ "$#" -eq 1 ] || unhandled_stub
+            printf '%s\n' "$project:$1" >"$stub_state_dir/docker/last-pulled"
+            ;;
+          ps)
+            if [ "${1:-}" = -q ]; then shift; fi
+            [ "$#" -eq 1 ] || unhandled_stub
+            case "$project" in
+              commonswarm-edge) printf '%s\n' dry-run-edge ;;
+              commonswarm-supabase-stack) printf '%s\n' dry-run-postgres ;;
+              *) unhandled_stub ;;
+            esac
+            ;;
+          up)
+            detached=0; no_deps=0
+            while [ "$#" -gt 0 ]; do
+              case "$1" in -d) detached=1; shift ;; --no-deps) no_deps=1; shift ;; *) break ;; esac
+            done
+            [ "$detached" -eq 1 ] && [ "$#" -eq 1 ] || unhandled_stub
+            case "$project:$1" in
+              commonswarm-edge:edge-runtime) : >"$stub_state_dir/docker/edge-runtime-up" ;;
+              commonswarm-supabase-stack:*) printf '%s\n' "$1" >"$stub_state_dir/docker/stack-service-up" ;;
+              *) unhandled_stub ;;
+            esac
+            ;;
+          *) unhandled_stub ;;
+        esac
+        ;;
+      logs)
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --timestamps) shift ;;
+            --since) [ "$#" -ge 2 ] || unhandled_stub; shift 2 ;;
+            -*) unhandled_stub ;;
+            *) break ;;
+          esac
+        done
+        [ "$#" -eq 1 ] || unhandled_stub
+        ;;
+      exec)
+        interactive=0
+        if [ "${1:-}" = -i ]; then interactive=1; shift; fi
+        [ "$#" -ge 3 ] || unhandled_stub
+        container=$1; runtime=$2; shift 2
+        case "$runtime:$1" in
+          node:-e|deno:eval) [ "$#" -eq 2 ] || unhandled_stub ;;
+          sh:-c)
+            [ "$interactive" -eq 1 ] && [ "$#" -eq 2 ] || unhandled_stub
+            sql=$(cat)
+            case "$sql" in
+              *'BEGIN READ ONLY;'*'revoked_at IS NULL'*)
+                printf '%s\n' "$sql" | grep -Eo "[0-9a-f]{8}-[0-9a-f-]{27}" | sort -u | while IFS= read -r principal; do
+                  printf '%s=0\n' "$principal"
+                done
+                ;;
+              *) unhandled_stub ;;
+            esac
+            ;;
+          *) unhandled_stub ;;
+        esac
+        ;;
+      *) unhandled_stub ;;
     esac
     ;;
   curl)
@@ -364,8 +623,9 @@ agents = []
 path = pathlib.Path(state)
 if path.exists():
     for raw in path.read_text().splitlines():
-        principal, revoked = raw.split("\t")
-        agents.append({"principal_id": principal, "revoked": revoked == "true"})
+        principal_workspace, principal, revoked = raw.split("\t")
+        if principal_workspace == workspace:
+            agents.append({"principal_id": principal, "revoked": revoked == "true"})
 print(json.dumps({
     "identity": {"user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc"},
     "selected_project": {"workspace_id": workspace},
@@ -395,26 +655,27 @@ PY
             principal_count=$((principal_count + 1))
             printf '%s\n' "$principal_count" >"$counter_file"
             principal=$(printf '10000000-0000-4000-8000-%012d' "$principal_count")
-            printf '%s\tfalse\n' "$principal" >>"$cswarm_state_dir/principals.tsv"
+            printf '%s\t%s\tfalse\n' "$workspace" "$principal" >>"$cswarm_state_dir/principals.tsv"
             # Output shape: src/cli.ts:2544-2568.
             printf '{"message":"Agent identity created.","status":"accepted","principal_id":"%s"}\n' "$principal"
             ;;
           revoke)
             [ -n "$principal" ] && [ -z "$seat_name" ] || fail_unproduced 'cswarm principal revoke arguments'
-            /usr/bin/python3 - "$cswarm_state_dir/principals.tsv" "$principal" <<'PY'
+            /usr/bin/python3 - "$cswarm_state_dir/principals.tsv" "$workspace" "$principal" <<'PY'
 import pathlib, sys
-path, wanted = pathlib.Path(sys.argv[1]), sys.argv[2]
+path, workspace, wanted = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 rows = []
 found = False
 if path.exists():
     for raw in path.read_text().splitlines():
-        principal, revoked = raw.split("\t")
-        if principal == wanted:
+        principal_workspace, principal, revoked = raw.split("\t")
+        if principal_workspace == workspace and principal == wanted:
             revoked, found = "true", True
-        rows.append((principal, revoked))
+        rows.append((principal_workspace, principal, revoked))
 if not found:
-    rows.append((wanted, "true"))
-path.write_text("".join(f"{principal}\t{revoked}\n" for principal, revoked in rows))
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
+path.write_text("".join(f"{principal_workspace}\t{principal}\t{revoked}\n" for principal_workspace, principal, revoked in rows))
 PY
             # Output shape: src/cli.ts:2583-2608.
             printf '{"message":"Agent identity revoked.","status":"accepted","principal_id":"%s","command_event_ids":["30000000-0000-4000-8000-000000000001"]}\n' "$principal"
@@ -440,6 +701,19 @@ PY
         done
         [ -n "$workspace" ] && [ -n "$principal" ] && [ -n "$run_id" ] && [ -n "$task_id" ] && [ -n "$epoch" ] && [ -n "$ttl" ] \
           || fail_unproduced 'cswarm token mint arguments'
+        /usr/bin/python3 - "$cswarm_state_dir/principals.tsv" "$workspace" "$principal" <<'PY'
+import pathlib, sys
+path, workspace, wanted = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+found = False
+if path.exists():
+    for raw in path.read_text().splitlines():
+        principal_workspace, principal, revoked = raw.split("\t")
+        if principal_workspace == workspace and principal == wanted and revoked == "false":
+            found = True
+if not found:
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
+PY
         # Output shape: agentCredentialArtifact at src/cli.ts:1177-1195.
         printf '{"message":"Agent credential minted.","status":"accepted","principal_id":"%s","token_id":"40000000-0000-4000-8000-%s","run_id":"%s","agent_token":"swm_agent_dry_run_%s","expires_at":"2099-01-01T00:00:00.000Z"}\n' \
           "$principal" "${principal##*-}" "$run_id" "${principal##*-}"
@@ -497,9 +771,21 @@ PY
         done
         [ -n "$profile" ] || fail_unproduced 'cswarm whoami profile'
         # Output shape: src/cli.ts:4619-4638.
-        /usr/bin/python3 - "$profile" <<'PY'
+        /usr/bin/python3 - "$profile" "$cswarm_state_dir/principals.tsv" <<'PY'
 import json, pathlib, sys
 profile = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state = pathlib.Path(sys.argv[2])
+valid = False
+if state.exists():
+    for raw in state.read_text().splitlines():
+        workspace, principal, revoked = raw.split("\t")
+        if workspace == profile["workspace_id"] and principal == profile["principal_id"] and revoked == "false":
+            valid = True
+if not valid:
+    # Failure shape: src/cli.ts:10716-10826 and the authenticated identity
+    # refusal at src/cloud/agent-check.ts:129-135.
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
 print(json.dumps({"credential_valid": True, "workspace_id": profile["workspace_id"],
     "principal_id": profile["principal_id"]}, separators=(",", ":")))
 PY
@@ -516,12 +802,31 @@ PY
           esac
         done
         [ -n "$recipient" ] && [ -n "$profile" ] || fail_unproduced 'cswarm note arguments'
-        signal='20000000-0000-4000-8000-000000000001'
-        /usr/bin/python3 - "$cswarm_state_dir/pending.json" "$signal" "$body" "$recipient" <<'PY'
+        signal_counter="$cswarm_state_dir/signal-counter"
+        signal_count=0
+        [ ! -f "$signal_counter" ] || signal_count=$(cat "$signal_counter")
+        signal_count=$((signal_count + 1))
+        printf '%s\n' "$signal_count" >"$signal_counter"
+        signal=$(printf '20000000-0000-4000-8000-%012d' "$signal_count")
+        /usr/bin/python3 - "$profile" "$cswarm_state_dir/principals.tsv" "$cswarm_state_dir/pending.jsonl" "$signal" "$body" "$recipient" <<'PY'
 import json, pathlib, sys
-pathlib.Path(sys.argv[1]).write_text(json.dumps({"id": sys.argv[2], "body": sys.argv[3], "recipient": sys.argv[4]}))
+profile = json.loads(pathlib.Path(sys.argv[1]).read_text())
+state, pending = pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+signal, body, recipient = sys.argv[4:]
+principals = {}
+if state.exists():
+    for raw in state.read_text().splitlines():
+        workspace, principal, revoked = raw.split("\t")
+        principals[principal] = (workspace, revoked)
+sender = principals.get(profile["principal_id"])
+target = principals.get(recipient)
+if sender != (profile["workspace_id"], "false") or target != (profile["workspace_id"], "false"):
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
+record = {"id": signal, "body": body, "recipient": recipient, "workspace_id": profile["workspace_id"]}
+with pending.open("a") as output:
+    output.write(json.dumps(record, separators=(",", ":")) + "\n")
 PY
-        rm -f "$cswarm_state_dir/pending-consumed"
         # Output shape: src/cli.ts:10750-10764.
         /usr/bin/python3 - "$signal" "$body" <<'PY'
 import json, sys
@@ -539,16 +844,31 @@ PY
         done
         [ -n "$profile" ] || fail_unproduced 'cswarm check profile'
         # Output shapes: src/cloud/agent-check.ts:285-310 and :389-428.
-        /usr/bin/python3 - "$profile" "$cswarm_state_dir/pending.json" "$cswarm_state_dir/pending-consumed" <<'PY'
+        /usr/bin/python3 - "$profile" "$cswarm_state_dir/principals.tsv" "$cswarm_state_dir/pending.jsonl" "$cswarm_state_dir/observed" <<'PY'
 import json, pathlib, sys
 profile = json.loads(pathlib.Path(sys.argv[1]).read_text())
-pending_path, consumed_path = map(pathlib.Path, sys.argv[2:])
+state, pending_path, observed_dir = map(pathlib.Path, sys.argv[2:])
+valid = False
+if state.exists():
+    for raw in state.read_text().splitlines():
+        workspace, principal, revoked = raw.split("\t")
+        if workspace == profile["workspace_id"] and principal == profile["principal_id"] and revoked == "false":
+            valid = True
+if not valid:
+    # Failure shape: src/cloud/agent-check.ts:129-135; CLI prefix and exit 1
+    # are from src/cli.ts:10716-10826.
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
 messages = []
-if pending_path.exists() and not consumed_path.exists():
-    pending = json.loads(pending_path.read_text())
-    if pending["recipient"] == profile["principal_id"]:
-        messages.append({"id": pending["id"], "body": pending["body"]})
-        consumed_path.write_text("observed\n")
+observed_dir.mkdir(exist_ok=True)
+if pending_path.exists():
+    for raw in pending_path.read_text().splitlines():
+        pending = json.loads(raw)
+        consumed_path = observed_dir / f'{profile["principal_id"]}-{pending["id"]}'
+        if (pending["workspace_id"] == profile["workspace_id"] and
+                pending["recipient"] == profile["principal_id"] and not consumed_path.exists()):
+            messages.append({"id": pending["id"], "body": pending["body"]})
+            consumed_path.write_text("observed\n")
 print(json.dumps({"checked": True, "workspace_id": profile["workspace_id"], "messages": messages}, separators=(",", ":")))
 PY
         ;;
@@ -564,13 +884,29 @@ PY
         done
         [ -n "$profile" ] || fail_unproduced 'cswarm receipt profile'
         # Output shape: src/cloud/receipts.ts:275-305.
-        /usr/bin/python3 - "$profile" "$cswarm_state_dir/pending.json" "$signal" <<'PY'
+        /usr/bin/python3 - "$profile" "$cswarm_state_dir/principals.tsv" "$cswarm_state_dir/pending.jsonl" "$cswarm_state_dir/observed" "$signal" <<'PY'
 import json, pathlib, sys
 profile = json.loads(pathlib.Path(sys.argv[1]).read_text())
-pending = json.loads(pathlib.Path(sys.argv[2]).read_text())
-print(json.dumps({"workspace_id": profile["workspace_id"], "signal_id": sys.argv[3], "receipts": [{
-    "recipient_agent_principal_id": pending["recipient"], "state": "observed", "outcome": "observed",
-    "acked_at": "2026-09-29T01:03:00Z"}]}, separators=(",", ":")))
+state, pending_path, observed_dir = map(pathlib.Path, sys.argv[2:5])
+signal = sys.argv[5]
+valid = False
+if state.exists():
+    for raw in state.read_text().splitlines():
+        workspace, principal, revoked = raw.split("\t")
+        if workspace == profile["workspace_id"] and principal == profile["principal_id"] and revoked == "false":
+            valid = True
+if not valid:
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
+pending = next((json.loads(raw) for raw in pending_path.read_text().splitlines()
+    if json.loads(raw)["id"] == signal and json.loads(raw)["workspace_id"] == profile["workspace_id"]), None)
+if pending is None:
+    print("cswarm: The service did not confirm this agent and workspace. No messages were shown. Ask for the correct connection file.", file=sys.stderr)
+    raise SystemExit(1)
+observed = (observed_dir / f'{pending["recipient"]}-{pending["id"]}').exists()
+receipts = [] if not observed else [{"recipient_agent_principal_id": pending["recipient"],
+    "state": "observed", "outcome": "observed", "acked_at": "2026-09-29T01:03:00Z"}]
+print(json.dumps({"workspace_id": profile["workspace_id"], "signal_id": signal, "receipts": receipts}, separators=(",", ":")))
 PY
         ;;
       *) fail_unproduced 'cswarm command' ;;
