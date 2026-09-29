@@ -14,10 +14,10 @@ H0 was the first live use of this procedure on 2026-09-23. Its operator findings
 are incorporated below.
 
 The box stays up. Never stop the host, run `docker prune`, use a linked Supabase
-command, or use `/home/commonswarm/migration.env` or
-`/home/commonswarm/migration-direct.env`. Those two files belong to the deleted
-hosted-project cutover; the only exception is the one-time copy of the
-`TARGET_DATABASE_URL` line in section 2.
+command, or use `/home/commonswarm/migration.env`; the historical
+`/home/commonswarm/migration-direct.env` must never be read. Those two files
+belong to the deleted hosted-project cutover. Section 2 verifies the current
+target-only source instead.
 
 Every box command block is a self-contained Bash subshell of the form
 `( set -euo pipefail; ... )`. Paste the whole block into the interactive root
@@ -148,15 +148,22 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 rm -f "$HOME/.commonswarm-release-window.env"
-SHA='<sha>'
 (
   set -euo pipefail
-  : "${WINDOW_START_UTC:?Set the HezLead-approved UTC window start}"
+  : "${RELEASE_SHA:?named release SHA required}"
+  SHA="$RELEASE_SHA"
+  WINDOW_OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$WINDOW_OPEN_RECEIPT"
+  test ! -L "$WINDOW_OPEN_RECEIPT"
+  test "$(stat -f %Lp "$WINDOW_OPEN_RECEIPT")" = 600
+  . "$WINDOW_OPEN_RECEIPT"
+  test "$SHA" = "$RELEASE_SHA"
   case "$WINDOW_START_UTC" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
     *) false ;;
   esac
-  WINDOW_ID="$(printf '%s' "$WINDOW_START_UTC" | tr -d ':-')"
+  DERIVED_WINDOW_ID="$(printf '%s' "$WINDOW_START_UTC" | tr -d ':-')"
+  test "$WINDOW_ID" = "$DERIVED_WINDOW_ID"
   check() {
     label="$1"
     shift
@@ -198,11 +205,14 @@ SHA='<sha>'
   check 'archive commit id' test "$(git get-tar-commit-id <"$ARCHIVE")" = "$SHA"
 
   # Written only after every check passed, so a failed preflight leaves no file.
-  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_ID=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\nBOX_WINDOW_INPUT=%q\n' \
-      "$SHA" "$WINDOW_START_UTC" "$WINDOW_ID" "$SHORT_SHA" "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" "$BOX_WINDOW_INPUT" >"$HOME/.commonswarm-release-window.env" )
+  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nSHORT_SHA=%q\nEVIDENCE_DIR=%q\nRUN_LOG=%q\nARCHIVE=%q\nBOX_WINDOW_INPUT=%q\n' \
+      "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
+      "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" "$SHORT_SHA" \
+      "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" "$BOX_WINDOW_INPUT" >"$HOME/.commonswarm-release-window.env" )
   chmod 0600 "$HOME/.commonswarm-release-window.env"
-  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_ID=%q\n' \
-      "$SHA" "$WINDOW_START_UTC" "$WINDOW_ID" >"$BOX_WINDOW_INPUT" )
+  ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\n' \
+      "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
+      "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" >"$BOX_WINDOW_INPUT" )
   chmod 0600 "$BOX_WINDOW_INPUT"
   printf 'window file written\n'
 )
@@ -255,22 +265,20 @@ initial manifest is built only from the explicit arrays below, never from
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
   test "$SHA" = '<sha>'
-  KIND_LIST='<edge|stack|edge stack>'
-  H0_LEDGER_BACKFILL='<yes-or-no>'
-  GUARDED_STACK_SWITCH='<yes-or-no>'
-  BACKUP_STATUS_PROOF='<yes-or-no>'
-  API_CADDY_PAIR='<yes-or-no>'
-  MCP_CADDY_RELEASE='<yes-or-no>'
-  MIGRATION_VERSIONS=(
-    # <approved-14-digit-version>
-  )
-  FUNCTIONAL_VERSIONS=(
-    # <approved-14-digit-version-with-functional-txt-output>
-  )
-  ITEM_COPY_BACK_FILES=(
-    # '<exact-relative-path-from-the-item-box-plan>'
-  )
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
+  . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${KIND_LIST:?resolved item input missing}"
+  : "${H0_LEDGER_BACKFILL:?resolved item input missing}"
+  : "${GUARDED_STACK_SWITCH:?resolved item input missing}"
+  : "${BACKUP_STATUS_PROOF:?resolved item input missing}"
+  : "${API_CADDY_PAIR:?resolved item input missing}"
+  : "${MCP_CADDY_RELEASE:?resolved item input missing}"
+  : "${MIGRATION_VERSIONS:?resolved item input missing}"
+  : "${FUNCTIONAL_VERSIONS:?resolved item input missing}"
+  ITEM_COPY_BACK_FILES=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && ITEM_COPY_BACK_FILES[${#ITEM_COPY_BACK_FILES[@]}]="$VALUE"
+  done <"$PROOF_DIR/item-copy-back-files.list"
   COPY_BACK_LIST="$PROOF_DIR/copy-back.list"
   COPY_BACK_FILES=(
     copy-back.list
@@ -407,14 +415,15 @@ the dark `mcp` name:
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = '<sha>'
+  . "$EVIDENCE_DIR/item-resolved-inputs.env"
   test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
   case "$ROUTER_DIR" in /tmp/commonswarm-router-??????) ;; *) false ;; esac
   trap 'status=$?; find "$ROUTER_DIR" -depth -delete; exit "$status"' EXIT
   ROUTER_SOURCE="$ROUTER_DIR/router.ts"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts >"$ROUTER_SOURCE"
-  CHANGED_FUNCTIONS='<space-separated changed function names>'
-  ROUTER_CHANGED='<yes-or-no>'
+  : "${CHANGED_FUNCTIONS:?resolved item input missing}"
+  : "${ROUTER_CHANGED:?resolved item input missing}"
   ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
   if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0 mcp'; fi
   case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
@@ -556,10 +565,10 @@ window state:
   set -euo pipefail
   . /tmp/commonswarm-release-window.env
   test "$SHA" = '<sha>'
-  KIND_LIST='<edge|stack|edge stack>'
-  WINDOW_END_UTC='<approved-YYYY-MM-DDTHH:MM:SSZ>'
+  : "${WINDOW_END_UTC:?load the box-clock-derived window end from the open receipt}"
   ARCHIVE=/tmp/commonswarm-release.tar
-  EXPECTED_ARCHIVE_SHA256='<sha256-from-Mac-evidence>'
+  : "${KIND_LIST:?resolved item input missing}"
+  : "${EXPECTED_ARCHIVE_SHA256:?archive digest missing from resolved box input}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   NEW_EDGE="/home/commonswarm/edge/releases/${SHA}"
   NEW_STACK="/home/commonswarm/stack/releases/${SHA}"
@@ -1082,37 +1091,40 @@ hide the failing block's evidence.
 
 ### Preflight — HezLead
 
-HezLead decision (2026-09-22): the only copy of the current `supabase_admin`
-target URL on the box is the `TARGET_DATABASE_URL` line of the root-only file
-`/home/commonswarm/migration-direct.env`. Copy that one line, once, with the
-script below. It never prints the value and never reads any `SOURCE_*` line.
-After this step, no release command reads either historical migration env file.
+The current target-only source is `/etc/commonswarm-release/target.env`. It was
+measured on the box as a root-owned mode-`0600` regular file. The historical
+`/home/commonswarm/migration-direct.env` must never be read by a release. A
+reviewed equivalent is acceptable only when the item plan names its absolute
+path, verifies the same one-assignment contract and installs it through a
+separately reviewed marked block before `runbook-14`.
 
 ### Apply — Anvil
 
-Using an approved protected editor or secret-file workflow that does not print
-the value, create a target-only file with exactly one assignment,
-`TARGET_DATABASE_URL=...`:
+Verify the existing target-only file in place. This block does not rewrite or
+print it:
 
 ```sh
 # step: runbook-14
-# readonly: no
+# readonly: yes
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
   . /home/commonswarm/stack/release-proofs/<sha>/window.env
-  install -d -m 0700 -o root -g root /etc/commonswarm-release
-  install -m 0600 -o root -g root /dev/null /etc/commonswarm-release/target.env
+  TARGET_SOURCE=/etc/commonswarm-release/target.env
+  test -f "$TARGET_SOURCE"
+  test ! -L "$TARGET_SOURCE"
+  test "$(stat -c '%U:%G:%a' "$TARGET_SOURCE")" = root:root:600
   python3 - <<'PY'
 from pathlib import Path
-src = Path('/home/commonswarm/migration-direct.env')
-lines = [l for l in src.read_text().splitlines() if l.startswith('TARGET_DATABASE_URL=')]
-assert len(lines) == 1, 'expected exactly one TARGET_DATABASE_URL line'
-Path('/etc/commonswarm-release/target.env').write_text(lines[0] + '\n')
-print('target.env written (value not shown)')
+src = Path('/etc/commonswarm-release/target.env')
+lines = [line for line in src.read_text().splitlines()
+         if line and not line.startswith('#')]
+assert len(lines) == 1, 'expected exactly one non-comment assignment'
+name, value = lines[0].split('=', 1)
+assert name == 'TARGET_DATABASE_URL'
+assert value and not value.startswith(('"', "'"))
+print('target.env verified (value not shown)')
 PY
-  chown root:root /etc/commonswarm-release/target.env
-  chmod 0600 /etc/commonswarm-release/target.env
 )
 ```
 
@@ -1447,7 +1459,7 @@ For each version with NO ledger row, CSwarmDevLead must supply
 `$PROOF_DIR/<version>-catalog.sql`. It must be a read-only, error-safe catalog
 query returning exactly one unaligned value: `t` only when that migration's real
 catalog/data postcondition is complete, otherwise `f`. A generic catalog query
-is **not established**; do not infer object state from the filename. For the
+must be measured from the live catalog; do not infer object state from the filename. For the
 transactional check, the file must end with its own `\gset` on the line after
 a query selecting exactly one Boolean column aliased `catalog_ok`. The query
 returns one row, whose unaligned value is `t` or `f`; the wrapper refuses every
