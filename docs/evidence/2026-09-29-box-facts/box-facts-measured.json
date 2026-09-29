@@ -385,6 +385,187 @@
     "exit": 0,
     "output": "edge_current=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20\nedge_health=healthy\nstack_current=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f\noauth_current=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05\noauth_container_count=1\noauth_health=healthy\noauth_workdir=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth\nId=commonswarm-edge-recycle.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-backup.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n\nId=commonswarm-postgres-restore.timer\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\n"
   },
+  "k4": {
+    "recorded_at_utc": "2026-09-29T09:42:29Z",
+    "constraints": {
+      "release_window_opened": false,
+      "box_changes": "none",
+      "account_changes": "none",
+      "signals_or_messages_sent": "none",
+      "github_actions_dispatched": "none",
+      "credential_values_printed": "none",
+      "browser_actions": "one task-owned /app tab opened read-only and closed; no click, login, logout or workspace switch"
+    },
+    "items": [
+      {
+        "id": "K4-1",
+        "status": "MEASURED",
+        "command": "command -v cswarm; cswarm --version",
+        "result": {
+          "path": "/Users/yulanbot/.local/bin/cswarm",
+          "version": "0.1.80",
+          "protocol": "0.1.0"
+        }
+      },
+      {
+        "id": "K4-2",
+        "status": "MEASURED",
+        "command": "cswarm profile ls --json | jq -r '.profiles[] | [.path,(.workspace_id//\"\"),(.principal_id//\"\"),(.principal_name//\"\"),(.url_host//\"\"),(.error//\"\")] | @tsv'",
+        "token_field_precheck": "PASS: recursive object-key inspection exposed no token or credential-value field",
+        "matching_rows": [
+          {
+            "path": "/Users/yulanbot/anvil-work/uat-20260927/seat-b/connect-profile-b.json",
+            "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+            "principal_id": "cee27f94-4231-4a02-934d-5bf08d73ed75",
+            "principal_name": "",
+            "url_host": "api.commonswarm.com",
+            "error": ""
+          }
+        ],
+        "other_row_count": 29
+      },
+      {
+        "id": "K4-3",
+        "status": "NOT MEASURED",
+        "command": "cswarm whoami --profile \"/Users/yulanbot/anvil-work/uat-20260927/seat-b/connect-profile-b.json\" --json | jq '{credential_valid,credential_metadata_match,principal_id,display_name,workspace_id,workspace_name,owner_user_id}'",
+        "reason": "The sole matching profile returned HTTP 403 forbidden, so its credential validity, metadata match, display identity and owner identity were not measurable.",
+        "window_a": {
+          "requirement": "NOT MET",
+          "cli_version_ok": true,
+          "production_host_ok": true,
+          "workspace_id_ok": true,
+          "matching_profile_count": 1,
+          "valid_credential_profile_count": 0,
+          "distinct_verified_principal_count": 0,
+          "sender_profile": null,
+          "receiver_profile": null,
+          "third_seat_profile": null,
+          "note": "Three distinct verified Cold Agent Test seats are required. Only one matching profile exists and its whoami request is forbidden, so no sender, receiver or exclusion-check seat can be assigned safely."
+        }
+      },
+      {
+        "id": "K4-4",
+        "status": "MEASURED",
+        "command": "cswarm status --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq '{user_id:.identity.user_id,workspace_id:.selected_project.workspace_id,workspace_name:.selected_project.name,project_count,warning_codes:[.warnings[]?.code]}'",
+        "human_session_exists": true,
+        "result": {
+          "user_id": "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
+          "workspace_id": "c2ea0541-f56d-4c73-bf71-56c5405c4934",
+          "workspace_name": "Cold Agent Test 0.1.12",
+          "project_count": 6,
+          "warning_codes": []
+        }
+      },
+      {
+        "id": "K4-5",
+        "status": "MEASURED",
+        "command": "ssh -o BatchMode=yes commonswarm@yulan-vps-1 'id -un; readlink -f /srv/commonswarm/site/current; test -w /srv/commonswarm/site && echo site_root_writable=yes; test -w /srv/commonswarm/site/releases && echo releases_writable=yes; stat -c \"%n %F %U:%G %a\" /srv/commonswarm/site /srv/commonswarm/site/releases'",
+        "direct_ssh": true,
+        "fallback_via_ops_used": false,
+        "result": {
+          "remote_user": "commonswarm",
+          "site_current": "/srv/commonswarm/site/releases/20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e",
+          "site_root_writable": true,
+          "releases_writable": true,
+          "site_root": "directory commonswarm:commonswarm 755",
+          "releases_root": "directory commonswarm:commonswarm 755"
+        }
+      },
+      {
+        "id": "K4-6",
+        "status": "MEASURED",
+        "command": "ssh -o BatchMode=yes commonswarm@yulan-vps-1 'python3 --version; curl -sS -I --max-time 15 -A commonswarm-release-probe/1.0 -o /dev/null -w \"site_http=%{http_code}\\n\" https://commonswarm.com/app; curl -sS -I --max-time 15 -A commonswarm-release-probe/1.0 -o /dev/null -w \"api_http=%{http_code}\\n\" https://api.commonswarm.com/functions/v1/h0/agent-doc/smoke'",
+        "result": {
+          "python": "3.12.3",
+          "probe_user_agent": "commonswarm-release-probe/1.0",
+          "site_http": 200,
+          "api_http": 200
+        }
+      },
+      {
+        "id": "K4-7",
+        "status": "MEASURED",
+        "command": "Immediate release entries were enumerated with a read-only shell glob and stat; retention was read from deploy/site/finalize-release.sh lines 183-215.",
+        "releases": [
+          {
+            "name": "20260926T032049Z-3ca168761cd5-3b58e64bc00d55dc",
+            "mtime_utc": "2026-09-26 03:20:17.000000000 +0000"
+          },
+          {
+            "name": "20260927T041743Z-21e40223ce7b-961cc6f2ca19e61a",
+            "mtime_utc": "2026-09-27 04:17:43.000000000 +0000"
+          },
+          {
+            "name": "20260927T085803Z-ff27acfbb805-3940c8d1ed9caa99",
+            "mtime_utc": "2026-09-27 08:58:03.000000000 +0000"
+          },
+          {
+            "name": "20260927T135007Z-736bac7a1fb9-2eb0bb6c002fdd19",
+            "mtime_utc": "2026-09-27 13:50:07.000000000 +0000"
+          },
+          {
+            "name": "20260927T173937Z-9b085c823523-7b9cc15f8a9b7f1e",
+            "mtime_utc": "2026-09-27 17:39:37.000000000 +0000"
+          }
+        ],
+        "retention": {
+          "keeps_newest": 5,
+          "release_count_now": 5,
+          "release_count_after_one_new": 6,
+          "prune_count_after_one_new": 1,
+          "release_pruned_after_one_new": "20260926T032049Z-3ca168761cd5-3b58e64bc00d55dc",
+          "current_live_release_pruned_after_one_new": false
+        }
+      },
+      {
+        "id": "K4-8",
+        "status": "MEASURED",
+        "command": "browser-harness opened one task-owned background tab at https://commonswarm.com/app and read only source-defined DOM state; no page action was clicked.",
+        "result": {
+          "signed_in": true,
+          "displayed_account": "Ridgeio",
+          "displayed_account_note": "The UI displayed a non-email account label, so there was no email address to mask or record.",
+          "selected_workspace_name": "CICD",
+          "selected_workspace_id": "292be0f9-ca5d-43ed-a6f7-31354fe7fe56",
+          "connected_apps_visible": false,
+          "cold_agent_test_profile_match": false
+        },
+        "note": "The existing Chrome session was not the requested Cold Agent Test account/workspace. It was not signed out, signed in or switched."
+      }
+    ],
+    "command_review": {
+      "supplied_commands_changed": [],
+      "supplied_commands_refused": [],
+      "safety_prechecks_added": [
+        "Before K4-2, recursive JSON object keys were inspected without printing values; no token or credential-value field was present."
+      ],
+      "fallbacks": [
+        "K4-5 direct SSH as commonswarm succeeded; the ops sudo fallback was not run."
+      ]
+    },
+    "production_recheck": {
+      "status": "MEASURED",
+      "edge_current": "72c57e0d76d0aa86fe4f811a2cf51499919fed20",
+      "edge_state": "running",
+      "edge_health": "healthy",
+      "stack_current": "ad964ed158181ba1692dd05895f36fa7a1f87d3f",
+      "stack_containers": {
+        "postgres": "running/healthy",
+        "gotrue": "running/healthy",
+        "postgrest": "running/healthy",
+        "realtime": "running/healthy",
+        "storage-api": "running/healthy"
+      },
+      "oauth_current": "826db6a34f235064a3a03c57377d8e32a35d2f05",
+      "oauth_state": "running",
+      "oauth_health": "healthy",
+      "timers": {
+        "commonswarm-edge-recycle.timer": "active",
+        "commonswarm-postgres-backup.timer": "active",
+        "commonswarm-postgres-restore.timer": "active"
+      }
+    }
+  },
   "measured_count": 18,
   "fact_count": 20
 }
