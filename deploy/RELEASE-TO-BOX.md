@@ -408,7 +408,7 @@ TS
     >"$EVIDENCE_DIR/required-edge-env.json"
   chmod 0600 "$EVIDENCE_DIR/required-edge-env.json"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts \
-    | rg -n 'REQUIRED_MAIN_ENV|mainEnvironmentProblems|FUNCTION_ENV_NAMES' \
+    | grep -nE 'REQUIRED_MAIN_ENV|mainEnvironmentProblems|FUNCTION_ENV_NAMES' \
     >"$EVIDENCE_DIR/edge-env-source-check.txt"
   chmod 0600 "$EVIDENCE_DIR/edge-env-source-check.txt"
 )

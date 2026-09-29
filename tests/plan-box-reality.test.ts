@@ -41,6 +41,12 @@ function directoryProblems(source: string): string[] {
   return problems;
 }
 
+function ripgrepProblems(source: string): string[] {
+  return blocks(source)
+    .filter((block) => /(?:^|[|;&]\s*)rg(?:[ \t]|$)/mu.test(block))
+    .map(() => "runnable block calls rg");
+}
+
 test("box plans encode public UA, psql path, and standalone-variable reality", () => {
   const plan = readFileSync(PLAN, "utf8");
   const site = readFileSync(SITE, "utf8");
@@ -52,6 +58,10 @@ test("box plans encode public UA, psql path, and standalone-variable reality", (
   assert.deepEqual(psqlFileProblems(runbook), []);
   assert.deepEqual(directoryProblems(plan), []);
   assert.deepEqual(directoryProblems(runbook), []);
+  assert.deepEqual(ripgrepProblems(plan), []);
+  assert.deepEqual(ripgrepProblems(site), []);
+  assert.deepEqual(ripgrepProblems(runbook), []);
+  assert.deepEqual(ripgrepProblems(readFileSync("docs/design/BOX-PLAN-TEMPLATE.md", "utf8")), []);
   assert.match(runbook, /CONTAINER_FILE=\/run\/commonswarm-release-apply\.sql/u);
   assert.match(runbook, /CONTAINER_FILE="\/proof\/\$PROOF_RELATIVE"/u);
   assert.match(runbook, /--file must name APPLY_SQL or a PROOF_DIR file/u);
@@ -66,4 +76,6 @@ test("reality checks have failing controls", () => {
   assert.deepEqual(psqlFileProblems('release_psql --file "$APPLY_SQL"'), []);
   const unset = "```sh\n# step: bad-dir\n# readonly: yes\nprintf x >\"$PROOF_DIR/x\"\n```";
   assert.notDeepEqual(directoryProblems(unset), []);
+  const ripgrep = "```sh\n# step: bad-rg\n# readonly: yes\nprintf x | rg -n x\n```";
+  assert.notDeepEqual(ripgrepProblems(ripgrep), []);
 });
