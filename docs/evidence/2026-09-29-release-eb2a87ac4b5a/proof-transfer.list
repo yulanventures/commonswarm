@@ -9,3 +9,8 @@
 gate-evidence.txt
 required-edge-env.json
 edge-env-source-check.txt
+hm37-closed-window-leftovers.txt
+hm37-worker-boundary.txt
+hm37-hosted-control-inputs.txt
+hm37-read-only-fixes.txt
+hm37-stack-runtime-review.txt

@@ -4,27 +4,35 @@
     {
       "method": "GET",
       "path": "/.well-known/oauth-authorization-server",
-      "status": 200
+      "status": 200,
+      "user_agent": "Python urllib default",
+      "headers": {
+        "server": "cloudflare",
+        "cf-ray": "a4277fbd2d55bde7-PRG",
+        "content-type": "application/json; charset=utf-8"
+      }
     },
     {
       "method": "GET",
       "path": "/.well-known/openid-configuration",
-      "status": 200
+      "status": 200,
+      "user_agent": "Python urllib default",
+      "headers": {
+        "server": "cloudflare",
+        "cf-ray": "a4277fbdbe6f8b99-PRG",
+        "content-type": "application/json; charset=utf-8"
+      }
     },
     {
       "method": "GET",
       "path": "/jwks",
-      "status": 200
-    },
-    {
-      "method": "GET",
-      "path": "/authorize",
-      "status": 503
-    },
-    {
-      "method": "POST",
-      "path": "/token",
-      "status": 503
+      "status": 200,
+      "user_agent": "Python urllib default",
+      "headers": {
+        "server": "cloudflare",
+        "cf-ray": "a4277fbe2ba0a6de-PRG",
+        "content-type": "application/jwk-set+json; charset=utf-8"
+      }
     }
   ]
 }

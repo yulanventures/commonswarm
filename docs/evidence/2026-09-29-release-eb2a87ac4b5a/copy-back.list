@@ -42,6 +42,9 @@ hm37-prerequisites.json
 hm37-stack-runtime-review.txt
 hm37-backup-gate.txt
 hm37-worker-boundary.txt
+hm37-loopback-reads.json
+hm37-public-reads.json
+hm37-mcp-hostname-reads.json
 hm37-loopback-boundaries.json
 hm37-public-boundaries.json
 hm37-mcp-hostname-boundaries.json
@@ -52,9 +55,5 @@ hm37-functional-after-control.txt
 hm37-local-control.json
 hm37-revocation-readback.json
 hm37-close-readback.txt
+hm37-closed-window-leftovers.txt
 hm37-read-only-fixes.txt
-hm37-previous-edge-mounts.txt
-commonswarm-edge-edge-runtime-1.72c57e0d76d0aa86fe4f811a2cf51499919fed20.docker.log
-commonswarm-edge-edge-runtime-1.eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.docker.log
-hm37-rollback-verification.txt
-release-abort.txt

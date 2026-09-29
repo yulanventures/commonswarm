@@ -1,1 +1,1 @@
-RELEASE_DIR_STATE=created
+RELEASE_DIR_STATE=reused

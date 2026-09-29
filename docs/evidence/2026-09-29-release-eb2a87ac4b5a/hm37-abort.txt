@@ -1,0 +1,15 @@
+HM37 window abort
+window_suffix=021020
+window_start_utc=2026-09-29T02:10:20Z
+COMMIT_POINT=not-reached
+CONTROLS=not-run
+failure_stage=precondition-evidence
+assertion_id=unmapped
+class=control
+raw_output=bash: line 5: STACK_RELEASE_DIR: unbound variable
+cause=operator-authored supplemental prerequisite evidence script referenced an undefined variable before any migration, edge, control, or temporary principal mutation
+failure_action=cleanup and revocation only; no rollback; stop
+migration_20260928000004=not-applied
+edge_eb2a87ac=not-live
+previous_edge_72c57e0d=still-live
+migration_edge_full_rollback=not-run because neither forward mutation occurred and an unmapped failure cannot authorize rollback

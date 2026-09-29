@@ -1,0 +1,80 @@
+Part A inventory and closed-window cleanup
+Inventory UTC: 2026-09-29T02:11:10Z
+Closed window: 001030
+Release SHA: eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+Historical evidence commit: 229cc29ebc248652cc76d899515217ae8d51ed18
+
+A3 glob/list review
+The later release procedure addresses NEW_EDGE, NEW_STACK, and PROOF_DIR by exact SHA paths. It does not enumerate releases/* or release-proofs/* as candidate releases. The .closed-window-001030 names are therefore not selected by a later release listing or glob.
+
+Inventory table
+path or object | what the step requires | state at Part A inventory | origin/proof
+/home/commonswarm/edge/current | target 72c57e0d before this release | 72c57e0d76d0aa86fe4f811a2cf51499919fed20 | readlink and running Compose working directory
+/home/commonswarm/stack/current | target ad964ed1; no stack switch when runtime diff is empty | ad964ed158181ba1692dd05895f36fa7a1f87d3f | readlink
+/home/commonswarm/oauth/current | target 826db6a3 and healthy | 826db6a34f235064a3a03c57377d8e32a35d2f05, healthy | readlink and container health
+/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 | absent or pristine archive before prepare | existed, owner commonswarm:commonswarm mode 0750, 3264 files/646 dirs/1 symlink; one extra box-only compose.override.yaml | RELEASE_SHA matched; mtime 2026-09-29T00:12:58.889886Z; window.env suffix 001030; prior edge state=created
+.../deploy/edge-runtime/compose.override.yaml | absent until runbook-31 copies it from the live old edge | present, owner commonswarm:commonswarm mode 0644, sha256 492676590faf4a269fc7b72331b31e0ab70a4fd92f96fbdd5ef1480de931df0c | closed window 001030 added the box-only override; parent release mtime and prior evidence
+/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 | absent or exact pristine same-SHA archive | present and pristine, owner commonswarm:commonswarm mode 0755, 3263 files/646 dirs/1 symlink | RELEASE_SHA matched; stack.SHA256SUMS from window 001030 verifies the full tree; mtime 2026-09-29T00:12:59.837883Z
+/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 | absent before creating new window proof state | existed, owner root:root mode 0700, 64 files/2 dirs | window.env suffix 001030; mtime 2026-09-29T00:30:10.056528Z; evidence commit 229cc29e
+.../window.env | new durable state for this window only | present from 001030, root:root 0600, sha256 7f4fddfb3ff0c84dc5e94f93b5152a6a2c67e7db4d796b388b82281d37367d97 | contained WINDOW_START_UTC=2026-09-29T00:10:30Z and WINDOW_PRINCIPAL_SUFFIX=001030
+.../copy-back.list | new explicit manifest for this window | present from 001030, root:root 0600, 60 names, sha256 7b718c45adf10a1c7a4b8153f10e241aa024459fb480d5fcb4adaccc0cb9e119 | all 60 names and sha256 values match commit 229cc29e
+.../box-run.log | new window-private log | present from 001030, root:root 0600 | mtime 2026-09-29T00:22:44.211990Z; not copied evidence
+.../current-migration.env | generated for this window migration | present from 001030, root:root 0600 | mtime 2026-09-29T00:21:25.546240Z
+.../edge-probe-window.log | absent before new edge probe interval | absent | closed window had already removed/not retained it
+.../database | generated database identity artifacts for this window | present from 001030, root:root 0700 | mtime 2026-09-29T00:15:14.114412Z
+/home/commonswarm/edge/controls/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 | absent before hosted control stage | absent | closed-window cleanup completed
+.../journal and hm37-open-ack-001030.journal.json | absent before stage; private journal only during control | absent | closed-window cleanup completed
+/run/commonswarm-hm37 | absent before protected stage | absent | closed-window cleanup completed
+/run/commonswarm-smoke.curl | absent | absent | closed-window cleanup completed
+/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-service.conf | absent before database session | absent | closed-window cleanup completed
+/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-pass | absent before database session | absent | closed-window cleanup completed
+/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-apply.sql | absent before database session | absent | closed-window cleanup completed
+/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-session.sh | absent before database session | absent | closed-window cleanup completed
+/tmp/commonswarm-release.tar | absent before upload | absent | closed-window cleanup completed
+/tmp/commonswarm-release-proofs.tar | absent before proof upload | absent | closed-window cleanup completed
+/tmp/commonswarm-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.tar | absent on box | absent | no leftover
+/tmp/commonswarm-release-proofs-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.tar | absent on box | absent | no leftover
+/etc/commonswarm-release/target.env | existing protected target-only credential is allowed; runbook-14 recreates it and runbook-15 verifies shape | present, root:root 0600, mtime 2026-09-29T00:15:10.421425Z | created in closed window 001030; contains exactly the approved target assignment (value not read into evidence); not a blocker
+commonswarm-edge-edge-runtime-1 | must run from 72c57e0d, healthy, no eb2a87ac mount/workdir | healthy; workdir and every bind mount are under 72c57e0d; memory 2147483648; network commonswarm-net | docker inspect
+Docker containers associated with eb2a87ac | none before switch | count 0 | full container label/image/mount scan
+Docker images tagged or labelled with eb2a87ac | none required or allowed as a leftover | count 0 | full local image tag/digest/label scan
+process references to the eb2a87ac edge/proof candidates | none before rename | count 0 | /proc cwd/root/exe/fd scan immediately before mv
+mount references to the eb2a87ac edge/proof candidates | none before rename | count 0 | /proc/self/mountinfo and container mount inspection immediately before mv
+migration 20260928000004 ledger row | absent before apply | count 0 | read-only SQL as postgres/supabase_admin
+migration 04 tables | absent before apply | hosted_mcp_check_cursors absent; hosted_mcp_check_batches absent | read-only to_regclass checks
+temporary principals hm37-hosted/local/sender-001030 | no active closed-window principals | total 0; active 0 | read-only SQL counts
+temporary agent tokens for 001030 principals | zero active unexpired tokens | total 0; active unexpired 0 | read-only SQL counts
+temporary hosted seat hm37-hosted-001030 | no active closed-window seat | total 0; active 0 | read-only SQL counts
+temporary hosted handles/grants for 001030 | none active | active handles 0; active grants 0 | read-only SQL counts
+commonswarm-edge-recycle.timer | active after closed window | active/enabled | systemd
+commonswarm-postgres-backup.timer | active after closed window | active/enabled | systemd
+commonswarm-postgres-restore.timer | active after closed window | active/enabled | systemd
+backup/restore services | prior successful result and not running | both inactive; Result=success | systemd
+
+Proof-directory commit check before rename
+Box regular files: 64. Commit 229cc29e evidence files: 63. Common names: 60. All 60 common names have identical sha256. copy-back.list has 60 names; every listed name exists in both locations and all listed sha256 values match. The four expected box-only private files are box-run.log, current-migration.env, database/logs/assert-database-identity-target.log, and window.env. The three expected Mac-only files are archive.sha256, proof-transfer.list, and run.log. There were no hash mismatches.
+
+Actions
+from=/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+to=/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030
+owner_before_after=commonswarm:commonswarm
+proof_of_origin=RELEASE_SHA matched; extra compose.override.yaml; window 001030 proof state; mtime 2026-09-29 00:12:58.889886287 +0000
+eligibility=current target no; running workdir/mount no; open process no; plan requires pristine archive
+
+from=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+to=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-001030
+owner_before_after=root:root
+proof_of_origin=window.env suffix 001030; all 60 copied evidence names and sha256 match commit 229cc29e; mtime 2026-09-29 00:30:10.056528436 +0000
+eligibility=current target no; running workdir/mount no; open process no; plan requires new proof state
+
+Unchanged by Part A
+/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922 remained in place, owner commonswarm:commonswarm. It is the pristine same-SHA archive accepted by the runbook verifier. No docker object, database row, Caddy file, current symlink, or path for 72c57e0d, ad964ed1, or 826db6a3 was changed.
+
+Production recheck after renames
+edge=72c57e0d76d0aa86fe4f811a2cf51499919fed20; health=healthy; loopback /health=PASS
+stack=ad964ed158181ba1692dd05895f36fa7a1f87d3f
+oauth=826db6a34f235064a3a03c57377d8e32a35d2f05; health=healthy
+commonswarm-edge-recycle.timer=active
+commonswarm-postgres-backup.timer=active
+commonswarm-postgres-restore.timer=active
+Part A blockers remaining: none

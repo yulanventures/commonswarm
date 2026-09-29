@@ -1,0 +1,27 @@
+{
+  "pass": true,
+  "results": [
+    {
+      "method": "GET",
+      "path": "/authorize",
+      "status": 503,
+      "user_agent": "Python urllib default",
+      "headers": {
+        "server": "cloudflare",
+        "cf-ray": "a4277fc9cf21deac-PRG",
+        "content-type": "application/json"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/token",
+      "status": 503,
+      "user_agent": "Python urllib default",
+      "headers": {
+        "server": "cloudflare",
+        "cf-ray": "a4277fca2adc6e94-PRG",
+        "content-type": "application/json"
+      }
+    }
+  ]
+}

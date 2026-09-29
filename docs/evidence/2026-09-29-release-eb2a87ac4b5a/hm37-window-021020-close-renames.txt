@@ -1,0 +1,45 @@
+HM37 window 021020 close cleanup
+
+Reason
+- Window stopped before migration or edge mutation because an operator-authored supplemental prerequisite-evidence script failed without a recognized assertion id: `bash: line 5: STACK_RELEASE_DIR: unbound variable`.
+- Required action: cleanup and revocation only; no rollback authorized; stop.
+
+A2 eligibility at close
+- `/home/commonswarm/edge/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` was created by window 021020 but remained pristine: `compose.override.yaml` absent and `edge.SHA256SUMS` passed. It therefore already met the plan's pristine requirement and was left unchanged for safe exact-directory reuse.
+- `/home/commonswarm/stack/releases/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` was reused from the prior closed window, remained checksum-clean, and was left unchanged.
+- `/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922` was non-pristine evidence from window 021020, was not current, mounted, open, or referenced by a process/container, and qualified for in-place rename.
+
+Rename
+- from: `/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922`
+- to: `/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922.closed-window-021020`
+- owner before/after: `root:root`
+- origin proof: `WINDOW_PRINCIPAL_SUFFIX='021020'`; `edge.release-dir-state.txt=created`; `stack.release-dir-state.txt=reused`; `hm37-closure.txt outcome=aborted-before-migration-and-edge`
+- source mtime: `2026-09-29 02:29:09.278098327 +0000`
+- pre-rename process refs: 0
+- pre-rename mount refs: 0
+
+Scratch cleanup
+- `/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-service.conf`: absent after guarded close cleanup
+- `/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-pass`: absent after guarded close cleanup
+- `/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-apply.sql`: absent after guarded close cleanup
+- `/run/commonswarm-release-eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922-session.sh`: absent after guarded close cleanup
+- `/tmp/commonswarm-release.tar`: absent after guarded close cleanup
+- `/tmp/commonswarm-release-proofs.tar`: absent after guarded close cleanup
+
+Revocation and database readback
+- migration 04 ledger: 0
+- migration 04 catalog tables: 0
+- temporary principals total/active: 0/0
+- temporary agent tokens total/active-unexpired: 0/0
+- temporary hosted seats total/active: 0/0
+- temporary hosted handles active: 0
+- temporary hosted grants active: 0
+
+Production recheck after rename
+- edge current: `72c57e0d76d0aa86fe4f811a2cf51499919fed20`; healthy
+- stack current: `ad964ed158181ba1692dd05895f36fa7a1f87d3f`
+- OAuth current: `826db6a34f235064a3a03c57377d8e32a35d2f05`; healthy
+- `SWARM_MCP_PUBLIC_ENABLED`: unset
+- edge recycle timer: active
+- PostgreSQL backup timer: active
+- PostgreSQL restore timer: active
