@@ -19,10 +19,7 @@ esac
 git() {
   box_dry_run_record git "$@"
   case " $* " in
-    *' remote get-url origin '*) printf '%s\n' 'https://github.com/yulanventures/commonswarm.git' ;;
-    *' fetch origin main '*) return 0 ;;
-    *' status --porcelain '*) return 0 ;;
-    *' diff --exit-code HEAD -- site deploy/site '*) return 0 ;;
+    *' fetch origin main '*) printf '%s\n' 'UNPRODUCED exact-SHA checkout preparation' >&2; return 69 ;;
     *) command git "$@" ;;
   esac
 }
@@ -33,51 +30,28 @@ python3() {
     printf 'injected dry-run failure: %s\n' "${BOX_DRY_RUN_STEP:-}" >&2
     return 41
   fi
-  if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ] && [ "${BOX_DRY_RUN_STEP:-}" = 1-apply-release-directories ]; then
+  if [ "${BOX_DRY_RUN_CONTROL:-}" = b912-second-open ]; then
     printf '%s\n' 'STOP: existing release directory cannot be reopened after rollback' >&2
     return 42
   fi
-  case "${BOX_DRY_RUN_STEP:-}" in
-    hm37-source-identity|hm37-hm6-oauth-precondition|hm37-hm6-oauth-refusal-probe|hm37-deno-install|hm37-hosted-control-stage|hm37-backup-gate|hm37-public-boundary-reads|hm37-public-boundaries|runbook-31|runbook-34|site-03*|site-05*)
-      command python3 "$@"
-      ;;
-    *)
-      printf '%s\n' 'dry-run python PASS'
-      ;;
-  esac
+  command python3 "$@"
 }
 
 node() {
   box_dry_run_record node "$@"
-  case "${BOX_DRY_RUN_STEP:-}" in
-    site-03*|runbook-44) command node "$@" ;;
-    hm37-hosted-human-session-input)
-      output=${4:?dry-run human-session output missing}
-      printf '%s\n' '{"access_token":"dry-run-placeholder"}' >"$output"
-      chmod 0600 "$output"
-      ;;
-    *) printf '%s\n' 'dry-run node PASS' ;;
-  esac
+  command node "$@"
 }
 
 release_psql() {
   box_dry_run_record release_psql "$@"
-  printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}"
+  printf '%s\n' 'UNPRODUCED database observation' >&2
+  return 69
 }
 
 release_psql_ro() {
   box_dry_run_record release_psql_ro "$@"
-  case "${BOX_DRY_RUN_STEP:-} $*" in
-    *"20260916000001"*"20260916000002"*) : ;;
-    runbook-26*"20260928000004"*"count"*) printf '%s\n' 0 ;;
-    runbook-26*"20260928000004-catalog.sql"*) printf '%s\n' f ;;
-    runbook-28*"20260928000004"*"count"*) printf '%s\n' 1 ;;
-    runbook-28*"20260928000004-catalog.sql"*) printf '%s\n' t ;;
-    *"ORDER BY version"*)
-      printf '%s\n' 20260916000001 20260916000002 20260925000001 20260926000001 20260927000001 20260927000002 20260927000003 20260928000001 20260928000002 20260928000003
-      ;;
-    *) printf '%s\n' "${BOX_DRY_RUN_PSQL_RESULT:-t}" ;;
-  esac
+  printf '%s\n' 'UNPRODUCED database observation' >&2
+  return 69
 }
 
 date() {
