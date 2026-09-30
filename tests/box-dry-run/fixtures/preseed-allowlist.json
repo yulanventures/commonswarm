@@ -52,7 +52,7 @@
   {"kind":"path","name":"/etc/commonswarm-oauth/database-credentials","source":"M7","evidence":"/etc/commonswarm-oauth/database-credentials"},
   {"kind":"path","name":"/etc/commonswarm-oauth/service.env","source":"M7","evidence":"/etc/commonswarm-oauth/service.env"},
   {"kind":"path","name":"/etc/ssl/yulan-internal-ca.pem","source":"M7","evidence":"/etc/ssl/yulan-internal-ca.pem"},
-  {"kind":"path","name":"/etc/commonswarm-release/target.env","source":"M8","evidence":"/etc/commonswarm-release/target.env"},
+  {"kind":"path","name":"/etc/commonswarm-release/target.env","source":"M8","evidence":"/etc/commonswarm-release/target.env","note":"M8 measures metadata and the variable name only. Contents are synthetic formatting input for deploy/supabase-stack/migrate/make-pg-service.mjs:35-46, never a measured URL or database identity; runbook-16 is NOT EXECUTED."},
   {"kind":"path","name":"/home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh","source":"M8","evidence":"run-db-tool.sh"},
   {"kind":"path","name":"/var/backups/commonswarm-postgres/status.json","source":"M9","evidence":"/var/backups/commonswarm-postgres/status.json"},
   {"kind":"path","name":"/home/commonswarm/.env","source":"M18","evidence":"/home/commonswarm/.env"},

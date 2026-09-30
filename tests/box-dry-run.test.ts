@@ -377,6 +377,11 @@ const OAUTH_RELEASE = measuredProductionMatch(/oauth_current=([^\n]+)/);
 const EDGE_MEMORY = Number(measuredMatch("M11", /memory=(\d+)/));
 const EDGE_NETWORK = measuredMatch("M11", /network=([^ ]+)/);
 const TARGET_ENV_NAME = measuredMatch("M8", /^(TARGET_DATABASE_URL)$/m);
+// M8 measures the file's metadata and variable name only, not a URL or PostgreSQL identity.
+// These synthetic credentials exercise make-pg-service.mjs's permitted-host formatting contract
+// (deploy/supabase-stack/migrate/make-pg-service.mjs:35-46). They are never database observations:
+// runbook-16 remains NOT EXECUTED and every database fixture call refuses with exit 69.
+const SYNTHETIC_TARGET_ENV_BODY = `${TARGET_ENV_NAME}=postgresql://fixture:fixture@db.commonswarm.internal/postgres\n`;
 const ACCOUNT_NAMES = measuredFact("M3").output.split("\n")
   .filter((line) => line.split(":").length >= 7)
   .map((line) => line.split(":", 1)[0]!)
@@ -1447,7 +1452,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   }
   file("/home/commonswarm/.env",
     Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600, commonswarm);
-  file("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600, rootOwned);
+  file("/etc/commonswarm-release/target.env", SYNTHETIC_TARGET_ENV_BODY, 0o600, rootOwned);
   file("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644, rootOwned);
   file("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640, rootOwned);
   file("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600, rootOwned);
@@ -2140,7 +2145,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   }
   writeMode("/home/commonswarm/.env",
     Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600);
-  writeMode("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600);
+  writeMode("/etc/commonswarm-release/target.env", SYNTHETIC_TARGET_ENV_BODY, 0o600);
   writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644);
   writeMode("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640);
   writeMode("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600);
@@ -3972,7 +3977,8 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
 test("controls: fixture node runs the real database service-file generator without a host PATH", () => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
   const bin = join(temporary, "bin");
-  const target = join(temporary, "target.env");
+  const boxRoot = join(temporary, "box");
+  const target = join(boxRoot, "etc/commonswarm-release/target.env");
   const service = join(temporary, "service.conf");
   const pass = join(temporary, "pass");
   const script = resolve("deploy/supabase-stack/migrate/make-pg-service.mjs");
@@ -3980,8 +3986,9 @@ test("controls: fixture node runs the real database service-file generator witho
   const env = explicitEnvironment({ PATH: bin, BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
     PG_SERVICE_OUTPUT: service, PG_PASS_OUTPUT: pass, COMMONSWARM_MIGRATION_ENV_FILE: target });
   try {
-    // Synthetic connection bytes only. This program formats files; it never connects to PostgreSQL.
-    writeMode(target, "TARGET_DATABASE_URL=postgresql://fixture:fixture@db.commonswarm.internal/postgres\n");
+    // Exercise the target.env that the fixture actually supplies to runbook-17. The generator only
+    // formats files; no connection is made and this control cannot establish database identity.
+    seedMacBoxRoot(boxRoot, "s2");
     const positive = spawnSync(process.execPath, [script], { encoding: "utf8", env });
     assert.equal(positive.status, 0, positive.stderr);
     const expectedService = readFileSync(service, "utf8");
