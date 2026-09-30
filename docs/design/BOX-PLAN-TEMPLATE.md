@@ -85,6 +85,21 @@ Double quotes around a writer's argument do not quote the generated assignment:
 `printf '%s\n' "KIND_LIST=$KIND_LIST"` writes an executable `stack` command when
 the value is `edge stack`. Use `printf 'KIND_LIST=%q\n' "$KIND_LIST"` instead.
 
+List prompt inputs remain quoted scalars in sourced state files. Each consuming
+block parses its own array with Bash 3.2-safe `read -r -a`, before any array
+length, iteration, or membership check; it never assumes the source file or a
+previous shell declared an array. For a required nonempty list, guard the
+scalar with `${LIST:?required list missing}`. Use
+`read -r -a ITEMS <<<"$LIST" || [ -n "${ITEMS[*]:-}" ]` and
+`test -n "${ITEMS[*]:-}"` before reading its length or elements. Keep the
+normal field separators for this parsing read; `IFS=` disables list splitting.
+A here-string supplies its own final newline. Array-read checks must compare
+the parsed entries, rather than require the first entry to equal the whole list.
+Iterate with `"${ITEMS[@]}"` so list entries cannot expand as file globs. Keep
+all count, entry-format, and subset checks. Validate a declared empty-list
+sentinel such as `none` before normalizing it to an empty array, and guard
+empty-array expansions under `set -u` (including on Bash 3.2).
+
 A plan whose opening gate proves a clean release checkout
 (`test -z "$(git status --porcelain)"`) keeps every file the window writes
 outside that checkout. Its open receipt names `EVIDENCE_ROOT`, an absolute Mac

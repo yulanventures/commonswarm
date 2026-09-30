@@ -318,6 +318,12 @@ initial manifest is built only from the explicit arrays below, never from
   : "${MCP_CADDY_RELEASE:?resolved item input missing}"
   : "${MIGRATION_VERSIONS:?resolved item input missing}"
   : "${FUNCTIONAL_VERSIONS:?resolved item input missing}"
+  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  read -r -a MIGRATION_VERSIONS <<<"$MIGRATION_VERSIONS" || [ -n "${MIGRATION_VERSIONS[*]:-}" ]
+  read -r -a FUNCTIONAL_VERSIONS <<<"$FUNCTIONAL_VERSIONS" || [ -n "${FUNCTIONAL_VERSIONS[*]:-}" ]
+  test -n "${KIND_ARRAY[*]:-}"
+  test -n "${MIGRATION_VERSIONS[*]:-}"
+  test -n "${FUNCTIONAL_VERSIONS[*]:-}"
   ITEM_COPY_BACK_FILES=()
   while IFS= read -r VALUE || [ -n "$VALUE" ]; do
     test -n "$VALUE" && ITEM_COPY_BACK_FILES[${#ITEM_COPY_BACK_FILES[@]}]="$VALUE"
@@ -335,18 +341,18 @@ initial manifest is built only from the explicit arrays below, never from
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
     *) false ;;
   esac
-  case " $KIND_LIST " in
+  case " ${KIND_ARRAY[*]} " in
     *' edge '*|*' stack '*) ;;
     *) false ;;
   esac
-  for KIND in $KIND_LIST; do
+  for KIND in "${KIND_ARRAY[@]}"; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
   for SWITCH in "$H0_LEDGER_BACKFILL" "$GUARDED_STACK_SWITCH" "$BACKUP_STATUS_PROOF" "$API_CADDY_PAIR" "$MCP_CADDY_RELEASE"; do
     case "$SWITCH" in yes|no) ;; *) false ;; esac
   done
   install -d -m 0700 -o root -g root "$PROOF_DIR"
-  case " $KIND_LIST " in
+  case " ${KIND_ARRAY[*]} " in
     *' edge '*)
       COPY_BACK_FILES+=(
         edge.SHA256SUMS
@@ -360,21 +366,21 @@ initial manifest is built only from the explicit arrays below, never from
       )
       ;;
   esac
-  case " $KIND_LIST " in
+  case " ${KIND_ARRAY[*]} " in
     *' stack '*) COPY_BACK_FILES+=(stack.SHA256SUMS stack.release-dir-state.txt) ;;
   esac
   if [ "$H0_LEDGER_BACKFILL" = yes ]; then
     COPY_BACK_FILES+=(h0-ledger-before.txt h0-ledger-after.txt)
   fi
   if [ "$GUARDED_STACK_SWITCH" = yes ]; then
-    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    case " ${KIND_ARRAY[*]} " in *' stack '*) ;; *) false ;; esac
     COPY_BACK_FILES+=(stack-switch-timers.txt)
   fi
   if [ "$BACKUP_STATUS_PROOF" = yes ]; then
     COPY_BACK_FILES+=(backup-status.json)
   fi
   if [ "$API_CADDY_PAIR" = yes ]; then
-    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    case " ${KIND_ARRAY[*]} " in *' stack '*) ;; *) false ;; esac
     COPY_BACK_FILES+=(
       caddy-before-10-commonswarm-api.caddy
       caddy-before-11-commonswarm-edge-staging.caddy
@@ -385,7 +391,7 @@ initial manifest is built only from the explicit arrays below, never from
     )
   fi
   if [ "$MCP_CADDY_RELEASE" = yes ]; then
-    case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+    case " ${KIND_ARRAY[*]} " in *' stack '*) ;; *) false ;; esac
     COPY_BACK_FILES+=(
       mcp-caddy-before.caddy
       mcp-caddy-before-state.txt
@@ -471,6 +477,8 @@ the dark `mcp` name:
   ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
   if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0 mcp'; fi
   case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
+  read -r -a CHANGED_FUNCTION_ARRAY <<<"$CHANGED_FUNCTIONS" || [ -n "${CHANGED_FUNCTION_ARRAY[*]:-}" ]
+  test -n "${CHANGED_FUNCTION_ARRAY[*]:-}"
   cat >"$ROUTER_DIR/inventory.ts" <<'TS'
 const { FUNCTION_ENV_NAMES, REQUIRED_MAIN_ENV, COMMAND_TEST_HOOKS } =
   await import(`file://${Deno.args[0]}`);
@@ -491,7 +499,7 @@ const optional = [...new Set(selected.flatMap((name) => FUNCTION_ENV_NAMES[name]
 console.log(JSON.stringify({ required: required.sort(), optional }, null, 2));
 TS
   deno run --no-config --allow-read="$ROUTER_DIR" "$ROUTER_DIR/inventory.ts" \
-    "$ROUTER_SOURCE" "$CHANGED_FUNCTIONS" "$ADDITIONAL_REQUIRED_ENV_NAMES" \
+    "$ROUTER_SOURCE" "${CHANGED_FUNCTION_ARRAY[*]}" "$ADDITIONAL_REQUIRED_ENV_NAMES" \
     >"$EVIDENCE_DIR/required-edge-env.json"
   chmod 0600 "$EVIDENCE_DIR/required-edge-env.json"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts \
@@ -628,6 +636,8 @@ window state:
   : "${WINDOW_END_UTC:?load the box-clock-derived window end from the open receipt}"
   ARCHIVE=/tmp/commonswarm-release.tar
   : "${KIND_LIST:?resolved item input missing}"
+  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  test -n "${KIND_ARRAY[*]:-}"
   : "${EXPECTED_ARCHIVE_SHA256:?archive digest missing from resolved box input}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   NEW_EDGE="/home/commonswarm/edge/releases/${SHA}"
@@ -636,11 +646,11 @@ window state:
   PREVIOUS_STACK="$(readlink -f /home/commonswarm/stack/current)"
   test -n "$PREVIOUS_EDGE"
   test -n "$PREVIOUS_STACK"
-  case " $KIND_LIST " in
+  case " ${KIND_ARRAY[*]} " in
     *' edge '*|*' stack '*) ;;
     *) false ;;
   esac
-  for KIND in $KIND_LIST; do
+  for KIND in "${KIND_ARRAY[@]}"; do
     case "$KIND" in edge|stack) ;; *) false ;; esac
   done
   for T in "$WINDOW_START_UTC" "$WINDOW_END_UTC"; do
@@ -889,7 +899,7 @@ PY
       >"$PROOF_DIR/${KIND}.release-dir-state.txt"
   }
 
-  for KIND in $KIND_LIST; do
+  for KIND in "${KIND_ARRAY[@]}"; do
     if [ "$KIND" = edge ]; then
       prepare_release_directory edge "$NEW_EDGE" 0750
       EDGE_RELEASE_DIR_STATE="$RELEASE_DIR_RESULT"
@@ -1009,8 +1019,11 @@ HezLead confirms their list contains no secret:
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
+  : "${KIND_LIST:?resolved item input missing}"
+  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  test -n "${KIND_ARRAY[*]:-}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
-  for KIND in $KIND_LIST; do
+  for KIND in "${KIND_ARRAY[@]}"; do
     if [ "$KIND" = edge ]; then RELEASE_DIR="$NEW_EDGE"; else RELEASE_DIR="$NEW_STACK"; fi
     test "$(cat "$RELEASE_DIR/RELEASE_SHA")" = "$SHA"
     test ! -e "$RELEASE_DIR/.git"
@@ -1988,10 +2001,18 @@ name per line; empty when none). The lead supplies both lists with the release; 
   test "$SHA" = "$RELEASE_SHA"
   . "/run/commonswarm-release-${SHA}-session.sh"
   . "$PROOF_DIR/item-resolved-inputs.env"
+  : "${EXPECTED_NEW_CRON_JOBS:?resolved item input missing}"
+  : "${EXPECTED_REMOVED_CRON_JOBS:?resolved item input missing}"
+  read -r -a EXPECTED_NEW_CRON_JOB_ARRAY <<<"$EXPECTED_NEW_CRON_JOBS" || [ -n "${EXPECTED_NEW_CRON_JOB_ARRAY[*]:-}" ]
+  read -r -a EXPECTED_REMOVED_CRON_JOB_ARRAY <<<"$EXPECTED_REMOVED_CRON_JOBS" || [ -n "${EXPECTED_REMOVED_CRON_JOB_ARRAY[*]:-}" ]
   test "$EXPECTED_NEW_CRON_JOBS" = none
   test "$EXPECTED_REMOVED_CRON_JOBS" = none
-  EXPECTED_NEW_CRON_JOBS=''
-  EXPECTED_REMOVED_CRON_JOBS=''
+  test "${#EXPECTED_NEW_CRON_JOB_ARRAY[@]}" -eq 1
+  test "${#EXPECTED_REMOVED_CRON_JOB_ARRAY[@]}" -eq 1
+  test "${EXPECTED_NEW_CRON_JOB_ARRAY[0]}" = none
+  test "${EXPECTED_REMOVED_CRON_JOB_ARRAY[0]}" = none
+  EXPECTED_NEW_CRON_JOB_ARRAY=()
+  EXPECTED_REMOVED_CRON_JOB_ARRAY=()
   release_psql_ro -Atq --command 'SELECT jobname FROM cron.job ORDER BY jobname;' \
     >"$PROOF_DIR/cron-after.txt"
   LC_ALL=C sort "$PROOF_DIR/cron-before.txt" >"$PROOF_DIR/cron-before-sorted.txt"
@@ -2000,8 +2021,8 @@ name per line; empty when none). The lead supplies both lists with the release; 
     >"$PROOF_DIR/cron-added.txt"
   LC_ALL=C comm -23 "$PROOF_DIR/cron-before-sorted.txt" "$PROOF_DIR/cron-after-sorted.txt" \
     >"$PROOF_DIR/cron-removed.txt"
-  test "$(cat "$PROOF_DIR/cron-added.txt")" = "$EXPECTED_NEW_CRON_JOBS"
-  test "$(cat "$PROOF_DIR/cron-removed.txt")" = "$EXPECTED_REMOVED_CRON_JOBS"
+  test "$(cat "$PROOF_DIR/cron-added.txt")" = "${EXPECTED_NEW_CRON_JOB_ARRAY[*]-}"
+  test "$(cat "$PROOF_DIR/cron-removed.txt")" = "${EXPECTED_REMOVED_CRON_JOB_ARRAY[*]-}"
 )
 ```
 
@@ -3092,7 +3113,10 @@ releases compare each installed file to its own previous-release source.
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
-  case " $KIND_LIST " in *' stack '*) ;; *) false ;; esac
+  : "${KIND_LIST:?resolved item input missing}"
+  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  test -n "${KIND_ARRAY[*]:-}"
+  case " ${KIND_ARRAY[*]} " in *' stack '*) ;; *) false ;; esac
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   SITE_DIR=/etc/caddy/sites
   API_SITE="$SITE_DIR/10-commonswarm-api.caddy"
