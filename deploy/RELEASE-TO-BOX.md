@@ -894,24 +894,24 @@ PY
 
   WINDOW_ENV="$PROOF_DIR/window.env"
   {
-    printf "%s='%s'\n" SHA "$SHA"
-    printf "%s='%s'\n" KIND_LIST "$KIND_LIST"
-    printf "%s='%s'\n" WINDOW_START_UTC "$WINDOW_START_UTC"
-    printf "%s='%s'\n" WINDOW_END_UTC "$WINDOW_END_UTC"
-    printf "%s='%s'\n" WINDOW_ID "$WINDOW_ID"
-    printf "%s='%s'\n" WINDOW_PRINCIPAL_SUFFIX "$WINDOW_PRINCIPAL_SUFFIX"
-    printf "%s='%s'\n" NEW_EDGE "$NEW_EDGE"
-    printf "%s='%s'\n" NEW_STACK "$NEW_STACK"
-    printf "%s='%s'\n" PREVIOUS_EDGE "$PREVIOUS_EDGE"
-    printf "%s='%s'\n" PREVIOUS_STACK "$PREVIOUS_STACK"
-    printf "%s='%s'\n" RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
-    printf "%s='%s'\n" BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
-    printf "%s='%s'\n" RELEASE_DIR_STATE "$RELEASE_DIR_STATE"
-    printf "%s='%s'\n" EDGE_RELEASE_DIR_STATE "$EDGE_RELEASE_DIR_STATE"
-    printf "%s='%s'\n" STACK_RELEASE_DIR_STATE "$STACK_RELEASE_DIR_STATE"
+    printf '%s=%q\n' SHA "$SHA"
+    printf '%s=%q\n' KIND_LIST "$KIND_LIST"
+    printf '%s=%q\n' WINDOW_START_UTC "$WINDOW_START_UTC"
+    printf '%s=%q\n' WINDOW_END_UTC "$WINDOW_END_UTC"
+    printf '%s=%q\n' WINDOW_ID "$WINDOW_ID"
+    printf '%s=%q\n' WINDOW_PRINCIPAL_SUFFIX "$WINDOW_PRINCIPAL_SUFFIX"
+    printf '%s=%q\n' NEW_EDGE "$NEW_EDGE"
+    printf '%s=%q\n' NEW_STACK "$NEW_STACK"
+    printf '%s=%q\n' PREVIOUS_EDGE "$PREVIOUS_EDGE"
+    printf '%s=%q\n' PREVIOUS_STACK "$PREVIOUS_STACK"
+    printf '%s=%q\n' RECYCLE_TIMER_STOPPED "$RECYCLE_TIMER_STOPPED"
+    printf '%s=%q\n' BACKUP_TIMERS_STOPPED "$BACKUP_TIMERS_STOPPED"
+    printf '%s=%q\n' RELEASE_DIR_STATE "$RELEASE_DIR_STATE"
+    printf '%s=%q\n' EDGE_RELEASE_DIR_STATE "$EDGE_RELEASE_DIR_STATE"
+    printf '%s=%q\n' STACK_RELEASE_DIR_STATE "$STACK_RELEASE_DIR_STATE"
   } >"$WINDOW_ENV"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/window-principal-suffix.txt"
-  printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
+  printf 'WINDOW_PRINCIPAL_SUFFIX=%q\n' "$WINDOW_PRINCIPAL_SUFFIX" >"$PROOF_DIR/window-principal-suffix.txt"
   chmod 0600 "$WINDOW_ENV" "$PROOF_DIR"/*.SHA256SUMS "$PROOF_DIR"/*.release-dir-state.txt "$PROOF_DIR/box-archive.sha256" "$PROOF_DIR/window-principal-suffix.txt" "$PROOF_DIR/known-box-only-files.txt"
   install -m 0600 -o root -g root /dev/null "$PROOF_DIR/box-run.log"
   printf 'PREVIOUS_EDGE=%s\nPREVIOUS_STACK=%s\n' "$PREVIOUS_EDGE" "$PREVIOUS_STACK" \
@@ -1185,13 +1185,13 @@ A proof directory whose `window.env` is missing still stops the block.
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
     systemctl list-timers commonswarm-edge-recycle.timer
-    sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=0/' "$PROOF_DIR/window.env"
+    sed -i "s/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED='0'/" "$PROOF_DIR/window.env"
     printf '%s\n' 'abort cleanup restarted commonswarm-edge-recycle.timer' >>"$PROOF_DIR/box-run.log"
   fi
   if [ "$BACKUP_TIMERS_STOPPED" = 1 ]; then
     systemctl start commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
     systemctl list-timers --all commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
-    sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=0/' "$PROOF_DIR/window.env"
+    sed -i "s/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED='0'/" "$PROOF_DIR/window.env"
     printf '%s\n' 'abort cleanup restarted backup/restore timers' >>"$PROOF_DIR/box-run.log"
   fi
 )
@@ -1348,7 +1348,7 @@ PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
 PGSERVICE_FILE="/run/commonswarm-release-${SHA}-service.conf"
 PGPASS_FILE="/run/commonswarm-release-${SHA}-pass"
 APPLY_SQL="/run/commonswarm-release-${SHA}-apply.sql"
-PSQL_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.147
+PSQL_IMAGE='public.ecr.aws/supabase/postgres:17.6.1.147'
 
 release_psql() {
   PSQL_ARGS=()
@@ -2057,7 +2057,7 @@ timer and start it after verification.
   done
   if [ "$OVERLAPS" = 1 ]; then
     systemctl is-active --quiet commonswarm-edge-recycle.timer
-    sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=1/' "$PROOF_DIR/window.env"
+    sed -i "s/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED='1'/" "$PROOF_DIR/window.env"
     systemctl stop commonswarm-edge-recycle.timer
     printf '%s\n' 'release window stopped commonswarm-edge-recycle.timer' >>"$PROOF_DIR/box-run.log"
   fi
@@ -2475,7 +2475,7 @@ successful release:
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
     systemctl list-timers commonswarm-edge-recycle.timer
-    sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=0/' "$PROOF_DIR/window.env"
+    sed -i "s/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED='0'/" "$PROOF_DIR/window.env"
   fi
 )
 ```
@@ -2548,7 +2548,7 @@ Restart `commonswarm-edge-recycle.timer` if it was stopped:
   if [ "$RECYCLE_TIMER_STOPPED" = 1 ]; then
     systemctl start commonswarm-edge-recycle.timer
     systemctl list-timers commonswarm-edge-recycle.timer
-    sed -i 's/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED=0/' "$PROOF_DIR/window.env"
+    sed -i "s/^RECYCLE_TIMER_STOPPED=.*/RECYCLE_TIMER_STOPPED='0'/" "$PROOF_DIR/window.env"
   fi
 )
 ```
@@ -2734,7 +2734,7 @@ the installed unit copies saved before the forward switch.
   test -n "$TARGET_STACK"
   for UNIT in "${UNIT_NAMES[@]}"; do test -f "$UNIT_SOURCE/$UNIT"; done
 
-  sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=1/' "$PROOF_DIR/window.env"
+  sed -i "s/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED='1'/" "$PROOF_DIR/window.env"
   systemctl stop commonswarm-postgres-backup.timer commonswarm-postgres-restore.timer
   while :; do
     BACKUP_STATE="$(systemctl is-active commonswarm-postgres-backup.service || true)"
@@ -2769,7 +2769,7 @@ the installed unit copies saved before the forward switch.
     test -n "$NEXT"
     test "$(date -u -d "$NEXT" +%s)" -gt "$NOW_EPOCH"
   done
-  sed -i 's/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED=0/' "$PROOF_DIR/window.env"
+  sed -i "s/^BACKUP_TIMERS_STOPPED=.*/BACKUP_TIMERS_STOPPED='0'/" "$PROOF_DIR/window.env"
   for SERVICE in commonswarm-postgres-backup.service commonswarm-postgres-restore.service; do
     while :; do
       STATE="$(systemctl is-active "$SERVICE" || true)"

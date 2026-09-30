@@ -175,15 +175,14 @@ PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
 test ! -e "$PROOF_DIR"
 install -d -m 0700 -o root -g root "$PROOF_DIR"
 install -m 0600 -o root -g root /tmp/commonswarm-hm37b-open.env "$PROOF_DIR/window.env"
-printf '%s\n' \
-  'PREVIOUS_EDGE=/home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20' \
-  "NEW_EDGE=/home/commonswarm/edge/releases/$SHA" \
-  "NEW_STACK=/home/commonswarm/stack/releases/$SHA" \
-  'PREVIOUS_STACK=/home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f' \
-  "PROOF_DIR=$PROOF_DIR" \
-  'RECYCLE_TIMER_STOPPED=0' \
-  'BACKUP_TIMERS_STOPPED=0' \
-  >>"$PROOF_DIR/window.env"
+{
+  printf 'PREVIOUS_EDGE=%q\n' /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  printf 'NEW_EDGE=%q\n' "/home/commonswarm/edge/releases/$SHA"
+  printf 'NEW_STACK=%q\n' "/home/commonswarm/stack/releases/$SHA"
+  printf 'PREVIOUS_STACK=%q\n' /home/commonswarm/stack/releases/ad964ed158181ba1692dd05895f36fa7a1f87d3f
+  printf 'PROOF_DIR=%q\n' "$PROOF_DIR"
+  printf "RECYCLE_TIMER_STOPPED='0'\nBACKUP_TIMERS_STOPPED='0'\n"
+} >>"$PROOF_DIR/window.env"
 rm -f /tmp/commonswarm-hm37b-open.env
 test "$(readlink -f /home/commonswarm/edge/current)" =   "/home/commonswarm/edge/releases/$SHA"
 test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
@@ -657,7 +656,7 @@ baseline. An unknown or changed file is never removed.
         "$DENO_DIR" >&2
       exit 1
     fi
-    printf 'deno_remove=not-installed\n' >>"$PROOF_DIR/window.env"
+    printf 'deno_remove=%q\n' not-installed >>"$PROOF_DIR/window.env"
     exit 0
   fi
   case "$RECORDED_DENO_SHA256" in (*[!0-9a-f]*|'') false ;; esac
@@ -676,7 +675,7 @@ baseline. An unknown or changed file is never removed.
     find "$DENO_DIR" -xdev -depth -delete
   fi
   test ! -e "$DENO_DIR"
-  printf 'DENO_REMOVED=1\n' >>"$PROOF_DIR/window.env"
+  printf "DENO_REMOVED='1'\n" >>"$PROOF_DIR/window.env"
 )
 ```
 

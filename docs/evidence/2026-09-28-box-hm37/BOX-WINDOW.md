@@ -619,21 +619,21 @@ it, as the runbook's copy-back section requires of the evidence it reviews.
   ARCHIVE_SHA256="$(awk 'NR == 1 {print $1}' "$EVIDENCE_DIR/archive.sha256")"
   case "$ARCHIVE_SHA256" in (*[!0-9a-f]*|'') false ;; esac
   test "${#ARCHIVE_SHA256}" -eq 64
-  printf '%s\n' \
-    "KIND_LIST=$KIND_LIST" \
-    "H0_LEDGER_BACKFILL=$H0_LEDGER_BACKFILL" \
-    "GUARDED_STACK_SWITCH=$GUARDED_STACK_SWITCH" \
-    "BACKUP_STATUS_PROOF=$BACKUP_STATUS_PROOF" \
-    "API_CADDY_PAIR=$API_CADDY_PAIR" \
-    "MCP_CADDY_RELEASE=$MCP_CADDY_RELEASE" \
-    "CHANGED_FUNCTIONS=$CHANGED_FUNCTIONS" \
-    "ROUTER_CHANGED=$ROUTER_CHANGED" \
-    "MIGRATION_VERSIONS=$MIGRATION_VERSIONS" \
-    "FUNCTIONAL_VERSIONS=$FUNCTIONAL_VERSIONS" \
-    "EXPECTED_NEW_CRON_JOBS=$EXPECTED_NEW_CRON_JOBS" \
-    "EXPECTED_REMOVED_CRON_JOBS=$EXPECTED_REMOVED_CRON_JOBS" \
-    "ARCHIVE_SHA256=$ARCHIVE_SHA256" \
-    >"$EVIDENCE_DIR/item-resolved-inputs.env"
+  {
+    printf 'KIND_LIST=%q\n' "$KIND_LIST"
+    printf 'H0_LEDGER_BACKFILL=%q\n' "$H0_LEDGER_BACKFILL"
+    printf 'GUARDED_STACK_SWITCH=%q\n' "$GUARDED_STACK_SWITCH"
+    printf 'BACKUP_STATUS_PROOF=%q\n' "$BACKUP_STATUS_PROOF"
+    printf 'API_CADDY_PAIR=%q\n' "$API_CADDY_PAIR"
+    printf 'MCP_CADDY_RELEASE=%q\n' "$MCP_CADDY_RELEASE"
+    printf 'CHANGED_FUNCTIONS=%q\n' "$CHANGED_FUNCTIONS"
+    printf 'ROUTER_CHANGED=%q\n' "$ROUTER_CHANGED"
+    printf 'MIGRATION_VERSIONS=%q\n' "$MIGRATION_VERSIONS"
+    printf 'FUNCTIONAL_VERSIONS=%q\n' "$FUNCTIONAL_VERSIONS"
+    printf 'EXPECTED_NEW_CRON_JOBS=%q\n' "$EXPECTED_NEW_CRON_JOBS"
+    printf 'EXPECTED_REMOVED_CRON_JOBS=%q\n' "$EXPECTED_REMOVED_CRON_JOBS"
+    printf 'ARCHIVE_SHA256=%q\n' "$ARCHIVE_SHA256"
+  } >"$EVIDENCE_DIR/item-resolved-inputs.env"
   cat >"$EVIDENCE_DIR/item-copy-back-files.list" <<'FILES'
 20260928000002-catalog.sql
 20260928000002-functional.sql
@@ -1271,7 +1271,7 @@ A rerun uses a fresh approved start and unused names. Never reuse a revoked prin
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *) false ;;
   esac
-  printf 'WINDOW_PRINCIPAL_SUFFIX=%s\n' "$WINDOW_PRINCIPAL_SUFFIX"
+  printf 'WINDOW_PRINCIPAL_SUFFIX=%q\n' "$WINDOW_PRINCIPAL_SUFFIX"
 )
 BOX
   . "$EVIDENCE_DIR/window-principal-suffix.txt"

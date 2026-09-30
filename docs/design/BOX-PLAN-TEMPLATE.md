@@ -78,6 +78,13 @@ variable, profile discovery, or operator branch choice may carry cross-window
 state. Cleanup that owns temporary principals runs on success, rollback,
 pre-commit failure, post-commit control failure, and abort.
 
+Serialize every value written to a file that a later shell sources with Bash
+`printf '%q'`, or single-quote a literal or a value whose validation excludes
+single quotes. Apply the same rule to appended assignments and replacements.
+Double quotes around a writer's argument do not quote the generated assignment:
+`printf '%s\n' "KIND_LIST=$KIND_LIST"` writes an executable `stack` command when
+the value is `edge stack`. Use `printf 'KIND_LIST=%q\n' "$KIND_LIST"` instead.
+
 A plan whose opening gate proves a clean release checkout
 (`test -z "$(git status --porcelain)"`) keeps every file the window writes
 outside that checkout. Its open receipt names `EVIDENCE_ROOT`, an absolute Mac
