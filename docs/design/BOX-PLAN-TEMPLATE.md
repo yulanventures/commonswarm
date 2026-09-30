@@ -27,6 +27,12 @@ path or metadata difference stops. Every other window artifact is removed by
 that window's close/rollback or has an approved-window-ID name, and no step may
 list, glob, or select a `<name>.closed-window-<id>` leftover.
 
+An opening check refuses the named `RELEASE_SHA`'s open window and stale proof
+path, including a dangling symlink, and any other currently running window by
+the plan's running-window process marker. Other releases' proof directories are
+historical evidence, not running-window markers; do not require closing, moving,
+or touching them to open the named release.
+
 When a window temporarily installs a host runtime that was absent in the
 measured baseline, pin and verify the downloaded archive before extraction,
 record the installed binary's digest in durable window state, and remove the

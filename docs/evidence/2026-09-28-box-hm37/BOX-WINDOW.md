@@ -434,14 +434,20 @@ task-owned directories; no credential value is present in the prompt.
   trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
   cat >"$CLOCK_SCRIPT" <<'BOX'
 set -euo pipefail
-ACTIVE="$(find /home/commonswarm/stack/release-proofs -mindepth 1 -maxdepth 1 -type d ! -name '*.closed-window-*' -print -quit)"
-test -z "$ACTIVE"
+RELEASE_SHA="${1:?named release SHA required}"
+case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
+test "${#RELEASE_SHA}" -eq 40
+PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
+# Refuse any proof path for this release: an open window, stale proof, or dangling link.
+test ! -e "$PROOF_DIR"
+test ! -L "$PROOF_DIR"
+# Other releases are checked by the running-window process marker, not their proofs.
 RUNNING="$(ps -eo pid=,args= | awk '$0 !~ /awk/ && $0 ~ /(RELEASE-TO-BOX|deploy\/site\/deploy|commonswarm-release-window)/ {print; exit}')"
 test -z "$RUNNING"
 date -u +%Y-%m-%dT%H:%M:%SZ
 date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ
 BOX
-  CLOCK="$(ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <"$CLOCK_SCRIPT")"
+  CLOCK="$(ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$RELEASE_SHA'" <"$CLOCK_SCRIPT")"
   rm -f -- "$CLOCK_SCRIPT"
   trap - EXIT
   WINDOW_START_UTC="$(printf '%s\n' "$CLOCK" | sed -n '1p')"
@@ -510,8 +516,10 @@ PY
 ```
 
 The open block reads the box clock to the second, derives the four-hour end,
-window ID and principal suffix, persists them, and refuses any other active
-window state or release process. The operator types no time.
+window ID and principal suffix, persists them, and refuses an open window or
+stale proof path for `RELEASE_SHA` and any running release process matched by
+`RUNNING`. Other releases' proof directories are read-only historical evidence;
+their presence does not require closing, moving, or touching them. The operator types no time.
 
 The open receipt also names `EVIDENCE_ROOT`, the protected Mac directory
 `$HOME/.commonswarm-release-evidence`. Window A keeps its whole evidence

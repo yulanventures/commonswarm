@@ -118,14 +118,20 @@ method. Any keychain dialog, interactive sign-in, or 2FA result is `STOP`.
   trap 'rm -f -- "$CLOCK_SCRIPT"' EXIT
   cat >"$CLOCK_SCRIPT" <<'BOX'
 set -euo pipefail
-ACTIVE="$(find /home/commonswarm/stack/release-proofs -mindepth 1 -maxdepth 1 -type d ! -name '*.closed-window-*' -print -quit)"
-test -z "$ACTIVE"
+RELEASE_SHA="${1:?named release SHA required}"
+case "$RELEASE_SHA" in (*[!0-9a-f]*|'') false ;; esac
+test "${#RELEASE_SHA}" -eq 40
+PROOF_DIR="/home/commonswarm/stack/release-proofs/$RELEASE_SHA"
+# Refuse any proof path for this release: an open window, stale proof, or dangling link.
+test ! -e "$PROOF_DIR"
+test ! -L "$PROOF_DIR"
+# Other releases are checked by the running-window process marker, not their proofs.
 RUNNING="$(ps -eo pid=,args= | awk '$0 !~ /awk/ && $0 ~ /(RELEASE-TO-BOX|deploy\/site\/deploy|commonswarm-release-window)/ {print; exit}')"
 test -z "$RUNNING"
 date -u +%Y-%m-%dT%H:%M:%SZ
 date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ
 BOX
-  CLOCK="$(ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <"$CLOCK_SCRIPT")"
+  CLOCK="$(ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$RELEASE_SHA'" <"$CLOCK_SCRIPT")"
   rm -f -- "$CLOCK_SCRIPT"
   trap - EXIT
   WINDOW_START_UTC="$(printf '%s\n' "$CLOCK" | sed -n '1p')"
@@ -145,9 +151,11 @@ BOX
 )
 ```
 
-The same open block refuses any active proof directory or matching release
-process. The operator never types either time: the first timestamp is the box
-clock to the second and the second is exactly four hours later.
+The same open block refuses an open window or stale proof path for `RELEASE_SHA`
+and any running release process matched by `RUNNING`. Other releases' proof
+directories are read-only historical evidence; their presence does not require
+closing, moving, or touching them. The operator never types either time: the first timestamp
+is the box clock to the second and the second is exactly four hours later.
 
 ```sh
 # step: hm37b-box-open
