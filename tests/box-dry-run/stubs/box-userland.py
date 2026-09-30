@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import stat as statmod
+import subprocess
 import sys
 
 STUB_PREFIX = "unhandled dry-run stub: "
@@ -580,9 +581,20 @@ def cmd_rsync(argv: list[str]) -> None:
     sync_tree(source, target, "--delete" in flags, "--ignore-existing" in flags)
 
 
+def cmd_diff(argv: list[str]) -> None:
+    if len(argv) != 3 or argv[0] != "-qr":
+        refuse("diff", argv)
+    root = box_root()
+    for path in argv[1:]:
+        if os.path.commonpath([root, os.path.realpath(path)]) != root:
+            refuse("diff", argv)
+    # Compare the actual fixture bytes. Missing operands and differences keep diff's nonzero status.
+    raise SystemExit(subprocess.run(["/usr/bin/diff", *argv], check=False).returncode)
+
+
 COMMANDS = {
     "record-owner": cmd_record_owner, "rsync": cmd_rsync, "date": cmd_date, "stat": cmd_stat, "sha256sum": cmd_sha256sum, "id": cmd_id, "install": cmd_install,
-    "chown": cmd_chown, "mv": cmd_mv, "cp": cmd_cp, "ps": cmd_ps, "pgrep": cmd_pgrep,
+    "chown": cmd_chown, "mv": cmd_mv, "cp": cmd_cp, "ps": cmd_ps, "pgrep": cmd_pgrep, "diff": cmd_diff,
 }
 
 
