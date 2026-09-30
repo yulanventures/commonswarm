@@ -37,8 +37,12 @@ function extractStep(markdown: string, step: string): string {
 
 function extractVerifier(step: string): string {
   const start = step.indexOf("  prepare_release_directory() {");
-  const end = step.indexOf("\n  for KIND in $KIND_LIST; do", start);
-  assert.ok(start >= 0 && end > start, "release-directory verifier is missing");
+  // The historical verifier is exercised as a failing rollback control too.
+  // Accept its scalar loop and the current guarded array loop, but require a loop.
+  const close = step.indexOf("\n  }\n\n", start);
+  const end = close < 0 ? -1 : close + "\n  }\n".length;
+  const loop = /^\n  for KIND in (?:"\$\{KIND_ARRAY\[@\]\}"|\$KIND_LIST); do/.test(step.slice(end));
+  assert.ok(start >= 0 && end > start && loop, "release-directory verifier is missing");
   return step.slice(start, end) + "\n";
 }
 
@@ -272,4 +276,16 @@ test("a rollback leaves release and window state acceptable to the next window",
   } finally {
     safeRemove(root);
   }
+});
+
+test("controls: the release verifier extractor refuses a removed apply loop", () => {
+  const apply = extractStep(readFileSync(RUNBOOK, "utf8"), "1-apply-release-directories");
+  assert.ok(extractVerifier(apply).includes("prepare_release_directory()"));
+  // Earlier input guards also iterate KIND_ARRAY. Mutate the loop that calls
+  // this verifier, rather than the first array loop in the apply block.
+  const verifierStart = apply.indexOf("  prepare_release_directory() {");
+  const removed = apply.slice(0, verifierStart) + apply.slice(verifierStart)
+    .replace(/\n  for KIND in "\$\{KIND_ARRAY\[@\]\}"; do/, "\n  # removed apply loop");
+  assert.notEqual(removed, apply, "control did not remove the current loop");
+  assert.throws(() => extractVerifier(removed), /release-directory verifier is missing/);
 });

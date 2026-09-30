@@ -19,6 +19,8 @@
   {"kind":"env","name":"BOX_DRY_RUN_DIST_FIXTURE","source":"harness:DIST_FIXTURE","value":"<temporary>/dist-fixture"},
   {"kind":"env","name":"BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE","source":"harness:REMOTE_SANDBOX_PROFILE","value":"the fixture box script containment profile"},
   {"kind":"env","name":"BOX_DRY_RUN_OAUTH_IMAGE","source":"K4-11","evidence":"sha256:5511a358e0a7d7d52749d2b7b562d8343cf0daf79e2d389041cb9ca359a6dd5a","evidence_file":"docs/evidence/2026-09-29-box-facts/box-facts-measured.json"},
+  {"kind":"env","name":"BOX_DRY_RUN_OAUTH_HEALTH","source":"production_recheck","evidence":"oauth_health=healthy","evidence_file":"docs/evidence/2026-09-29-box-facts/box-facts-measured.json"},
+  {"kind":"env","name":"BOX_DRY_RUN_OAUTH_WORKDIR","source":"production_recheck","evidence":"oauth_workdir=/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/deploy/mcp-auth","evidence_file":"docs/evidence/2026-09-29-box-facts/box-facts-measured.json"},
   {"kind":"env","name":"BOX_DRY_RUN_STEP","source":"harness:HARNESS_STEP","value":"dry-run-step"},
   {"kind":"env","name":"BOX_DRY_RUN_FAIL_STEP","source":"harness:HARNESS_FAIL_STEP","value":"dry-run-step"},
   {"kind":"env","name":"BOX_DRY_RUN_CONTROL","source":"harness:HARNESS_CONTROL","value":"dry-run-control"},
