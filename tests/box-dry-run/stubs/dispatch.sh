@@ -110,7 +110,7 @@ run_in_box() {
 # plan-subcommands: systemctl daemon-reload is-active list-timers reload restart show start stop
 # plan-flags: systemctl --all --no-pager --property -p --quiet --value
 # plan-subcommands: docker compose exec image-inspect inspect logs ps run
-# plan-flags: docker --add-host --entrypoint --env -f --filter --format -i --network --no-deps -p --project-directory -q --rm --since --timestamps --volume -d
+# plan-flags: docker --add-host --entrypoint --env --env-file -f --filter --format -i --network --no-deps -p --project-directory -q --rm --since --timestamps --volume -d
 # plan-options: ssh BatchMode=yes ConnectTimeout=10
 
 case "$name" in

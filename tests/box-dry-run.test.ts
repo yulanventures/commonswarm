@@ -2370,6 +2370,17 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
           }, fixture);
           records.push({ block, execution });
           if (execution.result === "failed") break;
+          // Root created these files in the fixture box. Record that virtual ownership only
+          // after the real producer succeeds; never seed its content or repair its mode.
+          for (const product of products.filter((item) => item.execute === "local")) {
+            const path = product.path.replaceAll("{sha}", RELEASE_SHA);
+            const target = join(fixture.boxRoot!, path);
+            assert.equal(pathExists(target), true, `${shortStep(block)} did not produce ${path}`);
+            const stat = lstatSync(target);
+            assert.equal(stat.isFile(), true, `${shortStep(block)} product is not a regular file: ${path}`);
+            assert.equal(stat.mode & 0o777, Number.parseInt(product.mode, 8), `${shortStep(block)} product mode: ${path}`);
+            recordBoxOwner(fixture.boxRoot!, path, product.owner);
+          }
         } else {
           const seeded = seedBoxProducts(fixture, shortStep(block));
           const shapes = products.flatMap((product) => product.plan_documented ? [{
@@ -3901,6 +3912,14 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
       const proof = join(fixture.boxRoot!, PROOF_DIR);
       assert.match(readFileSync(join(proof, "hm37b-failure-action.txt"), "utf8"), /^action=cleanup-only$/m);
       assert.ok(pathExists(join(proof, "hm37-hosted-cleanup-recovery.json")));
+      const action = join(proof, "hm37b-failure-action.txt");
+      const actionBefore = readFileSync(action, "utf8");
+      const metadata = containedCommand(fixture, "/usr/bin/python3", [USERLAND, "stat", "-c", "%U:%G:%a", action], {
+        env: fixture.env,
+      });
+      assert.equal(metadata.status, 0, metadata.stderr);
+      assert.equal(metadata.stdout.trim(), "root:root:600", "the actual dispatcher product retains box ownership and mode");
+      assert.equal(readFileSync(action, "utf8"), actionBefore, "metadata readback cannot replace the produced receipt");
       if (omit) {
         assert.equal(failed?.execution.step, "hm37b-copyback", failed?.execution.stderr);
         assert.match(failed!.execution.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$FILE"/);
@@ -3921,7 +3940,7 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
   }
 });
 
-test("controls: runbook-16 accepts the database-helper command shape without fabricating identity", () => {
+test("controls: runbook-16 accepts the database-helper command shape without fabricating identity", (t) => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
   const bin = join(temporary, "bin");
   const log = join(temporary, "stub.log");
@@ -3940,6 +3959,10 @@ test("controls: runbook-16 accepts the database-helper command shape without fab
     assert.match(run.stderr, /^UNPRODUCED database observation$/m);
     assert.doesNotMatch(run.stderr, /unhandled dry-run stub/);
     assert.match(readFileSync(log, "utf8"), /docker run .*--env-file .*--env-file .*assert-database-identity\.sh target/m);
+    for (const step of ["runbook-05", "runbook-16"]) {
+      assert.match(planBlock(RUNBOOK, step).host, /^box /, `${step} already names the box host`);
+    }
+    t.diagnostic("runbook-16: the box host and real helper invocation are valid; the remaining refusal is an unproduced live PostgreSQL identity observation, not a missing plan host. No database identity result is fabricated.");
     const unknown = spawnSync(join(bin, "docker"), ["run", "--h14-unreviewed-flag", "fixture"], { encoding: "utf8", env });
     assert.equal(unknown.status, 69);
     assert.match(unknown.stderr, /^unhandled dry-run stub: docker run --h14-unreviewed-flag fixture$/m);
