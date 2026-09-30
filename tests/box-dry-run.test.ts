@@ -38,6 +38,9 @@ const STUB = "tests/box-dry-run/stubs/dispatch.sh";
 const USERLAND = resolve("tests/box-dry-run/stubs/box-userland.py");
 const NON_SUBSTITUTABLE_FILE = "tests/box-dry-run/fixtures/non-substitutable.json";
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+const MAC_ONLY = process.env.BOX_DRY_RUN_PART === "box"
+  ? "Mac-only fixture/control; exercised by the Mac lane with its mandatory sandbox-exec jail"
+  : false;
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
 const PRESEED_ALLOWLIST_FILE = "tests/box-dry-run/fixtures/preseed-allowlist.json";
@@ -1200,7 +1203,8 @@ function unproducedReport(runs: PlannedRun[] = currentPlannedRuns()): string[] {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Containment (R4). Every Mac-side whole block and every fixture box script runs under sandbox-exec. A PATH
+// Containment (R4). Every Mac-side whole block and its fixture box scripts run under sandbox-exec. Linux box
+// fixtures require disposable-runner admission from guard.sh before any block can run. A PATH
 // stub cannot stop an absolute path such as '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' or
 // a path a script builds at run time; the kernel can. A denied operation fails its block and is reported,
 // never hidden. When the profile cannot be applied, the block does not run at all.
@@ -1462,6 +1466,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
 
   const normalize = (path: string): string => {
     if ([K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT].includes(path)) return path;
+    if (path === measuredDbHelper) return "/home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh";
     return path
       .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
       .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
@@ -1736,6 +1741,9 @@ function makeStubBin(bin: string, rootOwned = false): void {
   chmodSync(bin, rootOwned ? 0o755 : 0o700);
   if (rootOwned) chownSync(bin, 0, 0);
   for (const command of STUB_COMMANDS) {
+    // The disposable Linux runner has real GNU userland and real fixture ownership. Mac box scripts
+    // use writeBoxUserlandBin; do not shadow Linux's chown/cp with the Mac boundary stubs.
+    if (rootOwned && BOX_USERLAND_COMMANDS.includes(command)) continue;
     const target = join(bin, command);
     if (!existsSync(target)) {
       copyFileSync(STUB, target);
@@ -1980,8 +1988,21 @@ function windowEnvBody(state: string): string {
   ].join("\n");
 }
 
+const guardedBoxFixtures = new WeakSet<Fixture>();
+
+function boxRunnerGuard(env: NodeJS.ProcessEnv): ContainmentAvailability {
+  const result = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env });
+  return result.status === 0 && result.stdout.trim() === "BOX_DRY_RUN_GUARD=PASS"
+    ? { available: true, detail: "" }
+    : { available: false, detail: result.stderr.trim() || `runner guard exited ${result.status}` };
+}
+
 function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
+  // Run before creating real-path fixtures: the guard requires those paths to be absent.
+  const guard = boxRunnerGuard(process.env);
+  assert.ok(guard.available, `CONTAINMENT UNAVAILABLE: ${guard.detail}. The fixture was not created.`);
+  const finalEdge = planBlocks.some((block) => block.file === HM37B) ? windowAFinalEdge() : undefined;
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const model = buildBoxFixtureModel(state);
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
@@ -2058,7 +2079,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   mkdirSync("/home/commonswarm/edge", { recursive: true });
   mkdirSync("/home/commonswarm/stack", { recursive: true });
   for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack"]) chmodSync(path, 0o755);
-  symlinkSync(previousEdge, "/home/commonswarm/edge/current");
+  symlinkSync(finalEdge ?? previousEdge, "/home/commonswarm/edge/current");
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
   copyRootFixture(K4_10_COMPOSE_OVERRIDE_EVIDENCE, K4_10_COMPOSE_OVERRIDE_PATH, 0o644);
 
@@ -2133,6 +2154,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
 
   const normalizeSeededPath = (path: string): string => {
     if ([K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT].includes(path)) return path;
+    if (path === measuredDbHelper) return "/home/commonswarm/stack/current/deploy/supabase-stack/migrate/run-db-tool.sh";
     return path
       .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
       .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
@@ -2155,7 +2177,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     join(measuredSiteRelease, "app/index.html"), join(measuredSiteRelease, "download/index.html"),
   ].filter(pathExists).map(normalizeSeededPath).filter((path, index, paths) => paths.indexOf(path) === index).sort();
 
-  return {
+  const fixture: Fixture = {
     temporary, cwd: process.cwd(), home: "/root", bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, rootDirectories,
     denoZip, denoZipDigest, seededPaths,
@@ -2171,13 +2193,14 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
-      BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
+      BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
       BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
       BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
       BOX_DRY_RUN_EDGE_HEALTH: model.containers.edge.health,
-      BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"],
-      BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source} ${mount.destination}`).join("\n"),
+      BOX_DRY_RUN_EDGE_PUBLIC_ENABLED: EDGE_PUBLIC_ENABLED,
+      BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"]!.replace(previousEdge, finalEdge ?? previousEdge),
+      BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source.replace(previousEdge, finalEdge ?? previousEdge)} ${mount.destination}`).join("\n"),
       BOX_DRY_RUN_EDGE_MEMORY: model.containers.candidateEdge.memory,
       BOX_DRY_RUN_EDGE_NETWORK: model.containers.candidateEdge.network,
       BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
@@ -2186,9 +2209,12 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     promptInputs: declaredPromptInputs,
     part: "box",
   };
+  guardedBoxFixtures.add(fixture);
+  return fixture;
 }
 
 function cleanupBoxFixture(fixture: Fixture): void {
+  guardedBoxFixtures.delete(fixture);
   for (const path of ["/srv/commonswarm", "/home/commonswarm"]) rmSync(path, { recursive: true, force: true });
   for (const path of [
     "/tmp/commonswarm-release-window.env", "/tmp/commonswarm-release.tar", "/tmp/commonswarm-release-proofs.tar",
@@ -2231,14 +2257,30 @@ function produceDenoUnitPrerequisites(fixture: Fixture): void {
 function produceRunbook18UnitPrerequisites(fixture: Fixture): void {
   mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
   writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
+  // This unit control owns the empty-ledger shell check, not database identity or catalog verification.
+  // Supply those prerequisites only here; whole-plan runs retain their real producer dependencies.
+  const migrate = join(fixture.temporary!, "unit-database-tools");
+  const ledgerRows = join(fixture.temporary!, "unit-ledger-rows.txt");
+  writeRootMode(ledgerRows, "");
+  writeRootMode(join(migrate, "run-db-tool.sh"), [
+    "#!/bin/bash", "set -euo pipefail",
+    'test "$#" -eq 3', 'test "$1" = assert-database-identity.sh',
+    `test "$2" = '${PROOF_DIR}/database'`, 'test "$3" = target', "",
+  ].join("\n"), 0o755);
   writeRootMode(`/run/commonswarm-release-${RELEASE_SHA}-apply.sql`, "-- unit control\n");
   writeRootMode(`/run/commonswarm-release-${RELEASE_SHA}-session.sh`, [
     `STACK_RELEASE='${CANDIDATE_STACK}'`,
-    `MIGRATE='${CANDIDATE_STACK}/deploy/supabase-stack/migrate'`,
+    `MIGRATE='${migrate}'`,
     `PROOF_DIR='${PROOF_DIR}'`,
     `APPLY_SQL='/run/commonswarm-release-${RELEASE_SHA}-apply.sql'`,
-    "release_psql() { printf '%s\\n' t; }",
-    "release_psql_ro() { :; }",
+    "release_psql_ro() {",
+    '  if [ "$#" -eq 2 ] && [ "$1" = --file ] && [ "$2" = "$APPLY_SQL" ]; then',
+    '    test -s "$APPLY_SQL"',
+    '  elif [ "$#" -eq 3 ] && [ "$1" = -Atq ] && [ "$2" = --command ] &&',
+    `       [ "$3" = "SELECT version FROM supabase_migrations.schema_migrations WHERE version IN ('20260916000001','20260916000002') ORDER BY version;" ]; then`,
+    `    /bin/cat '${ledgerRows}'`,
+    "  else return 69; fi",
+    "}",
     "",
   ].join("\n"));
 }
@@ -2257,6 +2299,30 @@ interface Execution {
   declared?: NonSubstitutableEntry;
 }
 
+// B's opening window is a Mac-to-box handoff (HM37B:161-192). Box mode skips that Mac block,
+// so supply its declared file shape at the producer boundary. This is synthetic window state, not proof
+// that the Mac transfer ran. In particular, do not seed A's window before its real box apply producer.
+function seedBoxWindowBOpen(block: Block, fixture: Fixture): Execution | undefined {
+  if (block.file !== HM37B || shortStep(block) !== "hm37b-box-open") return undefined;
+  assert.ok(guardedBoxFixtures.has(fixture), "B handoff requires a guarded box fixture");
+  const current = "/home/commonswarm/edge/current";
+  assert.equal(realpathSync(current), windowAFinalEdge(), "B handoff requires A's PASSED final edge state");
+  assert.equal(readFileSync(join(current, "RELEASE_SHA"), "utf8").trim(), RELEASE_SHA);
+  assert.ok(fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED, "B handoff requires the public-enabled observation");
+  // Both A's close and B's open reject only "1"; the committed dark observation is "unset".
+  assert.notEqual(fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED, "1", "A's PASSED final edge must remain dark");
+  assert.equal(pathExists(PROOF_DIR), false, "B handoff refuses an existing active window");
+  makeRootDirectory(PROOF_DIR, 0o700);
+  // The clock-derived receipt fields follow the same synthetic window used by the box unit controls;
+  // the release paths and timer fields are the assignments in the skipped producer.
+  const window = join(PROOF_DIR, "window.env");
+  writeRootMode(window, windowEnvBody(fixture.model!.state));
+  return {
+    step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "",
+    seeded: [window],
+  };
+}
+
 function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): Array<{ block: Block; execution: Execution }> {
   const records: Array<{ block: Block; execution: Execution }> = [];
   for (const block of planBlocks) {
@@ -2264,6 +2330,10 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
     if (isBoxBlock !== (part === "box")) {
       // The Mac lane does not execute a box block. What the box block produced is what a later Mac block reads.
       if (part === "mac") seedBoxProducts(fixture, shortStep(block));
+      else {
+        const handoff = seedBoxWindowBOpen(block, fixture);
+        if (handoff) records.push({ block, execution: handoff });
+      }
       continue;
     }
     const execution = executeWholeBlock(block, fixture);
@@ -2296,6 +2366,16 @@ function containedCommand(
   args: string[],
   options: { input?: string; env: NodeJS.ProcessEnv; timeout?: number },
 ): ContainedResult {
+  if (fixture.part === "box") {
+    if (process.env.BOX_DRY_RUN_PART !== "box" || !guardedBoxFixtures.has(fixture)) {
+      return { status: 71, stdout: "", stderr: "CONTAINMENT UNAVAILABLE: disposable runner guard is not satisfied. The program was not run.\n" };
+    }
+    // Explicit Linux CI branch. Only prepareBoxFixture can admit a fixture after the existing guard passes.
+    const result = spawnSync(command, args, {
+      cwd: fixture.cwd, input: options.input, encoding: "utf8", env: options.env, timeout: options.timeout ?? 120_000,
+    });
+    return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
   const env = { ...options.env, BOX_DRY_RUN_CONTAINED: "1" };
   const availability = containmentAvailability();
   if (!availability.available) {
@@ -2358,14 +2438,7 @@ function executeWholeBlock(
   };
   for (const name of options.unsetEnv ?? []) delete childEnv[name];
   assertChildEnvironmentAllowed(childEnv, fixture.promptInputs);
-  const result: ContainedResult = contained
-    ? containedSpawn(fixture, script, childEnv)
-    : (() => {
-      const spawned = spawnSync("/bin/bash", [], {
-        cwd: fixture.cwd, input: script, encoding: "utf8", env: childEnv, timeout: 120_000,
-      });
-      return { status: spawned.status, stdout: spawned.stdout ?? "", stderr: spawned.stderr ?? "" };
-    })();
+  const result = containedSpawn(fixture, script, childEnv);
   const stderr = result.stderr;
   const failure = result.status === 0 ? undefined : /__FIRST_FAIL__:(.*)/.exec(stderr)?.[1];
   return {
@@ -2557,7 +2630,7 @@ test("window IDs are derived once and later read from persisted files", () => {
   }
 });
 
-test("runbook-01 fails clearly unless WINDOW_START_UTC is a valid approved UTC input", () => {
+test("runbook-01 fails clearly unless WINDOW_START_UTC is a valid approved UTC input", { skip: MAC_ONLY }, () => {
   const block = blocks(RUNBOOK).find((candidate) => shortStep(candidate) === "runbook-01");
   assert.ok(block);
   const fixture = prepareMacFixture();
@@ -2575,7 +2648,7 @@ test("runbook-01 fails clearly unless WINDOW_START_UTC is a valid approved UTC i
 });
 
 test("the box safety guard refuses this Mac and validates every blocking condition", {
-  skip: process.env.BOX_DRY_RUN_PART === "box",
+  skip: MAC_ONLY,
 }, () => {
   const guard = readFileSync(GUARD, "utf8");
   for (const required of [
@@ -2758,7 +2831,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
   }
 });
 
-test("Mac harness uses a temporary local clone and recorded command stubs only", () => {
+test("Mac harness uses a temporary local clone and recorded command stubs only", { skip: MAC_ONLY }, () => {
   const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
   try {
     const clone = join(temporary, "checkout");
@@ -2901,7 +2974,7 @@ test("deploy/site/deploy.sh and finalize-release.sh run only commands the site d
   assert.deepEqual([...sshOptions], [], "deploy.sh passes no ssh option the stub would need to list");
 });
 
-test("the containment profiles compile and carry every denial the dry run's containment names", (t) => {
+test("the containment profiles compile and carry every denial the dry run's containment names", { skip: MAC_ONLY }, (t) => {
   const fixture = prepareMacFixture();
   try {
     const profiles = [
@@ -2936,7 +3009,7 @@ test("the containment profiles compile and carry every denial the dry run's cont
   }
 });
 
-test("controls: unknown stub operations fail closed and accepted mutations change readback", () => {
+test("controls: unknown stub operations fail closed and accepted mutations change readback", { skip: MAC_ONLY }, () => {
   const fixture = prepareMacFixture();
   const run = (command: string, args: string[]) => spawnSync(command, args, {
     encoding: "utf8", env: {
@@ -2996,7 +3069,7 @@ test("controls: unknown stub operations fail closed and accepted mutations chang
   }
 });
 
-test("cswarm stub enforces workspace and revocation while delivering each note once", () => {
+test("cswarm stub enforces workspace and revocation while delivering each note once", { skip: MAC_ONLY }, () => {
   const fixture = prepareMacFixture();
   const workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934";
   const otherWorkspace = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56";
@@ -3076,7 +3149,7 @@ test("cswarm stub enforces workspace and revocation while delivering each note o
   }
 });
 
-test("scp and op stubs enforce transfer and protected-output boundaries", () => {
+test("scp and op stubs enforce transfer and protected-output boundaries", { skip: MAC_ONLY }, () => {
   const fixture = prepareMacFixture();
   const source = join(fixture.temporary!, "scp-source.txt");
   // The box path the transfer names, and where it lands. On the Mac lane the box's /tmp is a directory in the
@@ -3432,7 +3505,7 @@ test("prompt-input tables are strict and synthetic values follow their declared 
     /expected at most one prompt-inputs block/);
 });
 
-test("block shells use an explicit empty-base environment and plan code cannot read adapter variables", () => {
+test("block shells use an explicit empty-base environment and plan code cannot read adapter variables", { skip: MAC_ONLY }, () => {
   const source = readFileSync("tests/box-dry-run.test.ts", "utf8");
   assert.doesNotMatch(source, /\.\.\.process\.env/);
   for (const block of SCOPED.flatMap(blocks)) {
@@ -3612,7 +3685,7 @@ function seedControlOpenReceipt(fixture: Fixture, window: "a" | "b", extra: Reco
     `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(""));
 }
 
-test("controls: a gate receipt without its PASS lines fails runbook-02", () => {
+test("controls: a gate receipt without its PASS lines fails runbook-02", { skip: MAC_ONLY }, () => {
   const plan = resolveSteps("window-a/pass", windowAPaths().get("pass")!);
   const index = plan.findIndex((block) => shortStep(block) === "runbook-02");
   assert.ok(index > 0, "window A has no runbook-02 preflight");
@@ -3654,7 +3727,7 @@ test("controls: a gate receipt without its PASS lines fails runbook-02", () => {
   }
 });
 
-test("controls: window B fails when window A's candidate edge is not live", () => {
+test("controls: window B fails when window A's candidate edge is not live", { skip: MAC_ONLY }, () => {
   const plan = resolveSteps("window-b/pass", windowBPaths().get("pass")!);
   const index = plan.findIndex((block) => shortStep(block) === "hm37b-box-open");
   assert.ok(index > 0, "window B has no box-open step");
@@ -3711,7 +3784,7 @@ function seedCopybackProofDirectory(fixture: Fixture): string {
   return proof;
 }
 
-test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", () => {
+test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", { skip: MAC_ONLY }, () => {
   const block = planBlock(HM37B, "hm37b-copyback");
   const boxFiles = "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'";
   const fixture = prepareMacFixture([block]);
@@ -3755,7 +3828,7 @@ test("controls: a copy-back archive with a missing or an extra member fails the 
   }
 });
 
-test("controls: an ssh remote script that the fixture box root cannot satisfy fails", () => {
+test("controls: an ssh remote script that the fixture box root cannot satisfy fails", { skip: MAC_ONLY }, () => {
   const site01 = planBlock(SITE, "site-01");
   const fixture = prepareMacFixture([site01]);
   const previousRelease = join(fixtureSiteRoot(fixture), "releases", SITE_BASE_RELEASE);
@@ -3807,7 +3880,7 @@ test("controls: an ssh remote script that the fixture box root cannot satisfy fa
   }
 });
 
-test("controls: a remote script that writes outside the fixture box root is denied", () => {
+test("controls: a remote script that writes outside the fixture box root is denied", { skip: MAC_ONLY }, () => {
   const site01 = planBlock(SITE, "site-01");
   const fixture = prepareMacFixture([site01]);
   // A path the box mapping does not touch, on the host, where the user can normally write. Nothing may appear
@@ -3832,7 +3905,7 @@ test("controls: a remote script that writes outside the fixture box root is deni
   }
 });
 
-test("controls: a Mac block that starts an absolute-path application is denied and reported", () => {
+test("controls: a Mac block that starts an absolute-path application is denied and reported", { skip: MAC_ONLY }, () => {
   const preflight = planBlock(SITE, "site-03-browser-session-preflight");
   const chromeLine = "chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'";
   assert.ok(preflight.source.includes(chromeLine), "the plan names the absolute Chrome path");
@@ -3877,7 +3950,7 @@ test("controls: a Mac block that starts an absolute-path application is denied a
   }
 });
 
-test("controls: browser-harness refuses an unreviewed call shape", () => {
+test("controls: browser-harness refuses an unreviewed call shape", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-05-browser-acceptance");
   try {
     const acceptance = byStep.get("site-05-browser-acceptance")!;
@@ -3913,7 +3986,7 @@ test("controls: browser-harness refuses an unreviewed call shape", () => {
   }
 });
 
-test("controls: a browser fixture with a different user id fails site-03", () => {
+test("controls: a browser fixture with a different user id fails site-03", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-03-browser-session-preflight");
   try {
     const browser = byStep.get("site-03-browser-session-preflight")!;
@@ -3947,7 +4020,7 @@ test("controls: a browser fixture with a different user id fails site-03", () =>
   }
 });
 
-test("controls: a site-05-browser.json missing a documented field fails site-07", () => {
+test("controls: a site-05-browser.json missing a documented field fails site-07", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-05-browser-acceptance");
   try {
     const browser = byStep.get("site-05-browser-acceptance")!;
@@ -3987,7 +4060,7 @@ test("controls: a site-05-browser.json missing a documented field fails site-07"
   }
 });
 
-test("controls: an undeclared reduced-branch output stays UNPRODUCED", () => {
+test("controls: an undeclared reduced-branch output stays UNPRODUCED", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-03-browser-session-preflight");
   try {
     const browser = byStep.get("site-03-browser-session-preflight")!;
@@ -4021,7 +4094,7 @@ test("controls: an undeclared reduced-branch output stays UNPRODUCED", () => {
   }
 });
 
-test("controls: an unlisted command inside deploy/site/deploy.sh fails closed", () => {
+test("controls: an unlisted command inside deploy/site/deploy.sh fails closed", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-04");
   try {
     const site04 = byStep.get("site-04")!;
@@ -4068,7 +4141,7 @@ test("controls: an unlisted command inside deploy/site/deploy.sh fails closed", 
   }
 });
 
-test("controls: a site-04 deploy.sh call with a different target host fails", () => {
+test("controls: a site-04 deploy.sh call with a different target host fails", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-04");
   try {
     const site04 = byStep.get("site-04")!;
@@ -4089,7 +4162,7 @@ test("controls: a site-04 deploy.sh call with a different target host fails", ()
   }
 });
 
-test("controls: a fixture dist tree missing a file that deploy.sh validates fails site-04", () => {
+test("controls: a fixture dist tree missing a file that deploy.sh validates fails site-04", { skip: MAC_ONLY }, () => {
   const { fixture, byStep } = laneEightFixture("site-04");
   try {
     const site04 = byStep.get("site-04")!;
@@ -4133,7 +4206,7 @@ test("controls: a fixture dist tree missing a file that deploy.sh validates fail
   }
 });
 
-test("controls: a block that exits non-zero is reported as failed, never as passed", () => {
+test("controls: a block that exits non-zero is reported as failed, never as passed", { skip: MAC_ONLY }, () => {
   const fixture = prepareMacFixture();
   try {
     const block: Block = {
@@ -4155,7 +4228,7 @@ test("controls: a block that exits non-zero is reported as failed, never as pass
   }
 });
 
-test("controls: a dry run leaves the real checkout unchanged", async (t) => {
+test("controls: a dry run leaves the real checkout unchanged", { skip: MAC_ONLY }, async (t) => {
   const before = checkoutSnapshot(REAL_CHECKOUT);
   const labels = ["prep/pass", "window-a/s2/pass", "window-b/pass", "lane-8/FULL-CONTROL"];
   const fourPlanRuns = currentPlannedRuns().filter((run) => labels.includes(run.label));
@@ -4464,21 +4537,26 @@ test("runbook-18 accepts the selected H0 backfill's empty-ledger evidence state"
 }, () => {
   const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
   assert.equal(guard.status, 0, guard.stderr);
-  const fixture = prepareBoxFixture("s2");
-  produceRunbook18UnitPrerequisites(fixture);
+  const block = planBlock(RUNBOOK, "runbook-18");
+  // The runbook inherits RELEASE_SHA from its selecting window's prompt-input table.
+  const fixture = prepareBoxFixture("s2", [planBlock(HM37, "hm37a-go-record"), block]);
   try {
-    const block = blocks(RUNBOOK).find((candidate) => shortStep(candidate) === "runbook-18");
-    assert.ok(block);
+    produceRunbook18UnitPrerequisites(fixture);
     const record = executeWholeBlock(block, fixture);
     assert.equal(record.result, "passed", record.stderr);
     const ledger = `/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/h0-ledger-before.txt`;
     assert.equal(readFileSync(ledger, "utf8"), "");
+    writeRootMode(join(fixture.temporary!, "unit-ledger-rows.txt"), "20260916000001\n");
+    const nonempty = executeWholeBlock(block, fixture);
+    assert.equal(nonempty.result, "failed", "an existing ledger row was accepted");
+    assert.equal(nonempty.firstFailingCommand, 'test ! -s "$PROOF_DIR/h0-ledger-before.txt"');
+    assert.equal(readFileSync(ledger, "utf8"), "20260916000001\n");
   } finally {
     cleanupBoxFixture(fixture);
   }
 });
 
-test("historical controls execute and reproduce the named failures while current text fixes them", () => {
+test("historical controls execute and reproduce the named failures while current text fixes them", { skip: MAC_ONLY }, () => {
   const old = gitShow("1b1a5549", HM37);
   const oldOauth = stepSource(old, "hm37-hm6-oauth-precondition");
   assert.match(oldOauth, /IFS= read -r MCP_OAUTH_IMAGE <[^\n]+oauth-image\.id"\n/);
@@ -4609,7 +4687,7 @@ test("historical controls execute and reproduce the named failures while current
   }
 });
 
-test("lane 8 executes its declared plan and reports current unproduced inputs", (t) => {
+test("lane 8 executes its declared plan and reports current unproduced inputs", { skip: MAC_ONLY }, (t) => {
   const site = blocks(SITE);
   assert.equal(site.length, 15);
   assert.deepEqual(site.map(shortStep), [
@@ -4726,7 +4804,9 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
       for (const { block, execution } of records) {
         if (execution.result === "not-executed") {
           const key = `${block.file}:${block.line}`;
-          if (!notExecuted.has(key)) notExecuted.set(key, notExecutedLine(block, execution));
+          if (!notExecuted.has(key)) notExecuted.set(key, execution.declared
+            ? notExecutedLine(block, execution)
+            : `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] Mac-only box-opening transfer; seeded plan-documented synthetic window shape: ${execution.seeded!.join(", ")}`);
         }
         if (execution.result === "failed") {
           const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`;
@@ -4811,4 +4891,84 @@ test("CI box mode is guarded before real-path whole-block fixtures", { skip: pro
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) assert.equal(existsSync(path), false);
   assert.equal(existsSync("/home/commonswarm"), false);
   assert.equal(existsSync("/srv/commonswarm"), false);
+});
+
+test("controls: box mode refuses to run a block when the runner guard is not satisfied", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const refusedGuard = boxRunnerGuard(explicitEnvironment({ BOX_DRY_RUN: "1", GITHUB_ACTIONS: "true", CI: "false" }));
+  assert.equal(refusedGuard.available, false);
+  assert.match(refusedGuard.detail, /REFUSE: CI=true is required/);
+  const runnerCi = process.env.CI;
+  try {
+    process.env.CI = "false";
+    assert.throws(() => prepareBoxFixture("s2"), /CONTAINMENT UNAVAILABLE: REFUSE: CI=true is required/);
+    assert.equal(pathExists("/home/commonswarm"), false, "refused guard created a fixture");
+    assert.equal(pathExists("/srv/commonswarm"), false, "refused guard created a fixture");
+  } finally {
+    if (runnerCi === undefined) delete process.env.CI;
+    else process.env.CI = runnerCi;
+  }
+  const fixture = prepareBoxFixture("s2");
+  const block: Block = {
+    file: "runner-guard-control", step: "runner-guard-control", marker: "yes", host: "box /bin/bash 5.2 as root",
+    line: 1, source: "printf '%s\\n' block-ran",
+  };
+  try {
+    const accepted = executeWholeBlock(block, fixture);
+    assert.equal(accepted.result, "passed", accepted.stderr);
+    assert.equal(accepted.stdout, "block-ran\n");
+    // This fixture did not receive admission from a successful guard, even though its env is identical.
+    const refused = executeWholeBlock(block, { ...fixture });
+    assert.equal(refused.result, "failed");
+    assert.equal(refused.status, 71);
+    assert.match(refused.stderr, /CONTAINMENT UNAVAILABLE: disposable runner guard is not satisfied/);
+    assert.equal(refused.stdout, "", "the refused block reached a shell");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: box window B handoff accepts A's dark final state and refuses mismatched state", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const block = planBlock(HM37B, "hm37b-box-open");
+  const fixture = prepareBoxFixture("s2", [block]);
+  const current = "/home/commonswarm/edge/current";
+  try {
+    assert.equal(realpathSync(current), windowAFinalEdge());
+    assert.equal(pathExists(PROOF_DIR), false);
+    fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = "1";
+    assert.throws(() => seedBoxWindowBOpen(block, fixture), /A's PASSED final edge must remain dark/);
+    assert.equal(pathExists(PROOF_DIR), false, "public-enabled handoff opened B");
+    fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = EDGE_PUBLIC_ENABLED;
+    unlinkSync(current);
+    symlinkSync(PREVIOUS_EDGE, current);
+    assert.throws(() => seedBoxWindowBOpen(block, fixture), /B handoff requires A's PASSED final edge state/);
+    assert.equal(pathExists(PROOF_DIR), false, "previous-edge handoff opened B");
+    unlinkSync(current);
+    symlinkSync(windowAFinalEdge(), current);
+    const record = seedBoxWindowBOpen(block, fixture);
+    assert.equal(record?.result, "not-executed", "synthetic handoff was reported as an executed Mac transfer");
+    assert.deepEqual(record.seeded, [join(PROOF_DIR, "window.env")]);
+    // Read shell assignments through the same shell that consumes them; quoting is valid receipt syntax.
+    const window = containedCommand(fixture, "/bin/bash", ["-c",
+      '. "$1"; printf "%s\\n" "$SHA"', "window-readback", join(PROOF_DIR, "window.env")], { env: fixture.env });
+    assert.equal(window.status, 0, window.stderr);
+    assert.equal(window.stdout, `${RELEASE_SHA}\n`);
+    assert.equal(pathExists(join(PROOF_DIR, "GO.txt")), false, "handoff supplied B's later GO producer");
+    const go = executeWholeBlock(planBlock(HM37B, "hm37b-go-record"), fixture);
+    assert.equal(go.result, "passed", go.stderr);
+    assert.match(readFileSync(join(PROOF_DIR, "GO.txt"), "utf8"), /^HM37_A_CLOSE_RECEIPT=accepted$/m);
+    const goStat = statSync(join(PROOF_DIR, "GO.txt"));
+    assert.equal(goStat.uid, 0);
+    assert.equal(goStat.gid, 0);
+    assert.equal(goStat.mode & 0o777, 0o600);
+    const missingChown = executeWholeBlock({ ...block, file: "ownership-control", step: "ownership-control",
+      host: "box /bin/bash 5.2 as root", source: `chown root:root '${PROOF_DIR}/missing.txt'` }, fixture);
+    assert.equal(missingChown.result, "failed", "chown accepted a missing fixture file");
+    assert.equal(pathExists(join(PROOF_DIR, "missing.txt")), false);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
 });
