@@ -1525,7 +1525,8 @@ function seedBoxProducts(fixture: Fixture, step: string): string[] {
 // Non-substitutable surfaces (R3). The dry run does not emulate a browser or a site build. A block whose
 // result depends on one is declared in fixtures/non-substitutable.json and is NOT executed: not a part of it,
 // not with a canned answer. The harness seeds only the output files the declaration lists, and only from the
-// committed evidence the declaration cites. An output with no evidence is named and left absent.
+// committed evidence the declaration cites, or an explicitly labeled plan-documented shape for a consumer
+// contract check. The latter is not a browser result. Other outputs with no evidence are named and left absent.
 // ---------------------------------------------------------------------------------------------------------
 
 interface EvidenceRef {
@@ -1546,6 +1547,7 @@ interface DeclaredOutput {
   mode: string;
   branch: string;
   json?: Record<string, OutputValue>;
+  plan_documented?: { evidence: string; source_lines: string; label: string; json: Record<string, unknown> };
   lines?: Record<string, OutputValue>;
   invariants?: Array<{ equal: [string, string]; source: string }>;
 }
@@ -1624,13 +1626,13 @@ function seedDeclaredOutputs(entry: NonSubstitutableEntry, fixture: Fixture, ove
   const evidenceDir = fixture.env.SITE_EVIDENCE;
   for (const output of outputs) {
     const fields = output.json ?? output.lines ?? {};
-    const values: Record<string, unknown> = {};
+    const values: Record<string, unknown> = output.plan_documented ? structuredClone(output.plan_documented.json) : {};
     for (const [key, spec] of Object.entries(fields)) values[key] = resolveOutputValue(spec, values);
     // An override changes a value the output declares; a key the output does not have is not added to it.
-    for (const [key, value] of Object.entries(override)) if (key in fields) values[key] = value;
+    for (const [key, value] of Object.entries(override)) if (key in values) values[key] = value;
     const missing = Object.entries(values).filter(([, value]) => value === undefined).map(([key]) => key);
     if (missing.length > 0) {
-      result.refused.push(`UNPRODUCED ${output.file}: no committed evidence for ${missing.join(", ")}`);
+      result.refused.push(`UNPRODUCED ${output.file}: no ${output.plan_documented ? "plan-documented value" : "committed evidence"} for ${missing.join(", ")}`);
       continue;
     }
     const broken = (output.invariants ?? []).filter((rule) => values[rule.equal[0]] !== values[rule.equal[1]]);
@@ -2407,7 +2409,7 @@ function replaceLast(text: string, from: string, to: string): string {
 // Lane 8 carried up to, and not including, a step. Every earlier block runs for real, in plan order, in one Mac
 // fixture, so a control gets the box and the evidence directory in the state the plan leaves at that point by
 // running the plan and not by writing that state itself. A block that declares a browser surface is seeded from
-// its cited evidence and not executed, as in every plan run.
+// its cited evidence or labeled plan-documented shape and not executed, as in every plan run.
 function laneEightFixture(stopBefore: string): { fixture: Fixture; byStep: Map<string, Block> } {
   const laneBlocks = resolveSteps("lane-8/FULL-CONTROL", siteOrder());
   const stopIndex = laneBlocks.findIndex((block) => shortStep(block) === stopBefore);
@@ -3945,6 +3947,46 @@ test("controls: a browser fixture with a different user id fails site-03", () =>
   }
 });
 
+test("controls: a site-05-browser.json missing a documented field fails site-07", () => {
+  const { fixture, byStep } = laneEightFixture("site-05-browser-acceptance");
+  try {
+    const browser = byStep.get("site-05-browser-acceptance")!;
+    const consumer = byStep.get("site-07-manifest-close")!;
+    const output = join(fixture.env.SITE_EVIDENCE!, "site-05-browser.json");
+
+    // As with the site-03 control, an incomplete producer shape is refused before the file is written.
+    // site-07 checks that the producer wrote a file; it does not validate individual JSON fields itself.
+    const incomplete = executeWholeBlock(browser, fixture, { seedOverride: { identity: undefined } });
+    assert.equal(incomplete.result, "failed");
+    assert.match(incomplete.stderr, /^UNPRODUCED site-05-browser\.json: no plan-documented value for identity$/m);
+    assert.equal(existsSync(output), false);
+    const absent = executeWholeBlock(consumer, fixture);
+    assert.equal(absent.result, "failed");
+    assert.equal(absent.status, 1, absent.stderr);
+    assert.match(absent.firstFailingCommand ?? "", /test -f "\$SITE_EVIDENCE\/site-05-browser\.json"/);
+    assert.equal(existsSync(join(fixture.env.SITE_EVIDENCE!, "CLOSE.txt")), false);
+
+    // Positive: the same producer and whole consumer, with the complete documented FULL-CONTROL shape.
+    // No browser is executed and no screenshot is manufactured.
+    const seeded = executeWholeBlock(browser, fixture);
+    assert.equal(seeded.result, "not-executed", seeded.stderr);
+    assert.deepEqual(seeded.seeded, [output]);
+    const report = notExecutedLine(browser, seeded);
+    assert.match(report, /Seeded from committed evidence: nothing\./);
+    assert.match(report, /site-05-browser\.json \(plan-documented shape; no live evidence yet; replace with Anvil's live output after the lane 8 window;/);
+    const documented = JSON.parse(readFileSync(output, "utf8")) as { identity: string; screenshots: string[] };
+    assert.equal(documented.identity, "PASS");
+    for (const name of documented.screenshots) assert.equal(existsSync(join(fixture.env.SITE_EVIDENCE!, name)), false);
+    const positive = executeWholeBlock(consumer, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    const manifest = JSON.parse(readFileSync(join(fixture.env.SITE_EVIDENCE!, "manifest.json"), "utf8")) as Array<{ path: string; mode: string }>;
+    assert.equal(manifest.find((row) => row.path === "site-05-browser.json")?.mode, "0600");
+    assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "CLOSE.txt"), "utf8"), /^OUTCOME=released$/m);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("controls: an undeclared reduced-branch output stays UNPRODUCED", () => {
   const { fixture, byStep } = laneEightFixture("site-03-browser-session-preflight");
   try {
@@ -4635,14 +4677,20 @@ function failureDetail(block: Block, execution: Execution): string {
 }
 
 // A block that declares a non-substitutable surface is not executed. The report names it, what its declaration
-// says proves it live, what was seeded from committed evidence, and what is not produced, so a reader sees what
-// the dry run did not run.
+// says proves it live, what was seeded from committed evidence or a labeled plan shape, and what is not
+// produced, so a reader sees what the dry run did not run.
 function notExecutedLine(block: Block, execution: Execution): string {
   const declared = execution.declared!;
-  const seeded = (execution.seeded ?? []).map((path) => basename(path)).join(", ") || "nothing";
+  const outputs = declared.outputs ?? [];
+  const seeded = (execution.seeded ?? []).map((path) => basename(path));
+  const observed = seeded.filter((file) => !outputs.find((output) => output.file === file)?.plan_documented).join(", ") || "nothing";
+  const planShapes = seeded.flatMap((file) => {
+    const shape = outputs.find((output) => output.file === file)?.plan_documented;
+    return shape ? [` Plan-documented output: ${file} (${shape.label}; source: ${shape.evidence}:${shape.source_lines}).`] : [];
+  }).join("");
   const missing = (declared.unproduced ?? []).map((item) => item.output).join(", ") || "none";
   const items = (declared.plan_items ?? []).map((item) => ` Plan item: ${item}.`).join("");
-  return `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] non-substitutable (${declared.surface}): ${declared.reason} Live proof: ${declared.live_proof} Seeded from committed evidence: ${seeded}. Not produced, by name: ${missing}.${items}`;
+  return `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] non-substitutable (${declared.surface}): ${declared.reason} Live proof: ${declared.live_proof} Seeded from committed evidence: ${observed}.${planShapes} Not produced, by name: ${missing}.${items}`;
 }
 
 test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
@@ -4731,7 +4779,13 @@ test("non-substitutable surfaces are explicit", (t) => {
     assert.ok(entry.live_proof && entry.live_proof.length > 20, `${entry.step}: no live proof named`);
     assert.ok((entry.plan_items ?? []).every((item) => /^split block /.test(item)), `${entry.step}: plan items are block splits`);
     for (const file of citedEvidenceFiles(entry)) assert.equal(existsSync(file), true, `${entry.step}: cited evidence file is missing: ${file}`);
-    for (const output of entry.outputs ?? []) assert.ok(/^0[0-7]{3}$/.test(output.mode) && output.file, `${entry.step}: output ${output.file} has no file mode`);
+    for (const output of entry.outputs ?? []) {
+      assert.ok(/^0[0-7]{3}$/.test(output.mode) && output.file, `${entry.step}: output ${output.file} has no file mode`);
+      if (output.plan_documented) {
+        assert.ok(output.plan_documented.label && output.plan_documented.source_lines, `${entry.step}: plan shape has no provenance label or writer lines`);
+        t.diagnostic(`${entry.step}/${output.branch}: ${output.file}: ${output.plan_documented.label}`);
+      }
+    }
     for (const missing of entry.unproduced ?? []) assert.ok(missing.output && missing.reason, `${entry.step}: an unproduced output has no reason`);
     for (const branch of entry.branches ?? []) {
       assert.equal(branch.status, "not tested");
