@@ -377,6 +377,11 @@ const OAUTH_RELEASE = measuredProductionMatch(/oauth_current=([^\n]+)/);
 const EDGE_MEMORY = Number(measuredMatch("M11", /memory=(\d+)/));
 const EDGE_NETWORK = measuredMatch("M11", /network=([^ ]+)/);
 const TARGET_ENV_NAME = measuredMatch("M8", /^(TARGET_DATABASE_URL)$/m);
+// M8 measures the file's metadata and variable name only, not a URL or PostgreSQL identity.
+// These synthetic credentials exercise make-pg-service.mjs's permitted-host formatting contract
+// (deploy/supabase-stack/migrate/make-pg-service.mjs:35-46). They are never database observations:
+// runbook-16 remains NOT EXECUTED and every database fixture call refuses with exit 69.
+const SYNTHETIC_TARGET_ENV_BODY = `${TARGET_ENV_NAME}=postgresql://fixture:fixture@db.commonswarm.internal/postgres\n`;
 const ACCOUNT_NAMES = measuredFact("M3").output.split("\n")
   .filter((line) => line.split(":").length >= 7)
   .map((line) => line.split(":", 1)[0]!)
@@ -385,12 +390,12 @@ assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
   "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
-  "browser-harness", "cp", "readlink", "rsync", "npm",
+  "browser-harness", "cp", "readlink", "rsync", "npm", "node",
   // Commands that leave the process tree or reach the operator: they start an application or read the keychain.
   "open", "osascript", "launchctl", "security",
 ];
 // GNU behavior the box has and the Mac lacks. These names exist only on a box script's PATH, never on a Mac block's.
-const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep"];
+const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep", "diff"];
 // The Linux runner uses real GNU userland and real ownership; all box stub consumers share this inventory.
 const BOX_STUB_COMMANDS = STUB_COMMANDS.filter((command) => !BOX_USERLAND_COMMANDS.includes(command));
 // Host state a Mac block would otherwise read from the real Mac: its process table. These stub the Mac lane only;
@@ -1426,7 +1431,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
     file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
   }
   const measuredDbHelper = `${previousStack}/deploy/supabase-stack/migrate/run-db-tool.sh`;
-  file(measuredDbHelper, "#!/bin/sh\nexit 69\n", 0o775, commonswarm);
+  file(measuredDbHelper, "#!/bin/sh\nprintf '%s\\n' 'UNPRODUCED database observation' >&2\nexit 69\n", 0o775, commonswarm);
   symlinkSync(at(edgeTarget ?? previousEdge), at("/home/commonswarm/edge/current"));
   symlinkSync(at(previousStack), at("/home/commonswarm/stack/current"));
   file(K4_10_COMPOSE_OVERRIDE_PATH, readFileSync(K4_10_COMPOSE_OVERRIDE_EVIDENCE), 0o644, commonswarm);
@@ -1447,7 +1452,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   }
   file("/home/commonswarm/.env",
     Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600, commonswarm);
-  file("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600, rootOwned);
+  file("/etc/commonswarm-release/target.env", SYNTHETIC_TARGET_ENV_BODY, 0o600, rootOwned);
   file("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644, rootOwned);
   file("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640, rootOwned);
   file("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600, rootOwned);
@@ -1758,7 +1763,14 @@ function makeStubBin(bin: string, rootOwned = false): void {
   for (const command of rootOwned ? BOX_STUB_COMMANDS : STUB_COMMANDS) {
     const target = join(bin, command);
     if (!existsSync(target)) {
-      copyFileSync(STUB, target);
+      if (command === "node") {
+        // Remote shells have a restricted PATH. Use this runner's real Node even when its installation
+        // directory is absent there; the enclosing Mac jail or admitted box runner still contains it.
+        const executable = canonicalPath(process.execPath).replaceAll("'", "'\\''");
+        writeFileSync(target, `#!/bin/sh\nexec '${executable}' "$@"\n`, { mode: 0o755 });
+      } else {
+        copyFileSync(STUB, target);
+      }
       if (rootOwned) chownSync(target, 0, 0);
       chmodSync(target, 0o755);
     }
@@ -2106,7 +2118,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     chmodSync(release, release === previousEdge ? 0o750 : 0o755);
   }
   const measuredDbHelper = join(previousStack, "deploy/supabase-stack/migrate/run-db-tool.sh");
-  writeMode(measuredDbHelper, "#!/bin/sh\nexit 69\n", 0o775);
+  writeMode(measuredDbHelper, "#!/bin/sh\nprintf '%s\\n' 'UNPRODUCED database observation' >&2\nexit 69\n", 0o775);
   mkdirSync("/home/commonswarm/edge", { recursive: true });
   mkdirSync("/home/commonswarm/stack", { recursive: true });
   for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack"]) chmodSync(path, 0o755);
@@ -2133,7 +2145,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   }
   writeMode("/home/commonswarm/.env",
     Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600);
-  writeMode("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600);
+  writeMode("/etc/commonswarm-release/target.env", SYNTHETIC_TARGET_ENV_BODY, 0o600);
   writeMode("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644);
   writeMode("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640);
   writeMode("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600);
@@ -2395,6 +2407,28 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
           } });
         }
       } else {
+        if (block.file === HM37 && shortStep(block) === "hm37a-resolved-input-transfer") {
+          // The Mac producer is skipped in this lane. Supply synthetic prompt values by their declared
+          // names at its transfer boundary (HM37:988-1001), as shell assignments, never observations.
+          assert.ok(guardedBoxFixtures.has(fixture), "prompt transfer requires a guarded box fixture");
+          const target = join(PROOF_DIR, "item-resolved-inputs.env");
+          const body = fixture.promptInputs.map(({ name }) => {
+            const value = fixture.env[name];
+            assert.notEqual(value, undefined, `unresolved prompt input: ${name}`);
+            return `${name}='${value!.replaceAll("'", "'\\''")}'`;
+          }).join("\n") + "\n";
+          writeRootMode(target, body, 0o600);
+          records.push({ block, execution: {
+            step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded: [target],
+            declared: { surface: "Mac prompt-input transfer", reason: "Synthetic resolved prompt inputs; the Mac transfer is not executed in the box lane.",
+              live_proof: `${HM37}:988-1001 requires Anvil's real prompt-input transfer.`,
+              outputs: [{ file: basename(target), location: "box-proof", mode: "0600", branch: "box",
+                plan_documented: { evidence: HM37, source_lines: "624-636, 988-1001",
+                  label: "synthetic resolved prompt values; not measured observations",
+                  json: Object.fromEntries(fixture.promptInputs.map(({ name }) => [name, fixture.env[name]!])) },
+              }] },
+          } });
+        }
         const handoff = seedBoxWindowBOpen(block, fixture);
         if (handoff) records.push({ block, execution: handoff });
       }
@@ -2470,7 +2504,7 @@ function executeWholeBlock(
 ): Execution {
   const step = shortStep(block);
   const contained = fixture.part === "mac";
-  const declared = contained && !options.executeDeclared ? declaredNonSubstitutable(step) : undefined;
+  const declared = !options.executeDeclared ? declaredNonSubstitutable(step) : undefined;
   if (declared) {
     // A declared surface is not executed: not a part of the block, not with a canned answer.
     const seed = seedDeclaredOutputs(declared, fixture, options.seedOverride);
@@ -3940,6 +3974,47 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
   }
 });
 
+test("controls: fixture node runs the real database service-file generator without a host PATH", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  const bin = join(temporary, "bin");
+  const boxRoot = join(temporary, "box");
+  const target = join(boxRoot, "etc/commonswarm-release/target.env");
+  const service = join(temporary, "service.conf");
+  const pass = join(temporary, "pass");
+  const script = resolve("deploy/supabase-stack/migrate/make-pg-service.mjs");
+  makeStubBin(bin);
+  const env = explicitEnvironment({ PATH: bin, BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
+    PG_SERVICE_OUTPUT: service, PG_PASS_OUTPUT: pass, COMMONSWARM_MIGRATION_ENV_FILE: target });
+  try {
+    // Exercise the target.env that the fixture actually supplies to runbook-17. The generator only
+    // formats files; no connection is made and this control cannot establish database identity.
+    seedMacBoxRoot(boxRoot, "s2");
+    const positive = spawnSync(process.execPath, [script], { encoding: "utf8", env });
+    assert.equal(positive.status, 0, positive.stderr);
+    const expectedService = readFileSync(service, "utf8");
+    const expectedPass = readFileSync(pass, "utf8");
+    unlinkSync(service);
+    unlinkSync(pass);
+    const run = () => spawnSync("/bin/bash", ["-c", 'source "$1"; node "$2"', "node-control", PRELUDE, script],
+      { encoding: "utf8", env });
+    const accepted = run();
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(readFileSync(service, "utf8"), expectedService);
+    assert.equal(readFileSync(pass, "utf8"), expectedPass);
+    assert.equal(lstatSync(service).mode & 0o777, 0o600);
+    assert.equal(lstatSync(pass).mode & 0o777, 0o600);
+    // The same runtime must propagate the real generator's refusal, not substitute a passing result.
+    writeMode(target, "TARGET_DATABASE_URL=postgresql://fixture:fixture@unapproved.invalid/postgres\n");
+    const refused = run();
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /TARGET_DATABASE_URL host is not an allowed CommonSwarm target/);
+    assert.equal(readFileSync(service, "utf8"), expectedService);
+    assert.equal(readFileSync(pass, "utf8"), expectedPass);
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
+  }
+});
+
 test("controls: runbook-16 accepts the database-helper command shape without fabricating identity", (t) => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
   const bin = join(temporary, "bin");
@@ -3968,6 +4043,63 @@ test("controls: runbook-16 accepts the database-helper command shape without fab
     assert.match(unknown.stderr, /^unhandled dry-run stub: docker run --h14-unreviewed-flag fixture$/m);
   } finally {
     removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
+  }
+});
+
+test("controls: runbook-16 is NOT EXECUTED without measured database identity", () => {
+  const block = planBlock(RUNBOOK, "runbook-16");
+  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  const fixture = part === "box" ? prepareBoxFixture("s2") : prepareMacFixture();
+  try {
+    const record = executeWholeBlock(block, fixture);
+    assert.equal(record.result, "not-executed", record.stderr);
+    assert.equal(record.status, null);
+    assert.deepEqual(record.seeded, [], "unmeasured identity outputs were seeded");
+    assert.match(notExecutedLine(block, record), /NOT EXECUTED.*needs the real PostgreSQL identity; Anvil proves it live/);
+    assert.match(measuredFact("M8").note, /Database reachability was not attempted/);
+    assert.deepEqual(record.declared?.outputs, []);
+  } finally {
+    if (part === "box") cleanupBoxFixture(fixture);
+    else cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: the database fixture helper refuses every unmeasured call visibly", () => {
+  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  const fixture = part === "box" ? prepareBoxFixture("s2") : prepareMacFixture();
+  const helper = join(fixture.boxRoot ?? "/", PREVIOUS_STACK, "deploy/supabase-stack/migrate/run-db-tool.sh");
+  try {
+    for (const args of [["assert-database-identity.sh", "/proof/database", "target"], ["unknown-tool"]]) {
+      const run = containedCommand(fixture, helper, args, { env: fixture.env });
+      assert.equal(run.status, 69, run.stderr);
+      assert.equal(run.stderr, "UNPRODUCED database observation\n");
+      assert.equal(run.stdout, "");
+    }
+  } finally {
+    if (part === "box") cleanupBoxFixture(fixture);
+    else cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: box userland diff compares fixture bytes and refuses host paths", { skip: MAC_ONLY }, () => {
+  const fixture = prepareMacFixture();
+  const left = join(fixture.boxRoot!, "tmp/diff-left");
+  const right = join(fixture.boxRoot!, "tmp/diff-right");
+  const run = (args: string[]) => containedCommand(fixture, join(fixture.boxBin!, "diff"), args, { env: fixture.env });
+  try {
+    writeMode(left, "equal\n");
+    writeMode(right, "equal\n");
+    assert.equal(run(["-qr", left, right]).status, 0);
+    writeMode(right, "changed\n");
+    assert.equal(run(["-qr", left, right]).status, 1, "different bytes compared equal");
+    const missing = run(["-qr", left, `${right}-missing`]);
+    assert.equal(missing.status, 2, missing.stderr);
+    const outside = run(["-qr", left, "/etc/hosts"]);
+    assert.equal(outside.status, 69, outside.stderr);
+    assert.match(outside.stderr, /unhandled dry-run stub: diff/);
+    assert.equal(run(["--unreviewed", left, right]).status, 69);
+  } finally {
+    cleanupMacFixture(fixture);
   }
 });
 
@@ -5111,6 +5243,43 @@ test("controls: box mode refuses to run a block when the runner guard is not sat
     assert.equal(refused.status, 71);
     assert.match(refused.stderr, /CONTAINMENT UNAVAILABLE: disposable runner guard is not satisfied/);
     assert.equal(refused.stdout, "", "the refused block reached a shell");
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: the box lane writes resolved prompt inputs by name", {
+  skip: process.env.BOX_DRY_RUN_PART !== "box" ? "requires the disposable Linux root CI runner" : false,
+}, () => {
+  const block = planBlock(HM37, "hm37a-resolved-input-transfer");
+  const fixture = prepareBoxFixture("s2", [block]);
+  const target = join(PROOF_DIR, "item-resolved-inputs.env");
+  try {
+    assert.equal(pathExists(target), false, "prompt file was seeded before its transfer boundary");
+    // Include shell-sensitive and multiline bytes: the file must restore values, not execute their text.
+    fixture.env.APPROVER = "operator's $(exit 31)\nsecond line";
+    const records = executePlanUntilFailure([block], fixture, "box");
+    assert.equal(records.length, 1);
+    assert.equal(records[0]!.execution.result, "not-executed", "skipped Mac transfer was reported as executed");
+    assert.deepEqual(records[0]!.execution.seeded, [target]);
+    assert.match(notExecutedLine(block, records[0]!.execution), /Seeded from committed evidence: nothing\. Plan-documented output: item-resolved-inputs\.env/);
+    const bytes = readFileSync(target, "utf8");
+    assert.doesNotMatch(bytes, /\[object Object\]|=undefined/);
+    const names = fixture.promptInputs.map(({ name }) => name);
+    assert.equal([...bytes.matchAll(/^([A-Z][A-Z0-9_]*)=/gm)].length, names.length);
+    const restored = containedCommand(fixture, "/bin/bash", ["-c",
+      `set -euo pipefail; . "$1"; printf '%s\\0' ${names.map((name) => `"$${name}"`).join(" ")}`,
+      "prompt-readback", target], { env: fixture.env });
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(restored.stdout, names.map((name) => fixture.env[name]).join("\0") + "\0");
+    const stat = lstatSync(target);
+    assert.equal(stat.mode & 0o777, 0o600);
+    assert.equal(stat.uid, 0);
+    assert.equal(stat.gid, 0);
+    // A missing resolution fails at the producer instead of serializing undefined.
+    delete fixture.env[names[0]!];
+    assert.throws(() => executePlanUntilFailure([block], fixture, "box"), /unresolved prompt input:/);
+    assert.equal(readFileSync(target, "utf8"), bytes, "failed resolution overwrote the prior prompt file");
   } finally {
     cleanupBoxFixture(fixture);
   }
