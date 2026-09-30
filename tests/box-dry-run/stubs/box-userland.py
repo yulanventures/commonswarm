@@ -395,7 +395,9 @@ def cmd_install(argv: list[str]) -> None:
     source, target = operands
     if os.path.isdir(target):
         target = os.path.join(target, os.path.basename(source))
-    if not os.path.isfile(source):
+    # install /dev/null creates an empty regular file on the real box. It is a
+    # character device, so the ordinary-file check alone falsely rejects it.
+    if source != "/dev/null" and not os.path.isfile(source):
         sys.stderr.write("install: cannot stat '%s': No such file or directory\n" % source)
         raise SystemExit(1)
     require_ownership_right("install", owner, group, target)

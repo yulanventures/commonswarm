@@ -15,7 +15,21 @@ const UNKNOWN_TRANSPORT = /\b(?:sftp|ftp|lftp|rcp|rclone|bbcp|unison|sshpass)\b/
 const tokens = (line: string): string[] => (line.match(/(?:"[^"\n]*"|'[^'\n]*'|[^\s;"']+)+/g) ?? [])
   .map((word) => word.replace(/["']/g, ""));
 
-function expansions(block: HandoffBlock): (value: string) => string[] {
+// Here-document bodies belong to stdin, not the Mac shell's assignment scope.
+function outsideHeredocs(source: string): string {
+  const lines = source.split("\n");
+  const outer: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index]!;
+    outer.push(line);
+    const here = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(line);
+    if (here) while (++index < lines.length &&
+      (here[1] ? lines[index]!.replace(/^\t+/, "") : lines[index]) !== here[3]) { /* stdin */ }
+  }
+  return outer.join("\n");
+}
+
+function expansions(block: HandoffBlock, locals: Record<string, string> = {}): (value: string) => string[] {
   const vars = new Map<string, string[]>([
     ["SHA", ["{sha}"]], ["RELEASE_SHA", ["{sha}"]], ["WINDOW_ID", ["{window}"]],
   ]);
@@ -48,6 +62,7 @@ function expansions(block: HandoffBlock): (value: string) => string[] {
       if (accepted) vars.set(name, accepted.split("|"));
     }
   }
+  for (const [name, value] of Object.entries(locals)) vars.set(name, [value]);
   const expand = (value: string, depth = 0): string[] => {
     if (depth > 12) return [value];
     const match = [...value.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)].find((item) => vars.has(item[1] ?? item[2]!));
@@ -63,9 +78,9 @@ export type BoundaryOperation = { transfer: TransferProduct; transport: "scp" | 
 
 // Keep the remote command's shell quoting and here-document bytes. Only the Mac stdout
 // sink is removed; it is not a box product. File-fed scripts must have a visible writer.
-export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] {
+export function macBoundaryOperations(block: HandoffBlock, locals: Record<string, string> = {}): BoundaryOperation[] {
   if (block.host.startsWith("box ")) return [];
-  const expand = expansions(block);
+  const expand = expansions({ ...block, source: outsideHeredocs(block.source) }, locals);
   const lines = block.source.split("\n");
   const scripts = new Map<string, { script?: string; delimiter?: string; stdinProducer?: { path: string; writers: string[] } }>();
   const operations: BoundaryOperation[] = [];
@@ -154,7 +169,21 @@ export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] 
     if (!/\bssh\s/.test(line) && /[A-Za-z_][A-Za-z0-9_-]*@[^\s:]+:/.test(line)) unknown(line);
     const ssh = /\bssh\s/.exec(line);
     if (!ssh) continue;
-    let command = line.slice(ssh.index).trim();
+    let sshText = shellCommands(line.slice(ssh.index))[0]!.trim();
+    // A close of the enclosing Mac command substitution ends ssh too. Any
+    // redirections after it belong to the outer command, not the remote stdin.
+    let substitutionQuote = "", substitutionEscape = false;
+    for (let n = 0; n < sshText.length; n++) {
+      const c = sshText[n]!;
+      if (substitutionEscape) { substitutionEscape = false; continue; }
+      if (c === "\\" && substitutionQuote !== "'") { substitutionEscape = true; continue; }
+      if (substitutionQuote) { if (c === substitutionQuote) substitutionQuote = ""; continue; }
+      if (c === "'" || c === '"') { substitutionQuote = c; continue; }
+      if (c === ")") { sshText = sshText.slice(0, n); break; }
+    }
+    const sshHere = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(sshText);
+    if (sshHere && here?.[3] !== sshHere[3]) unknown(line);
+    let command = sshText;
     // Stop at the Mac redirection, pipeline or command-substitution close, while
     // respecting quotes and escapes inside the remote command string.
     let quote = "", escaped = false, end = command.length;
@@ -168,8 +197,8 @@ export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] 
     }
     command = command.slice(0, end).trim();
     if (!/\b(?:ops|commonswarm)@(?:100\.115\.66\.74|yulan-vps-1)\b/.test(command)) unknown(line);
-    if (!here) {
-      const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(line);
+    if (!sshHere) {
+      const input = /(?<!<)<(?!<)\s*("[^"]+"|'[^']+'|[^\s)]+)/.exec(sshText.slice(end));
       if (input) {
         const found = scripts.get(tokens(input[1]!)[0]!);
         if (!found) unknown(line);
@@ -178,7 +207,8 @@ export function macBoundaryOperations(block: HandoffBlock): BoundaryOperation[] 
       }
       if (/\bbash\s+-s\b/.test(command)) unknown(line);
     }
-    operations.push({ remote: { command: commandExpansion(command), ...(script !== undefined ? { script, delimiter: `${here![1]}${here![2]}${here![3]}${here![2]}` } : {}) } });
+    operations.push({ remote: { command: commandExpansion(command), ...(sshHere && script !== undefined
+      ? { script, delimiter: `${sshHere[1]}${sshHere[2]}${sshHere[3]}${sshHere[2]}` } : {}) } });
   }
   return operations;
 }
@@ -291,20 +321,21 @@ export function transferProducts(block: HandoffBlock): TransferProduct[] {
     if (enclosingQuote) command = enclosingQuote[2]!;
     // Outer assignments resolve argv such as STAGING_ROOT. Do not treat the Mac's
     // local writes as remote; only this SSH command and its stdin are inspected.
-    const outer = expansions(block);
+    const outer = expansions({ ...block, source: outsideHeredocs(block.source) });
     const argv = /\bbash -s -- (.*)/.exec(command)?.[1];
     if (/\bbash\s+-s\b/.test(command) && remote.stdinProducer) {
       throw new Error(`${block.file}:${block.line}: unknown transfer form: generated bash stdin from ${remote.stdinProducer.path}`);
     }
     let body = /\bbash\s+-s\b/.test(command) ? remote.script ?? "" : command;
+    // A quoted delimiter suppresses expansion by the Mac shell. An unquoted
+    // heredoc expands there before ssh sends the bytes to the remote shell.
+    if (remote.script !== undefined && !/["']/.test(remote.delimiter ?? "")) body = outer(body)[0]!;
     if (argv) {
-      const args = tokens(argv).map((arg) => outer(arg)[0]!);
+      const args = tokens(argv);
       body = body.replace(/\$\{([1-9][0-9]*)\}|\$([1-9])(?![0-9])/g,
         (original, braced: string | undefined, plain: string | undefined) => args[Number(braced ?? plain) - 1] ?? original);
     }
-    const assignments = block.source.split("\n").filter((line) => !line.includes("$(") &&
-      (/^\s*[A-Za-z_][A-Za-z0-9_]*=/.test(line) || /^\s*for [A-Z]/.test(line))).join("\n");
-    for (const product of shellWrites({ ...block, source: assignments + "\n" + command + "\n" + body })) {
+    for (const product of shellWrites({ ...block, source: command + "\n" + body })) {
       if (!products.has(product.path) || product.path.startsWith("/home/") || product.kind === "directory") products.set(product.path, product);
     }
   }
