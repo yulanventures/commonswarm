@@ -1178,9 +1178,9 @@ table and the runbook's switch-to-step mapping:
 hm37a-source-checkout hm37a-open-inputs hm37a-prep-seat-control-stage
 hm37a-gate-and-proof-ingest
 hm37-source-identity runbook-02 hm37a-resolved-inputs runbook-04
-hm37a-baseline-inventory 1-upload-release-archive runbook-05
+hm37a-baseline-inventory 1-upload-release-archive
 1-open-root-shell 1-apply-release-directories hm37a-resolved-input-transfer
-hm37a-go-record hm37a-prerequisite-evidence runbook-03
+hm37a-go-record hm37a-prerequisite-evidence runbook-03 runbook-05
 runbook-07 runbook-08 runbook-09 runbook-10 runbook-14 runbook-15
 runbook-16 runbook-17 hm37-hm6-schema-helpers-precondition
 hm37-hm6-oauth-precondition hm37-hm6-oauth-refusal-probe
@@ -2426,9 +2426,10 @@ A failed forward transaction does not automatically require destructive rollback
 ## 12. Evidence, cleanup and closure
 
 Run the resolved-input transfer, GO producer and prerequisite-evidence producer
-immediately after `1-apply-release-directories`, then run `runbook-03`, all
-before any database, service, timer, symlink, or Caddy mutation. The manifest
-is explicit and comes from persisted `window.env`.
+immediately after `1-apply-release-directories`, then run `runbook-03` and
+`runbook-05`, all before any database, service, timer, symlink, or Caddy mutation.
+The manifest and stack comparison read the `window.env` persisted by
+`1-apply-release-directories`.
 
 Add these exact item-relative paths without duplicating standard generated entries:
 

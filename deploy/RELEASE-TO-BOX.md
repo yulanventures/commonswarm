@@ -517,8 +517,9 @@ Any release with migrations uses `stack` in `KIND_LIST` because sections 2–5
 read migration files and helpers from `NEW_STACK`. H0 therefore uses
 `KIND_LIST='edge stack'`. Building that immutable stack directory does not
 itself switch `stack/current`. The guarded switch is the only switch site and
-runs only if stack runtime files changed. After the apply block below builds
-both release directories, compare them on the box before deciding:
+runs only if stack runtime files changed. Run `runbook-05` only after
+`1-apply-release-directories` below has built both release directories and
+persisted `window.env`. Compare them on the box before deciding:
 
 ```sh
 # step: runbook-05
@@ -591,14 +592,25 @@ block reads them from `window.env`.
 )
 ```
 
-Open a root shell on the box:
+Verify a noninteractive root shell on the box with `1-open-root-shell`.
+For each later box block, pass the complete block to a fresh
+`ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s'` invocation or execute it
+in a box root shell. This check exits after verifying root access; later
+blocks load their own persisted state.
 
 ```sh
 # step: 1-open-root-shell
 # readonly: yes
-# host: Mac mini /bin/bash 3.2 as Anvil; opens a box root shell
-ssh ops@100.115.66.74
-sudo -n -i
+# host: Mac mini /bin/bash 3.2 as Anvil; box /bin/bash 5.2 as root via ssh
+(
+  set -euo pipefail
+  ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
+(
+  set -euo pipefail
+  test "$(id -u)" -eq 0
+)
+BOX
+)
 ```
 
 Then prepare or verify each requested immutable release directory and write the
