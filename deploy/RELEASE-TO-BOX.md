@@ -318,9 +318,21 @@ initial manifest is built only from the explicit arrays below, never from
   : "${MCP_CADDY_RELEASE:?resolved item input missing}"
   : "${MIGRATION_VERSIONS:?resolved item input missing}"
   : "${FUNCTIONAL_VERSIONS:?resolved item input missing}"
-  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
-  read -r -a MIGRATION_VERSIONS <<<"$MIGRATION_VERSIONS" || [ -n "${MIGRATION_VERSIONS[*]:-}" ]
-  read -r -a FUNCTIONAL_VERSIONS <<<"$FUNCTIONAL_VERSIONS" || [ -n "${FUNCTIONAL_VERSIONS[*]:-}" ]
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  LIST_INPUT="$MIGRATION_VERSIONS"
+  MIGRATION_VERSIONS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then MIGRATION_VERSIONS[${#MIGRATION_VERSIONS[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  LIST_INPUT="$FUNCTIONAL_VERSIONS"
+  FUNCTIONAL_VERSIONS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then FUNCTIONAL_VERSIONS[${#FUNCTIONAL_VERSIONS[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${KIND_ARRAY[*]:-}"
   test -n "${MIGRATION_VERSIONS[*]:-}"
   test -n "${FUNCTIONAL_VERSIONS[*]:-}"
@@ -477,7 +489,11 @@ the dark `mcp` name:
   ADDITIONAL_REQUIRED_ENV_NAMES='' # Lead lists any new strict function requirements from this SHA.
   if [ "$ROUTER_CHANGED" = yes ]; then CHANGED_FUNCTIONS='command read capability activity h0 mcp'; fi
   case "$ROUTER_CHANGED" in yes|no) ;; *) false ;; esac
-  read -r -a CHANGED_FUNCTION_ARRAY <<<"$CHANGED_FUNCTIONS" || [ -n "${CHANGED_FUNCTION_ARRAY[*]:-}" ]
+  LIST_INPUT="$CHANGED_FUNCTIONS"
+  CHANGED_FUNCTION_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then CHANGED_FUNCTION_ARRAY[${#CHANGED_FUNCTION_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${CHANGED_FUNCTION_ARRAY[*]:-}"
   cat >"$ROUTER_DIR/inventory.ts" <<'TS'
 const { FUNCTION_ENV_NAMES, REQUIRED_MAIN_ENV, COMMAND_TEST_HOOKS } =
@@ -636,7 +652,11 @@ window state:
   : "${WINDOW_END_UTC:?load the box-clock-derived window end from the open receipt}"
   ARCHIVE=/tmp/commonswarm-release.tar
   : "${KIND_LIST:?resolved item input missing}"
-  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${KIND_ARRAY[*]:-}"
   : "${EXPECTED_ARCHIVE_SHA256:?archive digest missing from resolved box input}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -1020,7 +1040,11 @@ HezLead confirms their list contains no secret:
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   : "${KIND_LIST:?resolved item input missing}"
-  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${KIND_ARRAY[*]:-}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   for KIND in "${KIND_ARRAY[@]}"; do
@@ -2003,8 +2027,16 @@ name per line; empty when none). The lead supplies both lists with the release; 
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${EXPECTED_NEW_CRON_JOBS:?resolved item input missing}"
   : "${EXPECTED_REMOVED_CRON_JOBS:?resolved item input missing}"
-  read -r -a EXPECTED_NEW_CRON_JOB_ARRAY <<<"$EXPECTED_NEW_CRON_JOBS" || [ -n "${EXPECTED_NEW_CRON_JOB_ARRAY[*]:-}" ]
-  read -r -a EXPECTED_REMOVED_CRON_JOB_ARRAY <<<"$EXPECTED_REMOVED_CRON_JOBS" || [ -n "${EXPECTED_REMOVED_CRON_JOB_ARRAY[*]:-}" ]
+  LIST_INPUT="$EXPECTED_NEW_CRON_JOBS"
+  EXPECTED_NEW_CRON_JOB_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then EXPECTED_NEW_CRON_JOB_ARRAY[${#EXPECTED_NEW_CRON_JOB_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
+  LIST_INPUT="$EXPECTED_REMOVED_CRON_JOBS"
+  EXPECTED_REMOVED_CRON_JOB_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then EXPECTED_REMOVED_CRON_JOB_ARRAY[${#EXPECTED_REMOVED_CRON_JOB_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test "$EXPECTED_NEW_CRON_JOBS" = none
   test "$EXPECTED_REMOVED_CRON_JOBS" = none
   test "${#EXPECTED_NEW_CRON_JOB_ARRAY[@]}" -eq 1
@@ -3114,7 +3146,11 @@ releases compare each installed file to its own previous-release source.
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   : "${KIND_LIST:?resolved item input missing}"
-  read -r -a KIND_ARRAY <<<"$KIND_LIST" || [ -n "${KIND_ARRAY[*]:-}" ]
+  LIST_INPUT="$KIND_LIST"
+  KIND_ARRAY=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    if [ -n "$VALUE" ]; then KIND_ARRAY[${#KIND_ARRAY[@]}]="$VALUE"; fi
+  done < <(printf '%s\n' "$LIST_INPUT" | tr ' \t' '\n')
   test -n "${KIND_ARRAY[*]:-}"
   case " ${KIND_ARRAY[*]} " in *' stack '*) ;; *) false ;; esac
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
