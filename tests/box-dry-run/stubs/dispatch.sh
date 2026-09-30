@@ -501,7 +501,7 @@ case "$name" in
         while [ "$#" -gt 0 ]; do
           case "$1" in
             --rm) shift ;;
-            --network|--add-host|--env|--volume|--entrypoint)
+            --network|--add-host|--env|--env-file|--volume|--entrypoint)
               [ "$#" -ge 2 ] || unhandled_stub; shift 2 ;;
             -*) unhandled_stub ;;
             *) break ;;
@@ -682,6 +682,20 @@ case "$name" in
     exec /usr/bin/tar "${tar_arguments[@]}"
     ;;
   deno)
+    # The Mac inventory is a local computation, not a hosted control. Run the real pinned binary;
+    # accept only the runbook's file-only invocation, with Deno permissions closed to writes and network.
+    if [ "${BOX_DRY_RUN_PART:-}" = mac ] && [ "${BOX_DRY_RUN_IN_REMOTE:-}" != 1 ] &&
+       [ "$#" -eq 7 ] && [ "$1" = run ] && [ "$2" = --no-config ]; then
+      case "$3" in --allow-read=*) inventory_root=${3#--allow-read=} ;; *) unhandled_stub ;; esac
+      case "$inventory_root" in "${BOX_DRY_RUN_MAC_TMP:?Mac tmp required}"/commonswarm-router-??????) ;; *) unhandled_stub ;; esac
+      [ "$4" = "$inventory_root/inventory.ts" ] && [ "$5" = "$inventory_root/router.ts" ] || unhandled_stub
+      inventory_deno="${0%/*}/inventory-deno"
+      if [ ! -f "$inventory_deno" ] || [ ! -x "$inventory_deno" ]; then
+        printf '%s\n' 'deno unavailable: inventory.ts requires a real local Deno executable' >&2
+        exit 69
+      fi
+      exec "$inventory_deno" run --no-prompt --cached-only --no-lock --no-code-cache --no-check "$2" "$3" "$4" "$5" "$6" "$7"
+    fi
     if [ -n "${BOX_DRY_RUN_FAIL_STEP:-}" ] && [ "${BOX_DRY_RUN_FAIL_STEP}" = "${BOX_DRY_RUN_STEP:-}" ]; then
       if [ "${BOX_DRY_RUN_FAIL_STEP:-}" = hm37-hosted-open-ack-control ]; then
         journal="/home/commonswarm/edge/controls/${BOX_DRY_RUN_RELEASE_SHA:?release SHA required}-${BOX_DRY_RUN_WINDOW_ID:?window ID required}/journal/hm37-open-ack-010203.journal.json"
