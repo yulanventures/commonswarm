@@ -155,7 +155,9 @@ ownership, symlink, mode, target, or content mismatch remains a stop.
    repository. They prove
    the archive came from the GitHub remote. The lead must have already written
    `gate-evidence.txt` in the evidence directory, whose name uses the UTC date on
-   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>-<window-id>/`). `git archive` reads tracked
+   which the preflight runs (`docs/evidence/<UTC date>-release-<12-char sha>-<window-id>/`,
+   or the same name under `EVIDENCE_ROOT` when the item plan's open receipt names
+   one; see the note after `runbook-02`). `git archive` reads tracked
    Git objects and has no `--no-xattrs` option; Mac `tar` commands below use
    both `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
@@ -172,8 +174,16 @@ rm -f "$HOME/.commonswarm-release-window.env"
   test -f "$WINDOW_OPEN_RECEIPT"
   test ! -L "$WINDOW_OPEN_RECEIPT"
   test "$(stat -f %Lp "$WINDOW_OPEN_RECEIPT")" = 600
+  unset EVIDENCE_ROOT RELEASE_REPO
   . "$WINDOW_OPEN_RECEIPT"
   test "$SHA" = "$RELEASE_SHA"
+  if [ -n "${RELEASE_REPO:-}" ]; then
+    # An item plan that cloned its own release checkout names it in the open
+    # receipt. Every git command below, the archive, and the evidence-root
+    # guard then refer to that checkout and not to the caller's directory.
+    case "$RELEASE_REPO" in /*) ;; *) false ;; esac
+    cd "$RELEASE_REPO"
+  fi
   case "$WINDOW_START_UTC" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;;
     *) false ;;
@@ -202,7 +212,13 @@ rm -f "$HOME/.commonswarm-release-window.env"
 
   SHORT_SHA="$(git rev-parse --short=12 "$SHA")"
   RUN_DAY="$(date -u +%F)"
-  EVIDENCE_DIR="$PWD/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
+  EVIDENCE_DIR="${EVIDENCE_ROOT:-$PWD/docs/evidence}/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
+  if [ -n "${EVIDENCE_ROOT:-}" ]; then
+    # An item plan that names EVIDENCE_ROOT keeps its release checkout clean, so
+    # the evidence directory is absolute and never inside this checkout.
+    case "$EVIDENCE_ROOT" in /*) ;; *) false ;; esac
+    case "$EVIDENCE_DIR" in "$PWD"|"$PWD"/*) false ;; esac
+  fi
   RUN_LOG="$EVIDENCE_DIR/run.log"
   ARCHIVE="/tmp/commonswarm-${SHA}-${WINDOW_ID}.tar"
   BOX_WINDOW_INPUT="/tmp/commonswarm-${SHA}-${WINDOW_ID}.window.env"
@@ -239,6 +255,16 @@ block refuses to run. Every later Mac block runs in its own `set -euo pipefail`
 subshell, starts with `. "$HOME/.commonswarm-release-window.env"` and
 `test "$SHA" = <sha>`, and so fails closed after a lost shell. Section 1's
 Mac cleanup deletes the file when the window closes.
+
+When the open receipt names `EVIDENCE_ROOT` (an item plan sets it when its
+release checkout must stay clean), `runbook-02` creates the evidence directory
+under that root instead of `$PWD/docs/evidence`. The directory name is the same
+and the path is persisted in the window file, so every later block reads one
+value. A receipt with no `EVIDENCE_ROOT` keeps the checkout-relative default.
+When the receipt names `RELEASE_REPO`, `runbook-02` changes into that checkout
+first, so the origin URL, the fetch, the archive, and the guard that keeps the
+evidence directory outside the checkout all describe the checkout the plan
+proved clean.
 
 Record approvals, affected surfaces, the backup-age agreement, commands, exit
 codes, and safe verification output in `run.log`. Never record an environment
@@ -279,8 +305,9 @@ initial manifest is built only from the explicit arrays below, never from
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  . /home/commonswarm/stack/release-proofs/<sha>/window.env
-  test "$SHA" = '<sha>'
+  : "${RELEASE_SHA:?named release SHA required}"
+  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   . "$PROOF_DIR/item-resolved-inputs.env"
   : "${KIND_LIST:?resolved item input missing}"
@@ -994,9 +1021,12 @@ surface-specific section below restores the previous symlink and recreates from
 the previous release directory. Do not delete either release during the window.
 
 After the window, Anvil copies the curated proof files back to
-`docs/evidence/<UTC-date>-release-<short-sha>/`. CSwarmDevLead reviews and
-commits that evidence afterwards; the evidence must contain no secrets and no
-complete environment file. Use only the root-owned `copy-back.list` created by
+`docs/evidence/<UTC-date>-release-<short-sha>/`, or into the `EVIDENCE_DIR`
+that the window file names when the item plan set `EVIDENCE_ROOT`. CSwarmDevLead
+reviews and commits that evidence afterwards, first copying an `EVIDENCE_ROOT`
+directory into `docs/evidence/` on a repository branch; the evidence must
+contain no secrets and no complete environment file. Use only the root-owned
+`copy-back.list` created by
 the section 1 preflight block. It includes itself and the applicable standard
 evidence plus the exact item-specific paths from the box plan. Logs are never
 copied because they may contain request data, except for the bounded outgoing
@@ -1010,14 +1040,39 @@ copies it back. The window is closed by HezLead; Anvil runs copy-back
 `runbook-11`, box cleanup `runbook-60`, proof closure `runbook-61`, and Mac
 cleanup `runbook-12`, and reports each one.
 
+An abort can come before `runbook-02` has written the window file. No box
+release state exists then, so `runbook-11` says that no window file exists and
+copies nothing, and `runbook-12` removes only the exact per-window scratch files
+that the open receipt names. Both read that receipt only after the same
+regular-file, non-symlink, mode-`0600` checks as `runbook-02`. `runbook-11`
+takes the no-window-file path only when the box window input that `runbook-02`
+writes right after the window file is also absent; when it is present the window
+file was lost, and `runbook-11` stops so HezLead decides. Any abort after the
+window file exists reads it as before.
+
 ```sh
 # step: runbook-11
 # readonly: yes
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
-  . "$HOME/.commonswarm-release-window.env"
   : "${RELEASE_SHA:?named release SHA required}"
+  if [ ! -f "$HOME/.commonswarm-release-window.env" ]; then
+    # runbook-02 writes the window file, then the box window input, and no box
+    # release state exists before them. Only an open receipt with no box window
+    # input proves the window stopped before runbook-02 finished; a box window
+    # input without its window file is a lost window file, and the block stops.
+    WINDOW_OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+    test -f "$WINDOW_OPEN_RECEIPT"
+    test ! -L "$WINDOW_OPEN_RECEIPT"
+    test "$(stat -f %Lp "$WINDOW_OPEN_RECEIPT")" = 600
+    . "$WINDOW_OPEN_RECEIPT"
+    test "$SHA" = "$RELEASE_SHA"
+    test ! -e "/tmp/commonswarm-${SHA}-${WINDOW_ID}.window.env"
+    printf 'runbook-11: no window file and no box window input for %s; nothing to copy back\n' "$RELEASE_SHA"
+    exit 0
+  fi
+  . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = "$RELEASE_SHA"
   test -d "$EVIDENCE_DIR"
   ssh ops@100.115.66.74 "sudo -n -i bash -s -- '$RELEASE_SHA'" <<'BOX' | COPYFILE_DISABLE=1 tar --no-xattrs -xf - -C "$EVIDENCE_DIR"
@@ -1082,7 +1137,21 @@ distinct.
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
-  . "$HOME/.commonswarm-release-window.env"
+  : "${RELEASE_SHA:?named release SHA required}"
+  if [ -f "$HOME/.commonswarm-release-window.env" ]; then
+    . "$HOME/.commonswarm-release-window.env"
+  else
+    # Stopped before runbook-02 finished: only the open receipt exists. It names
+    # the same SHA and window ID, so the exact per-window scratch names follow.
+    WINDOW_OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+    test -f "$WINDOW_OPEN_RECEIPT"
+    test ! -L "$WINDOW_OPEN_RECEIPT"
+    test "$(stat -f %Lp "$WINDOW_OPEN_RECEIPT")" = 600
+    . "$WINDOW_OPEN_RECEIPT"
+    ARCHIVE="/tmp/commonswarm-${SHA}-${WINDOW_ID}.tar"
+    BOX_WINDOW_INPUT="/tmp/commonswarm-${SHA}-${WINDOW_ID}.window.env"
+  fi
+  test "$SHA" = "$RELEASE_SHA"
   rm -f "$ARCHIVE" "$BOX_WINDOW_INPUT" "/tmp/commonswarm-release-proofs-${SHA}-${WINDOW_ID}.tar"
   rm -f "$HOME/.commonswarm-release-window.env"
 )
@@ -1091,7 +1160,10 @@ distinct.
 ### Abort cleanup — Anvil runs `runbook-13` on every stop, refusal, or abort
 
 This is safe after a lost shell because it reads the durable state. It does not
-hide the failing block's evidence.
+hide the failing block's evidence. If the window stopped before
+`1-apply-release-directories` created the proof directory, no timer has been
+stopped: the block says there is no active proof directory and restores nothing.
+A proof directory whose `window.env` is missing still stops the block.
 
 ```sh
 # step: runbook-13
@@ -1100,6 +1172,13 @@ hide the failing block's evidence.
 (
   set -euo pipefail
   : "${RELEASE_SHA:?named release SHA required}"
+  ACTIVE_PROOF="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
+  if [ ! -e "$ACTIVE_PROOF" ] && [ ! -L "$ACTIVE_PROOF" ]; then
+    # 1-apply-release-directories creates the proof directory before any timer
+    # stops, so a window with no proof directory has no timer to restart.
+    printf 'runbook-13: no active proof directory for %s; no timer state to restore\n' "$RELEASE_SHA"
+    exit 0
+  fi
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
@@ -2006,7 +2085,7 @@ approved times overlap a protected interval.
   (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge.SHA256SUMS")
 
   # Observed by HezLead on 2026-09-22: the override lives in the current
-  # edge release, whose container mounts use its exact releases/<sha> path.
+  # edge release, whose container mounts use its exact release directory path.
   test -f "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml"
   cp -a "$PREVIOUS_EDGE/deploy/edge-runtime/compose.override.yaml" \
     "$NEW_EDGE/deploy/edge-runtime/compose.override.yaml"
@@ -3726,7 +3805,9 @@ full restore, delete a release, prune Docker, or point anything back to hosted
 Supabase, Railway, or Vercel.
 
 After either a successful close or an abort, remove the root-only transient
-database files and upload archives. This does not remove release evidence:
+database files and upload archives. This does not remove release evidence. When
+the window stopped before the proof directory existed, the names derive from the
+named release SHA and the same files are removed:
 
 ```sh
 # step: runbook-60
@@ -3735,7 +3816,15 @@ database files and upload archives. This does not remove release evidence:
 (
   set -euo pipefail
   : "${RELEASE_SHA:?named release SHA required}"
-  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  ACTIVE_PROOF="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
+  if [ -e "$ACTIVE_PROOF" ] || [ -L "$ACTIVE_PROOF" ]; then
+    . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
+  else
+    # A window that stopped before 1-apply-release-directories has no window
+    # file on the box, but its upload files can exist. Every name below derives
+    # from the named release SHA.
+    SHA="$RELEASE_SHA"
+  fi
   test "$SHA" = "$RELEASE_SHA"
   rm -f \
     "/run/commonswarm-release-${SHA}-service.conf" \
@@ -3750,7 +3839,8 @@ database files and upload archives. This does not remove release evidence:
 
 After copy-back and `runbook-60`, close the active proof directory by its exact
 name. A prior closed directory is never removed, listed, globbed, or selected;
-an existing destination is a stop for HezLead.
+an existing destination is a stop for HezLead. With no active proof directory
+the block says so and closes nothing.
 
 ```sh
 # step: runbook-61
@@ -3760,6 +3850,10 @@ an existing destination is a stop for HezLead.
   set -euo pipefail
   : "${RELEASE_SHA:?named release SHA required}"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${RELEASE_SHA}"
+  if [ ! -e "$PROOF_DIR" ] && [ ! -L "$PROOF_DIR" ]; then
+    printf 'runbook-61: no active proof directory for %s; nothing to close\n' "$RELEASE_SHA"
+    exit 0
+  fi
   . "$PROOF_DIR/window.env"
   test "$SHA" = "$RELEASE_SHA"
   case "$WINDOW_ID" in

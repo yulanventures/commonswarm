@@ -72,6 +72,23 @@ variable, profile discovery, or operator branch choice may carry cross-window
 state. Cleanup that owns temporary principals runs on success, rollback,
 pre-commit failure, post-commit control failure, and abort.
 
+A plan whose opening gate proves a clean release checkout
+(`test -z "$(git status --porcelain)"`) keeps every file the window writes
+outside that checkout. Its open receipt names `EVIDENCE_ROOT`, an absolute Mac
+directory, and `RELEASE_REPO`, the checkout itself; each block that creates the
+evidence directory refuses a path inside the checkout, and the runbook's opening
+block runs in the checkout the receipt names. The window file persists the
+resulting `EVIDENCE_DIR`, and the lead copies the reviewed directory into
+`docs/evidence/` after the window closes. Do not weaken the clean check to make
+room for evidence.
+
+A rollback or abort tail can run before the state it reads exists. Each tail
+block reads a durable file only when it can prove from what remains that an
+earlier step produced it, and says what it skipped. A missing file that an
+earlier step must have produced is a stop, not a skip: for example, the Mac
+copy-back block skips only when the open receipt exists and no per-window box
+input was written, and stops when the window file is gone but that input exists.
+
 Split successful reads from refusal probes. Give each half its own step ID and
 repeat the shell options, environment sourcing, and working directory so either
 block can run alone. Do not split a mutating block merely because it also reads.

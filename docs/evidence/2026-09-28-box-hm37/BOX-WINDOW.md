@@ -499,10 +499,11 @@ os.chmod(output_path, 0o600)
 PY
   OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
   test ! -e "$OPEN_RECEIPT"
-  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\nRELEASE_REPO=%q\n' \
+  EVIDENCE_ROOT="$HOME/.commonswarm-release-evidence"
+  printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\nPREP_RECEIPT_PATH=%q\nPREP_SEATS=%q\nRELEASE_REPO=%q\nEVIDENCE_ROOT=%q\n' \
     "$RELEASE_SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
     "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" \
-    "$PREP_RECEIPT_PATH" "$PREP_SEATS" "$RELEASE_REPO" >"$OPEN_RECEIPT"
+    "$PREP_RECEIPT_PATH" "$PREP_SEATS" "$RELEASE_REPO" "$EVIDENCE_ROOT" >"$OPEN_RECEIPT"
   chmod 0600 "$OPEN_RECEIPT"
   trap - EXIT
 )
@@ -511,6 +512,17 @@ PY
 The open block reads the box clock to the second, derives the four-hour end,
 window ID and principal suffix, persists them, and refuses any other active
 window state or release process. The operator types no time.
+
+The open receipt also names `EVIDENCE_ROOT`, the protected Mac directory
+`$HOME/.commonswarm-release-evidence`. Window A keeps its whole evidence
+directory, `${EVIDENCE_ROOT}/<UTC-date>-release-<12-char sha>-<window-id>/`,
+outside `RELEASE_REPO`. `hm37a-gate-and-proof-ingest` creates it, `runbook-02`
+adopts it when the receipt names one, and every later block reads it from the
+window file. Nothing the window produces is written under the release
+checkout, so the clean-checkout proof in `hm37-source-identity` keeps its full
+strength. After the window closes, CSwarmDevLead reviews that directory, copies
+it to `docs/evidence/` under the same name on a repository branch, and commits
+it, as the runbook's copy-back section requires of the evidence it reviews.
 
 ```sh
 # step: hm37a-gate-and-proof-ingest
@@ -523,10 +535,22 @@ window state or release process. The operator types no time.
   : "${PROOF_SQL_MANIFEST:?absolute SQL manifest required}"
   : "${RELEASE_REPO:?absolute release checkout required}"
   : "${RELEASE_SHA:?named release SHA required}"
-  . "/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  OPEN_RECEIPT="/tmp/commonswarm-release-open-${RELEASE_SHA}.env"
+  test -f "$OPEN_RECEIPT"
+  test ! -L "$OPEN_RECEIPT"
+  test "$(stat -f %Lp "$OPEN_RECEIPT")" = 600
+  . "$OPEN_RECEIPT"
+  test "$SHA" = "$RELEASE_SHA"
   SHORT_SHA="$(printf '%s' "$RELEASE_SHA" | cut -c1-12)"
   RUN_DAY="$(date -u +%F)"
-  EVIDENCE_DIR="$RELEASE_REPO/docs/evidence/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
+  case "$EVIDENCE_ROOT" in /*) ;; *) false ;; esac
+  EVIDENCE_DIR="$EVIDENCE_ROOT/${RUN_DAY}-release-${SHORT_SHA}-${WINDOW_ID}"
+  # Evidence never lives inside the release checkout: hm37-source-identity
+  # proves that checkout is clean, and any file written there would break it.
+  case "$EVIDENCE_DIR" in
+    "$RELEASE_REPO"|"$RELEASE_REPO"/*) false ;;
+  esac
+  install -d -m 0700 "$EVIDENCE_ROOT"
   mkdir -p -m 0700 "$EVIDENCE_DIR"
   : >"$EVIDENCE_DIR/gate-evidence.txt"
   install -m 0600 "$GATE_RECEIPT_PATH" "$EVIDENCE_DIR/gate-evidence.txt"
@@ -2439,7 +2463,7 @@ Add these exact item-relative paths without duplicating standard generated entri
 
 These are required outputs, not existing PASS claims. Transfer accepted Mac-side results to the proof directory before manifest-only copy-back.
 
-Use `docs/evidence/<UTC-date>-release-eb2a87ac4b5a/`. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
+Use `${EVIDENCE_ROOT}/<UTC-date>-release-eb2a87ac4b5a-<window-id>/` outside the release checkout, then `docs/evidence/` under the same name after review. Preserve distinct Mac `archive.sha256` and box `box-archive.sha256`. Mac tar operations use `COPYFILE_DISABLE=1` and `--no-xattrs`.
 
 ### Log exception and secret review
 
