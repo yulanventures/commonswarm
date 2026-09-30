@@ -391,6 +391,8 @@ const STUB_COMMANDS = [
 ];
 // GNU behavior the box has and the Mac lacks. These names exist only on a box script's PATH, never on a Mac block's.
 const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep"];
+// The Linux runner uses real GNU userland and real ownership; all box stub consumers share this inventory.
+const BOX_STUB_COMMANDS = STUB_COMMANDS.filter((command) => !BOX_USERLAND_COMMANDS.includes(command));
 // Host state a Mac block would otherwise read from the real Mac: its process table. These stub the Mac lane only;
 // on the box lane the runner's own ps and pgrep are the box's.
 const MAC_HOST_STATE_STUBS = ["pgrep", "ps"];
@@ -963,15 +965,22 @@ function windowBPaths(): Map<string, string[]> {
   const markdown = readFileSync(HM37B, "utf8");
   const tailText = /On interruption after a journal exists, run\n([\s\S]*?)\. No B step/.exec(markdown)?.[1] ?? "";
   const named = [...tailText.matchAll(/`([^`]+)`/g)].map((match) => match[1]!);
-  assert.deepEqual(named.slice(0, 2), ["hm37-hosted-control-cleanup-only", "hm37b-failure-dispatch"]);
-  const close = success.slice(success.indexOf("hm37-deno-remove"));
+  assert.deepEqual(named, ["hm37-hosted-control-cleanup-only", "hm37b-failure-dispatch", "hm37-deno-remove"]);
+  const control = success.indexOf("hm37-hosted-open-ack-control");
+  const remove = success.indexOf("hm37-deno-remove");
+  assert.ok(control >= 0 && remove > control);
+  // Identify the applicable readback from the successful order. The interruption text places it
+  // after runtime removal; preserve that abort order before closing and copying its products back.
+  const readback = success.slice(control + 1, remove);
+  const close = success.slice(remove);
   assert.ok(close.length > 0, "window-b close tail is absent from the successful order");
   return new Map([
     ["pass", success],
     ["abort", [
-      ...beforeStep("window-b abort", success, "hm37-hosted-open-ack-control"),
-      ...named.slice(0, 2),
-      ...close,
+      ...success.slice(0, control + 1),
+      ...named,
+      ...readback,
+      ...close.slice(1),
     ]],
   ]);
 }
@@ -1491,16 +1500,18 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Box blocks the Mac lane does not execute (they run in the box lane). Their outputs are seeded at their
-// place in the plan, and only from committed execution evidence, so a later Mac block that reads them sees
-// the state the plan expects at that point and no earlier (fixtures/box-block-products.json).
+// Hosted box producers run in the box lane. The Mac lane supplies their committed evidence or explicitly
+// labeled contract shapes only at their place in the plan. Pure local consumers run the complete box text
+// through the jailed ssh boundary; they never receive seeded result files (fixtures/box-block-products.json).
 // ---------------------------------------------------------------------------------------------------------
 
 const BOX_BLOCK_PRODUCTS_FILE = "tests/box-dry-run/fixtures/box-block-products.json";
 
 interface BoxProduct {
   path: string;
-  evidence: string;
+  evidence?: string;
+  plan_documented?: DeclaredOutput["plan_documented"];
+  execute?: "local";
   owner: string;
   mode: string;
 }
@@ -1514,11 +1525,14 @@ function seedBoxProducts(fixture: Fixture, step: string): string[] {
   assert.ok(fixture.boxRoot, "box products need a fixture box root");
   const seeded: string[] = [];
   for (const product of boxBlockProducts(step)) {
-    assert.equal(existsSync(product.evidence), true, `${step}: product evidence is missing: ${product.evidence}`);
+    if (product.execute === "local") continue;
+    if (product.evidence) assert.equal(existsSync(product.evidence), true, `${step}: product evidence is missing: ${product.evidence}`);
+    else assert.ok(product.plan_documented, `${step}: product has neither evidence nor a labeled contract shape`);
     const path = product.path.replaceAll("{sha}", RELEASE_SHA);
     const target = join(fixture.boxRoot, path);
     mkdirSync(dirname(target), { recursive: true });
-    copyFileSync(product.evidence, target);
+    if (product.evidence) copyFileSync(product.evidence, target);
+    else writeFileSync(target, JSON.stringify(product.plan_documented!.json, null, 2) + "\n");
     chmodSync(target, Number.parseInt(product.mode, 8));
     recordBoxOwner(fixture.boxRoot, path, product.owner);
     seeded.push(path);
@@ -1548,7 +1562,7 @@ type OutputValue =
 
 interface DeclaredOutput {
   file: string;
-  location: "site-evidence" | "site-window-env";
+  location: "site-evidence" | "site-window-env" | "box-proof";
   mode: string;
   branch: string;
   json?: Record<string, OutputValue>;
@@ -1724,6 +1738,7 @@ interface Fixture {
   replacedRuntime?: { path: string; backup?: string };
   replacedDirectory?: { path: string; mode: number; uid: number; gid: number };
   model?: BoxFixtureModel;
+  inventoryDeno?: { path: string; digest: string; version: string };
   denoZip?: string;
   denoZipDigest?: string;
   seededPaths?: string[];
@@ -1740,10 +1755,7 @@ function makeStubBin(bin: string, rootOwned = false): void {
   mkdirSync(bin, { recursive: true, mode: rootOwned ? 0o755 : 0o700 });
   chmodSync(bin, rootOwned ? 0o755 : 0o700);
   if (rootOwned) chownSync(bin, 0, 0);
-  for (const command of STUB_COMMANDS) {
-    // The disposable Linux runner has real GNU userland and real fixture ownership. Mac box scripts
-    // use writeBoxUserlandBin; do not shadow Linux's chown/cp with the Mac boundary stubs.
-    if (rootOwned && BOX_USERLAND_COMMANDS.includes(command)) continue;
+  for (const command of rootOwned ? BOX_STUB_COMMANDS : STUB_COMMANDS) {
     const target = join(bin, command);
     if (!existsSync(target)) {
       copyFileSync(STUB, target);
@@ -1830,6 +1842,24 @@ function checkoutFixture(parent: string, name: string, sha: string): string {
   return checkout;
 }
 
+// Resolve once and copy the actual executable bytes into each fixture. The copy pins the runtime for
+// that fixture; PATH changes cannot turn this deterministic computation into a stub or another binary.
+function pinInventoryDeno(bin: string): Fixture["inventoryDeno"] {
+  const located = spawnSync("/bin/bash", ["-c", "command -v deno"], {
+    encoding: "utf8", env: explicitEnvironment({ PATH: macBlockPath("") }),
+  });
+  if (located.status !== 0 || !located.stdout.trim()) return undefined;
+  const source = realpathSync(located.stdout.trim());
+  const version = spawnSync(source, ["--version"], { encoding: "utf8", env: explicitEnvironment() });
+  if (version.status !== 0 || !/^deno [0-9]+\.[0-9]+\.[0-9]+/m.test(version.stdout)) return undefined;
+  const path = join(bin, "inventory-deno");
+  copyFileSync(source, path);
+  chmodSync(path, 0o555);
+  const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
+  assert.equal(createHash("sha256").update(readFileSync(path)).digest("hex"), digest);
+  return { path, digest, version: version.stdout.trim() };
+}
+
 function prepareMacFixture(
   planBlocks: Block[] = [],
   options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean } = {},
@@ -1852,6 +1882,7 @@ function prepareMacFixture(
   writeFileSync(opServiceAccountTokenFile, promptSchemaContent("op-service-account-token"), { mode: 0o600 });
   chmodSync(opServiceAccountTokenFile, 0o600);
   makeStubBin(bin);
+  const inventoryDeno = planBlocks.some((block) => shortStep(block) === "runbook-04") ? pinInventoryDeno(bin) : undefined;
   for (const command of MAC_HOST_STATE_STUBS) {
     copyFileSync(STUB, join(bin, command));
     chmodSync(join(bin, command), 0o755);
@@ -1918,7 +1949,7 @@ function prepareMacFixture(
       `${prep.workspace_id}\t${seat.principal_id}\tfalse\n`).join(""), { mode: 0o600 });
   }
   return {
-    temporary, cwd: checkout, home, bin, log,
+    temporary, cwd: checkout, home, bin, log, inventoryDeno,
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: checkout,
@@ -2329,8 +2360,41 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
     const isBoxBlock = block.host.startsWith("box ");
     if (isBoxBlock !== (part === "box")) {
       // The Mac lane does not execute a box block. What the box block produced is what a later Mac block reads.
-      if (part === "mac") seedBoxProducts(fixture, shortStep(block));
-      else {
+      if (part === "mac") {
+        const products = boxBlockProducts(shortStep(block));
+        if (products.some((product) => product.execute === "local")) {
+          // This pure dispatcher reads only the preceding producer's JSON. Execute its complete text
+          // through the same jailed ssh boundary as every Mac block, with the fixture box's paths.
+          const execution = executeWholeBlock({ ...block,
+            source: `ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s" <<'LOCAL_BOX_BLOCK'\n${block.source}\nLOCAL_BOX_BLOCK`,
+          }, fixture);
+          records.push({ block, execution });
+          if (execution.result === "failed") break;
+          // Root created these files in the fixture box. Record that virtual ownership only
+          // after the real producer succeeds; never seed its content or repair its mode.
+          for (const product of products.filter((item) => item.execute === "local")) {
+            const path = product.path.replaceAll("{sha}", RELEASE_SHA);
+            const target = join(fixture.boxRoot!, path);
+            assert.equal(pathExists(target), true, `${shortStep(block)} did not produce ${path}`);
+            const stat = lstatSync(target);
+            assert.equal(stat.isFile(), true, `${shortStep(block)} product is not a regular file: ${path}`);
+            assert.equal(stat.mode & 0o777, Number.parseInt(product.mode, 8), `${shortStep(block)} product mode: ${path}`);
+            recordBoxOwner(fixture.boxRoot!, path, product.owner);
+          }
+        } else {
+          const seeded = seedBoxProducts(fixture, shortStep(block));
+          const shapes = products.flatMap((product) => product.plan_documented ? [{
+            file: basename(product.path), location: "box-proof" as const, mode: product.mode,
+            branch: "abort", plan_documented: product.plan_documented,
+          }] : []);
+          if (shapes.length) records.push({ block, execution: {
+            step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded,
+            declared: { surface: "hosted cleanup recovery", reason: shapes.map((shape) => shape.plan_documented.label).join(" "),
+              live_proof: "Requires the live journal and hosted cleanup; the Mac lane uses only a synthetic consumer contract.",
+              outputs: shapes },
+          } });
+        }
+      } else {
         const handoff = seedBoxWindowBOpen(block, fixture);
         if (handoff) records.push({ block, execution: handoff });
       }
@@ -2740,7 +2804,7 @@ test("box preflight reports every shared fixture precondition in one pass", {
     });
 
     check("PATH first entry", fixture.bin, () => fixture.env.PATH?.split(":")[0] ?? "", (actual) => actual === fixture.bin);
-    for (const command of STUB_COMMANDS) {
+    for (const command of BOX_STUB_COMMANDS) {
       const path = join(fixture.bin, command);
       checkStat(path, 0, 0, 0o755, "file");
       check(`PATH command ${command}`, path, () => {
@@ -3784,6 +3848,129 @@ function seedCopybackProofDirectory(fixture: Fixture): string {
   return proof;
 }
 
+test("controls: runbook-04's inventory runs the real inventory.ts and fails on an unknown function name", { skip: MAC_ONLY }, (t) => {
+  const sequence = resolveSteps("inventory control", windowAPaths().get("pass")!);
+  const index = sequence.findIndex((block) => shortStep(block) === "runbook-04");
+  assert.ok(index >= 0);
+  const block = sequence[index]!;
+  const fixture = prepareMacFixture(sequence, { state: "s1" });
+  try {
+    const earlier = executePlanUntilFailure(sequence.slice(0, index), fixture, "mac");
+    assert.equal(earlier.find(({ execution }) => execution.result === "failed"), undefined,
+      earlier.map(({ execution }) => `${execution.step}: ${execution.stderr}`).join("\n"));
+    const positive = executeWholeBlock(block, fixture);
+    if (!fixture.inventoryDeno) {
+      assert.equal(positive.status, 69);
+      assert.match(positive.stderr, /deno unavailable/);
+      t.skip("deno unavailable: the real inventory control cannot run; the block failed closed");
+      return;
+    }
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.equal(createHash("sha256").update(readFileSync(fixture.inventoryDeno.path)).digest("hex"), fixture.inventoryDeno.digest);
+    t.diagnostic(`inventory runtime pinned: ${fixture.inventoryDeno.version.split("\n")[0]} sha256=${fixture.inventoryDeno.digest}`);
+    const negative = executeWholeBlock(mutatedBlock(block, [[
+      "const selected = Deno.args[1].split(/\\s+/).filter(Boolean);",
+      "const selected = [...Deno.args[1].split(/\\s+/).filter(Boolean), 'h14-unknown-function'];",
+    ]]), fixture);
+    assert.equal(negative.result, "failed");
+    assert.match(negative.stderr, /unknown function: h14-unknown-function/);
+    assert.doesNotMatch(negative.stderr, /UNPRODUCED embedded Deno|unhandled dry-run stub/);
+    // A program mutation proves the stub is not supplying the inventory's JSON itself.
+    const program = executeWholeBlock(mutatedBlock(block, [[
+      "console.log(JSON.stringify({ required: required.sort(), optional }, null, 2));",
+      "throw new Error('h14-real-inventory-executed');",
+    ]]), fixture);
+    assert.match(program.stderr, /h14-real-inventory-executed/);
+    assert.equal(program.result, "failed");
+    renameSync(fixture.inventoryDeno.path, `${fixture.inventoryDeno.path}.hidden`);
+    const unavailable = executeWholeBlock(block, fixture);
+    assert.equal(unavailable.status, 69);
+    assert.match(unavailable.stderr, /deno unavailable/);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: window B abort copy-back fails when an abort-path producer did not run", { skip: MAC_ONLY }, () => {
+  const sequence = resolveSteps("abort producer control", windowBPaths().get("abort")!);
+  const copyback = sequence.findIndex((block) => shortStep(block) === "hm37b-copyback");
+  assert.ok(copyback >= 0);
+  for (const omit of [false, true]) {
+    const fixture = prepareMacFixture(sequence, { afterWindowA: true });
+    try {
+      const path = sequence.slice(0, copyback + 1).filter((block) =>
+        !omit || shortStep(block) !== "hm37-hosted-open-ack-control");
+      const records = executePlanUntilFailure(path, fixture, "mac");
+      const failed = records.find(({ execution }) => execution.result === "failed");
+      const recovery = records.find(({ execution }) => execution.step === "hm37-hosted-control-cleanup-only");
+      assert.ok(recovery, records.map(({ execution }) => `${execution.step}: ${execution.stderr}`).join("\n"));
+      const recoveryReport = notExecutedLine(recovery.block, recovery.execution);
+      assert.match(recoveryReport, /Seeded from committed evidence: nothing\./);
+      assert.match(recoveryReport, /Plan-documented output: hm37-hosted-cleanup-recovery\.json/);
+      assert.ok(records.some(({ execution }) => execution.step === "hm37b-failure-dispatch" && execution.result === "passed"),
+        records.map(({ execution }) => `${execution.step}: ${execution.stderr}`).join("\n"));
+      const proof = join(fixture.boxRoot!, PROOF_DIR);
+      assert.match(readFileSync(join(proof, "hm37b-failure-action.txt"), "utf8"), /^action=cleanup-only$/m);
+      assert.ok(pathExists(join(proof, "hm37-hosted-cleanup-recovery.json")));
+      const action = join(proof, "hm37b-failure-action.txt");
+      const actionBefore = readFileSync(action, "utf8");
+      const metadata = containedCommand(fixture, "/usr/bin/python3", [USERLAND, "stat", "-c", "%U:%G:%a", action], {
+        env: fixture.env,
+      });
+      assert.equal(metadata.status, 0, metadata.stderr);
+      assert.equal(metadata.stdout.trim(), "root:root:600", "the actual dispatcher product retains box ownership and mode");
+      assert.equal(readFileSync(action, "utf8"), actionBefore, "metadata readback cannot replace the produced receipt");
+      if (omit) {
+        assert.equal(failed?.execution.step, "hm37b-copyback", failed?.execution.stderr);
+        assert.match(failed!.execution.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$FILE"/);
+        assert.equal(pathExists(join(proof, "hm37-hosted-check-control.json")), false);
+      } else {
+        assert.equal(failed, undefined, failed?.execution.stderr);
+        const copied = records.find(({ execution }) => execution.step === "hm37b-copyback");
+        assert.equal(copied?.execution.result, "passed");
+        assert.ok(pathExists(join(proof, "hm37-hosted-check-control.json")));
+        // Recovery and dispatcher receipts are produced but the plan's exact copy-back list omits them.
+        const dirs = readdirSync(join(fixture.cwd, "docs/evidence")).filter((name) => name.includes(`-release-${RELEASE_SHA.slice(0, 12)}-`));
+        assert.equal(dirs.length, 1);
+        assert.deepEqual(readdirSync(join(fixture.cwd, "docs/evidence", dirs[0]!)).sort(), [...COPYBACK_MEMBERS, "hm37b-copyback.sha256"].sort());
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
+test("controls: runbook-16 accepts the database-helper command shape without fabricating identity", (t) => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  const bin = join(temporary, "bin");
+  const log = join(temporary, "stub.log");
+  makeStubBin(bin);
+  try {
+    const service = join(temporary, "service.env");
+    const target = join(temporary, "target.env");
+    writeMode(service, "# synthetic service file\n");
+    writeMode(target, "TARGET_DATABASE_URL=postgresql://fixture:fixture@db.commonswarm.internal/postgres\n");
+    const env = explicitEnvironment({ PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, TMPDIR: temporary,
+      COMMONSWARM_ENV_FILE: service, COMMONSWARM_MIGRATION_ENV_FILE: target,
+      BOX_DRY_RUN_STUB_LOG: log });
+    const run = spawnSync("/bin/bash", [resolve("deploy/supabase-stack/migrate/run-db-tool.sh"),
+      "assert-database-identity.sh", join(temporary, "database"), "target"], { encoding: "utf8", env });
+    assert.equal(run.status, 69, run.stderr);
+    assert.match(run.stderr, /^UNPRODUCED database observation$/m);
+    assert.doesNotMatch(run.stderr, /unhandled dry-run stub/);
+    assert.match(readFileSync(log, "utf8"), /docker run .*--env-file .*--env-file .*assert-database-identity\.sh target/m);
+    for (const step of ["runbook-05", "runbook-16"]) {
+      assert.match(planBlock(RUNBOOK, step).host, /^box /, `${step} already names the box host`);
+    }
+    t.diagnostic("runbook-16: the box host and real helper invocation are valid; the remaining refusal is an unproduced live PostgreSQL identity observation, not a missing plan host. No database identity result is fabricated.");
+    const unknown = spawnSync(join(bin, "docker"), ["run", "--h14-unreviewed-flag", "fixture"], { encoding: "utf8", env });
+    assert.equal(unknown.status, 69);
+    assert.match(unknown.stderr, /^unhandled dry-run stub: docker run --h14-unreviewed-flag fixture$/m);
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
+  }
+});
+
 test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", { skip: MAC_ONLY }, () => {
   const block = planBlock(HM37B, "hm37b-copyback");
   const boxFiles = "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'";
@@ -4351,7 +4538,7 @@ test("box runtime stubs are regular root-owned executables and emit accepted Den
     assert.equal(preparedUsrLocalBin.mode & 0o777, 0o755);
     assert.equal(preparedUsrLocalBin.uid, 0);
     assert.equal(preparedUsrLocalBin.gid, 0);
-    for (const command of STUB_COMMANDS) {
+    for (const command of BOX_STUB_COMMANDS) {
       const stat = lstatSync(join(fixture.bin, command));
       assert.equal(stat.isFile(), true, `${command} is not a regular file`);
       assert.equal(stat.isSymbolicLink(), false, `${command} is a symlink`);
