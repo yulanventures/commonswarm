@@ -22,6 +22,18 @@ function expansions(block: HandoffBlock): (value: string) => string[] {
     const value = match[2] ?? match[3] ?? match[4]!;
     if (!value.includes("$(") && !/^\$[0-9]+$/.test(value) && !["SHA", "RELEASE_SHA", "WINDOW_ID"].includes(match[1]!)) vars.set(match[1]!, [value]);
   }
+  // Some blocks inherit PROOF_DIR through sourced state (e.g. runbook-17's generated DB
+  // session), without assigning it locally. Their sourced window path identifies that
+  // proof root. Ignoring it loses H0 files even though copy-back explicitly selects them.
+  if (!vars.has("PROOF_DIR")) {
+    const windows = [...block.source.matchAll(/^\s*\.\s+["']?(\/[^\s"']+\/window\.env)["']?\s*$/gm)]
+      .map((match) => match[1]!.slice(0, -"/window.env".length));
+    if (windows.length) {
+      const paths = [...new Set(windows.map((path) => path.replace(/\$\{(?:RELEASE_SHA|SHA)\}|\$(?:RELEASE_SHA|SHA)\b/g, "{sha}")))];
+      if (paths.length !== 1) throw new Error(`${block.file}:${block.line}: ambiguous sourced window paths: ${paths.join(", ")}`);
+      vars.set("PROOF_DIR", paths);
+    }
+  }
   for (const match of block.source.matchAll(/\bfor ([A-Z][A-Z0-9_]*) in ([^;\n]+); do/g)) {
     const values = tokens(match[2]!);
     const expanded = values.flatMap((value) => {

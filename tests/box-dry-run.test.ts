@@ -1384,21 +1384,29 @@ function recordBoxOwner(root: string, path: string, owner: string): void {
   writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
 }
 
-const databaseToolArchives = new Map<string, Buffer>();
+const pinnedReleaseArchives = new Map<string, Buffer>();
 
-// B's runbook-17 loads make-pg-service.mjs and its database helpers from A's completed stack release.
-// Populate that tool subtree from the exact release source, rather than the current checkout or a stub.
-function populateExistingDatabaseTools(target: string, sha: string): void {
+function pinnedReleaseArchive(sha: string): Buffer {
   assert.match(sha, /^[0-9a-f]{40}$/);
-  let archive = databaseToolArchives.get(sha);
+  let archive = pinnedReleaseArchives.get(sha);
   if (!archive) {
-    const result = spawnSync("git", ["archive", "--format=tar", sha, "deploy/supabase-stack/migrate"], { maxBuffer: 16 * 1024 * 1024 });
+    const result = spawnSync("git", ["archive", "--format=tar", sha], { maxBuffer: 256 * 1024 * 1024 });
     assert.equal(result.status, 0, result.stderr.toString());
     archive = result.stdout;
-    databaseToolArchives.set(sha, archive);
+    pinnedReleaseArchives.set(sha, archive);
   }
-  const extracted = spawnSync("/usr/bin/tar", ["-xf", "-", "-C", target], { input: archive, encoding: "utf8" });
+  return archive;
+}
+
+// Existing releases are producer inputs: apply verifies the complete immutable archive, prerequisite
+// evidence diffs the runtime subtrees, and B loads A's database helpers. Supply pinned source bytes,
+// including archive modes, rather than copying a partial model or fabricating any of those results.
+function populateExistingRelease(target: string, sha: string): void {
+  const extracted = spawnSync("/usr/bin/tar", ["-xpf", "-", "-C", target], {
+    input: pinnedReleaseArchive(sha), encoding: "utf8",
+  });
   assert.equal(extracted.status, 0, extracted.stderr);
+  writeMode(join(target, "RELEASE_SHA"), `${sha}\n`, 0o644);
 }
 
 // The measured-now state of the box, written under `root`. Every path is one the pre-seed allowlist names
@@ -1437,6 +1445,16 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
     chmodSync(at(path), mode);
     note(path, owner);
   };
+  const releaseTree = (path: string, sha: string): void => {
+    populateExistingRelease(at(path), sha);
+    const visit = (entry: string): void => {
+      note(entry, commonswarm);
+      if (lstatSync(at(entry)).isDirectory()) {
+        for (const name of readdirSync(at(entry))) visit(join(entry, name));
+      }
+    };
+    visit(path);
+  };
   for (const path of ["/tmp", "/run", "/root", "/etc", "/var", "/usr", "/home", "/srv"]) mkdirSync(at(path), { recursive: true });
   directory("/home/commonswarm", 0o750, commonswarm);
   directory("/srv/commonswarm", 0o750, commonswarm);
@@ -1446,7 +1464,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   const previousStack = model.releases.previousStack.path;
   for (const release of [previousEdge, previousStack]) {
     directory(release, release === previousEdge ? 0o750 : 0o755, commonswarm);
-    file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
+    releaseTree(release, basename(release));
   }
   const measuredDbHelper = `${previousStack}/deploy/supabase-stack/migrate/run-db-tool.sh`;
   file(measuredDbHelper, "#!/bin/sh\nprintf '%s\\n' 'UNPRODUCED database observation' >&2\nexit 69\n", 0o775, commonswarm);
@@ -1489,8 +1507,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   if (state !== "s1") {
     for (const release of [CANDIDATE_EDGE, CANDIDATE_STACK]) {
       directory(release, release === CANDIDATE_EDGE ? 0o750 : 0o755, commonswarm);
-      if (release === CANDIDATE_STACK) populateExistingDatabaseTools(at(release), RELEASE_SHA);
-      file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
+      releaseTree(release, RELEASE_SHA);
     }
   }
   mkdirSync(join(root, ".fixture"), { recursive: true });
@@ -2135,7 +2152,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
     mkdirSync(release, { recursive: true });
     const releaseModel = Object.values(model.releases).find((candidate) => candidate.path === release);
     assert.ok(releaseModel);
-    writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
+    populateExistingRelease(release, releaseModel.sha);
     chmodSync(release, release === previousEdge ? 0o750 : 0o755);
   }
   const measuredDbHelper = join(previousStack, "deploy/supabase-stack/migrate/run-db-tool.sh");
@@ -2186,8 +2203,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   if (state !== "s1") {
     for (const release of [targetEdge, targetStack]) {
       mkdirSync(release, { recursive: true });
-      if (release === targetStack) populateExistingDatabaseTools(release, RELEASE_SHA);
-      writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
+      populateExistingRelease(release, RELEASE_SHA);
     }
     chownTree("commonswarm:commonswarm", targetEdge, targetStack);
     chmodSync(targetEdge, 0o750);
@@ -2258,6 +2274,9 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
+      BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
+      BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
+      BOX_DRY_RUN_DENO_VERSION: "deno 2.9.7\nv8 dry-run\ntypescript dry-run",
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
       BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
@@ -2314,9 +2333,6 @@ function produceDenoUnitPrerequisites(fixture: Fixture): void {
   assert.ok(fixture.denoZip && fixture.denoZipDigest);
   mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
   writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
-  fixture.env.BOX_DRY_RUN_DENO_VERSION = "deno 2.9.7\nv8 dry-run\ntypescript dry-run";
-  fixture.env.BOX_DRY_RUN_DENO_ZIP_FIXTURE = fixture.denoZip;
-  fixture.env.BOX_DRY_RUN_DENO_ZIP_SHA256 = fixture.denoZipDigest;
 }
 
 function produceRunbook18UnitPrerequisites(fixture: Fixture): void {
@@ -2461,7 +2477,32 @@ function modeledApplyFiles(block: Block, fixture: Fixture): Record<string, strin
   };
 }
 
-function modelApplyWindow(block: Block, fixture: Fixture): string {
+function modelApplyWindow(block: Block, fixture: Fixture): string[] {
+  const values = applyWindowValues(block, fixture.model!.state);
+  const seeded: string[] = [];
+  const root = fixture.boxRoot!;
+  const owner = /^\s*RELEASE_OWNER=([a-z]+)$/m.exec(block.source)?.[1];
+  const group = /^\s*RELEASE_GROUP=([a-z]+)$/m.exec(block.source)?.[1];
+  assert.ok(owner && group, "apply has no release owner/group");
+  const directories = [...block.source.matchAll(/prepare_release_directory (edge|stack) "\$(NEW_EDGE|NEW_STACK)" (0[0-7]{3})/g)];
+  for (const kind of values.KIND_LIST!.split(/\s+/)) {
+    const declaration = directories.find((match) => match[1] === kind);
+    assert.ok(declaration, `apply has no release-directory writer for ${kind}`);
+    const path = values[declaration[2]!]!;
+    const target = join(root, path);
+    if (pathExists(target)) continue; // Apply verifies reusable releases; its writer does not repair them.
+    mkdirSync(target, { recursive: true, mode: Number.parseInt(declaration[3]!, 8) });
+    populateExistingRelease(target, values.SHA!);
+    chmodSync(target, Number.parseInt(declaration[3]!, 8));
+    const owners = readBoxOwners(root);
+    const visit = (entry: string): void => {
+      owners[relative(root, entry)] = `${owner}:${group}`;
+      if (lstatSync(entry).isDirectory()) for (const name of readdirSync(entry)) visit(join(entry, name));
+    };
+    visit(target);
+    writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
+    seeded.push(path);
+  }
   const files = modeledApplyFiles(block, fixture);
   for (const [name, bytes] of Object.entries(files)) {
     const path = join(PROOF_DIR, name);
@@ -2469,16 +2510,13 @@ function modelApplyWindow(block: Block, fixture: Fixture): string {
     assert.equal(pathExists(dirname(target)), true, "apply writer requires its producer's proof directory");
     writeMode(target, bytes);
     recordBoxOwner(fixture.boxRoot!, path, "root:root");
+    seeded.push(path);
   }
-  return join(PROOF_DIR, "window.env");
+  return seeded;
 }
 
-let cachedReleaseArchive: Buffer | undefined;
 function releaseArchiveBytes(): Buffer {
-  if (cachedReleaseArchive) return cachedReleaseArchive;
-  const result = spawnSync("git", ["archive", "--format=tar", RELEASE_SHA], { maxBuffer: 256 * 1024 * 1024 });
-  assert.equal(result.status, 0, result.stderr.toString());
-  return cachedReleaseArchive = result.stdout;
+  return pinnedReleaseArchive(RELEASE_SHA);
 }
 
 function uploadWindowContent(fixture: Fixture, archive: Buffer): string {
@@ -2671,8 +2709,7 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
         } else {
           const seeded = seedBoxProducts(fixture, shortStep(block));
           if (shortStep(block) === "1-apply-release-directories") {
-            modelApplyWindow(block, fixture);
-            seeded.push(...Object.keys(modeledApplyFiles(block, fixture)).map((name) => join(PROOF_DIR, name)));
+            seeded.push(...modelApplyWindow(block, fixture));
           }
           const shapes = products.flatMap((product) => product.plan_documented ? [{
             file: basename(product.path), location: "box-proof" as const, mode: product.mode,
@@ -4942,6 +4979,68 @@ test("fixture image, repository-path, and environment-name values agree with rep
     "invented image control unexpectedly passed");
 });
 
+test("existing release fixtures supply the pinned archive and runtime comparison inputs", () => {
+  const part = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
+  // Box s1 runs the real apply in the whole-plan test; Mac must model its extracted inputs at that boundary.
+  for (const state of part === "box" ? ["s2"] : ["s2", "s1"]) {
+    const producer = planBlock(RUNBOOK, "1-apply-release-directories");
+    const fixture = part === "box" ? prepareBoxFixture(state) : prepareMacFixture([producer], { state });
+    const at = (path: string): string => fixture.part === "box" ? path : join(fixture.boxRoot!, path);
+    const verify = (target: string): void => {
+      // Inspect every archive member independently of the synthetic comparison model. This is fixture-input
+      // verification, not execution of the Linux-only apply verifier or a seeded prerequisite result.
+      const result = spawnSync("/usr/bin/python3", ["-c", [
+        "import hashlib, io, os, pathlib, stat, sys, tarfile",
+        "root = pathlib.Path(sys.argv[1])",
+        "with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as archive:",
+        " expected = {m.name.rstrip('/'): m for m in archive.getmembers() if m.name.rstrip('/') not in ('', '.')}",
+        " actual = {str(p.relative_to(root)): p for p in root.rglob('*')}",
+        " assert set(actual) == set(expected) | {'RELEASE_SHA'}, f'archive inventory differs: expected={len(expected)+1} actual={len(actual)} missing={sorted(set(expected)-set(actual))[:6]} extra={sorted(set(actual)-set(expected)-{\"RELEASE_SHA\"})[:6]}'",
+        " for name, member in expected.items():",
+        "  path = actual[name]; metadata = path.lstat()",
+        "  assert stat.S_IMODE(metadata.st_mode) == member.mode, f'archive mode differs: {name}'",
+        "  if member.isdir(): assert path.is_dir() and not path.is_symlink(), name",
+        "  elif member.issym(): assert path.is_symlink() and os.readlink(path) == member.linkname, name",
+        "  else:",
+        "   assert member.isfile() and path.is_file() and not path.is_symlink(), name",
+        "   assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(archive.extractfile(member).read()).digest(), f'archive bytes differ: {name}'",
+      ].join("\n"), at(target)], { input: releaseArchiveBytes(), encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(readFileSync(join(at(target), "RELEASE_SHA"), "utf8"), `${RELEASE_SHA}\n`);
+    };
+    try {
+      if (state === "s1") {
+        for (const target of [CANDIDATE_EDGE, CANDIDATE_STACK]) assert.equal(pathExists(at(target)), false);
+        const boundary = executePlanUntilFailure([producer], fixture, "mac");
+        assert.equal(boundary[0]!.execution.result, "not-executed", "modeled apply was reported as executed");
+      }
+      for (const target of [CANDIDATE_EDGE, CANDIDATE_STACK]) verify(target);
+      const prerequisite = planBlock(HM37, "hm37a-prerequisite-evidence");
+      const paths = /for RUNTIME_PATH in ([^;]+); do/.exec(prerequisite.source)?.[1]?.split(/\s+/);
+      assert.ok(paths?.length, "prerequisite producer has no runtime comparison inputs");
+      for (const path of paths) {
+        const result = spawnSync("/usr/bin/diff", ["-qr",
+          join(at(PREVIOUS_STACK), "deploy/supabase-stack", path),
+          join(at(CANDIDATE_STACK), "deploy/supabase-stack", path),
+        ], { encoding: "utf8" });
+        assert.equal(result.status, 0, `${path}: ${result.stdout}${result.stderr}`);
+      }
+      // A missing input must fail this contract before any producer outputs or consumers are seeded.
+      const router = join(at(CANDIDATE_EDGE), "deploy/edge-runtime/main/router.ts");
+      renameSync(router, `${router}.missing-control`);
+      try {
+        assert.throws(() => verify(CANDIDATE_EDGE), /archive inventory differs/);
+      } finally {
+        renameSync(`${router}.missing-control`, router);
+      }
+      verify(CANDIDATE_EDGE);
+    } finally {
+      if (fixture.part === "box") cleanupBoxFixture(fixture);
+      else cleanupMacFixture(fixture);
+    }
+  }
+});
+
 test("every box fixture model is internally consistent with plan comparisons", (t) => {
   const states = Object.keys(JSON.parse(readFileSync("tests/box-dry-run/fixtures/states.json", "utf8")) as Record<string, string>);
   const sources = fixtureComparisonSources();
@@ -5675,6 +5774,14 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Fixtu
 
 test("every cross-host handoff is covered in both modes", (t) => {
   const inventory = handoffInventory();
+  // These producers inherit PROOF_DIR from the generated DB session in a fresh box shell.
+  // Their manifest members must reach Mac copy-back, just like locally assigned paths.
+  for (const [step, file] of [["runbook-18", "h0-ledger-before.txt"], ["runbook-20", "h0-ledger-after.txt"],
+    ["runbook-24", "ledger-before.txt"], ["runbook-25", "cron-before.txt"]]) {
+    assert.ok(inventory.some((handoff) => handoff.producer.file === RUNBOOK && handoff.producer.step === step &&
+      handoff.consumer.step === "runbook-11" && handoff.path.endsWith(`/${file}`)),
+    `missing sourced-window handoff: ${step} -> runbook-11 ${file}`);
+  }
   const fixtures = new Map<string, Fixture>();
   try {
     for (const file of [PREP, HM37, HM37B, SITE, RUNBOOK]) {
