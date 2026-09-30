@@ -27,6 +27,7 @@ import shutil
 import stat as statmod
 import subprocess
 import sys
+import tempfile
 
 STUB_PREFIX = "unhandled dry-run stub: "
 
@@ -51,6 +52,7 @@ def box_root() -> str:
 BOX_PREFIXES = r"tmp|run|etc|var|usr/local|home|srv|root|opt|mnt"
 BOX_PATH = re.compile(r"(?<![\w.@~/$-])(/(?:%s))(?=/|[^\w.-]|$)" % BOX_PREFIXES)
 MAC_TMP_TOKEN = "@@BOX_DRY_RUN_MAC_TMP@@"
+FIXTURE_ROOT_TOKEN = "@@BOX_DRY_RUN_FIXTURE_ROOT@@"
 
 
 def looks_binary(data: bytes) -> bool:
@@ -63,6 +65,10 @@ def rewrite(data: bytes) -> bytes:
         return data
     root = box_root()
     text = data.decode("utf-8", "surrogateescape")
+    # Sourced files can already contain projected paths. Do not prefix them a
+    # second time (including when the fixture root itself starts with /tmp).
+    for variant in sorted({root, os.environ.get("BOX_DRY_RUN_BOX_ROOT", root)}, key=len, reverse=True):
+        text = re.sub(re.escape(variant) + r"(?=/|[^\w.-]|$)", FIXTURE_ROOT_TOKEN, text)
     mac_tmp = os.environ.get("BOX_DRY_RUN_MAC_TMP", "")
     if mac_tmp:
         # The Mac block's own /tmp was mapped into the dry run's temporary directory before it ran. Anything
@@ -71,7 +77,32 @@ def rewrite(data: bytes) -> bytes:
             text = text.replace(variant + "/", MAC_TMP_TOKEN + "/")
     text = BOX_PATH.sub(lambda match: root + match.group(1), text)
     text = text.replace(MAC_TMP_TOKEN + "/", root + "/tmp/")
+    text = text.replace(FIXTURE_ROOT_TOKEN, root)
     return text.encode("utf-8", "surrogateescape")
+
+
+def cmd_source_file(argv: list[str]) -> None:
+    """Project sourced text through the same mapping as ssh script text."""
+    if len(argv) != 1:
+        refuse("source-file", argv)
+    root = box_root()
+    path = os.path.realpath(argv[0])
+    if not path.startswith(root + "/"):
+        sys.stderr.write("REFUSE sourced file outside the fixture box root: " + path + "\n")
+        raise SystemExit(69)
+    with open(path, "rb") as handle:
+        data = rewrite(handle.read())
+    # A mapped path must still stay inside the root after traversal and symlinks resolve.
+    for match in re.finditer(re.escape(root) + r"/[^\s\"'`;|<>()]+", data.decode("utf-8", "surrogateescape")):
+        resolved = os.path.realpath(match.group())
+        if resolved != root and not resolved.startswith(root + "/"):
+            sys.stderr.write("REFUSE sourced box path outside the fixture box root: " + match.group() + "\n")
+            raise SystemExit(69)
+    # Preserve BASH_SOURCE's directory for libraries that find siblings through it.
+    descriptor, copy = tempfile.mkstemp(prefix=".box-source-", dir=os.path.dirname(path))
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+    sys.stdout.write(copy + "\n")
 
 
 def strip(data: bytes) -> bytes:
@@ -593,6 +624,7 @@ def cmd_diff(argv: list[str]) -> None:
 
 
 COMMANDS = {
+    "source-file": cmd_source_file,
     "record-owner": cmd_record_owner, "rsync": cmd_rsync, "date": cmd_date, "stat": cmd_stat, "sha256sum": cmd_sha256sum, "id": cmd_id, "install": cmd_install,
     "chown": cmd_chown, "mv": cmd_mv, "cp": cmd_cp, "ps": cmd_ps, "pgrep": cmd_pgrep, "diff": cmd_diff,
 }

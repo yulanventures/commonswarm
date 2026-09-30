@@ -5872,3 +5872,142 @@ test("controls: a missing cross-host handoff fails its consumer in box mode", {
     cleanupBoxFixture(fixture);
   }
 });
+
+test("controls: sourced box paths share the ssh mapping and preserve source bytes", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "h18-source-"));
+  const root = join(temporary, "box");
+  const directory = join(root, "home/commonswarm/releases/previous");
+  mkdirSync(directory, { recursive: true });
+  const window = join(root, "window.env");
+  const bytes = shellAssignments({ FIRST: "/home/commonswarm/releases/previous",
+    SECOND: "/home/commonswarm/releases/previous", ALREADY_MAPPED: directory, LABEL: "operator's label" });
+  const env = explicitEnvironment({ BOX_DRY_RUN_BOX_ROOT: root, BOX_DRY_RUN_USERLAND: USERLAND,
+    BASH_ENV: resolve("tests/box-dry-run/stubs/box-source.sh") });
+  const run = (): ReturnType<typeof spawnSync> => spawnSync("/bin/bash", ["-ec",
+    'builtin source "$BASH_ENV"; . "$1"; test -d "$FIRST"; test -d "$SECOND"; test -d "$ALREADY_MAPPED"; printf "%s\\n" "$FIRST" "$SECOND" "$ALREADY_MAPPED" "$LABEL"',
+    "source-control", window], { env, encoding: "utf8", timeout: 10_000 });
+  try {
+    writeMode(window, bytes);
+    const positive = run();
+    assert.equal(positive.status, 0, String(positive.stderr));
+    assert.equal(positive.stdout, `${directory}\n${directory}\n${directory}\noperator's label\n`);
+    assert.equal(readFileSync(window, "utf8"), bytes, "projection changed original sourced bytes");
+    writeMode(window, bytes + shellAssignments({ SECOND: "/home/../../outside" }));
+    const traversal = run();
+    assert.equal(traversal.status, 69, String(traversal.stderr));
+    assert.match(String(traversal.stderr), /REFUSE sourced box path outside the fixture box root/);
+    symlinkSync(temporary, join(root, "home/escape"));
+    writeMode(window, bytes + shellAssignments({ SECOND: "/home/escape" }));
+    const symlink = run();
+    assert.equal(symlink.status, 69, String(symlink.stderr));
+    assert.match(String(symlink.stderr), /REFUSE sourced box path outside the fixture box root/);
+    writeMode(window, bytes);
+    assert.equal(run().status, 0);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("controls: a sourced box path outside the fixture box root fails the Mac block", { skip: MAC_ONLY }, () => {
+  const producer = planBlock(RUNBOOK, "1-apply-release-directories");
+  const prerequisite = planBlock(HM37, "hm37a-prerequisite-evidence");
+  const fixture = prepareMacFixture([producer, prerequisite], { state: "s1" });
+  const consumer = { ...prerequisite, host: "Mac mini /bin/bash 3.2; ssh child on box",
+    source: `ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'\n${prerequisite.source}\nBOX` };
+  try {
+    executePlanUntilFailure([producer], fixture, "mac");
+    const window = join(fixture.boxRoot!, PROOF_DIR, "window.env");
+    const bytes = readFileSync(window, "utf8");
+    const positive = executeWholeBlock(consumer, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    const proof = JSON.parse(readFileSync(join(fixture.boxRoot!, PROOF_DIR, "hm37-prerequisites.json"), "utf8"));
+    assert.equal(proof.previous_stack, join(fixture.boxRoot!, PREVIOUS_STACK));
+    assert.equal(readFileSync(window, "utf8"), bytes);
+    writeMode(window, bytes + shellAssignments({ PREVIOUS_STACK: "/home/commonswarm/../../../outside" }));
+    const negative = executeWholeBlock(consumer, fixture);
+    assert.equal(negative.result, "failed");
+    assert.equal(negative.status, 69, negative.stderr);
+    assert.match(negative.stderr, /REFUSE sourced box path outside the fixture box root/);
+    assert.doesNotMatch(negative.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: box mode fails runbook-03 when item-resolved-inputs.env is missing", (t) => {
+  const sequence = resolveSteps("H18 input boundary", selectedHmSequence());
+  // Compare members of this resolved sequence. A separately parsed planBlock has
+  // different object identity even when it names the same consumer.
+  const transfer = sequence.find((block) => shortStep(block) === "hm37a-resolved-input-transfer");
+  const consumer = sequence.find((block) => block.file === RUNBOOK && shortStep(block) === "runbook-03");
+  assert.ok(transfer, "full lane has no resolved-input transfer");
+  assert.ok(consumer, "full lane has no resolved-input consumer");
+  assert.ok(sequence.indexOf(transfer) < sequence.indexOf(consumer), "full lane sources inputs before their transfer");
+  if (process.env.BOX_DRY_RUN_PART !== "box") {
+    t.skip("order verified; execution requires the disposable Linux root CI runner");
+    return;
+  }
+  const fixture = prepareBoxFixture("s2", sequence);
+  const target = join(PROOF_DIR, "item-resolved-inputs.env");
+  try {
+    // Only the prior apply writer's prerequisites; no resolved inputs before the actual transfer boundary.
+    makeRootDirectory(PROOF_DIR, 0o700);
+    for (const [name, bytes] of Object.entries(modeledApplyFiles(planBlock(RUNBOOK, "1-apply-release-directories"), fixture))) {
+      writeRootMode(join(PROOF_DIR, name), bytes);
+    }
+    assert.equal(pathExists(target), false);
+    const records = executePlanUntilFailure([transfer], fixture, "box");
+    assert.ok(records[0]!.execution.seeded!.includes(target));
+    assert.match(readFileSync(target, "utf8"), /^MIGRATION_VERSIONS='20260928000004'$/m);
+    const positive = executeWholeBlock(consumer, fixture);
+    // Run the unchanged consumer. Its source producer writes scalar versions (HM37:631-632),
+    // but runbook-03 uses array lengths (RELEASE-TO-BOX.md:398). A nounset failure there
+    // is a separate plan defect, after the input file and required values were read.
+    // Keep that failure in the whole-plan assertion; do not synthesize array declarations.
+    if (positive.result === "failed") {
+      assert.match(positive.stderr, /MIGRATION_VERSIONS: unbound variable/);
+      assert.doesNotMatch(positive.stderr, /resolved item input missing|No such file or directory|CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
+      t.diagnostic("PLAN: resolved scalar MIGRATION_VERSIONS reached runbook-03's array-length read at deploy/RELEASE-TO-BOX.md:398; transfer succeeded, consumer still fails.");
+    } else {
+      assert.equal(positive.result, "passed", positive.stderr);
+    }
+    unlinkSync(target);
+    const negative = executeWholeBlock(consumer, fixture);
+    assert.equal(negative.result, "failed");
+    assert.match(negative.firstFailingCommand ?? "", /item-resolved-inputs\.env/);
+    assert.match(negative.stderr, /No such file or directory/);
+    assert.doesNotMatch(negative.stderr, /CONTAINMENT UNAVAILABLE|unhandled dry-run stub/);
+  } finally {
+    cleanupBoxFixture(fixture);
+  }
+});
+
+test("controls: the OAuth database host line comes only from a measured fact", () => {
+  const entry = declaredNonSubstitutable("hm37-hosted-control-stage");
+  assert.ok(entry, "unmeasured OAuth host observation must be declared non-substitutable");
+  assert.deepEqual(entry.outputs, [], "unmeasured host must not supply a staging result");
+  assert.match(measuredFact("M7").note, /does not contain MCP_OAUTH_DATABASE_HOST/);
+  assert.doesNotMatch(MEASURED_FACTS.production_recheck.output, /^MCP_OAUTH_DATABASE_HOST=/m);
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "h18-oauth-"));
+  const bin = join(temporary, "bin");
+  mkdirSync(bin);
+  copyFileSync(STUB, join(bin, "docker"));
+  chmodSync(join(bin, "docker"), 0o755);
+  const env = explicitEnvironment({ BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
+    BOX_DRY_RUN_OAUTH_IMAGE: OAUTH_IMAGE_EVIDENCE.local_image_id });
+  try {
+    const run = (format: string, extra: NodeJS.ProcessEnv = {}): ReturnType<typeof spawnSync> => spawnSync(join(bin, "docker"),
+      ["inspect", "--format", format, "dry-run-oauth"], { encoding: "utf8", env: { ...env, ...extra }, timeout: 10_000 });
+    const positive = run("{{.Image}}");
+    assert.equal(positive.status, 0, String(positive.stderr));
+    assert.equal(positive.stdout, `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`);
+    for (const extra of [{}, { BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE: "MCP_OAUTH_DATABASE_HOST=invented.invalid" }]) {
+      const negative = run("{{range .Config.Env}}{{println .}}{{end}}", extra);
+      assert.equal(negative.status, 69, String(negative.stderr));
+      assert.match(String(negative.stderr), /UNPRODUCED OAuth database host observation/);
+      assert.equal(negative.stdout, "", "stub emitted an unmeasured host");
+    }
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});

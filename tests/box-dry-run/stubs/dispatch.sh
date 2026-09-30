@@ -80,6 +80,7 @@ run_in_box() {
   printf '%s\n' 'set -E' \
     'trap '\''printf "line %s: %s\n" "$LINENO" "$BASH_COMMAND" >>"$BOX_DRY_RUN_FAILURE_RECORD"'\'' ERR' \
     >"$call_dir/failure-trap.sh"
+  cat "${BOX_DRY_RUN_USERLAND%/*}/box-source.sh" >>"$call_dir/failure-trap.sh"
   : >"$call_dir/failure-record"
   status=0
   (
@@ -456,7 +457,9 @@ case "$name" in
           commonswarm-postgres) target=dry-run-postgres ;;
         esac
         case "$format" in
-          *'.Config.Env'*) printf '%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE:?OAuth host line required}" ;;
+          # M7 measured names only, and the production recheck measured no host
+          # value (box-facts-measured.json:83-89, 383-386). Never infer it from extra_hosts.
+          *'.Config.Env'*) fail_unproduced 'OAuth database host observation: no measured Config.Env host line' ;;
           *'.Image'*)
         case "$target" in
           dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_IMAGE:?OAuth image required}" ;;
