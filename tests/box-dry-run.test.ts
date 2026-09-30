@@ -1383,6 +1383,23 @@ function recordBoxOwner(root: string, path: string, owner: string): void {
   writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
 }
 
+const databaseToolArchives = new Map<string, Buffer>();
+
+// B's runbook-17 loads make-pg-service.mjs and its database helpers from A's completed stack release.
+// Populate that tool subtree from the exact release source, rather than the current checkout or a stub.
+function populateExistingDatabaseTools(target: string, sha: string): void {
+  assert.match(sha, /^[0-9a-f]{40}$/);
+  let archive = databaseToolArchives.get(sha);
+  if (!archive) {
+    const result = spawnSync("git", ["archive", "--format=tar", sha, "deploy/supabase-stack/migrate"], { maxBuffer: 16 * 1024 * 1024 });
+    assert.equal(result.status, 0, result.stderr.toString());
+    archive = result.stdout;
+    databaseToolArchives.set(sha, archive);
+  }
+  const extracted = spawnSync("/usr/bin/tar", ["-xf", "-", "-C", target], { input: archive, encoding: "utf8" });
+  assert.equal(extracted.status, 0, extracted.stderr);
+}
+
 // The measured-now state of the box, written under `root`. Every path is one the pre-seed allowlist names
 // (PLAN_VISIBLE_PATH_PRESEEDS); the returned list is checked against it. The states s1..s5 differ only where
 // the box measurements differ (M5, K4-12).
@@ -1471,6 +1488,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   if (state !== "s1") {
     for (const release of [CANDIDATE_EDGE, CANDIDATE_STACK]) {
       directory(release, release === CANDIDATE_EDGE ? 0o750 : 0o755, commonswarm);
+      if (release === CANDIDATE_STACK) populateExistingDatabaseTools(at(release), RELEASE_SHA);
       file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
     }
   }
@@ -1514,6 +1532,7 @@ const BOX_BLOCK_PRODUCTS_FILE = "tests/box-dry-run/fixtures/box-block-products.j
 
 interface BoxProduct {
   path: string;
+  kind?: "directory";
   evidence?: string;
   plan_documented?: DeclaredOutput["plan_documented"];
   execute?: "local";
@@ -1536,7 +1555,8 @@ function seedBoxProducts(fixture: Fixture, step: string): string[] {
     const path = product.path.replaceAll("{sha}", RELEASE_SHA);
     const target = join(fixture.boxRoot, path);
     mkdirSync(dirname(target), { recursive: true });
-    if (product.evidence) copyFileSync(product.evidence, target);
+    if (product.kind === "directory") mkdirSync(target, { recursive: true });
+    else if (product.evidence) copyFileSync(product.evidence, target);
     else writeFileSync(target, JSON.stringify(product.plan_documented!.json, null, 2) + "\n");
     chmodSync(target, Number.parseInt(product.mode, 8));
     recordBoxOwner(fixture.boxRoot, path, product.owner);
@@ -2165,6 +2185,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   if (state !== "s1") {
     for (const release of [targetEdge, targetStack]) {
       mkdirSync(release, { recursive: true });
+      if (release === targetStack) populateExistingDatabaseTools(release, RELEASE_SHA);
       writeMode(join(release, "RELEASE_SHA"), model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644);
     }
     chownTree("commonswarm:commonswarm", targetEdge, targetStack);
@@ -2397,12 +2418,12 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
           const seeded = seedBoxProducts(fixture, shortStep(block));
           const shapes = products.flatMap((product) => product.plan_documented ? [{
             file: basename(product.path), location: "box-proof" as const, mode: product.mode,
-            branch: "abort", plan_documented: product.plan_documented,
+            branch: product.kind === "directory" ? "box" : "abort", plan_documented: product.plan_documented,
           }] : []);
           if (shapes.length) records.push({ block, execution: {
             step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded,
-            declared: { surface: "hosted cleanup recovery", reason: shapes.map((shape) => shape.plan_documented.label).join(" "),
-              live_proof: "Requires the live journal and hosted cleanup; the Mac lane uses only a synthetic consumer contract.",
+            declared: { surface: "box producer products", reason: shapes.map((shape) => shape.plan_documented.label).join(" "),
+              live_proof: `Requires the real box producer at ${block.file}:${block.line}; the Mac lane uses only its declared consumer contract.`,
               outputs: shapes },
           } });
         }
@@ -3974,6 +3995,47 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
   }
 });
 
+test("controls: a Mac transfer fails when the box block that creates its target directory did not run", { skip: MAC_ONLY }, () => {
+  const sequence = resolveSteps("window-a/transfer-control", selectedHmSequence());
+  const transfer = sequence.findIndex((block) => shortStep(block) === "hm37a-resolved-input-transfer");
+  assert.ok(transfer >= 0);
+  const prefix = sequence.slice(0, transfer + 1);
+  const producer = "1-apply-release-directories";
+  assert.ok(prefix.some((block) => shortStep(block) === producer));
+  for (const omit of [true, false]) {
+    const fixture = prepareMacFixture(prefix, { state: "s1" });
+    try {
+      const target = join(fixture.boxRoot!, PROOF_DIR);
+      assert.equal(pathExists(target), false, "the target directory must not be preseeded");
+      const records = executePlanUntilFailure(omit ? prefix.filter((block) => shortStep(block) !== producer) : prefix, fixture, "mac");
+      const failed = records.find(({ execution }) => execution.result === "failed");
+      if (omit) {
+        assert.equal(failed?.execution.step, "hm37a-resolved-input-transfer", failed?.execution.stderr);
+        assert.ok(failed);
+        assert.equal(failed.execution.status, 1, failed.execution.stderr);
+        assert.match(failed.execution.stderr, /the box script exited 1[\s\S]*install -m 0600 -o root -g root/);
+        assert.equal(pathExists(target), false);
+      } else {
+        assert.equal(failed, undefined, failed?.execution.stderr);
+        assert.equal(records.at(-1)?.execution.result, "passed");
+        const evidence = containedCommand(fixture, "/bin/bash", ["-c",
+          'set -euo pipefail; . "$HOME/.commonswarm-release-window.env"; printf "%s" "$EVIDENCE_DIR"'], { env: fixture.env });
+        assert.equal(evidence.status, 0, evidence.stderr);
+        for (const name of ["item-resolved-inputs.env", "item-copy-back-files.list"]) {
+          const copied = join(target, name);
+          assert.equal(readFileSync(copied, "utf8"), readFileSync(join(evidence.stdout, name), "utf8"));
+          assert.equal(lstatSync(copied).mode & 0o777, 0o600);
+          assert.equal(readBoxOwners(fixture.boxRoot!)[relative(fixture.boxRoot!, copied)], "root:root");
+        }
+        assert.equal(lstatSync(target).mode & 0o777, 0o700);
+        assert.equal(readBoxOwners(fixture.boxRoot!)[relative(fixture.boxRoot!, target)], "root:root");
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
 test("controls: fixture node runs the real database service-file generator without a host PATH", () => {
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
   const bin = join(temporary, "bin");
@@ -3982,6 +4044,7 @@ test("controls: fixture node runs the real database service-file generator witho
   const service = join(temporary, "service.conf");
   const pass = join(temporary, "pass");
   const script = resolve("deploy/supabase-stack/migrate/make-pg-service.mjs");
+  const releaseScript = join(boxRoot, CANDIDATE_STACK, "deploy/supabase-stack/migrate/make-pg-service.mjs");
   makeStubBin(bin);
   const env = explicitEnvironment({ PATH: bin, BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
     PG_SERVICE_OUTPUT: service, PG_PASS_OUTPUT: pass, COMMONSWARM_MIGRATION_ENV_FILE: target });
@@ -3995,7 +4058,9 @@ test("controls: fixture node runs the real database service-file generator witho
     const expectedPass = readFileSync(pass, "utf8");
     unlinkSync(service);
     unlinkSync(pass);
-    const run = () => spawnSync("/bin/bash", ["-c", 'source "$1"; node "$2"', "node-control", PRELUDE, script],
+    // B starts after A's immutable release exists. Exercise that fixture's actual release script,
+    // not the current checkout's copy, which hid the missing script at runbook-17 in CI.
+    const run = () => spawnSync("/bin/bash", ["-c", 'source "$1"; node "$2"', "node-control", PRELUDE, releaseScript],
       { encoding: "utf8", env });
     const accepted = run();
     assert.equal(accepted.status, 0, accepted.stderr);
