@@ -51,6 +51,26 @@ run_in_box() {
   login_user=$1
   remote_command=$2
   [ -z "${BOX_DRY_RUN_IN_REMOTE:-}" ] || unhandled_stub
+  if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
+    # Admission belongs to containedCommand/prepareBoxFixture. This branch is reached
+    # only by the block shell on the admitted disposable Linux runner, using its stubs.
+    [ "${BOX_DRY_RUN_BOX_ROOT:-}" = / ] && [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] || unhandled_stub
+    remote_prelude="${BOX_DRY_RUN_PYTHON_FIXTURE:?box fixture required}/../prelude.sh"
+    [ -f "$remote_prelude" ] || fail_unproduced 'box remote prelude'
+    remote_trap=$(mktemp "${BOX_DRY_RUN_STUB_LOG}.remote.XXXXXX")
+    printf 'source %q\n' "$remote_prelude" >"$remote_trap"
+    printf '%s\n' 'set -E' \
+      'trap '\''block_status=$?; case $- in *e*) printf "__FIRST_FAIL__:%s\n" "$BASH_COMMAND" >&2; exit "$block_status" ;; esac'\'' ERR' >>"$remote_trap"
+    remote_env=()
+    for variable_name in $(compgen -e); do
+      case "$variable_name" in BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;; esac
+    done
+    status=0
+    /usr/bin/env -i PATH="$PATH" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+      ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
+    rm -f -- "$remote_trap"
+    exit "$status"
+  fi
   [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
   require_box_root
   box_bin=${BOX_DRY_RUN_BOX_BIN:?box userland bin required}
