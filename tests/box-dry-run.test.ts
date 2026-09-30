@@ -385,7 +385,7 @@ assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
   "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
-  "browser-harness", "cp", "readlink", "rsync", "npm",
+  "browser-harness", "cp", "readlink", "rsync", "npm", "node",
   // Commands that leave the process tree or reach the operator: they start an application or read the keychain.
   "open", "osascript", "launchctl", "security",
 ];
@@ -1758,7 +1758,14 @@ function makeStubBin(bin: string, rootOwned = false): void {
   for (const command of rootOwned ? BOX_STUB_COMMANDS : STUB_COMMANDS) {
     const target = join(bin, command);
     if (!existsSync(target)) {
-      copyFileSync(STUB, target);
+      if (command === "node") {
+        // Remote shells have a restricted PATH. Use this runner's real Node even when its installation
+        // directory is absent there; the enclosing Mac jail or admitted box runner still contains it.
+        const executable = canonicalPath(process.execPath).replaceAll("'", "'\\''");
+        writeFileSync(target, `#!/bin/sh\nexec '${executable}' "$@"\n`, { mode: 0o755 });
+      } else {
+        copyFileSync(STUB, target);
+      }
       if (rootOwned) chownSync(target, 0, 0);
       chmodSync(target, 0o755);
     }
@@ -3959,6 +3966,45 @@ test("controls: window B abort copy-back fails when an abort-path producer did n
     } finally {
       cleanupMacFixture(fixture);
     }
+  }
+});
+
+test("controls: fixture node runs the real database service-file generator without a host PATH", () => {
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-command-"));
+  const bin = join(temporary, "bin");
+  const target = join(temporary, "target.env");
+  const service = join(temporary, "service.conf");
+  const pass = join(temporary, "pass");
+  const script = resolve("deploy/supabase-stack/migrate/make-pg-service.mjs");
+  makeStubBin(bin);
+  const env = explicitEnvironment({ PATH: bin, BOX_DRY_RUN_STUB_LOG: join(temporary, "stub.log"),
+    PG_SERVICE_OUTPUT: service, PG_PASS_OUTPUT: pass, COMMONSWARM_MIGRATION_ENV_FILE: target });
+  try {
+    // Synthetic connection bytes only. This program formats files; it never connects to PostgreSQL.
+    writeMode(target, "TARGET_DATABASE_URL=postgresql://fixture:fixture@db.commonswarm.internal/postgres\n");
+    const positive = spawnSync(process.execPath, [script], { encoding: "utf8", env });
+    assert.equal(positive.status, 0, positive.stderr);
+    const expectedService = readFileSync(service, "utf8");
+    const expectedPass = readFileSync(pass, "utf8");
+    unlinkSync(service);
+    unlinkSync(pass);
+    const run = () => spawnSync("/bin/bash", ["-c", 'source "$1"; node "$2"', "node-control", PRELUDE, script],
+      { encoding: "utf8", env });
+    const accepted = run();
+    assert.equal(accepted.status, 0, accepted.stderr);
+    assert.equal(readFileSync(service, "utf8"), expectedService);
+    assert.equal(readFileSync(pass, "utf8"), expectedPass);
+    assert.equal(lstatSync(service).mode & 0o777, 0o600);
+    assert.equal(lstatSync(pass).mode & 0o777, 0o600);
+    // The same runtime must propagate the real generator's refusal, not substitute a passing result.
+    writeMode(target, "TARGET_DATABASE_URL=postgresql://fixture:fixture@unapproved.invalid/postgres\n");
+    const refused = run();
+    assert.equal(refused.status, 1, refused.stderr);
+    assert.match(refused.stderr, /TARGET_DATABASE_URL host is not an allowed CommonSwarm target/);
+    assert.equal(readFileSync(service, "utf8"), expectedService);
+    assert.equal(readFileSync(pass, "utf8"), expectedPass);
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-command-");
   }
 });
 
