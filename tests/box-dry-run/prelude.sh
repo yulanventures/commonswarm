@@ -18,9 +18,6 @@ case "${BOX_DRY_RUN_CONTROL:-}" in
 esac
 git() {
   box_dry_run_record git "$@"
-  case " $* " in
-    *' fetch origin main '*) printf '%s\n' 'UNPRODUCED exact-SHA checkout preparation' >&2; return 69 ;;
-  esac
   # A dry run never touches the network. The only remote it knows is the repository the plan names; a clone of
   # it is a clone of the dry run's own temporary checkout, with the plan's URL as origin. Every other
   # operation that talks to a remote is refused, not answered.
@@ -52,7 +49,19 @@ git() {
       # none, and a block that needs it fails on its own check.
       [ -z "${BOX_DRY_RUN_ORIGIN_MAIN:-}" ] || command git -C "$git_destination" update-ref refs/remotes/origin/main "$BOX_DRY_RUN_ORIGIN_MAIN"
       ;;
-    fetch|pull|push|ls-remote|submodule)
+    fetch)
+      # Fetch the harness's measured origin/main object from its temporary clone. This transfers real Git
+      # objects and updates the fixture ref; it neither contacts GitHub nor supplies a success-shaped echo.
+      if [ "${git_arguments[*]:$git_index}" != 'fetch origin main' ] ||
+         [ "$(command git "${git_arguments[@]:0:$git_index}" remote get-url origin)" != https://github.com/yulanventures/commonswarm.git ] ||
+         [ -z "${BOX_DRY_RUN_SOURCE_CLONE:-}" ] || [ -z "${BOX_DRY_RUN_ORIGIN_MAIN:-}" ]; then
+        printf '%s\n' 'UNPRODUCED exact-SHA checkout preparation' >&2
+        return 69
+      fi
+      command git "${git_arguments[@]:0:$git_index}" fetch --no-tags "$BOX_DRY_RUN_SOURCE_CLONE" \
+        "$BOX_DRY_RUN_ORIGIN_MAIN:refs/remotes/origin/main"
+      ;;
+    pull|push|ls-remote|submodule)
       printf 'UNPRODUCED network git operation: git %s\n' "$git_subcommand" >&2
       return 69
       ;;

@@ -50,6 +50,11 @@ const REAL_CHECKOUT = process.cwd();
 const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
 const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
+const EDGE_PUBLIC_ENABLED_EVIDENCE = "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-closure.txt";
+// Committed readback at hm37-closure.txt:12; A's final check preserves this dark state
+// (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2227-2228).
+const EDGE_PUBLIC_ENABLED = /^mcp_public_enabled=(.+)$/m.exec(readFileSync(EDGE_PUBLIC_ENABLED_EVIDENCE, "utf8"))?.[1];
+assert.ok(EDGE_PUBLIC_ENABLED, "committed closure has no public-enabled observation");
 
 interface Block {
   file: string;
@@ -283,7 +288,14 @@ function syntheticPromptValue(input: PromptInput, temporary: string, item = 0): 
 }
 
 function syntheticPromptEnvironment(temporary: string, inputs: PromptInput[]): NodeJS.ProcessEnv {
-  return Object.fromEntries(inputs.map((input) => [input.name, syntheticPromptValue(input, temporary)]));
+  const env = Object.fromEntries(inputs.map((input) => [input.name, syntheticPromptValue(input, temporary)]));
+  // Receipt shape: docs/evidence/2026-09-29-release-eb2a87ac4b5a/gate-evidence.txt:1,3-4.
+  // Keep those gate lines, but bind the receipt to this run's named release SHA.
+  for (const input of inputs.filter((item) => item.format === "abs-file:gate-receipt")) {
+    const path = env[input.name]!;
+    writeFileSync(path, readFileSync(path, "utf8").replace(/^SHA=[0-9a-f]{40}$/m, `SHA=${env.RELEASE_SHA ?? RELEASE_SHA}`));
+  }
+  return env;
 }
 
 const MEASURED_FACTS = JSON.parse(readFileSync(MEASURED_FACTS_FILE, "utf8")) as MeasuredFactInventory;
@@ -1162,6 +1174,7 @@ interface PlannedRun {
   // The box state the run starts from (M5, K4-12) and, for lane 8, the browser branch it follows.
   state: string;
   branch?: "FULL-CONTROL" | "REDUCED-CONTROL";
+  afterWindowA?: boolean;
 }
 
 function currentPlannedRuns(): PlannedRun[] {
@@ -1172,7 +1185,7 @@ function currentPlannedRuns(): PlannedRun[] {
     }
   }
   for (const [path, steps] of windowBPaths()) {
-    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps), state: "s5" });
+    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps), state: "s5", afterWindowA: true });
   }
   for (const branch of ["FULL-CONTROL", "REDUCED-CONTROL"] as const) {
     runs.push({ label: `lane-8/${branch}`, blocks: resolveSteps(`lane-8/${branch}`, siteOrder()), state: "s5", branch });
@@ -1355,7 +1368,22 @@ function recordBoxOwner(root: string, path: string, owner: string): void {
 // The measured-now state of the box, written under `root`. Every path is one the pre-seed allowlist names
 // (PLAN_VISIBLE_PATH_PRESEEDS); the returned list is checked against it. The states s1..s5 differ only where
 // the box measurements differ (M5, K4-12).
-function seedMacBoxRoot(root: string, state: string): string[] {
+function windowAFinalEdge(): string {
+  // A PASSED close asserts this final state before writing edge_live=true:
+  // docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2223-2225,2246-2255.
+  // B checks the same state at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:180-181.
+  const close = planBlock(HM37, "hm37a-close-readback");
+  const sha = /^\s*SHA=([0-9a-f]{40})$/m.exec(close.source)?.[1];
+  const target = /test "\$\(readlink -f \/home\/commonswarm\/edge\/current\)" =\s*\\?\s*"([^"\n]+)"/.exec(close.source)?.[1];
+  assert.ok(sha && target, "window A close has no declared final edge state");
+  assert.equal(sha, RELEASE_SHA, "window A final state names a different release");
+  const edge = target.replaceAll("$SHA", sha);
+  assert.ok(isAbsolute(edge) && !edge.includes("$"), "window A final edge is unresolved");
+  assert.equal(edge, CANDIDATE_EDGE, "window A final edge is absent from the measured release inventory");
+  return edge;
+}
+
+function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): string[] {
   const model = cachedBoxModel(state);
   const owners: Record<string, string> = {};
   const commonswarm = "commonswarm:commonswarm";
@@ -1386,7 +1414,7 @@ function seedMacBoxRoot(root: string, state: string): string[] {
   }
   const measuredDbHelper = `${previousStack}/deploy/supabase-stack/migrate/run-db-tool.sh`;
   file(measuredDbHelper, "#!/bin/sh\nexit 69\n", 0o775, commonswarm);
-  symlinkSync(at(previousEdge), at("/home/commonswarm/edge/current"));
+  symlinkSync(at(edgeTarget ?? previousEdge), at("/home/commonswarm/edge/current"));
   symlinkSync(at(previousStack), at("/home/commonswarm/stack/current"));
   file(K4_10_COMPOSE_OVERRIDE_PATH, readFileSync(K4_10_COMPOSE_OVERRIDE_EVIDENCE), 0o644, commonswarm);
 
@@ -1536,6 +1564,7 @@ interface NonSubstitutableEntry {
   outputs?: DeclaredOutput[];
   unproduced?: UnproducedOutput[];
   shape_evidence?: Array<{ file: string; shape: string }>;
+  branches?: Array<{ branch: string; status: "not tested"; reason: string; evidence: string; source_lines: string }>;
 }
 
 function nonSubstitutableEntries(): NonSubstitutableEntry[] {
@@ -1793,7 +1822,7 @@ function checkoutFixture(parent: string, name: string, sha: string): string {
 
 function prepareMacFixture(
   planBlocks: Block[] = [],
-  options: { state?: string; browserBranch?: Fixture["browserBranch"] } = {},
+  options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean } = {},
 ): Fixture {
   const state = options.state ?? "s5";
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-mac-"));
@@ -1820,7 +1849,9 @@ function prepareMacFixture(
   const macProcesses = join(temporary, "mac-processes");
   writeFileSync(macProcesses, "", { mode: 0o600 });
   writeBoxUserlandBin(boxBin);
-  const seededPaths = seedMacBoxRoot(boxRoot, state);
+  const afterWindowA = options.afterWindowA ?? planBlocks.some((block) => block.file === HM37B);
+  const finalEdge = afterWindowA ? windowAFinalEdge() : undefined;
+  const seededPaths = seedMacBoxRoot(boxRoot, state, finalEdge);
   prepareDistFixture(distFixture);
   const model = cachedBoxModel(state);
   const originMain = spawnSync("git", ["rev-parse", "--verify", "-q", "refs/remotes/origin/main^{commit}"], { encoding: "utf8" });
@@ -1852,14 +1883,15 @@ function prepareMacFixture(
     BOX_DRY_RUN_DIST_FIXTURE: distFixture,
     BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE: remoteProfile,
     BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: opServiceAccountTokenFile,
-    BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
+    BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? PREVIOUS_EDGE,
     BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
     BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
     BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
     BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image!,
     BOX_DRY_RUN_EDGE_HEALTH: model.containers.edge.health!,
-    BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"]!,
-    BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source} ${mount.destination}`).join("\n"),
+    BOX_DRY_RUN_EDGE_PUBLIC_ENABLED: EDGE_PUBLIC_ENABLED,
+    BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"]!.replace(PREVIOUS_EDGE, finalEdge ?? PREVIOUS_EDGE),
+    BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source.replace(PREVIOUS_EDGE, finalEdge ?? PREVIOUS_EDGE)} ${mount.destination}`).join("\n"),
     BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
     BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
     BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
@@ -3560,6 +3592,102 @@ test("controls: runbook-03 with a literal <sha> window.env path fails the runboo
   }
 });
 
+// Boundary controls supply the opening receipt rather than replay an opening guard unrelated to the
+// receipt/symlink under test. Full plan runs still execute that guard against all measured proof directories.
+// Shapes: docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:502-507 and
+// docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:141-144. Values are named harness inputs.
+function seedControlOpenReceipt(fixture: Fixture, window: "a" | "b", extra: Record<string, string> = {}): void {
+  const windowEnd = new Date(Date.parse(WINDOW_START) + 4 * 60 * 60 * 1000).toISOString().replace(".000Z", "Z");
+  const fields = {
+    SHA: fixture.env.RELEASE_SHA!, WINDOW_START_UTC: WINDOW_START, WINDOW_END_UTC: windowEnd,
+    WINDOW_ID, WINDOW_PRINCIPAL_SUFFIX: WINDOW_ID.slice(9, 15),
+    BACKUP_MAX_AGE_SECONDS: fixture.env.BACKUP_MAX_AGE_SECONDS!, ...extra,
+  };
+  for (const [name, value] of Object.entries(fields)) assert.ok(value, `control opening receipt is missing ${name}`);
+  const prefix = window === "a" ? "commonswarm-release-open" : "commonswarm-hm37b-open";
+  const receipt = join(fixture.macTmp!, `${prefix}-${fixture.env.RELEASE_SHA}.env`);
+  writeMode(receipt, Object.entries(fields).map(([name, value]) =>
+    `${name}='${value.replaceAll("'", "'\\''")}'\n`).join(""));
+}
+
+test("controls: a gate receipt without its PASS lines fails runbook-02", () => {
+  const plan = resolveSteps("window-a/pass", windowAPaths().get("pass")!);
+  const index = plan.findIndex((block) => shortStep(block) === "runbook-02");
+  assert.ok(index > 0, "window A has no runbook-02 preflight");
+  const receiptEvidence = readFileSync("docs/evidence/2026-09-29-release-eb2a87ac4b5a/gate-evidence.txt", "utf8").split("\n");
+  // Real receipt shape and gates: gate-evidence.txt:1,3-4. Strip only those gates; retain the correct SHA.
+  for (const missingPassLines of [true, false]) {
+    const fixture = prepareMacFixture(plan);
+    try {
+      const receipt = fixture.env.GATE_RECEIPT_PATH!;
+      const content = readFileSync(receipt, "utf8");
+      assert.ok(content.includes(`SHA=${fixture.env.RELEASE_SHA}\n`));
+      for (const gate of receiptEvidence.slice(2, 4)) assert.ok(content.includes(`${gate}\n`));
+      if (missingPassLines) writeFileSync(receipt, content.split("\n")
+        .filter((line) => !receiptEvidence.slice(2, 4).includes(line)).join("\n"));
+      seedControlOpenReceipt(fixture, "a", {
+        RELEASE_REPO: fixture.env.RELEASE_REPO!,
+        EVIDENCE_ROOT: join(fixture.home, ".commonswarm-release-evidence"),
+      });
+      // Run the actual checkout and ingest producers. The full-plan test separately owns the open guard.
+      const earlier = executePlanUntilFailure([
+        planBlock(HM37, "hm37a-source-checkout"), planBlock(HM37, "hm37a-gate-and-proof-ingest"),
+      ], fixture, "mac");
+      assert.equal(earlier.some(({ execution }) => execution.result === "failed"), false,
+        `receipt control did not reach runbook-02:\n${earlier.map(({ execution }) => execution.stderr).join("\n")}`);
+      const execution = executeWholeBlock(plan[index]!, fixture);
+      assert.equal(execution.result, missingPassLines ? "failed" : "passed", execution.stderr);
+      if (missingPassLines) {
+        assert.equal(execution.status, 1, execution.stderr);
+        assert.match(execution.stderr, /command-core gate: FAIL/);
+        assert.match(execution.stdout, /gate evidence SHA: PASS/);
+        assert.equal(pathExists(join(fixture.home, ".commonswarm-release-window.env")), false);
+      } else {
+        assert.match(execution.stdout, /command-core gate: PASS/);
+        assert.match(execution.stdout, /edge check gate: PASS/);
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
+test("controls: window B fails when window A's candidate edge is not live", () => {
+  const plan = resolveSteps("window-b/pass", windowBPaths().get("pass")!);
+  const index = plan.findIndex((block) => shortStep(block) === "hm37b-box-open");
+  assert.ok(index > 0, "window B has no box-open step");
+  for (const state of ["previous-edge", "candidate-edge", "public-enabled"]) {
+    const previousStillLive = state === "previous-edge";
+    const fixture = prepareMacFixture(plan, { afterWindowA: true });
+    try {
+      const current = join(fixture.boxRoot!, "/home/commonswarm/edge/current");
+      assert.equal(readlinkSync(current), join(fixture.boxRoot!, windowAFinalEdge()));
+      const receipt = readFileSync(fixture.env.HM37_A_CLOSE_RECEIPT!, "utf8");
+      assert.ok(receipt.includes(`release_sha=${basename(windowAFinalEdge())}\n`));
+      assert.match(receipt, /^edge_live=true$/m);
+      if (previousStillLive) {
+        unlinkSync(current);
+        symlinkSync(join(fixture.boxRoot!, PREVIOUS_EDGE), current);
+      }
+      if (state === "public-enabled") fixture.env.BOX_DRY_RUN_EDGE_PUBLIC_ENABLED = "1";
+      seedControlOpenReceipt(fixture, "b");
+      const execution = executeWholeBlock(plan[index]!, fixture);
+      assert.equal(execution.result, state === "candidate-edge" ? "passed" : "failed", execution.stderr);
+      if (previousStillLive) {
+        assert.equal(execution.status, 1, execution.stderr);
+        assert.match(execution.stderr, /the box script exited 1[\s\S]*readlink -f \/home\/commonswarm\/edge\/current/);
+      } else if (state === "public-enabled") {
+        assert.equal(execution.status, 1, execution.stderr);
+        assert.match(execution.stderr, /the box script exited 1[\s\S]*Deno\.env\.get\("SWARM_MCP_PUBLIC_ENABLED"\)/);
+      } else {
+        assert.equal(readlinkSync(current), join(fixture.boxRoot!, windowAFinalEdge()));
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
 // The five files a copy-back reads from the box's proof directory. Three are products of box blocks and are seeded
 // from their committed execution evidence (fixtures/box-block-products.json). The other two are staged from the Mac
 // by earlier blocks; their bytes come from the same committed evidence directory.
@@ -3812,6 +3940,40 @@ test("controls: a browser fixture with a different user id fails site-03", () =>
     assert.equal(preflight.cli_user_id, humanSession.identity.user_id);
     const passing = executeWholeBlock(cli, fixture);
     assert.equal(passing.result, "passed", passing.stderr);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: an undeclared reduced-branch output stays UNPRODUCED", () => {
+  const { fixture, byStep } = laneEightFixture("site-03-browser-session-preflight");
+  try {
+    const browser = byStep.get("site-03-browser-session-preflight")!;
+    const consumer = byStep.get("site-03")!;
+    const declaration = declaredNonSubstitutable(shortStep(browser))!;
+    assert.ok(declaration.branches?.some((branch) => branch.branch === "REDUCED-CONTROL" && branch.status === "not tested"));
+    const output = join(fixture.env.SITE_EVIDENCE!, "site-03-browser-preflight.json");
+    const windowFile = join(fixture.home, ".commonswarm-site-window.env");
+    const before = readFileSync(windowFile, "utf8");
+    fixture.browserBranch = "REDUCED-CONTROL";
+    const refused = executeWholeBlock(browser, fixture);
+    assert.equal(refused.result, "failed");
+    assert.match(refused.stderr, /^UNPRODUCED .*site-03-browser-preflight\.json.*REDUCED-CONTROL/m);
+    assert.deepEqual(refused.seeded, []);
+    assert.equal(existsSync(output), false);
+    assert.equal(readFileSync(windowFile, "utf8"), before, "undeclared window env lines were added");
+    const absent = executeWholeBlock(consumer, fixture);
+    assert.equal(absent.result, "failed");
+    assert.equal(absent.status, 1, absent.stderr);
+    assert.match(absent.firstFailingCommand ?? "", /test -f "\$SITE_EVIDENCE\/site-03-browser-preflight\.json"/);
+
+    // The same consumer passes with the declared FULL-CONTROL output from its cited evidence.
+    fixture.browserBranch = "FULL-CONTROL";
+    const seeded = executeWholeBlock(browser, fixture);
+    assert.equal(seeded.result, "not-executed", seeded.stderr);
+    assert.ok(seeded.seeded?.includes(output));
+    const positive = executeWholeBlock(consumer, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
   } finally {
     cleanupMacFixture(fixture);
   }
@@ -4491,8 +4653,17 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
   }
   const failed: string[] = [];
   const notExecuted = new Map<string, string>();
+  const notTested: string[] = [];
   const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
   for (const run of currentPlannedRuns()) {
+    const unavailable = run.branch && nonSubstitutableEntries().flatMap((entry) => entry.branches ?? [])
+      .find((branch) => branch.branch === run.branch && branch.status === "not tested");
+    if (unavailable) {
+      const line = `NOT TESTED [run=${run.label}] ${unavailable.reason} Evidence: ${unavailable.evidence}:${unavailable.source_lines}`;
+      notTested.push(line);
+      t.diagnostic(line);
+      continue;
+    }
     let fixture: Fixture;
     if (part === "box") {
       const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
@@ -4500,7 +4671,7 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
       const state = /^window-a\/(s[1-5])\//.exec(run.label)?.[1] ?? "s2";
       fixture = prepareBoxFixture(state, run.blocks);
     } else {
-      fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch });
+      fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch, afterWindowA: run.afterWindowA });
     }
     try {
       const records = executePlanUntilFailure(run.blocks, fixture, part);
@@ -4524,7 +4695,7 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
   const issues = [...unproducedByConsumer.values(), ...failed];
   for (const line of notExecuted.values()) t.diagnostic(line);
   assert.equal(issues.length, 0,
-    `HM37 dry-run failures (${issues.length}):\n${issues.join("\n")}\n\nNot executed, non-substitutable (${notExecuted.size}):\n${[...notExecuted.values()].join("\n")}`);
+    `HM37 dry-run failures (${issues.length}):\n${issues.join("\n")}\n\nNot executed, non-substitutable (${notExecuted.size}):\n${[...notExecuted.values()].join("\n")}\n\nNot tested (${notTested.length}):\n${notTested.join("\n")}`);
 });
 
 function citedEvidenceFiles(value: unknown, found = new Set<string>()): Set<string> {
@@ -4562,6 +4733,13 @@ test("non-substitutable surfaces are explicit", (t) => {
     for (const file of citedEvidenceFiles(entry)) assert.equal(existsSync(file), true, `${entry.step}: cited evidence file is missing: ${file}`);
     for (const output of entry.outputs ?? []) assert.ok(/^0[0-7]{3}$/.test(output.mode) && output.file, `${entry.step}: output ${output.file} has no file mode`);
     for (const missing of entry.unproduced ?? []) assert.ok(missing.output && missing.reason, `${entry.step}: an unproduced output has no reason`);
+    for (const branch of entry.branches ?? []) {
+      assert.equal(branch.status, "not tested");
+      assert.ok(branch.reason && branch.source_lines, `${entry.step}: untested branch has no explanation or evidence lines`);
+      assert.equal((entry.outputs ?? []).some((output) => output.branch === branch.branch), false,
+        `${entry.step}: untested branch must not seed outputs`);
+      t.diagnostic(`${entry.step}/${branch.branch}: NOT TESTED; ${branch.reason}`);
+    }
     t.diagnostic(`${entry.step}: ${entry.surface}; live proof: ${entry.live_proof}; outputs seeded: ${(entry.outputs ?? []).map((output) => output.file).join(", ") || "none"}; unproduced: ${(entry.unproduced ?? []).map((missing) => missing.output).join(", ") || "none"}`);
   }
   // The site build is declared too, with the evidence each fixture file's shape comes from.

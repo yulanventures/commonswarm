@@ -574,6 +574,14 @@ case "$name" in
         case "$runtime:$1" in
           node:-e|deno:eval)
             [ "$#" -eq 2 ] || unhandled_stub
+            # Only this environment comparison has a committed readback (hm37-closure.txt:12).
+            # All other container programs remain unproduced. Evaluate the comparison against fixture
+            # state, so an enabled public endpoint fails rather than receiving a canned passing result.
+            if [ "$container" = commonswarm-edge-edge-runtime-1 ] && [ "$runtime:$1" = deno:eval ] &&
+               [ "$2" = 'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)' ]; then
+              [ "${BOX_DRY_RUN_EDGE_PUBLIC_ENABLED:?edge public-enabled observation required}" != 1 ]
+              exit $?
+            fi
             # A program run inside a container needs the container. A Mac-side dry run has none, and it does
             # not answer for one.
             if [ "${BOX_DRY_RUN_PART:-mac}" = mac ]; then
