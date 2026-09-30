@@ -10,16 +10,19 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   readdirSync,
   renameSync,
   rmdirSync,
   rmSync,
+  statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
@@ -32,6 +35,9 @@ const TEMPLATE = "docs/design/BOX-PLAN-TEMPLATE.md";
 const SCOPED = [PREP, HM37, HM37B, RUNBOOK, SITE, TEMPLATE];
 const GUARD = "tests/box-dry-run/guard.sh";
 const STUB = "tests/box-dry-run/stubs/dispatch.sh";
+const USERLAND = resolve("tests/box-dry-run/stubs/box-userland.py");
+const NON_SUBSTITUTABLE_FILE = "tests/box-dry-run/fixtures/non-substitutable.json";
+const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 const PRELUDE = resolve("tests/box-dry-run/prelude.sh");
 const PYTHON_FIXTURE = resolve("tests/box-dry-run/python");
 const PRESEED_ALLOWLIST_FILE = "tests/box-dry-run/fixtures/preseed-allowlist.json";
@@ -345,6 +351,9 @@ assert.equal(CLOSED_PROOF_PATHS.length, 2);
 const PSQL_IMAGE = measuredMatch("M17", /(public\.ecr\.aws\/supabase\/postgres:[0-9.]+)/, "command");
 const POSTGRES_IMAGE_ID = measuredMatch("M17", /image_id=(sha256:[0-9a-f]{64})/);
 const SITE_BASE_RELEASE = measuredMatch("M15", /release=([^\n]+)/);
+// The version the measured live site release carries in its /download page (M15's marker). A fixture page that
+// carries a typed number would be a second copy of it; the release SHA's own package.json is checked against it.
+const SITE_VERSION = measuredMatch("M15", /version_([0-9][0-9.]*)_marker=true/);
 const SITE_BASE_PREFIX = SITE_BASE_RELEASE.split("-")[1]!;
 const baseResult = spawnSync("git", ["rev-parse", `${SITE_BASE_PREFIX}^{commit}`], { encoding: "utf8" });
 assert.equal(baseResult.status, 0, baseResult.stderr);
@@ -361,8 +370,15 @@ assert.equal(ACCOUNT_NAMES.length, 4);
 assert.equal(new Set(ACCOUNT_NAMES).size, ACCOUNT_NAMES.length);
 const STUB_COMMANDS = [
   "docker", "systemctl", "psql", "caddy", "ssh", "scp", "sudo", "op", "curl", "chown", "tar", "deno", "python3", "sleep", "cswarm",
-  "browser-harness", "cp", "readlink",
+  "browser-harness", "cp", "readlink", "rsync", "npm",
+  // Commands that leave the process tree or reach the operator: they start an application or read the keychain.
+  "open", "osascript", "launchctl", "security",
 ];
+// GNU behavior the box has and the Mac lacks. These names exist only on a box script's PATH, never on a Mac block's.
+const BOX_USERLAND_COMMANDS = ["date", "stat", "sha256sum", "id", "install", "chown", "mv", "cp", "ps", "pgrep"];
+// Host state a Mac block would otherwise read from the real Mac: its process table. These stub the Mac lane only;
+// on the box lane the runner's own ps and pgrep are the box's.
+const MAC_HOST_STATE_STUBS = ["pgrep", "ps"];
 
 function measuredProductionMatch(pattern: RegExp): string {
   const match = pattern.exec(MEASURED_FACTS.production_recheck.output);
@@ -850,17 +866,14 @@ function assertRunbook03NamedShaWindowPath(markdown: string): void {
   assert.match(source, /: "\$\{RELEASE_SHA:\?named release SHA required\}"/);
   assert.match(source, /\. "\/home\/commonswarm\/stack\/release-proofs\/\$\{RELEASE_SHA\}\/window\.env"/);
   assert.doesNotMatch(source, /\/release-proofs\/<sha>\/window\.env/);
-}
-
-function browserProgram(block: Block): string {
-  const match = /browser-harness[^\n]*<<'PY'\n([\s\S]*?)\nPY/.exec(block.source);
-  assert.ok(match, `${block.step}: missing browser-harness stdin Python program`);
-  return match[1]!;
+  // Any placeholder in an executable line is an input the block cannot resolve: the window.env path, the
+  // `test "$SHA" = '<sha>'` comparison (deploy/RELEASE-TO-BOX.md:283), or anything a later edit adds.
+  assert.doesNotMatch(source, /<sha>/, "runbook-03 still carries a literal <sha> placeholder");
 }
 
 function removeOwnedTemporary(path: string, prefix: string): void {
   const resolved = resolve(path);
-  assert.equal(dirname(resolved), resolve(tmpdir()));
+  assert.equal(realpathSync(dirname(resolved)), realpathSync(tmpdir()));
   assert.ok(basename(resolved).startsWith(prefix));
   rmSync(resolved, { recursive: true, force: true });
 }
@@ -1146,20 +1159,23 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
 interface PlannedRun {
   label: string;
   blocks: Block[];
+  // The box state the run starts from (M5, K4-12) and, for lane 8, the browser branch it follows.
+  state: string;
+  branch?: "FULL-CONTROL" | "REDUCED-CONTROL";
 }
 
 function currentPlannedRuns(): PlannedRun[] {
-  const runs: PlannedRun[] = [{ label: "prep/pass", blocks: resolveSteps("prep/pass", prepSuccessOrder()) }];
+  const runs: PlannedRun[] = [{ label: "prep/pass", blocks: resolveSteps("prep/pass", prepSuccessOrder()), state: "s5" }];
   for (const state of ["s1", "s2", "s3", "s4", "s5"]) {
     for (const [path, steps] of windowAPaths()) {
-      runs.push({ label: `window-a/${state}/${path}`, blocks: resolveSteps(`window-a/${state}/${path}`, steps) });
+      runs.push({ label: `window-a/${state}/${path}`, blocks: resolveSteps(`window-a/${state}/${path}`, steps), state });
     }
   }
   for (const [path, steps] of windowBPaths()) {
-    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps) });
+    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps), state: "s5" });
   }
-  for (const branch of ["FULL-CONTROL", "REDUCED-CONTROL"]) {
-    runs.push({ label: `lane-8/${branch}`, blocks: resolveSteps(`lane-8/${branch}`, siteOrder()) });
+  for (const branch of ["FULL-CONTROL", "REDUCED-CONTROL"] as const) {
+    runs.push({ label: `lane-8/${branch}`, blocks: resolveSteps(`lane-8/${branch}`, siteOrder()), state: "s5", branch });
   }
   return runs;
 }
@@ -1168,6 +1184,485 @@ function unproducedReport(runs: PlannedRun[] = currentPlannedRuns()): string[] {
   return runs.flatMap((run) => discoverUnproducedReads(run.blocks).map((read) =>
     `UNPRODUCED ${read.what} read by ${shortStep(read.block)} at ${read.block.file}:${sourceLineAt(read.block, read.offset)} [run=${run.label} plan=${read.plan}]`,
   ));
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Containment (R4). Every Mac-side whole block and every fixture box script runs under sandbox-exec. A PATH
+// stub cannot stop an absolute path such as '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' or
+// a path a script builds at run time; the kernel can. A denied operation fails its block and is reported,
+// never hidden. When the profile cannot be applied, the block does not run at all.
+// ---------------------------------------------------------------------------------------------------------
+
+function sbplPath(path: string): string {
+  assert.ok(isAbsolute(path) && !/["\\\n\r]/.test(path), `unsafe path for a sandbox profile: ${JSON.stringify(path)}`);
+  return `"${path}"`;
+}
+
+function operatorHomes(): string[] {
+  return [...new Set([userInfo().homedir, "/Users/yulanbot"])];
+}
+
+function canonicalPath(path: string): string {
+  return existsSync(path) ? realpathSync(path) : path;
+}
+
+// The PATH a Mac block and its stubs search: the stub directory first, then the host's own PATH without any
+// directory under the operator's home. The containment refuses to start a program from the operator's home (a
+// personal wrapper such as ~/.local/bin/rm is one), so a PATH that lists such a directory would make a plain `rm`
+// in a stub or a plan block fail for a reason that has nothing to do with the code under test.
+function macBlockPath(bin: string): string {
+  const homes = operatorHomes().flatMap((home) => [home, canonicalPath(home)]);
+  const kept = (process.env.PATH ?? "").split(":").filter((entry) => entry !== ""
+    && !homes.some((home) => entry === home || entry.startsWith(`${home}/`)));
+  return [bin, ...kept].join(":");
+}
+
+// The node binary's directory and the repository's node_modules: the tooling a block may still start from
+// under the operator's home.
+function nodeToolingRoots(): string[] {
+  const roots = new Set<string>([dirname(canonicalPath(process.execPath))]);
+  const modules = join(REAL_CHECKOUT, "node_modules");
+  if (existsSync(modules)) roots.add(realpathSync(modules));
+  return [...roots];
+}
+
+interface ContainmentScope {
+  writableSubpaths: string[];
+  writableLiterals: string[];
+  // Under the operator's home, only these may start a process.
+  executableRoots: string[];
+}
+
+// Denies: network; file writes everywhere except the named directories, /dev/null and /dev/fd; process
+// execution of /Applications/** and of anything under the operator's home except the named roots and the node
+// tooling; reads of the operator's private state (the agent profiles and the cswarm credentials).
+function containmentProfile(scope: ContainmentScope): string {
+  const homes = operatorHomes().flatMap((home) => [...new Set([home, canonicalPath(home)])]);
+  const notWritable = [
+    ...scope.writableSubpaths.map((path) => `(require-not (subpath ${sbplPath(canonicalPath(path))}))`),
+    ...scope.writableLiterals.map((path) => `(require-not (literal ${sbplPath(path)}))`),
+    '(require-not (literal "/dev/null"))',
+    '(require-not (subpath "/dev/fd"))',
+  ];
+  const notExecutable = [...scope.executableRoots, ...nodeToolingRoots()]
+    .map((path) => `(require-not (subpath ${sbplPath(canonicalPath(path))}))`);
+  const applications = ["/Applications", "/System/Applications", ...homes.map((home) => join(home, "Applications"))]
+    .map((path) => `(subpath ${sbplPath(path)})`).join(" ");
+  // The operator's private state: Anvil's profile and the other agents' (.hermes), the cswarm credentials, the
+  // Keychain, and the Chrome profile directories. A block has no reason to read any of it.
+  const privateState = homes.flatMap((home) => [
+    join(home, ".hermes"), join(home, ".config/cswarm"), join(home, "Library/Keychains"),
+    join(home, "Library/Application Support/Google"), join(home, ".chrome-agent-profile"),
+  ]).map((path) => `(subpath ${sbplPath(path)})`).join(" ");
+  return [
+    "(version 1)",
+    "(allow default)",
+    "(deny network*)",
+    `(deny file-write* (require-all ${notWritable.join(" ")}))`,
+    `(deny process-exec ${applications})`,
+    ...homes.map((home) => `(deny process-exec (require-all (subpath ${sbplPath(home)}) ${notExecutable.join(" ")}))`),
+    `(deny file-read* ${privateState})`,
+    "",
+  ].join("\n");
+}
+
+interface ContainmentAvailability {
+  available: boolean;
+  detail: string;
+}
+
+let cachedContainment: ContainmentAvailability | undefined;
+
+// The positive control for every contained run: the smallest profile is applied to a harmless command. A
+// process that is already inside another sandbox cannot apply a second one; then nothing runs uncontained.
+function containmentAvailability(): ContainmentAvailability {
+  if (!cachedContainment) {
+    const probe = spawnSync(SANDBOX_EXEC, ["-p", "(version 1)\n(allow default)\n", "/usr/bin/true"], { encoding: "utf8" });
+    const refusal = `sandbox-exec exited ${probe.status}: ${(probe.stderr ?? "").trim()}`;
+    cachedContainment = probe.status === 0
+      ? { available: true, detail: "" }
+      : {
+        available: false,
+        // Exit 71 with sandbox_apply refused is what macOS answers when the process tree is already sandboxed:
+        // it takes one profile per tree. The dry run does not treat an outer profile as its own containment,
+        // so the run must start outside any sandbox-exec wrapper.
+        detail: probe.status === 71 && /sandbox_apply/.test(probe.stderr ?? "")
+          ? `${refusal} (this process tree is already inside another sandbox, and macOS applies one sandbox profile per process tree; run the dry run outside any outer sandbox-exec wrapper)`
+          : refusal,
+      };
+  }
+  return cachedContainment;
+}
+
+// sandbox-exec exits 65 when the profile does not compile and 71 when a compiled profile cannot be applied to
+// this process. A profile that compiles is one whose only problem is where it runs.
+function profileCompileProblem(profile: string): string | undefined {
+  const result = spawnSync(SANDBOX_EXEC, ["-p", profile, "/usr/bin/true"], { encoding: "utf8" });
+  if (result.status === 0 || result.status === 71) return undefined;
+  return `sandbox-exec exited ${result.status}: ${(result.stderr ?? "").trim()}`;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// R5: the plan's Mac /tmp is the dry run's own temporary directory. The box's /tmp is a different tree; text
+// that crosses the ssh boundary is mapped back to it by the ssh stub (box-userland.py `rewrite`).
+// ---------------------------------------------------------------------------------------------------------
+
+const MAC_TMP_PATH = /(?<![\w.@~/$-])\/tmp(?=\/|[^\w.-]|$)/g;
+
+function mapMacTmp(source: string, macTmp: string): string {
+  return source.replace(MAC_TMP_PATH, () => macTmp);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The fixture box root (R1): the tree every Mac-side ssh, scp and rsync lands in.
+// ---------------------------------------------------------------------------------------------------------
+
+const boxModelCache = new Map<string, BoxFixtureModel>();
+
+function cachedBoxModel(state: string): BoxFixtureModel {
+  let model = boxModelCache.get(state);
+  if (!model) {
+    model = buildBoxFixtureModel(state);
+    boxModelCache.set(state, model);
+  }
+  return model;
+}
+
+function writeBoxUserlandBin(bin: string): void {
+  mkdirSync(bin, { recursive: true, mode: 0o700 });
+  for (const command of BOX_USERLAND_COMMANDS) {
+    const target = join(bin, command);
+    writeFileSync(target, `#!/bin/sh\nexec /usr/bin/python3 "$BOX_DRY_RUN_USERLAND" ${command} "$@"\n`, { mode: 0o755 });
+    chmodSync(target, 0o755);
+  }
+}
+
+function boxOwnersFile(root: string): string {
+  return join(root, ".fixture", "owners.json");
+}
+
+function readBoxOwners(root: string): Record<string, string> {
+  return existsSync(boxOwnersFile(root)) ? JSON.parse(readFileSync(boxOwnersFile(root), "utf8")) as Record<string, string> : {};
+}
+
+function recordBoxOwner(root: string, path: string, owner: string): void {
+  const owners = readBoxOwners(root);
+  owners[path.replace(/^\//, "")] = owner;
+  mkdirSync(dirname(boxOwnersFile(root)), { recursive: true });
+  writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
+}
+
+// The measured-now state of the box, written under `root`. Every path is one the pre-seed allowlist names
+// (PLAN_VISIBLE_PATH_PRESEEDS); the returned list is checked against it. The states s1..s5 differ only where
+// the box measurements differ (M5, K4-12).
+function seedMacBoxRoot(root: string, state: string): string[] {
+  const model = cachedBoxModel(state);
+  const owners: Record<string, string> = {};
+  const commonswarm = "commonswarm:commonswarm";
+  const rootOwned = "root:root";
+  const at = (path: string): string => join(root, path);
+  const note = (path: string, owner: string): void => { owners[path.replace(/^\//, "")] = owner; };
+  const directory = (path: string, mode: number, owner: string): void => {
+    mkdirSync(at(path), { recursive: true });
+    chmodSync(at(path), mode);
+    note(path, owner);
+  };
+  const file = (path: string, bytes: string | Buffer, mode: number, owner: string): void => {
+    mkdirSync(dirname(at(path)), { recursive: true });
+    writeFileSync(at(path), bytes, { mode });
+    chmodSync(at(path), mode);
+    note(path, owner);
+  };
+  for (const path of ["/tmp", "/run", "/root", "/etc", "/var", "/usr", "/home", "/srv"]) mkdirSync(at(path), { recursive: true });
+  directory("/home/commonswarm", 0o750, commonswarm);
+  directory("/srv/commonswarm", 0o750, commonswarm);
+  directory("/home/commonswarm/edge", 0o755, commonswarm);
+  directory("/home/commonswarm/stack", 0o755, commonswarm);
+  const previousEdge = model.releases.previousEdge.path;
+  const previousStack = model.releases.previousStack.path;
+  for (const release of [previousEdge, previousStack]) {
+    directory(release, release === previousEdge ? 0o750 : 0o755, commonswarm);
+    file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
+  }
+  const measuredDbHelper = `${previousStack}/deploy/supabase-stack/migrate/run-db-tool.sh`;
+  file(measuredDbHelper, "#!/bin/sh\nexit 69\n", 0o775, commonswarm);
+  symlinkSync(at(previousEdge), at("/home/commonswarm/edge/current"));
+  symlinkSync(at(previousStack), at("/home/commonswarm/stack/current"));
+  file(K4_10_COMPOSE_OVERRIDE_PATH, readFileSync(K4_10_COMPOSE_OVERRIDE_EVIDENCE), 0o644, commonswarm);
+
+  directory(K4_12_STACK_PROOF_PARENT, 0o755, rootOwned);
+  if (state === "s5") {
+    for (const name of K4_12_DIRECTORY_NAMES) directory(join(K4_12_STACK_PROOF_PARENT, name), 0o700, rootOwned);
+  } else {
+    directory(dirname(K4_11_OAUTH_IMAGE_PATH), 0o700, rootOwned);
+  }
+  file(K4_11_OAUTH_IMAGE_PATH, K4_11_OAUTH_IMAGE_BYTES, 0o644, rootOwned);
+  if (state === "s2" || state === "s5") {
+    for (const closed of CLOSED_PROOF_PATHS) directory(closed, 0o700, rootOwned);
+  }
+  if (state === "s5") {
+    assert.equal(pathExists(at(PROOF_DIR)), false, "M5 measured-now fixture unexpectedly has an active proof directory");
+    assert.equal(CLOSED_PROOF_PATHS.filter((path) => pathExists(at(path))).length, 2);
+  }
+  file("/home/commonswarm/.env",
+    Object.entries(model.envValues).map(([name, value]) => `${name}=${value}`).join("\n") + "\n", 0o600, commonswarm);
+  file("/etc/commonswarm-release/target.env", `${TARGET_ENV_NAME}=postgres://placeholder\n`, 0o600, rootOwned);
+  file("/etc/ssl/yulan-internal-ca.pem", "dry-run-ca\n", 0o644, rootOwned);
+  file("/etc/commonswarm-oauth/database-credentials", "UNMEASURED\n", 0o640, rootOwned);
+  file("/etc/commonswarm-oauth/service.env", "MCP_OAUTH_DATABASE_NAME=commonswarm\n", 0o600, rootOwned);
+  file("/var/backups/commonswarm-postgres/status.json", JSON.stringify({
+    ok: true, database_bytes_verified: true, object_bytes_verified: true,
+    verified_at: WINDOW_START, destination: "r2:yulan-vps-1-backups/000-commonswarm-postgres/dry-run",
+  }) + "\n", 0o600, rootOwned);
+  directory("/usr/local/bin", 0o755, rootOwned);
+  const measuredSiteRelease = join("/srv/commonswarm/site/releases", SITE_BASE_RELEASE);
+  directory(measuredSiteRelease, 0o755, commonswarm);
+  directory(join(measuredSiteRelease, "app"), 0o755, commonswarm);
+  directory(join(measuredSiteRelease, "download"), 0o755, commonswarm);
+  file(join(measuredSiteRelease, "app/index.html"), "measured baseline without connected-apps marker\n", 0o644, commonswarm);
+  file(join(measuredSiteRelease, "download/index.html"), `cswarm ${SITE_VERSION}\n`, 0o644, commonswarm);
+  symlinkSync(at(measuredSiteRelease), at("/srv/commonswarm/site/current"));
+  if (state !== "s1") {
+    for (const release of [CANDIDATE_EDGE, CANDIDATE_STACK]) {
+      directory(release, release === CANDIDATE_EDGE ? 0o750 : 0o755, commonswarm);
+      file(`${release}/RELEASE_SHA`, model.files[`${release}/RELEASE_SHA`]!.bytes, 0o644, commonswarm);
+    }
+  }
+  mkdirSync(join(root, ".fixture"), { recursive: true });
+  writeFileSync(boxOwnersFile(root), JSON.stringify(owners));
+  writeFileSync(join(root, ".fixture", "processes"), "");
+
+  const normalize = (path: string): string => {
+    if ([K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT].includes(path)) return path;
+    return path
+      .replace(PREVIOUS_EDGE, "/home/commonswarm/edge/releases/<previous>")
+      .replace(PREVIOUS_STACK, "/home/commonswarm/stack/releases/<previous>")
+      .replace(CANDIDATE_EDGE, "/home/commonswarm/edge/releases/<candidate>")
+      .replace(CANDIDATE_STACK, "/home/commonswarm/stack/releases/<candidate>")
+      .replace(new RegExp(`${PROOF_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.closed-window-[^/]+`),
+        "/home/commonswarm/stack/release-proofs/<closed>")
+      .replace(measuredSiteRelease, "/srv/commonswarm/site/releases/<previous>");
+  };
+  return [
+    "/home/commonswarm/edge/current", "/home/commonswarm/stack/current",
+    previousEdge, join(previousEdge, "RELEASE_SHA"), previousStack, join(previousStack, "RELEASE_SHA"),
+    ...(state === "s1" ? [] : [CANDIDATE_EDGE, join(CANDIDATE_EDGE, "RELEASE_SHA"), CANDIDATE_STACK, join(CANDIDATE_STACK, "RELEASE_SHA")]),
+    ...((state === "s2" || state === "s5") ? CLOSED_PROOF_PATHS : []),
+    K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT,
+    "/etc/commonswarm-oauth/database-credentials", "/etc/commonswarm-oauth/service.env",
+    "/etc/ssl/yulan-internal-ca.pem", "/etc/commonswarm-release/target.env", measuredDbHelper,
+    "/var/backups/commonswarm-postgres/status.json", "/home/commonswarm/.env", "/usr/local/bin",
+    "/srv/commonswarm/site/current", measuredSiteRelease,
+    join(measuredSiteRelease, "app/index.html"), join(measuredSiteRelease, "download/index.html"),
+  ].map(normalize).filter((path, index, paths) => paths.indexOf(path) === index).sort();
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Box blocks the Mac lane does not execute (they run in the box lane). Their outputs are seeded at their
+// place in the plan, and only from committed execution evidence, so a later Mac block that reads them sees
+// the state the plan expects at that point and no earlier (fixtures/box-block-products.json).
+// ---------------------------------------------------------------------------------------------------------
+
+const BOX_BLOCK_PRODUCTS_FILE = "tests/box-dry-run/fixtures/box-block-products.json";
+
+interface BoxProduct {
+  path: string;
+  evidence: string;
+  owner: string;
+  mode: string;
+}
+
+function boxBlockProducts(step: string): BoxProduct[] {
+  const table = JSON.parse(readFileSync(BOX_BLOCK_PRODUCTS_FILE, "utf8")) as Record<string, BoxProduct[]>;
+  return table[step] ?? [];
+}
+
+function seedBoxProducts(fixture: Fixture, step: string): string[] {
+  assert.ok(fixture.boxRoot, "box products need a fixture box root");
+  const seeded: string[] = [];
+  for (const product of boxBlockProducts(step)) {
+    assert.equal(existsSync(product.evidence), true, `${step}: product evidence is missing: ${product.evidence}`);
+    const path = product.path.replaceAll("{sha}", RELEASE_SHA);
+    const target = join(fixture.boxRoot, path);
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(product.evidence, target);
+    chmodSync(target, Number.parseInt(product.mode, 8));
+    recordBoxOwner(fixture.boxRoot, path, product.owner);
+    seeded.push(path);
+  }
+  return seeded;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Non-substitutable surfaces (R3). The dry run does not emulate a browser or a site build. A block whose
+// result depends on one is declared in fixtures/non-substitutable.json and is NOT executed: not a part of it,
+// not with a canned answer. The harness seeds only the output files the declaration lists, and only from the
+// committed evidence the declaration cites. An output with no evidence is named and left absent.
+// ---------------------------------------------------------------------------------------------------------
+
+interface EvidenceRef {
+  evidence: string;
+  path: string;
+  equals?: unknown;
+}
+
+type OutputValue =
+  | { evidence: string; path: string }
+  | { copy: string; note: string }
+  | { derive: string; from: EvidenceRef[]; note: string }
+  | { template: string; params: Record<string, EvidenceRef> };
+
+interface DeclaredOutput {
+  file: string;
+  location: "site-evidence" | "site-window-env";
+  mode: string;
+  branch: string;
+  json?: Record<string, OutputValue>;
+  lines?: Record<string, OutputValue>;
+  invariants?: Array<{ equal: [string, string]; source: string }>;
+}
+
+interface UnproducedOutput {
+  output: string;
+  reason: string;
+}
+
+interface NonSubstitutableEntry {
+  surface: string;
+  reason: string;
+  step?: string;
+  live_proof?: string;
+  plan_items?: string[];
+  outputs?: DeclaredOutput[];
+  unproduced?: UnproducedOutput[];
+  shape_evidence?: Array<{ file: string; shape: string }>;
+}
+
+function nonSubstitutableEntries(): NonSubstitutableEntry[] {
+  return JSON.parse(readFileSync(NON_SUBSTITUTABLE_FILE, "utf8")) as NonSubstitutableEntry[];
+}
+
+function declaredNonSubstitutable(step: string): NonSubstitutableEntry | undefined {
+  return nonSubstitutableEntries().find((entry) => entry.step === step);
+}
+
+// `a.b[id=K4-8].c` walks objects by key and arrays by an `[key=value]` selector.
+function evidenceValue(ref: { evidence: string; path: string }): unknown {
+  let value: unknown = JSON.parse(readFileSync(ref.evidence, "utf8"));
+  for (const segment of ref.path.split(".")) {
+    const match = /^([A-Za-z0-9_]+)(?:\[([A-Za-z0-9_]+)=([^\]]+)\])?$/.exec(segment);
+    assert.ok(match, `${ref.evidence}: bad evidence path segment ${segment}`);
+    assert.ok(value && typeof value === "object", `${ref.evidence}: ${ref.path} stops before ${segment}`);
+    value = (value as Record<string, unknown>)[match[1]!];
+    if (match[2] !== undefined) {
+      assert.ok(Array.isArray(value), `${ref.evidence}: ${match[1]} is not an array`);
+      value = (value as Array<Record<string, unknown>>).find((item) => item[match[2]!] === match[3]);
+    }
+  }
+  assert.notEqual(value, undefined, `${ref.evidence} has no ${ref.path}`);
+  return value;
+}
+
+function resolveOutputValue(spec: OutputValue, siblings: Record<string, unknown>): unknown {
+  if ("derive" in spec) {
+    for (const condition of spec.from) {
+      if (evidenceValue(condition) !== condition.equals) return undefined;
+    }
+    return spec.derive;
+  }
+  if ("copy" in spec) return siblings[spec.copy];
+  if ("template" in spec) {
+    let text = spec.template;
+    for (const [name, ref] of Object.entries(spec.params)) text = text.replaceAll(`{${name}}`, String(evidenceValue(ref)));
+    return text;
+  }
+  return evidenceValue(spec);
+}
+
+interface SeedResult {
+  seeded: string[];
+  refused: string[];
+}
+
+function seedDeclaredOutputs(entry: NonSubstitutableEntry, fixture: Fixture, override: Record<string, unknown> = {}): SeedResult {
+  const result: SeedResult = { seeded: [], refused: [] };
+  const branch = fixture.browserBranch ?? "FULL-CONTROL";
+  const outputs = (entry.outputs ?? []).filter((output) => output.branch === branch);
+  if (outputs.length === 0 && (entry.outputs ?? []).length > 0) {
+    result.refused.push(`UNPRODUCED ${(entry.outputs ?? []).map((output) => output.file).join(", ")} for ${branch}: no committed evidence of that branch`);
+    return result;
+  }
+  const evidenceDir = fixture.env.SITE_EVIDENCE;
+  for (const output of outputs) {
+    const fields = output.json ?? output.lines ?? {};
+    const values: Record<string, unknown> = {};
+    for (const [key, spec] of Object.entries(fields)) values[key] = resolveOutputValue(spec, values);
+    // An override changes a value the output declares; a key the output does not have is not added to it.
+    for (const [key, value] of Object.entries(override)) if (key in fields) values[key] = value;
+    const missing = Object.entries(values).filter(([, value]) => value === undefined).map(([key]) => key);
+    if (missing.length > 0) {
+      result.refused.push(`UNPRODUCED ${output.file}: no committed evidence for ${missing.join(", ")}`);
+      continue;
+    }
+    const broken = (output.invariants ?? []).filter((rule) => values[rule.equal[0]] !== values[rule.equal[1]]);
+    if (broken.length > 0) {
+      // The browser program exits before it writes this file when its own comparison fails, so a file that
+      // breaks the comparison is one the real block could never have produced.
+      result.refused.push(`REFUSED ${output.file}: ${broken.map((rule) => `${rule.equal.join(" == ")} (${rule.source})`).join(", ")}`);
+      continue;
+    }
+    if (output.location === "site-evidence") {
+      assert.ok(evidenceDir, "seeding a browser output needs SITE_EVIDENCE");
+      const target = join(evidenceDir, output.file);
+      writeFileSync(target, JSON.stringify(Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b))), null, 2) + "\n", { mode: 0o600 });
+      chmodSync(target, Number.parseInt(output.mode, 8));
+      result.seeded.push(target);
+    } else {
+      const target = join(fixture.home, output.file);
+      const lines = Object.entries(values).map(([key, value]) => `${key}=${String(value)}\n`).join("");
+      writeFileSync(target, `${existsSync(target) ? readFileSync(target, "utf8") : ""}${lines}`, { mode: 0o600 });
+      chmodSync(target, Number.parseInt(output.mode, 8));
+      result.seeded.push(target);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The site build fixture. `npm run build` is a declared non-substitutable surface; the stub lays down this
+// tree. Its file list comes from committed evidence: deploy/site/vercel-reference.json (the 25 stable
+// artifacts of a real build), M15 in box-facts-measured.json (the five real _astro assets), and the live
+// /guides/grok-bot 200 in docs/evidence/2026-09-27-release-9b085c823523/run.log. Page bodies are placeholders,
+// so the dry run cannot prove what the real build emits; deploy/site/deploy.sh's own validation and Anvil's
+// live readback prove it.
+// ---------------------------------------------------------------------------------------------------------
+
+function prepareDistFixture(directory: string): string[] {
+  const reference = JSON.parse(readFileSync("deploy/site/vercel-reference.json", "utf8")) as { artifacts: string[] };
+  const astro = [...measuredFact("M15").output.matchAll(/\/_astro\/(\S+\.(?:js|css)) mode=/g)].map((match) => match[1]!);
+  assert.equal(astro.length, 5, "M15 records five _astro assets");
+  const assets = astro.map((name) => `/_astro/${name}`);
+  const links = assets.map((asset) => (asset.endsWith(".css")
+    ? `<link rel="stylesheet" href="${asset}">`
+    : `<script type="module" src="${asset}"></script>`)).join("\n");
+  // The build inlines PUBLIC_SUPABASE_URL into the /start page's commonswarm:url meta. The plan's own build-env
+  // check names the URL it requires.
+  const buildUrl = /PUBLIC_SUPABASE_URL"\) !== "([^"]+)"/.exec(readFileSync(SITE, "utf8"))?.[1];
+  assert.ok(buildUrl, "the lane 8 build-env check names the backend URL");
+  const pages: Record<string, string> = {
+    "index.html": "<!doctype html><title>CommonSwarm</title><h1>CommonSwarm</h1>\n",
+    "start/index.html": `<!doctype html><meta name="commonswarm:url" content="${buildUrl}"><title>start</title>\n`,
+    "app/index.html": `<!doctype html><title>app</title>\n${links}\n<button data-connected-apps-open>Connected apps</button>\n`,
+    "download/index.html": `<!doctype html><title>download</title><p>cswarm ${SITE_VERSION}</p>\n`,
+    "guides/grok-bot/index.html": "<!doctype html><title>guide</title><p>cswarm with Grok</p>\n",
+  };
+  const files = [...new Set([...reference.artifacts, "guides/grok-bot/index.html", ...astro.map((name) => `_astro/${name}`)])].sort();
+  for (const path of files) {
+    const target = join(directory, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, pages[path] ?? `fixture ${path}\n`);
+  }
+  return files;
 }
 
 interface Fixture {
@@ -1180,6 +1675,14 @@ interface Fixture {
   prelude: string;
   pythonFixture: string;
   sourceRoot: string;
+  // Mac lane only: the dry run's own directories, the fixture box root, and the containment profile.
+  part?: FixturePart;
+  macTmp?: string;
+  boxRoot?: string;
+  boxBin?: string;
+  distFixture?: string;
+  containment?: string;
+  browserBranch?: "FULL-CONTROL" | "REDUCED-CONTROL";
   supportRoot?: string;
   rootDirectories?: RootDirectoryFixture[];
   replacedRuntime?: { path: string; backup?: string };
@@ -1288,52 +1791,88 @@ function checkoutFixture(parent: string, name: string, sha: string): string {
   return checkout;
 }
 
-function prepareMacFixture(planBlocks: Block[] = []): Fixture {
-  const temporary = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-mac-"));
+function prepareMacFixture(
+  planBlocks: Block[] = [],
+  options: { state?: string; browserBranch?: Fixture["browserBranch"] } = {},
+): Fixture {
+  const state = options.state ?? "s5";
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-mac-"));
+  chmodSync(temporary, 0o700);
   const checkout = checkoutFixture(temporary, "checkout", "HEAD");
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const home = join(temporary, "child-home");
   const bin = join(temporary, "bin");
+  const boxBin = join(temporary, "box-bin");
+  const macTmp = join(temporary, "tmp");
+  const boxRoot = join(temporary, "box");
+  const distFixture = join(temporary, "dist-fixture");
   const log = join(temporary, "stub.log");
   const promptRoot = join(temporary, "prompt-inputs");
-  const copybackEvidence = join(temporary, "copyback-evidence");
   const opServiceAccountTokenFile = join(promptRoot, "op-service-account-token");
-  mkdirSync(home, { mode: 0o700 });
-  mkdirSync(promptRoot, { mode: 0o700 });
-  mkdirSync(copybackEvidence, { mode: 0o700 });
-  for (const name of [
-    "hm37-worker-boundary.txt",
-    "hm37-hosted-control-inputs.txt",
-    "hm37-hosted-check-control.json",
-    "hm37-revocation-readback.json",
-    "hm37-close-readback.txt",
-  ]) copyFileSync(join("docs/evidence/2026-09-29-release-eb2a87ac4b5a", name), join(copybackEvidence, name));
+  for (const directory of [home, promptRoot, macTmp, boxRoot, distFixture]) mkdirSync(directory, { mode: 0o700 });
   writeFileSync(opServiceAccountTokenFile, promptSchemaContent("op-service-account-token"), { mode: 0o600 });
   chmodSync(opServiceAccountTokenFile, 0o600);
   makeStubBin(bin);
+  for (const command of MAC_HOST_STATE_STUBS) {
+    copyFileSync(STUB, join(bin, command));
+    chmodSync(join(bin, command), 0o755);
+  }
+  const macProcesses = join(temporary, "mac-processes");
+  writeFileSync(macProcesses, "", { mode: 0o600 });
+  writeBoxUserlandBin(boxBin);
+  const seededPaths = seedMacBoxRoot(boxRoot, state);
+  prepareDistFixture(distFixture);
+  const model = cachedBoxModel(state);
+  const originMain = spawnSync("git", ["rev-parse", "--verify", "-q", "refs/remotes/origin/main^{commit}"], { encoding: "utf8" });
+  // The block profile covers the whole tree a block starts, remote scripts included: writes only inside the dry
+  // run's own temporary directory. The remote profile is what an ssh stub applies when a caller outside a
+  // contained tree starts a remote script: writes only inside the fixture box root and the stub's own state.
+  const blockProfile = containmentProfile({ writableSubpaths: [temporary], writableLiterals: [], executableRoots: [temporary] });
+  const remoteProfile = containmentProfile({
+    writableSubpaths: [boxRoot, `${log}.stub-state`, `${log}.cswarm-state`],
+    writableLiterals: [log],
+    executableRoots: [temporary],
+  });
   const env = explicitEnvironment({
     ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
     HOME: home,
-    PATH: `${bin}:${process.env.PATH ?? ""}`,
+    TMPDIR: macTmp,
+    PATH: macBlockPath(bin),
     BOX_DRY_RUN_PART: "mac",
     BOX_DRY_RUN_STUB_LOG: log,
     BOX_DRY_RUN_PYTHON_FIXTURE: PYTHON_FIXTURE,
+    BOX_DRY_RUN_USERLAND: USERLAND,
+    BOX_DRY_RUN_BOX_ROOT: boxRoot,
+    BOX_DRY_RUN_BOX_BIN: boxBin,
+    BOX_DRY_RUN_MAC_TMP: macTmp,
+    BOX_DRY_RUN_BOX_CLOCK: WINDOW_START,
+    BOX_DRY_RUN_MAC_PROCESSES: macProcesses,
+    BOX_DRY_RUN_SOURCE_CLONE: checkout,
+    ...(originMain.status === 0 ? { BOX_DRY_RUN_ORIGIN_MAIN: originMain.stdout.trim() } : {}),
+    BOX_DRY_RUN_DIST_FIXTURE: distFixture,
+    BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE: remoteProfile,
     BOX_DRY_RUN_OP_SERVICE_ACCOUNT_TOKEN_FILE: opServiceAccountTokenFile,
-    BOX_DRY_RUN_COPYBACK_EVIDENCE_DIR: copybackEvidence,
     BOX_DRY_RUN_EXPECTED_EDGE: PREVIOUS_EDGE,
     BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
     BOX_DRY_RUN_SITE_BASE_RELEASE: SITE_BASE_RELEASE,
+    BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
+    BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image!,
+    BOX_DRY_RUN_EDGE_HEALTH: model.containers.edge.health!,
+    BOX_DRY_RUN_EDGE_WORKDIR: model.containers.edge.labels["com.docker.compose.project.working_dir"]!,
+    BOX_DRY_RUN_EDGE_MOUNTS: model.containers.edge.mounts.map((mount) => `${mount.source} ${mount.destination}`).join("\n"),
     BOX_DRY_RUN_EDGE_MEMORY: String(EDGE_MEMORY),
     BOX_DRY_RUN_EDGE_NETWORK: EDGE_NETWORK,
+    BOX_DRY_RUN_CANDIDATE_EDGE: CANDIDATE_EDGE,
+    BOX_DRY_RUN_OAUTH_IMAGE: model.containers.oauth.image!,
   });
   if (env.PREP_RECEIPT_PATH) {
     const prep = JSON.parse(readFileSync(env.PREP_RECEIPT_PATH, "utf8")) as {
       workspace_id: string;
       seats: Array<{ principal_id: string }>;
     };
-    const state = `${log}.cswarm-state`;
-    mkdirSync(state, { mode: 0o700 });
-    writeFileSync(join(state, "principals.tsv"), prep.seats.map((seat) =>
+    const cswarmState = `${log}.cswarm-state`;
+    mkdirSync(cswarmState, { mode: 0o700 });
+    writeFileSync(join(cswarmState, "principals.tsv"), prep.seats.map((seat) =>
       `${prep.workspace_id}\t${seat.principal_id}\tfalse\n`).join(""), { mode: 0o600 });
   }
   return {
@@ -1341,48 +1880,27 @@ function prepareMacFixture(planBlocks: Block[] = []): Fixture {
     prelude: PRELUDE,
     pythonFixture: PYTHON_FIXTURE,
     sourceRoot: checkout,
+    part: "mac", macTmp, boxRoot, boxBin, distFixture, containment: blockProfile,
+    browserBranch: options.browserBranch ?? "FULL-CONTROL",
+    seededPaths, model,
     env,
     promptInputs: declaredPromptInputs,
   };
 }
 
+// Everything a Mac fixture wrote is under its own temporary directory; removing that directory is the whole
+// cleanup. Nothing lives at a fixed host path.
 function cleanupMacFixture(fixture: Fixture): void {
-  for (const path of [
-    `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`,
-    `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env`,
-    `/tmp/commonswarm-release-proofs-${RELEASE_SHA}-${WINDOW_ID}.tar`,
-    `/tmp/commonswarm-release-open-${RELEASE_SHA}.env`,
-    `/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env`,
-    "/tmp/commonswarm-hm37b-open.env",
-    "/tmp/commonswarm-site-window.env",
-  ]) rmSync(path, { force: true });
   removeOwnedTemporary(fixture.temporary!, "commonswarm-box-dry-run-mac-");
 }
 
 function seedHm37bCopybackReceipt(fixture: Fixture): void {
-  writeMode(`/tmp/commonswarm-hm37b-open-${RELEASE_SHA}.env`, [
+  writeMode(join(fixture.macTmp!, `commonswarm-hm37b-open-${RELEASE_SHA}.env`), [
     `SHA='${RELEASE_SHA}'`, `WINDOW_START_UTC='${WINDOW_START}'`,
     "WINDOW_END_UTC='2026-09-28T05:02:03Z'", `WINDOW_ID='${WINDOW_ID}'`,
     "WINDOW_PRINCIPAL_SUFFIX='010203'", "BACKUP_MAX_AGE_SECONDS='86400'", "",
   ].join("\n"));
   fixture.env.RELEASE_SHA = RELEASE_SHA;
-}
-
-function runBrowserProgram(fixture: Fixture, block: Block, userId?: string) {
-  const evidence = join(fixture.temporary!, "browser-evidence");
-  mkdirSync(evidence, { recursive: true, mode: 0o700 });
-  return spawnSync("browser-harness", [], {
-    encoding: "utf8",
-    input: browserProgram(block),
-    env: {
-      ...fixture.env,
-      SITE_EVIDENCE: evidence,
-      CLI_USER_ID: "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc",
-      BU_CDP_URL: "http://127.0.0.1:9335",
-      BH_TAB_MARKER: "0",
-      ...(userId ? { BOX_DRY_RUN_BROWSER_USER_ID: userId } : {}),
-    },
-  });
 }
 
 interface CheckoutSnapshot {
@@ -1541,7 +2059,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
   mkdirSync(join(measuredSiteRelease, "app"), { recursive: true });
   mkdirSync(join(measuredSiteRelease, "download"), { recursive: true });
   writeMode(join(measuredSiteRelease, "app/index.html"), "measured baseline without connected-apps marker\n", 0o644);
-  writeMode(join(measuredSiteRelease, "download/index.html"), "0.1.80\n", 0o644);
+  writeMode(join(measuredSiteRelease, "download/index.html"), `cswarm ${SITE_VERSION}\n`, 0o644);
   mkdirSync("/srv/commonswarm/site", { recursive: true });
   symlinkSync(measuredSiteRelease, "/srv/commonswarm/site/current");
   const targetEdge = CANDIDATE_EDGE;
@@ -1616,6 +2134,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       BOX_DRY_RUN_PART: "box",
+      BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
       BOX_DRY_RUN_EXPECTED_EDGE: previousEdge,
@@ -1631,6 +2150,7 @@ function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
       BOX_DRY_RUN_RELEASE_SHA: RELEASE_SHA,
     }),
     promptInputs: declaredPromptInputs,
+    part: "box",
   };
 }
 
@@ -1691,73 +2211,27 @@ function produceRunbook18UnitPrerequisites(fixture: Fixture): void {
 
 type FixturePart = "mac" | "box";
 
-function persistedFixturePaths(fixture: Fixture, part: FixturePart): string[] {
-  if (part === "mac") {
-    return [
-      fixture.temporary!,
-      `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.tar`,
-      `/tmp/commonswarm-${RELEASE_SHA}-${WINDOW_ID}.window.env`,
-      `/tmp/commonswarm-release-proofs-${RELEASE_SHA}-${WINDOW_ID}.tar`,
-    ].filter(existsSync);
-  }
-  const paths = [
-    fixture.temporary!,
-    "/home/commonswarm",
-    "/srv/commonswarm",
-    "/etc/commonswarm-release/target.env",
-    "/etc/ssl/yulan-internal-ca.pem",
-    "/etc/commonswarm-oauth/database-credentials",
-    "/etc/commonswarm-oauth/service.env",
-    "/etc/caddy/sites/10-commonswarm-api.caddy",
-    "/etc/caddy/sites/11-commonswarm-edge-staging.caddy",
-    "/etc/caddy/sites/12-commonswarm-mcp.caddy",
-    "/var/backups/commonswarm-postgres/status.json",
-    "/tmp/commonswarm-release-window.env",
-    "/tmp/commonswarm-release.tar",
-    "/tmp/commonswarm-release-proofs.tar",
-    "/tmp/commonswarm-site-window.env",
-    `/run/commonswarm-release-${RELEASE_SHA}-session.sh`,
-    `/run/commonswarm-release-${RELEASE_SHA}-apply.sql`,
-    `/run/commonswarm-hm37-${WINDOW_ID}`,
-  ];
-  if (fixture.replacedRuntime) paths.push(fixture.replacedRuntime.path);
-  return paths.filter(existsSync);
-}
-
-function snapshotFixture(fixture: Fixture, part: FixturePart, archive: string): void {
-  const paths = persistedFixturePaths(fixture, part)
-    .map((path) => (part === "mac" ? realpathSync(path) : resolve(path)).slice(1));
-  assert.ok(paths.length > 0);
-  const result = spawnSync("/usr/bin/tar", ["-cpf", archive, "-C", "/", ...paths], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-}
-
-function restoreFixture(fixture: Fixture, part: FixturePart, archive: string): void {
-  if (part === "box") cleanupBoxFixture(fixture);
-  else cleanupMacFixture(fixture);
-  const result = spawnSync("/usr/bin/tar", ["-xpf", archive, "-C", "/"], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  if (part === "box") {
-    for (const directory of fixture.rootDirectories ?? []) {
-      if (!directory.created) continue;
-      assert.equal(lstatSync(directory.path).isDirectory(), true, `restored fixture root is not a directory: ${directory.path}`);
-      chownSync(directory.path, 0, 0);
-      chmodSync(directory.path, directory.mode);
-    }
-  }
-}
-
 interface Execution {
   step: string;
-  result: "passed" | "failed";
+  result: "passed" | "failed" | "not-executed";
+  status: number | null;
   firstFailingCommand?: string;
   stderr: string;
+  stdout: string;
+  seeded?: string[];
+  refused?: string[];
+  declared?: NonSubstitutableEntry;
 }
 
 function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): Array<{ block: Block; execution: Execution }> {
   const records: Array<{ block: Block; execution: Execution }> = [];
   for (const block of planBlocks) {
-    if (block.host.startsWith("box ") !== (part === "box")) continue;
+    const isBoxBlock = block.host.startsWith("box ");
+    if (isBoxBlock !== (part === "box")) {
+      // The Mac lane does not execute a box block. What the box block produced is what a later Mac block reads.
+      if (part === "mac") seedBoxProducts(fixture, shortStep(block));
+      continue;
+    }
     const execution = executeWholeBlock(block, fixture);
     records.push({ block, execution });
     if (execution.result === "failed") break;
@@ -1772,6 +2246,37 @@ function executionUnproducedLine(block: Block, execution: Execution, state: stri
   return `UNPRODUCED ${failure} read by ${shortStep(block)} at ${block.file}:${block.line} [plan=${planName(block)} state=${state}]`;
 }
 
+interface ContainedResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+// A Mac process tree runs under sandbox-exec, or it does not run. One profile is applied at the top of the
+// tree; a second sandbox-exec inside it is refused by the kernel, so nothing below the top applies its own. The
+// marker tells an ssh stub that the tree it is in was contained by this function. When the profile cannot be
+// applied the result says so and the program's text never reaches a shell.
+function containedCommand(
+  fixture: Fixture,
+  command: string,
+  args: string[],
+  options: { input?: string; env: NodeJS.ProcessEnv; timeout?: number },
+): ContainedResult {
+  const env = { ...options.env, BOX_DRY_RUN_CONTAINED: "1" };
+  const availability = containmentAvailability();
+  if (!availability.available) {
+    return { status: 71, stdout: "", stderr: `CONTAINMENT UNAVAILABLE: ${availability.detail}. The program was not run.\n` };
+  }
+  const result = spawnSync(SANDBOX_EXEC, ["-p", fixture.containment!, command, ...args], {
+    cwd: fixture.cwd, input: options.input, encoding: "utf8", env, timeout: options.timeout ?? 120_000,
+  });
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+function containedSpawn(fixture: Fixture, script: string, env: NodeJS.ProcessEnv): ContainedResult {
+  return containedCommand(fixture, "/bin/bash", [], { input: script, env });
+}
+
 function executeWholeBlock(
   block: Block,
   fixture: Fixture,
@@ -1781,16 +2286,31 @@ function executeWholeBlock(
     env?: NodeJS.ProcessEnv;
     unsetEnv?: string[];
     trapErrors?: boolean;
+    executeDeclared?: boolean;
+    seedOverride?: Record<string, unknown>;
   } = {},
 ): Execution {
   const step = shortStep(block);
+  const contained = fixture.part === "mac";
+  const declared = contained && !options.executeDeclared ? declaredNonSubstitutable(step) : undefined;
+  if (declared) {
+    // A declared surface is not executed: not a part of the block, not with a canned answer.
+    const seed = seedDeclaredOutputs(declared, fixture, options.seedOverride);
+    return {
+      step, result: seed.refused.length > 0 ? "failed" : "not-executed", status: null,
+      stderr: seed.refused.join("\n"), stdout: "", seeded: seed.seeded, refused: seed.refused, declared,
+    };
+  }
   let body = materialize(block);
   if (fixture.temporary) body = body.replaceAll("/Users/yulanbot/anvil-work/hm37-prep", join(fixture.temporary, "hm37-prep"));
+  if (fixture.macTmp) body = mapMacTmp(body, fixture.macTmp);
   const script = [
     "set -E", `source ${JSON.stringify(fixture.prelude)}`,
     options.trapErrors === false
       ? "trap - ERR"
-      : "trap 'block_status=$?; printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\"' ERR",
+      // The ERR trap fires on a failing command whether or not errexit is on. The plan decides where errexit is
+      // off (`set +e` around a command whose status it reads), so the trap ends the block only when errexit is on.
+      : "trap 'block_status=$?; case $- in *e*) printf \"__FIRST_FAIL__:%s\\n\" \"$BASH_COMMAND\" >&2; exit \"$block_status\" ;; esac' ERR",
     body,
   ].join("\n");
   const childEnv: NodeJS.ProcessEnv = {
@@ -1799,24 +2319,122 @@ function executeWholeBlock(
     BOX_DRY_RUN_STEP: step,
     BOX_DRY_RUN_FAIL_STEP: options.fail ? step : "",
     BOX_DRY_RUN_CONTROL: options.control ?? "",
+    // Set only for a tree the harness puts under its sandbox profile (containedCommand sets it again).
+    ...(contained ? { BOX_DRY_RUN_CONTAINED: "1" } : {}),
   };
   for (const name of options.unsetEnv ?? []) delete childEnv[name];
   assertChildEnvironmentAllowed(childEnv, fixture.promptInputs);
-  const result = spawnSync("/bin/bash", [], {
-    cwd: fixture.cwd,
-    input: script,
-    encoding: "utf8",
-    env: childEnv,
-    timeout: 120_000,
-  });
-  const stderr = result.stderr ?? "";
+  const result: ContainedResult = contained
+    ? containedSpawn(fixture, script, childEnv)
+    : (() => {
+      const spawned = spawnSync("/bin/bash", [], {
+        cwd: fixture.cwd, input: script, encoding: "utf8", env: childEnv, timeout: 120_000,
+      });
+      return { status: spawned.status, stdout: spawned.stdout ?? "", stderr: spawned.stderr ?? "" };
+    })();
+  const stderr = result.stderr;
   const failure = result.status === 0 ? undefined : /__FIRST_FAIL__:(.*)/.exec(stderr)?.[1];
   return {
     step,
     result: result.status === 0 ? "passed" : "failed",
+    status: result.status,
     firstFailingCommand: failure,
     stderr,
+    stdout: result.stdout,
   };
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Control helpers. A control runs real plan text through executeWholeBlock, or a minimal mutation of it, next to
+// a positive run of the same path, and asserts the exact exit status: 69 where a stub refuses.
+// ---------------------------------------------------------------------------------------------------------
+
+function planBlock(file: string, step: string): Block {
+  const block = blocks(file).find((candidate) => shortStep(candidate) === step);
+  assert.ok(block, `${file} has no step ${step}`);
+  return block;
+}
+
+// A mutation that does not change the block is a control that tests nothing, so it is an error.
+function mutatedBlock(block: Block, mutations: Array<[string, string]>): Block {
+  let source = block.source;
+  for (const [from, to] of mutations) {
+    assert.ok(source.includes(from), `control mutation target is absent from ${shortStep(block)}: ${JSON.stringify(from)}`);
+    source = source.replace(from, () => to);
+  }
+  assert.notEqual(source, block.source, `control mutation did not change ${shortStep(block)}`);
+  return { ...block, source };
+}
+
+function replaceLast(text: string, from: string, to: string): string {
+  const index = text.lastIndexOf(from);
+  assert.ok(index >= 0, `control mutation target is absent: ${JSON.stringify(from)}`);
+  return `${text.slice(0, index)}${to}${text.slice(index + from.length)}`;
+}
+
+// Lane 8 carried up to, and not including, a step. Every earlier block runs for real, in plan order, in one Mac
+// fixture, so a control gets the box and the evidence directory in the state the plan leaves at that point by
+// running the plan and not by writing that state itself. A block that declares a browser surface is seeded from
+// its cited evidence and not executed, as in every plan run.
+function laneEightFixture(stopBefore: string): { fixture: Fixture; byStep: Map<string, Block> } {
+  const laneBlocks = resolveSteps("lane-8/FULL-CONTROL", siteOrder());
+  const stopIndex = laneBlocks.findIndex((block) => shortStep(block) === stopBefore);
+  assert.ok(stopIndex >= 0, `lane 8 has no step ${stopBefore}`);
+  const fixture = prepareMacFixture(laneBlocks);
+  const records = executePlanUntilFailure(laneBlocks.slice(0, stopIndex), fixture, "mac");
+  const failed = records.find(({ execution }) => execution.result === "failed");
+  if (failed) {
+    cleanupMacFixture(fixture);
+    assert.fail(`lane 8 stopped at ${failed.execution.step} before ${stopBefore}:\n${failed.execution.stderr}`);
+  }
+  return { fixture, byStep: new Map(laneBlocks.map((block) => [shortStep(block), block])) };
+}
+
+interface SiteBoxState {
+  current: string;
+  releases: string[];
+}
+
+function fixtureSiteRoot(fixture: Fixture): string {
+  return join(fixture.boxRoot!, "srv/commonswarm/site");
+}
+
+function siteBoxState(fixture: Fixture): SiteBoxState {
+  const site = fixtureSiteRoot(fixture);
+  return { current: readlinkSync(join(site, "current")), releases: readdirSync(join(site, "releases")).sort() };
+}
+
+// A failed site-04 leaves what a real failed deploy leaves: its evidence files, and possibly an upload directory
+// that never became a release. Removing them lets the positive run of the same block follow the negative one in
+// the same fixture. Only names the block itself wrote are removed.
+function resetSiteFourAttempt(fixture: Fixture, before: SiteBoxState): void {
+  const evidence = fixture.env.SITE_EVIDENCE!;
+  for (const name of ["deploy.log", "deploy-status.txt", "after.release", "pin-after-deploy.txt"]) rmSync(join(evidence, name), { force: true });
+  const releases = join(fixtureSiteRoot(fixture), "releases");
+  for (const name of readdirSync(releases)) {
+    if (before.releases.includes(name)) continue;
+    assert.match(name, /^\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}\.tmp$/, `a failed deploy left something other than an upload directory: ${name}`);
+    rmSync(join(releases, name), { recursive: true });
+  }
+  assert.deepEqual(siteBoxState(fixture), before);
+}
+
+// The real deploy.sh at the release SHA, copied beside itself with one line added, so the block still runs the
+// script from its own directory. The block's own pre-checks compare tracked files only, and an untracked copy is
+// not one of them.
+function writeMutatedDeploy(fixture: Fixture, mutate: (source: string) => string): string {
+  const repo = fixture.env.SITE_RELEASE_REPO!;
+  const original = readFileSync(join(repo, "deploy/site/deploy.sh"), "utf8");
+  const mutated = mutate(original);
+  assert.notEqual(mutated, original, "control deploy.sh mutation did not change the script");
+  writeFileSync(join(repo, "deploy/site/deploy-control.sh"), mutated, { mode: 0o644 });
+  return "deploy/site/deploy-control.sh";
+}
+
+const SITE_FOUR_DEPLOY_CALL = "/bin/sh deploy/site/deploy.sh commonswarm@yulan-vps-1";
+
+function siteFourDeployStatus(fixture: Fixture): string {
+  return readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy-status.txt"), "utf8");
 }
 
 test("all scoped fences and host declarations are executable or explicitly text", (t) => {
@@ -2153,6 +2771,137 @@ test("plan-used systemctl, docker, and ssh operations are explicitly listed by t
   ]), /plan operations missing from dry-run stub list:\ndocker network/);
 });
 
+// ---------------------------------------------------------------------------------------------------------
+// The site deploy boundary. Lane 8 step site-04 runs the real deploy/site/deploy.sh, and through it the real
+// finalize-release.sh. fixtures/site-deploy-commands.json lists every command those scripts run and how the dry
+// run answers it; this reads the commands from the script text, so a command a later edit adds fails here until it
+// is listed, and the stubs refuse every shape the file does not list.
+// ---------------------------------------------------------------------------------------------------------
+
+const SITE_DEPLOY_COMMANDS_FILE = "tests/box-dry-run/fixtures/site-deploy-commands.json";
+
+interface SiteDeployInventory {
+  scripts: string[];
+  builtins: string[];
+  stubs: Record<string, { shapes: string[]; flags: string[]; used_at: string[]; effect: string; evidence: Array<{ file: string; line?: number; shape: string }> }>;
+  box_userland: Record<string, { shapes: string[]; used_at: string[]; effect: string; evidence: Array<{ file: string; line?: number; shape: string }> }>;
+  local: Record<string, string[]>;
+}
+
+// The command words of a POSIX shell script, read from its text: the first word of every simple command, in the
+// script and in every command substitution. Strings, variable references, arithmetic and comments are removed
+// first, so text inside a message is not a command. A scan cannot replace running the script, so the stubs also
+// refuse every shape the inventory does not list; this is the check that a new command is listed at all.
+function scriptCommandWords(script: string): string[] {
+  let text = script.replace(/\\\n\s*/g, " ").split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  const functions = new Set([...text.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{/gm)].map((match) => match[1]!));
+  const keywords = new Set(["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "function", "time"]);
+  text = text.replace(/\$\(\([^)]*\)\)/g, " ARITHMETIC ");
+  const bodies: string[] = [];
+  for (let previous = ""; previous !== text;) {
+    previous = text;
+    text = text.replace(/\$\(([^()]*)\)/g, (_match, body: string) => { bodies.push(body); return " SUBSTITUTION "; });
+  }
+  const words = new Set<string>();
+  for (const part of [text, ...bodies]) {
+    const plain = part
+      .replace(/'[^']*'/g, " S ")
+      .replace(/"[^"]*"/g, " S ")
+      .replace(/\$\{[^}]*\}/g, " V ")
+      .replace(/\$[A-Za-z0-9_@*#?]+/g, " V ");
+    for (const segment of plain.split(/[;&|(){}`\n]+/)) {
+      const tokens = segment.trim().split(/\s+/).filter(Boolean);
+      while (tokens.length && (tokens[0] === "!" || /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0]!) || keywords.has(tokens[0]!))) {
+        if (keywords.has(tokens[0]!) && ["for", "case", "in", "function"].includes(tokens[0]!)) { tokens.length = 0; break; }
+        tokens.shift();
+      }
+      const word = tokens[0];
+      if (word && /^[a-z][a-z0-9_-]*$/.test(word) && !functions.has(word) && !keywords.has(word)) words.add(word);
+    }
+  }
+  return [...words].sort();
+}
+
+test("deploy/site/deploy.sh and finalize-release.sh run only commands the site deploy inventory lists", () => {
+  const inventory = JSON.parse(readFileSync(SITE_DEPLOY_COMMANDS_FILE, "utf8")) as SiteDeployInventory;
+  const listed = new Set([
+    ...inventory.builtins, "break", "continue", "true", "false",
+    ...Object.keys(inventory.stubs), ...Object.keys(inventory.box_userland), ...Object.keys(inventory.local),
+  ]);
+  const scripts = new Map(inventory.scripts.map((file) => [file, readFileSync(file, "utf8")]));
+  for (const [file, text] of scripts) {
+    // Site-04 runs the scripts of the release checkout, at the release SHA. They are the scripts read here.
+    assert.equal(gitShow(SITE_SHA, file), text, `${file} at the lane 8 release SHA differs from the working tree`);
+    const unlisted = scriptCommandWords(text).filter((word) => !listed.has(word));
+    assert.deepEqual(unlisted, [], `${file} runs a command the site deploy inventory does not list`);
+  }
+  // The scanner sees what it is meant to see: a command added to the script text is reported.
+  assert.deepEqual(scriptCommandWords(`${scripts.get("deploy/site/deploy.sh")!}\ncurl -fsS https://example.invalid/\n`).filter((word) => !listed.has(word)), ["curl"]);
+  assert.deepEqual(scriptCommandWords(`${scripts.get("deploy/site/finalize-release.sh")!}\nif true; then aws s3 sync . s3://bucket; fi\n`).filter((word) => !listed.has(word)), ["aws"]);
+
+  // Every cited place names its command, and every cited evidence file and line exists.
+  const entries: Array<[string, { used_at: string[]; evidence: Array<{ file: string; line?: number }> }]> = [
+    ...Object.entries(inventory.stubs), ...Object.entries(inventory.box_userland),
+  ];
+  for (const [command, entry] of entries) {
+    for (const place of entry.used_at) {
+      const [file, line] = place.split(":") as [string, string];
+      const source = (scripts.get(file) ?? readFileSync(file, "utf8")).split("\n")[Number(line) - 1] ?? "";
+      const word = command === "npm" ? "npm" : command;
+      assert.ok(source.includes(word), `${place} does not run ${command}: ${source.trim()}`);
+    }
+    assert.ok(entry.evidence.length > 0, `${command} cites no evidence`);
+    for (const evidence of entry.evidence) {
+      assert.equal(existsSync(evidence.file), true, `${command}: evidence file is missing: ${evidence.file}`);
+      if (evidence.line) assert.ok(readFileSync(evidence.file, "utf8").split("\n").length >= evidence.line, `${command}: ${evidence.file} has no line ${evidence.line}`);
+    }
+  }
+  // The flags and subcommands the scripts use are the ones the inventory lists for the stubbed commands.
+  const deploy = scripts.get("deploy/site/deploy.sh")!;
+  const finalize = scripts.get("deploy/site/finalize-release.sh")!;
+  const npmSubcommands = new Set([...deploy.matchAll(/run_site_npm\s+"[^"]+"\s+([a-z]+(?: [a-z]+)?)\s*$/gm)].map((match) => match[1]!));
+  assert.deepEqual([...npmSubcommands].sort(), [...inventory.stubs.npm!.shapes].sort());
+  const rsyncFlags = new Set([...`${deploy}\n${finalize}`.matchAll(/^\s*rsync ((?:-\S+ )+)/gm)].flatMap((match) => match[1]!.trim().split(" ")));
+  assert.deepEqual([...rsyncFlags].sort(), [...inventory.stubs.rsync!.flags].sort());
+  const sshOptions = new Set([...`${deploy}\n${finalize}`.matchAll(/\bssh (-o \S+)/g)].map((match) => match[1]!));
+  assert.deepEqual([...sshOptions], [], "deploy.sh passes no ssh option the stub would need to list");
+});
+
+test("the containment profiles compile and carry every denial the dry run's containment names", (t) => {
+  const fixture = prepareMacFixture();
+  try {
+    const profiles = [
+      ["block", fixture.containment!, fixture.temporary!],
+      ["remote", fixture.env.BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE!, fixture.boxRoot!],
+    ] as const;
+    for (const [name, profile, writable] of profiles) {
+      // sandbox-exec compiles a profile before it applies it: 65 is a profile that does not compile; 71 a compiled
+      // profile that cannot be applied to this process because it is already sandboxed; 0 is applied.
+      assert.equal(profileCompileProblem(profile), undefined, `the ${name} profile does not compile`);
+      assert.match(profile, /^\(version 1\)\n\(allow default\)\n/);
+      assert.match(profile, /\(deny network\*\)/);
+      // Writes: refused everywhere except the named directory, /dev/null and /dev/fd.
+      const writes = /\(deny file-write\* \(require-all ([^\n]*)\)\)\n/.exec(profile)?.[1] ?? "";
+      assert.ok(writes.includes(`(require-not (subpath ${JSON.stringify(canonicalPath(writable))}))`), `the ${name} profile allows writes in ${writable}`);
+      assert.ok(writes.includes('(require-not (literal "/dev/null"))') && writes.includes('(require-not (subpath "/dev/fd"))'));
+      // Applications are not started, and nothing under the operator's home is, except the named directories and the node tooling.
+      assert.match(profile, /\(deny process-exec \(subpath "\/Applications"\) \(subpath "\/System\/Applications"\)/);
+      assert.match(profile, new RegExp(`\\(deny process-exec \\(require-all \\(subpath "${userInfo().homedir}"\\) \\(require-not \\(subpath`));
+      // The operator's private state is not read.
+      for (const path of [".hermes", ".config/cswarm", "Library/Keychains"]) {
+        assert.ok(profile.includes(`(subpath ${JSON.stringify(join(userInfo().homedir, path))})`), `the ${name} profile does not deny reads of ~/${path}`);
+      }
+      assert.match(profile, /\(deny file-read\* /);
+    }
+    t.diagnostic(`block profile:\n${fixture.containment}`);
+    t.diagnostic(`remote profile:\n${fixture.env.BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE}`);
+    // A profile that does not compile is refused with 65, so the check above sees it.
+    assert.equal(spawnSync(SANDBOX_EXEC, ["-p", "(version 1)\n(bogus-form)\n", "/usr/bin/true"], { encoding: "utf8" }).status, 65);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("controls: unknown stub operations fail closed and accepted mutations change readback", () => {
   const fixture = prepareMacFixture();
   const run = (command: string, args: string[]) => spawnSync(command, args, {
@@ -2175,6 +2924,17 @@ test("controls: unknown stub operations fail closed and accepted mutations chang
       assert.match(rejected.stderr, new RegExp(`^unhandled dry-run stub: ${command} `));
     }
 
+    // Every stub that refuses answers an unreviewed flag with exactly 69, so a call that no stub lists cannot pass
+    // for a call that one does. (curl, tar, python3 and sleep pass through to the host tool or the network fixture.)
+    for (const command of [
+      "systemctl", "docker", "psql", "caddy", "ssh", "scp", "sudo", "op", "chown", "deno", "cswarm",
+      "browser-harness", "cp", "readlink", "rsync", "npm", "open", "osascript", "launchctl", "security", "pgrep", "ps",
+    ]) {
+      const rejected = run(command, ["--h10-unreviewed-flag"]);
+      assert.equal(rejected.status, 69, `${command} did not refuse an unreviewed flag: ${rejected.stderr}`);
+      if (command !== "op") assert.match(rejected.stderr, /unhandled dry-run stub|UNPRODUCED/); // op refuses silently by design: its output is a secret boundary
+    }
+
     assert.equal(run("systemctl", ["stop", "commonswarm-edge-recycle.timer"]).status, 0);
     const stopped = run("systemctl", ["is-active", "commonswarm-edge-recycle.timer"]);
     assert.equal(stopped.status, 3);
@@ -2190,7 +2950,11 @@ test("controls: unknown stub operations fail closed and accepted mutations chang
     assert.equal(workdir.status, 0, workdir.stderr);
     assert.equal(workdir.stdout, `${CANDIDATE_EDGE}/deploy/edge-runtime\n`);
 
-    const ssh = run("ssh", ["-o", "BatchMode=yes", "ops@100.115.66.74", "readlink -f /home/commonswarm/edge/current"]);
+    // The remote command runs against the fixture box root, so it reads the state the fixture seeded: the
+    // measured previous edge release (M5). An ssh call is a Mac process tree and runs contained.
+    const ssh = containedCommand(fixture, "ssh", ["-o", "BatchMode=yes", "ops@100.115.66.74", "readlink -f /home/commonswarm/edge/current"], {
+      env: fixture.env,
+    });
     assert.equal(ssh.status, 0, ssh.stderr);
     assert.equal(ssh.stdout, `${PREVIOUS_EDGE}\n`);
   } finally {
@@ -2281,7 +3045,11 @@ test("cswarm stub enforces workspace and revocation while delivering each note o
 test("scp and op stubs enforce transfer and protected-output boundaries", () => {
   const fixture = prepareMacFixture();
   const source = join(fixture.temporary!, "scp-source.txt");
-  const target = `/tmp/commonswarm-scp-control-${process.pid}`;
+  // The box path the transfer names, and where it lands. On the Mac lane the box's /tmp is a directory in the
+  // fixture box root; nothing is written to the host's /tmp. The box lane runs on a guarded runner whose real
+  // /tmp is the box's, and it names a per-process file there.
+  const boxTarget = `/tmp/commonswarm-scp-control-${process.pid}`;
+  const target = process.env.BOX_DRY_RUN_PART === "box" ? boxTarget : join(fixture.boxRoot!, boxTarget);
   const outputDirectory = join(fixture.temporary!, "op-output");
   const output = join(outputDirectory, "site-build.env");
   writeMode(source, "recorded transfer bytes\n", 0o600);
@@ -2290,7 +3058,7 @@ test("scp and op stubs enforce transfer and protected-output boundaries", () => 
     const acceptedEnv = process.env.BOX_DRY_RUN_PART === "box"
       ? { ...fixture.env, BOX_DRY_RUN_PART: "box" }
       : fixture.env;
-    const accepted = spawnSync("scp", [source, `ops@100.115.66.74:${target}`], {
+    const accepted = spawnSync("scp", [source, `ops@100.115.66.74:${boxTarget}`], {
       encoding: "utf8", env: acceptedEnv,
     });
     assert.equal(accepted.status, 0, accepted.stderr);
@@ -2304,7 +3072,7 @@ test("scp and op stubs enforce transfer and protected-output boundaries", () => 
     }
     const digest = createHash("sha256").update(readFileSync(source)).digest("hex");
     assert.match(readFileSync(fixture.log, "utf8"), new RegExp(
-      `^scp-transfer source_sha256=${digest} target_user=ops target_host=100\\.115\\.66\\.74 target_path=${target}$`, "m",
+      `^scp-transfer source_sha256=${digest} target_user=ops target_host=100\\.115\\.66\\.74 target_path=${boxTarget}$`, "m",
     ));
 
     const wrongHost = spawnSync("scp", [source, "ops@192.0.2.1:/tmp/rejected"], {
@@ -2361,7 +3129,7 @@ test("scp and op stubs enforce transfer and protected-output boundaries", () => 
     assert.equal(outputStat.mode & 0o777, 0o600);
     assert.match(readFileSync(output, "utf8"), /^PUBLIC_SUPABASE_URL=https:\/\/api\.commonswarm\.com$/m);
   } finally {
-    rmSync(target, { force: true });
+    if (process.env.BOX_DRY_RUN_PART === "box") rmSync(target, { force: true });
     cleanupMacFixture(fixture);
   }
 });
@@ -2646,9 +3414,26 @@ test("block shells use an explicit empty-base environment and plan code cannot r
   }
 });
 
+// The outcome lines the plans print themselves (`BOX_EGRESS=PASS`, `PIN=PASS`, `close=PASS`, and any a later edit
+// adds) are read from the plan text. A stub that contains one is answering for a block, so the list is derived and
+// never typed.
+function planOutcomeMarkers(): string[] {
+  const markers = new Set<string>();
+  for (const block of SCOPED.flatMap(blocks)) {
+    for (const match of block.source.matchAll(/\b([A-Za-z][A-Za-z0-9_]*=(?:PASS|FAIL))\b/g)) markers.add(match[1]!);
+  }
+  return [...markers].sort();
+}
+
+function outcomeMarkersIn(text: string): string[] {
+  return planOutcomeMarkers().filter((marker) => text.includes(marker));
+}
+
 test("stubs do not return synthetic whole-step success", () => {
   const prelude = readFileSync("tests/box-dry-run/prelude.sh", "utf8");
   const dispatch = readFileSync("tests/box-dry-run/stubs/dispatch.sh", "utf8");
+  const userland = readFileSync("tests/box-dry-run/stubs/box-userland.py", "utf8");
+  const sitecustomize = readFileSync("tests/box-dry-run/python/sitecustomize.py", "utf8");
   assert.doesNotMatch(prelude, /dry-run (?:python|node) PASS/);
   assert.match(prelude, /python3\(\)[\s\S]*?command python3 "\$@"/);
   assert.match(prelude, /node\(\)[\s\S]*?command node "\$@"/);
@@ -2657,6 +3442,25 @@ test("stubs do not return synthetic whole-step success", () => {
   assert.doesNotMatch(dispatch, /case "\$\{BOX_DRY_RUN_STEP/);
   assert.doesNotMatch(dispatch, /if \[ "\$\{BOX_DRY_RUN_STEP/);
   assert.doesNotMatch(dispatch, /BOX_DRY_RUN_CANDIDATE_EDGE_WORKDIR/);
+
+  // No stub prints a line a plan block prints. The markers are the ones the current plan text prints.
+  const markers = planOutcomeMarkers();
+  assert.ok(markers.length >= 5, `the plan text prints too few outcome markers to check against: ${markers.join(", ")}`);
+  for (const [name, text] of [["prelude.sh", prelude], ["dispatch.sh", dispatch], ["box-userland.py", userland], ["sitecustomize.py", sitecustomize]] as const) {
+    assert.deepEqual(outcomeMarkersIn(text), [], `${name} contains an outcome line a plan block prints`);
+  }
+  // The detector sees what it is meant to see: the same scan finds a marker in a stub that prints one.
+  assert.deepEqual(outcomeMarkersIn("printf '%s\\n' 'BOX_EGRESS=PASS user_agent=x'"), ["BOX_EGRESS=PASS"]);
+
+  // A stub that answers for a whole remote script is a stub that matches the script's text. The ssh stub runs the
+  // remote command in a shell against the fixture box root; it never branches on what the script says.
+  assert.doesNotMatch(dispatch, /remote_input/);
+  assert.doesNotMatch(dispatch, /case "\$remote_command" in\s*\*['"]/);
+  // The browser stub does not emulate a browser: no program runs, and nothing in the stubs evaluates page code.
+  const browserBranch = /\n  browser-harness\)([\s\S]*?)\n    ;;/.exec(dispatch)?.[1] ?? "";
+  assert.match(browserBranch, /unhandled_stub/);
+  assert.doesNotMatch(browserBranch, /python|node|exec |js\(|cdp\(/);
+  assert.doesNotMatch(dispatch, /def (?:js|cdp)\(/);
 });
 
 test("current plans report only undeclared operator inputs as UNPRODUCED", (t) => {
@@ -2688,8 +3492,8 @@ test("controls: pre-revision plans still report their audited UNPRODUCED items",
     return block;
   });
   const report = unproducedReport([
-    { label: "pre-revision/window-a", blocks: oldWindow },
-    { label: "pre-revision/lane-8", blocks: blocksFromMarkdown(SITE, oldSiteMarkdown) },
+    { label: "pre-revision/window-a", blocks: oldWindow, state: "s5" },
+    { label: "pre-revision/lane-8", blocks: blocksFromMarkdown(SITE, oldSiteMarkdown), state: "s5" },
   ]);
   for (const audited of [
     "GO.txt", "hm37-open-ack-control.ts", "human-session.json", "gate-evidence.txt",
@@ -2720,92 +3524,406 @@ test("controls: a measured basename under a different directory remains UNPRODUC
 
 test("controls: runbook-03 with a literal <sha> window.env path fails the runbook-03 check", () => {
   const current = readFileSync(RUNBOOK, "utf8");
+  // The named form of runbook-03, whichever form the plan text is in now: the window file and the SHA comparison
+  // both take the named release SHA.
   const named = current
-    .replace("  . /home/commonswarm/stack/release-proofs/<sha>/window.env", [
-      '  : "${RELEASE_SHA:?named release SHA required}"',
-      '  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
+    .replace(/^( *)\. \/home\/commonswarm\/stack\/release-proofs\/<sha>\/window\.env$/m, (_line, indent: string) => [
+      `${indent}: "\${RELEASE_SHA:?named release SHA required}"`,
+      `${indent}. "/home/commonswarm/stack/release-proofs/\${RELEASE_SHA}/window.env"`,
     ].join("\n"))
-    .replace("  test \"$SHA\" = '<sha>'", '  test "$SHA" = "$RELEASE_SHA"');
+    .replace(/^( *)test "\$SHA" = '<sha>'$/m, (_line, indent: string) => `${indent}test "$SHA" = "$RELEASE_SHA"`);
   assert.doesNotThrow(() => assertRunbook03NamedShaWindowPath(named));
-  const regressed = named.replace(
-    '  . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"',
-    "  . /home/commonswarm/stack/release-proofs/<sha>/window.env",
-  );
-  assert.throws(() => assertRunbook03NamedShaWindowPath(regressed), /release-proofs/);
+
+  // Three regressions, each one a literal <sha> in runbook-03's executable text. The check must reject every
+  // one; it used to reject only the first.
+  const windowLine = /^( *)\. "\/home\/commonswarm\/stack\/release-proofs\/\$\{RELEASE_SHA\}\/window\.env"$/m;
+  const compareLine = /^( *)test "\$SHA" = "\$RELEASE_SHA"$/m;
+  const strictLine = /^( *)set -euo pipefail$/m;
+  const runbook03 = stepSource(named, "runbook-03");
+  for (const [pattern, name] of [[windowLine, "window file"], [compareLine, "SHA comparison"], [strictLine, "options line"]] as const) {
+    assert.match(runbook03, pattern, `the named runbook-03 has the ${name} line the control mutates`);
+  }
+  // Each mutation is applied inside runbook-03 only: the same line can appear in another block.
+  const inRunbook03 = (pattern: RegExp, replacement: string): string => named.replace(runbook03, () => runbook03.replace(pattern, replacement));
+  const regressions = [
+    inRunbook03(windowLine, "$1. /home/commonswarm/stack/release-proofs/<sha>/window.env"),
+    inRunbook03(compareLine, "$1test \"$SHA\" = '<sha>'"),
+    inRunbook03(strictLine, "$1set -euo pipefail\n$1# release directory: <sha>"),
+  ];
+  for (const regressed of regressions) {
+    assert.notEqual(regressed, named, "a regression must change the plan text");
+    assert.throws(() => assertRunbook03NamedShaWindowPath(regressed), /<sha>|release-proofs/);
+  }
+  // The SHA comparison and the comment are caught only by the any-placeholder check.
+  for (const regressed of regressions.slice(1)) {
+    assert.throws(() => assertRunbook03NamedShaWindowPath(regressed), /literal <sha> placeholder/);
+  }
 });
 
+// The five files a copy-back reads from the box's proof directory. Three are products of box blocks and are seeded
+// from their committed execution evidence (fixtures/box-block-products.json). The other two are staged from the Mac
+// by earlier blocks; their bytes come from the same committed evidence directory.
+const COPYBACK_MEMBERS = [
+  "hm37-worker-boundary.txt", "hm37-hosted-control-inputs.txt", "hm37-hosted-check-control.json",
+  "hm37-revocation-readback.json", "hm37-close-readback.txt",
+];
+const COPYBACK_EVIDENCE_DIRECTORY = "docs/evidence/2026-09-29-release-eb2a87ac4b5a";
+
+function seedCopybackProofDirectory(fixture: Fixture): string {
+  const proof = join(fixture.boxRoot!, "home/commonswarm/stack/release-proofs", RELEASE_SHA);
+  mkdirSync(proof, { recursive: true, mode: 0o700 });
+  for (const member of COPYBACK_MEMBERS) {
+    const evidence = join(COPYBACK_EVIDENCE_DIRECTORY, member);
+    assert.equal(existsSync(evidence), true, `copy-back evidence is missing: ${evidence}`);
+    copyFileSync(evidence, join(proof, member));
+    chmodSync(join(proof, member), 0o600);
+  }
+  return proof;
+}
+
 test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", () => {
-  const block = blocks(HM37B).find((candidate) => shortStep(candidate) === "hm37b-copyback");
-  assert.ok(block);
+  const block = planBlock(HM37B, "hm37b-copyback");
+  const boxFiles = "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'";
   const fixture = prepareMacFixture([block]);
-  seedHm37bCopybackReceipt(fixture);
   try {
+    seedHm37bCopybackReceipt(fixture);
+    const proof = seedCopybackProofDirectory(fixture);
+    writeFileSync(join(proof, "unexpected.txt"), "not part of the copy-back\n", { mode: 0o600 });
+    const tarMember = /tar --no-xattrs -tf|printf '%s\\n' \$FILES/;
+
+    // The Mac side compares the archive's members with its own list. The box half's list is the one mutated, so
+    // the box builds an archive that differs from what the Mac expects; the plan text is otherwise the block that
+    // runs. (The last FILES assignment in the block is the box half's.)
+    const missing = executeWholeBlock({
+      ...block,
+      source: replaceLast(block.source, boxFiles, "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json'"),
+    }, fixture);
+    const extra = executeWholeBlock({
+      ...block,
+      source: replaceLast(block.source, boxFiles, `${boxFiles.slice(0, -1)} unexpected.txt'`),
+    }, fixture);
+    for (const [name, execution] of [["missing", missing], ["extra", extra]] as const) {
+      assert.equal(execution.result, "failed", `${name} archive unexpectedly passed`);
+      assert.match(execution.firstFailingCommand ?? execution.stderr, tarMember, `${name} archive failed somewhere other than the member comparison`);
+    }
+
     const positive = executeWholeBlock(block, fixture);
     assert.equal(positive.result, "passed", positive.stderr);
-    for (const variant of ["missing", "extra"]) {
-      const negative = executeWholeBlock(block, fixture, {
-        env: { BOX_DRY_RUN_COPYBACK_ARCHIVE_VARIANT: variant },
-      });
-      assert.equal(negative.result, "failed", `${variant} archive unexpectedly passed`);
-      assert.match(negative.firstFailingCommand ?? negative.stderr, /tar --no-xattrs -tf|printf '%s\\n' \$FILES/);
-    }
+    const evidenceDirectories = readdirSync(join(fixture.cwd, "docs/evidence")).filter((name) => name.includes(`-release-${RELEASE_SHA.slice(0, 12)}-`));
+    assert.equal(evidenceDirectories.length, 1);
+    const copied = readdirSync(join(fixture.cwd, "docs/evidence", evidenceDirectories[0]!)).sort();
+    assert.deepEqual(copied, [...COPYBACK_MEMBERS, "hm37b-copyback.sha256"].sort(), "the copy-back wrote the five members and their digest list");
+
+    // A member the box does not have: the box half's own check refuses it, and the ssh child's failure is
+    // reported with the box script's own command.
+    rmSync(join(proof, "hm37-close-readback.txt"));
+    const absent = executeWholeBlock(block, fixture);
+    assert.equal(absent.result, "failed");
+    assert.match(absent.stderr, /the box script exited 1[\s\S]*test -f "\$PROOF_DIR\/\$FILE"/);
   } finally {
     cleanupMacFixture(fixture);
   }
 });
 
 test("controls: an ssh remote script that the fixture box root cannot satisfy fails", () => {
-  const fixture = prepareMacFixture();
-  const command = `sudo -n -i /bin/bash -s -- '${RELEASE_SHA}'`;
-  const run = (input: string) => spawnSync("ssh", ["ops@100.115.66.74", command], {
-    encoding: "utf8", input, env: fixture.env,
-  });
+  const site01 = planBlock(SITE, "site-01");
+  const fixture = prepareMacFixture([site01]);
+  const previousRelease = join(fixtureSiteRoot(fixture), "releases", SITE_BASE_RELEASE);
   try {
-    const positive = run(`set -euo pipefail\ntest -f /home/commonswarm/stack/release-proofs/${RELEASE_SHA}/hm37-close-readback.txt\ntar -C /home/commonswarm/stack/release-proofs/${RELEASE_SHA} -cf - hm37-close-readback.txt\n`);
-    assert.equal(positive.status, 0, positive.stderr);
-    assert.ok(positive.stdout.length > 0, "satisfied remote script returned no tar stream");
+    // 1. Box state the fixture cannot satisfy: current names a release other than the one the plan expects, so
+    //    the plan's own check inside the box script fails.
+    const current = join(fixtureSiteRoot(fixture), "current");
+    const originalTarget = readlinkSync(current);
+    const otherRelease = join(fixtureSiteRoot(fixture), "releases", "20260101T000000Z-000000000000-0000000000000000");
+    mkdirSync(otherRelease);
+    unlinkSync(current);
+    symlinkSync(otherRelease, current);
+    const unsatisfied = executeWholeBlock(site01, fixture);
+    assert.equal(unsatisfied.result, "failed");
+    assert.equal(unsatisfied.status, 1, unsatisfied.stderr);
+    assert.match(unsatisfied.stderr, /the box script exited 1[\s\S]*test "\$previous" = /);
+    unlinkSync(current);
+    symlinkSync(originalTarget, current);
 
-    const missing = run(`set -euo pipefail\ntest -f /home/commonswarm/stack/release-proofs/${RELEASE_SHA}/not-produced.txt\n`);
-    assert.notEqual(missing.status, 0);
-    const unhandled = run("set -euo pipefail\nunreviewed-box-command\n");
-    assert.notEqual(unhandled.status, 0);
+    // 2. An unreviewed command shape on a box-userland command: the stub refuses it, exactly 69 (an unknown
+    //    command name would be 127, and would show only that nothing answered).
+    const unreviewed = executeWholeBlock(mutatedBlock(site01, [[
+      "test -w \"$root\" && test -w \"$root/releases\"", "stat -x \"$root\"; test -w \"$root\" && test -w \"$root/releases\"",
+    ]]), fixture);
+    assert.equal(unreviewed.result, "failed");
+    assert.equal(unreviewed.status, 69, unreviewed.stderr);
+    assert.match(unreviewed.stderr, /^unhandled dry-run stub: stat -x /m);
+
+    // 3. The positive run of the same block. Its output is computed from the fixture: the digests are the
+    //    digests of the bytes in the fixture box root, and the window end is the fixture clock plus four hours.
+    const appPage = join(previousRelease, "app/index.html");
+    const changedBytes = Buffer.concat([readFileSync(appPage), Buffer.from("changed for this control\n")]);
+    writeFileSync(appPage, changedBytes);
+    const positive = executeWholeBlock(site01, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    const open = readFileSync(join(fixture.env.SITE_EVIDENCE!, "site-01-open.txt"), "utf8");
+    const digest = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
+    const previousPath = `/srv/commonswarm/site/releases/${SITE_BASE_RELEASE}`;
+    assert.ok(open.includes(`SITE_WINDOW_START_UTC=${WINDOW_START}\n`));
+    assert.ok(open.includes("SITE_WINDOW_END_UTC=2026-09-28T05:02:03Z\n"));
+    assert.ok(open.includes(`PREVIOUS_RELEASE=${previousPath}\n`));
+    assert.ok(open.includes(`${digest(changedBytes)}  ${previousPath}/app/index.html\n`), "the app digest is the digest of the fixture's bytes");
+    assert.ok(open.includes(`${digest(readFileSync(join(previousRelease, "download/index.html")))}  ${previousPath}/download/index.html\n`));
+    assert.ok(open.includes("BOX_EGRESS=PASS user_agent=commonswarm-release-probe/1.0\n"));
+    assert.equal(readFileSync(join(fixture.boxRoot!, "tmp/commonswarm-site-window.env"), "utf8").includes(`SITE_WINDOW_START_UTC=${WINDOW_START}`), true,
+      "the window file crossed the ssh boundary into the box's /tmp");
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: a remote script that writes outside the fixture box root is denied", () => {
+  const site01 = planBlock(SITE, "site-01");
+  const fixture = prepareMacFixture([site01]);
+  // A path the box mapping does not touch, on the host, where the user can normally write. Nothing may appear
+  // there.
+  const outside = `/private/tmp/h10-outside-${process.pid}-${Date.now()}`;
+  try {
+    assert.equal(existsSync(outside), false);
+    const escaping = executeWholeBlock(mutatedBlock(site01, [[
+      "root=/srv/commonswarm/site\n", `root=/srv/commonswarm/site\n: >${outside}\n`,
+    ]]), fixture);
+    assert.equal(existsSync(outside), false, "a remote script wrote outside the fixture box root");
+    assert.equal(escaping.result, "failed");
+    assert.match(escaping.stderr, /Operation not permitted/, "the denial is reported, not hidden");
+    assert.match(escaping.stderr, /the box script exited [1-9]/);
+
+    const positive = executeWholeBlock(site01, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.equal(existsSync(join(fixture.boxRoot!, "tmp/commonswarm-site-window.env")), true, "the same block writes inside the fixture box root");
+  } finally {
+    rmSync(outside, { force: true });
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: a Mac block that starts an absolute-path application is denied and reported", () => {
+  const preflight = planBlock(SITE, "site-03-browser-session-preflight");
+  const chromeLine = "chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'";
+  assert.ok(preflight.source.includes(chromeLine), "the plan names the absolute Chrome path");
+  assert.equal(existsSync("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"), true,
+    "this control starts the Chrome binary the plan names, with --version, and needs it installed");
+  const fixture = prepareMacFixture([preflight]);
+  try {
+    writeMode(join(fixture.home, ".commonswarm-site-window.env"), `SITE_EVIDENCE=${fixture.env.SITE_EVIDENCE}\n`);
+    const launch = preflight.source.indexOf("  chrome_port=9335\n");
+    assert.ok(launch > 0);
+    // The block up to the launch, with a scratch profile, and one foreground `--version` call in place of the
+    // launch. Nothing here starts a browser or reads Anvil's profile. If containment failed, --version would print
+    // and exit. The call carries no redirection: bash 3.2 reports 1, not 126, for a refused exec that has one.
+    const head = preflight.source.slice(0, launch)
+      .replace('profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"', 'profile="$SITE_EVIDENCE/control-profile"; mkdir -p "$profile"');
+    const versionCall = '  "$chrome" --version\n)\n';
+    const executableCheck = '  test -x "$chrome"\n';
+    assert.ok(head.includes(executableCheck), "the plan checks that the Chrome binary is executable");
+
+    // Positive: the same block with an absolute-path program that is allowed (/usr/bin/true).
+    const positive = executeWholeBlock({ ...preflight, source: head.replace(chromeLine, "chrome='/usr/bin/true'") + versionCall }, fixture, { executeDeclared: true });
+    assert.equal(positive.result, "passed", positive.stderr);
+
+    // Negative 1: the block with the plan's own executable check removed reaches the exec of the absolute Chrome
+    // path, and the exec is refused: "Operation not permitted", reported as the failing command.
+    const denied = executeWholeBlock({ ...preflight, source: head.replace(executableCheck, "") + versionCall }, fixture, { executeDeclared: true });
+    assert.equal(denied.result, "failed", "a Mac block started an application under /Applications");
+    // bash 3.2 reports 126 for a refused exec, and 1 when errexit ends the subshell that made it.
+    assert.ok([1, 126].includes(denied.status ?? -1), `status ${denied.status}: ${denied.stderr}`);
+    assert.match(denied.stderr, /Operation not permitted/);
+    assert.match(denied.firstFailingCommand ?? "", /"\$chrome" --version/);
+    assert.doesNotMatch(denied.stdout, /Google Chrome/, "the application ran");
+
+    // Negative 2: the block with the plan's own check kept. Whether the kernel refuses the executable check on
+    // that path or only the exec, the block fails and the application does not run.
+    const checked = executeWholeBlock({ ...preflight, source: head + versionCall }, fixture, { executeDeclared: true });
+    assert.equal(checked.result, "failed");
+    assert.notEqual(checked.status, 0);
+    assert.doesNotMatch(checked.stdout, /Google Chrome/, "the application ran");
   } finally {
     cleanupMacFixture(fixture);
   }
 });
 
 test("controls: browser-harness refuses an unreviewed call shape", () => {
-  const block = blocks(SITE).find((candidate) => shortStep(candidate) === "site-03-browser-session-preflight");
-  assert.ok(block);
-  const fixture = prepareMacFixture([block]);
+  const { fixture, byStep } = laneEightFixture("site-05-browser-acceptance");
   try {
-    const positive = runBrowserProgram(fixture, block);
-    assert.equal(positive.status, 0, positive.stderr);
-    const refused = spawnSync("browser-harness", ["--unreviewed"], {
-      encoding: "utf8", input: browserProgram(block),
-      env: { ...fixture.env, BU_CDP_URL: "http://127.0.0.1:9335", BH_TAB_MARKER: "0" },
-    });
-    assert.equal(refused.status, 69);
-    assert.match(refused.stderr, /^unhandled dry-run stub: browser-harness --unreviewed$/m);
+    const acceptance = byStep.get("site-05-browser-acceptance")!;
+    const before = siteBoxState(fixture);
+    const evidence = fixture.env.SITE_EVIDENCE!;
+
+    // Positive: the block's own path when the browser program succeeds. Nothing else changes: the release stays.
+    const passing = executeWholeBlock(mutatedBlock(acceptance, [[
+      "BH_TAB_MARKER=0 browser-harness >/dev/null", "BH_TAB_MARKER=0 /usr/bin/true >/dev/null",
+    ]]), fixture, { executeDeclared: true });
+    assert.equal(passing.result, "passed", passing.stderr);
+    assert.deepEqual(siteBoxState(fixture), before);
+    assert.equal(existsSync(join(evidence, "rollback-auto.txt")), false);
+
+    // Negative: the real text. The stub refuses every program, and the plan's own reaction to a failed browser
+    // control runs against the fixture box: it restores the pinned release and exits with the browser's status.
+    const refused = executeWholeBlock(acceptance, fixture, { executeDeclared: true });
+    assert.equal(refused.result, "failed");
+    assert.equal(refused.status, 69, `the real block: status ${refused.status}, stderr ${JSON.stringify(refused.stderr)}, stdout ${JSON.stringify(refused.stdout)}`);
+    assert.match(readFileSync(join(evidence, "rollback-auto.txt"), "utf8"), /^rollback_reason=browser-control-failure$/m);
+    const pin = readFileSync(join(evidence, "previous.release"), "utf8").trim();
+    assert.equal(realpathSync(join(fixtureSiteRoot(fixture), "current")), realpathSync(join(fixture.boxRoot!, pin)),
+      "the automatic rollback pointed current at the pinned release");
+
+    // Every program is refused, whatever its text and whatever the arguments.
+    for (const [args, input] of [[[], "print(1)\n"], [[], ""], [["--anything"], "js('return true')\n"]] as const) {
+      const direct = containedCommand(fixture, "browser-harness", [...args], { input, env: { ...fixture.env, BU_CDP_URL: "http://127.0.0.1:9335", BH_TAB_MARKER: "0" } });
+      assert.equal(direct.status, 69, `direct call: status ${direct.status}, stderr ${JSON.stringify(direct.stderr)}`);
+      assert.match(direct.stderr, /^unhandled dry-run stub: browser-harness/m);
+    }
   } finally {
     cleanupMacFixture(fixture);
   }
 });
 
 test("controls: a browser fixture with a different user id fails site-03", () => {
-  const block = blocks(SITE).find((candidate) => shortStep(candidate) === "site-03-browser-session-preflight");
-  assert.ok(block);
-  const fixture = prepareMacFixture([block]);
+  const { fixture, byStep } = laneEightFixture("site-03-browser-session-preflight");
   try {
-    const positive = runBrowserProgram(fixture, block);
-    assert.equal(positive.status, 0, positive.stderr);
-    const evidence = join(fixture.temporary!, "browser-evidence", "site-03-browser-preflight.json");
-    assert.equal(JSON.parse(readFileSync(evidence, "utf8")).web_user_id,
-      "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc");
-    rmSync(evidence);
-    const wrongUser = runBrowserProgram(fixture, block, "00000000-0000-4000-8000-000000000001");
-    assert.notEqual(wrongUser.status, 0);
-    assert.equal(existsSync(evidence), false, "wrong-user browser fixture wrote passing site-03 evidence");
+    const browser = byStep.get("site-03-browser-session-preflight")!;
+    const cli = byStep.get("site-03")!;
+    const output = join(fixture.env.SITE_EVIDENCE!, "site-03-browser-preflight.json");
+
+    // Negative: an output whose web user id differs from the CLI's is one the real program could never write (it
+    // exits before writing when the ids differ), so it is refused, and the next block that is executed finds no
+    // browser output.
+    const wrong = executeWholeBlock(browser, fixture, { seedOverride: { web_user_id: "00000000-0000-4000-8000-000000000001" } });
+    assert.equal(wrong.result, "failed");
+    assert.match(wrong.stderr, /^REFUSED site-03-browser-preflight\.json: web_user_id == cli_user_id/m);
+    assert.equal(existsSync(output), false);
+    const next = executeWholeBlock(cli, fixture);
+    assert.equal(next.result, "failed");
+    assert.equal(next.status, 1);
+    assert.match(next.firstFailingCommand ?? "", /test -f "\$SITE_EVIDENCE\/site-03-browser-preflight\.json"/);
+
+    // Positive: the same two blocks with the output seeded from the committed evidence.
+    const seeded = executeWholeBlock(browser, fixture);
+    assert.equal(seeded.result, "not-executed");
+    assert.ok(seeded.seeded?.includes(output));
+    const humanSession = JSON.parse(readFileSync("docs/evidence/2026-09-27-prod-controls/RUN/00-human-session.json", "utf8")) as { identity: { user_id: string } };
+    const preflight = JSON.parse(readFileSync(output, "utf8")) as Record<string, string>;
+    assert.equal(preflight.web_user_id, humanSession.identity.user_id);
+    assert.equal(preflight.cli_user_id, humanSession.identity.user_id);
+    const passing = executeWholeBlock(cli, fixture);
+    assert.equal(passing.result, "passed", passing.stderr);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: an unlisted command inside deploy/site/deploy.sh fails closed", () => {
+  const { fixture, byStep } = laneEightFixture("site-04");
+  try {
+    const site04 = byStep.get("site-04")!;
+    const before = siteBoxState(fixture);
+    const variants: Array<{ name: string; status: number; mutate: (source: string) => string }> = [
+      {
+        name: "an npm subcommand no stub lists",
+        status: 69,
+        mutate: (source) => source.replace('run_site_npm "$checkout/site" run build\n', 'run_site_npm "$checkout/site" run build\nrun_site_npm "$checkout/site" publish\n'),
+      },
+      {
+        name: "an rsync flag no stub lists",
+        status: 69,
+        mutate: (source) => source.replace('rsync -a --delete "$checkout/site/dist/"', 'rsync -a --delete --chmod=755 "$checkout/site/dist/"'),
+      },
+      {
+        name: "a command that is not on the stub list and not a plan tool",
+        status: 127,
+        mutate: (source) => source.replace("release=$(release_name)\n", "commonswarm-unlisted-tool --version\nrelease=$(release_name)\n"),
+      },
+    ];
+    for (const variant of variants) {
+      const script = writeMutatedDeploy(fixture, variant.mutate);
+      const execution = executeWholeBlock(mutatedBlock(site04, [[SITE_FOUR_DEPLOY_CALL, SITE_FOUR_DEPLOY_CALL.replace("deploy/site/deploy.sh", script)]]), fixture);
+      assert.equal(execution.result, "failed", `${variant.name}: site-04 passed`);
+      assert.equal(execution.status, 70, `${variant.name}: the block reports a failed deploy\n${execution.stderr}`);
+      assert.equal(siteFourDeployStatus(fixture).split("\n")[0], `deploy_exit=${variant.status}`, `${variant.name}: deploy.sh exit status`);
+      const log = readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8");
+      if (variant.status === 69) assert.match(log, /^unhandled dry-run stub: (?:npm|rsync) /m, `${variant.name}: the stub names the refused call`);
+      else assert.match(log, /commonswarm-unlisted-tool: (?:command )?not found/, `${variant.name}: the shell reports the missing command`);
+      assert.equal(siteBoxState(fixture).current, before.current, `${variant.name}: the live release did not change`);
+      resetSiteFourAttempt(fixture, before);
+    }
+
+    // The positive run of the same block: the real deploy.sh, unchanged, deploys through the same stubs.
+    rmSync(join(fixture.env.SITE_RELEASE_REPO!, "deploy/site/deploy-control.sh"));
+    const positive = executeWholeBlock(site04, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.equal(siteFourDeployStatus(fixture), "deploy_exit=0\nafter_read_exit=0\n");
+    assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8"),
+      /^Deployed release \d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16} to commonswarm@yulan-vps-1\. The five newest releases were kept for rollback\.$/m);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: a site-04 deploy.sh call with a different target host fails", () => {
+  const { fixture, byStep } = laneEightFixture("site-04");
+  try {
+    const site04 = byStep.get("site-04")!;
+    const before = siteBoxState(fixture);
+    const wrongHost = executeWholeBlock(mutatedBlock(site04, [[SITE_FOUR_DEPLOY_CALL, SITE_FOUR_DEPLOY_CALL.replace("commonswarm@yulan-vps-1", "commonswarm@example.invalid")]]), fixture);
+    assert.equal(wrongHost.result, "failed");
+    assert.equal(wrongHost.status, 70, wrongHost.stderr);
+    assert.equal(siteFourDeployStatus(fixture).split("\n")[0], "deploy_exit=69", "deploy.sh exits with the ssh stub's refusal");
+    assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8"), /^UNPRODUCED ssh host$/m);
+    assert.deepEqual(siteBoxState(fixture), before, "nothing reached the fixture box");
+    resetSiteFourAttempt(fixture, before);
+
+    const positive = executeWholeBlock(site04, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.notDeepEqual(siteBoxState(fixture), before, "the positive run switched the fixture box's current release");
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
+test("controls: a fixture dist tree missing a file that deploy.sh validates fails site-04", () => {
+  const { fixture, byStep } = laneEightFixture("site-04");
+  try {
+    const site04 = byStep.get("site-04")!;
+    const before = siteBoxState(fixture);
+    const startPage = join(fixture.distFixture!, "start/index.html");
+    const startBytes = readFileSync(startPage);
+
+    // The page deploy.sh validates is absent: deploy.sh's own check refuses it, exit 1.
+    rmSync(startPage);
+    const missing = executeWholeBlock(site04, fixture);
+    assert.equal(missing.result, "failed");
+    assert.equal(missing.status, 70, missing.stderr);
+    assert.equal(siteFourDeployStatus(fixture).split("\n")[0], "deploy_exit=1");
+    assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8"), /^Refusing deploy: built \/start page is missing\.$/m);
+    assert.deepEqual(siteBoxState(fixture), before, "nothing was uploaded");
+    resetSiteFourAttempt(fixture, before);
+
+    // The page is there but its commonswarm:url meta carries no value: the second check refuses it.
+    writeFileSync(startPage, startBytes.toString("utf8").replace(/content="[^"]*"/, 'content=""'));
+    const empty = executeWholeBlock(site04, fixture);
+    assert.equal(empty.result, "failed");
+    assert.equal(siteFourDeployStatus(fixture).split("\n")[0], "deploy_exit=1");
+    assert.match(readFileSync(join(fixture.env.SITE_EVIDENCE!, "deploy.log"), "utf8"), /^Refusing deploy: built \/start commonswarm:url meta value is empty\.$/m);
+    assert.deepEqual(siteBoxState(fixture), before);
+    resetSiteFourAttempt(fixture, before);
+
+    // The positive run of the same block with the tree intact: the release is uploaded, normalized, and switched in.
+    writeFileSync(startPage, startBytes);
+    const positive = executeWholeBlock(site04, fixture);
+    assert.equal(positive.result, "passed", positive.stderr);
+    const after = siteBoxState(fixture);
+    assert.match(after.current, /^releases\/\d{8}T\d{6}Z-8b8989f2b29e-[0-9a-f]{16}$/, "current now names the new release, relative, as finalize-release.sh links it");
+    const release = join(fixtureSiteRoot(fixture), after.current);
+    assert.deepEqual(readFileSync(join(release, "start/index.html")), startBytes, "the uploaded bytes are the built bytes");
+    assert.equal(statSync(join(release, "start/index.html")).mode & 0o777, 0o644);
+    assert.equal(statSync(join(release, "start")).mode & 0o777, 0o755);
+    assert.equal(after.releases.some((name) => name.endsWith(".tmp")), false, "the upload directory became the release");
+    assert.ok(after.releases.includes(basename(before.current)), "the previous release is kept for rollback");
   } finally {
     cleanupMacFixture(fixture);
   }
@@ -2819,8 +3937,14 @@ test("controls: a block that exits non-zero is reported as failed, never as pass
       marker: "no", host: "Mac mini /bin/bash 3.2", line: 1,
       source: "# step: synthetic-nonzero\n# readonly: no\n# host: Mac mini /bin/bash 3.2\n( set -euo pipefail; exit 23 )\n",
     };
+    // The positive run of the same path: a block that exits zero passes. The negative run exits with the block's
+    // own status, so a block that never ran (containment unavailable exits 71) cannot pass for it.
+    const passing = executeWholeBlock({ ...block, source: block.source.replace("exit 23", "exit 0") }, fixture);
+    assert.equal(passing.result, "passed", passing.stderr);
+    assert.equal(passing.status, 0);
     const execution = executeWholeBlock(block, fixture);
     assert.equal(execution.result, "failed");
+    assert.equal(execution.status, 23, execution.stderr);
     assert.notEqual(execution.result, "passed");
   } finally {
     cleanupMacFixture(fixture);
@@ -2834,7 +3958,7 @@ test("controls: a dry run leaves the real checkout unchanged", async (t) => {
   assert.deepEqual(fourPlanRuns.map((run) => run.label), labels);
 
   for (const run of fourPlanRuns) {
-    const fixture = prepareMacFixture(run.blocks);
+    const fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch });
     try {
       executePlanUntilFailure(run.blocks, fixture, "mac");
     } finally {
@@ -2843,9 +3967,21 @@ test("controls: a dry run leaves the real checkout unchanged", async (t) => {
   }
   assertCheckoutUnchanged(REAL_CHECKOUT, before);
 
+  const syntheticPath = join(REAL_CHECKOUT, "tests", `.box-dry-run-real-checkout-write-${process.pid}`);
   await t.test("failing sub-case detects a write under the real checkout", () => {
+    assert.equal(existsSync(syntheticPath), false);
+    try {
+      // The write is made here, by the test process, so the detector has something to find.
+      writeFileSync(syntheticPath, "synthetic write\n");
+      assert.throws(() => assertCheckoutUnchanged(REAL_CHECKOUT, before), /dry run changed the real checkout/);
+    } finally {
+      rmSync(syntheticPath, { force: true });
+    }
+  });
+  assertCheckoutUnchanged(REAL_CHECKOUT, before);
+
+  await t.test("a contained block cannot write under the real checkout", () => {
     const fixture = prepareMacFixture();
-    const syntheticPath = join(REAL_CHECKOUT, "tests", `.box-dry-run-real-checkout-write-${process.pid}`);
     assert.equal(existsSync(syntheticPath), false);
     try {
       const block: Block = {
@@ -2856,9 +3992,14 @@ test("controls: a dry run leaves the real checkout unchanged", async (t) => {
         line: 1,
         source: `# step: synthetic-real-checkout-write\n# readonly: no\n# host: Mac mini /bin/bash 3.2\nprintf 'synthetic write\\n' >${JSON.stringify(syntheticPath)}\n`,
       };
+      // The positive run of the same write, into the fixture's own directory, passes.
+      const inside = executeWholeBlock({ ...block, source: block.source.replace(JSON.stringify(syntheticPath), JSON.stringify(join(fixture.temporary!, "inside-write"))) }, fixture);
+      assert.equal(inside.result, "passed", inside.stderr);
       const execution = executeWholeBlock(block, fixture);
-      assert.equal(execution.result, "passed", execution.stderr);
-      assert.throws(() => assertCheckoutUnchanged(REAL_CHECKOUT, before), /dry run changed the real checkout/);
+      assert.equal(execution.result, "failed", "a contained block wrote under the real checkout");
+      assert.match(execution.stderr, /Operation not permitted/);
+      assert.equal(existsSync(syntheticPath), false);
+      assertCheckoutUnchanged(REAL_CHECKOUT, before);
     } finally {
       rmSync(syntheticPath, { force: true });
       cleanupMacFixture(fixture);
@@ -3078,15 +4219,19 @@ test("five states execute selected whole blocks in order and fail honestly on cu
       assert.equal(guard.status, 0, guard.stderr);
       fixture = prepareBoxFixture(state, planBlocks);
     } else {
-      fixture = prepareMacFixture(planBlocks);
+      fixture = prepareMacFixture(planBlocks, { state });
     }
     try {
       const records = executePlanUntilFailure(planBlocks, fixture, part);
       assert.ok(records.length > 0, `${part}/${state} selected no blocks`);
       const failures = records.filter(({ execution }) => execution.result === "failed");
       const expected = unproducedReport().some((line) => line.includes(`[run=window-a/${state}/pass `));
-      assert.equal(failures.length, expected ? 1 : 0,
-        `${part}/${state} whole-plan result disagrees with the derived dependency report`);
+      // Execution stops at the first failed block, so a run fails at most once. A run the dependency report flags
+      // must fail. A run it does not flag may still fail: against a fixture box that holds the state the evidence
+      // measured, a block can fail on a defect no text scan sees. The plan assertion reports each with its file
+      // and line.
+      assert.ok(failures.length <= 1, `${part}/${state} continued past a failed block`);
+      if (expected) assert.equal(failures.length, 1, `${part}/${state} passed although the derived dependency report names an unproduced input`);
       if (failures[0]) t.diagnostic(`${description}: ${executionUnproducedLine(failures[0].block, failures[0].execution, state)}`);
       t.diagnostic(`${part}:${state}: ${records.map(({ execution }) => `${execution.step}=${execution.result}`).join(",")}`);
     } finally {
@@ -3210,9 +4355,14 @@ test("historical controls execute and reproduce the named failures while current
 
     writeMode(join(oldOauthProof, "oauth-image.id"), `sha256:${"0".repeat(64)}\n`);
     const historicalMediaSource = stepSource(oldMedia, "hm37-hm6-oauth-precondition");
+    // The old block also reads a program's result out of the OAuth container, which the dry run cannot run and
+    // refuses (69). That readback is not what this control tests, so it is the one line replaced; the media
+    // check after it is the old text, byte for byte.
+    const containerReadback = "  docker exec \"$CID\" node -e \\\n    'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === \"1\" ? 1 : 0)'\n";
+    assert.ok(historicalMediaSource.includes(containerReadback), "the old block carries the container readback");
     const historicalMedia: Block = {
       file: HM37, step: "hm37-hm6-oauth-precondition", marker: "yes", host: "Mac mini /bin/bash 3.2",
-      line: 1, source: historicalMediaSource.replaceAll("/home/commonswarm", controlRoot),
+      line: 1, source: historicalMediaSource.replace(containerReadback, "  true\n").replaceAll("/home/commonswarm", controlRoot),
     };
     const wrongMedia = executeWholeBlock(historicalMedia, historicalFixture, { control: "historical-media" });
     assert.equal(wrongMedia.result, "failed");
@@ -3309,13 +4459,38 @@ test("recorded command fixtures cite builders or measured browser controls", () 
   }
 });
 
-test("HM37 plans are UNPRODUCED-free and every block passes", () => {
+// A failing ssh child reports its own last failing command and the line of the box script it was on. The report
+// names that command's place in the plan text, so a defect in a box script is cited at the plan's file and line.
+function failureDetail(block: Block, execution: Execution): string {
+  const detail = execution.firstFailingCommand ?? execution.stderr.trim().split("\n")[0] ?? "unknown";
+  const remote = /the box script exited (\d+)\. Its last failing commands:\n(?:line \d+: .*\n?)+/.exec(execution.stderr);
+  if (!remote) return detail;
+  const last = [...remote[0].matchAll(/^line (\d+): (.*)$/gm)].at(-1);
+  if (!last) return detail;
+  const offset = block.source.indexOf(last[2]!);
+  const place = offset >= 0 ? ` at ${block.file}:${sourceLineAt(block, offset)}` : "";
+  return `${detail} <- the box script exited ${remote[1]} on its line ${last[1]}: ${last[2]}${place}`;
+}
+
+// A block that declares a non-substitutable surface is not executed. The report names it, what its declaration
+// says proves it live, what was seeded from committed evidence, and what is not produced, so a reader sees what
+// the dry run did not run.
+function notExecutedLine(block: Block, execution: Execution): string {
+  const declared = execution.declared!;
+  const seeded = (execution.seeded ?? []).map((path) => basename(path)).join(", ") || "nothing";
+  const missing = (declared.unproduced ?? []).map((item) => item.output).join(", ") || "none";
+  const items = (declared.plan_items ?? []).map((item) => ` Plan item: ${item}.`).join("");
+  return `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] non-substitutable (${declared.surface}): ${declared.reason} Live proof: ${declared.live_proof} Seeded from committed evidence: ${seeded}. Not produced, by name: ${missing}.${items}`;
+}
+
+test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
   const unproducedByConsumer = new Map<string, string>();
   for (const line of unproducedReport()) {
     const key = line.replace(/ \[run=.*$/, "");
     if (!unproducedByConsumer.has(key)) unproducedByConsumer.set(key, line);
   }
   const failed: string[] = [];
+  const notExecuted = new Map<string, string>();
   const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
   for (const run of currentPlannedRuns()) {
     let fixture: Fixture;
@@ -3325,14 +4500,17 @@ test("HM37 plans are UNPRODUCED-free and every block passes", () => {
       const state = /^window-a\/(s[1-5])\//.exec(run.label)?.[1] ?? "s2";
       fixture = prepareBoxFixture(state, run.blocks);
     } else {
-      fixture = prepareMacFixture(run.blocks);
+      fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch });
     }
     try {
       const records = executePlanUntilFailure(run.blocks, fixture, part);
       for (const { block, execution } of records) {
+        if (execution.result === "not-executed") {
+          const key = `${block.file}:${block.line}`;
+          if (!notExecuted.has(key)) notExecuted.set(key, notExecutedLine(block, execution));
+        }
         if (execution.result === "failed") {
-          const detail = execution.firstFailingCommand ?? execution.stderr.trim().split("\n")[0] ?? "unknown";
-          const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${detail}`;
+          const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`;
           if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
             failed.push(line);
           }
@@ -3344,17 +4522,53 @@ test("HM37 plans are UNPRODUCED-free and every block passes", () => {
     }
   }
   const issues = [...unproducedByConsumer.values(), ...failed];
-  assert.equal(issues.length, 0, `HM37 dry-run failures (${issues.length}):\n${issues.join("\n")}`);
+  for (const line of notExecuted.values()) t.diagnostic(line);
+  assert.equal(issues.length, 0,
+    `HM37 dry-run failures (${issues.length}):\n${issues.join("\n")}\n\nNot executed, non-substitutable (${notExecuted.size}):\n${[...notExecuted.values()].join("\n")}`);
 });
 
+function citedEvidenceFiles(value: unknown, found = new Set<string>()): Set<string> {
+  if (Array.isArray(value)) for (const item of value) citedEvidenceFiles(item, found);
+  else if (value && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      if (key === "evidence" && typeof item === "string") found.add(item);
+      else citedEvidenceFiles(item, found);
+    }
+  }
+  return found;
+}
+
 test("non-substitutable surfaces are explicit", (t) => {
-  const items = JSON.parse(readFileSync("tests/box-dry-run/fixtures/non-substitutable.json", "utf8")) as Array<{ surface: string; reason: string }>;
+  const items = nonSubstitutableEntries();
   assert.ok(items.length >= 6);
   assert.ok(items.every((item) => item.surface && item.reason));
-  assert.deepEqual(items.find((item) => item.surface === "browser-harness"), {
-    surface: "browser-harness",
-    reason: "the dry run cannot prove a real browser session; Anvil proves it live.",
-  });
+  const browser = items.find((item) => item.surface === "browser-harness" && item.step === undefined);
+  assert.ok(browser, "the browser surface is declared");
+  assert.match(browser.reason, /does not emulate a browser/);
+
+  // Every block whose text starts a browser or drives one is declared, by step. The scan reads the plan text, so
+  // a browser block a later edit adds is caught here.
+  const declared = items.filter((item) => item.step);
+  for (const block of SCOPED.flatMap(blocks)) {
+    if (!/\bbrowser-harness\b|Google Chrome/.test(block.source)) continue;
+    assert.ok(declared.some((item) => item.step === shortStep(block)),
+      `${shortStep(block)} runs a browser and is not declared non-substitutable`);
+  }
+  const known = blockIndex();
+  for (const entry of declared) {
+    assert.ok(known.has(entry.step!), `declared step does not exist in a plan: ${entry.step}`);
+    assert.ok(entry.live_proof && entry.live_proof.length > 20, `${entry.step}: no live proof named`);
+    assert.ok((entry.plan_items ?? []).every((item) => /^split block /.test(item)), `${entry.step}: plan items are block splits`);
+    for (const file of citedEvidenceFiles(entry)) assert.equal(existsSync(file), true, `${entry.step}: cited evidence file is missing: ${file}`);
+    for (const output of entry.outputs ?? []) assert.ok(/^0[0-7]{3}$/.test(output.mode) && output.file, `${entry.step}: output ${output.file} has no file mode`);
+    for (const missing of entry.unproduced ?? []) assert.ok(missing.output && missing.reason, `${entry.step}: an unproduced output has no reason`);
+    t.diagnostic(`${entry.step}: ${entry.surface}; live proof: ${entry.live_proof}; outputs seeded: ${(entry.outputs ?? []).map((output) => output.file).join(", ") || "none"}; unproduced: ${(entry.unproduced ?? []).map((missing) => missing.output).join(", ") || "none"}`);
+  }
+  // The site build is declared too, with the evidence each fixture file's shape comes from.
+  const build = items.find((item) => /site build/.test(item.surface));
+  assert.ok(build && build.live_proof, "the site build is declared with its live proof");
+  assert.ok((build.shape_evidence ?? []).length >= 3, "the site build cites the evidence its fixture shape comes from");
+  for (const shape of build.shape_evidence ?? []) assert.equal(existsSync(shape.file), true, `site build shape evidence is missing: ${shape.file}`);
   for (const item of items) t.diagnostic(`${item.surface}: ${item.reason}`);
 });
 

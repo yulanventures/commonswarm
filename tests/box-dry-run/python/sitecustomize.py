@@ -112,15 +112,23 @@ def _fixture(request):
     elif "/functions/v1/h0/agent-doc/smoke" in url:
         status, body, content_type = 200, b'{"ok":true}', "application/json"
     elif "commonswarm.com" in url and url.startswith("https://commonswarm.com"):
-        root = pathlib.Path("/srv/commonswarm/site/current")
+        # Public bytes come from the fixture box root only. The Mac lane names its own directory; the box lane
+        # names "/" because its fixture is the runner's real, guarded root. A missing name is a refusal, never a
+        # read of whatever /srv/commonswarm/site/current the host happens to have.
+        box_root = os.environ.get("BOX_DRY_RUN_BOX_ROOT")
+        if not box_root:
+            raise SystemExit("UNPRODUCED fixture box root")
+        root = pathlib.Path(box_root) / "srv/commonswarm/site/current"
         suffix = url.split("commonswarm.com", 1)[1].split("?", 1)[0]
-        if suffix == "/app":
-            path = root / "app/index.html"
-        elif suffix == "/download":
-            path = root / "download/index.html"
+        path = root / suffix.lstrip("/")
+        if path.is_dir():
+            path = path / "index.html"
+        if path.is_file():
+            content_type = {".html": "text/html", ".css": "text/css", ".js": "text/javascript"}.get(
+                path.suffix, "application/octet-stream")
+            status, body = 200, path.read_bytes()
         else:
-            path = root / suffix.lstrip("/")
-        status, body, content_type = 200, path.read_bytes(), "text/html" if path.suffix == ".html" else "text/css"
+            status, body, content_type = 404, b"", "text/plain"
     elif "/rest/v1/" in url:
         status, body, content_type = 200, b"[]", "application/json"
     else:

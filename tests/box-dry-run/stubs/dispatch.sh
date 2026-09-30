@@ -15,7 +15,8 @@ fail_unproduced() {
 
 unhandled_stub() {
   printf 'unhandled dry-run stub: %s' "$name" >&2
-  printf ' %q' "${original_argv[@]}" >&2
+  # An empty array is an unbound variable to bash 3.2 under set -u; a call with no arguments must still exit 69.
+  printf ' %q' ${original_argv[@]+"${original_argv[@]}"} >&2
   printf '\n' >&2
   exit 69
 }
@@ -23,159 +24,84 @@ unhandled_stub() {
 cswarm_state_dir="${BOX_DRY_RUN_STUB_LOG}.cswarm-state"
 stub_state_dir="${BOX_DRY_RUN_STUB_LOG}.stub-state"
 
-box_fixture_root() {
-  mkdir -p "$stub_state_dir"
-  resolved_stub_state_dir=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$stub_state_dir")
-  fixture_root_file="$stub_state_dir/ssh-fixture-root"
-  if [ -f "$fixture_root_file" ]; then
-    fixture_root=$(cat "$fixture_root_file")
-  else
-    fixture_root=$(mktemp -d "$stub_state_dir/ssh-box.XXXXXX")
-    fixture_root=$(/usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$fixture_root")
-    printf '%s\n' "$fixture_root" >"$fixture_root_file"
-  fi
-  case "$fixture_root" in
-    "$resolved_stub_state_dir"/ssh-box.??????) ;;
-    *) printf 'refusing unsafe fixture root: %s\n' "$fixture_root" >&2; exit 70 ;;
-  esac
-  printf '%s\n' "$fixture_root"
+# The fixture box root is a directory under the dry run's own temporary directory. Every ssh, scp and rsync
+# operation lands there, and nothing else. The harness creates it; a stub never invents one.
+require_box_root() {
+  box_root_dir=${BOX_DRY_RUN_BOX_ROOT:-}
+  [ -n "$box_root_dir" ] && [ -d "$box_root_dir" ] && [ ! -L "$box_root_dir" ] || fail_unproduced 'fixture box root'
 }
 
-seed_box_fixture() {
-  fixture_root=$(box_fixture_root)
-  fixture_sha=${BOX_DRY_RUN_RELEASE_SHA:?fixture release SHA required}
-  case "$fixture_sha" in *[!0-9a-f]*|'') fail_unproduced 'ssh fixture release SHA' ;; esac
-  [ "${#fixture_sha}" -eq 40 ] || fail_unproduced 'ssh fixture release SHA'
-  fixture_proof="$fixture_root/home/commonswarm/stack/release-proofs/$fixture_sha"
-  mkdir -p "$fixture_proof"
-
-  # Each fixture is copied byte-for-byte from its committed execution evidence:
-  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-worker-boundary.txt
-  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-control-inputs.txt
-  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json
-  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-revocation-readback.json
-  # ./docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt
-  fixture_evidence=${BOX_DRY_RUN_COPYBACK_EVIDENCE_DIR:?copy-back evidence fixture required}
-  for fixture_member in \
-    hm37-worker-boundary.txt \
-    hm37-hosted-control-inputs.txt \
-    hm37-hosted-check-control.json \
-    hm37-revocation-readback.json \
-    hm37-close-readback.txt; do
-    [ -f "$fixture_evidence/$fixture_member" ] || fail_unproduced 'ssh fixture evidence'
-    if [ ! -e "$fixture_proof/$fixture_member" ]; then
-      /bin/cp "$fixture_evidence/$fixture_member" "$fixture_proof/$fixture_member"
-      chmod 0600 "$fixture_proof/$fixture_member"
-    fi
-  done
-
-  # M15 in docs/evidence/2026-09-29-box-facts/box-facts-measured.json
-  # records the current site release. The committed site release evidence at
-  # docs/evidence/2026-09-27-release-9b085c823523 carries the app/download tree
-  # shape copied by site-03-pin-previous.
-  fixture_site_root="$fixture_root/srv/commonswarm/site"
-  fixture_site_release="$fixture_site_root/releases/${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}"
-  if [ ! -e "$fixture_site_root/current" ] && [ ! -L "$fixture_site_root/current" ]; then
-    mkdir -p "$fixture_site_release/app" "$fixture_site_release/download"
-    printf '%s\n' 'dry-run measured app entry' >"$fixture_site_release/app/index.html"
-    printf '%s\n' 'dry-run measured download entry' >"$fixture_site_release/download/index.html"
-    ln -s "$fixture_site_release" "$fixture_site_root/current"
-  fi
-
-  printf '%s\n' "$fixture_root"
+userland() {
+  /usr/bin/python3 "${BOX_DRY_RUN_USERLAND:?box userland required}" "$@"
 }
 
-run_box_fixture_script() {
-  remote_input=$1
-  shift
-  remote_arguments=()
-  remote_shell_command=
-  if [ "$#" -eq 1 ]; then
-    remote_shell_command=$1
-  else
-    [ "$#" -ge 4 ] && [ "$1" = /bin/bash ] && [ "$2" = -s ] && [ "$3" = -- ] || \
-      fail_unproduced 'ssh remote shell output'
-    shift 3
-    [ "$#" -gt 0 ] || fail_unproduced 'ssh remote shell argument'
-    remote_arguments=("$@")
-  fi
-
-  fixture_root=$(seed_box_fixture)
-  fixture_sha=${BOX_DRY_RUN_RELEASE_SHA:?fixture release SHA required}
-  fixture_proof="$fixture_root/home/commonswarm/stack/release-proofs/$fixture_sha"
-  if [ -n "$remote_shell_command" ]; then
-    parsed_arguments="$fixture_root/remote-arguments"
-    if ! /usr/bin/python3 - "$remote_shell_command" >"$parsed_arguments" <<'PY'
-import shlex, sys
-parts = shlex.split(sys.argv[1])
-if parts[:6] != ["sudo", "-n", "-i", "/bin/bash", "-s", "--"] or len(parts) < 7:
-    raise SystemExit(1)
-for value in parts[6:]:
-    if "\n" in value or "\r" in value:
-        raise SystemExit(1)
-    print(value)
-PY
-    then
-      fail_unproduced 'ssh remote shell output'
-    fi
-    while IFS= read -r remote_argument || [ -n "$remote_argument" ]; do
-      [ -n "$remote_argument" ] || fail_unproduced 'ssh remote shell argument'
-      remote_arguments+=("$remote_argument")
-    done <"$parsed_arguments"
-    [ "${#remote_arguments[@]}" -gt 0 ] || fail_unproduced 'ssh remote shell argument'
-  fi
-
-  remote_script="$fixture_root/remote-script.sh"
-  printf '%s\n' "$remote_input" | sed \
-    -e "s|/tmp/|$fixture_root/tmp/|g" \
-    -e "s|/run/|$fixture_root/run/|g" \
-    -e "s|/etc/|$fixture_root/etc/|g" \
-    -e "s|/home/commonswarm|$fixture_root/home/commonswarm|g" \
-    -e "s|/srv/commonswarm|$fixture_root/srv/commonswarm|g" \
-    >"$remote_script"
-  chmod 0700 "$remote_script"
-  remote_output="$fixture_root/remote-output"
-  for argument_index in "${!remote_arguments[@]}"; do
-    case "${remote_arguments[$argument_index]}" in
-      /srv/commonswarm/*)
-        remote_arguments[$argument_index]="$fixture_root${remote_arguments[$argument_index]}"
-        ;;
-      /home/commonswarm/*)
-        remote_arguments[$argument_index]="$fixture_root${remote_arguments[$argument_index]}"
-        ;;
+# ssh runs the remote command string the way sshd does: one shell, the joined arguments as its command line,
+# ssh's standard input as the command's standard input. The command string and standard input are text
+# bound for the box, so their box paths are mapped into the fixture box root; the output is shown back with
+# the box's own paths.
+#
+# Containment. A process tree can be put under sandbox-exec exactly once: a process that is already sandboxed
+# cannot apply a second profile (sandbox_apply is refused with EPERM, exit 71). So the harness applies ONE
+# profile at the top of every Mac-side process tree, and a remote script started by an ssh stub inside a
+# contained block runs in that tree. When the stub is called outside a contained tree, it applies the remote
+# profile itself (write only inside the fixture box root and the stub logs; no application start; no read of
+# the operator's private state). It never runs a remote script uncontained: if the profile cannot be applied,
+# the script does not run.
+run_in_box() {
+  login_user=$1
+  remote_command=$2
+  [ -z "${BOX_DRY_RUN_IN_REMOTE:-}" ] || unhandled_stub
+  [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
+  require_box_root
+  box_bin=${BOX_DRY_RUN_BOX_BIN:?box userland bin required}
+  ssh_dir="$box_root_dir/.fixture/ssh"
+  mkdir -p "$ssh_dir" "$box_root_dir/root" "$box_root_dir/tmp"
+  call_dir=$(mktemp -d "$ssh_dir/call.XXXXXX")
+  cat >"$call_dir/stdin"
+  userland rewrite <"$call_dir/stdin" >"$call_dir/stdin.rewritten"
+  printf '%s' "$remote_command" | userland rewrite >"$call_dir/command"
+  rewritten_command=$(cat "$call_dir/command")
+  remote_env=()
+  for variable_name in $(compgen -e); do
+    case "$variable_name" in
+      BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE|BOX_DRY_RUN_IN_REMOTE|BOX_DRY_RUN_REMOTE_USER|BOX_DRY_RUN_CONTAINED) ;;
+      BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;;
     esac
   done
-  (
-    cd "$fixture_root"
-    env PATH="${0%/*}:/usr/bin:/bin" BOX_DRY_RUN_PART=box \
-      /bin/bash "$remote_script" "${remote_arguments[@]}" >"$remote_output"
-  )
-
-  archive_output=no
-  if /usr/bin/tar -tf "$remote_output" >/dev/null 2>&1; then archive_output=yes; fi
-  case "${BOX_DRY_RUN_COPYBACK_ARCHIVE_VARIANT:-exact}" in
-    exact) ;;
-    missing)
-        [ "$archive_output" = yes ] || unhandled_stub
-        /usr/bin/tar -C "$fixture_proof" -cf "$remote_output" \
-          hm37-worker-boundary.txt hm37-hosted-control-inputs.txt \
-          hm37-hosted-check-control.json hm37-revocation-readback.json
-        ;;
-    extra)
-        [ "$archive_output" = yes ] || unhandled_stub
-        printf '%s\n' 'unexpected fixture member' >"$fixture_proof/unexpected.txt"
-        /usr/bin/tar -C "$fixture_proof" -cf "$remote_output" \
-          hm37-worker-boundary.txt hm37-hosted-control-inputs.txt \
-          hm37-hosted-check-control.json hm37-revocation-readback.json \
-          hm37-close-readback.txt unexpected.txt
-        ;;
-    *) unhandled_stub ;;
-  esac
-  if [ "$archive_output" = yes ]; then
-    cat "$remote_output"
-  else
-    sed "s|$fixture_root||g" "$remote_output"
+  remote_shell=(/bin/bash -c "$rewritten_command")
+  if [ -z "${BOX_DRY_RUN_CONTAINED:-}" ]; then
+    remote_profile=${BOX_DRY_RUN_REMOTE_SANDBOX_PROFILE:-}
+    [ -n "$remote_profile" ] || fail_unproduced 'fixture box containment'
+    remote_shell=(/usr/bin/sandbox-exec -p "$remote_profile" "${remote_shell[@]}")
   fi
+  # A failing box script is reported with its own command and script line, not only an exit status. The record
+  # goes to a file through an ERR trap that bash reads from BASH_ENV; it never touches the script's own stdout
+  # or stderr, so a script's output is exactly what it printed.
+  printf '%s\n' 'set -E' \
+    'trap '\''printf "line %s: %s\n" "$LINENO" "$BASH_COMMAND" >>"$BOX_DRY_RUN_FAILURE_RECORD"'\'' ERR' \
+    >"$call_dir/failure-trap.sh"
+  : >"$call_dir/failure-record"
+  status=0
+  (
+    cd "$box_root_dir/root"
+    exec /usr/bin/env -i \
+      PATH="$box_bin:${0%/*}:/usr/bin:/bin:/usr/sbin:/sbin" \
+      HOME="$box_root_dir/root" TMPDIR="$box_root_dir/tmp" LANG=C.UTF-8 TZ=UTC \
+      BASH_ENV="$call_dir/failure-trap.sh" BOX_DRY_RUN_FAILURE_RECORD="$call_dir/failure-record" \
+      BOX_DRY_RUN_IN_REMOTE=1 BOX_DRY_RUN_REMOTE_USER="$login_user" \
+      ${remote_env[@]+"${remote_env[@]}"} \
+      "${remote_shell[@]}"
+  ) <"$call_dir/stdin.rewritten" >"$call_dir/stdout" 2>"$call_dir/stderr" || status=$?
+  userland strip <"$call_dir/stdout"
+  userland strip <"$call_dir/stderr" >&2
+  if [ "$status" -ne 0 ] && [ -s "$call_dir/failure-record" ]; then
+    printf 'dry-run: the box script exited %s. Its last failing commands:\n' "$status" >&2
+    /usr/bin/tail -n 3 "$call_dir/failure-record" | userland strip >&2
+  fi
+  rm -f "$call_dir/stdin" "$call_dir/stdin.rewritten" "$call_dir/command" "$call_dir/stdout" "$call_dir/stderr" \
+    "$call_dir/failure-trap.sh" "$call_dir/failure-record"
+  rmdir "$call_dir"
+  exit "$status"
 }
 
 # These inventories are checked against every executable plan block by
@@ -211,92 +137,14 @@ case "$name" in
       esac
     done
     [ -n "${ssh_host:-}" ] || fail_unproduced 'ssh host'
-    remote_command="$*"
-    case "$remote_command" in
-      *'/bin/bash -s'*|*'bash -s'*)
-        if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
-          # The box lane has the real box-shaped fixture tree. Execute the remote
-          # command there; PATH still resolves every external boundary to this
-          # same stub set.
-          exec /bin/bash -c "$remote_command"
-        fi
-        remote_input=$(cat)
-        case "$remote_input" in
-          *'root=/srv/commonswarm/site'*'BOX_EGRESS=PASS'*)
-            # Shape sources: M15 (live release and readable app/download files)
-            # and M13 (200 JSON/HTML egress with the explicit probe UA) in the
-            # measured box-facts JSON artifact.
-            base=${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}
-            printf '%s\n' \
-              'SITE_WINDOW_START_UTC=2026-09-28T01:02:03Z' \
-              'SITE_WINDOW_END_UTC=2026-09-28T05:02:03Z' \
-              "PREVIOUS_RELEASE=/srv/commonswarm/site/releases/$base" \
-              "0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/$base/app/index.html" \
-              "0000000000000000000000000000000000000000000000000000000000000000  /srv/commonswarm/site/releases/$base/download/index.html" \
-              'BOX_EGRESS=PASS user_agent=commonswarm-release-probe/1.0'
-            ;;
-          *'find /home/commonswarm/stack/release-proofs'*"date -u -d '+4 hours'"*)
-            # The two-line clock shape is the recorded box-clock contract in
-            # the reviewed HM37 box-window evidence, lines 436-444.
-            printf '%s\n' '2026-09-28T01:02:03Z' '2026-09-28T05:02:03Z'
-            ;;
-          *'PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"'*'SWARM_MCP_PUBLIC_ENABLED'*)
-            # This exact B-open remote block has no stdout. Its durable box
-            # state is exercised in the box half; the Mac half only verifies
-            # that the reviewed remote command is accepted by the transport.
-            ;;
-          *'install -m 0600 -o root -g root /tmp/hm37-open-ack-control.ts'*'hm37-hosted-control-inputs.txt'*)
-            # Verify the five transferred inputs before accepting the remote
-            # installation boundary. Box-mode controls verify remote owner and
-            # mode separately on the actual target path.
-            for transferred in \
-              /tmp/hm37-open-ack-control.ts \
-              /tmp/hm37-open-ack-deno.json \
-              /tmp/hm37-human-session.json \
-              /tmp/hm37-worker-boundary.txt \
-              /tmp/hm37-hosted-control-inputs.txt; do
-              [ -f "$transferred" ] && [ ! -L "$transferred" ] || fail_unproduced 'scp transferred input'
-            done
-            test "$(shasum -a 256 /tmp/hm37-open-ack-control.ts | awk '{print $1}')" = \
-              dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013
-            test "$(shasum -a 256 /tmp/hm37-open-ack-deno.json | awk '{print $1}')" = \
-              f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b
-            rm -f \
-              /tmp/hm37-open-ack-control.ts \
-              /tmp/hm37-open-ack-deno.json \
-              /tmp/hm37-human-session.json \
-              /tmp/hm37-worker-boundary.txt \
-              /tmp/hm37-hosted-control-inputs.txt
-            ;;
-          *) run_box_fixture_script "$remote_input" "$@" ;;
-        esac
-        ;;
-      *'readlink -f /home/commonswarm/edge/current'*)
-        # M5 in box-facts-measured.json records this exact symlink target.
-        printf '%s\n' "${BOX_DRY_RUN_EXPECTED_EDGE:?measured edge required}"
-        ;;
-      "date -u +%Y-%m-%dT%H:%M:%SZ"|"date -u '+%Y-%m-%dT%H:%M:%SZ'")
-        # The output format is the box-clock contract cited above.
-        printf '%s\n' '2026-09-28T01:02:03Z'
-        ;;
-      *'readlink -f /srv/commonswarm/site/current'*)
-        # M15 in box-facts-measured.json records the live site release.
-        printf '/srv/commonswarm/site/releases/%s\n' "${BOX_DRY_RUN_SITE_BASE_RELEASE:?measured site base required}"
-        ;;
-      *'install -d -m 0700 -o root -g root '*'/run/commonswarm-hm37-'*)
-        # The Mac half verifies this transport request. The box half owns the
-        # real root-shaped fixture and executes the box blocks there.
-        ;;
-      'umask 077; : > /tmp/hm37-open-ack-control.ts'|\
-      'umask 077; : > /tmp/hm37-open-ack-deno.json'|\
-      'umask 077; : > /tmp/hm37-human-session.json')
-        target_path=${remote_command##* > }
-        : >"$target_path"
-        chmod 0600 "$target_path"
-        ;;
-      *'test '*'/srv/commonswarm/site/'*) ;;
-      *) fail_unproduced 'ssh output' ;;
+    case "$ssh_host" in
+      ops@100.115.66.74|ops@yulan-vps-1) ssh_user=ops ;;
+      commonswarm@100.115.66.74|commonswarm@yulan-vps-1) ssh_user=commonswarm ;;
+      *) fail_unproduced 'ssh host' ;;
     esac
+    # No remote command asks for an interactive login shell. The dry run has no terminal to give it.
+    [ "$#" -gt 0 ] || fail_unproduced 'ssh interactive shell'
+    run_in_box "$ssh_user" "$*"
     ;;
   scp)
     [ "$#" -eq 2 ] || fail_unproduced 'scp flags'
@@ -304,9 +152,7 @@ case "$name" in
     destination=$2
     [ -f "$source_path" ] && [ ! -L "$source_path" ] || fail_unproduced 'scp regular source file'
     case "$destination" in
-      ops@100.115.66.74:/tmp/*|commonswarm@100.115.66.74:/tmp/*) ;;
-      # Lane 8 carries this measured Tailscale hostname in its existing plan.
-      commonswarm@yulan-vps-1:/tmp/*) ;;
+      ops@100.115.66.74:*|commonswarm@100.115.66.74:*|ops@yulan-vps-1:*|commonswarm@yulan-vps-1:*) ;;
       *) fail_unproduced 'scp target' ;;
     esac
     remote=${destination%%:*}
@@ -314,55 +160,111 @@ case "$name" in
     target_user=${remote%@*}
     target_host=${remote#*@}
     case "$target_path" in
-      /tmp/*/../*|/tmp/../*|*'\n'*) fail_unproduced 'scp target path' ;;
+      */../*|*/..|*'\n'*) fail_unproduced 'scp target path' ;;
     esac
+    if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
+      case "$target_path" in /tmp/*) ;; *) fail_unproduced 'scp target' ;; esac
+      logged_target=$target_path
+    else
+      # The destination is the box's /tmp. It lands in the fixture box root, and nowhere else.
+      require_box_root
+      box_root_real=$(cd "$box_root_dir" && pwd -P)
+      box_target=$(printf '%s' "$target_path" | userland rewrite)
+      case "$box_target" in "$box_root_real"/tmp/*) ;; *) fail_unproduced 'scp target' ;; esac
+      logged_target=${box_target#"$box_root_real"}
+      target_path=$box_target
+    fi
     [ ! -L "$target_path" ] || fail_unproduced 'scp symlink target'
     if command -v shasum >/dev/null 2>&1; then
       source_sha256=$(shasum -a 256 "$source_path" | awk '{print $1}')
     else
       source_sha256=$(sha256sum "$source_path" | awk '{print $1}')
     fi
-    cp "$source_path" "$target_path"
+    /bin/cp "$source_path" "$target_path"
     chmod 0600 "$target_path"
     if [ "${BOX_DRY_RUN_PART:-mac}" = box ]; then
       /usr/bin/chown "$target_user:$target_user" "$target_path"
+    else
+      userland record-owner "$target_path" "$target_user" "$target_user"
     fi
     {
       printf 'scp-transfer source_sha256=%s target_user=%q target_host=%q target_path=%q\n' \
-        "$source_sha256" "$target_user" "$target_host" "$target_path"
+        "$source_sha256" "$target_user" "$target_host" "$logged_target"
     } >>"$BOX_DRY_RUN_STUB_LOG"
     ;;
+  rsync)
+    # Local-to-box (a release upload) and box-local (the box's own retention merge). Both land in the
+    # fixture box root. The accepted flag sets are listed in box-userland.py.
+    userland rsync "$@"
+    ;;
+  npm)
+    # The site build is a declared non-substitutable surface (fixtures/non-substitutable.json). ci checks the
+    # lock file and changes nothing; run build lays down the fixture dist tree. Nothing reaches a registry.
+    case "$*" in
+      ci)
+        [ -f package.json ] && [ -f package-lock.json ] || { printf '%s\n' 'npm ERR! ci needs package.json and package-lock.json' >&2; exit 1; }
+        ;;
+      'run build')
+        [ -f package.json ] && /usr/bin/grep -q '"build"' package.json || { printf '%s\n' 'npm ERR! missing script: build' >&2; exit 1; }
+        dist_fixture=${BOX_DRY_RUN_DIST_FIXTURE:-}
+        [ -n "$dist_fixture" ] && [ -d "$dist_fixture" ] || fail_unproduced 'site build output'
+        mkdir -p dist
+        /bin/cp -R "$dist_fixture/." dist/
+        ;;
+      *) unhandled_stub ;;
+    esac
+    ;;
   cp)
-    cp_arguments=()
-    while [ "$#" -gt 0 ]; do
-      case "$1" in
+    cp_flags=()
+    cp_operands=()
+    for cp_argument in "$@"; do
+      case "$cp_argument" in
         --reflink=auto) ;;
-        *) cp_arguments+=("$1") ;;
+        -a) cp_flags+=("$cp_argument") ;;
+        -*) unhandled_stub ;;
+        *) cp_operands+=("$cp_argument") ;;
       esac
-      shift
     done
-    exec /bin/cp "${cp_arguments[@]}"
+    [ "${#cp_operands[@]}" -eq 2 ] || unhandled_stub
+    exec /bin/cp ${cp_flags[@]+"${cp_flags[@]}"} "${cp_operands[@]}"
     ;;
   readlink)
     if [ "$#" -eq 2 ] && [ "$1" = -f ]; then
-      exec /usr/bin/python3 -c 'import os,sys; value=os.path.realpath(sys.argv[1]); print("/tmp/"+value.removeprefix("/private/tmp/") if value.startswith("/private/tmp/") else value)' "$2"
+      exec /usr/bin/python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2"
     fi
-    exec /usr/bin/readlink "$@"
+    if [ "$#" -eq 1 ]; then
+      case "$1" in -*) unhandled_stub ;; esac
+      exec /usr/bin/readlink "$1"
+    fi
+    unhandled_stub
     ;;
   chown|caddy)
     printf 'UNPRODUCED %s result\n' "$name" >&2
     exit 69
     ;;
+  pgrep|ps)
+    # A Mac block's view of the host's processes is the fixture's own table, which is empty: the dry run's Mac runs
+    # no other release process. It never reads the real process table. The box's ps and pgrep are the box
+    # userland's, ahead of this stub on a box script's PATH.
+    BOX_DRY_RUN_PROCESS_TABLE=${BOX_DRY_RUN_MAC_PROCESSES:?Mac process table required} userland "$name" "$@"
+    ;;
   sudo)
+    sudo_user=root
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        -u) shift 2 ;;
+        -u) [ "$#" -ge 2 ] || unhandled_stub; sudo_user=$2; shift 2 ;;
         -n|-i) shift ;;
         --) shift; break ;;
+        -*) unhandled_stub ;;
         *) break ;;
       esac
     done
-    [ "$#" -eq 0 ] || exec "$@"
+    [ "$#" -gt 0 ] || unhandled_stub
+    if [ -n "${BOX_DRY_RUN_IN_REMOTE:-}" ]; then
+      case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
+      export BOX_DRY_RUN_REMOTE_USER="$sudo_user"
+    fi
+    exec "$@"
     ;;
   op)
     # A real token is never part of the harness. The synthetic token reaches
@@ -547,6 +449,12 @@ case "$name" in
         [ "$#" -ge 1 ] || unhandled_stub
         for target in "$@"; do case "$target" in -*) unhandled_stub ;; esac; done
         target=${@: -1}
+        # The plan names containers by their Compose names (M11 and M17 in box-facts-measured.json).
+        case "$target" in
+          commonswarm-oauth-oauth-1) target=dry-run-oauth ;;
+          commonswarm-edge-edge-runtime-1) target=dry-run-edge ;;
+          commonswarm-postgres) target=dry-run-postgres ;;
+        esac
         case "$format" in
           *'.Config.Env'*) printf '%s\n' "${BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE:?OAuth host line required}" ;;
           *'.Image'*)
@@ -664,7 +572,15 @@ case "$name" in
         [ "$#" -ge 3 ] || unhandled_stub
         container=$1; runtime=$2; shift 2
         case "$runtime:$1" in
-          node:-e|deno:eval) [ "$#" -eq 2 ] || unhandled_stub ;;
+          node:-e|deno:eval)
+            [ "$#" -eq 2 ] || unhandled_stub
+            # A program run inside a container needs the container. A Mac-side dry run has none, and it does
+            # not answer for one.
+            if [ "${BOX_DRY_RUN_PART:-mac}" = mac ]; then
+              printf '%s\n' 'UNPRODUCED container program result' >&2
+              exit 69
+            fi
+            ;;
           sh:-c)
             [ "$interactive" -eq 1 ] && [ "$#" -eq 2 ] || unhandled_stub
             sql=$(cat)
@@ -744,7 +660,7 @@ case "$name" in
     exit 69
     ;;
   python3)
-    exec /usr/bin/env PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 "$@"
+    exec /usr/bin/env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 "$@"
     ;;
   tar)
     tar_arguments=()
@@ -779,94 +695,10 @@ typescript 5.8.3}" ;;
   sleep)
     ;;
   browser-harness)
-    [ "$#" -eq 0 ] || unhandled_stub
-    browser_program=$(cat)
-    [ -n "$browser_program" ] || unhandled_stub
-    [ "${BH_TAB_MARKER:-}" = 0 ] || unhandled_stub
-    case "${BU_CDP_URL:-}" in http://127.0.0.1:9335) ;; *) unhandled_stub ;; esac
-    # Browser state shapes are grounded in the committed 2026-09-26/27 controls:
-    # ./docs/evidence/2026-09-26-item-cp/CP1-LANDING.md:22-29 records the
-    # Ridgeio production sign-in, and
-    # ./docs/evidence/2026-09-27-prod-controls/RUN/00-human-session.json:1-18
-    # records the user, owner label, and Cold Agent Test workspace. The retained
-    # starting-workspace shape is K4-8 in box-facts-measured.json:521-533.
-    {
-      cat <<'PY'
-import os, pathlib, urllib.parse
-
-_fixture_user = os.environ.get("BOX_DRY_RUN_BROWSER_USER_ID", "d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc")
-_fixture_start = "292be0f9-ca5d-43ed-a6f7-31354fe7fe56"
-_fixture_control = "c2ea0541-f56d-4c73-bf71-56c5405c4934"
-_fixture_selected = _fixture_start
-_fixture_width = 1280
-_fixture_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-
-def new_tab(url):
-    return {"url": url}
-
-def wait_for_load():
-    return None
-
-def goto_url(url):
-    global _fixture_selected
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    if query.get("w"):
-        _fixture_selected = query["w"][0]
-    return {"url": url}
-
-def cdp(method, **kwargs):
-    global _fixture_width
-    if method == "Emulation.setDeviceMetricsOverride":
-        _fixture_width = kwargs["width"]
-    if method == "Page.captureScreenshot":
-        return {"data": _fixture_png}
-    return {}
-
-def js(source):
-    global _fixture_selected
-    if "two-factor|2fa|verification code|keychain" in source:
-        return False
-    if "data-workspace-id=\"c2ea0541-f56d-4c73-bf71-56c5405c4934\"" in source:
-        _fixture_selected = _fixture_control
-        return True
-    if "data-workspace-id=\"292be0f9-ca5d-43ed-a6f7-31354fe7fe56\"" in source:
-        _fixture_selected = _fixture_start
-        return True
-    if "return {userId, selectedWorkspace" in source:
-        return {"userId": _fixture_user, "selectedWorkspace": _fixture_selected,
-                "workspaceIds": [_fixture_start, _fixture_control], "display": "Ridgeio", "signedOut": False}
-    if "return {userId,workspaceId" in source:
-        return {"userId": _fixture_user, "workspaceId": _fixture_selected, "workspaceCount": 2,
-                "display": "Ridgeio", "signedOut": False, "connectedSurface": True,
-                "connectedCreateAction": False, "errors": []}
-    if "feed:!!document.querySelector" in source:
-        return {"feed": True, "roster": True, "localSeat": True, "h0": True, "workspaceError": False}
-    if "performance.getEntriesByType('resource')" in source:
-        public = pathlib.Path(os.environ["SITE_EVIDENCE"]) / "site-05-public.txt"
-        return [line.split(" ", 1)[1] for line in public.read_text().splitlines() if line.startswith("asset_sha256=")]
-    if "data-connected-apps-list" in source:
-        return "No apps are connected to this account."
-    if "data-connected-apps-status" in source:
-        return "Nothing was changed"
-    if "data-connected-apps-retry" in source:
-        return False
-    if "data-connected-apps-dialog" in source and "getBoundingClientRect" in source:
-        return {"x": 0, "y": 0, "width": 280, "height": 200, "scale": 1}
-    if "railHeight" in source and "scrollWidth" in source:
-        return {"innerWidth": _fixture_width, "scrollWidth": _fixture_width, "railHeight": 64,
-                "controls": [{"top": 8, "bottom": 48, "left": 8, "right": 48},
-                             {"top": 8, "bottom": 48, "left": 56, "right": 96},
-                             {"top": 8, "bottom": 48, "left": 104, "right": 144}]}
-    if "[aria-checked=\"true\"]" in source:
-        return _fixture_selected
-    if "data-rail-account" in source:
-        return "Ridgeio"
-    if "data-panel=\"auth\"" in source:
-        return False
-    return True
-PY
-      printf '%s\n' "$browser_program"
-    } | /usr/bin/env PYTHONPATH="${BOX_DRY_RUN_PYTHON_FIXTURE:?Python fixture path required}" /usr/bin/python3 -
+    # The dry run does not emulate a browser. Every program is refused, whatever its text. Browser surfaces
+    # are declared in fixtures/non-substitutable.json and proved live by Anvil.
+    printf '%s\n' 'UNPRODUCED browser session: the dry run does not emulate a browser' >&2
+    unhandled_stub
     ;;
   cswarm)
     mkdir -p "$cswarm_state_dir"

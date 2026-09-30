@@ -20,6 +20,42 @@ git() {
   box_dry_run_record git "$@"
   case " $* " in
     *' fetch origin main '*) printf '%s\n' 'UNPRODUCED exact-SHA checkout preparation' >&2; return 69 ;;
+  esac
+  # A dry run never touches the network. The only remote it knows is the repository the plan names; a clone of
+  # it is a clone of the dry run's own temporary checkout, with the plan's URL as origin. Every other
+  # operation that talks to a remote is refused, not answered.
+  local git_arguments=("$@") git_index=0 git_subcommand=''
+  while [ "$git_index" -lt "${#git_arguments[@]}" ]; do
+    case "${git_arguments[$git_index]}" in
+      -C|-c|--git-dir|--work-tree) git_index=$((git_index + 2)) ;;
+      -*) git_index=$((git_index + 1)) ;;
+      *) git_subcommand=${git_arguments[$git_index]}; break ;;
+    esac
+  done
+  case "$git_subcommand" in
+    clone)
+      local git_url='' git_destination='' git_flags=() git_argument
+      for git_argument in "${git_arguments[@]:$((git_index + 1))}"; do
+        case "$git_argument" in
+          --no-checkout) git_flags+=("$git_argument") ;;
+          -*) printf 'UNPRODUCED git clone flag %s\n' "$git_argument" >&2; return 69 ;;
+          *) if [ -z "$git_url" ]; then git_url=$git_argument; else git_destination=$git_argument; fi ;;
+        esac
+      done
+      if [ "$git_url" != https://github.com/yulanventures/commonswarm.git ] || [ -z "$git_destination" ] || [ -z "${BOX_DRY_RUN_SOURCE_CLONE:-}" ]; then
+        printf 'UNPRODUCED network git operation: git clone %s\n' "$git_url" >&2
+        return 69
+      fi
+      command git clone --no-hardlinks ${git_flags[@]+"${git_flags[@]}"} "$BOX_DRY_RUN_SOURCE_CLONE" "$git_destination" || return $?
+      command git -C "$git_destination" remote set-url origin "$git_url" || return $?
+      # The repository's own view of origin/main stands for the remote's main. Without one, the clone has
+      # none, and a block that needs it fails on its own check.
+      [ -z "${BOX_DRY_RUN_ORIGIN_MAIN:-}" ] || command git -C "$git_destination" update-ref refs/remotes/origin/main "$BOX_DRY_RUN_ORIGIN_MAIN"
+      ;;
+    fetch|pull|push|ls-remote|submodule)
+      printf 'UNPRODUCED network git operation: git %s\n' "$git_subcommand" >&2
+      return 69
+      ;;
     *) command git "$@" ;;
   esac
 }

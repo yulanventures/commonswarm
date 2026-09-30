@@ -1,0 +1,26 @@
+{
+  "hm37-hosted-open-ack-control": [
+    {
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-check-control.json",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json",
+      "owner": "root:root",
+      "mode": "0600"
+    }
+  ],
+  "hm37b-live-revoke-readback": [
+    {
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-revocation-readback.json",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-revocation-readback.json",
+      "owner": "root:root",
+      "mode": "0600"
+    }
+  ],
+  "hm37b-close-readback": [
+    {
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-close-readback.txt",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt",
+      "owner": "root:root",
+      "mode": "0600"
+    }
+  ]
+}
