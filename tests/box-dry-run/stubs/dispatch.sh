@@ -57,18 +57,31 @@ run_in_box() {
     [ "${BOX_DRY_RUN_BOX_ROOT:-}" = / ] && [ "$(uname -s)" = Linux ] && [ "$(id -u)" = 0 ] || unhandled_stub
     remote_prelude="${BOX_DRY_RUN_PYTHON_FIXTURE:?box fixture required}/../prelude.sh"
     [ -f "$remote_prelude" ] || fail_unproduced 'box remote prelude'
-    remote_trap=$(mktemp "${BOX_DRY_RUN_STUB_LOG}.remote.XXXXXX")
+    case "$login_user" in ops|commonswarm) ;; *) unhandled_stub ;; esac
+    /usr/bin/id -u "$login_user" >/dev/null || fail_unproduced 'box ssh login user'
+    remote_support="${BOX_DRY_RUN_PYTHON_FIXTURE%/*}"
+    remote_trap=$(mktemp "$remote_support/remote-trap.XXXXXX")
+    remote_log=$(mktemp "$remote_support/remote-log.XXXXXX")
+    /usr/bin/chown "$login_user:$login_user" "$remote_log"
+    chmod 0600 "$remote_log"
     printf 'source %q\n' "$remote_prelude" >"$remote_trap"
     printf '%s\n' 'set -E' \
       'trap '\''block_status=$?; case $- in *e*) printf "__FIRST_FAIL__:%s\n" "$BASH_COMMAND" >&2; exit "$block_status" ;; esac'\'' ERR' >>"$remote_trap"
+    chmod 0644 "$remote_trap"
     remote_env=()
     for variable_name in $(compgen -e); do
-      case "$variable_name" in BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;; esac
+      case "$variable_name" in
+        BOX_DRY_RUN_STUB_LOG) ;;
+        BOX_DRY_RUN_*) remote_env+=("$variable_name=${!variable_name}") ;;
+      esac
     done
     status=0
-    /usr/bin/env -i PATH="$PATH" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+    /usr/sbin/runuser -u "$login_user" -- /usr/bin/env -i \
+      PATH="$PATH" LANG=C.UTF-8 TZ=UTC BASH_ENV="$remote_trap" \
+      BOX_DRY_RUN_STUB_LOG="$remote_log" BOX_DRY_RUN_ROOT_STUB_LOG="$BOX_DRY_RUN_STUB_LOG" \
       ${remote_env[@]+"${remote_env[@]}"} /bin/bash -c "$remote_command" || status=$?
-    rm -f -- "$remote_trap"
+    cat "$remote_log" >>"$BOX_DRY_RUN_STUB_LOG"
+    rm -f -- "$remote_trap" "$remote_log"
     exit "$status"
   fi
   [ "${BOX_DRY_RUN_PART:-mac}" = mac ] || unhandled_stub
@@ -284,6 +297,19 @@ case "$name" in
     if [ -n "${BOX_DRY_RUN_IN_REMOTE:-}" ]; then
       case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
       export BOX_DRY_RUN_REMOTE_USER="$sudo_user"
+    fi
+    if [ "${BOX_DRY_RUN_PART:-}" = box ]; then
+      [ "${BOX_DRY_RUN_BOX_ROOT:-}" = / ] && [ "$(uname -s)" = Linux ] || unhandled_stub
+      sudo_env=()
+      for variable_name in $(compgen -e); do
+        case "$variable_name" in BOX_DRY_RUN_*) sudo_env+=("$variable_name=${!variable_name}") ;; esac
+      done
+      case "$sudo_user" in root|ops|commonswarm) ;; *) unhandled_stub ;; esac
+      root_log=$BOX_DRY_RUN_STUB_LOG
+      if [ "$sudo_user" = root ]; then root_log=${BOX_DRY_RUN_ROOT_STUB_LOG:-$BOX_DRY_RUN_STUB_LOG}; fi
+      exec /usr/bin/sudo -n -u "$sudo_user" /usr/bin/env -i \
+        PATH="$PATH" LANG=C.UTF-8 TZ=UTC ${BASH_ENV:+BASH_ENV="$BASH_ENV"} \
+        ${sudo_env[@]+"${sudo_env[@]}"} BOX_DRY_RUN_STUB_LOG="$root_log" "$@"
     fi
     exec "$@"
     ;;
