@@ -23,6 +23,7 @@
  * return zero. It answers one request with one JSON object and closes.
  */
 import postgres from "npm:postgres@3.4.9";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 
 type Sql = postgres.TransactionSql<Record<string, unknown>>;
@@ -565,6 +566,7 @@ async function handle(request: Request): Promise<Response> {
   // Preflight answers before anything else and touches no state: it must be fast
   // and it reveals nothing, since it depends only on the verb and the Origin.
   if (request.method === "OPTIONS") return preflight(request);
+  if (presentsAdminCredential(request)) return uniformFailure(request);
 
   // ★ THE GATE COMES FIRST, BEFORE ANY DATABASE WORK, AND THAT ORDERING IS THE FIX.
   // It used to sit ~70 lines below, AFTER two rate-bucket upserts and after a method

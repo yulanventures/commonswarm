@@ -2,7 +2,7 @@ import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
 import { commandRequiredConfig } from "./required-config.ts";
 import {
-  adminTransaction, adminDigest, recordAdminFailure, isAdminAccessCredential, isAdminRefreshCredential,
+  adminTransaction, adminDigest, recordAdminFailure, isAdminAccessCredential,
   type AdminAuthentication, type AdminInput,
   type AdminCredentialDelivery,
 } from "./admin-delegation.ts";
@@ -12934,28 +12934,35 @@ async function insertCommandFailure(
   `;
 }
 
+import { isAdminCredential } from "../_shared/admin-credential-boundary.ts";
+
 async function handlePostRequest(request: Request): Promise<Response> {
+  const credential = bearer(request);
+  // Runtime JWT proofs belong only to the trusted runtime adapter. Opaque
+  // access credentials may use the account path, never a worker command.
+  if (credential !== null && isAdminCredential(credential) &&
+      (!isAdminAccessCredential(credential) || request.method !== "POST")) {
+    return json(403, { error: "credential_kind_forbidden" });
+  }
   if (request.method !== "POST") {
     return json(405, { error: "method_not_allowed" });
   }
 
   const parsed = await readBody(request);
   if (!parsed.ok) {
-    const malformedCredential = bearer(request);
-    if (malformedCredential !== null && isAdminAccessCredential(malformedCredential)) {
-      await runAdminAccountCommand({ command_id: crypto.randomUUID(), command: { kind: 'invalid_request' } }, { kind: 'access', credential: malformedCredential });
+    if (isAdminCredential(credential)) {
+      return json(403, { error: "credential_kind_forbidden" });
     }
     return parsed.response;
   }
   const body = parsed.body;
-  const credential = bearer(request);
   // A separate account credential never reaches worker or GoTrue authentication.
   if (credential !== null && isAdminAccessCredential(credential)) {
+    if (record(body.stream)?.kind !== "account") {
+      return json(403, { error: "credential_kind_forbidden" });
+    }
     const result = await runAdminAccountCommand(body, { kind: "access", credential });
     return json(result.status, result.body);
-  }
-  if (credential !== null && isAdminRefreshCredential(credential)) {
-    return json(403, { error: "credential_runtime_required" });
   }
 
   const kind = commandKind(body);

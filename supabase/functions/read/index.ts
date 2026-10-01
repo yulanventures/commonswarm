@@ -5,6 +5,7 @@ import {
 } from "../command/cors.ts";
 import { createClient } from "npm:@supabase/supabase-js@2.110.8";
 import postgres from "npm:postgres@3.4.9";
+import { isAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   extractSafeDiagnostics,
@@ -418,16 +419,16 @@ async function handle(
   setPhase: (phase: ReadHandlerPhase) => void,
 ): Promise<Response> {
   setPhase("auth");
+  const token = bearer(request);
+  if (isAdminCredential(token)) {
+    return json(403, { error: "credential_kind_forbidden" });
+  }
   if (request.method !== "POST") {
     return json(405, { error: "method_not_allowed" });
   }
   if (request.headers.has("x-cswarm-hosted-capability") ||
       request.headers.has("x-commonswarm-hosted-capability")) {
     return json(403, { error: "forbidden" });
-  }
-  const token = bearer(request);
-  if (token?.startsWith("swm_adm_") || token?.startsWith("swm_adr_")) {
-    return json(403, { error: "credential_kind_forbidden" });
   }
   if (token === null) {
     return json(401, { error: "unauthenticated" });
