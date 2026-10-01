@@ -368,6 +368,8 @@ install -m 0600 -o root -g root /tmp/commonswarm-hm37b-open.env "$PROOF_DIR/wind
   printf 'PROOF_DIR=%q\n' "$PROOF_DIR"
   printf "RECYCLE_TIMER_STOPPED='0'\nBACKUP_TIMERS_STOPPED='0'\n"
 } >>"$PROOF_DIR/window.env"
+install -m 0600 -o root -g root /dev/null "$PROOF_DIR/copy-back.list"
+printf '%s\n' hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt >"$PROOF_DIR/copy-back.list"
 rm -f /tmp/commonswarm-hm37b-open.env
 test "$(readlink -f /home/commonswarm/edge/current)" =   "/home/commonswarm/edge/releases/$SHA"
 test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
@@ -452,8 +454,9 @@ BOX
   scp "$HARNESS_SOURCE" ops@100.115.66.74:/tmp/hm37-open-ack-control.ts
   ssh ops@100.115.66.74 "umask 077; : > /tmp/hm37-open-ack-deno.json"
   scp "$IMPORT_MAP_SOURCE" ops@100.115.66.74:/tmp/hm37-open-ack-deno.json
-  ssh ops@100.115.66.74 "umask 077; : > /tmp/hm37-human-session.json"
-  scp "$HUMAN_SESSION_SOURCE" ops@100.115.66.74:/tmp/hm37-human-session.json
+  ssh -o BatchMode=yes ops@100.115.66.74 \
+    "sudo -n -i /bin/bash -c 'set -euo pipefail; umask 077; test ! -e \"$STAGING_ROOT/human-session.json\"; test ! -L \"$STAGING_ROOT/human-session.json\"; cat >\"$STAGING_ROOT/human-session.json\"; chmod 0600 \"$STAGING_ROOT/human-session.json\"'" \
+    <"$HUMAN_SESSION_SOURCE"
   scp "$EVIDENCE_DIR/hm37-worker-boundary.txt" ops@100.115.66.74:/tmp/hm37-worker-boundary.txt
   scp "$EVIDENCE_DIR/hm37-hosted-control-inputs.txt" ops@100.115.66.74:/tmp/hm37-hosted-control-inputs.txt
   ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$STAGING_ROOT'" <<'BOX'
@@ -461,12 +464,11 @@ set -euo pipefail
 STAGING_ROOT="$1"
 install -m 0600 -o root -g root /tmp/hm37-open-ack-control.ts   "$STAGING_ROOT/hm37-open-ack-control.ts"
 install -m 0600 -o root -g root /tmp/hm37-open-ack-deno.json   "$STAGING_ROOT/hm37-open-ack-deno.json"
-install -m 0600 -o root -g root /tmp/hm37-human-session.json   "$STAGING_ROOT/human-session.json"
 PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
 install -m 0600 -o root -g root /tmp/hm37-worker-boundary.txt "$PROOF_DIR/hm37-worker-boundary.txt"
 install -m 0600 -o root -g root /tmp/hm37-hosted-control-inputs.txt "$PROOF_DIR/hm37-hosted-control-inputs.txt"
 rm -f /tmp/hm37-open-ack-control.ts /tmp/hm37-open-ack-deno.json \
-  /tmp/hm37-human-session.json /tmp/hm37-worker-boundary.txt \
+  /tmp/hm37-worker-boundary.txt \
   /tmp/hm37-hosted-control-inputs.txt
 test "$(stat -c '%U:%G:%a' "$STAGING_ROOT")" = root:root:700
 for FILE in hm37-open-ack-control.ts hm37-open-ack-deno.json human-session.json; do
@@ -588,7 +590,7 @@ contact only `registry.npmjs.org`.
   cleanup_download() {
     case "$DOWNLOAD_ROOT" in
       /run/commonswarm-deno-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z)
-        find "$DOWNLOAD_ROOT" -xdev -depth -delete
+        rm -r -- "$DOWNLOAD_ROOT"
         ;;
       *) return 1 ;;
     esac
@@ -697,7 +699,15 @@ PY
     "${OAUTH_CIDS[0]}")"
   case "$MCP_OAUTH_DATABASE_HOST_LINE" in MCP_OAUTH_DATABASE_HOST=?*) ;; *) false ;; esac
   MCP_OAUTH_DATABASE_HOST=${MCP_OAUTH_DATABASE_HOST_LINE#MCP_OAUTH_DATABASE_HOST=}
-  python3 - "$CONTROL_ROOT/oauth-database.json" "$MCP_OAUTH_DATABASE_HOST" <<'PY'
+  # Docker's db.commonswarm.internal extra-host is not host DNS. Use the
+  # measured target IP for host Deno, retaining certificate verification.
+  case "$MCP_OAUTH_DATABASE_HOST" in db.commonswarm.internal|172.31.0.10) ;; *) false ;; esac
+  HOST_DATABASE_IP="$(docker inspect --format \
+    '{{with index .NetworkSettings.Networks "commonswarm-net"}}{{.IPAddress}}{{end}}' commonswarm-postgres)"
+  test "$HOST_DATABASE_IP" = 172.31.0.10
+  openssl x509 -in /etc/commonswarm/pg-tls/server.crt -noout \
+    -checkip "$HOST_DATABASE_IP" >/dev/null
+  python3 - "$CONTROL_ROOT/oauth-database.json" "$HOST_DATABASE_IP" <<'PY'
 import json, os, pathlib, sys
 out = pathlib.Path(sys.argv[1])
 host = sys.argv[2]
@@ -833,7 +843,12 @@ try {
   const tls = withDatabaseTls({ prepare: false, max: 1, idle_timeout: 3, connect_timeout: 5,
     statement_timeout: 10_000, query_timeout: 10_000 },
     env.SWARM_DATABASE_TLS_CA_B64);
-  const edge = postgres(url, tls);
+  const hostUrl = new URL(url);
+  require(["postgres:", "postgresql:"].includes(hostUrl.protocol));
+  require(["db.commonswarm.internal", "172.31.0.10"].includes(hostUrl.hostname));
+  require(!hostUrl.port || hostUrl.port === "5432");
+  hostUrl.hostname = "172.31.0.10";
+  const edge = postgres(hostUrl.toString(), tls);
   pools.push(edge);
   const oauth = JSON.parse(Deno.readTextFileSync(`${controlRoot}/oauth-database.json`));
   require(Object.keys(oauth).sort().join(",") === "database,host,password,port,ssl_ca,user");
@@ -897,9 +912,10 @@ TS
 ```
 
 Run only after the migration and edge gates that section 9 observes are live.
-The suffix comes from the existing root-owned window file. Sourcing the edge
-environment exports secrets only to the Deno process; the command line remains
-secret-free. The one stdout document is safe evidence. The private journal is
+The suffix comes from the existing root-owned window file. The launcher reads the protected edge environment in memory and supplies only
+the required settings to Deno. Host database URLs use the measured TLS-covered
+172.31.0.10 address because the container extra-host is not host DNS. Credentials
+remain out of shell variables, command arguments and output. The one stdout document is safe evidence. The private journal is
 never copied.
 
 ```sh
@@ -919,10 +935,8 @@ never copied.
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *) false ;;
   esac
-  set -a
-  . /home/commonswarm/.env
-  set +a
-  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
+  WINDOW_PRINCIPAL_SUFFIX="$WINDOW_PRINCIPAL_SUFFIX" \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" python3 - /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -933,7 +947,37 @@ never copied.
     --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 \
     --human-session-file "$CONTROL_ROOT/human-session.json" \
     --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
-    >"$PROOF_DIR/hm37-hosted-check-control.json"
+    <<'PY' >"$PROOF_DIR/hm37-hosted-check-control.json"
+import os, pathlib, subprocess, sys, urllib.parse
+try:
+    values = {}
+    for raw in pathlib.Path("/home/commonswarm/.env").read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"): continue
+        name, value = line.split("=", 1)
+        assert name and value and not value.startswith(('"', "'"))
+        values[name] = value
+    env = os.environ.copy()
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SWARM_DATABASE_TLS_CA_B64",
+                 "SWARM_DATABASE_URL", "SUPABASE_DB_URL"):
+        env.pop(name, None)
+        if name in values: env[name] = values[name]
+    assert env.get("SWARM_DATABASE_URL") or env.get("SUPABASE_DB_URL")
+    for name in ("SWARM_DATABASE_URL", "SUPABASE_DB_URL"):
+        if name not in env: continue
+        url = urllib.parse.urlsplit(env[name])
+        assert url.scheme in ("postgres", "postgresql")
+        assert url.hostname in ("db.commonswarm.internal", "172.31.0.10")
+        assert url.port in (None, 5432)
+        # Keep encoded credentials private and preserve the database/options.
+        authority = url.netloc.rsplit("@", 1)
+        assert len(authority) == 2
+        env[name] = url._replace(netloc=authority[0]+"@172.31.0.10:5432").geturl()
+except Exception:
+    raise SystemExit("STOP: protected hosted database settings refused") from None
+raise SystemExit(subprocess.run(sys.argv[1:], env=env).returncode)
+PY
+
   chmod 0600 "$PROOF_DIR/hm37-hosted-check-control.json"
 )
 ```
@@ -956,10 +1000,8 @@ idempotent and still verifies complete revocation before returning zero.
   CONTROL_ROOT="/home/commonswarm/edge/controls/${SHA}-${WINDOW_ID}"
   JOURNAL="$CONTROL_ROOT/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json"
   test "$(stat -c %a "$JOURNAL")" = 600
-  set -a
-  . /home/commonswarm/.env
-  set +a
-  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" /usr/local/bin/deno run --cached-only --no-lock \
+  WINDOW_PRINCIPAL_SUFFIX="$WINDOW_PRINCIPAL_SUFFIX" \
+  DENO_NO_UPDATE_CHECK=1 DENO_DIR="$CONTROL_ROOT/deno-cache" python3 - /usr/local/bin/deno run --cached-only --no-lock \
     --config "$CONTROL_ROOT/hm37-open-ack-deno.json" \
     --allow-env --allow-net \
     --allow-read="$RELEASE_ROOT,$CONTROL_ROOT" \
@@ -969,7 +1011,37 @@ idempotent and still verifies complete revocation before returning zero.
     --human-session-file "$CONTROL_ROOT/human-session.json" \
     --oauth-database-config-file "$CONTROL_ROOT/oauth-database.json" \
     --cleanup-only "$JOURNAL" \
-    >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+    <<'PY' >"$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+import os, pathlib, subprocess, sys, urllib.parse
+try:
+    values = {}
+    for raw in pathlib.Path("/home/commonswarm/.env").read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"): continue
+        name, value = line.split("=", 1)
+        assert name and value and not value.startswith(('"', "'"))
+        values[name] = value
+    env = os.environ.copy()
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "SWARM_DATABASE_TLS_CA_B64",
+                 "SWARM_DATABASE_URL", "SUPABASE_DB_URL"):
+        env.pop(name, None)
+        if name in values: env[name] = values[name]
+    assert env.get("SWARM_DATABASE_URL") or env.get("SUPABASE_DB_URL")
+    for name in ("SWARM_DATABASE_URL", "SUPABASE_DB_URL"):
+        if name not in env: continue
+        url = urllib.parse.urlsplit(env[name])
+        assert url.scheme in ("postgres", "postgresql")
+        assert url.hostname in ("db.commonswarm.internal", "172.31.0.10")
+        assert url.port in (None, 5432)
+        # Keep encoded credentials private and preserve the database/options.
+        authority = url.netloc.rsplit("@", 1)
+        assert len(authority) == 2
+        env[name] = url._replace(netloc=authority[0]+"@172.31.0.10:5432").geturl()
+except Exception:
+    raise SystemExit("STOP: protected hosted database settings refused") from None
+raise SystemExit(subprocess.run(sys.argv[1:], env=env).returncode)
+PY
+
   chmod 0600 "$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
 )
 ```
@@ -1023,7 +1095,7 @@ baseline. An unknown or changed file is never removed.
   if [ -e "$DENO_DIR" ] || [ -L "$DENO_DIR" ]; then
     test -d "$DENO_DIR"
     test ! -L "$DENO_DIR"
-    find "$DENO_DIR" -xdev -depth -delete
+    rm -r -- "$DENO_DIR"
   fi
   test ! -e "$DENO_DIR"
   printf "DENO_REMOVED='1'\n" >>"$PROOF_DIR/window.env"
@@ -1101,8 +1173,19 @@ PY
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
-  FAILURE_JSON="$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+  FAILURE_JSON="$PROOF_DIR/hm37-hosted-check-control.json"
+  RECOVERY_JSON="$PROOF_DIR/hm37-hosted-cleanup-recovery.json"
+  if [ -f "$RECOVERY_JSON" ] && ! python3 - "$RECOVERY_JSON" <<'PY'
+import json,sys
+raise SystemExit(0 if json.load(open(sys.argv[1])).get('ok') is True else 1)
+PY
+  then
+    FAILURE_JSON="$RECOVERY_JSON"
+  elif [ ! -f "$FAILURE_JSON" ]; then
+    FAILURE_JSON="$RECOVERY_JSON"
+  fi
   test -f "$FAILURE_JSON"
+  test ! -L "$FAILURE_JSON"
   python3 - "$FAILURE_JSON" >"$PROOF_DIR/hm37b-failure-action.txt" <<'PY'
 import json, sys
 value = json.load(open(sys.argv[1]))
@@ -1149,11 +1232,19 @@ classification is requested during B.
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
-  : "${OUTGOING_LOG:?exact bounded outgoing log path required}"
-  : "${SECRET_SCAN_RESULT:?exact secret-scan result file required}"
   SHA=eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   PROOF_DIR="/home/commonswarm/stack/release-proofs/$SHA"
   . "$PROOF_DIR/window.env"
+  OUTGOING_LOG="$PROOF_DIR/commonswarm-edge-edge-runtime-1.${SHA}.docker.log"
+  SECRET_SCAN_RESULT="$PROOF_DIR/hm37b-outgoing-secret-scan.txt"
+  if LC_ALL=C grep -Eiq '(authorization:|cookie:|set-cookie:|access[_-]?token|refresh[_-]?token|service[_-]?role)' "$OUTGOING_LOG"; then
+    printf 'FAIL\n' >"$SECRET_SCAN_RESULT"
+  else
+    test "$?" -eq 1
+    test -f "$OUTGOING_LOG" && test ! -L "$OUTGOING_LOG"
+    printf 'PASS\n' >"$SECRET_SCAN_RESULT"
+  fi
+  chmod 0600 "$SECRET_SCAN_RESULT"
   test -f "$OUTGOING_LOG"
   test ! -L "$OUTGOING_LOG"
   test "$(stat -c '%U:%G:%a' "$OUTGOING_LOG")" = root:root:600
@@ -1200,12 +1291,12 @@ container and skips it.
   if [ -e "$CONTROL_ROOT" ]; then
     test -d "$CONTROL_ROOT"
     test ! -L "$CONTROL_ROOT"
-    find "$CONTROL_ROOT" -xdev -depth -delete
+    rm -r -- "$CONTROL_ROOT"
   fi
   if [ -e "$STAGING_ROOT" ]; then
     test -d "$STAGING_ROOT"
     test ! -L "$STAGING_ROOT"
-    find "$STAGING_ROOT" -xdev -depth -delete
+    rm -r -- "$STAGING_ROOT"
   fi
   test ! -e "$CONTROL_ROOT"
   test ! -e "$STAGING_ROOT"
@@ -1267,7 +1358,7 @@ readback is STOP and report; it never produces a success-shaped receipt.
   FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'
   COPYBACK_TEMP="$(mktemp -d /tmp/commonswarm-hm37b-copyback.XXXXXX)"
   case "$COPYBACK_TEMP" in /tmp/commonswarm-hm37b-copyback.??????) ;; *) false ;; esac
-  trap 'status=$?; find "$COPYBACK_TEMP" -depth -delete; exit "$status"' EXIT
+  trap 'status=$?; rm -r -- "$COPYBACK_TEMP"; exit "$status"' EXIT
   COPYBACK_ARCHIVE="$COPYBACK_TEMP/evidence.tar"
   test ! -e "$COPYBACK_ARCHIVE"
   ssh ops@100.115.66.74 "sudo -n -i /bin/bash -s -- '$RELEASE_SHA'" \
@@ -1298,7 +1389,7 @@ BOX
   (cd "$EVIDENCE_DIR" && shasum -a 256 $FILES) \
     >"$EVIDENCE_DIR/hm37b-copyback.sha256"
   chmod 0600 "$EVIDENCE_DIR/hm37b-copyback.sha256"
-  find "$COPYBACK_TEMP" -depth -delete
+  rm -r -- "$COPYBACK_TEMP"
   test ! -e "$COPYBACK_TEMP"
   trap - EXIT
 )

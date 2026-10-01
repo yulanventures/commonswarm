@@ -1265,7 +1265,7 @@ PY
   test -z "$MCP_PUBLIC_STATE"
 
   cat >"$APPLY_SQL" <<'SQL'
-\i /work/deploy/release-proofs/item-hm/20260928000002-catalog.sql
+\i /proof/20260928000002-catalog.sql
 SELECT
   (SELECT count(*) FROM supabase_migrations.schema_migrations
    WHERE version = '20260928000002') = 1
@@ -1273,7 +1273,7 @@ SELECT
 SQL
   test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
   cat >"$APPLY_SQL" <<'SQL'
-\i /work/deploy/release-proofs/item-hm/20260928000002-functional.sql
+\i /proof/20260928000002-functional.sql
 SQL
   test "$(release_psql_ro -Atq --file "$APPLY_SQL")" = t
   test "$(release_psql_ro -Atq --command \
@@ -1669,6 +1669,7 @@ repeat their Mac and box execution context so either can run alone.
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  cd "${RELEASE_REPO:?isolated release checkout required}"
   test "$(git rev-parse HEAD)" = "$SHA"
   git diff --exit-code "$SHA" -- src/protocol/hosted-authority.ts
   READS="$(mktemp /tmp/hm37-boundary-reads.XXXXXX)"
@@ -1789,6 +1790,7 @@ PY
   umask 077
   . "$HOME/.commonswarm-release-window.env"
   test "$SHA" = eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
+  cd "${RELEASE_REPO:?isolated release checkout required}"
   test "$(git rev-parse HEAD)" = "$SHA"
   git diff --exit-code "$SHA" -- src/protocol/hosted-authority.ts
   PROBE="$(mktemp /tmp/hm37-boundaries.XXXXXX)"
@@ -1963,7 +1965,7 @@ Requests to `edge-staging.commonswarm.com` and `api.commonswarm.com` send and re
 
 The named **COMMIT POINT** is reached only after all loopback DARK checks, both
 gateway public-boundary blocks, and all MCP-hostname boundary checks pass.
-Before it, any changed-state failure follows edge-first rollback. After it,
+Before it, any changed-state failure follows edge-first rollback. Transfer actual failed Mac receipts with `hm37a-failure-evidence-transfer` before dispatch. After it,
 `hm37a-failure-dispatch` maps stable IDs without human classification:
 
 | Assertion id | Class | Block-owned action |
@@ -2084,7 +2086,7 @@ window before migration or edge change.
     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json"
   install -m 0600 "/tmp/hm37a-directed-check-${SHA}.py" \
     "$EVIDENCE_DIR/hm37a-directed-check.py"
-  test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
+  test "$(ssh -o BatchMode=yes ops@100.115.66.74 'sudo -n readlink -f /home/commonswarm/edge/current')" =     /home/commonswarm/edge/releases/72c57e0d76d0aa86fe4f811a2cf51499919fed20
   python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" old     "$EVIDENCE_DIR/hm37a-local-control-old.json"
   chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-old.json"
 )
@@ -2101,7 +2103,7 @@ failure in this block selects full rollback.
   set -euo pipefail
   umask 077
   . "$HOME/.commonswarm-release-window.env"
-  test "$(ssh ops@100.115.66.74 'readlink -f /home/commonswarm/edge/current')" =     "/home/commonswarm/edge/releases/$SHA"
+  test "$(ssh -o BatchMode=yes ops@100.115.66.74 'sudo -n readlink -f /home/commonswarm/edge/current')" =     "/home/commonswarm/edge/releases/$SHA"
   python3 "$EVIDENCE_DIR/hm37a-directed-check.py"     "$EVIDENCE_DIR/hm37a-prep-seat-inventory.json" "$WINDOW_ID" new     "$EVIDENCE_DIR/hm37a-local-control-new.json"
   chmod 0600 "$EVIDENCE_DIR/hm37a-local-control-new.json"
 )
@@ -2114,7 +2116,7 @@ failure in this block selects full rollback.
 (
   set -euo pipefail
   . "$HOME/.commonswarm-release-window.env"
-  for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+  for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-reads.json hm37-public-reads.json hm37-mcp-hostname-reads.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
     test -f "$EVIDENCE_DIR/$FILE"
     test "$(stat -f %Lp "$EVIDENCE_DIR/$FILE")" = 600
     scp "$EVIDENCE_DIR/$FILE" ops@100.115.66.74:/tmp/"$FILE"
@@ -2122,7 +2124,7 @@ failure in this block selects full rollback.
   ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s' <<'BOX'
 set -euo pipefail
 PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
-for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json; do
+for FILE in hm37a-prep-seat-inventory.json hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-reads.json hm37-public-reads.json hm37-mcp-hostname-reads.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
   install -m 0600 -o root -g root "/tmp/$FILE" "$PROOF_DIR/$FILE"
   rm -f "/tmp/$FILE"
 done
@@ -2174,7 +2176,7 @@ records that outcome for the operator.
 ```sh
 # step: hm37a-prep-seat-cleanup
 # readonly: no
-# host: Mac mini /bin/bash 3.2 as Anvil; read-only ssh child on box
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box for token readback and safe receipt copy
 (
   set -euo pipefail
   umask 077
@@ -2272,7 +2274,7 @@ BOX
      [ "${RESOLVED_PREP_DIR##*/}" = "$PREP_ID" ] && \
      [ "$ID_SHAPE_OK" = yes ]
   then
-    if /bin/rm -R -- "$RESOLVED_PREP_DIR"; then
+    if rm -R -- "$RESOLVED_PREP_DIR"; then
       DELETE_RESULT=removed
       DELETE_REASON=guarded-delete-complete
     else
@@ -2297,7 +2299,30 @@ BOX
   if [ -n "${EVIDENCE_DIR:-}" ] && [ -d "$EVIDENCE_DIR" ]; then
     install -m 0600 "$CLEANUP_RECEIPT" "$EVIDENCE_DIR/hm37a-prep-cleanup.json"
   fi
+  # Copy the non-secret revocation receipt into the exact active box proof.
+  # Early aborts with no box proof retain the Mac receipt only.
+  ssh -o BatchMode=yes ops@100.115.66.74 \
+    "sudo -n -i /bin/bash -c 'set -euo pipefail; proof=/home/commonswarm/stack/release-proofs/$RELEASE_SHA; if test -d \"\$proof\" && test ! -L \"\$proof\"; then umask 077; cat >\"\$proof/hm37a-prep-cleanup.json\"; chmod 0600 \"\$proof/hm37a-prep-cleanup.json\"; fi'" \
+    <"$CLEANUP_RECEIPT"
   test "$DELETE_RESULT" != failed
+)
+```
+
+```sh
+# step: hm37a-failure-evidence-transfer
+# readonly: no
+# host: Mac mini /bin/bash 3.2 as Anvil; ssh child on box
+(
+  set -euo pipefail
+  . "$HOME/.commonswarm-release-window.env"
+  for FILE in hm37a-local-control-old.json hm37a-local-control-new.json hm37-loopback-boundaries.json hm37-public-boundaries.json hm37-mcp-hostname-boundaries.json; do
+    if [ -f "$EVIDENCE_DIR/$FILE" ] && [ ! -L "$EVIDENCE_DIR/$FILE" ]; then
+      test "$(stat -f %Lp "$EVIDENCE_DIR/$FILE")" = 600
+      ssh -o BatchMode=yes ops@100.115.66.74 \
+        "sudo -n -i /bin/bash -c 'set -euo pipefail; proof=/home/commonswarm/stack/release-proofs/$SHA; test -d \"\$proof\"; test ! -L \"\$proof\"; umask 077; cat >\"\$proof/$FILE\"; chmod 0600 \"\$proof/$FILE\"'" \
+        <"$EVIDENCE_DIR/$FILE"
+    fi
+  done
 )
 ```
 
@@ -2309,7 +2334,21 @@ BOX
   set -euo pipefail
   PROOF_DIR=/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922
   . "$PROOF_DIR/window.env"
-  FAILURE_JSON="$PROOF_DIR/hm37a-local-control-new.json"
+  FAILURE_JSON="$(python3 - "$PROOF_DIR" <<'PY'
+import json, pathlib, sys
+root=pathlib.Path(sys.argv[1])
+for name in ('hm37a-local-control-old.json','hm37a-local-control-new.json',
+             'hm37-loopback-boundaries.json','hm37-public-boundaries.json',
+             'hm37-mcp-hostname-boundaries.json'):
+    path=root/name
+    if path.is_file() and not path.is_symlink():
+        value=json.loads(path.read_text())
+        if value.get('pass') is False:
+            print(path); break
+else:
+    raise SystemExit('STOP: no actual failed control receipt')
+PY
+  )"
   test -f "$FAILURE_JSON"
   python3 - "$FAILURE_JSON" >"$PROOF_DIR/hm37a-failure-action.txt" <<'PY'
 import json, sys
@@ -2375,6 +2414,7 @@ ordering-proven S5 bearer failure performs full rollback.
   if LC_ALL=C grep -Eiq '(authorization:|cookie:|set-cookie:|access[_-]?token|refresh[_-]?token|service[_-]?role)' "$OUTGOING_LOG"; then
     printf 'FAIL\n' >"$SECRET_SCAN_RESULT"
   else
+    test "$?" -eq 1
     printf 'PASS\n' >"$SECRET_SCAN_RESULT"
   fi
   chmod 0600 "$SECRET_SCAN_RESULT"
@@ -2417,7 +2457,7 @@ copy-back manifest, records that disposition, and continues automatically.
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")" = 1
   test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t
   python3 - "$PROOF_DIR/hm37-local-control.json" \
-    "/tmp/hm37a-prep-cleanup-${SHA}.json" \
+    "$PROOF_DIR/hm37a-prep-cleanup.json" \
     >"$PROOF_DIR/hm37-revocation-readback.json" <<'PY'
 import json, sys
 control = json.load(open(sys.argv[1]))
