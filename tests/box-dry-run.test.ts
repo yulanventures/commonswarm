@@ -115,6 +115,9 @@ const PRESEED_ALLOWLIST = JSON.parse(readFileSync(PRESEED_ALLOWLIST_FILE, "utf8"
 const PLAN_VISIBLE_PATH_PRESEEDS = [
   "/home/commonswarm/edge/current",
   "/home/commonswarm/stack/current",
+  "/home/commonswarm/oauth/current",
+  "/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05",
+  "/home/commonswarm/oauth/releases/826db6a34f235064a3a03c57377d8e32a35d2f05/RELEASE_SHA",
   "/home/commonswarm/edge/releases/<previous>",
   "/home/commonswarm/edge/releases/<previous>/RELEASE_SHA",
   "/home/commonswarm/stack/releases/<previous>",
@@ -384,6 +387,11 @@ const sitePackage = spawnSync("git", ["show", `${BASE_SHA}:package.json`], { enc
 assert.equal(sitePackage.status, 0, sitePackage.stderr);
 const SITE_VERSION = (JSON.parse(sitePackage.stdout) as { version: string }).version;
 const OAUTH_RELEASE = measuredProductionMatch(/oauth_current=([^\n]+)/);
+const OAUTH_RELEASE_EVIDENCE = "docs/evidence/2026-09-28-release-826db6a34f23-v5";
+// The historical reuse receipt verifies archive bytes, ownership and modes
+// (HM6 BOX-WINDOW.md:623-642). These are baseline inputs, never HM37 results.
+assert.equal(readFileSync(`${OAUTH_RELEASE_EVIDENCE}/oauth.release-dir-state.txt`, "utf8"), "OAUTH_RELEASE_DIR_STATE=reused\n");
+const OAUTH_ARCHIVE_SHA256 = readFileSync(`${OAUTH_RELEASE_EVIDENCE}/archive.sha256`, "utf8").split(" ")[0]!;
 const EDGE_MEMORY = Number(measuredMatch("M11", /memory=(\d+)/));
 const EDGE_NETWORK = measuredMatch("M11", /network=([^ ]+)/);
 const TARGET_ENV_NAME = measuredMatch("M8", /^(TARGET_DATABASE_URL)$/m);
@@ -1394,6 +1402,10 @@ function pinnedReleaseArchive(sha: string): Buffer {
     const result = spawnSync("git", ["archive", "--format=tar", sha], { maxBuffer: 256 * 1024 * 1024 });
     assert.equal(result.status, 0, result.stderr.toString());
     archive = result.stdout;
+    if (sha === basename(OAUTH_RELEASE)) {
+      assert.equal(createHash("sha256").update(archive).digest("hex"), OAUTH_ARCHIVE_SHA256,
+        "OAuth baseline archive must match the committed reused-release input");
+    }
     pinnedReleaseArchives.set(sha, archive);
   }
   return archive;
@@ -1458,9 +1470,10 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   directory("/srv/commonswarm", 0o750, commonswarm);
   directory("/home/commonswarm/edge", 0o755, commonswarm);
   directory("/home/commonswarm/stack", 0o755, commonswarm);
+  directory("/home/commonswarm/oauth", 0o755, commonswarm);
   const previousEdge = model.releases.previousEdge.path;
   const previousStack = model.releases.previousStack.path;
-  for (const release of [previousEdge, previousStack]) {
+  for (const release of [previousEdge, previousStack, model.releases.oauth.path]) {
     directory(release, release === previousEdge ? 0o750 : 0o755, commonswarm);
     releaseTree(release, basename(release));
   }
@@ -1468,6 +1481,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   file(measuredDbHelper, "#!/bin/sh\nprintf '%s\\n' 'UNPRODUCED database observation' >&2\nexit 69\n", 0o775, commonswarm);
   symlinkSync(at(edgeTarget ?? previousEdge), at("/home/commonswarm/edge/current"));
   symlinkSync(at(previousStack), at("/home/commonswarm/stack/current"));
+  symlinkSync(at(model.releases.oauth.path), at("/home/commonswarm/oauth/current"));
   file(K4_10_COMPOSE_OVERRIDE_PATH, readFileSync(K4_10_COMPOSE_OVERRIDE_EVIDENCE), 0o644, commonswarm);
 
   directory(K4_12_STACK_PROOF_PARENT, 0o755, rootOwned);
@@ -1527,6 +1541,7 @@ function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): strin
   return [
     "/home/commonswarm/edge/current", "/home/commonswarm/stack/current",
     previousEdge, join(previousEdge, "RELEASE_SHA"), previousStack, join(previousStack, "RELEASE_SHA"),
+    "/home/commonswarm/oauth/current", model.releases.oauth.path, join(model.releases.oauth.path, "RELEASE_SHA"),
     ...(state === "s1" ? [] : [CANDIDATE_EDGE, join(CANDIDATE_EDGE, "RELEASE_SHA"), CANDIDATE_STACK, join(CANDIDATE_STACK, "RELEASE_SHA")]),
     ...((state === "s2" || state === "s5") ? CLOSED_PROOF_PATHS : []),
     K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT,
@@ -2216,7 +2231,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   for (const path of ["/home/commonswarm", "/srv/commonswarm"]) makeRootDirectory(path, 0o750);
   const previousEdge = model.releases.previousEdge.path;
   const previousStack = model.releases.previousStack.path;
-  for (const release of [previousEdge, previousStack]) {
+  for (const release of [previousEdge, previousStack, model.releases.oauth.path]) {
     mkdirSync(release, { recursive: true });
     const releaseModel = Object.values(model.releases).find((candidate) => candidate.path === release);
     assert.ok(releaseModel);
@@ -2227,9 +2242,11 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   writeMode(measuredDbHelper, "#!/bin/sh\nprintf '%s\\n' 'UNPRODUCED database observation' >&2\nexit 69\n", 0o775);
   mkdirSync("/home/commonswarm/edge", { recursive: true });
   mkdirSync("/home/commonswarm/stack", { recursive: true });
-  for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack"]) chmodSync(path, 0o755);
+  mkdirSync("/home/commonswarm/oauth", { recursive: true });
+  for (const path of ["/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth"]) chmodSync(path, 0o755);
   symlinkSync(finalEdge ?? previousEdge, "/home/commonswarm/edge/current");
   symlinkSync(previousStack, "/home/commonswarm/stack/current");
+  symlinkSync(model.releases.oauth.path, "/home/commonswarm/oauth/current");
   copyRootFixture(K4_10_COMPOSE_OVERRIDE_EVIDENCE, K4_10_COMPOSE_OVERRIDE_PATH, 0o644);
 
   makeRootDirectory(K4_12_STACK_PROOF_PARENT, 0o755);
@@ -2287,11 +2304,11 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
     "/etc/commonswarm-oauth/service.env",
     "/var/backups/commonswarm-postgres/status.json",
   ]) chownSync(path, 0, 0);
-  chownTree("commonswarm:commonswarm", previousEdge, previousStack, measuredSiteRelease);
+  chownTree("commonswarm:commonswarm", previousEdge, previousStack, model.releases.oauth.path, measuredSiteRelease);
   if (state !== "s1") chownTree("commonswarm:commonswarm", targetEdge, targetStack);
   chownPaths(
     "commonswarm:commonswarm",
-    "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack",
+    "/home/commonswarm", "/home/commonswarm/edge", "/home/commonswarm/stack", "/home/commonswarm/oauth",
     "/home/commonswarm/.env",
     "/srv/commonswarm", "/srv/commonswarm/site", "/srv/commonswarm/site/releases",
   );
@@ -2316,6 +2333,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   const seededPaths = [
     "/home/commonswarm/edge/current", "/home/commonswarm/stack/current",
     previousEdge, join(previousEdge, "RELEASE_SHA"), previousStack, join(previousStack, "RELEASE_SHA"),
+    "/home/commonswarm/oauth/current", model.releases.oauth.path, join(model.releases.oauth.path, "RELEASE_SHA"),
     targetEdge, join(targetEdge, "RELEASE_SHA"), targetStack, join(targetStack, "RELEASE_SHA"),
     ...CLOSED_PROOF_PATHS,
     K4_10_COMPOSE_OVERRIDE_PATH, K4_11_OAUTH_IMAGE_PATH, K4_12_STACK_PROOF_PARENT,
@@ -5343,7 +5361,7 @@ test("existing release fixtures supply the pinned archive and runtime comparison
     const producer = planBlock(RUNBOOK, "1-apply-release-directories");
     const fixture = part === "box" ? prepareBoxFixture(state) : prepareMacFixture([producer], { state });
     const at = (path: string): string => fixture.part === "box" ? path : join(fixture.boxRoot!, path);
-    const verify = (target: string): void => {
+    const verify = (target: string, sha = RELEASE_SHA): void => {
       // Inspect every archive member independently of the synthetic comparison model. This is fixture-input
       // verification, not execution of the Linux-only apply verifier or a seeded prerequisite result.
       const result = spawnSync("/usr/bin/python3", ["-c", [
@@ -5361,9 +5379,9 @@ test("existing release fixtures supply the pinned archive and runtime comparison
         "  else:",
         "   assert member.isfile() and path.is_file() and not path.is_symlink(), name",
         "   assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(archive.extractfile(member).read()).digest(), f'archive bytes differ: {name}'",
-      ].join("\n"), at(target)], { input: releaseArchiveBytes(), encoding: "utf8" });
+      ].join("\n"), at(target)], { input: pinnedReleaseArchive(sha), encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);
-      assert.equal(readFileSync(join(at(target), "RELEASE_SHA"), "utf8"), `${RELEASE_SHA}\n`);
+      assert.equal(readFileSync(join(at(target), "RELEASE_SHA"), "utf8"), `${sha}\n`);
     };
     try {
       if (state === "s1") {
@@ -5372,6 +5390,10 @@ test("existing release fixtures supply the pinned archive and runtime comparison
         assert.equal(boundary[0]!.execution.result, "not-executed", "modeled apply was reported as executed");
       }
       for (const target of [CANDIDATE_EDGE, CANDIDATE_STACK]) verify(target);
+      verify(OAUTH_RELEASE, basename(OAUTH_RELEASE));
+      assert.equal(realpathSync(at("/home/commonswarm/oauth/current")), realpathSync(at(OAUTH_RELEASE)));
+      assert.equal(statSync(at(OAUTH_RELEASE)).mode & 0o777, 0o755);
+      assert.equal(statSync(join(at(OAUTH_RELEASE), "RELEASE_SHA")).mode & 0o777, 0o644);
       const prerequisite = planBlock(HM37, "hm37a-prerequisite-evidence");
       const paths = /for RUNTIME_PATH in ([^;]+); do/.exec(prerequisite.source)?.[1]?.split(/\s+/);
       assert.ok(paths?.length, "prerequisite producer has no runtime comparison inputs");
@@ -5383,14 +5405,19 @@ test("existing release fixtures supply the pinned archive and runtime comparison
         assert.equal(result.status, 0, `${path}: ${result.stdout}${result.stderr}`);
       }
       // A missing input must fail this contract before any producer outputs or consumers are seeded.
-      const router = join(at(CANDIDATE_EDGE), "deploy/edge-runtime/main/router.ts");
-      renameSync(router, `${router}.missing-control`);
-      try {
-        assert.throws(() => verify(CANDIDATE_EDGE), /archive inventory differs/);
-      } finally {
-        renameSync(`${router}.missing-control`, router);
+      for (const [target, sha, member] of [
+        [CANDIDATE_EDGE, RELEASE_SHA, "deploy/edge-runtime/main/router.ts"],
+        [OAUTH_RELEASE, basename(OAUTH_RELEASE), "services/mcp-auth/src/config.js"],
+      ]) {
+        const input = join(at(target!), member!);
+        renameSync(input, `${input}.missing-control`);
+        try {
+          assert.throws(() => verify(target!, sha), /archive inventory differs/);
+        } finally {
+          renameSync(`${input}.missing-control`, input);
+        }
+        verify(target!, sha);
       }
-      verify(CANDIDATE_EDGE);
     } finally {
       if (fixture.part === "box") cleanupBoxFixture(fixture);
       else cleanupMacFixture(fixture);
@@ -6638,7 +6665,7 @@ test("controls: executable-qualified tee writers cannot evade producer discovery
   const path = "/home/commonswarm/stack/release-proofs/qualified-writer/new-proof.json";
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
   for (const executable of ["tee", "/usr/bin/tee", '"/usr/bin/tee"', "/usr/bin/t\\ee",
-    "LC_ALL=C /usr/bin/tee", "sudo -n /usr/bin/tee", "env LC_ALL=C /usr/bin/tee", "command /usr/bin/tee"]) {
+    "LC_ALL=C /usr/bin/tee", "sudo -n /usr/bin/tee", "env LC_ALL=C /usr/bin/tee", "command /usr/bin/tee", "exec /usr/bin/tee"]) {
     const producer: Block = { ...planBlock(RUNBOOK, "runbook-23"), source: `printf actual | ${executable} "${path}"` };
     const discovered = crossHostHandoffs([producer, consumer]);
     assert.deepEqual(discovered.map((item) => [item.path, item.direction]), [[path, "box-to-mac"]], executable);
@@ -6683,11 +6710,22 @@ test("controls: opaque writer executables cannot silently omit cross-host produc
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
   const positive = crossHostHandoffs([producer, consumer]);
   assert.deepEqual(positive.map((item) => [item.path, item.producer, item.consumer]), [[path, producer, consumer]]);
-  for (const executable of ["$T", '"${T}"', "env LC_ALL=C $T", "sudo -n $T", "command $T"]) {
+  for (const executable of ["$T", '"${T}"', "env LC_ALL=C $T", "sudo -n $T", "command $T",
+    "$(echo /usr/bin/tee)", "`echo /usr/bin/tee`", "tee$EMPTY", "eval$EMPTY",
+    "env LC_ALL=C $(echo /usr/bin/tee)", "sudo -n tee$EMPTY"]) {
     const source = `T=/usr/bin/tee\nprintf actual | ${executable} "${path}"`;
     assert.throws(() => crossHostHandoffs([{ ...producer, source }, consumer]), /unknown writer executable form/);
-    assert.throws(() => transferProducts({ ...consumer,
-      source: `ssh ops@yulan-vps-1 'T=/usr/bin/tee; printf actual | ${executable} "${path}"'` }), /unknown writer executable form/);
+    const remote = { ...consumer,
+      source: `ssh ops@yulan-vps-1 'T=/usr/bin/tee; printf actual | ${executable} "${path}"'` };
+    assert.throws(() => crossHostHandoffs([remote, { ...producer, source: `cat "${path}"` }]), /unknown writer executable form/);
+    assert.throws(() => transferProducts(remote), /unknown writer executable form/);
+  }
+  for (const wrapper of ["nice", "/usr/bin/nice -n 1", "nohup", "timeout 1", "stdbuf -oL", "ionice", "setsid", "chrt 1"]) {
+    const source = `printf actual | ${wrapper} /usr/bin/tee "${path}"`;
+    const remote = { ...consumer, source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` };
+    assert.throws(() => crossHostHandoffs([{ ...producer, source }, consumer]), /unknown writer executable wrapper/);
+    assert.throws(() => crossHostHandoffs([remote, { ...producer, source: `cat "${path}"` }]), /unknown writer executable wrapper/);
+    assert.throws(() => transferProducts(remote), /unknown writer executable wrapper/);
   }
   for (const executable of ["sh", "/bin/bash", "sudo -n /bin/bash"]) {
     const script = `printf actual | tee "${path}"`;
@@ -6715,6 +6753,18 @@ test("controls: opaque writer executables cannot silently omit cross-host produc
 test("controls: command substitutions retain writers and executable eval refuses at the producer boundary", () => {
   const path = "/home/commonswarm/stack/release-proofs/capture-writer/proof.txt";
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
+  // Captured stdout used as a destination cannot disappear at the absolute-path
+  // filter. Each row owns a distinct writer operand grammar, in both directions.
+  for (const destination of [`$(echo ${path})`, `\`echo ${path}\``, `"${dirname(path)}/$(echo proof.txt)"`]) {
+    for (const source of [`printf actual | tee ${destination}`, `printf actual >${destination}`,
+      `cp /tmp/input ${destination}`, `curl --output=${destination} https://example.invalid`]) {
+      const producer = { ...planBlock(RUNBOOK, "runbook-23"), source };
+      const remote = { ...consumer, source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` };
+      assert.throws(() => crossHostHandoffs([producer, consumer]), /unknown writer destination form/);
+      assert.throws(() => crossHostHandoffs([remote, { ...producer, source: `cat "${path}"` }]), /unknown writer destination form/);
+      assert.throws(() => transferProducts(remote), /unknown writer destination form/);
+    }
+  }
   for (const source of [`BYTES="$(printf actual | /usr/bin/tee "${path}")"`,
     `BYTES=\`printf actual | /usr/bin/tee "${path}"\``,
     `BYTES="\`printf actual | /usr/bin/tee '${path}'\`"`,

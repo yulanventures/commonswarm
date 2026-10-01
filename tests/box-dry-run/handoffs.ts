@@ -12,6 +12,9 @@ export interface Handoff {
 }
 export interface TransferProduct { path: string; source: string; mode: string; owner: string; remote?: boolean; kind?: "file" | "directory" }
 const UNKNOWN_TRANSPORT = /\b(?:sftp|ftp|lftp|rcp|rclone|bbcp|unison|sshpass)\b/;
+// An impossible shell argv byte distinguishes captured data from literal text.
+// Its meaning must survive projection until the executable/destination boundary.
+const CAPTURED_STDOUT = "\0captured-stdout\0";
 const tokens = (line: string): string[] => (line.match(/(?:"[^"\n]*"|'[^'\n]*'|[^\s;"']+)+/g) ?? [])
   .map((word) => word.replace(/["']/g, ""));
 
@@ -263,10 +266,12 @@ function shellCommands(line: string): string[] {
 function executableWords(command: string): string[] {
   const words: string[] = [];
   const rawWords: string[] = [];
+  const dynamicBasenames: boolean[] = [];
+  let dynamic = false;
   let word = "", raw = "", started = false, quote = "", escaped = false;
   const flush = (): void => {
-    if (started) { words.push(word); rawWords.push(raw); }
-    word = ""; raw = ""; started = false;
+    if (started) { words.push(word); rawWords.push(raw); dynamicBasenames.push(dynamic); }
+    word = ""; raw = ""; started = false; dynamic = false;
   };
   for (const char of command.trimStart()) {
     if (escaped) {
@@ -276,27 +281,41 @@ function executableWords(command: string): string[] {
       word += char; started = true; escaped = false; continue;
     }
     if (char === "\\" && quote !== "'") { raw += char; escaped = true; started = true; continue; }
-    if (quote) { raw += char; if (char === quote) quote = ""; else word += char; continue; }
+    if (quote) {
+      raw += char;
+      if (char === quote) quote = "";
+      else {
+        if (char === "/") dynamic = false;
+        if (quote !== "'" && ["$", "`", "\0"].includes(char)) dynamic = true;
+        word += char;
+      }
+      continue;
+    }
     if (char === "'" || char === '"') { raw += char; quote = char; started = true; continue; }
     if (/\s/.test(char)) { flush(); continue; }
     if (char === "#" && !started) break;
     // Redirection targets are inventoried separately. Do not split a quoted
     // operand containing an operator, or count a descriptor as a file operand.
     if (char === "<" || char === ">") { if (!/^\d*$/.test(word)) flush(); else { word = ""; raw = ""; started = false; } break; }
+    if (char === "/") dynamic = false;
+    if (["$", "`", "\0"].includes(char)) dynamic = true;
     raw += char; word += char; started = true;
   }
   flush();
   const name = (value: string | undefined): string => value?.split("/").at(-1) ?? "";
-  const shift = (): string | undefined => { rawWords.shift(); return words.shift(); };
+  const shift = (): string | undefined => { rawWords.shift(); dynamicBasenames.shift(); return words.shift(); };
   // Shell assignment names must be unquoted. env/sudo instead receive ordinary
   // argv, where a quoted NAME=value word still defines their environment.
-  while (/^[A-Za-z_][A-Za-z0-9_]*(?:\[.*\])?=/.test(rawWords[0] ?? "")) {
+  while (/^[A-Za-z_][A-Za-z0-9_]*(?:\[.*\])?\+?=/.test(rawWords[0] ?? "")) {
     // Arithmetic/command substitutions contain whitespace that is not an
     // executable argv boundary. Their outer assignment is not a command.
-    if (rawWords[0]!.includes("$(")) return [];
+    if (rawWords[0]!.includes("$(") || /^[^=]+=\(/.test(rawWords[0]!)) return [];
     shift();
   }
   while (["sudo", "env", "command", "exec"].includes(name(words[0]))) {
+    if (dynamicBasenames[0] || words[0]?.includes(CAPTURED_STDOUT)) {
+      throw new Error(`unknown writer executable form: ${command.trim()}`);
+    }
     const wrapper = name(shift());
     while (words[0]?.startsWith("-")) {
       const option = shift()!;
@@ -314,12 +333,19 @@ function executableWords(command: string): string[] {
     }
   }
   if (words.length) {
+    const casePattern = rawWords[0]!.endsWith(")");
+    const capturedExecutable = words[0]!.includes(CAPTURED_STDOUT);
     words[0] = name(words[0]);
     // An unresolved executable can be a writer. Its directory may be symbolic
     // when its basename is literal, but guessing a variable basename loses
     // ownership silently (e.g. T=/usr/bin/tee followed by $T).
-    if (/^[$`]/.test(words[0]!) && words.length > 1 && !words[0]!.endsWith(")")) {
+    if ((dynamicBasenames[0] && !casePattern) || capturedExecutable) {
       throw new Error(`unknown writer executable form: ${command.trim()}`);
+    }
+    // These utilities execute another argv. Until their option grammars are
+    // supported, refusing the envelope keeps wrapped writers visible.
+    if (["nice", "nohup", "timeout", "stdbuf", "ionice", "setsid", "chrt"].includes(words[0]!)) {
+      throw new Error(`unknown writer executable wrapper: ${command.trim()}`);
     }
   }
   return words;
@@ -351,7 +377,7 @@ function substitutionPrograms(line: string): { outer: string; programs: string[]
       }
       if (end === line.length) { incomplete = true; continue; }
       programs.push(program);
-      outer += line.slice(start, index) + "CAPTURED_STDOUT";
+      outer += line.slice(start, index) + CAPTURED_STDOUT;
       start = end + 1;
       index = end;
       continue;
@@ -372,7 +398,7 @@ function substitutionPrograms(line: string): { outer: string; programs: string[]
     // Arithmetic is data, but any nested command substitutions still execute.
     if (program.startsWith("(")) programs.push(...substitutionPrograms(program.slice(1, -1)).programs);
     else programs.push(program);
-    outer += line.slice(start, index) + "CAPTURED_STDOUT";
+    outer += line.slice(start, index) + CAPTURED_STDOUT;
     start = end + 1;
     index = end;
   }
@@ -455,7 +481,7 @@ function redirectedOutputPaths(line: string): string[] {
 }
 
 function outputPaths(line: string, expand?: (value: string) => string[]): string[] {
-  const paths = redirectedOutputPaths(line);
+  const paths = redirectedOutputPaths(substitutionPrograms(line).outer);
   // curl owns both its response body and header file even when stdout is
   // captured for the status code. Parse command operands, not quoted prose or
   // the response URL. These paths have the same producer/consumer contract as
@@ -493,7 +519,14 @@ function outputPaths(line: string, expand?: (value: string) => string[]): string
       }
     }
   }
+  for (const path of paths) assertWriterDestination(path);
   return paths;
+}
+
+function assertWriterDestination(path: string): void {
+  if (path.includes(CAPTURED_STDOUT)) {
+    throw new Error(`unknown writer destination form: ${path}`);
+  }
 }
 
 // These are Mac-local files written after an SSH command substitution. Keep
@@ -516,6 +549,7 @@ function shellWrites(block: HandoffBlock): TransferProduct[] {
   const products = new Map<string, TransferProduct>();
   const add = (expression: string, mode = "0600", kind: "file" | "directory" = "file", source = ""): void => {
     for (const path of expand(expression)) {
+      assertWriterDestination(path);
       if (!/^\/(?:home|run|tmp|srv)\//.test(path) && !/^\$/.test(path)) continue;
       products.set(path, { path, source, mode, owner: "root:root", remote: true, kind });
     }
@@ -653,7 +687,11 @@ export function crossHostHandoffs(blocks: HandoffBlock[]): Handoff[] {
       const words = executableWords(line);
       if (!["cp", "mv", "ln", "install"].includes(words[0] ?? "") || words.includes("-d")) continue;
       const destination = words.filter((word) => !word.startsWith(">") && !/^[0-9]+>/.test(word)).at(-1);
-      if (destination) writes.push(...expand(destination).map(normalize).filter((path) => /^\/(?:home|run|tmp|srv)\//.test(path)));
+      if (destination) {
+        assertWriterDestination(destination);
+        writes.push(...expand(destination).map((path) => { assertWriterDestination(path); return normalize(path); })
+          .filter((path) => /^\/(?:home|run|tmp|srv)\//.test(path)));
+      }
     }
     for (const path of new Set(writes)) {
       for (const consumer of blocks.filter((block) => !block.host.startsWith("box "))) {
