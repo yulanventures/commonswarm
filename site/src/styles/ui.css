@@ -253,7 +253,12 @@
 .btn--danger:hover {
   color: var(--danger-ink);
   background: color-mix(in oklab, var(--danger) 80%, var(--text) 20%);
-  transform: translateY(-1px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .btn--danger:hover {
+    transform: translateY(-1px);
+  }
 }
 
 .btn--danger:active {

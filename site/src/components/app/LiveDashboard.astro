@@ -13359,9 +13359,11 @@ const signInMethods = signInDoors(await enabledProvidersForBuild({
   }
 
 
+  /* --accent-bright, not --accent: these links also sit in table headers on --elev-3, where
+   * the Daylight cobalt is 4.45:1. --accent-bright is 6.47:1 there. */
   .dashboard__message-markdown a:hover,
   .dashboard__message-toggle:hover {
-    color: var(--accent);
+    color: var(--accent-bright);
   }
 
   .dashboard__message-markdown a:focus-visible,

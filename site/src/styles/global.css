@@ -884,14 +884,15 @@ kbd {
    fill darkens and contrast against white ink RISES; it is near-white in dark, so the fill
    lightens and keeps the original "lifts under the cursor" feel. */
 /* Daylight Orbs: hover is the flat --accent-bright (#2446CC light, 7.44:1 with white ink;
-   #C2CFFF dark, 10.04:1 with its dark ink). The 1px lift is fine-pointer only. */
+   #C2CFFF dark, 10.04:1 with its dark ink). The 1px lift is fine-pointer only, and only
+   when the reader has not asked for reduced motion: the lift is opt-in, not reset after. */
 .btn--primary:hover {
   color: var(--accent-ink);
   background: var(--accent-bright);
   border-color: var(--accent-bright);
 }
 
-@media (hover: hover) and (pointer: fine) {
+@media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) {
   .btn--primary:hover {
     transform: translateY(-1px);
   }
@@ -962,7 +963,13 @@ a.card:hover,
   color: inherit;
   background: var(--surface-2);
   border-color: var(--border-strong);
-  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a.card:hover,
+  .card--link:hover {
+    transform: translateY(-2px);
+  }
 }
 
 /* --- misc utilities ----------------------------------------------------- */
