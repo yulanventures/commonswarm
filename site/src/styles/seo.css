@@ -7,9 +7,11 @@
 
 .seo-hero {
   border-bottom: 1px solid var(--seo-rule);
+  /* Daylight Orbs: the homepage's lavender and peach daylight, halved in dark mode. */
   background:
-    radial-gradient(circle at 82% 18%, var(--accent-dim), transparent 27rem),
-    var(--elev-1);
+    radial-gradient(ellipse 40rem 22rem at 84% 10%, rgb(184 173 242 / calc(0.24 * var(--glow-strength))), transparent 70%),
+    radial-gradient(ellipse 30rem 20rem at 98% 70%, rgb(243 184 157 / calc(0.2 * var(--glow-strength))), transparent 70%),
+    var(--bg);
 }
 
 .seo-hero__inner {
@@ -21,7 +23,7 @@
   margin-block: var(--s-4) 0;
   font-size: clamp(2.15rem, 6vw, 4.8rem);
   font-weight: var(--weight-display);
-  line-height: 0.98;
+  line-height: 1.05;
   letter-spacing: var(--track-display);
   text-wrap: balance;
 }
@@ -37,8 +39,7 @@
 .seo-hero__date {
   margin-block: var(--s-6) 0;
   color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
+  font-size: 0.8125rem;
 }
 
 .seo-shell {
@@ -99,8 +100,7 @@
 }
 
 .seo-content li::marker {
-  color: var(--accent);
-  font-family: var(--font-mono);
+  color: var(--text-muted);
   font-weight: var(--weight-semibold);
 }
 
@@ -118,7 +118,7 @@
   margin-block: var(--s-8);
   padding: var(--s-6);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--elev-1);
   box-shadow: var(--ring-top);
 }
@@ -128,8 +128,7 @@
 }
 
 .seo-callout__label {
-  color: var(--accent-bright);
-  font-family: var(--font-mono);
+  color: var(--text-muted);
   font-size: var(--t-xs) !important;
   font-weight: var(--weight-semibold);
   letter-spacing: var(--track-eyebrow);
@@ -147,7 +146,7 @@
   counter-increment: seo-step;
   padding: var(--s-6);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--elev-1);
 }
 
@@ -155,9 +154,10 @@
   content: counter(seo-step, decimal-leading-zero);
   display: block;
   margin-block-end: var(--s-3);
-  color: var(--accent-bright);
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .seo-steps strong {
@@ -170,7 +170,7 @@
   margin-block: var(--s-6);
   padding: var(--s-6);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--elev-2);
   overflow-x: auto;
   box-shadow: var(--ring-top);
@@ -185,7 +185,7 @@
   margin-block: var(--s-6);
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
 }
 
 .seo-table {
@@ -206,8 +206,8 @@
 .seo-table th {
   color: var(--text-muted);
   background: var(--elev-2);
-  font-family: var(--font-mono);
-  font-size: var(--t-xs);
+  font-size: 0.8125rem;
+  font-weight: 500;
   letter-spacing: var(--track-xs);
 }
 
@@ -230,7 +230,7 @@
 .seo-choice {
   padding: var(--s-6);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--elev-1);
 }
 
@@ -251,16 +251,15 @@
   top: calc(var(--header-h) + var(--s-6));
   padding: var(--s-6);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-xl);
   background: var(--elev-1);
   box-shadow: var(--shadow-sm), var(--ring-top);
 }
 
 .about-swarm__eyebrow {
   margin: 0 0 var(--s-3);
-  color: var(--accent-bright);
-  font-family: var(--font-mono);
-  font-size: var(--t-2xs);
+  color: var(--text-muted);
+  font-size: var(--t-xs);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--track-eyebrow);
   text-transform: uppercase;

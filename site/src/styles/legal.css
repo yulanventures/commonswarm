@@ -93,12 +93,13 @@
   gap: var(--s-3);
   margin-top: var(--s-8);
   padding: var(--s-4) var(--s-5);
-  border: 1px solid color-mix(in oklab, var(--warning) 34%, transparent);
-  border-radius: var(--radius);
-  background: var(--warning-dim);
+  /* Daylight Orbs "For review" chip colours (7.06:1 light, 8.68:1 dark). */
+  border: 1px solid color-mix(in oklab, var(--chip-review-ink) 22%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--chip-review-bg);
   font-size: var(--t-sm);
   line-height: var(--lh-sm);
-  color: var(--text);
+  color: var(--chip-review-ink);
   max-width: var(--measure-wide);
 }
 
@@ -165,7 +166,6 @@
 }
 
 .lgl__toc-n {
-  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   color: var(--text-faint);
 }
@@ -200,11 +200,11 @@
 }
 
 .lgl__sec-n {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--t-sm);
   font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
-  color: var(--accent-bright);
+  color: var(--text-muted);
 }
 
 .lgl__sub {
