@@ -7065,6 +7065,50 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
         source: `ssh ops@100.115.66.74 'printf actual' ${redirect}${target}` }), /unknown writer destination form/);
     }
   }
+  // These are source strings only. The adapter has no local pipeline replay;
+  // refusing with the producer identity prevents a remote-only success shape.
+  for (const sink of ["tee", "/usr/bin/tee", '"/usr/bin/tee"', "/usr/bin/t\\ee",
+    "LC_ALL=C /usr/bin/tee", "sudo -n /usr/bin/tee", "env LC_ALL=C /usr/bin/tee",
+    "command /usr/bin/tee", "exec /usr/bin/tee", "cat >"]) {
+    for (const tail of [`| ${sink} /tmp/ssh-pipe-product`,
+      `|& ${sink} /tmp/ssh-pipe-product`,
+      `| ${sink} /tmp/ssh-pipe-product >/tmp/pipe-stdout`,
+      `>/tmp/direct-before-pipe | ${sink} /tmp/ssh-pipe-product`,
+      `| ${sink} "$UNKNOWN_DESTINATION"`, `| ${sink} "$(printf /tmp/dynamic)"`]) {
+      const local = { ...producer, source: `ssh ops@100.115.66.74 'printf actual' ${tail}\n` +
+        "scp /tmp/unrelated ops@100.115.66.74:/tmp/ssh-pipe-product" };
+      for (const discover of [macBoundaryOperations, capturedMacProductPaths, transferProducts]) {
+        assert.throws(() => discover(local), (error: unknown) => {
+          assert.ok(error instanceof Error);
+          assert.match(error.message, /^write-forms-control:1 writes: unsupported Mac SSH pipeline:/);
+          assert.ok(error.message.includes(local.source.split("\n")[0]!));
+          return true;
+        });
+      }
+      assert.throws(() => crossHostHandoffs([local, consumer]), /unsupported Mac SSH pipeline/);
+    }
+  }
+  const quotedPipe = { ...producer,
+    source: "ssh ops@100.115.66.74 'printf actual | tee /tmp/remote-pipe-product' >/tmp/local-direct" };
+  assert.deepEqual(capturedMacProductPaths(quotedPipe), ["/tmp/local-direct"]);
+  assert.deepEqual(transferProducts(quotedPipe), [{ path: "/tmp/remote-pipe-product", source: "",
+    mode: "0600", owner: "root:root", remote: true, kind: "file" }]);
+  for (const separator of [";", "&&", "||", "&"]) {
+    const adjacent = { ...producer,
+      source: `printf before | tee /tmp/neighbor-before ${separator} ssh ops@100.115.66.74 'printf actual' >/tmp/owned ${separator} printf after | tee /tmp/neighbor-after` };
+    assert.deepEqual(capturedMacProductPaths(adjacent), ["/tmp/owned"]);
+    assert.deepEqual(transferProducts(adjacent), []);
+    for (const second of ["ssh", '"/usr/bin/ssh"', "env LC_ALL=C ssh", "sudo -n /usr/bin/ssh", "printf input | ssh"]) {
+      const multiple = { ...producer,
+        source: `ssh ops@100.115.66.74 'printf first' >/tmp/first ${separator} ${second} ops@100.115.66.74 'printf second' | tee /tmp/second` };
+      assert.throws(() => macBoundaryOperations(multiple), /write-forms-control:1 writes: unknown transfer form: multiple SSH commands/);
+    }
+  }
+  for (const tail of ["|", "|&", "| curl --output /tmp/curl-body https://example.invalid",
+    "| /usr/bin/tee --unknown-writer /tmp/product", "| tee >(tee /tmp/dynamic)"]) {
+    assert.throws(() => macBoundaryOperations({ ...producer,
+      source: `ssh ops@100.115.66.74 'printf actual' ${tail}` }), /write-forms-control:1 writes: unsupported Mac SSH pipeline/);
+  }
   for (const transport of ["scp", "rsync -a"]) {
     for (const source of [
       `for FILE in /tmp/one /tmp/two; do\n${transport} "$FILE" ops@100.115.66.74:/tmp/destination/\ndone`,

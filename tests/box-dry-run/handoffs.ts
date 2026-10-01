@@ -275,7 +275,12 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
         ...(/\.env["']/.test(tail) && /printf '[^'\n]*%q/.test(tail)
           ? { localStateSource: tail } : {}) };
     }
-    let sshText = shellCommands(line.slice(ssh.index))[0]!.trim();
+    const sshPipelines = shellCommands(line.slice(ssh.index), true);
+    if (shellCommands(line.slice(ssh.index)).slice(1).some((text) =>
+      /\bssh\b/.test(text) && executableWords(text)[0] === "ssh")) {
+      throw new Error(`${block.file}:${block.line} ${block.step}: unknown transfer form: multiple SSH commands on one Mac line: ${line.trim()}`);
+    }
+    let sshText = sshPipelines[0]!.trim();
     // A close of the enclosing Mac command substitution ends ssh too. Any
     // redirections after it belong to the outer command, not the remote stdin.
     let substitutionQuote = "", substitutionEscape = false;
@@ -286,6 +291,22 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
       if (substitutionQuote) { if (c === substitutionQuote) substitutionQuote = ""; continue; }
       if (c === "'" || c === '"') { substitutionQuote = c; continue; }
       if (c === ")") { sshText = sshText.slice(0, n); break; }
+    }
+    const sshCommand = shellCommands(sshText)[0]!;
+    if (sshCommand.length < sshText.length) {
+      // Inventory the local pipe consumers before projecting just SSH. A
+      // retained stdout writer has no replay here and must not borrow bytes
+      // from an unrelated transfer. Non-stdout consumers (e.g. archive
+      // extraction) retain their existing boundary handling.
+      const refuse = (cause?: unknown): never => {
+        throw new Error(`${block.file}:${block.line} ${block.step}: unsupported Mac SSH pipeline: ${sshText}`, { cause });
+      };
+      let paths: string[];
+      try { paths = outputPaths(sshText.slice(sshCommand.length), expand).flatMap(expand); }
+      catch (error) { return refuse(error); }
+      if (/^\s*\|&?\s*$/.test(sshText.slice(sshCommand.length))) refuse();
+      if (paths.some((path) => path !== "/dev/null")) refuse();
+      sshText = sshCommand.trim();
     }
     const sshHere = /<<(-?)(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/.exec(sshText);
     if (sshHere && here?.[3] !== sshHere[3]) unknown(line);
@@ -328,7 +349,7 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
 
 // A writer can follow a pipeline or a list operator. Quoted payloads and escaped
 // operators remain data; parsing them as commands would invent remote products.
-function shellCommands(line: string): string[] {
+function shellCommands(line: string, retainPipeline = false): string[] {
   const commands: string[] = [];
   let start = 0, quote = "", escaped = false;
   for (let index = 0; index < line.length; index++) {
@@ -341,7 +362,9 @@ function shellCommands(line: string): string[] {
       commands.push(line.slice(start, index));
       return commands.filter((command) => command.trim());
     }
-    if (char === "\n" || char === ";" || (char === "|" && line[index - 1] !== ">") || (char === "&" && !/[<>]/.test(line[index - 1] ?? ""))) {
+    if (char === "\n" || char === ";" || (char === "|" && line[index - 1] !== ">" &&
+        (!retainPipeline || line[index + 1] === "|" || line[index - 1] === "|")) ||
+        (char === "&" && !/[<>]/.test(line[index - 1] ?? "") && !(retainPipeline && line[index - 1] === "|"))) {
       commands.push(line.slice(start, index));
       start = index + 1;
     }
