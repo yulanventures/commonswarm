@@ -852,11 +852,39 @@ function at(number: number, description: string): void {
 function errorName(error: unknown): string {
   // Never print arbitrary names: dependency errors may contain input values.
   const name = error instanceof Error ? error.name : "Error";
-  return ["Error", "TypeError", "SyntaxError", "RangeError", "URIError", "EvalError",
+  return ["Error", "AggregateError", "TypeError", "SyntaxError", "RangeError", "URIError", "EvalError",
     "ReferenceError", "NotFound", "PermissionDenied", "InvalidData", "TimedOut",
     "ConnectionRefused", "ConnectionReset", "BadResource", "AbortError", "TimeoutError",
     "PostgresError", "AuthApiError", "AuthSessionMissingError", "AuthInvalidJwtError",
     "AuthRetryableFetchError", "AuthUnknownError"].includes(name) ? name : "Error";
+}
+function sanitizedError(error: unknown): string {
+  // Never print messages, stacks, URLs, SQL, or arbitrary property values.
+  const record = (value: unknown): Record<string, unknown> =>
+    value !== null && typeof value === "object" ? value as Record<string, unknown> : {};
+  const safeCode = (value: unknown): value is string => typeof value === "string" &&
+    /^(ERR_[A-Z0-9_]{2,60}|E[A-Z]{2,20}|[0-9A-Z]{5}|[a-z_]{2,40})$/.test(value);
+  const e = record(error);
+  const details: string[] = [];
+  if (safeCode(e.code)) details.push(`code=${e.code}`);
+  if (typeof e.status === "number" && Number.isInteger(e.status) && e.status >= 100 && e.status < 600) {
+    details.push(`status=${e.status}`);
+  }
+  if (e.cause !== undefined) {
+    const cause = record(e.cause);
+    details.push(`cause=${errorName(e.cause)}`);
+    if (safeCode(cause.code)) details.push(`cause.code=${cause.code}`);
+  }
+  const codes = new Set<string>();
+  for (const aggregate of [error, e.cause]) {
+    if (!(aggregate instanceof AggregateError)) continue;
+    for (const item of aggregate.errors) {
+      const code = record(item).code;
+      if (safeCode(code)) codes.add(code);
+    }
+  }
+  if (codes.size) details.push(`errors.code=${[...codes].join(",")}`);
+  return `${errorName(error)}: details redacted${details.length ? ` (${details.join(" ")})` : ""}`;
 }
 function require(value: unknown): asserts value {
   if (!value) throw new Error("dependency preflight refused");
@@ -923,7 +951,12 @@ try {
   require(!hostUrl.port || hostUrl.port === "5432");
   at(21, "edge database client initialization");
   hostUrl.hostname = "172.31.0.10";
-  const edge = postgres(hostUrl.toString(), tls);
+  // postgres@3.4.9 omits TLS servername for IP sockets. Supply the
+  // certificate DNS SAN explicitly while retaining the measured IP dial.
+  const verifiedTls = tls as typeof tls & { ssl?: { ca?: unknown; rejectUnauthorized?: unknown } };
+  require(verifiedTls.ssl && typeof verifiedTls.ssl.ca === "string" && verifiedTls.ssl.rejectUnauthorized === true);
+  const edge = postgres(hostUrl.toString(), { ...tls,
+    ssl: { ...verifiedTls.ssl, servername: "db.commonswarm.internal", rejectUnauthorized: true } });
   pools.push(edge);
   at(22, "OAuth database config readable and valid JSON");
   const oauth = JSON.parse(Deno.readTextFileSync(`${controlRoot}/oauth-database.json`));
@@ -939,11 +972,14 @@ try {
   at(29, "OAuth database CA certificate shape");
   require(typeof oauth.ssl_ca === "string" && oauth.ssl_ca.includes("-----BEGIN CERTIFICATE-----"));
   at(30, "OAuth database client initialization");
-  const provider = postgres({ host: oauth.host, port: oauth.port, database: oauth.database,
+  // Preserve the existing option object; a variable also passes the
+  // postgres typings' excess-property check for the original top-level keys.
+  const providerOptions = { host: oauth.host, port: oauth.port, database: oauth.database,
     username: oauth.user, password: oauth.password,
-    ssl: { ca: oauth.ssl_ca, rejectUnauthorized: true },
+    ssl: { ca: oauth.ssl_ca, rejectUnauthorized: true, servername: "db.commonswarm.internal" },
     application_name: "commonswarm-hm37-control", max: 2,
-    statement_timeout: 10_000, query_timeout: 10_000, connect_timeout: 5 });
+    statement_timeout: 10_000, query_timeout: 10_000, connect_timeout: 5 };
+  const provider = postgres(providerOptions);
   pools.push(provider);
   const workspace = "c2ea0541-f56d-4c73-bf71-56c5405c4934";
   at(31, "edge connection and read-only transaction");
@@ -988,14 +1024,14 @@ try {
   });
 } catch (error) {
   failed = true;
-  failure = [...requirement, errorName(error)];
+  failure = [...requirement, sanitizedError(error)];
 } finally {
   const closed = await Promise.allSettled(pools.map((pool) => pool.end({ timeout: 2 })));
   for (const [index, result] of closed.entries()) {
     if (result.status !== "rejected") continue;
     failed = true;
     failure ??= [38 + index, index === 0 ? "edge database pool closes" : "OAuth database pool closes",
-      errorName(result.reason)];
+      sanitizedError(result.reason)];
   }
 }
 if (failed) {
@@ -1010,8 +1046,10 @@ TS
 Run only after the migration and edge gates that section 9 observes are live.
 The suffix comes from the existing root-owned window file. The launcher reads the protected edge environment in memory and supplies only
 the required settings to Deno. Host database URLs use the measured TLS-covered
-172.31.0.10 address because the container extra-host is not host DNS. Credentials
-remain out of shell variables, command arguments and output. The one stdout document is safe evidence. The private journal is
+172.31.0.10 address because the container extra-host is not host DNS. The
+preflight supplies `db.commonswarm.internal` as the TLS servername for both
+IP-dialed clients and requires the edge CA object; certificate verification
+remains enabled. Credentials remain out of shell variables, command arguments and output. The one stdout document is safe evidence. The private journal is
 never copied.
 
 ```sh
