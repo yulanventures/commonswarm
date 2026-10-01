@@ -31,7 +31,7 @@
   "scope": "whole-block",
   "surface": "read-only live confirmed-human authentication preflight",
   "reason": "needs network and live production authentication, the protected HUMAN_SESSION_SOURCE and the actual box environment",
-  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:123-208 must exit zero after authenticated GET /auth/v1/user returns HTTP 200 without redirects and the confirmed email/UUID checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:184-193, followed by guarded cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:136-151. It creates no durable success receipt fields or later-consumed preflight result; neither historical identity evidence nor a staged session proves fresh authentication.",
+  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:123-219 must exit zero after authenticated GET /auth/v1/user returns HTTP 200 without redirects and the confirmed identity, nonempty email and UUID checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:189-199, followed by guarded cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:136-151. It creates no durable success receipt fields or later-consumed preflight result; neither historical identity evidence nor a staged session proves fresh authentication.",
   "receipt_fields": [
     "none: no durable success receipt fields or later-consumed preflight result; replacement proof is the live zero exit described above"
   ],
@@ -48,14 +48,14 @@
       "path": "/private/tmp/anvil-secret.XXXXXX/human-session.json",
       "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:155-156",
       "evidence": null,
-      "reason": "Protected mode-0600 session copy is streamed to the box at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207 and removed with SECRET_ROOT within this live block. Private input copy, not evidence; no committed evidence or later consumer; never seed."
+      "reason": "Ephemeral protected mode-0600 credential-bearing session copy is read to generate the protected Python stdin program at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207-216; that program carries the same session to the box only on stdin at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:218. Both files are removed with SECRET_ROOT within this live block. Private input copy, not evidence; no committed evidence or later consumer; never seed."
     },
     {
-      "output": "auth-probe.py",
-      "path": "/private/tmp/anvil-secret.XXXXXX/auth-probe.py",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:157-200",
+      "output": "auth-probe-input.py",
+      "path": "/private/tmp/anvil-secret.XXXXXX/auth-probe-input.py",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:159-213",
       "evidence": null,
-      "reason": "Generated probe program is read to form program-only SSH argv at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:202-206 and removed with SECRET_ROOT within this live block. No committed evidence or later consumer; never seed."
+      "reason": "Ephemeral generated program contains credential-sensitive session text as a Python string constant via repr() and is protected mode-0600 at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207-216. Literal SSH argv runs sudo -n -i python3 - with this file only on stdin at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:218; it creates no box files or directories. Removed with SECRET_ROOT within this live block. No committed evidence or later consumer; never seed."
     }
   ],
   "outputs": [],
@@ -67,11 +67,11 @@
     },
     {
       "output": "human-session.json",
-      "reason": "Protected mode-0600 session copy is streamed to the box at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207 and removed with SECRET_ROOT within this live block. Private input copy, not evidence; no committed evidence or later consumer; never seed."
+      "reason": "Ephemeral protected mode-0600 credential-bearing session copy is read to generate the protected Python stdin program at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207-216; that program carries the same session to the box only on stdin at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:218. Both files are removed with SECRET_ROOT within this live block. Private input copy, not evidence; no committed evidence or later consumer; never seed."
     },
     {
-      "output": "auth-probe.py",
-      "reason": "Generated probe program is read to form program-only SSH argv at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:202-206 and removed with SECRET_ROOT within this live block. No committed evidence or later consumer; never seed."
+      "output": "auth-probe-input.py",
+      "reason": "Ephemeral generated program contains credential-sensitive session text as a Python string constant via repr() and is protected mode-0600 at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:207-216. Literal SSH argv runs sudo -n -i python3 - with this file only on stdin at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:218; it creates no box files or directories. Removed with SECRET_ROOT within this live block. No committed evidence or later consumer; never seed."
     }
   ]
 },
@@ -80,7 +80,7 @@
   "scope": "whole-block",
   "surface": "official Deno artifact and absent-runtime dependency preflight",
   "reason": "needs the official Deno 2.9.7 artifact and the box runtime",
-  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:212-255 must exit zero after runtime absence at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:222-224, one HTTPS redirect to release-assets.githubusercontent.com and exact effective-URL/ZIP SHA-256 checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:244-253, followed by guarded temporary cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:226-241. The digest is the M19 published ZIP checksum in docs/evidence/2026-09-29-box-facts/box-facts-measured.json, not committed ZIP bytes or an installed-binary digest. No install or executable run occurs here; no durable receipt fields or later-consumed preflight result exists.",
+  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:223-266 must exit zero after runtime absence at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:233-235, one HTTPS redirect to release-assets.githubusercontent.com and exact effective-URL/ZIP SHA-256 checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:255-264, followed by guarded temporary cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:237-252. The digest is the M19 published ZIP checksum in docs/evidence/2026-09-29-box-facts/box-facts-measured.json, not committed ZIP bytes or an installed-binary digest. No install or executable run occurs here; no durable receipt fields or later-consumed preflight result exists.",
   "receipt_fields": [
     "none: no durable success receipt fields or later-consumed preflight result; replacement proof is the live zero exit described above"
   ],
@@ -88,35 +88,35 @@
     {
       "output": "DOWNLOAD_ROOT",
       "path": "/tmp/commonswarm-deno-preflight.XXXXXX",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:225,242-243",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:236,253-254",
       "evidence": null,
-      "reason": "Owned mode-0700 download directory, removed within the live block by EXIT/INT/TERM cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:226-241. No committed evidence or later consumer; never seed."
+      "reason": "Owned mode-0700 download directory, removed within the live block by EXIT/INT/TERM cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:237-252. No committed evidence or later consumer; never seed."
     },
     {
       "output": "redirect.headers",
       "path": "/tmp/commonswarm-deno-preflight.XXXXXX/redirect.headers",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:244-245",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:255-256",
       "evidence": null,
       "reason": "Transient HEAD response headers; removed with DOWNLOAD_ROOT within the live block. M19 is a checksum measurement, not these headers. No committed evidence or later consumer; never seed."
     },
     {
       "output": "discarded HEAD body",
       "path": "/dev/null",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:244-245",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:255-256",
       "evidence": null,
       "reason": "Discard sink, not an artifact or evidence file; no retained bytes, committed evidence or later consumer; never seed."
     },
     {
       "output": "deno.zip",
       "path": "/tmp/commonswarm-deno-preflight.XXXXXX/deno.zip",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:249-251",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:260-262",
       "evidence": null,
       "reason": "Transient official download checked against M19, then removed with DOWNLOAD_ROOT within the live block. No committed archive bytes or later consumer; never seed."
     },
     {
       "output": "effective-url.txt",
       "path": "/tmp/commonswarm-deno-preflight.XXXXXX/effective-url.txt",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:249-251",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:260-262",
       "evidence": null,
       "reason": "Transient effective download URL, removed with DOWNLOAD_ROOT within the live block. No committed evidence or later consumer; never seed."
     }
@@ -126,7 +126,7 @@
   "unproduced": [
     {
       "output": "DOWNLOAD_ROOT",
-      "reason": "Owned mode-0700 download directory, removed within the live block by EXIT/INT/TERM cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:226-241. No committed evidence or later consumer; never seed."
+      "reason": "Owned mode-0700 download directory, removed within the live block by EXIT/INT/TERM cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:237-252. No committed evidence or later consumer; never seed."
     },
     {
       "output": "redirect.headers",
@@ -151,7 +151,7 @@
   "scope": "whole-block",
   "surface": "cached hosted auth and two read-only database-client dependency preflight",
   "reason": "needs network and the hosted databases, the actual staged pinned Deno/cache/config, protected human session/OAuth config and recorded installed binary hash",
-  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:748-882 must exit zero after installed digest/metadata and protected-input checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:759-770, cached getUser/getClaims confirmed identity at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:803-815, edge READ ONLY identity/membership/capacity/fresh-name queries at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:838-860 and OAuth READ ONLY TLS/identity/provider-table access at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:861-869, including pool closure at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:873-875. No journal, authority object, durable success receipt fields or later-consumed preflight result is created. Earlier install/stage outputs remain those producers' inputs, not outputs of this preflight.",
+  "live_proof": "The live Window B block at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:759-893 must exit zero after installed digest/metadata and protected-input checks at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:770-781, cached getUser/getClaims confirmed identity at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:814-826, edge READ ONLY identity/membership/capacity/fresh-name queries at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:849-871 and OAuth READ ONLY TLS/identity/provider-table access at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:872-880, including pool closure at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:884-886. No journal, authority object, durable success receipt fields or later-consumed preflight result is created. Earlier install/stage outputs remain those producers' inputs, not outputs of this preflight.",
   "receipt_fields": [
     "none: no durable success receipt fields or later-consumed preflight result; replacement proof is the live zero exit described above"
   ],
@@ -307,7 +307,7 @@
   "scope": "whole-block",
   "surface": "official Deno 2.9.7 installer on pass and abort paths",
   "reason": "needs the official Deno 2.9.7 artifact and the box runtime",
-  "live_proof": "The live Window B installer at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:537-643 must verify the official M19 archive hash, record DENO_INSTALLED_BINARY_SHA256 in window.env, verify --version and root:root:755, and record that the download root is removed. Both pass and abort runs use this whole-block declaration.",
+  "live_proof": "The live Window B installer at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:548-654 must verify the official M19 archive hash, record DENO_INSTALLED_BINARY_SHA256 in window.env, verify --version and root:root:755, and record that the download root is removed. Both pass and abort runs use this whole-block declaration.",
   "receipt_fields": [
     "official archive SHA256 matches M19",
     "DENO_INSTALLED_BINARY_SHA256",
@@ -319,42 +319,42 @@
     {
       "output": "redirect.headers",
       "path": "/run/commonswarm-deno-{window}/redirect.headers",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:583-585",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:594-596",
       "evidence": null,
       "reason": "M19 records the checksum lookup, not this per-run redirect header file; removed by the installer trap."
     },
     {
       "output": "effective-url.txt",
       "path": "/run/commonswarm-deno-{window}/effective-url.txt",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:589-592",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:600-603",
       "evidence": null,
       "reason": "No committed effective redirect URL output; removed by the installer trap."
     },
     {
       "output": "deno.zip",
       "path": "/run/commonswarm-deno-{window}/deno.zip",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:590-594",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:601-605",
       "evidence": null,
       "reason": "M19 measures the official archive checksum, but no committed archive bytes exist; no download is permitted in this dry run."
     },
     {
       "output": "extracted deno",
       "path": "/run/commonswarm-deno-{window}/deno",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:595-613",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:606-624",
       "evidence": null,
       "reason": "No committed extracted executable bytes or binary checksum; removed by the installer trap."
     },
     {
       "output": "/usr/local/bin/deno",
       "path": "/usr/local/bin/deno",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:622-639",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:633-650",
       "evidence": null,
       "reason": "M1 observes the absent baseline and M19 measures the archive checksum only. Neither supports installed executable bytes."
     },
     {
       "output": "window.env:DENO_INSTALLED_BINARY_SHA256",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:620",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:631",
       "evidence": null,
       "reason": "No committed installed-binary digest. The official zip digest is not the digest of its executable and cannot seed this line."
     }
@@ -398,7 +398,7 @@
   "scope": "whole-block",
   "surface": "Deno installer cleanup on success and abort",
   "reason": "needs the official Deno 2.9.7 artifact and the box runtime",
-  "live_proof": "The live Window B cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:968-1016 must verify the recorded binary digest before removal, prove the runtime and cache absent, and write DENO_REMOVED=1 or the measured not-installed disposition. An absent baseline alone does not prove this installed-runtime transition.",
+  "live_proof": "The live Window B cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:979-1027 must verify the recorded binary digest before removal, prove the runtime and cache absent, and write DENO_REMOVED=1 or the measured not-installed disposition. An absent baseline alone does not prove this installed-runtime transition.",
   "receipt_fields": [
     "DENO_INSTALLED_BINARY_SHA256 readback",
     "DENO_REMOVED or deno_remove",
@@ -409,14 +409,14 @@
     {
       "output": "window.env:DENO_REMOVED",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1015",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1026",
       "evidence": null,
       "reason": "No committed removal receipt for a verified installed executable; do not infer it from M1 baseline absence."
     },
     {
       "output": "window.env:deno_remove",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:996",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1007",
       "evidence": null,
       "reason": "The plan-only not-installed line is not a committed output. No not-installed result is pre-seeded."
     }
@@ -444,7 +444,7 @@
   "scope": "whole-block",
   "surface": "authenticated hosted HTTP and database open/ACK control",
   "reason": "needs network and the hosted database",
-  "live_proof": "The live Window B run at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:892-924 invokes deploy/release-proofs/item-hm/hm37-open-ack-control.ts. Its stdout must record ok, mode=control, disposable IDs, assertion IDs and independently verified cleanup fields; only that protected output can feed the live-revoke readback.",
+  "live_proof": "The live Window B run at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:903-935 invokes deploy/release-proofs/item-hm/hm37-open-ack-control.ts. Its stdout must record ok, mode=control, disposable IDs, assertion IDs and independently verified cleanup fields; only that protected output can feed the live-revoke readback.",
   "receipt_fields": [
     "ok",
     "mode",
@@ -459,7 +459,7 @@
     {
       "output": "hm37-hosted-check-control.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-check-control.json",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:911-923",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:922-934",
       "evidence": null,
       "reason": "The committed file with this name says pass=false/not_run=true and aborted before staging. It is not an ok/mode=control result and cannot seed the successful writer shape."
     },
@@ -494,7 +494,7 @@
   "scope": "whole-block",
   "surface": "hosted control recovery on an interrupted/abort path",
   "reason": "needs network and the hosted database",
-  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:931-960 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1130-1153; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1090-1117 must consume that real receipt before classifying the failure.",
+  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:942-971 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1130-1153; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1101-1128 must consume that real receipt before classifying the failure.",
   "receipt_fields": [
     "ok",
     "mode=cleanup-only",
@@ -509,7 +509,7 @@
     {
       "output": "hm37-hosted-cleanup-recovery.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-cleanup-recovery.json",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:948-959",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:959-970",
       "evidence": null,
       "reason": "No committed recovery output exists. The prior plan-only ok=true/mode=cleanup-only shape is forbidden; the failure dispatcher must see this file absent."
     },
@@ -539,7 +539,7 @@
     }
   ]
 },
-  {"step": "hm37-hosted-control-stage", "surface": "Docker OAuth Config.Env database host observation", "reason": "No measured MCP_OAUTH_DATABASE_HOST value is available. M7 recorded service.env names only and found the host name absent; the production recheck recorded health and workdir only. Compose environment names and extra_hosts do not measure the running container's host value.", "live_proof": "The live docker inspect at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:681-683 must record the effective host before staging can be verified.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M7:83-89 and production_recheck:383-386 contain no measured Config.Env host value"}], "outputs": [], "unproduced": [{"output": "oauth-database.json", "reason": "Its host field depends on the unmeasured container Config.Env observation."}]},
+  {"step": "hm37-hosted-control-stage", "surface": "Docker OAuth Config.Env database host observation", "reason": "No measured MCP_OAUTH_DATABASE_HOST value is available. M7 recorded service.env names only and found the host name absent; the production recheck recorded health and workdir only. Compose environment names and extra_hosts do not measure the running container's host value.", "live_proof": "The live docker inspect at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:692-694 must record the effective host before staging can be verified.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M7:83-89 and production_recheck:383-386 contain no measured Config.Env host value"}], "outputs": [], "unproduced": [{"output": "oauth-database.json", "reason": "Its host field depends on the unmeasured container Config.Env observation."}]},
   {"step": "runbook-16", "surface": "live PostgreSQL database identity", "reason": "needs the real PostgreSQL identity; Anvil proves it live. M8 measured the helper and target.env file metadata and the TARGET_DATABASE_URL name only; database reachability was not attempted. No measured server address, database-level stack marker, or superuser identity is available to serve the real helper's assertion.", "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1320-1332 through deploy/supabase-stack/migrate/lib.sh:81-114.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M8: database reachability was not attempted"}], "outputs": []},
   {"surface": "live PostgreSQL catalog, transaction, rollback, and swarm.agent_tokens readback", "reason": "The harness checks command shape, ordering, read-only SQL, and reconciliation; only the production database can establish its current durable rows."},
   {"surface": "Docker image, container recreation, health, mounts, and network", "reason": "Measured inspect outputs seed exact shapes, but cannot establish newly pulled bytes or a live recreated container."},
