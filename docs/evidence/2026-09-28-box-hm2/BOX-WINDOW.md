@@ -10,8 +10,8 @@ The reviewed proof bytes are fixed by these full SHA-256 digests:
 |---|---|
 | `deploy/release-proofs/item-hm/20260928000002-catalog.sql` | `83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144` |
 | `deploy/release-proofs/item-hm/20260928000002-functional.sql` | `1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3` |
-| `deploy/release-proofs/item-hm/20260928000002-rollback.sql` | `c785367daf8fca1305773302af4cc46d6f1321e6ad55355dcbf69fc98ed85970` |
-| `deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql` | `c7378b2a1136010928fbaaf93d7678435e6ca2e1b356505e10fd456da5c4ae59` |
+| `deploy/release-proofs/item-hm/20260928000002-rollback.sql` | `4f645461833cc828c1624b0d7268bd13e12b0f6efc959c724707419df59d7a7b` |
+| `deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql` | `b870d101bfea39018c165f2b8f527dcc7ac1b0f2175a81f5490311da3ec0e54c` |
 
 Release hosted authority and internal authentication from that unchanged release SHA, applying migration **`20260928000002_hm_hosted_authority.sql`** before switching the edge.
 
@@ -66,8 +66,8 @@ Reproduce the release-shape measurement:
   for SPEC in \
     'deploy/release-proofs/item-hm/20260928000002-catalog.sql:83e16d2ae549137e1abcd599428c6f94800b357ee06c982ae060c30d96a61144' \
     'deploy/release-proofs/item-hm/20260928000002-functional.sql:1e8274f07674960748a4217022a65f3cca5fcb5e43a14476abf5e2b4ae006fa3' \
-    'deploy/release-proofs/item-hm/20260928000002-rollback.sql:c785367daf8fca1305773302af4cc46d6f1321e6ad55355dcbf69fc98ed85970' \
-    'deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql:c7378b2a1136010928fbaaf93d7678435e6ca2e1b356505e10fd456da5c4ae59'
+    'deploy/release-proofs/item-hm/20260928000002-rollback.sql:4f645461833cc828c1624b0d7268bd13e12b0f6efc959c724707419df59d7a7b' \
+    'deploy/release-proofs/item-hm/20260928000002-rollback-catalog.sql:b870d101bfea39018c165f2b8f527dcc7ac1b0f2175a81f5490311da3ec0e54c'
   do
     FILE="${SPEC%%:*}"
     EXPECTED="${SPEC##*:}"

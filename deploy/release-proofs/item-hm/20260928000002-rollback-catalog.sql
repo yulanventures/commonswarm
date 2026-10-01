@@ -9,10 +9,9 @@ SELECT
   AND to_regprocedure('swarm.resolve_hosted_seat_command_authorization(uuid,text,text)') IS NULL
   AND to_regprocedure('swarm.resolve_hosted_seat_read_authorization(uuid,text,text)') IS NULL
   AND COALESCE((
-    SELECT pg_get_constraintdef(c.oid)
-      LIKE '%user%agent%join%'
-      AND pg_get_constraintdef(c.oid) NOT LIKE '%hosted_grant%'
-      AND pg_get_constraintdef(c.oid) NOT LIKE '%hosted_seat%'
+    SELECT c.contype = 'c' AND c.convalidated
+      AND pg_get_constraintdef(c.oid) =
+        $check$CHECK ((principal_kind = ANY (ARRAY['user'::text, 'agent'::text, 'join'::text, 'hosted_grant'::text, 'hosted_seat'::text])))$check$
     FROM pg_constraint AS c
     WHERE c.conrelid = 'swarm.idempotency_keys'::regclass
       AND c.conname = 'idempotency_keys_principal_kind_check'

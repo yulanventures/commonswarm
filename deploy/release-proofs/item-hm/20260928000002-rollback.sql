@@ -1,4 +1,7 @@
--- Complete inverse for 20260928000002_hm_hosted_authority.sql.
+-- Authority-schema inverse for 20260928000002_hm_hosted_authority.sql.
+-- Hosted receipts may outlive that schema. Preserve their kinds and replay
+-- history alongside the pre-HM user/agent/join receipts; never rewrite them.
+-- The caller supplies the transaction and rollback-catalog verification.
 DROP VIEW IF EXISTS swarm_read.hosted_mcp_seats;
 DROP VIEW IF EXISTS swarm_read.hosted_mcp_connections;
 
@@ -15,4 +18,4 @@ ALTER TABLE swarm.idempotency_keys
   DROP CONSTRAINT IF EXISTS idempotency_keys_principal_kind_check;
 ALTER TABLE swarm.idempotency_keys
   ADD CONSTRAINT idempotency_keys_principal_kind_check
-  CHECK (principal_kind IN ('user', 'agent', 'join'));
+  CHECK (principal_kind IN ('user', 'agent', 'join', 'hosted_grant', 'hosted_seat'));
