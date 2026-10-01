@@ -483,7 +483,7 @@ the switch.
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$SITE_WINDOW_ID" \
     >"$SITE_EVIDENCE/site-03-pin.txt" <<'BOX'
 set -euo pipefail
-window_id=$1
+window_id=${1:-}
 case "$window_id" in
   [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;; *) exit 1 ;;
 esac
