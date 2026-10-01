@@ -16,7 +16,7 @@ Lane 8 starts only after HM37 WINDOW A closes with
 not wait for WINDOW B. The site SHA is an ancestor of that edge SHA. While MCP
 is dark, no hosted connection exists, so customers see Connected apps empty and
 cannot reach a revoke. The live grant-and-seat revoke control moves to HM37
-WINDOW B before MCP enable; lane 8 keeps only the real-Chrome empty-state
+WINDOW B before MCP enable; lane 8 keeps only the headless-browser empty-state
 control.
 
 ## 1. Named prompt inputs
@@ -242,12 +242,25 @@ PY
   if compgen -A variable OP_SESSION_ >/dev/null; then exit 1; fi
   test -f "$OP_SERVICE_ACCOUNT_TOKEN_FILE" && test ! -L "$OP_SERVICE_ACCOUNT_TOKEN_FILE"
   test "$(stat -f '%Lp' "$OP_SERVICE_ACCOUNT_TOKEN_FILE")" = 600
-  SITE_BUILD_ENV_TEMP="$(mktemp -d /tmp/commonswarm-site-build-env.XXXXXX)"
-  case "$SITE_BUILD_ENV_TEMP" in /tmp/commonswarm-site-build-env.??????) ;; *) exit 1 ;; esac
-  trap 'status=$?; find "$SITE_BUILD_ENV_TEMP" -depth -delete; exit "$status"' EXIT
+  SITE_BUILD_ENV_TEMP="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
+  case "$SITE_BUILD_ENV_TEMP" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+  trap 'status=$?; if ! rm -r -- "$SITE_BUILD_ENV_TEMP"; then printf "STOP: guarded cleanup refused %s; leave it for HezLead\n" "$SITE_BUILD_ENV_TEMP" >&2; exit 1; fi; exit "$status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   SITE_BUILD_ENV_SOURCE="$SITE_BUILD_ENV_TEMP/site-build.env"
   test ! -e "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
-  op read "$SITE_BUILD_ENV_OP_REFERENCE" --out-file "$SITE_BUILD_ENV_SOURCE"
+  chmod 0700 "$SITE_BUILD_ENV_TEMP"
+  python3 - "$OP_SERVICE_ACCOUNT_TOKEN_FILE" "$SITE_BUILD_ENV_OP_REFERENCE" "$SITE_BUILD_ENV_SOURCE" <<'PY'
+import os,pathlib,subprocess,sys
+token_file,reference,output=sys.argv[1:]
+env=os.environ.copy()
+assert not any(name.startswith('OP_SESSION_') for name in env)
+env['OP_SERVICE_ACCOUNT_TOKEN']=pathlib.Path(token_file).read_text().strip()
+assert env['OP_SERVICE_ACCOUNT_TOKEN']
+result=subprocess.run(['op','read',reference,'--out-file',output],env=env,
+                      stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+if result.returncode: raise SystemExit('STOP: service-account build-env read failed')
+PY
   chmod 0600 "$SITE_BUILD_ENV_SOURCE"
   test -f "$SITE_BUILD_ENV_SOURCE" && test ! -L "$SITE_BUILD_ENV_SOURCE"
   test "$(stat -f '%Lp' "$SITE_BUILD_ENV_SOURCE")" = 600
@@ -277,9 +290,9 @@ if (payload.role !== "anon") process.exit(1);
 console.log("BUILD_ENV=PASS url=https://api.commonswarm.com role=anon h0=1");
 NODE
   chmod 0600 "$SITE_EVIDENCE/site-00-build-env.txt"
-  find "$SITE_BUILD_ENV_TEMP" -depth -delete
+  rm -r -- "$SITE_BUILD_ENV_TEMP"
   test ! -e "$SITE_BUILD_ENV_TEMP"
-  trap - EXIT
+  trap - EXIT INT TERM
 )
 ```
 
@@ -330,42 +343,67 @@ positive controls.
 )
 ```
 
-### Dedicated Anvil Chrome session
+### Fresh headless Chromium session
 
-Browser controls use only Anvil's retained Chrome user-data directory
-`/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome`, started with
-`--password-store=basic`. They never create or copy another Chrome profile and
-never print a token or email. The site's client enables persisted sessions at
-`site/src/lib/commonswarm.ts:138-140`; the browser inspection finds that
-client's `sb-*-auth-token` key and returns only `user.id` from its parsed value.
+Browser controls use Playwright's bundled Chromium, headless with
+`--password-store=basic`, and a fresh mode-0700 profile in the window's
+`/private/tmp/anvil-secret.XXXXXX` directory. They never launch an installed
+Google Chrome app, read a real profile, or initiate sign-in. This plan's browser
+blocks are for a separately assigned browser release task; a read-only audit
+must not execute them.
 
-The first block compares that web user ID with the CLI human user ID and the
-fixed expected ID, asserts the displayed label `Ridgeio`, records the initially
-selected CICD workspace, and uses the normal workspace switcher to select Cold
-Agent Test. If the site is signed out, it may choose the GitHub button and use
-the existing Ridgeio GitHub session. A 2FA challenge, keychain dialog, or any
-failure to restore the session selects `REDUCED-CONTROL` automatically; there
-is no operator branch input. Neither branch signs out.
+The preflight compares any authenticated web user with the CLI human and the
+fixed expected ID, retains the original full-control assertions, and otherwise
+selects REDUCED-CONTROL. A fresh signed-out profile therefore reports the
+signed-in and mobile claims as NOT PROVED. A keychain dialog is STOP, never a
+click-through or reduced-control fallback. Close stops only the task-owned
+headless process and removes its private profile through guarded rm.
 
 ```sh
-# step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome identity and workspace preflight
+# step: site-03-browser-session-preflight — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium identity and workspace preflight
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil
 (
   set -euo pipefail
   . "$HOME/.commonswarm-site-window.env"
-  profile="/Users/yulanbot/.hermes/profiles/anvil/browser-profile/chrome"
-  test -d "$profile"
-  test ! -L "$profile"
-  chrome='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+  umask 077
+  test "$(command -v rm)" = "$HOME/.local/bin/rm"
+  browser_root="$(mktemp -d /private/tmp/anvil-secret.XXXXXX)"
+  case "$browser_root" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+  chrome_pid=
+  cleanup_browser_preflight() {
+    status=$?
+    trap - EXIT
+    if [ -n "$chrome_pid" ]; then kill "$chrome_pid" 2>/dev/null || true; wait "$chrome_pid" 2>/dev/null || true; fi
+    if ! rm -r -- "$browser_root"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$browser_root" >&2
+      exit 1
+    fi
+    exit "$status"
+  }
+  trap cleanup_browser_preflight EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  chmod 0700 "$browser_root"
+  profile="$browser_root/browser-profile"
+  mkdir -m 0700 "$profile"
+  # Resolve Playwright's bundled Chromium without launching it or /Applications.
+  chrome="$(node - "$(npm root -g)/playwright" <<'NODE'
+const { chromium } = require(process.argv[2]);
+console.log(chromium.executablePath());
+NODE
+  )"
+  case "$chrome" in "$HOME/Library/Caches/ms-playwright/"*) ;; *) exit 1 ;; esac
   test -x "$chrome"
   CLI_USER_ID="$(cswarm status \
     --workspace-id c2ea0541-f56d-4c73-bf71-56c5405c4934 --json | jq -er '.identity.user_id')"
   test "$CLI_USER_ID" = d37e2ff2-2efb-4bdc-b8fb-176ce4bfccbc
   chrome_port=9335
-  "$chrome" --user-data-dir="$profile" --password-store=basic --remote-debugging-port="$chrome_port" \
+  if lsof -nP -iTCP:"$chrome_port" -sTCP:LISTEN >/dev/null 2>&1; then exit 1; fi
+  "$chrome" --headless --user-data-dir="$profile" --password-store=basic --use-mock-keychain \
+    --remote-debugging-address=127.0.0.1 --remote-debugging-port="$chrome_port" \
     --no-first-run --no-default-browser-check about:blank \
-    >"$SITE_EVIDENCE/chrome-launch.log" 2>&1 &
+    >"$browser_root/chromium-launch.log" 2>&1 &
   chrome_pid=$!
   port_file="$profile/DevToolsActivePort"
   tries=0
@@ -374,6 +412,8 @@ is no operator branch input. Neither branch signs out.
   done
   endpoint="http://127.0.0.1:$chrome_port"
   {
+    printf 'SITE_BROWSER_ROOT=%q\n' "$browser_root"
+    printf 'SITE_CHROME_BINARY=%q\n' "$chrome"
     printf 'SITE_CHROME_PROFILE=%q\n' "$profile"
     printf 'SITE_CHROME_PID=%q\n' "$chrome_pid"
     printf 'SITE_CHROME_ENDPOINT=%q\n' "$endpoint"
@@ -403,15 +443,10 @@ def state():
     })()""")
 observed=state()
 signin_attempted=False
-if observed.get("signedOut"):
-    signin_attempted=True
-    github=js("""(() => [...document.querySelectorAll('button,a')]
-      .find(node => node.textContent?.trim() === 'Sign in with GitHub')?.click() || false)()""")
-    if github:
-        for _ in range(120):
-            time.sleep(1); observed=state()
-            if observed.get("userId"): break
-challenge=js("/two-factor|2fa|verification code|keychain/i.test(document.body?.innerText||'')")
+# A fresh profile has no inherited operator SSO. This view-only control never
+# initiates sign-in. Signed-out state selects the existing reduced branch.
+if js("/keychain/i.test(document.body?.innerText||'')"): raise SystemExit('STOP: keychain dialog')
+challenge=js("/two-factor|2fa|verification code/i.test(document.body?.innerText||'')")
 if observed.get("signedOut") or challenge:
     result={"branch":"REDUCED-CONTROL","signin_attempted":signin_attempted,
       "reason":"signed-out-or-interactive-challenge",
@@ -437,6 +472,7 @@ else:
 path=pathlib.Path(os.environ["SITE_EVIDENCE"])/"site-03-browser-preflight.json"
 path.write_text(json.dumps(result,sort_keys=True,indent=2)+"\n",encoding="utf-8"); path.chmod(0o600)
 PY
+  trap - EXIT INT TERM
 )
 ```
 
@@ -616,7 +652,7 @@ PY
   chmod 0600 "$SITE_EVIDENCE/after.release"
   if test "$deploy_status" -ne 0 || test "$read_status" -ne 0; then exit 70; fi
   after=$(cat "$SITE_EVIDENCE/after.release")
-  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06503564-????????????????) ;; *) exit 1 ;; esac
+  case "$after" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06509f9a-????????????????) ;; *) exit 1 ;; esac
   ssh -o BatchMode=yes commonswarm@yulan-vps-1 "test -f '$pin/app/index.html'"
   printf '%s\n' 'PIN_AFTER_DEPLOY=PASS' >"$SITE_EVIDENCE/pin-after-deploy.txt"
   chmod 0600 "$SITE_EVIDENCE/pin-after-deploy.txt"
@@ -641,7 +677,7 @@ immediate rollback; a third state stops for incident handling.
     printf '%s\n' 'DEPLOYMENT=failed-before-switch' 'RETRY=forbidden' \
       >"$SITE_EVIDENCE/site-04-reconciliation.txt"
   else
-    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06503564-????????????????) ;; *) exit 1 ;; esac
+    case "$current" in /srv/commonswarm/site/releases/????????T??????Z-4d6a06509f9a-????????????????) ;; *) exit 1 ;; esac
     ssh -o BatchMode=yes commonswarm@yulan-vps-1 /bin/bash -s -- "$pin" "$current" "$SITE_WINDOW_ID" \
       >"$SITE_EVIDENCE/rollback-auto.txt" <<'BOX'
 set -euo pipefail
@@ -684,7 +720,7 @@ python3 - "$expected" <<'PY'
 import hashlib,json,pathlib,re,sys,urllib.error,urllib.request
 UA="commonswarm-release-probe/1.0"; root=pathlib.Path("/srv/commonswarm/site")
 release=(root/"current").resolve(strict=True); assert str(release)==sys.argv[1]
-assert re.fullmatch(r"\d{8}T\d{6}Z-4d6a06503564-[0-9a-f]{16}",release.name)
+assert re.fullmatch(r"\d{8}T\d{6}Z-4d6a06509f9a-[0-9a-f]{16}",release.name)
 def fetch(path,media):
     request=urllib.request.Request("https://commonswarm.com"+path,headers={
       "Cache-Control":"no-cache","Accept-Encoding":"identity","User-Agent":UA})
@@ -705,7 +741,7 @@ assert b"CommonSwarm" in home and b"cswarm" in guide and b"Grok" in guide
 assets=sorted(set(re.findall(rb'(?:src|href)="(/_astro/[^"]+\.(?:js|css))"',app))); assert assets
 for encoded in assets:
     path=encoded.decode(); local=(release/path.lstrip("/")).resolve(strict=True); assert release in local.parents
-    data=local.read_bytes(); media="text/css" if path.endswith(".css") else "text/javascript"
+    data=local.read_bytes(); media="text/css" if path.endswith(".css") else "application/javascript"
     assert fetch(path,media)==data; print("asset_sha256="+hashlib.sha256(data).hexdigest()+" "+path)
 print("release="+release.name); print("app_sha256="+hashlib.sha256(app).hexdigest())
 print("download_sha256="+hashlib.sha256(download).hexdigest())
@@ -740,7 +776,7 @@ the recorded start workspace before it finishes. Failure rolls back
 automatically.
 
 ```sh
-# step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; dedicated Chrome acceptance
+# step: site-05-browser-acceptance — Mac mini /bin/bash 3.2; Anvil; fresh headless Chromium acceptance
 # readonly: no
 # host: Mac mini /bin/bash 3.2 as Anvil; ssh child only for automatic rollback
 (
@@ -947,7 +983,7 @@ Closure is mechanical. It rejects credentials, raw HTML, HAR content, email
 addresses, and private browser state. It records the browser branch. On success
 the pin is guardedly removed. After rollback, `current` first returns to the
 measured normal release name; if retention pruned it, the pin is renamed back.
-The existing Chrome profile and its session are left open and signed in. The
+The task-owned headless browser is stopped and its private profile is removed through guarded rm. The
 temporary build `site/.env` is removed at close.
 
 ```sh
@@ -1001,12 +1037,13 @@ if test "$current" = "$pin"; then
 fi
 if test -n "$pin" && test -d "$pin" && test ! -L "$pin"; then
   python3 - "$pin" "$root/releases" "$window_id" <<'PY'
-import pathlib,shutil,sys
+import pathlib,sys
 target=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]).resolve(strict=True); window_id=sys.argv[3]
 assert target.name==".site-window-pin-"+window_id and not target.is_symlink()
 resolved=target.resolve(strict=True); assert resolved.parent==root and resolved!=pathlib.Path.home().resolve()
-shutil.rmtree(resolved); assert not target.exists()
 PY
+  rm -r -- "$pin"
+  test ! -e "$pin"
 fi
 rm -f /tmp/commonswarm-site-window.env
 printf 'pin_released=yes\noutcome=%s\n' "$outcome"
@@ -1033,9 +1070,31 @@ BOX
   python3 - "$SITE_RELEASE_REPO/site/.env" <<'PY'
 import pathlib,sys
 build_env=pathlib.Path(sys.argv[1])
-if build_env.exists(): assert build_env.is_file() and not build_env.is_symlink(); build_env.unlink()
-assert not build_env.exists()
+if build_env.exists(): assert build_env.is_file() and not build_env.is_symlink()
 PY
+  rm -f -- "$SITE_RELEASE_REPO/site/.env"
+  test ! -e "$SITE_RELEASE_REPO/site/.env"
+  # Close only this block's fresh headless process and private profile.
+  if [ -n "${SITE_BROWSER_ROOT:-}" ] && [ -d "$SITE_BROWSER_ROOT" ]; then
+    case "$SITE_BROWSER_ROOT" in /private/tmp/anvil-secret.??????) ;; *) exit 1 ;; esac
+    test ! -L "$SITE_BROWSER_ROOT"
+    test "$SITE_CHROME_PROFILE" = "$SITE_BROWSER_ROOT/browser-profile"
+    if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then
+      browser_command="$(ps -p "$SITE_CHROME_PID" -o command=)"
+      case "$browser_command" in *"$SITE_CHROME_BINARY"*"--user-data-dir=$SITE_CHROME_PROFILE"*) ;; *) exit 1 ;; esac
+      kill "$SITE_CHROME_PID"
+      for tries in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$SITE_CHROME_PID" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$SITE_CHROME_PID" 2>/dev/null; then exit 1; fi
+    fi
+    if ! rm -r -- "$SITE_BROWSER_ROOT"; then
+      printf 'STOP: guarded cleanup refused %s; leave it for HezLead\n' "$SITE_BROWSER_ROOT" >&2
+      exit 1
+    fi
+    test ! -e "$SITE_BROWSER_ROOT"
+  fi
   rm -f "$SITE_WINDOW_FILE"
 )
 ```
@@ -1047,7 +1106,7 @@ PY
 | P2-K1-01 | `site-01`: box-clock start, derived four-hour end and ID. |
 | P2-K1-02 | Named `SITE_EVIDENCE`; `site-01` creates/verifies `0700`. |
 | P2-K1-03 | Named `SITE_RELEASE_REPO`; `site-00-source-checkout` creates/verifies it. |
-| P2-K1-04 | Removed: no browser bearer is exported; controls use the existing site session in Anvil's dedicated Chrome directory. |
+| P2-K1-04 | No browser bearer is exported; controls use a fresh headless profile and record signed-in claims as NOT PROVED when signed out. |
 | P2-K2-01 | `site-01` creates the protected evidence directory. |
 | P2-K2-02 | `site-00-source-checkout` creates detached exact-SHA source. |
 | P2-K2-03 | Named `SITE_BUILD_ENV_OP_REFERENCE` and service-account token-file path; `site-00-build-env` creates a private temporary directory, reads with `op read --out-file`, installs and validates the build file, then removes the whole temporary directory. |
@@ -1056,7 +1115,7 @@ PY
 | P2-K2-06 | `site-03-go-record` writes bounded `GO.txt`. |
 | P2-K2-07 | `site-03-pin-previous` creates/proves the retention-proof copy; close releases it. |
 | P2-K2-08 | `site-04-reconcile-failure` records state and forbids replay. |
-| P2-K2-09 | The marked browser steps use only Anvil's dedicated retained Chrome directory and restore its starting workspace. |
+| P2-K2-09 | The marked browser steps use only Anvil's task-owned fresh headless profile and restore its starting workspace. |
 | P2-K2-10 | Failed controls auto-switch; `site-06` verifies public/browser rollback. |
 | P2-K2-11 | `site-07-manifest-close` scans, hashes, closes, and cleans inputs. |
 | P2-K3-01 | `site-01` produces the evidence directory. |
@@ -1070,7 +1129,7 @@ PY
 | P2-K3-09 | Close produces and validates `manifest.json`. |
 | P2-K4-01 | `site-01` proves direct SSH identity and site-root write access. |
 | P2-K4-02 | `site-01` proves box Python/DNS/HTTPS, exact media types and required User-Agent. |
-| P2-K4-03 | Branch selection is automatic from the dedicated Chrome session; 2FA/keychain/sign-in failure selects reduced control. |
+| P2-K4-03 | Branch selection is automatic from the fresh headless Chromium session; signed-out/2FA state selects reduced control; a keychain dialog is STOP. |
 | P2-K5-01 | Named `HM37_A_CLOSE_RECEIPT`; no WINDOW B wait. |
 | P2-K5-02 | Static Connected apps exposure acceptance in GO. |
 | P2-K5-03 | Live revoke moved to HM37 WINDOW B; lane 8 uses empty state only. |
@@ -1083,7 +1142,7 @@ PY
 | Pre-seed: start/evidence | `site-01` measures time and creates the named destination. |
 | Pre-seed: checkout/base | Named checkout/base; source and `site-02` prove them. |
 | Pre-seed: `site/.env` | Named 1Password reference and protected service-account token-file path; the build-env step produces its own temporary output path, installs and proves `site/.env`, and clears the temporary directory. |
-| Pre-seed: browser session | K4-8/K4-9 measured the retained dedicated Chrome directory; the live block revalidates it and exports no token. |
+| Pre-seed: browser session | Historical K4-8/K4-9 used retained Chrome. The current preflight creates and validates its own fresh headless profile; those historical measurements do not prove this control. |
 | Pre-seed: `GO.txt` | GO step produces it from approver, plan commit, release SHA and prompt number. |
 
 ## 9. Recorded outcomes

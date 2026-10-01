@@ -68,12 +68,15 @@ that may unlock Window B or the dependent site lane. A dry run executes the
 selected whole blocks in their documented order from an empty environment and
 must report no `UNPRODUCED` dependency.
 
-Browser release controls use the operator seat's named retained browser
-directory when the item plan specifies one. They must record the starting
-workspace, switch through the product's workspace switcher, assert the control
-workspace before every action, remain view-only, and restore the starting
-workspace. Sign-in failure or an interactive security prompt selects the
-plan's reduced branch automatically; it is not a prompt choice.
+Browser release controls use headless Playwright's bundled Chromium or
+agent-browser with a fresh task-owned profile and `--password-store=basic`,
+only in an explicitly assigned browser task. Never start installed Google
+Chrome, use a real profile, or read the macOS keychain. Controls record the
+starting workspace, switch through the product's workspace switcher, assert
+the control workspace before every action, remain view-only, and restore the
+starting workspace. A signed-out profile selects the plan's reduced branch;
+a keychain dialog is STOP. Remove the task-owned profile through guarded rm
+when the window closes.
 
 Every window plan that mints a control, seed, or proof principal must append the
 per-run `WINDOW_PRINCIPAL_SUFFIX` to every such name and use that one value in
@@ -241,6 +244,9 @@ rm -f "$HOME/.commonswarm-release-window.env"
       "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
       "$WINDOW_PRINCIPAL_SUFFIX" "$BACKUP_MAX_AGE_SECONDS" "$SHORT_SHA" \
       "$EVIDENCE_DIR" "$RUN_LOG" "$ARCHIVE" "$BOX_WINDOW_INPUT" >"$HOME/.commonswarm-release-window.env" )
+  if [ -n "${RELEASE_REPO:-}" ]; then
+    printf 'RELEASE_REPO=%q\n' "$RELEASE_REPO" >>"$HOME/.commonswarm-release-window.env"
+  fi
   chmod 0600 "$HOME/.commonswarm-release-window.env"
   ( umask 077; printf 'SHA=%q\nWINDOW_START_UTC=%q\nWINDOW_END_UTC=%q\nWINDOW_ID=%q\nWINDOW_PRINCIPAL_SUFFIX=%q\nBACKUP_MAX_AGE_SECONDS=%q\n' \
       "$SHA" "$WINDOW_START_UTC" "$WINDOW_END_UTC" "$WINDOW_ID" \
@@ -481,7 +487,7 @@ the dark `mcp` name:
   test -s "$ARCHIVE"
   ROUTER_DIR="$(mktemp -d /tmp/commonswarm-router-XXXXXX)"
   case "$ROUTER_DIR" in /tmp/commonswarm-router-??????) ;; *) false ;; esac
-  trap 'status=$?; find "$ROUTER_DIR" -depth -delete; exit "$status"' EXIT
+  trap 'status=$?; rm -r -- "$ROUTER_DIR"; exit "$status"' EXIT
   ROUTER_SOURCE="$ROUTER_DIR/router.ts"
   tar -xOf "$ARCHIVE" deploy/edge-runtime/main/router.ts >"$ROUTER_SOURCE"
   : "${CHANGED_FUNCTIONS:?resolved item input missing}"
@@ -1018,7 +1024,8 @@ HezLead confirms their list contains no secret:
   test "$SHA" = "$RELEASE_SHA"
   PROOF_DIR="/home/commonswarm/stack/release-proofs/${SHA}"
   tar -xf /tmp/commonswarm-release-proofs.tar -C "$PROOF_DIR"
-  find "$PROOF_DIR" -type f -name '._*' -delete
+  # Resource-fork metadata is unexpected after the no-xattrs Mac archive.
+  test -z "$(find "$PROOF_DIR" -type f -name '._*' -print -quit)"
   chown -R root:root "$PROOF_DIR"
   find "$PROOF_DIR" -type f -exec chmod 0600 {} +
   if compgen -G "$PROOF_DIR/*.sql" >/dev/null; then
@@ -1318,7 +1325,7 @@ Then use the repository identity gate against the exact stack release:
 
 ```sh
 # step: runbook-16
-# readonly: yes
+# readonly: no
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
@@ -1661,7 +1668,9 @@ SELECT to_regclass('swarm.example_table') IS NOT NULL AS catalog_ok
   : "${RELEASE_SHA:?named release SHA required}"
   . "/home/commonswarm/stack/release-proofs/${RELEASE_SHA}/window.env"
   test "$SHA" = "$RELEASE_SHA"
-  BACKUP_MAX_AGE_SECONDS='<agreed-seconds>'
+  : "${BACKUP_MAX_AGE_SECONDS:?HezLead-approved backup age required}"
+  case "$BACKUP_MAX_AGE_SECONDS" in ''|*[!0-9]*) false ;; esac
+  test "$BACKUP_MAX_AGE_SECONDS" -gt 0
   BACKUP_STATUS=/var/backups/commonswarm-postgres/status.json
   BACKUP_WAIT_MAX_SECONDS=14400
   BACKUP_WAIT_DEADLINE=$(( $(date +%s) + BACKUP_WAIT_MAX_SECONDS ))
@@ -1746,7 +1755,7 @@ proceed merely because the service command returned.
 
 ```sh
 # step: runbook-23
-# readonly: yes
+# readonly: no
 # host: box /bin/bash 5.2 as root
 (
   set -euo pipefail
