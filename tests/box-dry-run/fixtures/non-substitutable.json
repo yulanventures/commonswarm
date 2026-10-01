@@ -1535,7 +1535,7 @@
   "scope": "whole-block",
   "surface": "authenticated hosted HTTP and database open/ACK control",
   "reason": "needs network and the hosted database",
-  "live_proof": "The live Window B run at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:903-935 invokes deploy/release-proofs/item-hm/hm37-open-ack-control.ts. Its stdout must record ok, mode=control, disposable IDs, assertion IDs and independently verified cleanup fields; only that protected output can feed the live-revoke readback.",
+  "live_proof": "The live Window B run at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1056-1118 invokes deploy/release-proofs/item-hm/hm37-open-ack-control.ts. Its stdout must record ok, mode=control, disposable IDs, assertion IDs and independently verified cleanup fields; only that protected output can feed the live-revoke readback.",
   "receipt_fields": [
     "ok",
     "mode",
@@ -1550,14 +1550,14 @@
     {
       "output": "hm37-hosted-check-control.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-check-control.json",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:922-934",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1074-1117",
       "evidence": null,
       "reason": "The committed file with this name says pass=false/not_run=true and aborted before staging. It is not an ok/mode=control result and cannot seed the successful writer shape."
     },
     {
       "output": "private open/ACK journal",
       "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
-      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:297-307,793-811",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:297-308,808-829",
       "evidence": null,
       "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
     }
@@ -1585,7 +1585,7 @@
   "scope": "whole-block",
   "surface": "hosted control recovery on an interrupted/abort path",
   "reason": "needs network and the hosted database",
-  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:942-971 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1130-1153; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1101-1128 must consume that real receipt before classifying the failure.",
+  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1125-1184 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1148-1171; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1310-1365 must consume that real receipt before classifying the failure.",
   "receipt_fields": [
     "ok",
     "mode=cleanup-only",
@@ -1600,14 +1600,14 @@
     {
       "output": "hm37-hosted-cleanup-recovery.json",
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-cleanup-recovery.json",
-      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:959-970",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:1141-1183",
       "evidence": null,
       "reason": "No committed recovery output exists. The prior plan-only ok=true/mode=cleanup-only shape is forbidden; the failure dispatcher must see this file absent."
     },
     {
       "output": "private open/ACK journal update",
       "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
-      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:644-754",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:656-766",
       "evidence": null,
       "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
     }

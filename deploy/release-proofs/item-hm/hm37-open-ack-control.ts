@@ -349,6 +349,16 @@ async function loadRuntime(releaseRoot: string): Promise<Runtime> {
       typeof auth.authenticateHostedGrantCapability !== "function" ||
       typeof auth.authenticateHostedSeatCapability !== "function" ||
       typeof adapter.createPostgresAdapter !== "function") fail("release entry point missing");
+  const commandHosts = [command.db.options.host].flat().filter(
+    (host): host is string => typeof host === "string" && host.length > 0);
+  const commandDatabaseUrl = Deno.env.get("SWARM_DATABASE_URL") ?? Deno.env.get("SUPABASE_DB_URL");
+  if (commandHosts.includes("172.31.0.10") || (commandHosts.length === 0 && commandDatabaseUrl &&
+      new URL(commandDatabaseUrl).hostname === "172.31.0.10")) {
+    const commandSsl = command.db.options.ssl;
+    if (!commandSsl || typeof commandSsl !== "object" || typeof commandSsl.ca !== "string" ||
+        commandSsl.rejectUnauthorized !== true) fail("command database TLS is unavailable");
+    commandSsl.servername = "db.commonswarm.internal";
+  }
   return {
     command, auth,
     withDatabaseTls: tls.withDatabaseTls,
@@ -411,10 +421,12 @@ function oauthPoolConfig(value: Record<string, unknown>): Record<string, unknown
       requiredStrings.some((key) => typeof value[key] !== "string" || value[key] === "") ||
       !Number.isSafeInteger(value.port) || Number(value.port) < 1 || Number(value.port) > 65535 ||
       typeof value.ssl_ca !== "string") fail("invalid OAuth database config");
+  if (value.host === "172.31.0.10" && value.ssl_ca === "") fail("OAuth database TLS is unavailable");
   return {
     host: value.host, port: value.port, database: value.database,
     username: value.user, password: value.password,
-    ...(value.ssl_ca === "" ? {} : { ssl: { ca: value.ssl_ca, rejectUnauthorized: true } }),
+    ...(value.ssl_ca === "" ? {} : { ssl: { ca: value.ssl_ca, rejectUnauthorized: true,
+      ...(value.host === "172.31.0.10" ? { servername: "db.commonswarm.internal" } : {}) } }),
     application_name: "commonswarm-hm37-control", max: 2,
     statement_timeout: 10_000, query_timeout: 10_000,
   };
@@ -769,6 +781,12 @@ async function execute(): Promise<Record<string, Json>> {
   if (!databaseUrl) fail("edge database environment is unavailable");
   const tlsOptions = runtime.withDatabaseTls({ prepare: false, max: 1, idle_timeout: 3, connect_timeout: 5 },
     Deno.env.get("SWARM_DATABASE_TLS_CA_B64"));
+  if (new URL(databaseUrl).hostname === "172.31.0.10") {
+    const verifiedTls = tlsOptions as typeof tlsOptions & { ssl?: { ca?: unknown; rejectUnauthorized?: unknown; servername?: string } };
+    if (!verifiedTls.ssl || typeof verifiedTls.ssl.ca !== "string" ||
+        verifiedTls.ssl.rejectUnauthorized !== true) fail("edge database TLS is unavailable");
+    verifiedTls.ssl.servername = "db.commonswarm.internal";
+  }
   const statusDb = postgres(databaseUrl, tlsOptions);
   const proofDb = postgres(databaseUrl, { ...tlsOptions, max: 1 });
   const oauthDb = postgres(oauthConfig);
