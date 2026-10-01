@@ -553,7 +553,7 @@ test("parity check exits nonzero for one injected header difference", async () =
   }
 });
 
-test("parity discovers a fresh hashed asset from served HTML and uses Vercel's policy", async () => {
+test("parity discovers fresh assets, relative imports, and Vite preload paths using Vercel's policy", async () => {
   const fixture = await mkdtemp(join(tmpdir(), "commonswarm-site-dynamic-asset-"));
   const server = createServer((request, response) => {
     response.statusCode = 200;
@@ -564,7 +564,7 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
     } else if (request.url === "/_astro/future.NEW123.js") {
       response.setHeader("content-type", "application/javascript; charset=utf-8");
       response.setHeader("cache-control", "public, max-age=0, must-revalidate");
-      response.end('import "./dependency.DEP456.js";');
+      response.end('import "./dependency.DEP456.js"; const preloadDeps = ["_astro/preload.PRE789.js"];');
     } else {
       response.setHeader("content-type", "application/javascript; charset=utf-8");
       response.setHeader("cache-control", "public, max-age=1");
@@ -606,7 +606,9 @@ test("parity discovers a fresh hashed asset from served HTML and uses Vercel's p
       (error: unknown) => {
         const result = error as { code?: number; stderr?: string };
         assert.equal(result.code, 1);
+        assert.doesNotMatch(result.stderr ?? "", /\/_astro\/_astro\//);
         assert.match(result.stderr ?? "", /\/_astro\/dependency\.DEP456\.js: cache-control expected/);
+        assert.match(result.stderr ?? "", /\/_astro\/preload\.PRE789\.js: cache-control expected/);
         assert.match(result.stderr ?? "", /\/_astro\/future\.NEW123\.js\/: cache-control expected/);
         return true;
       },
