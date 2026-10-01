@@ -155,3 +155,7 @@ $fn$;
 ALTER FUNCTION swarm_read.admin_recovery_page(text, uuid, integer, text) OWNER TO swarm_admin;
 REVOKE ALL ON FUNCTION swarm_read.admin_recovery_page(text, uuid, integer, text) FROM PUBLIC, anon, authenticated, swarm_command;
 GRANT EXECUTE ON FUNCTION swarm_read.admin_recovery_page(text, uuid, integer, text) TO swarm_read;
+
+-- Reserve rollback (verbatim SQL retained in
+-- admin-delegation-reserve/20261001000003-rollback.sql):
+-- DROP FUNCTION IF EXISTS swarm_read.admin_recovery_page(text, uuid, integer, text);
