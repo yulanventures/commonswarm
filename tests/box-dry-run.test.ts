@@ -2767,32 +2767,29 @@ function proofArchiveContent(fixture: ProductContext): Buffer {
   return result.stdout;
 }
 
-// The success JSON structure comes from the Mac producer's literal Python writer. Variable values
-// are synthetic labels. This models the producer's output contract, not a successful local control.
-// Only the static handoff coverage reads it: that producer is declared NOT EXECUTED and documents no signal_id,
-// so modelMacProducer refuses to ship these bytes (unproducedMacProduct) and no box block ever reads them.
-function localControlProduct(phase: "old" | "new"): string {
-  const stage = planBlock(HM37, "hm37a-prep-seat-control-stage");
-  const python = /<<'PY'\n([\s\S]*?)\nPY/.exec(stage.source)?.[1];
-  assert.ok(python, "directed control stage has no Python producer");
-  const result = spawnSync("/usr/bin/python3", ["-c", [
-    "import ast,json,sys", "tree=ast.parse(sys.stdin.read())", "phase=sys.argv[1]",
-    "constants={}",
-    "for node in tree.body:",
-    " if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant):",
-    "  for target in node.targets:",
-    "   if isinstance(target,ast.Name): constants[target.id]=node.value.value",
-    "def value(node):",
-    " if isinstance(node,ast.Constant): return node.value",
-    " if isinstance(node,ast.Dict): return {value(k):value(v) for k,v in zip(node.keys,node.values)}",
-    " if isinstance(node,ast.Name): return phase if node.id=='phase' else constants.get(node.id,'SYNTHETIC-'+node.id)",
-    " raise ValueError('unsupported producer expression: '+ast.dump(node))",
-    "writers=[node for node in ast.walk(tree) if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute) and node.func.attr=='dumps' and node.args and isinstance(node.args[0],ast.Dict)]",
-    "writers=[node for node in writers if any(isinstance(k,ast.Constant) and k.value=='pass' and isinstance(v,ast.Constant) and v.value is True for k,v in zip(node.args[0].keys,node.args[0].values))]",
-    "assert len(writers)==1", "print(json.dumps(value(writers[0].args[0]),indent=2))",
-  ].join("\n"), phase], { input: python, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-  return result.stdout;
+// The PREP_SEATS file window A's open block derives from the operator-supplied PREP receipt. The plan's own writer
+// (`python3 - "$PREP_RECEIPT_PATH" "$WINDOW_END_UTC" "$PREP_SEATS"`) runs on the supplied receipt, so the schema, the
+// key order and the format are whatever that writer prints, never a copy of the receipt. The window end is the fixture
+// clock's, the same input the writer's expiry assertion reads in a Mac run. This is a pure file derivation for static
+// handoff coverage: the executed transfer still refuses the file, because the install that puts it in the evidence
+// directory belongs to the declared directed-check block and is not added to any execution.
+function prepSeatInventory(fixture: ProductContext): Buffer {
+  const open = planBlock(HM37, "hm37a-open-inputs");
+  const writer = /python3 - "\$PREP_RECEIPT_PATH" "\$WINDOW_END_UTC" "\$PREP_SEATS" <<'PY'\n([\s\S]*?)\nPY\n/.exec(open.source)?.[1];
+  assert.ok(writer, "window A's open block has no PREP_SEATS writer");
+  const receipt = fixture.env.PREP_RECEIPT_PATH;
+  assert.ok(receipt && pathExists(receipt), "the PREP_SEATS writer needs the supplied PREP receipt");
+  const windowEnd = applyWindowValues(planBlock(RUNBOOK, "1-apply-release-directories"), "s2").WINDOW_END_UTC;
+  assert.ok(windowEnd, "the fixture clock has no window end");
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-prep-seats-"));
+  try {
+    const output = join(temporary, "prep-seats.json");
+    const run = spawnSync("/usr/bin/python3", ["-", receipt, windowEnd, output], { input: `${writer}\n`, encoding: "utf8" });
+    assert.equal(run.status, 0, `the PREP_SEATS writer did not run on the supplied receipt: ${run.error?.message ?? run.stderr}`);
+    return readFileSync(output);
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-prep-seats-");
+  }
 }
 
 // A transfer source that names a prompt input holding a file: the operator's own bytes, never a model of a producer.
@@ -2809,7 +2806,9 @@ function unproducedMacProduct(file: string): NonSubstitutableEntry | undefined {
     blockIndex().get(entry.step)?.host.startsWith("Mac ") && (entry.unproduced ?? []).some((missing) => missing.output === file));
 }
 
-function macProductContent(product: TransferProduct, block: Block, fixture: ProductContext): string | Buffer {
+// The bytes a Mac-to-box transfer's own producer writer and the supplied inputs give, or undefined when no writer of
+// this plan gives them. Nothing here invents bytes for a product whose producer is not executed.
+function macProductModel(product: TransferProduct, block: Block, fixture: ProductContext): string | Buffer | undefined {
   const source = product.source;
   if (source === `/tmp/commonswarm-hm37b-open-{sha}.env`) {
     const producer = planBlock(HM37B, "hm37b-open-inputs");
@@ -2827,13 +2826,7 @@ function macProductContent(product: TransferProduct, block: Block, fixture: Prod
   if (supplied) return readFileSync(supplied);
   const name = basename(product.path);
   if (name === "commonswarm-release-proofs.tar") return proofArchiveContent(fixture);
-  if (/^hm37a-local-control-(old|new)\.json$/.test(name)) {
-    return localControlProduct(name.includes("-old.") ? "old" : "new");
-  }
-  if (name === "hm37a-prep-seat-inventory.json") {
-    assert.ok(fixture.env.PREP_RECEIPT_PATH, "local inventory needs the synthetic PREP producer product");
-    return readFileSync(fixture.env.PREP_RECEIPT_PATH);
-  }
+  if (name === "hm37a-prep-seat-inventory.json") return prepSeatInventory(fixture);
   if (name === "item-resolved-inputs.env") {
     const values = Object.fromEntries(resolvedTransferNames().map((name) => {
       const value = name === "ARCHIVE_SHA256" ? createHash("sha256").update(releaseArchiveBytes()).digest("hex") : fixture.env[name];
@@ -2856,7 +2849,13 @@ function macProductContent(product: TransferProduct, block: Block, fixture: Prod
       writer.replace(/"release_sha=\$RELEASE_SHA"/, `release_sha=${RELEASE_SHA}`).match(/'[^']+'|release_sha=\S+/g)!
         .map((word) => word.replace(/^'|'$/g, "")).join("\n") + "\n";
   }
-  assert.fail(`${block.file}:${block.line}: no source model for cross-host product ${product.path} from ${source}`);
+  return undefined;
+}
+
+function macProductContent(product: TransferProduct, block: Block, fixture: ProductContext): string | Buffer {
+  const content = macProductModel(product, block, fixture);
+  assert.notEqual(content, undefined, `${block.file}:${block.line}: no source model for cross-host product ${product.path} from ${product.source}`);
+  return content!;
 }
 
 function shellWord(value: string): string {
@@ -3074,7 +3073,8 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
         return { step: shortStep(block), result: "failed", status: 69, stdout,
           stderr: `UNPRODUCED Mac writer product ${product.source}\n`, seeded };
       }
-      // The static handoff coverage keeps a field model of the directed receipts; an executed transfer never ships it.
+      // A name a declared NOT EXECUTED Mac producer enumerates as unavailable has no source in a dry run, so an executed
+      // transfer refuses it. Static handoff coverage reports the same name as unavailable and models no bytes for it.
       const absent = !stateSource && !suppliedPromptFile(symbolic.source, fixture) ? unproducedMacProduct(basename(product.path)) : undefined;
       if (absent) {
         return { step: shortStep(block), result: "failed", status: 69, stdout, seeded,
@@ -5172,6 +5172,101 @@ test("controls: box userland diff compares fixture bytes and refuses host paths"
   }
 });
 
+// runbook-31 first verifies the archive-derived edge manifest against the release directory. The box userland answers
+// `sha256sum --strict --check` by hashing the fixture's own bytes, so a changed, a missing or a malformed entry has to
+// fail the plan's own check. The block is carried up to and including that check: its `test -f` lines run first, and
+// the positive run of the same text shows they pass, so a failure below is the checksum's own and no earlier error.
+test("controls: runbook-31 manifest verification fails on a changed, a missing and a malformed entry", { skip: MAC_ONLY }, () => {
+  const apply = planBlock(RUNBOOK, "1-apply-release-directories");
+  const consumer = planBlock(RUNBOOK, "runbook-31");
+  const check = '  (cd "$NEW_EDGE" && sha256sum --quiet --strict --check "$PROOF_DIR/edge.SHA256SUMS")\n';
+  const end = consumer.source.indexOf(check);
+  assert.ok(end > 0, "runbook-31 no longer verifies the archive-derived edge manifest");
+  const head = consumer.source.slice(0, end + check.length);
+  for (const earlier of ['test -f "$NEW_EDGE/deploy/edge-runtime/compose.yaml"', 'test -f "$NEW_EDGE/deploy/edge-runtime/main/router.ts"']) {
+    assert.ok(head.includes(earlier), `the carried text lost its earlier check: ${earlier}`);
+  }
+  const prefix: Block = { ...consumer, source: `${head})\n` };
+  const fixture = prepareMacFixture([apply, prefix], { state: "s1" });
+  try {
+    // The apply producer is declared: the proof directory, the committed manifest and the extracted release
+    // directory arrive through the plan's real seeding path, as in every plan run.
+    const produced = executePlanUntilFailure([apply], fixture, "mac");
+    assert.equal(produced.length, 1);
+    assert.equal(produced[0]!.execution.result, "not-executed", produced[0]!.execution.stderr);
+    const release = join(fixture.boxRoot!, CANDIDATE_EDGE);
+    const manifest = join(fixture.boxRoot!, PROOF_DIR, "edge.SHA256SUMS");
+    const listed = readFileSync(manifest, "utf8").split("\n").map((line) => /^[0-9a-f]{64} {2}(\S.*)$/.exec(line)?.[1]);
+    for (const name of ["./package.json", "./README.md"]) assert.ok(listed.includes(name), `the committed manifest does not list ${name}`);
+    const run = () => {
+      const records = executePlanUntilFailure([prefix], fixture, "mac");
+      assert.equal(records.length, 1);
+      return records[0]!.execution;
+    };
+    // The failure record names the plan's own command: the box script failed AT the checksum check.
+    const atCheck = /the box script exited (\d+)[\s\S]*sha256sum --quiet --strict --check "\$PROOF_DIR\/edge\.SHA256SUMS"/;
+
+    const positive = run();
+    assert.equal(positive.result, "passed", positive.stderr);
+    assert.doesNotMatch(positive.stdout, /: OK$/m, "--quiet printed a line for a verified file");
+
+    const changedFile = join(release, "package.json");
+    const original = readFileSync(changedFile);
+    writeFileSync(changedFile, Buffer.concat([original, Buffer.from("changed for this control\n")]));
+    const changed = run();
+    writeFileSync(changedFile, original);
+    assert.equal(changed.result, "failed");
+    assert.equal(changed.status, 1, changed.stderr);
+    assert.match(changed.stderr, atCheck);
+    assert.equal(atCheck.exec(changed.stderr)?.[1], "1");
+    assert.match(changed.stdout, /^\.\/package\.json: FAILED$/m);
+    assert.match(changed.stderr, /WARNING: 1 computed checksum did NOT match/);
+
+    const missingFile = join(release, "README.md");
+    const missingBytes = readFileSync(missingFile);
+    unlinkSync(missingFile);
+    const missing = run();
+    writeFileSync(missingFile, missingBytes);
+    assert.equal(missing.result, "failed");
+    assert.equal(missing.status, 1, missing.stderr);
+    assert.match(missing.stderr, atCheck);
+    assert.match(missing.stdout, /^\.\/README\.md: FAILED open or read$/m);
+    assert.match(missing.stderr, /sha256sum: \.\/README\.md: No such file or directory/);
+
+    // A line that is not a checksum line fails only under --strict, which the plan passes.
+    const manifestBytes = readFileSync(manifest);
+    writeFileSync(manifest, Buffer.concat([manifestBytes, Buffer.from("not a checksum line\n")]));
+    const malformed = run();
+    writeFileSync(manifest, manifestBytes);
+    assert.equal(malformed.result, "failed");
+    assert.equal(malformed.status, 1, malformed.stderr);
+    assert.match(malformed.stderr, atCheck);
+    assert.match(malformed.stderr, /WARNING: 1 line is improperly formatted/);
+    assert.doesNotMatch(malformed.stdout, /FAILED/, "every listed file still verified");
+
+    // An entry that leaves the fixture box root is refused before anything outside it is read.
+    writeFileSync(manifest, Buffer.concat([manifestBytes, Buffer.from(`${"0".repeat(64)}  ../../../../../../etc/hosts\n`)]));
+    const escaping = run();
+    writeFileSync(manifest, manifestBytes);
+    assert.equal(escaping.result, "failed");
+    assert.equal(escaping.status, 69, escaping.stderr);
+    assert.match(escaping.stderr, /REFUSE sha256sum listed path outside the fixture box root/);
+
+    // An option the plan does not use is refused (69) instead of answered, so no unreviewed shape passes for the reviewed one.
+    const unreviewed = executePlanUntilFailure([mutatedBlock(prefix, [["sha256sum --quiet --strict --check", "sha256sum --quiet --strict --status --check"]])], fixture, "mac");
+    assert.equal(unreviewed.length, 1);
+    assert.equal(unreviewed[0]!.execution.result, "failed");
+    assert.equal(unreviewed[0]!.execution.status, 69, unreviewed[0]!.execution.stderr);
+    assert.match(unreviewed[0]!.execution.stderr, /unhandled dry-run stub: sha256sum --quiet --strict --status --check /);
+
+    // Every failure above came from its own mutation: the restored state passes again.
+    const restored = run();
+    assert.equal(restored.result, "passed", restored.stderr);
+  } finally {
+    cleanupMacFixture(fixture);
+  }
+});
+
 test("controls: a copy-back archive with a missing or an extra member fails the copy-back block", { skip: MAC_ONLY }, () => {
   const block = planBlock(HM37B, "hm37b-copyback");
   const boxFiles = "FILES='hm37-worker-boundary.txt hm37-hosted-control-inputs.txt hm37-hosted-check-control.json hm37-revocation-readback.json hm37-close-readback.txt'";
@@ -6466,20 +6561,44 @@ test("controls: the box lane never ships the unproduced receipts of a NOT EXECUT
 }, () => {
   const producer = planBlock(HM37, "hm37a-directed-check-old");
   const transfer = planBlock(HM37, "hm37a-local-evidence-transfer");
-  const fixture = prepareBoxFixture("s2", [producer, transfer]);
+  // The sibling transfer of the same window, with the same scp loop and the same install into the proof directory.
+  // Its files are written by an executed Mac producer from the supplied prompt inputs, so the same boundary has
+  // bytes to ship; the directed receipts below do not.
+  const supplied = planBlock(HM37, "hm37a-resolved-input-transfer");
+  const available = ["item-resolved-inputs.env", "item-copy-back-files.list"];
+  const directed = ["hm37a-prep-seat-inventory.json", "hm37a-local-control-old.json", "hm37a-local-control-new.json"];
+  const fixture = prepareBoxFixture("s2", [supplied, producer, transfer]);
   try {
+    // Only the earlier apply producer's directory prerequisite, as in the resolved prompt input control.
+    makeRootDirectory(PROOF_DIR, 0o700);
+    fixture.env.KIND_LIST ??= "edge stack";
+    // Positive: bytes that exist are transferred and installed through the boundary the refusal below shares.
+    const shipped = executePlanUntilFailure([supplied], fixture, "box");
+    assert.equal(shipped.length, 1);
+    assert.equal(shipped[0]!.execution.result, "not-executed", shipped[0]!.execution.stderr);
+    assert.deepEqual(shipped[0]!.execution.seeded, available.map((name) => join(PROOF_DIR, name)));
+    for (const name of available) {
+      const arrived = lstatSync(join(PROOF_DIR, name));
+      assert.ok(arrived.size > 0, `${name} arrived empty`);
+      assert.equal(arrived.mode & 0o777, 0o600);
+      assert.equal(arrived.uid, 0);
+    }
     // The directed program needs the live hosted workspace, so its block is declared and seeds nothing the transfer could ship.
     const declared = executeWholeBlock(producer, fixture, { laterBlocks: [transfer] });
     assert.equal(declared.result, "not-executed", declared.stderr);
     assert.deepEqual(declared.seeded, []);
-    // The static handoff coverage keeps a field model of those receipts, but an executed transfer refuses it.
+    // Negative: the transfer of the directed receipts is refused, whose producer enumerates them as unavailable.
+    const logBefore = readFileSync(fixture.log, "utf8");
     const refused = modelMacProducer(transfer, fixture)!;
     assert.equal(refused.result, "failed", "the box lane shipped bytes for an unproduced Mac product");
     assert.equal(refused.status, 69, refused.stderr);
     assert.match(refused.stderr, /^UNPRODUCED Mac product hm37a-[a-z-]+\.json: its producer hm37a-directed-check-(?:old|new) is NOT EXECUTED/);
-    for (const name of ["hm37a-prep-seat-inventory.json", "hm37a-local-control-old.json", "hm37a-local-control-new.json"]) {
+    assert.equal(readFileSync(fixture.log, "utf8"), logBefore, "the refused transfer still ran scp or ssh");
+    for (const name of directed) {
       assert.equal(pathExists(join(PROOF_DIR, name)), false, `${name} reached the box proof directory`);
     }
+    // The refusal is selective: the bytes that were available are still installed.
+    for (const name of available) assert.equal(pathExists(join(PROOF_DIR, name)), true, `${name} was removed by the refusal`);
   } finally {
     cleanupBoxFixture(fixture);
   }
@@ -6669,7 +6788,24 @@ test("controls: box window B handoff accepts a dark candidate INPUT and refuses 
   }
 });
 
-function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, ProductContext>): void {
+// A Mac product is covered by the bytes its own producer's writer and the supplied inputs give, or by a declared
+// NOT EXECUTED Mac producer that enumerates it as unavailable, by name and with its reason, and seeds nothing under
+// that name. Invented success bytes are neither.
+function assertEnumeratedUnavailable(product: TransferProduct, label: string): string {
+  const name = basename(product.path);
+  const producer = unproducedMacProduct(name);
+  assert.ok(producer, `box mode has no producer bytes for handoff ${label}, and no declared NOT EXECUTED Mac producer enumerates ${name} as unavailable`);
+  const missing = (producer.unproduced ?? []).find((item) => item.output === name);
+  assert.ok(missing && missing.reason.length > 40, `${producer.step}: ${name} is unavailable without a stated reason`);
+  const seeded = [...(producer.outputs ?? []).filter((output) => output.file === name),
+    ...(producer.success_receipts ?? []).filter((receipt) => receipt.file === name)];
+  assert.deepEqual(seeded, [], `${producer.step} enumerates ${name} as unavailable and also seeds it`);
+  return `${name} (${producer.step})`;
+}
+
+// Returns the Mac products no executed or modeled writer can give bytes for, each named with its declaring producer.
+function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, ProductContext>): string[] {
+  const unavailable: string[] = [];
   for (const handoff of inventory) {
     const label = `${handoff.direction} ${handoff.producer.file}:${handoff.producer.line} ${handoff.producer.step} -> ${handoff.consumer.step} ${handoff.path}`;
     if (handoff.direction === "mac-to-box") {
@@ -6682,8 +6818,9 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
       if (!product.remote) {
         const content = capturedMacProductPaths(handoff.producer).includes(product.source)
           ? macCapturedWriterContract(handoff.producer as Block, product.source)
-          : macProductContent(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!);
-        assert.ok(content.length,
+          : macProductModel(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!);
+        if (content === undefined) unavailable.push(assertEnumeratedUnavailable(product, label));
+        else assert.ok(content.length,
           `box mode has no producer bytes for handoff ${label}`);
       } else if (product.remote) {
         assert.ok(macBoundaryOperations(handoff.producer).some((op) => "remote" in op), `box mode has no executable remote producer for ${label}`);
@@ -6702,7 +6839,33 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
         `Mac mode has no producer coverage for handoff ${label}`);
     }
   }
+  return [...new Set(unavailable)].sort();
 }
+
+// hm37a-prep-seat-inventory.json is window A's PREP_SEATS: the open block's writer keeps four fields per seat, drops
+// the rest of the receipt, derives prep_directory and prints sorted keys. Static handoff coverage models those bytes
+// from that writer, so a copy of the receipt (the earlier model) is a different file and must not come back.
+test("controls: the PREP seat inventory model is the open block's writer output and not the PREP receipt", () => {
+  const prefix = "commonswarm-box-dry-run-commonswarm-prep-seats-model-";
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  try {
+    const fixture: ProductContext = { env: syntheticPromptEnvironment(temporary, promptInputsForBlocks(blocks(HM37))), model: cachedBoxModel("s5") };
+    const receiptPath = fixture.env.PREP_RECEIPT_PATH!;
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as { seats: Array<Record<string, string>> };
+    const bytes = prepSeatInventory(fixture).toString("utf8");
+    const inventory = JSON.parse(bytes) as { prep_directory: string; seats: Array<Record<string, string>>; created_at?: string };
+    assert.notEqual(bytes, readFileSync(receiptPath, "utf8"), "the inventory is a byte copy of the receipt");
+    assert.equal(inventory.prep_directory, dirname(receiptPath), "prep_directory is derived from the receipt's location");
+    assert.equal(inventory.created_at, undefined, "the writer keeps no receipt field it does not name");
+    assert.ok(receipt.seats.every((seat) => Object.hasOwn(seat, "name") && Object.hasOwn(seat, "directory_mode")), "the supplied receipt carries the fields the writer drops");
+    assert.deepEqual(inventory.seats.map((seat) => Object.keys(seat)),
+      inventory.seats.map(() => ["principal_id", "profile_path", "role", "token_expires_at"]));
+    assert.deepEqual(inventory.seats.map((seat) => seat.principal_id), receipt.seats.map((seat) => seat.principal_id));
+    assert.equal(bytes, JSON.stringify(JSON.parse(bytes), null, 2) + "\n", "sorted keys, two-space indent and a final newline, as the writer prints");
+  } finally {
+    removeOwnedTemporary(temporary, prefix);
+  }
+});
 
 test("every cross-host handoff is covered in both modes", (t) => {
   const inventory = handoffInventory();
@@ -6725,7 +6888,11 @@ test("every cross-host handoff is covered in both modes", (t) => {
       const plan = file === RUNBOOK ? [...blocks(HM37), ...blocks(RUNBOOK)] : blocks(file);
       fixtures.set(file, { env: syntheticPromptEnvironment(root, promptInputsForBlocks(plan)), model: cachedBoxModel("s5") });
     }
-    assertHandoffCoverage(inventory, fixtures);
+    const unavailable = assertHandoffCoverage(inventory, fixtures);
+    t.diagnostic(`Mac products with no bytes in a dry run, enumerated unavailable by their NOT EXECUTED producer: ${unavailable.join(", ") || "none"}`);
+    // The set is closed: only the two directed receipts, whose success writer prints the id a live note returned, have no
+    // bytes. A product that joins it must be a deliberate change to this list, not a quiet fallback of the coverage.
+    assert.deepEqual(unavailable, ["hm37a-local-control-new.json (hm37a-directed-check-new)", "hm37a-local-control-old.json (hm37a-directed-check-old)"]);
     const products = new Map(inventory.map((handoff) => [
       `${handoff.producer.file}:${handoff.producer.step}:${handoff.path}`, handoff,
     ]));

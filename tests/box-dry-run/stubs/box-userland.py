@@ -11,7 +11,10 @@ a box script the GNU behavior it asks for, and only that behavior:
   * ownership that the real box would hold (install -o root, chown) is kept in a sidecar file inside the
     fixture box root, because the Mac user cannot chown; stat -c reads it back, and an owner nothing recorded
     is refused (69) instead of guessed;
-  * a script that is not root cannot change ownership, exactly as on the box.
+  * a script that is not root cannot change ownership, exactly as on the box;
+  * `sha256sum --check` hashes the fixture's own bytes against the manifest and exits as GNU does (1 for a digest
+    that differs, a file that cannot be read, a malformed line under --strict, or no checksum line at all); a
+    manifest or listed path outside the fixture box root is refused (69), never read.
 
 Path rewriting and output stripping for the ssh boundary live here too (`rewrite` and `strip`), so the
 Mac-to-box path mapping has one implementation.
@@ -308,7 +311,123 @@ def cmd_stat(argv: list[str]) -> None:
     raise SystemExit(status)
 
 
+SHA256_CHECK_OPTIONS = ("--check", "-c", "--quiet", "--strict")
+# GNU's checksum line: an optional backslash (the name is escaped), 64 hex digits, one space, a mode character
+# (space is text, * is binary) and the name.
+SHA256_LINE = re.compile(rb"^(\\)?([0-9a-fA-F]{64}) [ *](.+)$", re.DOTALL)
+
+
+def inside_box(path: str) -> bool:
+    root = box_root()
+    return os.path.commonpath([root, os.path.realpath(path)]) == root
+
+
+def unescape_checksum_name(name: bytes) -> bytes | None:
+    """GNU escapes a backslash as \\\\ and a newline as \\n in an escaped line; any other escape is malformed."""
+    out = bytearray()
+    index = 0
+    while index < len(name):
+        byte = name[index:index + 1]
+        if byte != b"\\":
+            out += byte
+            index += 1
+            continue
+        following = name[index + 1:index + 2]
+        if following == b"\\":
+            out += b"\\"
+        elif following == b"n":
+            out += b"\n"
+        else:
+            return None
+        index += 2
+    return bytes(out)
+
+
+def file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def plural(count: int, singular: str, many: str) -> str:
+    return singular if count == 1 else many
+
+
+def check_sha256sum(argv: list[str]) -> None:
+    """sha256sum --check [--quiet] [--strict] MANIFEST, with GNU coreutils 9.4 results.
+
+    Every listed file is hashed from the fixture's own bytes and compared with the listed digest: a digest that
+    differs, a file that cannot be read, a line that is not a checksum line under --strict, and a manifest with no
+    checksum line at all each exit 1, as on the box. A manifest or a listed path that leaves the fixture box root is
+    refused (69) before anything outside it is read; the operand shapes this accepts are the only ones the plan uses.
+    """
+    options = [item for item in argv if item.startswith("-")]
+    operands = [item for item in argv if not item.startswith("-")]
+    if "--check" not in options and "-c" not in options:
+        refuse("sha256sum", argv)
+    if any(item not in SHA256_CHECK_OPTIONS for item in options) or len(operands) != 1:
+        refuse("sha256sum", argv)
+    manifest = operands[0]
+    quiet = "--quiet" in options
+    strict = "--strict" in options
+    if not inside_box(manifest):
+        sys.stderr.write("REFUSE sha256sum manifest outside the fixture box root: " + manifest + "\n")
+        raise SystemExit(69)
+    try:
+        with open(manifest, "rb") as handle:
+            data = handle.read()
+    except OSError as error:
+        sys.stderr.write("sha256sum: %s: %s\n" % (manifest, error.strerror))
+        raise SystemExit(1)
+    lines = data.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines.pop()
+    out = sys.stdout.buffer
+    err = sys.stderr.buffer
+    formatted = malformed = mismatched = unreadable = 0
+    for raw in lines:
+        found = SHA256_LINE.match(raw)
+        name = found.group(3) if found else None
+        if found and found.group(1):
+            name = unescape_checksum_name(found.group(3))
+        if not found or name is None:
+            malformed += 1
+            continue
+        formatted += 1
+        path = os.fsdecode(name)
+        if not inside_box(path):
+            sys.stderr.write("REFUSE sha256sum listed path outside the fixture box root: " + path + "\n")
+            raise SystemExit(69)
+        try:
+            actual = file_sha256(path)
+        except OSError as error:
+            err.write(b"sha256sum: " + name + b": " + os.fsencode(error.strerror or "read error") + b"\n")
+            out.write(name + b": FAILED open or read\n")
+            unreadable += 1
+            continue
+        if actual != found.group(2).decode("ascii").lower():
+            out.write(name + b": FAILED\n")
+            mismatched += 1
+        elif not quiet:
+            out.write(name + b": OK\n")
+    out.flush()
+    if formatted == 0:
+        sys.stderr.write("sha256sum: %s: no properly formatted checksum lines found\n" % manifest)
+        raise SystemExit(1)
+    if malformed:
+        sys.stderr.write("sha256sum: WARNING: %d %s\n" % (malformed, plural(malformed, "line is improperly formatted", "lines are improperly formatted")))
+    if unreadable:
+        sys.stderr.write("sha256sum: WARNING: %d %s\n" % (unreadable, plural(unreadable, "listed file could not be read", "listed files could not be read")))
+    if mismatched:
+        sys.stderr.write("sha256sum: WARNING: %d %s\n" % (mismatched, plural(mismatched, "computed checksum did NOT match", "computed checksums did NOT match")))
+    raise SystemExit(1 if unreadable or mismatched or (strict and malformed) else 0)
+
+
 def cmd_sha256sum(argv: list[str]) -> None:
+    if any(item in SHA256_CHECK_OPTIONS for item in argv):
+        check_sha256sum(argv)
     files = [item for item in argv if item != "--"]
     if not files or any(item.startswith("-") for item in files):
         refuse("sha256sum", argv)

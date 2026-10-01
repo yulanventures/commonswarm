@@ -84,7 +84,13 @@ function pythonLiteralJson(source: string, file: string): string {
   const rendered = spawnSync("/usr/bin/python3", ["-c",
     "import ast, json, sys\nprint(json.dumps(ast.literal_eval(sys.stdin.read().strip()), indent=2))"],
   { input: call, encoding: "utf8" });
-  assert.equal(rendered.status, 0, `${file}: its Python writer prints more than literals, so it has no plan-documented success value`);
+  // A Python that did not run to an exit status is a harness failure, not a statement about the plan's writer: say which.
+  if (rendered.error || rendered.status === null) {
+    const cause = rendered.error ? `${(rendered.error as NodeJS.ErrnoException).code ?? rendered.error.name}: ${rendered.error.message}` : `signal ${rendered.signal}`;
+    assert.fail(`${file}: /usr/bin/python3 did not render the writer (${cause}); the writer was not read`);
+  }
+  assert.equal(rendered.status, 0,
+    `${file}: its Python writer prints more than literals, so it has no plan-documented success value: ${rendered.stderr.trim().split("\n").at(-1) ?? ""}`);
   return rendered.stdout;
 }
 
