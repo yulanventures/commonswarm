@@ -243,6 +243,64 @@
   ]
 },
 {
+  "step": "hm37-hm6-oauth-precondition",
+  "scope": "whole-block",
+  "surface": "live OAuth container effective-authorization readback and public discovery probe",
+  "reason": "needs the live OAuth container and the public mcp.commonswarm.com network; no committed measurement is a container-program result for the effective MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED value",
+  "live_proof": "The live Window A block at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:852-970 must exit zero after the one-container, image, working-directory and health checks at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:874-885 and the docker exec read of MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:886-887, which exits nonzero when the effective value is exactly 1. It must then record the five oauth runtime fields at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894 and a passing public discovery and JWKS probe at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969. The effective flag is never invented or computed by the dry run. The following refusal probe owns hm37-hm6-oauth-refusals.json separately at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:978.",
+  "receipt_fields": [
+    "oauth_release",
+    "oauth_current_matches",
+    "oauth_image_identity_matches",
+    "oauth_container_healthy",
+    "public_authorization_effective_disabled",
+    "public precondition pass=true"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-hm6-oauth-runtime.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-runtime.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-runtime.txt",
+      "reason": "Historical Window A prerequisite readback, not proof that the present block ran. The real run wrote public_authorization_effective_disabled=true only after the docker exec at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:886-887 exited zero; these committed bytes are copied because copy-back reads the file, and the harness never evaluates, answers or replaces that read."
+    },
+    {
+      "output": "hm37-hm6-oauth-public-precondition.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-public-precondition.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-public-precondition.json",
+      "reason": "Historical Window A prerequisite readback of the public discovery and JWKS probe, not proof that the present block ran. The committed bytes are copied because copy-back reads the file; the harness does not make the network request."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "hm37-hm6-oauth-runtime.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-runtime.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-runtime.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:888-894"
+    },
+    {
+      "file": "hm37-hm6-oauth-public-precondition.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-oauth-public-precondition.json",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-oauth-public-precondition.json",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:896-969"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "docker exec MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED container-program result",
+      "reason": "No committed measurement records the effective flag as the result of a program run inside the OAuth container; hm37-hm6-oauth-runtime.txt records only the historical run's verdict. The dry run has no container to ask, so it neither answers the read nor supplies a flag value. The live proof above is the only observation."
+    }
+  ]
+},
+{
   "step": "hm37a-prep-seat-cleanup",
   "scope": "whole-block",
   "surface": "Window A pass/abort cleanup and independent agent-token database counts",

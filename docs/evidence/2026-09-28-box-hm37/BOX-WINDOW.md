@@ -848,6 +848,97 @@ SQL
 
 The live OAuth release directory and `oauth/current` must identify `826db6a34f235064a3a03c57377d8e32a35d2f05`. The one running OAuth container must be healthy, use that release as its Compose working directory, and use the exact accepted image ID recorded by the continuation window. Public discovery and JWKS must be served through `https://mcp.commonswarm.com`, while the effective public-authorization flag is not `1` and both authorization endpoints refuse with the owned disabled error. The `/jwks` endpoint answers `application/jwk-set+json` per RFC 7517.
 
+Run `hm37a-oauth-dependency-preflight` immediately after `hm37a-open-inputs`
+and before `hm37a-prep-seat-control-stage`. That is the earliest point at which
+the existing abort cleanup is defined: the open block writes the open receipt
+that `hm37a-prep-seat-cleanup` and `runbook-12` read. Only
+`hm37a-source-checkout`, which prepares the Mac checkout, and the open block
+itself come before it. The preflight therefore precedes the PREP-seat staging,
+`runbook-02` (which writes the window file), the archive upload,
+`1-apply-release-directories`, the release credential and session steps, the
+old-edge signal control, migration 04, timer stops, the edge switch and the
+COMMIT POINT. It needs only what already exists on the box when A opens:
+Anvil's noninteractive root `ssh` (the method the open block uses), HM6's
+OAuth release directory and its protected `oauth-image.id` proof, and the
+running OAuth container with `docker` and `node`. It reads no window state, no
+database helper and no credential.
+
+The block authenticates the live OAuth service with the same identity chain as
+`hm37-hm6-oauth-precondition`: the release directory and its `RELEASE_SHA`, the
+`oauth/current` link, the protected image ID, exactly one running container
+for Compose project `commonswarm-oauth` service `oauth`, that container's
+image ID and Compose working directory, and its health. It then runs the same
+disabled read, `process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED
+=== "1" ? 1 : 0)`, inside that one container. The marker is `# readonly: no`
+because this is a whole-block live preflight; every command in it reads. It
+writes no file and no receipt, and it prints nothing: the container read's
+output is discarded, so no environment value is shown, and the result is the
+exit status alone. A zero exit means the flag is not exactly `1`; the plan
+records no flag value.
+
+A nonzero exit is a pre-COMMIT-POINT setup failure: stop dependent work and use
+the section 12 abort cleanup (`hm37a-prep-seat-cleanup`, `runbook-13`,
+`runbook-11`, `runbook-60`, `runbook-61`, `runbook-12`). At this position no
+window file and no box proof directory exist, so each of those blocks takes the
+early-stop branch that `deploy/RELEASE-TO-BOX.md` already defines:
+`runbook-13` reports no active proof directory and restores no timer,
+`runbook-11` reports no window file and nothing to copy back, `runbook-60`
+derives its names from `RELEASE_SHA`, `runbook-61` closes nothing, and
+`runbook-12` removes only the scratch files that the open receipt names. No
+edge switch or schema application has occurred to reverse, so `runbook-42` and
+`hm37-reserve-schema-rollback` are not entered. If a resumed window has already
+changed edge/schema state, use section 11's existing pre-COMMIT-POINT rollback
+tail before that cleanup; this early setup failure path does not authorize
+retaining an unverified forward transition.
+
+The whole preflight is NOT EXECUTED by the contained dry run: it reads the
+environment of the live OAuth container, which no committed measurement
+provides. Its replacement proof is the live run on the box, which must exit zero
+after the identity checks and the disabled read above. It has no receipt
+fields, writes no output and seeds nothing, so no later block reads it.
+`hm37-hm6-oauth-precondition` below keeps its own identity chain and flag read,
+still runs before the COMMIT POINT, and remains the only producer of
+`hm37-hm6-oauth-runtime.txt` and `hm37-hm6-oauth-public-precondition.json`.
+Preflight success is not evidence for either receipt.
+
+```sh
+# step: hm37a-oauth-dependency-preflight
+# readonly: no
+# host: box /bin/bash 5.2 as root
+# Runs on the box over ssh, as Anvil in a root Bash shell, immediately after hm37a-open-inputs; every command reads, and nothing is written or printed.
+(
+  set -euo pipefail
+  HM6_OAUTH_SHA=826db6a34f235064a3a03c57377d8e32a35d2f05
+  HM6_OAUTH="/home/commonswarm/oauth/releases/${HM6_OAUTH_SHA}"
+  HM6_OAUTH_PROOF="/home/commonswarm/stack/release-proofs/${HM6_OAUTH_SHA}"
+  test -d "$HM6_OAUTH"
+  test -f "$HM6_OAUTH/RELEASE_SHA"
+  test "$(cat "$HM6_OAUTH/RELEASE_SHA")" = "$HM6_OAUTH_SHA"
+  test "$(readlink -f /home/commonswarm/oauth/current)" = "$HM6_OAUTH"
+  test -f "$HM6_OAUTH_PROOF/oauth-image.id"
+  IFS= read -r MCP_OAUTH_IMAGE <"$HM6_OAUTH_PROOF/oauth-image.id" || [ -n "$MCP_OAUTH_IMAGE" ]
+  test "$(cat "$HM6_OAUTH_PROOF/oauth-image.id")" = "$MCP_OAUTH_IMAGE"
+  case "$MCP_OAUTH_IMAGE" in sha256:*) ;; *) false ;; esac
+  case "${MCP_OAUTH_IMAGE#sha256:}" in ''|*[!0-9a-f]*) false ;; esac
+  test "${#MCP_OAUTH_IMAGE}" -eq 71
+  CIDS=()
+  while IFS= read -r VALUE || [ -n "$VALUE" ]; do
+    test -n "$VALUE" && CIDS[${#CIDS[@]}]="$VALUE"
+  done < <(docker ps -q \
+    --filter label=com.docker.compose.project=commonswarm-oauth \
+    --filter label=com.docker.compose.service=oauth)
+  test "${#CIDS[@]}" -eq 1
+  CID="${CIDS[0]}"
+  test "$(docker inspect --format '{{.Image}}' "$CID")" = "$MCP_OAUTH_IMAGE"
+  test "$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' "$CID")" = \
+    "$HM6_OAUTH/deploy/mcp-auth"
+  test "$(docker inspect --format '{{.State.Health.Status}}' "$CID")" = healthy
+  docker exec "$CID" node -e \
+    'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1" ? 1 : 0)' \
+    >/dev/null 2>&1
+)
+```
+
 ```sh
 # step: hm37-hm6-oauth-precondition
 # readonly: yes
@@ -1255,8 +1346,8 @@ The successful path uses this exact whole-block order after applying the input
 table and the runbook's switch-to-step mapping:
 
 ```text
-hm37a-source-checkout hm37a-open-inputs hm37a-prep-seat-control-stage
-hm37a-gate-and-proof-ingest
+hm37a-source-checkout hm37a-open-inputs hm37a-oauth-dependency-preflight
+hm37a-prep-seat-control-stage hm37a-gate-and-proof-ingest
 hm37-source-identity runbook-02 hm37a-resolved-inputs runbook-04
 hm37a-baseline-inventory 1-upload-release-archive
 1-open-root-shell 1-apply-release-directories hm37a-resolved-input-transfer

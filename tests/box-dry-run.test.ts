@@ -61,7 +61,9 @@ const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
 const EDGE_PUBLIC_ENABLED_EVIDENCE = "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-closure.txt";
 // Committed readback at hm37-closure.txt:12; A's final check preserves this dark state
-// (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2227-2228).
+// (docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2227-2228). This is the only committed measurement of the
+// edge's public flag, so it answers the container program for every fixture, including window B after a passed
+// window A: the dry run has no container to observe it. It is not a window A transition and supplies no edge.
 const EDGE_PUBLIC_ENABLED = /^mcp_public_enabled=(.+)$/m.exec(readFileSync(EDGE_PUBLIC_ENABLED_EVIDENCE, "utf8"))?.[1];
 assert.ok(EDGE_PUBLIC_ENABLED, "committed closure has no public-enabled observation");
 
@@ -299,13 +301,22 @@ function syntheticPromptValue(input: PromptInput, temporary: string, item = 0): 
   assert.fail(`unmaterialized prompt format ${format}`);
 }
 
-function syntheticPromptEnvironment(temporary: string, inputs: PromptInput[]): NodeJS.ProcessEnv {
+function syntheticPromptEnvironment(temporary: string, inputs: PromptInput[], windowA?: WindowAFinalState): NodeJS.ProcessEnv {
   const env = Object.fromEntries(inputs.map((input) => [input.name, syntheticPromptValue(input, temporary)]));
   // Receipt shape: docs/evidence/2026-09-29-release-eb2a87ac4b5a/gate-evidence.txt:1,3-4.
   // Keep those gate lines, but bind the receipt to this run's named release SHA.
   for (const input of inputs.filter((item) => item.format === "abs-file:gate-receipt")) {
     const path = env[input.name]!;
     writeFileSync(path, readFileSync(path, "utf8").replace(/^SHA=[0-9a-f]{40}$/m, `SHA=${env.RELEASE_SHA ?? RELEASE_SHA}`));
+  }
+  // Window B's only A-to-B handoff is window A's close receipt. After a passed window A it is that run's own
+  // bytes; without one the schema INPUT stays, which only boundary controls use and which starts no window B.
+  if (windowA) {
+    for (const input of inputs.filter((item) => item.format === "abs-file:hm37-a-close-receipt")) {
+      const path = env[input.name]!;
+      writeFileSync(path, windowA.closeReceipt, { mode: 0o600 });
+      chmodSync(path, 0o600);
+    }
   }
   return env;
 }
@@ -1235,8 +1246,13 @@ interface PlannedRun {
   // The box state the run starts from (M5, K4-12) and, for lane 8, the browser branch it follows.
   state: string;
   branch?: "FULL-CONTROL" | "REDUCED-CONTROL";
-  afterWindowA?: boolean;
+  // The label of the run whose PASSED final state this run starts from. Window B follows a passed window A in
+  // the same dry run; it never starts from the committed closure of the real aborted window A.
+  after?: string;
 }
+
+// Window A's pass path from the measured-now box state (M5). A window B run starts only from its final state.
+const WINDOW_A_PASS_RUN = "window-a/s5/pass";
 
 function currentPlannedRuns(): PlannedRun[] {
   const runs: PlannedRun[] = [{ label: "prep/pass", blocks: resolveSteps("prep/pass", prepSuccessOrder()), state: "s5" }];
@@ -1246,7 +1262,7 @@ function currentPlannedRuns(): PlannedRun[] {
     }
   }
   for (const [path, steps] of windowBPaths()) {
-    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps), state: "s5", afterWindowA: true });
+    runs.push({ label: `window-b/${path}`, blocks: resolveSteps(`window-b/${path}`, steps), state: "s5", after: WINDOW_A_PASS_RUN });
   }
   for (const branch of ["FULL-CONTROL", "REDUCED-CONTROL"] as const) {
     runs.push({ label: `lane-8/${branch}`, blocks: resolveSteps(`lane-8/${branch}`, siteOrder()), state: "s5", branch });
@@ -1460,15 +1476,70 @@ function populateExistingRelease(target: string, sha: string): void {
 // (PLAN_VISIBLE_PATH_PRESEEDS); the returned list is checked against it. The states s1..s5 differ only where
 // the box measurements differ (M5, K4-12).
 function windowAFinalEdge(): string {
-  // The committed close is ABORTED_ROLLED_BACK, not the plan's expected PASS.
-  // Preserve that observed state. B's real opening check must reject it until a
-  // successful A close is committed; an input receipt is not a live transition.
+  // The committed close is the real window A's ABORTED_ROLLED_BACK, not a PASS. It is the state "window A did
+  // not pass": the previous edge is still live. Only the refusal controls and a fixture built without a passed
+  // window A use it, and B's real opening check rejects it. It never starts a successful window B: that start
+  // is windowAFinalState(), read from a PASSED window A's own fixture in the same dry run.
   const receipt = readFileSync(EDGE_PUBLIC_ENABLED_EVIDENCE, "utf8");
   const sha = /^edge_current=([0-9a-f]{40})$/m.exec(receipt)?.[1];
   assert.ok(sha, "committed Window A closure has no edge_current observation");
   const edge = `/home/commonswarm/edge/releases/${sha}`;
   assert.ok([PREVIOUS_EDGE, CANDIDATE_EDGE].includes(edge), "committed closure names an unknown edge release");
   return edge;
+}
+
+// What a PASSED window A leaves for window B (BOX-WINDOW.md of window B, "Required window-A result": the
+// candidate is live and DARK, and the close receipt is the only A-to-B handoff). Both values are read from window
+// A's own fixture when its pass run ends, never from the committed closure of the real aborted window A.
+interface WindowAFinalState {
+  edge: string;
+  closeReceipt: Buffer;
+  closeReceiptPath: string;
+}
+
+type WindowAStart = { state: WindowAFinalState } | { refused: string };
+
+// `root` is the box root of window A's fixture: its own directory in a Mac run, "/" in a box run. A failed block,
+// a previous edge still live, or a missing or non-PASS close receipt is a refusal, and a refusal starts no B.
+function windowAFinalState(records: Array<{ block: Block; execution: Execution }>, root: string): WindowAStart {
+  const failed = records.find(({ execution }) => execution.result === "failed");
+  if (failed) {
+    return { refused: `window A did not pass: ${shortStep(failed.block)} at ${failed.block.file}:${failed.block.line} failed` };
+  }
+  if (records.length === 0) return { refused: "window A ran no block" };
+  let target: string;
+  try {
+    target = readlinkSync(join(root, "home/commonswarm/edge/current"));
+  } catch {
+    return { refused: "window A left no edge/current symlink" };
+  }
+  const edge = root !== "/" && target.startsWith(`${root}/`) ? target.slice(root.length) : target;
+  if (edge !== CANDIDATE_EDGE) {
+    return { refused: `window A left edge/current at ${edge}, not the candidate ${CANDIDATE_EDGE}` };
+  }
+  // The receipt is in the active proof directory, or in the one runbook-61 closed by its exact name
+  // `<sha>.closed-window-<window id>`. Do not assume the id: read it from where the receipt is. The closed
+  // directories of earlier windows exist empty and never match.
+  const proofs = join(root, dirname(PROOF_DIR));
+  const found = (pathExists(proofs) ? readdirSync(proofs).sort() : [])
+    .filter((name) => name === basename(PROOF_DIR) || name.startsWith(`${basename(PROOF_DIR)}.closed-window-`))
+    .map((name) => join(proofs, name, "hm37-close-readback.txt")).filter(pathExists);
+  if (found.length !== 1) {
+    return { refused: `window A produced ${found.length === 0 ? "no" : "more than one"} hm37-close-readback.txt` };
+  }
+  const closeReceipt = readFileSync(found[0]!);
+  const lines = closeReceipt.toString("utf8").split("\n");
+  for (const required of [`release_sha=${RELEASE_SHA}`, "close=PASS"]) {
+    if (!lines.includes(required)) return { refused: `window A's close receipt does not record ${required}` };
+  }
+  return { state: { edge, closeReceipt, closeReceiptPath: found[0]! } };
+}
+
+// A run that names a predecessor starts from that run's captured final state or not at all. There is no fallback
+// to the committed aborted closure: a predecessor that did not run, or did not pass, is a refusal.
+function windowBStart(run: PlannedRun, finals: ReadonlyMap<string, WindowAStart>): WindowAStart | undefined {
+  if (run.after === undefined) return undefined;
+  return finals.get(run.after) ?? { refused: `${run.after} did not run` };
 }
 
 function seedMacBoxRoot(root: string, state: string, edgeTarget?: string): string[] {
@@ -2002,17 +2073,20 @@ function pinInventoryDeno(bin: string): Fixture["inventoryDeno"] {
   return { path, digest, version: version.stdout.trim() };
 }
 
-function prepareMacFixture(
-  planBlocks: Block[] = [],
-  options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean } = {},
-): Fixture {
+// `afterWindowA` starts window B from the committed aborted closure ("window A did not pass") and is the
+// default for any plan with a window B block. `fromWindowA` starts it from a passed window A's own final state.
+interface MacFixtureOptions {
+  state?: string;
+  browserBranch?: Fixture["browserBranch"];
+  afterWindowA?: boolean;
+  fromWindowA?: WindowAFinalState;
+}
+
+function prepareMacFixture(planBlocks: Block[] = [], options: MacFixtureOptions = {}): Fixture {
   return withTemporarySetup(() => prepareMacFixtureSetup(planBlocks, options));
 }
 
-function prepareMacFixtureSetup(
-  planBlocks: Block[],
-  options: { state?: string; browserBranch?: Fixture["browserBranch"]; afterWindowA?: boolean },
-): Fixture {
+function prepareMacFixtureSetup(planBlocks: Block[], options: MacFixtureOptions): Fixture {
   const state = options.state ?? "s5";
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-mac-"));
   chmodSync(temporary, 0o700);
@@ -2040,7 +2114,7 @@ function prepareMacFixtureSetup(
   writeFileSync(macProcesses, "", { mode: 0o600 });
   writeBoxUserlandBin(boxBin);
   const afterWindowA = options.afterWindowA ?? planBlocks.some((block) => block.file === HM37B);
-  const finalEdge = afterWindowA ? windowAFinalEdge() : undefined;
+  const finalEdge = options.fromWindowA?.edge ?? (afterWindowA ? windowAFinalEdge() : undefined);
   const seededPaths = seedMacBoxRoot(boxRoot, state, finalEdge);
   prepareDistFixture(distFixture);
   const model = cachedBoxModel(state);
@@ -2055,7 +2129,7 @@ function prepareMacFixtureSetup(
     executableRoots: [temporary],
   });
   const env = explicitEnvironment({
-    ...syntheticPromptEnvironment(temporary, declaredPromptInputs),
+    ...syntheticPromptEnvironment(temporary, declaredPromptInputs, options.fromWindowA),
     HOME: home,
     TMPDIR: macTmp,
     PATH: macBlockPath(bin),
@@ -2185,16 +2259,16 @@ function boxRunnerGuard(env: NodeJS.ProcessEnv): ContainmentAvailability {
     : { available: false, detail: result.stderr.trim() || `runner guard exited ${result.status}` };
 }
 
-function prepareBoxFixture(state: string, planBlocks: Block[] = []): Fixture {
-  return withTemporarySetup(() => prepareBoxFixtureSetup(state, planBlocks));
+function prepareBoxFixture(state: string, planBlocks: Block[] = [], fromWindowA?: WindowAFinalState): Fixture {
+  return withTemporarySetup(() => prepareBoxFixtureSetup(state, planBlocks, fromWindowA));
 }
 
-function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
+function prepareBoxFixtureSetup(state: string, planBlocks: Block[], fromWindowA: WindowAFinalState | undefined): Fixture {
   assert.equal(process.env.BOX_DRY_RUN_PART, "box");
   // Run before creating real-path fixtures: the guard requires those paths to be absent.
   const guard = boxRunnerGuard(process.env);
   assert.ok(guard.available, `CONTAINMENT UNAVAILABLE: ${guard.detail}. The fixture was not created.`);
-  const finalEdge = planBlocks.some((block) => block.file === HM37B) ? windowAFinalEdge() : undefined;
+  const finalEdge = fromWindowA?.edge ?? (planBlocks.some((block) => block.file === HM37B) ? windowAFinalEdge() : undefined);
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const model = buildBoxFixtureModel(state);
   const temporary = mkdtempSync(join(tmpdir(), `commonswarm-box-dry-run-${state}-`));
@@ -2378,7 +2452,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
     join(measuredSiteRelease, "app/index.html"), join(measuredSiteRelease, "download/index.html"),
   ].filter(pathExists).map(normalizeSeededPath).filter((path, index, paths) => paths.indexOf(path) === index).sort();
 
-  const boxPromptEnvironment = syntheticPromptEnvironment(temporary, declaredPromptInputs);
+  const boxPromptEnvironment = syntheticPromptEnvironment(temporary, declaredPromptInputs, fromWindowA);
   const fixture: Fixture = {
     temporary, cwd: process.cwd(), home: join(macLocalRoot, "home"), bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, sudoPolicy, rootDirectories,
@@ -4630,6 +4704,121 @@ test("controls: window B fails when window A's candidate edge is not live", { sk
   }
 });
 
+test("controls: window B starts only from a passed window A's final state", () => {
+  const runs = currentPlannedRuns();
+  // Window B's runs name window A's pass path and nothing else: an abort, a pre-commit failure or a rollback
+  // path of window A is never a start. No other run starts from another.
+  assert.deepEqual(runs.filter((run) => run.after !== undefined).map((run) => [run.label, run.after]),
+    [["window-b/pass", WINDOW_A_PASS_RUN], ["window-b/abort", WINDOW_A_PASS_RUN]]);
+  assert.ok(runs.some((run) => run.label === WINDOW_A_PASS_RUN), "window B names a window A run that is not planned");
+  const closeBlock = planBlock(HM37, "hm37a-close-readback");
+  const record = (result: Execution["result"]): { block: Block; execution: Execution } => ({
+    block: closeBlock, execution: { step: shortStep(closeBlock), result, status: result === "failed" ? 1 : 0, stderr: "", stdout: "" },
+  });
+  const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-window-start-"));
+  try {
+    const root = join(temporary, "box");
+    const current = join(root, "home/commonswarm/edge/current");
+    const proof = join(root, PROOF_DIR);
+    const closed = `${proof}.closed-window-20990101T000000Z`;
+    const receipt = join(proof, "hm37-close-readback.txt");
+    const passingReceipt = promptSchemaContent("hm37-a-close-receipt");
+    mkdirSync(dirname(current), { recursive: true });
+    mkdirSync(proof, { recursive: true });
+    symlinkSync(join(root, CANDIDATE_EDGE), current);
+    writeFileSync(receipt, passingReceipt);
+    const refusal = (records: Array<{ block: Block; execution: Execution }>): string =>
+      refusalOf(windowAFinalState(records, root));
+
+    // Positive control: the same files, a passed window A, and the final state is read from them.
+    const accepted = windowAFinalState([record("passed")], root);
+    assert.ok("state" in accepted, "refused" in accepted ? accepted.refused : "");
+    assert.equal(accepted.state.edge, CANDIDATE_EDGE);
+    assert.equal(accepted.state.closeReceiptPath, receipt);
+    assert.deepEqual(accepted.state.closeReceipt, Buffer.from(passingReceipt));
+    // The recorded states reach the run that starts from them, and only a run naming a predecessor takes one.
+    const window = runs.find((run) => run.label === "window-b/pass")!;
+    assert.equal(windowBStart(window, new Map([[WINDOW_A_PASS_RUN, accepted]])), accepted);
+    assert.match(refusalOf(windowBStart(window, new Map())), /window-a\/s5\/pass did not run/);
+    assert.equal(windowBStart(runs.find((run) => run.label === WINDOW_A_PASS_RUN)!, new Map()), undefined);
+
+    // Failure and abort start nothing, whatever files are on the box.
+    assert.match(refusal([record("passed"), record("failed")]), /window A did not pass: hm37a-close-readback at .*:\d+ failed/);
+    assert.match(refusal([]), /window A ran no block/);
+    const failedStart = windowAFinalState([record("failed")], root);
+    assert.match(refusalOf(windowBStart(window, new Map([[WINDOW_A_PASS_RUN, failedStart]]))), /window A did not pass/);
+
+    // The previous edge still live is a window A that did not switch; the committed aborted closure says so too.
+    assert.equal(windowAFinalEdge(), PREVIOUS_EDGE);
+    unlinkSync(current);
+    symlinkSync(join(root, windowAFinalEdge()), current);
+    assert.match(refusal([record("passed")]), /window A left edge\/current at \/home\/commonswarm\/edge\/releases\/[0-9a-f]{40}, not the candidate/);
+    unlinkSync(current);
+    assert.match(refusal([record("passed")]), /window A left no edge\/current symlink/);
+    symlinkSync(join(root, CANDIDATE_EDGE), current);
+
+    // The committed receipt of the real aborted window A is not a PASS close, nor is a receipt that says FAIL.
+    const aborted = readFileSync("docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt");
+    assert.match(aborted.toString("utf8"), /^window_result=ABORTED_ROLLED_BACK$/m);
+    writeFileSync(receipt, aborted);
+    assert.match(refusal([record("passed")]), /close receipt does not record release_sha=[0-9a-f]{40}/);
+    writeFileSync(receipt, passingReceipt.replace("close=PASS", "close=FAIL"));
+    assert.match(refusal([record("passed")]), /close receipt does not record close=PASS/);
+    unlinkSync(receipt);
+    assert.match(refusal([record("passed")]), /window A produced no hm37-close-readback\.txt/);
+
+    // A box run closes the proof directory by its exact name (runbook-61); the receipt is found there, whatever
+    // window id the closed name carries, and an earlier window's empty closed directory is not a second receipt.
+    writeFileSync(receipt, passingReceipt);
+    mkdirSync(`${proof}.closed-window-20260929T021020Z`);
+    renameSync(proof, closed);
+    const afterClose = windowAFinalState([record("passed")], root);
+    assert.ok("state" in afterClose, "refused" in afterClose ? afterClose.refused : "");
+    assert.equal(afterClose.state.closeReceiptPath, join(closed, "hm37-close-readback.txt"));
+    // Two receipts are ambiguous, not a choice.
+    mkdirSync(proof);
+    writeFileSync(receipt, passingReceipt);
+    assert.match(refusal([record("passed")]), /window A produced more than one hm37-close-readback\.txt/);
+  } finally {
+    removeOwnedTemporary(temporary, "commonswarm-box-dry-run-window-start-");
+  }
+});
+
+function refusalOf(start: WindowAStart | undefined): string {
+  assert.ok(start && "refused" in start, "a start was accepted where a refusal is required");
+  return start.refused;
+}
+
+test("controls: window B opens from a passed window A's final state and refuses the committed aborted closure", { skip: MAC_ONLY }, (t) => {
+  t.diagnostic("Boundary control: the passed-A final state here is a named INPUT of the fromWindowA option; the plan assertion derives the real one from window A's own run.");
+  const plan = resolveSteps("window-b/pass", windowBPaths().get("pass")!);
+  const index = plan.findIndex((block) => shortStep(block) === "hm37b-box-open");
+  assert.ok(index > 0, "window B has no box-open step");
+  const closeReceipt = Buffer.from(promptSchemaContent("hm37-a-close-receipt"));
+  const passed: WindowAFinalState = { edge: CANDIDATE_EDGE, closeReceipt, closeReceiptPath: "boundary-input" };
+  for (const fromWindowA of [passed, undefined]) {
+    const fixture = prepareMacFixture(plan, { state: "s5", ...(fromWindowA ? { fromWindowA } : {}) });
+    try {
+      const current = join(fixture.boxRoot!, "/home/commonswarm/edge/current");
+      assert.equal(readlinkSync(current), join(fixture.boxRoot!, fromWindowA ? CANDIDATE_EDGE : windowAFinalEdge()));
+      const receiptPath = fixture.env.HM37_A_CLOSE_RECEIPT!;
+      if (fromWindowA) {
+        assert.deepEqual(readFileSync(receiptPath), closeReceipt);
+        assert.equal(lstatSync(receiptPath).mode & 0o777, 0o600);
+      }
+      seedControlOpenReceipt(fixture, "b");
+      const execution = executeWholeBlock(plan[index]!, fixture);
+      assert.equal(execution.result, fromWindowA ? "passed" : "failed", execution.stderr);
+      if (!fromWindowA) {
+        assert.equal(execution.status, 1, execution.stderr);
+        assert.match(execution.stderr, /the box script exited 1[\s\S]*readlink -f \/home\/commonswarm\/edge\/current/);
+      }
+    } finally {
+      cleanupMacFixture(fixture);
+    }
+  }
+});
+
 // The five files a copy-back reads from the box's proof directory. Three are products of box blocks and are seeded
 // from their committed execution evidence (fixtures/box-block-products.json). The other two are staged from the Mac
 // by earlier blocks; their bytes come from the same committed evidence directory.
@@ -5835,11 +6024,12 @@ test("historical controls execute and reproduce the named failures while current
     const historicalMediaSource = stepSource(oldMedia, "hm37-hm6-oauth-precondition");
     // The old block also reads a program's result out of the OAuth container, which the dry run cannot run and
     // refuses (69). That readback is not what this control tests, so it is the one line replaced; the media
-    // check after it is the old text, byte for byte.
+    // check after it is the old text, byte for byte. The current plan block of that name is a declared
+    // whole-block surface that executeWholeBlock never runs, so this historical copy carries its own step id.
     const containerReadback = "  docker exec \"$CID\" node -e \\\n    'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === \"1\" ? 1 : 0)'\n";
     assert.ok(historicalMediaSource.includes(containerReadback), "the old block carries the container readback");
     const historicalMedia: Block = {
-      file: HM37, step: "hm37-hm6-oauth-precondition", marker: "yes", host: "Mac mini /bin/bash 3.2",
+      file: HM37, step: "historical-oauth-media", marker: "yes", host: "Mac mini /bin/bash 3.2",
       line: 1, source: historicalMediaSource.replace(containerReadback, "  true\n").replaceAll("/home/commonswarm", controlRoot),
     };
     const wrongMedia = executeWholeBlock(historicalMedia, historicalFixture, { control: "historical-media" });
@@ -5989,7 +6179,17 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
   const notExecuted = new Map<string, string>();
   const notTested: string[] = [];
   const part: FixturePart = process.env.BOX_DRY_RUN_PART === "box" ? "box" : "mac";
-  for (const run of currentPlannedRuns()) {
+  const reportFailed = (line: string): void => {
+    if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
+      failed.push(line);
+    }
+  };
+  // A run another run starts from keeps its final state here, read before its fixture is removed. Window B
+  // runs follow it: a failed window A leaves no entry to start from.
+  const runs = currentPlannedRuns();
+  const needed = new Set(runs.flatMap((run) => run.after ? [run.after] : []));
+  const windowAFinals = new Map<string, WindowAStart>();
+  for (const run of runs) {
     const unavailable = run.branch && nonSubstitutableEntries().flatMap((entry) => entry.branches ?? [])
       .find((branch) => branch.branch === run.branch && branch.status === "not tested");
     if (unavailable) {
@@ -5998,17 +6198,31 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
       t.diagnostic(line);
       continue;
     }
+    const start = windowBStart(run, windowAFinals);
+    if (start && "refused" in start) {
+      const first = run.blocks[0]!;
+      reportFailed(`failed block ${first.file}:${first.line} [run=${run.label} step=${shortStep(first)}] window B not started: ${start.refused}; the committed aborted closure is not a starting state`);
+      continue;
+    }
     let fixture: Fixture;
     if (part === "box") {
       const guard = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env: process.env });
       assert.equal(guard.status, 0, guard.stderr);
       const state = /^window-a\/(s[1-5])\//.exec(run.label)?.[1] ?? "s2";
-      fixture = prepareBoxFixture(state, run.blocks);
+      fixture = prepareBoxFixture(state, run.blocks, start?.state);
     } else {
-      fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch, afterWindowA: run.afterWindowA });
+      fixture = prepareMacFixture(run.blocks, { state: run.state, browserBranch: run.branch, ...(start ? { fromWindowA: start.state } : {}) });
     }
     try {
       const records = executePlanUntilFailure(run.blocks, fixture, part);
+      if (needed.has(run.label)) {
+        const final = windowAFinalState(records, part === "box" ? "/" : fixture.boxRoot!);
+        windowAFinals.set(run.label, final);
+        t.diagnostic("state" in final
+          ? `${run.label} passed; window B starts from its final state: edge/current ${final.state.edge}, close receipt ${final.state.closeReceiptPath} (${final.state.closeReceipt.length} bytes)`
+          : `${run.label} left no state for window B: ${final.refused}`);
+      }
+      if (start) t.diagnostic(`${run.label} started from ${run.after}'s final state: edge/current ${start.state.edge}`);
       for (const { block, execution } of records) {
         if (execution.result === "not-executed") {
           const key = `${block.file}:${block.line}`;
@@ -6018,10 +6232,7 @@ test("HM37 plans are UNPRODUCED-free and every block passes", (t) => {
         }
         if (execution.result === "failed") {
           t.diagnostic(`Execution.stderr ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}]:\n${execution.stderr}`);
-          const line = `failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`;
-          if (!failed.some((existing) => existing.replace(/ \[run=.*? step=/, " [step=") === line.replace(/ \[run=.*? step=/, " [step="))) {
-            failed.push(line);
-          }
+          reportFailed(`failed block ${block.file}:${block.line} [run=${run.label} step=${shortStep(block)}] ${failureDetail(block, execution)}`);
         }
       }
     } finally {
