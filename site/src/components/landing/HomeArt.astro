@@ -1,0 +1,142 @@
+---
+/*
+ * HomeArt — the Daylight Orbs props for the homepage (2026-10-01).
+ *
+ * Every piece is decoration: the root carries aria-hidden and nothing inside is readable
+ * copy. Orbs are CSS radial gradients (home.css `.orb--*`), props are rounded tiles whose
+ * "writing" is abstract bars, and icons follow the brand set (24px grid, 1.75 stroke, round
+ * caps). Props carry the restrained 8-12 degree tilt; real UI cards stay front-facing.
+ *
+ * Kept out of ConsumerStory.astro on purpose: that file's SVGs must each carry an accessible
+ * name (heading-lines.observer.test.ts), and none of these should be announced.
+ */
+
+interface Props {
+  name:
+    | 'step-open'
+    | 'step-prompt'
+    | 'step-steer'
+    | 'life'
+    | 'work'
+    | 'key'
+    | 'icon-eye'
+    | 'icon-lock'
+    | 'icon-file'
+    | 'close';
+  class?: string;
+}
+
+const { name, class: klass = '' } = Astro.props;
+---
+
+{name === 'step-open' && (
+  <div class:list={['art art--step', klass]} aria-hidden="true">
+    <span class="tile tile--doc tile--tilt-l">
+      <i class="bar bar--w70"></i><i class="bar bar--w50"></i><i class="bar bar--w60"></i>
+      <i class="bar bar--accent"></i>
+    </span>
+    <span class="orb orb--lavender art__orb art__orb--step-r"></span>
+  </div>
+)}
+
+{name === 'step-prompt' && (
+  <div class:list={['art art--step', klass]} aria-hidden="true">
+    <span class="tile tile--doc tile--tilt-r">
+      <i class="bar bar--w60"></i><i class="bar bar--w80"></i><i class="bar bar--w40"></i>
+    </span>
+    <span class="orb orb--peach art__orb art__orb--step-r"></span>
+  </div>
+)}
+
+{name === 'step-steer' && (
+  <div class:list={['art art--step', klass]} aria-hidden="true">
+    <span class="orb orb--sage art__orb art__orb--step-l"></span>
+    <span class="tile tile--sliders tile--tilt-r">
+      <i class="slider"><b style="left: 30%"></b></i>
+      <i class="slider"><b style="left: 64%"></b></i>
+      <i class="slider"><b style="left: 46%"></b></i>
+    </span>
+  </div>
+)}
+
+{name === 'life' && (
+  <div class:list={['art art--scene', klass]} aria-hidden="true">
+    <span class="tile tile--calendar tile--tilt-l">
+      <i class="bar bar--w50"></i>
+      <span class="cal">
+        {Array.from({ length: 12 }, (_, i) => (
+          <i class:list={['cal__day', { 'cal__day--on': i === 3 || i === 8 }]}></i>
+        ))}
+      </span>
+    </span>
+    <span class="orb orb--lavender art__orb art__orb--life-a"></span>
+    <span class="orb orb--peach art__orb art__orb--life-b"></span>
+  </div>
+)}
+
+{name === 'work' && (
+  <div class:list={['art art--scene', klass]} aria-hidden="true">
+    <span class="tile tile--doc tile--file-a tile--tilt-l">
+      <i class="bar bar--sky bar--w60"></i><i class="bar bar--w80"></i><i class="bar bar--w50"></i>
+    </span>
+    <span class="tile tile--doc tile--file-b tile--tilt-r">
+      <i class="bar bar--sky bar--w50"></i><i class="bar bar--w70"></i><i class="bar bar--w60"></i>
+    </span>
+    <span class="orb orb--sky art__orb art__orb--work-a"></span>
+    <span class="orb orb--sage art__orb art__orb--work-b"></span>
+  </div>
+)}
+
+{name === 'key' && (
+  <div class:list={['art art--key', klass]} aria-hidden="true">
+    <svg class="art__orbit" viewBox="0 0 320 160" preserveAspectRatio="none" focusable="false">
+      <ellipse cx="160" cy="80" rx="150" ry="58"></ellipse>
+    </svg>
+    <span class="tile tile--key tile--tilt-r">
+      <svg viewBox="0 0 24 24" class="icon" focusable="false">
+        <circle cx="8" cy="15" r="4"></circle>
+        <path d="M11 12l8-8M16 7l2 2M14 9l2 2"></path>
+      </svg>
+    </span>
+    <span class="orb orb--lavender art__orb art__orb--key-a"></span>
+    <span class="orb orb--peach art__orb art__orb--key-b"></span>
+    <span class="orb orb--sky art__orb art__orb--key-c"></span>
+    <span class="orb orb--sage art__orb art__orb--key-d"></span>
+  </div>
+)}
+
+{name === 'icon-eye' && (
+  <span class:list={['art-icon', klass]} aria-hidden="true">
+    <svg viewBox="0 0 24 24" class="icon" focusable="false">
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+  </span>
+)}
+
+{name === 'icon-lock' && (
+  <span class:list={['art-icon', klass]} aria-hidden="true">
+    <svg viewBox="0 0 24 24" class="icon" focusable="false">
+      <rect x="5" y="10.5" width="14" height="10" rx="2.5"></rect>
+      <path d="M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"></path>
+      <path d="M12 14.5v2"></path>
+    </svg>
+  </span>
+)}
+
+{name === 'icon-file' && (
+  <svg viewBox="0 0 24 24" class:list={['icon', klass]} aria-hidden="true" focusable="false">
+    <path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8Z"></path>
+    <path d="M14 3v5h5"></path>
+  </svg>
+)}
+
+{name === 'close' && (
+  <div class:list={['art art--close', klass]} aria-hidden="true">
+    <span class="orb orb--lavender art__orb art__orb--c-n"></span>
+    <span class="orb orb--peach art__orb art__orb--c-e"></span>
+    <span class="orb orb--sage art__orb art__orb--c-s"></span>
+    <span class="orb orb--sky art__orb art__orb--c-w"></span>
+    <span class="orb orb--pearl art__orb art__orb--c-c"></span>
+  </div>
+)}
