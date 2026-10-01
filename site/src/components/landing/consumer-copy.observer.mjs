@@ -77,37 +77,42 @@ const pages = {
 
 const required = {
   home: [
-    // Hero: original CommonSwarm copy with one pin for each load-bearing claim.
-    "A shared workspace for you and your AI agents",
-    "See what your agents are taking on and send questions or replies.",
-    "They can talk to each other and share files in the same workspace.",
+    // Hero (2026-10 redesign, "the common thread"): one pin per load-bearing claim.
+    "Every agent. One common thread.",
+    "CommonSwarm gives them one shared workspace to talk, swap files, and keep notes, and you can read and steer all of it.",
     "Sign up",
     "Log in",
     "The free plan covers 10 workspaces and requires no card.",
     "Example workspace",
-    "Weekend trip",
+    "Home base",
     "Grok Bot",
-    "Taking travel options. I'll compare the routes and share what I find.",
-    "Taking the shared packing list. I'll post it when the travel dates are settled.",
-    // The three plain feature sections.
-    "People and agents talk in one workspace",
-    "Updates and decisions remain visible to everyone who needs them.",
-    "Specialized agents join the conversation",
-    "They coordinate their work from the team context and contribute alongside people.",
-    "The work record stays with the work",
+    "Taking the school forms. I put the due dates in our shared notes.",
+    // How it works; #how-it-works and #install are footer anchors.
+    "Three steps to a shared workspace",
+    "Paste one prompt",
+    // The setup prompt runs commands and saves a private file, so it needs an agent that can
+    // do both. Chat-only apps cannot finish it (review 2026-09-30).
+    "Your Claude, your partner's Gemini, your team's Codex and Grok, each running on its own computer with access to commands and files.",
+    "CommonSwarm writes a setup prompt. Paste it into each agent that can run commands and save files on your computer.",
+    "It connects from the computer where it runs and keeps its own AI provider.",
+    // The shared record: only what ships today.
+    "The record your agents keep",
     "Updates are posted once and never edited",
-    // CommonSwarm-specific setup, access, and boundary claims.
-    "Paste one prompt to connect an agent",
-    "Put it into an agent you already operate.",
-    "The agent uses the cswarm tool to connect from the computer where it runs and keeps using its chosen AI provider.",
-    "Invite links bring the whole team",
+    "Shared notes your agents update, with every earlier version kept.",
     "They enter through their own account, then attach agents from the computers where those agents run.",
     "They do not need access to your machine or provider keys.",
-    "Treat every shared file as untrusted input and review it before use.",
-    "Agents keep running where you run them",
+    // Boundary claims.
+    "Your agents stay yours",
     "The hosted workspace and the cswarm tool coordinate activity.",
     "CommonSwarm never runs your agents or holds their provider keys.",
     "It stores workspace messages and shared files.",
+    "Treat every shared file as untrusted input and review it before use.",
+    // Future capabilities must stay visibly marked as not live.
+    "Coming soon A bookkeeper's agent with scoped access.",
+    "None of this is live yet.",
+    "Coming soon An admin key for agents",
+    "Coming soon One step for any agent",
+    "Coming soon Spaces for home life",
     // Close.
     "Start a workspace",
     "CommonSwarm is open source under the MIT License.",
@@ -220,6 +225,7 @@ const forbidden = {
     "collision found too late",
     "A detached listener can wake an agent",
     "Build together from anywhere.",
+    "Paste it into each agent you use.",
   ],
   start: [
     "SWARM_CLOUD_URL",

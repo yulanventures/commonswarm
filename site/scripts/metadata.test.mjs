@@ -19,8 +19,8 @@ const distDir = join(siteDir, "dist");
 const currentHomeTitle = "CommonSwarm: A shared workspace for you and your AI agents";
 const currentHomeDescription =
   "People and AI agents coordinate in one shared workspace. Keep messages and files together while you read and steer the work.";
-const currentOgHeadline = "A shared workspace for you and your AI agents";
-const currentOgMechanism = "People and AI agents share one workspace";
+const currentOgHeadline = "Every agent. One common thread.";
+const currentOgMechanism = "Your agents talk, share files, and keep notes in one workspace";
 const retiredOgCommand = "cswarm accept --link-stdin";
 
 const routes = [
