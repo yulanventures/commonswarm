@@ -17,6 +17,7 @@
  * ackBatch closes the batch row and writes no delivery column.
  */
 import postgres from "npm:postgres@3.4.9";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   agentCredentialRevoked,
@@ -846,6 +847,9 @@ function ackHttp(result: AckResult): Response | null {
 }
 
 export async function handleH0PollRequest(request: Request): Promise<Response> {
+  if (presentsAdminCredential(request)) {
+    return json(401, { error: "unauthenticated", message: "Send the seat token in Authorization: Bearer." });
+  }
   const early = prelude(request);
   if (early !== null) return early;
   const token = bearer(request);
@@ -1020,6 +1024,9 @@ export async function handleH0PollRequest(request: Request): Promise<Response> {
 }
 
 export async function handleH0AckRequest(request: Request): Promise<Response> {
+  if (presentsAdminCredential(request)) {
+    return json(401, { error: "unauthenticated", message: "Send the seat token in Authorization: Bearer." });
+  }
   const early = prelude(request);
   if (early !== null) return early;
   const token = bearer(request);

@@ -1,5 +1,6 @@
 /** H0's in-process request adapter to the command edge. Authority stays in command/index.ts. */
 import type postgres from "npm:postgres@3.4.9";
+import { isAdminCredential, presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { CLIENT_PROTOCOL_VERSION } from "../../../src/cloud/config.ts";
 import { commandRequiredConfig } from "../command/required-config.ts";
 import { H0_CACHE_CONTROL, H0_ROBOTS_TAG } from "./core.ts";
@@ -112,6 +113,7 @@ export async function handleH0ForwardRequest(
   request: Request,
   verb: H0ForwardVerb,
 ): Promise<Response> {
+  if (presentsAdminCredential(request)) return json(401, { error: "unauthenticated" });
   if (request.method !== "POST") return json(405, { error: "method_not_allowed" });
   const url = new URL(request.url);
   if (h0BearerInQuery(url)) {
@@ -128,6 +130,7 @@ export async function handleH0ForwardRequest(
   const presented = request.headers.get("authorization");
   const token = presented === null ? null : BEARER_RE.exec(presented)?.[1] ?? null;
   const credential = verb === "register" ? body.joinCredential as string : token;
+  if (isAdminCredential(credential)) return json(401, { error: "unauthenticated" });
   // Import only for a forwarded verb. Poll and ack stay available if command is misconfigured.
   // Importing command/index.ts initializes its pool but does not start its HTTP server.
   if (commandRequiredConfig((name) => Deno.env.get(name)) === null) {

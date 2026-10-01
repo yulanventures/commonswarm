@@ -1,4 +1,5 @@
 import postgres from "npm:postgres@3.4.9";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import { redactCredentialText } from "../../../src/host/credential-redaction.ts";
 import {
@@ -80,6 +81,9 @@ async function boundedJson(request: Request): Promise<unknown> {
 }
 
 async function handle(request: Request): Promise<Response> {
+  if (presentsAdminCredential(request)) {
+    return json(401, { error: "unauthenticated" });
+  }
   if (request.method !== "POST") {
     return json(405, { error: "method_not_allowed" });
   }
