@@ -90,6 +90,54 @@ callback requests return `503 authorization_service_disabled`. Enabling the
 flag also requires the reviewed lane-2 management-command binding; startup
 fails closed if that binding is absent.
 
+## Lane-2 entrypoint and image build
+
+The real `node src/server.js` entrypoint composes the bindings before calling
+`startServer`. The image builds the existing
+`supabase/functions/command/index.ts` transaction path for Node; it does not
+forward these commands to the public HTTP command route (that route refuses
+them). Workspace listing uses `swarm_read.workspaces` with transaction-local
+verified-user claims. No extra listener or management bearer is introduced.
+
+Enabled startup additionally requires
+`MCP_OAUTH_MANAGEMENT_DATABASE_CREDENTIALS_FILE`, mounted from
+`/etc/commonswarm-oauth/management-database-credentials`. Its JSON document
+contains `databaseUrl`, read from the existing box edge configuration's
+`SWARM_DATABASE_URL` (or `SUPABASE_DB_URL`). The login must be able to set
+`swarm_command` and `swarm_read`; do not broaden the OAuth artifact role.
+The URL must use `MCP_OAUTH_DATABASE_HOST`, contain a login/password, and
+have no query overrides. The same verified CA applies. `SUPABASE_URL` and
+`SUPABASE_ANON_KEY` come from the existing service env file. Signing/cookie
+keys and the OAuth artifact database credential are unchanged. No new
+1Password item name is defined here; HezLead supplies existing item references
+in vault **Yulan Ventures Infra** if recovery is needed.
+
+The Dockerfile now uses the **clean exact-SHA repository archive root** as its
+build context because it packages the shared lane-2 source. The two stages
+use the same digest-pinned base. Build only on the box, retaining the old
+image; the release procedure contains the exact pull and build commands:
+
+```sh
+# step: oauth-image-build
+set -eu
+: "${OAUTH_RELEASE_DIR:?FAIL: exact-SHA archive directory required}"
+: "${PROOF_DIR:?FAIL: release proof directory required}"
+BASE_REFERENCE=node:22.23.3-bookworm-slim@sha256:43ac6c60b8f89723f746e8a92ce91abd5017e627ce1ddfe4238355d3a30b772c
+docker pull "$BASE_REFERENCE" || { echo 'FAIL: pinned base pull' >&2; exit 1; }
+docker build --pull=false \
+  --iidfile "$PROOF_DIR/oauth-image.id" \
+  --file "$OAUTH_RELEASE_DIR/services/mcp-auth/Dockerfile" \
+  "$OAUTH_RELEASE_DIR" || { echo 'FAIL: OAuth image build' >&2; exit 1; }
+```
+
+Use the resulting local immutable `sha256:<image-id>` in Compose with
+`--pull never`, as in HM6. No registry image tag is assumed. See
+`docs/evidence/2026-10-02-mcp-auth-release/RELEASE.md` for the full release,
+readiness, Caddy switch-on and rollback blocks. Root development dependencies
+and service dependencies must be installed before running the service tests;
+the service `pretest` builds the management bundle, and `test/*.test.js`
+includes the entrypoint regression.
+
 ## Port rule
 
 The host port is one value from `3490` through `3499`, chosen by Anvil only

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "pretest": "node build-management.mjs",
     "test": "node --test test/*.test.js",
     "test:postgres": "node --test test-postgres/*.test.js"
   },

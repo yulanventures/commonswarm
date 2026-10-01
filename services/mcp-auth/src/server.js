@@ -12,6 +12,7 @@ import { createLogger } from "./logger.js";
 import { createPinnedMetadataFetch, createPostgresCimdFetch } from "./metadata-fetch.js";
 import { createPostgresAdapter } from "./postgres-adapter.js";
 import { createMcpProvider } from "./provider.js";
+import { createProductionManagementBindings } from "./management-bindings.js";
 
 const ALWAYS_AVAILABLE = new Set([
   "/health",
@@ -134,11 +135,12 @@ export function createProductionFindAccount(pool) {
 
 export async function startServer({
   env = process.env,
+  config,
   writeLog,
   managementCommand,
   managementWorkspaceReader,
 } = {}) {
-  const config = await loadConfig(env);
+  config ??= await loadConfig(env);
   if (config.publicAuthorizationEnabled &&
       (typeof managementCommand !== "function" || typeof managementWorkspaceReader !== "function")) {
     throw new Error("public authorization requires lane-2 management command and workspace-read bindings");
@@ -214,8 +216,22 @@ export async function startServer({
   return { server, provider, pool };
 }
 
+// Both npm start and the Docker CMD reach this production composition root.
+export async function startProductionServer() {
+  const config = await loadConfig();
+  const bindings = await createProductionManagementBindings(config);
+  try {
+    const running = await startServer({ config, ...bindings });
+    running.server.once("close", () => { void bindings.closeManagement?.(); });
+    return running;
+  } catch (error) {
+    await bindings.closeManagement?.();
+    throw error;
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  startServer().catch((error) => {
+  startProductionServer().catch((error) => {
     process.stderr.write(`mcp-auth failed to start (${error?.code ?? "configuration_error"})\n`);
     process.exitCode = 1;
   });
