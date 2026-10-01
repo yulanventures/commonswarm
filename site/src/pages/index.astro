@@ -1,11 +1,13 @@
 ---
 /*
- * The consumer front door. The argument is promise -> mechanism -> handoff -> boundaries
- * -> one door into /app. Technical command reference remains available on /download, but
- * it no longer interrupts the first-time journey.
+ * The consumer front door: "every agent, one common thread". The argument is promise ->
+ * how it works -> the shared record -> life and work -> boundaries -> what is coming -> one
+ * door into /app. Technical command reference remains available on /download, but it does
+ * not interrupt the first-time journey. Homepage-only styles live in src/styles/home.css.
  */
 
 import Base from "../layouts/Base.astro";
+import "../styles/home.css";
 import ConsumerHero from "../components/landing/ConsumerHero.astro";
 import ConsumerStory from "../components/landing/ConsumerStory.astro";
 

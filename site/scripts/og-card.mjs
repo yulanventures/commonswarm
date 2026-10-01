@@ -34,10 +34,16 @@ const fonts = join(root, "public", "fonts");
 const inter = readFileSync(join(fonts, "inter-latin.woff2")).toString("base64");
 const mono = readFileSync(join(fonts, "jetbrains-mono-latin.woff2")).toString("base64");
 
+const fraunces = readFileSync(join(fonts, "fraunces-latin.woff2")).toString("base64");
+const frauncesItalic = readFileSync(join(fonts, "fraunces-italic-latin.woff2")).toString("base64");
+
+/* 2026-10 homepage redesign, "the common thread": four agent threads (coral, teal, blue,
+ * gold — the homepage's light thread colours in src/styles/home.css) cross behind one
+ * workspace card. The headline is the homepage h1, word for word. */
 const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <title>CommonSwarm</title>
-  <desc>A shared workspace for you and your AI agents. People and AI agents share one workspace.</desc>
+  <desc>Every agent. One common thread. Your agents talk, share files, and keep notes in one workspace.</desc>
   <defs>
     <style>
       @font-face {
@@ -50,25 +56,42 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
         font-weight: 100 800;
         src: url("data:font/woff2;base64,${mono}") format("woff2");
       }
+      @font-face {
+        font-family: "Fraunces";
+        font-style: normal;
+        font-weight: 300 800;
+        src: url("data:font/woff2;base64,${fraunces}") format("woff2");
+      }
+      @font-face {
+        font-family: "Fraunces";
+        font-style: italic;
+        font-weight: 300 800;
+        src: url("data:font/woff2;base64,${frauncesItalic}") format("woff2");
+      }
       .sans { font-family: "InterVariable", "Helvetica Neue", Arial, sans-serif; }
+      .serif { font-family: "Fraunces", Georgia, serif; }
       .mono { font-family: "JetBrains Mono", ui-monospace, monospace; }
     </style>
     <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#f8f9fc"/>
       <stop offset="1" stop-color="#eef1f7"/>
     </linearGradient>
-    <linearGradient id="headline" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#10142a"/>
-      <stop offset="1" stop-color="#2a2550"/>
-    </linearGradient>
+    <radialGradient id="glow-coral" cx=".1" cy=".05" r=".6">
+      <stop offset="0" stop-color="#e2683c" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#e2683c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-blue" cx=".9" cy=".2" r=".55">
+      <stop offset="0" stop-color="#3a72f0" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#3a72f0" stop-opacity="0"/>
+    </radialGradient>
     <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="160%">
-      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#10142a" flood-opacity=".08"/>
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#10142a" flood-opacity=".12"/>
     </filter>
   </defs>
 
   <rect width="1200" height="630" fill="url(#page)"/>
-  <circle cx="1110" cy="46" r="236" fill="#ddd8ff" opacity=".36"/>
-  <circle cx="10" cy="644" r="196" fill="#d8eee7" opacity=".34"/>
+  <rect width="1200" height="630" fill="url(#glow-coral)"/>
+  <rect width="1200" height="630" fill="url(#glow-blue)"/>
 
   <g transform="translate(72 58)">
     <g transform="translate(0 2)">
@@ -82,43 +105,55 @@ const svg = `<?xml version="1.0" encoding="UTF-8"?>
       letter-spacing="-.7" fill="#10142a">CommonSwarm</text>
   </g>
 
-  <text class="sans" x="72" y="278" font-size="46" font-weight="790"
-    letter-spacing="-1.3" fill="url(#headline)">
-    <tspan x="72" dy="0">A shared workspace for you</tspan>
-    <tspan x="72" dy="52">and your AI agents</tspan>
+  <text class="serif" x="72" y="250" font-size="72" font-weight="560"
+    letter-spacing="-2" fill="#10142a">
+    <tspan x="72" dy="0">Every agent.</tspan>
+    <tspan x="72" dy="80">One common <tspan font-style="italic" font-weight="480" fill="#c2410c">thread.</tspan></tspan>
   </text>
 
-  <g transform="translate(72 438)" filter="url(#soft-shadow)">
-    <rect width="460" height="58" rx="12" fill="#eef1f7" stroke="#dde3ec"/>
-    <circle cx="27" cy="29" r="5" fill="#4633b8"/>
-    <text class="sans" x="46" y="35" font-size="17" font-weight="650"
-      fill="#4633b8">People and AI agents share one workspace</text>
+  <g transform="translate(72 430)">
+    <rect width="640" height="58" rx="29" fill="#ffffff" stroke="#dde3ec"/>
+    <circle cx="30" cy="29" r="6" fill="#e2683c"/>
+    <circle cx="46" cy="29" r="6" fill="#0f9d8a"/>
+    <circle cx="62" cy="29" r="6" fill="#3a72f0"/>
+    <circle cx="78" cy="29" r="6" fill="#d99a0b"/>
+    <text class="sans" x="100" y="35" font-size="17" font-weight="620"
+      fill="#10142a">Your agents talk, share files, and keep notes in one workspace</text>
   </g>
 
-  <g transform="translate(564 438)">
-    <circle cx="7" cy="29" r="5" fill="#056f52"/>
-    <text class="sans" x="26" y="35" font-size="17" font-weight="520"
+  <g transform="translate(72 520)">
+    <circle cx="7" cy="17" r="5" fill="#056f52"/>
+    <text class="sans" x="24" y="23" font-size="17" font-weight="520"
       fill="#4f5769">Free · 10 workspaces · no card</text>
   </g>
 
-  <g transform="translate(874 164)" opacity=".96">
-    <path d="M112 36 32 176M112 36l84 140M32 176h164" fill="none"
-      stroke="#cbc6ed" stroke-width="5" stroke-linecap="round"/>
-    <circle cx="32" cy="176" r="34" fill="#e8e6f8" stroke="#d6d1f1" stroke-width="2"/>
-    <circle cx="196" cy="176" r="34" fill="#e8e6f8" stroke="#d6d1f1" stroke-width="2"/>
-    <circle cx="112" cy="36" r="39" fill="#dff0ea" stroke="#c9e4db" stroke-width="2"/>
-    <text class="mono" x="32" y="184" text-anchor="middle" font-size="18"
-      font-weight="700" fill="#5b4ada">A1</text>
-    <text class="mono" x="196" y="184" text-anchor="middle" font-size="18"
-      font-weight="700" fill="#5b4ada">A2</text>
-    <text class="mono" x="112" y="44" text-anchor="middle" font-size="22"
-      font-weight="700" fill="#056f52">TEAM</text>
-    <rect x="2" y="242" width="224" height="68" rx="13" fill="#f8f9fc" stroke="#dde3ec"/>
-    <rect x="2" y="242" width="3" height="68" rx="1.5" fill="#056f52"/>
-    <text class="sans" x="20" y="269" font-size="12" font-weight="700"
-      letter-spacing=".7" fill="#056f52">MESSAGES AND FILES</text>
-    <text class="sans" x="20" y="292" font-size="15" font-weight="570"
-      fill="#10142a">People can read and steer the work.</text>
+  <g transform="translate(840 150)">
+    <g fill="none" stroke-width="5" stroke-linecap="round">
+      <path d="M-20 60 C 60 60, 80 150, 180 150 S 300 260, 400 260" stroke="#e2683c"/>
+      <path d="M-20 260 C 60 260, 80 170, 180 170 S 300 60, 400 60" stroke="#0f9d8a"/>
+      <path d="M-20 160 C 60 160, 100 110, 180 120 S 320 160, 400 160" stroke="#3a72f0"/>
+      <path d="M0 340 C 80 320, 120 200, 180 200 S 300 300, 400 330" stroke="#d99a0b"/>
+    </g>
+    <g filter="url(#soft-shadow)">
+      <rect x="70" y="40" width="230" height="250" rx="22" fill="#ffffff" stroke="#dde3ec"/>
+    </g>
+    <rect x="70" y="40" width="230" height="44" rx="22" fill="#eef1f7"/>
+    <rect x="70" y="62" width="230" height="22" fill="#eef1f7"/>
+    <text class="sans" x="92" y="68" font-size="15" font-weight="680" fill="#10142a">Home base</text>
+    <g>
+      <circle cx="100" cy="114" r="11" fill="#ffffff" stroke="#e2683c" stroke-width="3"/>
+      <rect x="122" y="106" width="88" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
+      <rect x="122" y="119" width="150" height="6" rx="3" fill="#4f5769" opacity=".35"/>
+      <circle cx="100" cy="164" r="11" fill="#ffffff" stroke="#3a72f0" stroke-width="3"/>
+      <rect x="122" y="156" width="70" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
+      <rect x="122" y="169" width="132" height="6" rx="3" fill="#4f5769" opacity=".35"/>
+      <circle cx="100" cy="214" r="11" fill="#ffffff" stroke="#d99a0b" stroke-width="3"/>
+      <rect x="122" y="206" width="80" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
+      <rect x="122" y="219" width="110" height="6" rx="3" fill="#4f5769" opacity=".35"/>
+      <circle cx="100" cy="262" r="11" fill="#ffffff" stroke="#0f9d8a" stroke-width="3"/>
+      <rect x="122" y="254" width="96" height="7" rx="3.5" fill="#10142a" opacity=".8"/>
+      <rect x="122" y="267" width="60" height="6" rx="3" fill="#4f5769" opacity=".35"/>
+    </g>
   </g>
 </svg>`;
 
