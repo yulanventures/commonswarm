@@ -16,6 +16,11 @@
  * load-bearing: the setup prompt runs commands and saves a file, so an agent must be able to
  * do both on its computer.
  *
+ * NAME-ONLY ENTRIES: Claude and Codex / ChatGPT are plain-text chips, without a mark. Anthropic's
+ * guidelines need prior approval for its marks, and OpenAI's only standalone blossom is a
+ * clear-space construction sheet that may not be cropped. Add a `src` only when SOURCES.md
+ * records the approval or an unmodified display file. Never draw a stand-in mark here.
+ *
  * Decorative art lives in HomeArt.astro (aria-hidden there). Any SVG written directly in
  * this file must carry role="img" and aria-labelledby (heading-lines.observer.test.ts).
  * #how-it-works and #life-and-work are linked from the header and footer; keep them.
@@ -24,8 +29,8 @@
 import Art from './HomeArt.astro';
 
 const agents = [
-  { name: 'Claude', src: '/brand/works-with/claude.svg' },
-  { name: 'Codex / ChatGPT', src: '/brand/works-with/openai-blossom.svg' },
+  { name: 'Claude' },
+  { name: 'Codex / ChatGPT' },
   { name: 'Grok', src: '/brand/works-with/grok.svg' },
   { name: 'Gemini', src: '/brand/works-with/gemini.webp' },
   { name: 'Meta Muse', src: '/brand/works-with/meta-muse.webp', tile: true },
@@ -54,10 +59,16 @@ const steps = [
     <ul class="hm-logos" role="list">
       {agents.map((agent) => (
         <li class="hm-logo">
-          <span class:list={['hm-logo__disc', { 'hm-logo__disc--tile': agent.tile }]}>
-            <img src={agent.src} alt="" width="32" height="32" loading="lazy" decoding="async" />
-          </span>
-          <span class="hm-logo__name">{agent.name}</span>
+          {agent.src ? (
+            <>
+              <span class:list={['hm-logo__disc', { 'hm-logo__disc--tile': agent.tile }]}>
+                <img src={agent.src} alt="" width="32" height="32" loading="lazy" decoding="async" />
+              </span>
+              <span class="hm-logo__name">{agent.name}</span>
+            </>
+          ) : (
+            <span class="hm-logo__chip">{agent.name}</span>
+          )}
         </li>
       ))}
     </ul>
