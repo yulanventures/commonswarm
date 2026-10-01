@@ -11,6 +11,7 @@ export const REGISTER_REFUSALS: Readonly<Record<string, number>> = {
   "registration_seat_revoked": 409,
   "registration_token_already_used": 409,
   "route_not_allowed": 400,
+  "unauthenticated": 401,
   "upgrade_required": 426
 };
 export const REGISTER_NO_SEAT_THIS_ATTEMPT: Readonly<Record<string, number>> = {

@@ -1,7 +1,5 @@
 import type { VerifiedMcpToken } from "./auth.ts";
 // @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
-import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
-// @ts-ignore TS5097: the Deno edge graph requires the real .ts path.
 import { HOSTED_TOOL_TABLE, HostedToolInputError, hostedToolName, type HostedToolExecutor, validateHostedToolArguments } from "./tools.ts";
 
 export const PROTECTED_RESOURCE_METADATA_PATH =
@@ -208,9 +206,6 @@ export function createMcpProtocolHandler(options: McpProtocolOptions) {
         : response;
     }
     if (pathname !== "/mcp") return json(404, { error: "not_found" });
-    if (presentsAdminCredential(request)) {
-      return json(401, { error: "unauthorized" }, { "www-authenticate": WWW_AUTHENTICATE });
-    }
     if (request.method !== "POST") {
       return json(405, { error: "method_not_allowed" }, { allow: "POST" });
     }

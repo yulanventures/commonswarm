@@ -1,4 +1,5 @@
 import postgres from "npm:postgres@3.4.9";
+import { presentsAdminCredential } from "../_shared/admin-credential-boundary.ts";
 import { withDatabaseTls } from "../_shared/database-options.ts";
 import {
   authenticateHostedGrantCapability,
@@ -18,6 +19,7 @@ import {
 } from "./auth.ts";
 import {
   createMcpProtocolHandler,
+  WWW_AUTHENTICATE,
   type McpProtocolLimits,
 } from "./protocol.ts";
 import type {
@@ -372,7 +374,7 @@ const verifier = new McpJwtVerifier({
   clockSkewSeconds: boundedInteger("SWARM_MCP_CLOCK_SKEW_SECONDS", 30, 0, 60),
 });
 
-export const handleRequest = createMcpProtocolHandler({
+const handleProtocolRequest = createMcpProtocolHandler({
   issuer,
   resource,
   publicEnabled,
@@ -381,5 +383,21 @@ export const handleRequest = createMcpProtocolHandler({
   verifyToken: (token, signal) => verifier.verify(token, signal),
   executeTool,
 });
+
+export async function handleRequest(request: Request): Promise<Response> {
+  // Refuse foreign credentials before routing, parsing, authentication or tools.
+  // Keep the protocol module independent of the account authority bundle.
+  if (presentsAdminCredential(request)) {
+    return new Response(JSON.stringify({ error: "unauthorized" }), {
+      status: 401,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "www-authenticate": WWW_AUTHENTICATE,
+      },
+    });
+  }
+  return await handleProtocolRequest(request);
+}
 
 if (import.meta.main) Deno.serve(handleRequest);
