@@ -13,14 +13,14 @@ Sources: `/Users/yulanbot/work/cswarm-vision/lanes/task-a.md:3`,
 `/Users/yulanbot/work/cswarm-vision/STRATEGY-MEMO-2026-10-01.md:54`.
 
 Everything below is a proposed requirement unless labelled as checked-in behavior.
-This document specifies the amendment needed before implementation. It does not override the canonical specification today.
+The accompanying "Delegated admin (proposed 2026-10-01)" section in the canonical specification is also a proposal; both require review before implementation.
 The canonical specification wins on conflict. [AGENTS.md:34](../../AGENTS.md#L34).
 
 ## Checked-in boundaries
 
 | Evidence | Current source behavior |
 |---|---|
-| [SWARM-CLOUD.md:125](SWARM-CLOUD.md#L125) | Ordinary agent tokens cannot create workspaces, invite members, mint other agents' tokens, or administer memberships. This rule needs an explicit exception for a new credential class. |
+| [SWARM-CLOUD.md:127](SWARM-CLOUD.md#L127) | Ordinary agent tokens cannot create workspaces, invite members, mint other agents' tokens, or administer memberships. The accompanying proposal defines an exception for a distinct credential class, preserving these worker restrictions. |
 | [workspace-commands.ts:410](../../src/protocol/workspace-commands.ts#L410), [workspace-commands.ts:675](../../src/protocol/workspace-commands.ts#L675) | The core requires a human credential for its human-only command set. Removing that gate for ordinary workers would violate this contract. |
 | [workspace-commands.ts:664](../../src/protocol/workspace-commands.ts#L664), [hosted-authority.ts:237](../../src/protocol/hosted-authority.ts#L237) | A hosted grant claims hosted seats through a separate path. A hosted seat cannot execute workspace management commands, apart from the feedback exception. |
 | [hosted-seat-auth.ts:5](../../supabase/functions/_shared/hosted-seat-auth.ts#L5), [mcp/tools.ts:28](../../supabase/functions/mcp/tools.ts#L28) | Hosted tools have an explicit allowlist. It contains no admin, file, or wiki tools. |
@@ -48,7 +48,8 @@ Store secret material in a protected runtime credential store. Hash opaque refre
 Use an authenticated runtime delivery channel for provisioning. Never return a worker credential as model-visible tool text.
 
 Extend the OAuth machinery with separate admin consent and a distinct admin resource audience.
-The exact audience URL is **not verified** and must be pinned before implementation.
+The proposed admin resource audience is exactly `https://api.commonswarm.com/admin` (`ADMIN_RESOURCE` below).
+The current provider accepts only its exact MCP resource and uses that resource as the JWT audience; a distinct admin resource requires explicit provider support, not an environment override. [provider.js:85](../../services/mcp-auth/src/provider.js#L85), [config.js:146](../../services/mcp-auth/src/config.js#L146).
 Worker endpoints and hosted MCP endpoints must reject admin access credentials.
 The admin endpoint must reject ordinary workers, hosted seat handles, existing MCP access credentials, and human refresh credentials.
 An authenticated internal adapter may dispatch approved admin commands. It must retain `delegated_admin` identity through the core.
@@ -61,7 +62,7 @@ It advertises `mcp`, with its own resource audience, rather than admin scope.
 [provider.js:94](../../services/mcp-auth/src/provider.js#L94), [provider.js:115](../../services/mcp-auth/src/provider.js#L115), [provider.js:121](../../services/mcp-auth/src/provider.js#L121), [provider.js:128](../../services/mcp-auth/src/provider.js#L128).
 Reuse these lifecycle bounds, not its existing consent or audience.
 
-Both grant modes are timeboxed in the first release. The person may choose an earlier expiry.
+Proposed default, pending Tom's confirmation: both grant modes are **timeboxed for the first release**, with a thirty-day default and maximum. The person may choose an earlier positive expiry.
 Grant expiry must not exceed the initial refresh deadline. Access expiry is the earlier of the access policy and grant expiry.
 Refresh checks the durable grant and current rights. It preserves or narrows scope and never moves the grant deadline.
 Refresh rotation is atomic. Replay revokes the entire admin credential lineage.
@@ -76,7 +77,7 @@ An action committed before revocation remains in history. Revocation cannot retr
 Queued actions revalidate at execution time. They cannot finish using authorization captured before revocation.
 
 Access provisioned by an admin grant must depend on that grant. Record its `parent_admin_grant_id` and show the dependency at consent.
-Revocation is lineage-wide in the canonical specification. [SWARM-CLOUD.md:126](SWARM-CLOUD.md#L126).
+Revocation is lineage-wide in the canonical specification. [SWARM-CLOUD.md:128](SWARM-CLOUD.md#L128).
 The proposed extension must carry that ancestry through worker credentials, renewal successors, and hosted seat access.
 Revoking the admin grant stops all such descendants. Expiry or suspension also refuses their remote reads, commands, and renewals.
 Check the parent grant on every child call, even before child token expiry. Replacement cannot erase ancestry or clear a tombstone.
@@ -123,7 +124,7 @@ Timeboxed worker horizons stay finite. Standing worker maintenance needs explici
 Admin renewal cannot reset a budget, extend a horizon, widen worker scopes, or revive a revoked lineage.
 An idle worker pause requires explicit human resume. No delegated admin credential may lift it.
 The checked-in worker policies include timeboxed and standing renewal, device binding, and idle pause.
-[SWARM-CLOUD.md:126](SWARM-CLOUD.md#L126).
+[SWARM-CLOUD.md:128](SWARM-CLOUD.md#L128).
 
 ### Full-account option
 
@@ -174,7 +175,7 @@ The proposed human-only commands are `grant_admin_delegation`, `narrow_admin_del
 `revoke_admin_delegation`, and `withdraw_admin_workspace_access`.
 The security system may call `suspend_admin_delegation` or `revoke_admin_delegation` with a system actor.
 `expire_admin_delegation` materializes a reached deadline. It cannot extend one.
-Credential rotation and replay detection enter the same account decision and event path.
+The proposed `issue_admin_credential`, `rotate_admin_credential`, and `record_admin_credential_replay` commands enter the same account decision and event path through a trusted credential runtime; none can create a grant.
 These lifecycle commands are outside the delegated scope registry. An admin cannot call them to grant or restore permission.
 Read-only access to its own grant health and an exact-grant surrender command remain available without workspace membership.
 `surrender_admin_delegation` can only revoke the presenting admin's grant. It cannot revoke another grant.
@@ -184,7 +185,7 @@ Read-only access to its own grant health and an exact-grant surrender command re
 Neither mode may transfer ownership, add or remove an owner, permanently delete a workspace or account,
 create another admin grant, expand this grant, disable managed-session protection, or change human sign-in and recovery settings.
 Inviting or promoting a person to workspace `admin` also requires a human each time. Routine invitations use `member`.
-Lifting an idle worker renewal pause remains human-only, as required by [SWARM-CLOUD.md:126](SWARM-CLOUD.md#L126) and checked by [command/index.ts:7988](../../supabase/functions/command/index.ts#L7988).
+Lifting an idle worker renewal pause remains human-only, as required by [SWARM-CLOUD.md:128](SWARM-CLOUD.md#L128) and checked by [command/index.ts:7988](../../supabase/functions/command/index.ts#L7988).
 Neither may accept an invitation or vendor authorization as another person.
 Cross-person access requires that person's own specific confirmation.
 Full-account consent does not count as confirmation of any of these actions.
@@ -230,7 +231,7 @@ Redemption uses the recipient's one-attempt credential. Progress uses recipient-
 ## Transaction and recovery requirements
 
 The canonical specification requires server-derived identity, transactional checks, events, and projections.
-[SWARM-CLOUD.md:85](SWARM-CLOUD.md#L85).
+[SWARM-CLOUD.md:87](SWARM-CLOUD.md#L87).
 Add an account grant stream and pure grant decision/reducer for grants that exist before a workspace.
 The existing event envelope requires a workspace ID. An account stream therefore needs an explicit new envelope variant.
 [events.ts:34](../../src/protocol/events.ts#L34).
@@ -250,8 +251,47 @@ This contract does not grant permission to transfer repository landing authority
 
 Budgets cover workspace creation, seats, invitations, credential issuance, and renewal successors.
 Count by grant lineage, granting person, and workspace. Rotation and retries never reset them.
-Exact capacity ceilings are **not verified**. Use approved policy constants shared by consent and enforcement.
+The proposed bounds are pinned in the policy table below; they are design limits, not measured service capacity. Once reviewed, use one policy registry shared by consent and enforcement.
 Missing bounds must refuse activation or the affected operation rather than mean unlimited.
+
+### Proposed policy constants (2026-10-01)
+
+Every value below is **proposed**, for independent review. These admin constants do not exist in code yet.
+Reasons identify checked-in bounds or mechanisms being reused; they do not claim admin enforcement or capacity has been measured.
+The same ceilings apply to granular and full-account grants. Human consent may select lower limits, never higher ones.
+
+| Name | Proposed value | Reason grounded in code |
+|---|---|---|
+| `ADMIN_RESOURCE` | **Proposed:** `https://api.commonswarm.com/admin` | Separate from `https://mcp.commonswarm.com/mcp`: the provider binds audience to the exact resource ([provider.js:14](../../services/mcp-auth/src/provider.js#L14), [provider.js:85](../../services/mcp-auth/src/provider.js#L85)) and MCP validates exact `aud` ([auth.ts:265](../../supabase/functions/mcp/auth.ts#L265)); the new URL is an identifier proposal, not a verified route. |
+| `ADMIN_ACCESS_TTL_SECONDS` | **Proposed:** 300 seconds; actual expiry is `min(now + 300s, grant expiry, initial refresh deadline)` | Reuse the five-minute OAuth access bound ([provider.js:15](../../services/mcp-auth/src/provider.js#L15), [config.js:171](../../services/mcp-auth/src/config.js#L171)). |
+| `ADMIN_REFRESH_MAX_LIFETIME_SECONDS` | **Proposed:** 2,592,000 seconds (30 days) from initial issuance; truncate at grant expiry | Reuse the OAuth refresh bound and remaining-lifetime rotation ([provider.js:17](../../services/mcp-auth/src/provider.js#L17), [provider.js:128](../../services/mcp-auth/src/provider.js#L128)). |
+| `ADMIN_GRANT_TTL_SECONDS` | **Proposed:** default/max 2,592,000 seconds (30 days), minimum 1 second; timeboxed in both modes, pending Tom's confirmation | Match the existing finite renewal default ([workspace-commands.ts:42](../../src/protocol/workspace-commands.ts#L42)) and OAuth ceiling ([provider.js:17](../../services/mcp-auth/src/provider.js#L17)); positive lifetimes follow the core's TTL validation ([workspace-commands.ts:1095](../../src/protocol/workspace-commands.ts#L1095)). |
+| `ADMIN_READ_RATE_PER_HOUR` | **Proposed:** 120 per grant lineage/connection; 1,000 per granting account and per target workspace | Reuse the existing 120/1,000 hourly pair ([command/index.ts:694](../../supabase/functions/command/index.ts#L694)) and atomic hourly counter ([command/index.ts:5377](../../supabase/functions/command/index.ts#L5377)); account aggregation is an added admin bound. |
+| `ADMIN_MUTATION_RATE_PER_HOUR` | **Proposed:** 20 per grant lineage/connection; 60 per granting account and per target workspace | Reuse the 20/60 credential/workspace issuance pair ([command/index.ts:793](../../supabase/functions/command/index.ts#L793)) with the hourly counter ([command/index.ts:5377](../../supabase/functions/command/index.ts#L5377)); account aggregation is an added admin bound. |
+| `ADMIN_REFRESH_RATE_PER_HOUR` | **Proposed:** 20 per admin credential lineage/connection, separate from reads and mutations | Five-minute access needs about 12 rotations/hour ([provider.js:15](../../services/mcp-auth/src/provider.js#L15)); the existing 20-operation bound ([command/index.ts:793](../../supabase/functions/command/index.ts#L793)) leaves eight retries without unlimited refresh. |
+| `ADMIN_WORKSPACE_CREATE_PER_DAY` | **Proposed:** 20 accepted creations per granting person across all grants and human calls in a rolling 24 hours | Preserve the existing anti-churn identity ceiling ([command/index.ts:831](../../supabase/functions/command/index.ts#L831)). |
+| `ADMIN_INVITATION_ISSUE_PER_DAY` | **Proposed:** 10 accepted member or agent invitations per granting person across all grants; include human member invitations in the same rolling 24-hour count | Preserve the existing ten member-invitations/day bound ([command/index.ts:837](../../supabase/functions/command/index.ts#L837)); including agent invitations is a proposed extra anti-churn restriction. |
+| `ADMIN_WORKSPACES_CREATED_PER_GRANT` | **Proposed:** 10 total creations over the grant lineage | Reuse the ten-live-owned-workspaces ceiling ([command/index.ts:818](../../supabase/functions/command/index.ts#L818)) as a stricter lifetime creation budget; archiving does not refund it. |
+| `ADMIN_SEATS_PER_GRANT` | **Proposed:** 10 live grant-created seats across covered spaces; 50 total seat creations over the lineage | Ten matches the hosted connection seat bound ([hosted-authority.ts:8](../../src/protocol/hosted-authority.ts#L8)); fifty matches the workspace principal ceiling ([command/index.ts:846](../../supabase/functions/command/index.ts#L846)) as a finite churn budget. |
+| `ADMIN_INVITATIONS_PER_GRANT` | **Proposed:** 10 total member/agent invitations over the lineage; at most 5 live agent invitations | Ten reuses the invitation bound ([command/index.ts:837](../../supabase/functions/command/index.ts#L837)); five reuses the live join limit for one person in a workspace ([agent-join-limits.ts:21](../../src/protocol/agent-join-limits.ts#L21)), tightened to the whole grant. |
+| `ADMIN_WORKER_CREDENTIAL_ISSUES_PER_GRANT` | **Proposed:** 50 initial worker credential issues or undelivered replacements in total | Reuse the fifty-principal bound ([command/index.ts:846](../../supabase/functions/command/index.ts#L846)) as a finite issuance budget; replacements consume it rather than enabling a mint loop. |
+| `ADMIN_WORKER_RENEWAL_LIMITS` | **Proposed:** bearer lifetime at most 3,600 seconds; finite horizon at most 30 days for newly provisioned timeboxed workers, clipped to parent expiry; 800 successors per worker lineage and 8,000 delegated successors per admin grant | Reuse one-hour worker TTL, thirty-day default horizon and 800-successor budget ([workspace-commands.ts:17](../../src/protocol/workspace-commands.ts#L17), [workspace-commands.ts:42](../../src/protocol/workspace-commands.ts#L42), [workspace-commands.ts:45](../../src/protocol/workspace-commands.ts#L45)); 8,000 = ten live seats × 800, without extending a predecessor's policy. |
+| `ADMIN_CONNECTION_ATTEMPTS_PER_GRANT` | **Proposed:** 50 prepared attempts over the lineage, including cancelled or failed attempts | Reuse the fifty-principal resource bound ([command/index.ts:846](../../supabase/functions/command/index.ts#L846)) to bound setup churn; success is separately proven by recipient evidence. |
+| `ADMIN_INVITATION_AND_ATTEMPT_TTL` | **Proposed:** member invitations at most 7 days; agent invitations 1–24 hours and at most 10 seats each; connection attempts at most 24 hours; all deadlines clipped to parent grant expiry | Reuse member invitation TTL ([workspace-commands.ts:16](../../src/protocol/workspace-commands.ts#L16)) and join lifetime/seat bounds ([agent-join-limits.ts:12](../../src/protocol/agent-join-limits.ts#L12)); the attempt bound follows the join it prepares. |
+| `ADMIN_EXISTING_RESOURCE_CEILINGS` | **Proposed:** retain 10 live owned spaces/person, 25 members plus pending member invitations/workspace, 50 live principals/workspace, 5 live join credentials/person/workspace, 20/workspace, and 10 live hosted seats/hosted connection | Delegation cannot bypass current resource ceilings ([command/index.ts:818](../../supabase/functions/command/index.ts#L818), [command/index.ts:845](../../supabase/functions/command/index.ts#L845), [agent-join-limits.ts:21](../../src/protocol/agent-join-limits.ts#L21), [hosted-authority.ts:8](../../src/protocol/hosted-authority.ts#L8)). |
+
+Hourly limits use fixed server-clock hour windows. Apply lineage and connection buckets independently so rotating access credentials or replacing a grant on the same connection cannot reset a connection's hourly allowance.
+Account and workspace admin buckets aggregate all applicable delegated connections. An account-only read has no target-workspace bucket.
+Authenticated read/mutation/refresh attempts consume their corresponding hourly allowance, including refusals; unknown credentials use a separate security limiter and cannot charge a victim's allowance.
+An idempotent retry returns its recorded outcome without consuming another operation or issuance budget.
+Lifetime budgets count accepted creations/issues/renewals, except the attempt budget counts each accepted preparation even if subsequent setup fails.
+Grant-wide renewal spend includes undelivered replacements; the existing per-worker successor accounting still applies and cannot be widened.
+Managing an existing independently human-granted seat does not consume a seat-creation slot, but delegated issues, renewals, and connection attempts still consume their own budgets.
+Rotation, revocation of a child, cancellation, and retries never reset lifetime spend. A fresh human-approved replacement grant may receive a new finite budget; it atomically ends the old grant and cannot bypass account/workspace ceilings.
+Standing maintenance of independently human-granted workers requires explicit consent, retains existing device/idle rules, and stops when the admin grant ends; admin calls cannot convert a timeboxed worker to standing.
+Store lifetime and rolling-day counters durably with the grant/account transaction; daily windows cannot use the short-retention rate table ([command/index.ts:8202](../../supabase/functions/command/index.ts#L8202)).
+Human grant revocation, narrowing, recovery, workspace withdrawal, and exact-grant surrender remain available when admin allowances are exhausted. Admin buckets never consume human recovery allowance.
+Missing/invalid constants, counter state, or ancestry refuse activation or the affected operation. Consent and enforcement must read the same reviewed policy registry.
 
 Idempotency binds the admin identity and command ID to the canonical request digest.
 A retry returns the recorded outcome without another seat, invitation, charge, or event.
@@ -356,10 +396,10 @@ Treat model output and incoming workspace content as untrusted inputs to permiss
 | Audit leaks private account structure or supplies executable instructions. | Account and workspace visibility filters, minimal fields, bounded schemas, inert text rendering, no credentials or content bodies. | Immutable history retains necessary metadata. Retention policy needs review before sensitive use. |
 | Agent floods invitations or audit attempts to exhaust resources. | Atomic issuance limits and bounded requests; rate policy by connection, lineage, account, and workspace. Keep revoke usable under load. | Distributed invalid requests can still burden the service. Capacity is **not verified**. |
 
-## Open questions for Tom
+## Proposed default pending Tom's confirmation
 
-- Accept timeboxed admin grants using the existing OAuth lifetime bounds, or require an explicit standing admin option later? Recommend timeboxed for the first release.
+- **Timeboxed for the first release**, in both modes, using the proposed bounds above. Pending Tom's confirmation; no standing admin option is included in this proposal.
 
-Before implementation, HezLead must arrange the independent review, resolve the audience and policy constants,
-and land the canonical-spec amendment with the new credential, account stream, and reducer contract.
+Before implementation, HezLead must arrange the independent review, obtain Tom's confirmation of the timeboxed default,
+approve the proposed audience and policy constants, and land the accompanying canonical-spec amendment with the new credential, account stream, and reducer contract.
 This lane changes no HM37 code, harness, deployment file, or release plan.
