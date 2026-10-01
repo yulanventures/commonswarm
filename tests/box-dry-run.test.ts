@@ -4448,6 +4448,20 @@ test("controls: a window A copy without its GO producer reports GO.txt as UNPROD
   ]) assert.ok(sessionReads(changed).length, "a missing, unrelated, or late copy borrowed producer coverage");
   assert.deepEqual(sessionReads(copy.source.replace(writer,
     '  /bin/cp -- "$HUMAN_SESSION_SOURCE" \\\n    "$SECRET_ROOT/human-session.json"')), [], "a qualified continued copy lost its producer");
+  for (const command of ["cp", "/bin/cp --", "command /bin/cp --"]) {
+    for (const destination of ["/tmp/dir/", '"/tmp/output.env/"', '"$DIRECTORY"']) {
+      const source = `DIRECTORY=/tmp/dir/\n${command} "$INPUT" \\\n        ${destination}`;
+      assert.throws(() => localCopyProducts({ ...copy, source }), /unknown local copy directory destination/);
+    }
+    assert.deepEqual(localCopyProducts({ ...copy, source: `${command} "$INPUT" "/tmp/output.env"` }),
+      [{ source: "$INPUT", path: "/tmp/output.env" }]);
+  }
+  assert.throws(() => localCopyProducts({ ...copy, source: "cp file.txt /tmp/dir/" }),
+    /unknown local copy directory destination/);
+  for (const options of ["-t /tmp/dir", "--target-directory=/tmp/dir", "-T", "--unknown"]) {
+    assert.throws(() => localCopyProducts({ ...copy, source: `cp ${options} file.txt /tmp/output.env` }),
+      /unknown local copy option/);
+  }
 });
 
 test("controls: a measured basename under a different directory remains UNPRODUCED", () => {
@@ -7222,6 +7236,11 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
     "| /usr/bin/tee --unknown-writer /tmp/product", "| tee >(tee /tmp/dynamic)",
     "| echo \\ # | tee /tmp/hidden", "| echo \\\t# | tee /tmp/hidden",
     "| echo \\# | tee /tmp/hidden", "| echo word# | tee /tmp/hidden",
+    "| echo $(echo a)# | tee /tmp/hidden", "| echo $(echo a; echo b)# | tee /tmp/hidden",
+    "| echo $(echo $(echo a))# | tee /tmp/hidden", "| echo $((1 + (2)))# | tee /tmp/hidden",
+    '| echo "$(echo a)"# | tee /tmp/hidden', '| echo "a)"# | tee /tmp/hidden',
+    "| echo `echo a`# | tee /tmp/hidden", "| echo `echo a; echo b`# | tee /tmp/hidden",
+    "| echo <(echo a)# | tee /tmp/hidden", "| echo $(echo a)\\\n# | tee /tmp/hidden",
     "| echo \\ # $(tee /tmp/hidden)", "| echo \\ # > /tmp/hidden",
     '| echo \\ # "first\nsecond" | tee /tmp/hidden']) {
     for (const discover of [macBoundaryOperations, capturedMacProductPaths, transferProducts]) {
@@ -7229,12 +7248,26 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
         source: `ssh ops@100.115.66.74 'printf actual' ${tail}` }), /write-forms-control:1 writes: unsupported Mac SSH pipeline/);
     }
   }
-  for (const prefix of ["echo \\ #", "echo \\\t#", "echo word#"]) {
+  for (const prefix of ["echo \\ #", "echo \\\t#", "echo word#", "echo $(echo a)#",
+    "echo $(echo a; echo b)#", "echo $((1 + (2)))#", 'echo "$(echo a)"#', "echo `echo a`#"]) {
     for (const writer of ["| tee /tmp/comment-data", "$(tee /tmp/comment-data)", "> /tmp/comment-data"]) {
       assert.deepEqual(transferProducts({ ...producer,
         source: `ssh ops@100.115.66.74 '${prefix} ${writer}'` }).map((item) => item.path), ["/tmp/comment-data"]);
     }
   }
+  for (const expression of ["$(echo a)", "$(echo a; echo b)", "$((1 + (2)))", '"$(echo a)"', "`echo a; echo b`", "<(echo a)"]) {
+    for (const tail of [`| echo ${expression}#`, `| echo ${expression} # | tee /tmp/comment-only`,
+      `| echo ${expression} # $(tee /tmp/comment-only) > /tmp/comment-only`]) {
+      const local = { ...producer, source: `ssh ops@100.115.66.74 'printf actual' ${tail}` };
+      assert.deepEqual(macBoundaryOperations(local), [{ remote: { command: "ssh ops@100.115.66.74 'printf actual'" } }]);
+      assert.deepEqual(capturedMacProductPaths(local), []);
+      assert.deepEqual(transferProducts(local), []);
+    }
+  }
+  const box = { ...consumer, source: "echo $(echo a)# | tee /tmp/hidden" };
+  const reader = { ...producer, source: "cat /tmp/hidden" };
+  assert.deepEqual(crossHostHandoffs([box, reader]).map((item) => [item.producer, item.consumer, item.path]),
+    [[box, reader, "/tmp/hidden"]]);
   for (const prefix of ["printf actual #", "printf actual;#", "printf actual \\\\ #"]) {
     assert.deepEqual(transferProducts({ ...producer,
       source: `ssh ops@100.115.66.74 '${prefix} $(tee /tmp/comment-only) > /tmp/comment-only'` }), []);

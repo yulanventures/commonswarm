@@ -29,6 +29,11 @@ function shellCommentStart(source: string, index: number): boolean {
   };
   // An unquoted backslash-newline contributes neither data nor a boundary.
   while (index >= 2 && source[index - 1] === "\n" && source[index - 2] === "\\" && !escapedAt(index - 2)) index -= 2;
+  // A substitution closes a word component, unlike a subshell/group close.
+  // Project the prefix with the same grammar the writer scanner uses, so nested
+  // command/process substitutions and arithmetic expansions keep an adjacent #.
+  if (source[index - 1] === ")" && !escapedAt(index - 1) &&
+      substitutionPrograms(source.slice(0, index)).outer.endsWith(CAPTURED_STDOUT)) return false;
   return index === 0 || (/[\s;|&()<>]/.test(source[index - 1]!) && !escapedAt(index - 1));
 }
 
@@ -152,7 +157,7 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i]!;
     if (/^\s*#/.test(line)) continue;
-    while (line.endsWith("\\") && i + 1 < lines.length) line = line.slice(0, -1) + " " + lines[++i]!.trimStart();
+    while (line.endsWith("\\") && i + 1 < lines.length) line = line.slice(0, -1) + lines[++i]!;
     if (/\bssh\s/.test(line) || /^\s*(?:scp|rsync)\s/.test(line)) {
       // A heredoc in an enclosing capture is read by the stdin scanner below;
       // its body must not be swallowed while joining a quoted SSH argv.
@@ -364,11 +369,16 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
 // operators remain data; parsing them as commands would invent remote products.
 function shellCommands(line: string, retainPipeline = false): string[] {
   const commands: string[] = [];
+  const substitutions = new Map(substitutionPrograms(line).spans.map(({ start, end }) => [start, end]));
   let start = 0, quote = "", escaped = false;
   for (let index = 0; index < line.length; index++) {
     const char = line[index]!;
     if (escaped) { escaped = false; continue; }
     if (char === "\\" && quote !== "'") { escaped = true; continue; }
+    // Keep substitution programs intact; their list/pipeline operators and
+    // quotes do not delimit the containing command's argv or pipeline.
+    const substitutionEnd = substitutions.get(index);
+    if (substitutionEnd !== undefined) { index = substitutionEnd; continue; }
     if (quote) { if (char === quote) quote = ""; continue; }
     if (char === "'" || char === '"') { quote = char; continue; }
     if (char === "#" && shellCommentStart(line, index)) {
@@ -492,10 +502,11 @@ function executableWords(command: string): string[] {
 // complete programs out before splitting pipelines; single-quoted prose and
 // escaped dollars remain data. Replacing only the capture keeps its stdout
 // from masquerading as an executable or a writer operand in the outer command.
-function substitutionPrograms(line: string, arithmetic = false): { outer: string; programs: string[]; incomplete: boolean } {
+function substitutionPrograms(line: string, arithmetic = false): { outer: string; programs: string[]; incomplete: boolean; spans: Array<{ start: number; end: number }> } {
   let quote = "", escaped = false, start = 0, outer = "";
   let incomplete = false;
   const programs: string[] = [];
+  const spans: Array<{ start: number; end: number }> = [];
   for (let index = 0; index < line.length; index++) {
     const char = line[index]!;
     if (escaped) { escaped = false; continue; }
@@ -518,6 +529,7 @@ function substitutionPrograms(line: string, arithmetic = false): { outer: string
         program += line[end];
       }
       if (end === line.length) { incomplete = true; continue; }
+      spans.push({ start: index, end });
       programs.push(program);
       outer += line.slice(start, index) + CAPTURED_STDOUT;
       start = end + 1;
@@ -544,6 +556,7 @@ function substitutionPrograms(line: string, arithmetic = false): { outer: string
       if (next === ")" && --depth === 0) break;
     }
     if (depth !== 0) { incomplete = true; continue; }
+    spans.push({ start: index, end });
     const program = line.slice(index + 2, end);
     // Arithmetic is data, but any nested command substitutions still execute.
     if (arithmeticCommand) programs.push(...substitutionPrograms(program.slice(0, -1), true).programs);
@@ -553,11 +566,11 @@ function substitutionPrograms(line: string, arithmetic = false): { outer: string
     start = end + 1;
     index = end;
   }
-  return { outer: outer + line.slice(start), programs, incomplete };
+  return { outer: outer + line.slice(start), programs, incomplete, spans };
 }
 
 function writerSourceLines(source: string): string[] {
-  const lines = outsideHeredocs(source).replace(/\\\n\s*/g, " ").split("\n");
+  const lines = outsideHeredocs(source).replace(/\\\n/g, "").split("\n");
   const logical: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     let line = lines[index]!;
@@ -718,7 +731,7 @@ export function capturedMacProductPaths(block: HandoffBlock): string[] {
 export function localCopyProducts(block: HandoffBlock): Array<{ source: string; path: string }> {
   // Read-discovery prefixes can end inside non-shell source or quoted data.
   // Validate copy grammar only when the executable boundary actually has cp.
-  const commands = shellCommands(block.source.replace(/\\\n\s*/g, " "));
+  const commands = shellCommands(block.source.replace(/\\\n/g, ""));
   if (!commands.some((command) => executableWords(command)[0] === "cp")) return [];
   const expand = expansions({ ...block, source: outsideHeredocs(block.source) });
   return writerSourceLines(block.source).flatMap((line) => writerCommands(line, 0, expand).flatMap((command) => {
@@ -736,6 +749,9 @@ export function localCopyProducts(block: HandoffBlock): Array<{ source: string; 
     const sources = expand(operands[0]!), paths = expand(operands[1]!);
     if (sources.length !== 1 || paths.length !== 1) throw new Error(`unknown local copy form: ${command.trim()}`);
     assertWriterDestination(paths[0]!);
+    // A trailing slash proves a directory operand, not a retained file path.
+    // Source type/basename expansion is not established by this copy grammar.
+    if (paths[0]!.endsWith("/")) throw new Error(`unknown local copy directory destination: ${command.trim()}`);
     return [{ source: sources[0]!, path: paths[0]! }];
   }));
 }
