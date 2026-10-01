@@ -4412,7 +4412,7 @@ test("prompt-input tables are strict and synthetic values follow their declared 
   ];
   for (const schemaId of requiredSchemas) assert.ok(promptSchemaContent(schemaId).length > 0, `${schemaId} schema is empty`);
   assert.equal(createHash("sha256").update(promptSchemaContent("harness-source")).digest("hex"),
-    "dcef7ccd8c825f4b011a8f1c36b665be7c8c3d84fc086021a862591092ab3013");
+    "cc4ec38444104c188808bd844e20b407e11077df7a41969a39d67152b65d2a7d");
   assert.equal(createHash("sha256").update(promptSchemaContent("import-map-source")).digest("hex"),
     "f0902bd4f2fe745b853ad2c9d0b4bbce7364ae94b2f70504fe13129b7fa7411b");
   const plans = [PREP, HM37, HM37B, RUNBOOK, SITE, TEMPLATE];

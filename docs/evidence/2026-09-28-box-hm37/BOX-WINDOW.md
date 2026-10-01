@@ -214,7 +214,7 @@ Code proof that both controls work with all twelve unset:
 
 - `deploy/edge-runtime/main/router.ts:265-284` forwards those names only to the future MCP worker; the DARK router gate prevents worker creation before any of them are read.
 - `supabase/functions/mcp/index.ts:40-88,370-380` supplies defaults for absent limits, issuer/resource/JWKS, origins, cache TTL and clock skew, and treats absent `SWARM_MCP_PUBLIC_ENABLED` as false. This is supporting DARK-worker proof, not permission to load the worker publicly.
-- `deploy/release-proofs/item-hm/hm37-open-ack-control.ts:729-744` imports the command/auth paths directly and requires only the existing database alias plus existing Supabase and optional database-CA inputs. Its only `SWARM_ENV` reads are test-only forced-failure hooks; unset production behavior skips them. It never reads a `SWARM_MCP_*` name.
+- `deploy/release-proofs/item-hm/hm37-open-ack-control.ts:341-361,762-782` imports the command/auth paths directly and requires the existing database alias, Supabase inputs, and verified database-CA TLS objects; it sets `ssl.servername=db.commonswarm.internal` while retaining the IP dial and CA verification. Its only `SWARM_ENV` reads are test-only forced-failure hooks; unset production behavior skips them. It never reads a `SWARM_MCP_*` name.
 - The local control runs released `cswarm 0.1.80` and stdio MCP, whose source comparison is empty from the already-live HM2 release; it receives its credential/profile files and no edge `SWARM_MCP_*` input. The plan must not add any of the twelve names to `/home/commonswarm/.env` or the edge Compose environment for either control.
 
 ## 3. Exact-tree file hashes
