@@ -1,4 +1,383 @@
 [
+{
+  "step": "hm37-hm6-schema-helpers-precondition",
+  "scope": "whole-block",
+  "surface": "live schema-helper PostgreSQL readback",
+  "reason": "needs the live production database",
+  "live_proof": "The live Window A run at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:719-765 must record both PostgreSQL t readbacks and the stack/helper/timer fields before accepting the prerequisite.",
+  "receipt_fields": [
+    "migration-03 catalog=t",
+    "migration-03 functional=t",
+    "stack_release",
+    "migration_03_ledger_and_catalog",
+    "migration_03_functional",
+    "backup_restore_helpers_live",
+    "backup_restore_timers_active"
+  ],
+  "written_outputs": [
+    {
+      "output": "APPLY_SQL",
+      "path": "/run/commonswarm-release-{sha}-apply.sql",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:744-750",
+      "evidence": null,
+      "reason": "Ephemeral combined SQL file; the standalone committed catalog SQL does not contain this ledger-query writer. It is not a later retained output and is not seeded."
+    },
+    {
+      "output": "hm37-hm6-migration-03-catalog.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-migration-03-catalog.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:752",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-migration-03-catalog.txt",
+      "reason": "Historical Window A prerequisite readback, not proof that the present block ran."
+    },
+    {
+      "output": "hm37-hm6-migration-03-functional.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-migration-03-functional.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:755",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-migration-03-functional.txt",
+      "reason": "Historical Window A prerequisite readback, not proof that the present block ran."
+    },
+    {
+      "output": "hm37-hm6-schema-helpers.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-schema-helpers.txt",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:757-763",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-schema-helpers.txt",
+      "reason": "Historical Window A prerequisite readback, not proof that the present block ran."
+    }
+  ],
+  "outputs": [
+    {
+      "file": "hm37-hm6-migration-03-catalog.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-migration-03-catalog.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-migration-03-catalog.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:752"
+    },
+    {
+      "file": "hm37-hm6-migration-03-functional.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-migration-03-functional.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-migration-03-functional.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:755"
+    },
+    {
+      "file": "hm37-hm6-schema-helpers.txt",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hm6-schema-helpers.txt",
+      "location": "box-proof",
+      "mode": "0600",
+      "branch": "all",
+      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hm6-schema-helpers.txt",
+      "source_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:757-763"
+    }
+  ],
+  "shape_evidence": [],
+  "unproduced": [
+    {
+      "output": "APPLY_SQL",
+      "reason": "Ephemeral combined SQL file; the standalone committed catalog SQL does not contain this ledger-query writer. It is not a later retained output and is not seeded."
+    }
+  ]
+},
+{
+  "step": "hm37a-prep-seat-cleanup",
+  "scope": "whole-block",
+  "surface": "Window A pass/abort cleanup and independent agent-token database counts",
+  "reason": "needs the live production database",
+  "live_proof": "The live Window A cleanup tail at docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2000-2124 must record principal_ids, revoked_readback, active_unexpired_token_count and prep_directory.result/reason. docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2241-2251 and 2289-2296 consume the protected receipt; the DB readback must precede deletion.",
+  "receipt_fields": [
+    "schema",
+    "workspace_id",
+    "principal_ids",
+    "revoked_readback",
+    "active_unexpired_token_count",
+    "prep_directory.result",
+    "prep_directory.reason"
+  ],
+  "written_outputs": [
+    {
+      "output": "QUERY_SCRIPT",
+      "path": "/tmp/hm37a-token-readback.XXXXXX",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2038-2061",
+      "evidence": null,
+      "reason": "Task-local generated read-only SQL script is removed within the block; no committed output bytes and no later reader."
+    },
+    {
+      "output": "hm37a-prep-cleanup-{sha}.json",
+      "path": "/tmp/hm37a-prep-cleanup-{sha}.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2109-2119",
+      "evidence": null,
+      "reason": "No committed receipt has the three principal_ids, independent DB readback and prep_directory fields of this writer. The older hm37-revocation-readback.json is an aborted window aggregate, not this receipt."
+    },
+    {
+      "output": "hm37a-prep-cleanup.json",
+      "path": "$EVIDENCE_DIR/hm37a-prep-cleanup.json",
+      "producer_lines": "docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2120-2121",
+      "evidence": null,
+      "reason": "Optional copy of the same missing cleanup receipt. The curated copy-back list names it, but naming it is not evidence."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-revocation-readback.json",
+      "shape": "Historical aborted-before-staging aggregate only; does not support the new cleanup receipt."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "QUERY_SCRIPT",
+      "reason": "Task-local generated read-only SQL script is removed within the block; no committed output bytes and no later reader."
+    },
+    {
+      "output": "hm37a-prep-cleanup-{sha}.json",
+      "reason": "No committed receipt has the three principal_ids, independent DB readback and prep_directory fields of this writer. The older hm37-revocation-readback.json is an aborted window aggregate, not this receipt."
+    },
+    {
+      "output": "hm37a-prep-cleanup.json",
+      "reason": "Optional copy of the same missing cleanup receipt. The curated copy-back list names it, but naming it is not evidence."
+    }
+  ]
+},
+{
+  "step": "hm37-deno-install",
+  "scope": "whole-block",
+  "surface": "official Deno 2.9.7 installer on pass and abort paths",
+  "reason": "needs the official Deno 2.9.7 artifact and the box runtime",
+  "live_proof": "The live Window B installer at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:363-469 must verify the official M19 archive hash, record DENO_INSTALLED_BINARY_SHA256 in window.env, verify --version and root:root:755, and record that the download root is removed. Both pass and abort runs use this whole-block declaration.",
+  "receipt_fields": [
+    "official archive SHA256 matches M19",
+    "DENO_INSTALLED_BINARY_SHA256",
+    "native --version",
+    "binary owner/group/mode",
+    "download root absent"
+  ],
+  "written_outputs": [
+    {
+      "output": "redirect.headers",
+      "path": "/run/commonswarm-deno-{window}/redirect.headers",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:410-412",
+      "evidence": null,
+      "reason": "M19 records the checksum lookup, not this per-run redirect header file; removed by the installer trap."
+    },
+    {
+      "output": "effective-url.txt",
+      "path": "/run/commonswarm-deno-{window}/effective-url.txt",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:416-419",
+      "evidence": null,
+      "reason": "No committed effective redirect URL output; removed by the installer trap."
+    },
+    {
+      "output": "deno.zip",
+      "path": "/run/commonswarm-deno-{window}/deno.zip",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:417-420",
+      "evidence": null,
+      "reason": "M19 measures the official archive checksum, but no committed archive bytes exist; no download is permitted in this dry run."
+    },
+    {
+      "output": "extracted deno",
+      "path": "/run/commonswarm-deno-{window}/deno",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:421-440",
+      "evidence": null,
+      "reason": "No committed extracted executable bytes or binary checksum; removed by the installer trap."
+    },
+    {
+      "output": "/usr/local/bin/deno",
+      "path": "/usr/local/bin/deno",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:448-466",
+      "evidence": null,
+      "reason": "M1 observes the absent baseline and M19 measures the archive checksum only. Neither supports installed executable bytes."
+    },
+    {
+      "output": "window.env:DENO_INSTALLED_BINARY_SHA256",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:446",
+      "evidence": null,
+      "reason": "No committed installed-binary digest. The official zip digest is not the digest of its executable and cannot seed this line."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json",
+      "shape": "M1: absent executable; M19: c6527f24f4b16031d3ae4fa9f658d5f11534c8d84ce7dc8502420280919c3490 is the ZIP checksum only."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "redirect.headers",
+      "reason": "M19 records the checksum lookup, not this per-run redirect header file; removed by the installer trap."
+    },
+    {
+      "output": "effective-url.txt",
+      "reason": "No committed effective redirect URL output; removed by the installer trap."
+    },
+    {
+      "output": "deno.zip",
+      "reason": "M19 measures the official archive checksum, but no committed archive bytes exist; no download is permitted in this dry run."
+    },
+    {
+      "output": "extracted deno",
+      "reason": "No committed extracted executable bytes or binary checksum; removed by the installer trap."
+    },
+    {
+      "output": "/usr/local/bin/deno",
+      "reason": "M1 observes the absent baseline and M19 measures the archive checksum only. Neither supports installed executable bytes."
+    },
+    {
+      "output": "window.env:DENO_INSTALLED_BINARY_SHA256",
+      "reason": "No committed installed-binary digest. The official zip digest is not the digest of its executable and cannot seed this line."
+    }
+  ]
+},
+{
+  "step": "hm37-deno-remove",
+  "scope": "whole-block",
+  "surface": "Deno installer cleanup on success and abort",
+  "reason": "needs the official Deno 2.9.7 artifact and the box runtime",
+  "live_proof": "The live Window B cleanup at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:634-683 must verify the recorded binary digest before removal, prove the runtime and cache absent, and write DENO_REMOVED=1 or the measured not-installed disposition. An absent baseline alone does not prove this installed-runtime transition.",
+  "receipt_fields": [
+    "DENO_INSTALLED_BINARY_SHA256 readback",
+    "DENO_REMOVED or deno_remove",
+    "runtime absent",
+    "cache absent"
+  ],
+  "written_outputs": [
+    {
+      "output": "window.env:DENO_REMOVED",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:681",
+      "evidence": null,
+      "reason": "No committed removal receipt for a verified installed executable; do not infer it from M1 baseline absence."
+    },
+    {
+      "output": "window.env:deno_remove",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/window.env",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:662",
+      "evidence": null,
+      "reason": "The plan-only not-installed line is not a committed output. No not-installed result is pre-seeded."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json",
+      "shape": "M1 is baseline absence, not an installation/removal receipt."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "window.env:DENO_REMOVED",
+      "reason": "No committed removal receipt for a verified installed executable; do not infer it from M1 baseline absence."
+    },
+    {
+      "output": "window.env:deno_remove",
+      "reason": "The plan-only not-installed line is not a committed output. No not-installed result is pre-seeded."
+    }
+  ]
+},
+{
+  "step": "hm37-hosted-open-ack-control",
+  "scope": "whole-block",
+  "surface": "authenticated hosted HTTP and database open/ACK control",
+  "reason": "needs network and the hosted database",
+  "live_proof": "The live Window B run at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:558-590 invokes deploy/release-proofs/item-hm/hm37-open-ack-control.ts. Its stdout must record ok, mode=control, disposable IDs, assertion IDs and independently verified cleanup fields; only that protected output can feed the live-revoke readback.",
+  "receipt_fields": [
+    "ok",
+    "mode",
+    "workspace_id",
+    "grant_id",
+    "seat_id",
+    "principal_id",
+    "assertions",
+    "cleanup"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-hosted-check-control.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-check-control.json",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:577-589",
+      "evidence": null,
+      "reason": "The committed file with this name says pass=false/not_run=true and aborted before staging. It is not an ok/mode=control result and cannot seed the successful writer shape."
+    },
+    {
+      "output": "private open/ACK journal",
+      "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:297-307,793-811",
+      "evidence": null,
+      "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json",
+      "shape": "Lines 2-6: pass=false, not_run=true, no temporary hosted seat, aborted before staging. Kept as negative evidence; not seeded as a control result."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-hosted-check-control.json",
+      "reason": "The committed file with this name says pass=false/not_run=true and aborted before staging. It is not an ok/mode=control result and cannot seed the successful writer shape."
+    },
+    {
+      "output": "private open/ACK journal",
+      "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
+    }
+  ]
+},
+{
+  "step": "hm37-hosted-control-cleanup-only",
+  "scope": "whole-block",
+  "surface": "hosted control recovery on an interrupted/abort path",
+  "reason": "needs network and the hosted database",
+  "live_proof": "The live Window B recovery at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:597-626 must authenticate with the existing journal and independently prove cleanup. The receipt fields are owned by deploy/release-proofs/item-hm/hm37-open-ack-control.ts:1130-1153; docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:755-781 must consume that real receipt before classifying the failure.",
+  "receipt_fields": [
+    "ok",
+    "mode=cleanup-only",
+    "workspace_id",
+    "grant_id",
+    "seat_id",
+    "principal_id",
+    "cleanup",
+    "error.assertion_id when failed"
+  ],
+  "written_outputs": [
+    {
+      "output": "hm37-hosted-cleanup-recovery.json",
+      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-cleanup-recovery.json",
+      "producer_lines": "docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:612-625",
+      "evidence": null,
+      "reason": "No committed recovery output exists. The prior plan-only ok=true/mode=cleanup-only shape is forbidden; the failure dispatcher must see this file absent."
+    },
+    {
+      "output": "private open/ACK journal update",
+      "path": "/home/commonswarm/edge/controls/{sha}-{window}/journal/hm37-open-ack-${WINDOW_PRINCIPAL_SUFFIX}.journal.json",
+      "producer_lines": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts:644-754",
+      "evidence": null,
+      "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
+    }
+  ],
+  "outputs": [],
+  "shape_evidence": [
+    {
+      "file": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json",
+      "shape": "Aborted before control staging; cannot support journal recovery or complete revocation."
+    }
+  ],
+  "unproduced": [
+    {
+      "output": "hm37-hosted-cleanup-recovery.json",
+      "reason": "No committed recovery output exists. The prior plan-only ok=true/mode=cleanup-only shape is forbidden; the failure dispatcher must see this file absent."
+    },
+    {
+      "output": "private open/ACK journal update",
+      "reason": "Private recovery journal is never copied or seeded; it contains runtime state and no committed safe journal exists."
+    }
+  ]
+},
   {"step": "hm37-hosted-control-stage", "surface": "Docker OAuth Config.Env database host observation", "reason": "No measured MCP_OAUTH_DATABASE_HOST value is available. M7 recorded service.env names only and found the host name absent; the production recheck recorded health and workdir only. Compose environment names and extra_hosts do not measure the running container's host value.", "live_proof": "The live docker inspect at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:504-506 must record the effective host before staging can be verified.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M7:83-89 and production_recheck:383-386 contain no measured Config.Env host value"}], "outputs": [], "unproduced": [{"output": "oauth-database.json", "reason": "Its host field depends on the unmeasured container Config.Env observation."}]},
   {"step": "runbook-16", "surface": "live PostgreSQL database identity", "reason": "needs the real PostgreSQL identity; Anvil proves it live. M8 measured the helper and target.env file metadata and the TARGET_DATABASE_URL name only; database reachability was not attempted. No measured server address, database-level stack marker, or superuser identity is available to serve the real helper's assertion.", "live_proof": "Anvil's live run of deploy/RELEASE-TO-BOX.md:1271-1284 through deploy/supabase-stack/migrate/lib.sh:81-114.", "shape_evidence": [{"file": "docs/evidence/2026-09-29-box-facts/box-facts-measured.json", "shape": "M8: database reachability was not attempted"}], "outputs": []},
   {"surface": "live PostgreSQL catalog, transaction, rollback, and swarm.agent_tokens readback", "reason": "The harness checks command shape, ordering, read-only SQL, and reconciliation; only the production database can establish its current durable rows."},

@@ -24,7 +24,8 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
-import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
+import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, blockPathReferences, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
+import { consumedEvidenceProducts, type EvidenceProduct } from "./box-dry-run/evidence-products.js";
 import { createTemporary as mkdtempSync, removeTemporary, withTemporarySetup } from "./box-dry-run/temporary.js";
 
 const RUNBOOK = "deploy/RELEASE-TO-BOX.md";
@@ -51,7 +52,11 @@ const MEASURED_FACTS_FILE = "docs/evidence/2026-09-29-box-facts/box-facts-measur
 const OAUTH_IMAGE_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-image.json";
 const OAUTH_RUNTIME_FILE = "docs/evidence/2026-09-28-release-826db6a34f23-v5/oauth-runtime.json";
 const REAL_CHECKOUT = process.cwd();
-const SITE_SHA = "8b8989f2b29e440a317a2cdedf11195901c8342c";
+// Rulings 5/6 supply release inputs, not replacement measurements for historical M15.
+const SITE_INPUTS = JSON.parse(readFileSync("tests/box-dry-run/fixtures/site-release-inputs.json", "utf8")) as {
+  site_base_sha: string; site_release_sha: string; baseline_release: string;
+};
+const SITE_SHA = SITE_INPUTS.site_release_sha;
 const WINDOW_START = "2026-09-28T01:02:03Z";
 const WINDOW_ID = "20260928T010203Z";
 const EDGE_PUBLIC_ENABLED_EVIDENCE = "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-closure.txt";
@@ -366,14 +371,16 @@ const CLOSED_PROOF_PATHS = [...measuredFact("M5").output.matchAll(/^closed_proof
 assert.equal(CLOSED_PROOF_PATHS.length, 2);
 const PSQL_IMAGE = measuredMatch("M17", /(public\.ecr\.aws\/supabase\/postgres:[0-9.]+)/, "command");
 const POSTGRES_IMAGE_ID = measuredMatch("M17", /image_id=(sha256:[0-9a-f]{64})/);
-const SITE_BASE_RELEASE = measuredMatch("M15", /release=([^\n]+)/);
-// The version the measured live site release carries in its /download page (M15's marker). A fixture page that
-// carries a typed number would be a second copy of it; the release SHA's own package.json is checked against it.
-const SITE_VERSION = measuredMatch("M15", /version_([0-9][0-9.]*)_marker=true/);
-const SITE_BASE_PREFIX = SITE_BASE_RELEASE.split("-")[1]!;
-const baseResult = spawnSync("git", ["rev-parse", `${SITE_BASE_PREFIX}^{commit}`], { encoding: "utf8" });
-assert.equal(baseResult.status, 0, baseResult.stderr);
-const BASE_SHA = baseResult.stdout.trim();
+const SITE_BASE_RELEASE = SITE_INPUTS.baseline_release;
+const BASE_SHA = SITE_INPUTS.site_base_sha;
+assert.match(BASE_SHA, /^[0-9a-f]{40}$/);
+assert.match(SITE_SHA, /^[0-9a-f]{40}$/);
+assert.equal(SITE_BASE_RELEASE.split("-")[1], BASE_SHA.slice(0, 12));
+// Package source establishes the fixture's version input. It does not measure
+// the current site's /download bytes; M15's old live observation stays intact.
+const sitePackage = spawnSync("git", ["show", `${BASE_SHA}:package.json`], { encoding: "utf8" });
+assert.equal(sitePackage.status, 0, sitePackage.stderr);
+const SITE_VERSION = (JSON.parse(sitePackage.stdout) as { version: string }).version;
 const OAUTH_RELEASE = measuredProductionMatch(/oauth_current=([^\n]+)/);
 const EDGE_MEMORY = Number(measuredMatch("M11", /memory=(\d+)/));
 const EDGE_NETWORK = measuredMatch("M11", /network=([^ ]+)/);
@@ -1413,17 +1420,14 @@ function populateExistingRelease(target: string, sha: string): void {
 // (PLAN_VISIBLE_PATH_PRESEEDS); the returned list is checked against it. The states s1..s5 differ only where
 // the box measurements differ (M5, K4-12).
 function windowAFinalEdge(): string {
-  // A PASSED close asserts this final state before writing edge_live=true:
-  // docs/evidence/2026-09-28-box-hm37/BOX-WINDOW.md:2223-2225,2246-2255.
-  // B checks the same state at docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:180-181.
-  const close = planBlock(HM37, "hm37a-close-readback");
-  const sha = /^\s*SHA=([0-9a-f]{40})$/m.exec(close.source)?.[1];
-  const target = /test "\$\(readlink -f \/home\/commonswarm\/edge\/current\)" =\s*\\?\s*"([^"\n]+)"/.exec(close.source)?.[1];
-  assert.ok(sha && target, "window A close has no declared final edge state");
-  assert.equal(sha, RELEASE_SHA, "window A final state names a different release");
-  const edge = target.replaceAll("$SHA", sha);
-  assert.ok(isAbsolute(edge) && !edge.includes("$"), "window A final edge is unresolved");
-  assert.equal(edge, CANDIDATE_EDGE, "window A final edge is absent from the measured release inventory");
+  // The committed close is ABORTED_ROLLED_BACK, not the plan's expected PASS.
+  // Preserve that observed state. B's real opening check must reject it until a
+  // successful A close is committed; an input receipt is not a live transition.
+  const receipt = readFileSync(EDGE_PUBLIC_ENABLED_EVIDENCE, "utf8");
+  const sha = /^edge_current=([0-9a-f]{40})$/m.exec(receipt)?.[1];
+  assert.ok(sha, "committed Window A closure has no edge_current observation");
+  const edge = `/home/commonswarm/edge/releases/${sha}`;
+  assert.ok([PREVIOUS_EDGE, CANDIDATE_EDGE].includes(edge), "committed closure names an unknown edge release");
   return edge;
 }
 
@@ -1587,8 +1591,9 @@ function seedBoxProducts(fixture: Fixture, step: string): string[] {
 // Non-substitutable surfaces (R3). The dry run does not emulate a browser or a site build. A block whose
 // result depends on one is declared in fixtures/non-substitutable.json and is NOT executed: not a part of it,
 // not with a canned answer. The harness seeds only the output files the declaration lists, and only from the
-// committed evidence the declaration cites, or an explicitly labeled plan-documented shape for a consumer
-// contract check. The latter is not a browser result. Other outputs with no evidence are named and left absent.
+// committed evidence the declaration cites. The older browser contract fixtures also support explicitly
+// labeled plan-documented shapes; these do not prove browser results. Ruling 7 whole-block declarations
+// forbid that route, seed only actual later reads, and leave unsupported outputs absent by name.
 // ---------------------------------------------------------------------------------------------------------
 
 interface EvidenceRef {
@@ -1612,6 +1617,9 @@ interface DeclaredOutput {
   plan_documented?: { evidence: string; source_lines: string; label: string; json: Record<string, unknown> };
   lines?: Record<string, OutputValue>;
   invariants?: Array<{ equal: [string, string]; source: string }>;
+  path?: string;
+  evidence?: string;
+  source_lines?: string;
 }
 
 interface UnproducedOutput {
@@ -1629,6 +1637,9 @@ interface NonSubstitutableEntry {
   unproduced?: UnproducedOutput[];
   shape_evidence?: Array<{ file: string; shape: string }>;
   branches?: Array<{ branch: string; status: "not tested"; reason: string; evidence: string; source_lines: string }>;
+  scope?: "whole-block";
+  receipt_fields?: string[];
+  written_outputs?: Array<{ output: string; path: string; producer_lines: string; evidence: string | null; reason?: string }>;
 }
 
 function nonSubstitutableEntries(): NonSubstitutableEntry[] {
@@ -1677,8 +1688,44 @@ interface SeedResult {
   refused: string[];
 }
 
-function seedDeclaredOutputs(entry: NonSubstitutableEntry, fixture: Fixture, override: Record<string, unknown> = {}): SeedResult {
+function seedDeclaredOutputs(entry: NonSubstitutableEntry, fixture: Fixture, override: Record<string, unknown> = {}, block?: Block, laterBlocks: Block[] = []): SeedResult {
   const result: SeedResult = { seeded: [], refused: [] };
+  if (entry.scope === "whole-block") {
+    assert.ok(block, "whole-block declaration needs its producer identity");
+    const reads = new Set(laterBlocks.flatMap(blockPathReferences).map((path) =>
+      path.replaceAll(RELEASE_SHA, "{sha}").replaceAll(WINDOW_ID, "{window}")));
+    // Curated copy-back manifests read member names through tar -T; discover
+    // those consumers from the same mandatory source inventory as execution.
+    for (const handoff of handoffInventory()) {
+      if (handoff.producer.file === block.file && handoff.producer.step === block.step &&
+          laterBlocks.some((consumer) => consumer.file === handoff.consumer.file && consumer.step === handoff.consumer.step)) reads.add(handoff.path);
+    }
+    const outputs = (entry.outputs ?? []).map((output): EvidenceProduct => {
+      assert.ok(output.path, `${entry.step}/${output.file}: no producer path`);
+      assert.equal(output.plan_documented, undefined, `${entry.step}: plan-only seeding is forbidden`);
+      return { file: output.file, path: output.path, mode: output.mode, evidence: output.evidence };
+    });
+    const selected = consumedEvidenceProducts(outputs, reads);
+    if (selected.length > 0) {
+      assert.ok(fixture.part === "box" ? guardedBoxFixtures.has(fixture) : admittedMacFixtures.has(fixture),
+        "evidence products require the existing runner guard or canary admission");
+    }
+    for (const output of selected) {
+      const path = handoffPath(output.path);
+      const target = fixture.part === "box" ? path : join(fixture.boxRoot!, path);
+      // The earlier directory producer must have run. Do not repair its absence.
+      if (!pathExists(dirname(target))) {
+        result.refused.push(`UNPRODUCED ${path}: its producer directory is absent`);
+        continue;
+      }
+      writeFileSync(target, output.bytes, { mode: Number.parseInt(output.mode, 8) });
+      chmodSync(target, Number.parseInt(output.mode, 8));
+      if (fixture.part === "box") chownSync(target, 0, 0);
+      else recordBoxOwner(fixture.boxRoot!, path, "root:root");
+      result.seeded.push(target);
+    }
+    return result;
+  }
   const branch = fixture.browserBranch ?? "FULL-CONTROL";
   const outputs = (entry.outputs ?? []).filter((output) => output.branch === branch);
   if (outputs.length === 0 && (entry.outputs ?? []).length > 0) {
@@ -2091,35 +2138,6 @@ function windowEnvBody(state: string): string {
 }
 
 const guardedBoxFixtures = new WeakSet<Fixture>();
-let pinnedBoxDenoZip: Buffer | undefined;
-
-function boxDenoZip(): Buffer {
-  // This is runner preparation, never a plan command or a production operation.
-  // Preserve M1's absent baseline; the plan installs these verified bytes later.
-  assert.ok(boxRunnerGuard(process.env).available, "pinned Deno requires the guarded box runner");
-  if (pinnedBoxDenoZip) return pinnedBoxDenoZip;
-  const root = mkdtempSync(join(tmpdir(), "commonswarm-box-dry-run-commonswarm-box-deno-"));
-  try {
-    const zip = join(root, "deno.zip");
-    const probe = measuredFact("M16").checks?.find((check) => check.id === "a1")?.command;
-    assert.equal(typeof probe, "string", "M16 has no measured Deno asset probe");
-    const url = /(https:\/\/github\.com\/denoland\/deno\/releases\/download\/v[0-9.]+\/deno-x86_64-unknown-linux-gnu\.zip)\.sha256sum/.exec(probe as string)?.[1];
-    assert.ok(url, "M16's Deno asset URL is missing");
-    const downloaded = spawnSync("/usr/bin/curl", ["--fail", "--silent", "--show-error", "--location",
-      "--proto", "=https", "--proto-redir", "=https", "--max-time", "120", "--output", zip, url], {
-      encoding: "utf8", env: explicitEnvironment(), timeout: 125_000,
-    });
-    assert.equal(downloaded.status, 0, "could not obtain the measured pinned Deno archive");
-    const bytes = readFileSync(zip);
-    assert.equal(createHash("sha256").update(bytes).digest("hex"), DENO_ZIP_SHA256,
-      "runner Deno archive differs from M19's independently measured checksum");
-    pinnedBoxDenoZip = bytes;
-    return bytes;
-  } finally {
-    removeOwnedTemporary(root, "commonswarm-box-dry-run-commonswarm-box-deno-");
-  }
-}
-
 function boxRunnerGuard(env: NodeJS.ProcessEnv): ContainmentAvailability {
   const result = spawnSync("/bin/bash", [GUARD], { encoding: "utf8", env });
   return result.status === 0 && result.stdout.trim() === "BOX_DRY_RUN_GUARD=PASS"
@@ -2136,7 +2154,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   // Run before creating real-path fixtures: the guard requires those paths to be absent.
   const guard = boxRunnerGuard(process.env);
   assert.ok(guard.available, `CONTAINMENT UNAVAILABLE: ${guard.detail}. The fixture was not created.`);
-  const runtimeZip = boxDenoZip();
   const finalEdge = planBlocks.some((block) => block.file === HM37B) ? windowAFinalEdge() : undefined;
   const declaredPromptInputs = promptInputsForBlocks(planBlocks);
   const model = buildBoxFixtureModel(state);
@@ -2180,17 +2197,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
     join(sourceRoot, "supabase/migrations/20260928000003_hm_oauth_store.sql"),
     0o644,
   );
-  const denoZip = join(supportRoot, "deno-v2.9.7.zip");
-  writeFileSync(denoZip, runtimeZip, { mode: 0o644 });
-  chownSync(denoZip, 0, 0);
-  chmodSync(denoZip, 0o644);
-  const denoZipDigest = createHash("sha256").update(readFileSync(denoZip)).digest("hex");
-  const binaryDigest = spawnSync("/usr/bin/python3", ["-c",
-    "import hashlib,sys,zipfile; print(hashlib.sha256(zipfile.ZipFile(sys.argv[1]).read('deno')).hexdigest())", denoZip],
-  { encoding: "utf8", env: explicitEnvironment() });
-  assert.equal(binaryDigest.status, 0, binaryDigest.stderr);
-  const denoBinaryDigest = binaryDigest.stdout.trim();
-  assert.match(denoBinaryDigest, /^[0-9a-f]{64}$/);
   makeStubBin(bin, true);
   writeRootMode(log, "", 0o600);
   const originalDeno = pathExists(DENO_PATH)
@@ -2333,7 +2339,7 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
   const fixture: Fixture = {
     temporary, cwd: process.cwd(), home: join(macLocalRoot, "home"), bin, log, model,
     prelude, pythonFixture, sourceRoot, supportRoot, sudoPolicy, rootDirectories,
-    denoZip, denoZipDigest, denoBinaryDigest, seededPaths, macLocalRoot, macSiteSequence,
+    seededPaths, macLocalRoot, macSiteSequence,
     replacedRuntime: { path: DENO_PATH, ...(originalDeno ? { backup: originalDeno } : {}) },
     replacedDirectory: {
       path: "/usr/local/bin", mode: originalUsrLocalBin.mode & 0o777,
@@ -2346,8 +2352,6 @@ function prepareBoxFixtureSetup(state: string, planBlocks: Block[]): Fixture {
       BOX_DRY_RUN_BOX_ROOT: "/",
       BOX_DRY_RUN_STUB_LOG: log,
       BOX_DRY_RUN_PYTHON_FIXTURE: pythonFixture,
-      BOX_DRY_RUN_DENO_ZIP_FIXTURE: denoZip,
-      BOX_DRY_RUN_DENO_ZIP_SHA256: denoZipDigest,
       BOX_DRY_RUN_EXPECTED_EDGE: finalEdge ?? previousEdge,
       BOX_DRY_RUN_PSQL_IMAGE: PSQL_IMAGE,
       BOX_DRY_RUN_POSTGRES_IMAGE_ID: model.containers.postgres.image,
@@ -2416,7 +2420,8 @@ function cleanupBoxFixture(fixture: Fixture): void {
 }
 
 function produceDenoUnitPrerequisites(fixture: Fixture): void {
-  assert.ok(fixture.denoZip && fixture.denoZipDigest);
+  assert.ok(fixture.denoZip && fixture.denoZipDigest,
+    "NOT EXECUTED: the official Deno installer is a whole-block declaration; no downloaded runtime prerequisite is supplied");
   mkdirSync(PROOF_DIR, { recursive: true, mode: 0o700 });
   writeRootMode(join(PROOF_DIR, "window.env"), windowEnvBody("s2"));
 }
@@ -2475,6 +2480,7 @@ function handoffInventory(): Handoff[] {
 }
 
 function executesBoxProducerOnMac(block: Block): boolean {
+  if (declaredNonSubstitutable(shortStep(block))?.scope === "whole-block") return false;
   return boxBlockProducts(shortStep(block)).some((product) => product.execute === "local") ||
     (boxBlockProducts(shortStep(block)).length === 0 && shortStep(block) !== "1-apply-release-directories" && handoffInventory().some((item) =>
       item.direction === "box-to-mac" && item.producer.file === block.file && item.producer.step === block.step));
@@ -2924,7 +2930,16 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
 
 function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: FixturePart): Array<{ block: Block; execution: Execution }> {
   const records: Array<{ block: Block; execution: Execution }> = [];
-  for (const block of planBlocks) {
+  for (const [index, block] of planBlocks.entries()) {
+    const laterBlocks = planBlocks.slice(index + 1);
+    // Whole-block declarations apply before host routing: neither the native
+    // box lane nor the Mac SSH projection may execute a fragment or fallback.
+    if (declaredNonSubstitutable(shortStep(block))?.scope === "whole-block") {
+      const execution = executeWholeBlock(block, fixture, { laterBlocks });
+      records.push({ block, execution });
+      if (execution.result === "failed") break;
+      continue;
+    }
     const isBoxBlock = block.host.startsWith("box ");
     if (isBoxBlock !== (part === "box")) {
       // The Mac lane does not execute a box block. What the box block produced is what a later Mac block reads.
@@ -2982,9 +2997,20 @@ function executePlanUntilFailure(planBlocks: Block[], fixture: Fixture, part: Fi
       }
       continue;
     }
-    const execution = executeWholeBlock(block, fixture);
+    const execution = executeWholeBlock(block, fixture, { laterBlocks });
     records.push({ block, execution });
     if (execution.result === "failed") break;
+  }
+  // A prior failed consumer can stop the plan before another declaration. The
+  // report must still name every unavailable whole block, without seeding its
+  // outputs or running it after the failure.
+  for (const block of planBlocks) {
+    const declared = declaredNonSubstitutable(shortStep(block));
+    if (declared?.scope !== "whole-block" || records.some((record) => record.block === block)) continue;
+    records.push({ block, execution: {
+      step: shortStep(block), result: "not-executed", status: null, stdout: "", stderr: "", seeded: [],
+      declared: { ...declared, reason: `${declared.reason}. Not reached after an earlier failed block; no outputs seeded.` },
+    } });
   }
   return records;
 }
@@ -3100,14 +3126,16 @@ function executeWholeBlock(
     trapErrors?: boolean;
     executeDeclared?: boolean;
     seedOverride?: Record<string, unknown>;
+    laterBlocks?: Block[];
   } = {},
 ): Execution {
   const step = shortStep(block);
   const contained = fixture.part === "mac";
-  const declared = !options.executeDeclared ? declaredNonSubstitutable(step) : undefined;
+  const candidate = declaredNonSubstitutable(step);
+  const declared = candidate?.scope === "whole-block" || !options.executeDeclared ? candidate : undefined;
   if (declared) {
     // A declared surface is not executed: not a part of the block, not with a canned answer.
-    const seed = seedDeclaredOutputs(declared, fixture, options.seedOverride);
+    const seed = seedDeclaredOutputs(declared, fixture, options.seedOverride, block, options.laterBlocks);
     return {
       step, result: seed.refused.length > 0 ? "failed" : "not-executed", status: null,
       stderr: seed.refused.join("\n"), stdout: "", seeded: seed.seeded, refused: seed.refused, declared,
@@ -5840,13 +5868,22 @@ function notExecutedLine(block: Block, execution: Execution): string {
   const declared = execution.declared!;
   const outputs = declared.outputs ?? [];
   const seeded = (execution.seeded ?? []).map((path) => basename(path));
-  const observed = seeded.filter((file) => !outputs.find((output) => output.file === file)?.plan_documented).join(", ") || "nothing";
+  const observed = seeded.filter((file) => !outputs.find((output) => output.file === file)?.plan_documented).map((file) => {
+    const evidence = outputs.find((output) => output.file === file)?.evidence;
+    return evidence ? `${file} (${evidence}; historical bytes, not this window's result)` : file;
+  }).join(", ") || "nothing";
   const planShapes = seeded.flatMap((file) => {
     const shape = outputs.find((output) => output.file === file)?.plan_documented;
     return shape ? [` Plan-documented output: ${file} (${shape.label}; source: ${shape.evidence}:${shape.source_lines}).`] : [];
   }).join("");
-  const missing = (declared.unproduced ?? []).map((item) => item.output).join(", ") || "none";
-  const items = (declared.plan_items ?? []).map((item) => ` Plan item: ${item}.`).join("");
+  const missing = [...new Set([
+    ...(declared.unproduced ?? []).map((item) => item.output),
+    ...(declared.scope === "whole-block" ? outputs.filter((output) => !seeded.includes(output.file)).map((output) => output.file) : []),
+  ])].join(", ") || "none";
+  const items = (declared.plan_items ?? []).map((item) => ` Plan item: ${item}.`).join("") +
+    (declared.receipt_fields?.length ? ` Live receipt fields: ${declared.receipt_fields.join(", ")}.` : "") +
+    (declared.written_outputs ?? []).map((output) =>
+      ` Output: ${output.output} at ${output.path}; writer ${output.producer_lines}; evidence: ${output.evidence ?? "MISSING"}${output.reason ? ` (${output.reason})` : ""}.`).join("");
   return `NOT EXECUTED ${block.file}:${block.line} [step=${shortStep(block)}] non-substitutable (${declared.surface}): ${declared.reason} Live proof: ${declared.live_proof} Seeded from committed evidence: ${observed}.${planShapes} Not produced, by name: ${missing}.${items}`;
 }
 
@@ -6272,7 +6309,8 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
       const producer = handoff.producer as Block;
       const products = boxBlockProducts(shortStep(producer));
       const declared = products.some((product) => product.path === handoff.path ||
-        (!handoff.path.includes("$") && handoffPath(product.path) === handoffPath(handoff.path)));
+        (!handoff.path.includes("$") && handoffPath(product.path) === handoffPath(handoff.path))) ||
+        (declaredNonSubstitutable(shortStep(producer))?.written_outputs ?? []).some((output) => output.path === handoff.path);
       const applyWindow = shortStep(producer) === "1-apply-release-directories" &&
         Object.hasOwn(modeledApplyFiles(producer, fixtures.get(HM37)!), basename(handoff.path));
       assert.ok(executesBoxProducerOnMac(producer) || declared || applyWindow,
@@ -6717,6 +6755,69 @@ test("controls: opaque writer executables cannot silently omit cross-host produc
   const payload = { ...producer,
     source: `printf 'sh -c tee ${path}'\ncat <<'DATA'\nsh -c 'tee ${path}'\nDATA\n` };
   assert.deepEqual(crossHostHandoffs([payload, consumer]), []);
+});
+
+test("controls: command substitutions retain writers and executable eval refuses at the producer boundary", () => {
+  const path = "/home/commonswarm/stack/release-proofs/capture-writer/proof.txt";
+  const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
+  for (const source of [`BYTES="$(printf actual | /usr/bin/tee "${path}")"`,
+    `BYTES=$(printf actual | sudo -n /usr/bin/tee "${path}")`,
+    `BYTES="$(printf actual | /usr/bin/tee "${path}"\n)"`,
+    `BYTES="$(printf '%s' "$(printf actual | /usr/bin/tee "${path}")")"`,
+    `WRITER=/usr/bin/tee\nBYTES="$("$WRITER" "${path}")"`,
+    `PROOF_DIR=${dirname(path)}\ncat <<'DATA'\nPROOF_DIR=/home/not-shell\nDATA\nprintf actual | /usr/bin/tee "$PROOF_DIR/proof.txt"`,
+    `printf '%s' "$(printf actual | /usr/bin/tee "${path}")"`]) {
+    const producer = { ...planBlock(RUNBOOK, "runbook-23"), source };
+    const inventory = crossHostHandoffs([producer, consumer]);
+    assert.deepEqual(inventory.map((item) => [item.path, item.producer, item.consumer]), [[path, producer, consumer]]);
+    const remote = { ...consumer, source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` };
+    assert.deepEqual(transferProducts(remote).map((item) => item.path), [path]);
+  }
+  for (const executable of ["eval", "env LC_ALL=C eval", "sudo -n eval", "command eval"]) {
+    const source = `${executable} 'printf actual | /usr/bin/tee "${path}"'`;
+    assert.throws(() => crossHostHandoffs([{ ...planBlock(RUNBOOK, "runbook-23"), source }, consumer]), /unknown writer executable form/);
+    assert.throws(() => transferProducts({ ...consumer,
+      source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` }), /unknown writer executable form/);
+  }
+  const data = { ...planBlock(RUNBOOK, "runbook-23"),
+    source: `printf 'eval tee ${path}; $(tee ${path})'\ncat <<'DATA'\neval 'tee ${path}'\nBYTES="$(tee ${path})"\nDATA` };
+  assert.deepEqual(crossHostHandoffs([data, consumer]), []);
+});
+
+test("controls: SSH positional arguments resolve in their outer scope without lending it to a quoted heredoc", () => {
+  const block: Block = { ...planBlock(HM37B, "hm37b-box-open"), step: "symbolic-argv-scope",
+    source: `STAGING_ROOT=/tmp/symbolic-argv\nMAC_LOCAL=/tmp/mac-only\nssh ops@yulan-vps-1 "bash -s -- '$STAGING_ROOT'" <<'BOX'\nROOT="$1"\nprintf actual >"$ROOT/argv.txt"\nprintf actual >"$MAC_LOCAL/hidden.txt"\nBOX` };
+  assert.deepEqual(transferProducts(block).map((product) => product.path), ["/tmp/symbolic-argv/argv.txt", "$MAC_LOCAL/hidden.txt"]);
+  const remoteVariable = { ...block, source: block.source.replace('"bash -s -- \'$STAGING_ROOT\'"', "'bash -s -- \"$STAGING_ROOT\"'") };
+  assert.throws(() => transferProducts(remoteVariable), /unknown transfer form: unresolved SSH positional argv \$STAGING_ROOT/);
+  const expanded = { ...block, source: block.source.replace("<<'BOX'", "<<BOX") };
+  assert.ok(transferProducts(expanded).some((product) => product.path === "/tmp/mac-only/hidden.txt"));
+});
+
+test("controls: whole-block declarations cannot execute or seed plan-only and unused outputs", () => {
+  const entries = nonSubstitutableEntries().filter((entry) => entry.scope === "whole-block");
+  assert.ok(entries.length > 0);
+  for (const entry of entries) {
+    const block = blockIndex().get(entry.step!)!;
+    assert.ok(block);
+    // No fixture or shell prerequisites are provided. Even an execution override
+    // cannot enter an unavailable whole block, and no later reader means no seed.
+    const execution = executeWholeBlock(block, {} as Fixture, { executeDeclared: true });
+    assert.equal(execution.result, "not-executed");
+    assert.equal(execution.status, null);
+    assert.equal(execution.stdout, "");
+    assert.deepEqual(execution.seeded, []);
+    assert.equal((entry.outputs ?? []).some((output) => output.plan_documented), false);
+    assert.ok(entry.receipt_fields?.length && Array.isArray(entry.written_outputs));
+  }
+  const outputs = entries.flatMap((entry) => (entry.outputs ?? []).map((output): EvidenceProduct => ({
+    file: output.file, path: output.path!, mode: output.mode, evidence: output.evidence,
+  })));
+  const selected = consumedEvidenceProducts(outputs, new Set(outputs.map((output) => output.path)));
+  assert.equal(selected.length, outputs.length);
+  for (const output of selected) assert.ok(output.bytes.equals(readFileSync(output.evidence)));
+  assert.deepEqual(consumedEvidenceProducts(outputs, new Set()), []);
+  assert.deepEqual(consumedEvidenceProducts([{ file: "missing.json", path: "/tmp/missing.json", mode: "0600" }], new Set(["/tmp/missing.json"])), []);
 });
 
 test("controls: missing interpreters cannot produce Deno or database observations", () => {

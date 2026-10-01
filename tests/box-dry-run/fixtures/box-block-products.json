@@ -26,14 +26,6 @@
       "mode": "0600"
     }
   ],
-  "hm37-hosted-open-ack-control": [
-    {
-      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-check-control.json",
-      "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-hosted-check-control.json",
-      "owner": "root:root",
-      "mode": "0600"
-    }
-  ],
   "hm37b-live-revoke-readback": [
     {
       "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-revocation-readback.json",
@@ -48,22 +40,6 @@
       "evidence": "docs/evidence/2026-09-29-release-eb2a87ac4b5a/hm37-close-readback.txt",
       "owner": "root:root",
       "mode": "0600"
-    }
-  ],
-  "hm37-hosted-control-cleanup-only": [
-    {
-      "path": "/home/commonswarm/stack/release-proofs/{sha}/hm37-hosted-cleanup-recovery.json",
-      "owner": "root:root",
-      "mode": "0600",
-      "plan_documented": {
-        "evidence": "deploy/release-proofs/item-hm/hm37-open-ack-control.ts",
-        "source_lines": "1130-1133; consumer: docs/evidence/2026-09-29-box-hm37b/BOX-WINDOW.md:755-781",
-        "label": "Synthetic successful cleanup-only output shape for an interrupted journal. No committed recovery output exists; this does not prove hosted cleanup or the aborted control passed. The real dispatcher consumes this at the cleanup producer boundary.",
-        "json": {
-          "ok": true,
-          "mode": "cleanup-only"
-        }
-      }
     }
   ],
   "hm37b-failure-dispatch": [
