@@ -3256,8 +3256,8 @@ function siteFourDeployStatus(fixture: Fixture): string {
 test("all scoped fences and host declarations are executable or explicitly text", (t) => {
   const parsed = SCOPED.flatMap(blocks);
   assert.equal(blocks(PREP).length, 5);
-  assert.equal(blocks(HM37).length, 29);
-  assert.equal(blocks(HM37B).length, 21);
+  assert.equal(blocks(HM37).length, 30);
+  assert.equal(blocks(HM37B).length, 24);
   assert.equal(blocks(RUNBOOK).length, 67);
   assert.equal(blocks(SITE).length, 15);
   assert.equal(blocks(TEMPLATE).length, 3);
@@ -3272,7 +3272,7 @@ test("all scoped fences and host declarations are executable or explicitly text"
     const syntax = spawnSync("/bin/bash", ["-n"], { input: block.source, encoding: "utf8" });
     assert.equal(syntax.status, 0, `${block.file}:${block.line} [${block.step}] ${syntax.stderr}`);
   }
-  t.diagnostic(`blocks=${parsed.length}; prep=5 hm37a=29 hm37b=21 runbook=67 site=15 template=3`);
+  t.diagnostic(`blocks=${parsed.length}; prep=5 hm37a=30 hm37b=24 runbook=67 site=15 template=3`);
 });
 
 test("operator requirements name an executing step or an explicit HezLead decision", () => {
