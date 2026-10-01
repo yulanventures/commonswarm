@@ -14,7 +14,7 @@ const scenarios = {
   boundary: 'admin HTTP credentials stay separate from humans/workers and refuse foreign targets and widened requests',
   lifecycle: 'admin refresh rotates atomically, replay revokes, and revocation fences stored read retries',
   consent: 'admin human consent is CSRF/session-bound, single-use, and full-account must be selected',
-  limits: 'admin refused requests consume durable budgets, retries do not, and recovery survives exhaustion',
+  limits: 'admin issuance and refused requests consume durable hourly allowances, retries do not, and recovery survives exhaustion',
   expiry: 'admin narrowing clips access and refuses expired credentials before lazy expiration while retaining human recovery',
   failure: 'admin rollback produces one failure card, no success event, and a replayable failure receipt',
   storage: 'admin migration preserves RLS, append-only audit, rollback, and account recovery after membership loss',

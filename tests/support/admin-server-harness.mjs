@@ -205,7 +205,11 @@ try {
       };
       check((await http(readWire(grant), token)).status === 200 && gotrue === 0, 'admin never uses GoTrue');
       globalThis.fetch = upstream;
-      check((await http({ ...readWire(grant), resource: 'https://mcp.commonswarm.com/mcp' }, token)).status === 403, 'wrong resource refused');
+      const beforeWrongResource = await count();
+      const wrongResource = await http({ ...readWire(grant), resource: 'https://mcp.commonswarm.com/mcp' }, token);
+      check(wrongResource.status === 400 && wrongResource.body.error === 'invalid_request' && !Object.hasOwn(wrongResource.body, 'grant'), 'wrong resource refused without metadata');
+      const [resourceAudit] = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid ORDER BY seq DESC LIMIT 1`;
+      check(await count() === beforeWrongResource + 1 && resourceAudit.event.type === 'AdminActionRecorded' && resourceAudit.event.payload.outcome === 'refused' && resourceAudit.event.payload.reason_code === 'invalid_request' && resourceAudit.event.payload.related_event_ids.length === 0, 'wrong resource produces only refusal audit');
       check((await http(wire({ ...read.command, workspace_id: id() }), token)).status === 403, 'foreign workspace refused');
       check((await http(wire({ ...read.command, grant_id: id() }), token)).status === 403, 'foreign grant refused');
       check((await http({ ...readWire(grant), command_id: '' }, token)).status === 400, 'invalid command ID audited');
@@ -248,15 +252,34 @@ try {
       const [ended] = await db`SELECT state FROM swarm.admin_grants WHERE grant_id = ${another.grantId}::uuid`;
       check(ended.state === 'revoked', 'uncertain delivery terminally revoked');
     } else if (scenario === 'limits') {
+      const mutationKeys = [`mutation:grant:${grant.grantId}`, `mutation:connection:${grant.manifest.connection_id}`, `mutation:account:${config.owner}`];
+      async function mutationAttempts() {
+        return await db`SELECT bucket_key, attempts FROM swarm.admin_rate_buckets
+          WHERE bucket_key = ANY(${mutationKeys}) AND hour_start = floor(extract(epoch FROM clock_timestamp()) / 3600)::bigint`;
+      }
+      const initial = await mutationAttempts();
+      // Issuance is an authenticated mutation, so it already used one attempt.
+      check(initial.length === mutationKeys.length && initial.every(row => row.attempts === 1), 'credential issuance consumes mutation allowance');
       const beforeRetry = await count();
       check((await http(read, token)).status === 200 && await count() === beforeRetry, 'read retry uncharged');
-      for (let i = 0; i < policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage; i++) {
-        check((await http(wire({ kind: 'unsupported_command' }), token)).status === 403, 'refused mutation charged');
+      check((await mutationAttempts()).every(row => row.attempts === 1), 'read retry preserves mutation allowance');
+      const remaining = policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage - initial[0].attempts;
+      for (let i = 0; i < remaining; i++) {
+        const refused = wire({ kind: 'unsupported_command' });
+        const beforeRefusal = await count();
+        const result = await http(refused, token);
+        check(result.status === 403 && result.body.error === 'human_confirmation_required', 'unsupported mutation refused');
+        const charged = await mutationAttempts();
+        check(charged.length === mutationKeys.length && charged.every(row => row.attempts === i + 2) && await count() === beforeRefusal + 1, 'refused mutation durably charged once');
+        check((await http(refused, token)).status === 403 && await count() === beforeRefusal + 1 && (await mutationAttempts()).every(row => row.attempts === i + 2), 'refused mutation retry uncharged');
       }
-      check((await http(wire({ kind: 'unsupported_command' }), token)).status === 429, 'malformed mutation allowance exhausted');
+      const exhausted = await http(wire({ kind: 'unsupported_command' }), token);
+      check(exhausted.status === 429 && exhausted.body.error === 'rate_limited', 'malformed mutation allowance exhausted');
+      check((await mutationAttempts()).every(row => row.attempts === policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage + 1), 'exhausted refusal still charged');
       check((await http(wire({ kind: 'surrender_admin_delegation', grant_id: grant.grantId, reason_code: 'surrendered' }), token)).status === 200, 'surrender survives exhausted allowance');
+      check((await mutationAttempts()).every(row => row.attempts === policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage + 1), 'surrender preserves exhausted allowance');
       const [audit] = await db`SELECT count(*)::integer AS n FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid AND event->>'type' = 'AdminActionRecorded' AND event->'payload'->>'outcome' = 'refused'`;
-      check(audit.n >= policy.ADMIN_MUTATION_RATE_PER_HOUR.lineage, 'refusals have durable human audit');
+      check(audit.n === remaining + 1, 'every refusal has one durable human audit');
     } else throw new Error('unknown scenario');
     const events = await db`SELECT event FROM swarm.admin_events WHERE owner_user_id = ${config.owner}::uuid`;
     const material = JSON.stringify(events);
