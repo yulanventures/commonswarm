@@ -82,6 +82,8 @@ Supabase (Postgres + Auth + Storage) with Edge Functions fronting a `handle_comm
 - **Workspace stream**: membership, invitations, devices, agent principals, GitHub installations, workspace messages, workspace-scoped (non-repo) tasks.
 - **Repo stream** (per repository): repo-scoped tasks, leases, repo messages, evidence.
 
+Proposed exception: [Delegated admin (proposed 2026-10-01)](#delegated-admin-proposed-2026-10-01) adds an account stream and a distinct credential class for explicitly delegated routine administration; ordinary worker and coordinator restrictions remain.
+
 Command flow: Edge Function authenticates the credential, derives the principal server-side, and invokes the command function (pinned `search_path`, minimal privileges), which — in one transaction on server time — rechecks membership/scope, validates the transition, appends canonical events, updates projections, and commits. Authority tables live in a private schema with CRUD revoked from `anon`/`authenticated`; RLS governs explicitly exposed human READ views only.
 
 **Client-supplied identifiers are never trusted (Kimi #9).** The command function validates EVERY client-supplied identifier (workspace, repo, principal, run, device, recipient, task) against the server-derived principal's tenancy in the same transaction; a request whose derived principal is not a current member of the referenced workspace/repo is rejected before any state read. Actor identity (`actor_user`, `actor_agent_principal`, `actor_run`, `device`) is stamped from the authenticated credential, never from request fields.
@@ -127,6 +129,78 @@ Tables: `users`, `devices`, `memberships`, `workspaces`, `invitations`, `agent_p
 - **`SWARM_SERVICE_TOKEN` (CI):** subject to the same scope axes, the agent-token denylist above, a stated TTL, and a rotation procedure — it is a scoped automation credential, never a stand-in for a human refresh token (Kimi #8).
 - **Coordinator capability (§2.10):** the per-human manager agent gets a distinct **read-mostly** credential class — human- and run-bound, short-lived, revocation-checked-every-command. It may read permitted fleet metadata, send messages, and place/override reservations; it may **not** submit, close, take over a lease, issue grants, mint worker tokens, or land code. This keeps a coordinator's fleet-wide visibility from becoming fleet-wide authority: a stolen coordinator token exposes coordination, not the ability to close tasks or land code.
 - **GitHub App:** selected repos; Metadata:r, Contents:r, Pull requests:r, Checks:r; writes only with a named future gate. Webhooks: **SHA-256 HMAC verified (`X-Hub-Signature-256`) with constant-time comparison**, delivery-id deduped with a retention window exceeding GitHub's redelivery window (replay defense), install-suspend/remove handled, **repository or installation TRANSFER treated as an unmap event** (Kimi #12, #18), repo-id→workspace validated. Installation tokens are server-side, 1h.
+
+### Delegated admin (proposed 2026-10-01)
+
+**Status: proposal for HezLead's independent review and Tom's confirmation; no implementation or live behavior is claimed.**
+The [agent administration grant contract](2026-10-01-AGENT-ADMIN-GRANT-CONTRACT.md) supplies the proposed scope registry, payloads, and concrete policy constants.
+Implementation requires approval and landing of both proposals. This is a narrow proposed exception to the human-only routine administration rules in §2.3; it does not relax the agent-token denylist or confer administration on a worker, coordinator, service token, or hosted MCP seat.
+
+**Credential and consent.** Introduce `delegated_admin`, a server-derived account identity for a named runtime connection acting under a person's durable PostgreSQL grant.
+It is neither a human session nor a workspace worker. Its proposed exact OAuth resource audience is `https://api.commonswarm.com/admin`, distinct from the hosted MCP resource `https://mcp.commonswarm.com/mcp`.
+The current MCP provider does not accept the new audience; explicit separate admin consent, resource validation, and an admin endpoint are required.
+Worker and MCP endpoints reject admin credentials; the admin endpoint rejects ordinary workers, hosted handles, MCP credentials, and human refresh credentials.
+An internal adapter retains the delegated actor through the decision core and never impersonates a human or forwards the admin bearer into human authentication.
+Access and rotating refresh credentials stay in a protected runtime credential store, with opaque refresh values hashed at rest; the model receives only an opaque non-bearer connection handle.
+No credential material enters prompts, tool text, events, signals, or audit records.
+
+**Granular is the default.** Begin with selected workspace IDs, administration-metadata read, and no mutation scopes.
+The person selects routine operations, permitted targets/recipients, role and worker-scope ceilings, issuance/renewal budgets, and expiry.
+Workspace creation is a separate permission, off by default. Creation atomically associates only the expressly approved new-space operations; unrelated future spaces inherit nothing.
+Each action intersects the grant with the person's current membership and role. Target rules cover named own seats or grant-created seats, invitation recipients, transports, and credential recipients.
+Shared-space administration needs explicit coverage and the person's current workspace role; another person's private spaces or agents require that person's independent consent.
+
+**Full-account is an explicit option.** A fresh trusted human session must select it and confirm a CSRF-protected, single-use summary bound to the exact manifest digest, named connection/client, pinned registry version, deadlines, operations, limits, and covered spaces.
+It covers existing and future spaces owned by the granting person; shared spaces owned by others still need explicit selection and current rights.
+It includes the routine registry at the confirmed version, with workspace creation separately listed. New registry operations, wider scopes, or higher approved limits require new human consent; there is no future-expanding wildcard.
+The summary explains resulting content access through provisioned workers and their dependency on the grant.
+The admin endpoint itself reads only administration metadata, not messages, files, wiki contents, exports, billing credentials, or external service credentials. Metadata-only admin reads do not isolate workspace content: provisioned workers have existing member visibility under §2.3/§4.
+Durable indicators in account settings and covered spaces show permission, expiry, actual grant state, and a view-actions/revoke control, even while the agent is offline.
+
+**Timeboxed first release (proposed default, pending Tom's confirmation).** Both modes default to thirty days, accept an earlier positive expiry, and cannot exceed thirty days or the initial refresh deadline.
+Admin access lasts at most five minutes and is clipped to grant expiry. Refresh lasts at most thirty days from initial issuance, rotates atomically, preserves or narrows scope, and never slides the deadline.
+Refresh replay revokes the entire admin lineage. Revocation is durable and terminal; suspended or expired grants require fresh human consent and a new lineage.
+Replacement atomically ends the prior grant. The proposed contract's finite creation, invitation, credential, connection-attempt, and renewal budgets apply in both modes, along with account/workspace resource ceilings and persistent rate limits.
+Missing bounds or counter state refuse activation or the affected operation. Rotation and retries do not reset budgets; idempotent retries return the recorded result without another charge or event.
+There is no standing admin grant in this proposal. Existing standing worker grants retain their device binding and human-only idle-pause recovery; delegated maintenance cannot widen their policy and ends with the admin grant.
+
+**Account stream and deterministic reducer.** Add an account stream keyed by the granting `owner_user_id`, available before any workspace exists and after a workspace is archived or membership ends.
+This is an explicit third stream class alongside §2.1 workspace/repo streams. Account grant, consent, credential lineage, counters, audit, and connection-attempt state are durable PostgreSQL projections rebuilt by pure decision functions and reducers.
+Use a new account envelope variant with `stream_kind=account` and `owner_user_id` instead of mandatory `workspace_id`; retain `stream_id`, monotonic `seq`, event/command IDs, schema version, server time, actor fields, and payload.
+Both account and workspace delegated events carry server-derived `admin_identity_id`, `grant_id`, and `grant_manifest_digest`; an admin is never recorded as a worker principal or human actor.
+Do not create a synthetic workspace to host the account grant or its revoke controls. Grant/credential records and account audit are private to the person and authorized account recovery staff; workspace owners see only relevant workspace actions and recipients only their own progress.
+
+Every delegated state change goes through the transactional command path: authenticate, lock grant/account and affected streams, recheck current rights/targets/ancestry/deadlines, charge durable limits, decide, append canonical events, reduce projections, record audit/idempotency, and commit.
+The pure core enforces the same restrictions as the adapter. Reads check the grant before reading and record filtered metadata access through an audited transaction.
+Cross-stream effects commit atomically with deterministic lock ordering. Workspace target events remain reducer-complete; an admin summary cannot replace them.
+
+| Proposed reducer commands | Proposed canonical events |
+|---|---|
+| Human-only `grant_admin_delegation`, `narrow_admin_delegation`, `revoke_admin_delegation`, `withdraw_admin_workspace_access`; security-system suspension/revocation; system `expire_admin_delegation`; presenting admin `surrender_admin_delegation` for its exact grant only | `AdminDelegationGranted`, `AdminDelegationNarrowed`, `AdminDelegationRevoked`, `AdminDelegationSuspended`, `AdminDelegationExpired`, `AdminWorkspaceAccessWithdrawn` |
+| `issue_admin_credential`, `rotate_admin_credential`, `record_admin_credential_replay`, bound to an approved grant and trusted credential runtime; issuance never creates a grant | `AdminCredentialIssued`, `AdminCredentialRotated`, `AdminCredentialReplayDetected` plus `AdminDelegationRevoked` on replay |
+| `admin_read_metadata`, `admin_create_workspace`, `admin_archive_workspace` | `AdminMetadataRead`, `AdminWorkspaceCreated` plus reducer-complete workspace creation, `AdminWorkspaceArchived` |
+| `admin_create_seat`, `admin_provision_seat`, `admin_replace_undelivered_seat_credential`, `admin_renew_seat`, `admin_set_seat_model`, `admin_enable_seat_management`, `admin_recover_seat_session`, `admin_revoke_seat`, `admin_revoke_seat_credential` | `AdminSeatCreated`, `AdminSeatProvisioned`, `AdminSeatCredentialReplaced`, `AdminSeatRenewed`, `AdminSeatModelSet`, `AdminSeatManagementEnabled`, `AdminSeatSessionRecovered`, `AdminSeatRevoked`, `AdminSeatCredentialRevoked` |
+| `admin_invite_member`, `admin_issue_agent_invitation`, `admin_revoke_invitation`, `admin_revoke_agent_invitation`, authenticated-recipient redemption, `admin_remove_member`, `admin_change_member_role` | `AdminMemberInvited`, `AdminAgentInvitationIssued`, `AdminInvitationRevoked`, `AdminInvitationRedeemed`, `AdminMemberRemoved`, `AdminMemberRoleChanged` |
+| `admin_prepare_connection`, recipient-bound `redeem_agent_connection`, recipient-proof-bound `record_agent_connection_progress`, `admin_cancel_connection` | `AdminConnectionPrepared`, `AdminConnectionRedeemed`, `AdminConnectionProgressed`, `AdminConnectionCancelled` |
+
+Successful state changes append their domain/target events and `AdminActionRecorded` atomically. No-ops and identifiable refusals record only the action outcome; unknown credentials go to security audit without resolving private targets.
+Failed transactions emit no success event and retain a separate failure audit. Account lifecycle outcomes use the account stream; workspace effects retain workspace events and linked account attribution in the same transaction.
+Action records carry action, target, outcome (`accepted`, `refused`, `pending`, `failed`), reason, related event IDs, and safe next/recovery steps. They exclude secrets, token digests, content bodies, and private sign-in data.
+Connection progress is a durable attempt; configured or connected status requires measured recipient identity, inbox check, and setup acknowledgment, not an agent-authored claim or roster row. Raw credentials are delivered separately from replayable command results.
+
+**Fail closed on every read, command, refresh, child call, and queued execution.** Recheck active grant, current rights, exact audience, scope/target ceilings, deadline, and lineage tombstones inside the transaction; never fall back to cached roles or human authentication.
+Locking orders competing revoke/action outcomes: a revoke committed first prevents the action, while a previously committed action remains history. Expiry applies immediately even before its event is materialized.
+Grant-provisioned workers, hosted access, and renewal successors retain `parent_admin_grant_id`; revoke, expiry, or suspension stops all dependent access, cancels pending attempts, and invalidates unredeemed invitations/attempt credentials.
+Replacement cannot detach descendants or clear tombstones. Pre-existing independently human-granted memberships/worker lineages are not descendants merely because the admin managed them.
+After grant termination, continued child access requires fresh human permission and a new lineage. Already disclosed data cannot be recalled.
+Member removal/demotion must resolve all affected repository landing-authority dependencies in the same transaction; refuse `landing_authority_unresolved` and ask for a human transfer if unresolved. This grant supplies no landing-authority transfer permission.
+Account revoke/narrow/recovery, workspace withdrawal, and exact-grant surrender remain usable without the agent, a live workspace, or spare admin rate/budget allowance.
+
+**Human confirmation for each protected action.** Neither mode permits ownership transfer, owner addition/removal, permanent workspace/account deletion, creation of another admin grant, expansion of this grant, disabling managed-session protection, changing human sign-in/recovery, lifting a worker idle pause, inviting/promoting a workspace admin, accepting an invitation/vendor authorization as another person, or cross-person private access on standing consent alone.
+The affected person must confirm each such action; full-account activation is not that confirmation. First release keeps protected execution on a fresh human-only path and returns `human_confirmation_required` with a safe next step to the admin requester.
+Any future assisted execution needs a single-use approval bound to exact action, target, change, and expiry, consumed in the same transaction; it grants no continuing scope.
+Delegation also grants no capability-URL minting, trusted-content acceptance, close/review grants, repository mapping/landing-authority transfer, code landing, or infrastructure apply permission; the existing human gates in §2.3/§2.10/§2.12 still apply.
+No confirmation overrides another person's refusal, the last-owner invariant, or a prohibited product operation. Ordinary worker exact-token surrender and coordinator confinement remain unchanged.
 
 ### 2.4 Claims, dispositions, evidence
 
