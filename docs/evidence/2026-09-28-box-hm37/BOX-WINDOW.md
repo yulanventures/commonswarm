@@ -2741,7 +2741,10 @@ BASH
   CHECK=migration-04-ledger
   test "$(release_psql_ro -Atq --command "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version='20260928000004';")" = 1
   CHECK=migration-04-catalog
-  test "$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-catalog.sql")" = t
+  # The catalog proof saves catalog_ok with \gset and prints nothing; emit it explicitly (host psql, host path).
+  CATALOG_04="$(printf '\\i %s\nSELECT :%s::boolean;\n' "$PROOF_DIR/20260928000004-catalog.sql" "'catalog_ok'" \
+    | release_psql_ro -Atq --file -)"
+  test "$CATALOG_04" = t || { echo "FAIL hm37a-close-resume-state: migration 04 catalog is not t" >&2; exit 1; }
   CHECK=migration-04-functional
   test "$(release_psql_ro -Atq --file "$PROOF_DIR/20260928000004-functional.sql")" = t
   CHECK=prep-revoked-and-zero-active-tokens
