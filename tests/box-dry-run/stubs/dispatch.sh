@@ -35,6 +35,16 @@ userland() {
   /usr/bin/python3 "${BOX_DRY_RUN_USERLAND:?box userland required}" "$@"
 }
 
+# Path-valued metadata is compared inside the projected box shell. Use the
+# same mapping as its script and sourced inputs; SSH strips it on the way out.
+path_readback() {
+  if [ "${BOX_DRY_RUN_IN_REMOTE:-}" = 1 ] && [ "${BOX_DRY_RUN_PART:-mac}" = mac ]; then
+    printf '%s\n' "$1" | userland rewrite
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
 # ssh runs the remote command string the way sshd does: one shell, the joined arguments as its command line,
 # ssh's standard input as the command's standard input. The command string and standard input are text
 # bound for the box, so their box paths are mapped into the fixture box root; the output is shown back with
@@ -528,12 +538,12 @@ case "$name" in
           *Mounts*) printf '%s\n' "${BOX_DRY_RUN_EDGE_MOUNTS:?edge mounts required}" ;;
           *working_dir*)
         case "$target" in
-          dry-run-oauth) printf '%s\n' "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
+          dry-run-oauth) path_readback "${BOX_DRY_RUN_OAUTH_WORKDIR:?OAuth workdir required}" ;;
           *)
             if [ -f "$stub_state_dir/docker/edge-runtime-up" ]; then
-              printf '%s\n' "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}/deploy/edge-runtime"
+              path_readback "${BOX_DRY_RUN_CANDIDATE_EDGE:?candidate edge required}/deploy/edge-runtime"
             else
-              printf '%s\n' "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}"
+              path_readback "${BOX_DRY_RUN_EDGE_WORKDIR:?edge workdir required}"
             fi
             ;;
         esac

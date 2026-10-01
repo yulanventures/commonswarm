@@ -24,7 +24,7 @@ import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
-import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, blockPathReferences, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
+import { crossHostHandoffs, transferProducts, macBoundaryOperations, capturedMacProductPaths, capturedMacProducts, localCopyProducts, blockPathReferences, type Handoff, type TransferProduct } from "./box-dry-run/handoffs.js";
 import { consumedEvidenceProducts, type EvidenceProduct } from "./box-dry-run/evidence-products.js";
 import { createTemporary as mkdtempSync, removeTemporary, withTemporarySetup } from "./box-dry-run/temporary.js";
 
@@ -1089,15 +1089,43 @@ function sourceLineAt(block: Block, offset: number): number {
   return block.line + block.source.slice(0, offset).split("\n").length;
 }
 
-function matchingProducer(resource: string, earlier: Block[]): boolean {
+function logicalLineAt(source: string, offset: number): { source: string; start: number } {
+  let start = source.lastIndexOf("\n", offset) + 1;
+  while (start > 0) {
+    const previous = source.lastIndexOf("\n", start - 2) + 1;
+    if (!source.slice(previous, start - 1).trimEnd().endsWith("\\")) break;
+    start = previous;
+  }
+  let end = source.indexOf("\n", offset);
+  if (end < 0) end = source.length;
+  while (end < source.length && source.slice(start, end).trimEnd().endsWith("\\")) {
+    const next = source.indexOf("\n", end + 1);
+    end = next < 0 ? source.length : next;
+  }
+  return { source: source.slice(start, end), start };
+}
+
+function matchingProducer(resource: string, earlier: Block[], namedInputs = new Set<string>()): boolean {
   if (resource === "exact-SHA clean release checkout") {
     return earlier.some((block) => /git (?:clone|worktree add)/.test(block.source));
   }
   const leaf = resource.replace(/^.*\//, "").replace(/^\$[A-Z_]+/, "");
   if (!leaf) return false;
-  return earlier.some((block) => block.source.split("\n").some((line) =>
-    line.includes(leaf) && /(?:>|install|mkdir|cp|scp|write|printf|touch)/.test(line),
-  ));
+  return earlier.some((block, blockIndex) => block.source.split("\n").some((line, lineIndex, lines) => {
+    if (!line.includes(leaf)) return false;
+    const logical = logicalLineAt(block.source, lines.slice(0, lineIndex).join("\n").length + (lineIndex ? 1 : 0));
+    const copies = localCopyProducts({ ...block, source: logical.source });
+    if (copies.length) {
+      const before = [...earlier.slice(0, blockIndex), { ...block, source: block.source.slice(0, logical.start) }];
+      const variables = resolvedPathVariables(before);
+      const normalize = (path: string): string => path.replace(/\$\{([A-Z][A-Z0-9_]*)\}|\$([A-Z][A-Z0-9_]*)/g,
+        (whole, braced, plain) => variables.get(braced ?? plain) ?? `$${braced ?? plain}`);
+      return copies.some((copy) => normalize(copy.path) === normalize(resource) &&
+        (namedInputs.has(/^\$\{?([A-Z][A-Z0-9_]*)\}?$/.exec(copy.source)?.[1] ?? "") ||
+          measuredPathPreseed(copy.source, before) || matchingProducer(copy.source, before, namedInputs)));
+    }
+    return /(?:>|install|mkdir|scp|write|printf|touch)/.test(line);
+  }));
 }
 
 function pathExpressionAt(source: string, offset: number, leaf: string): string {
@@ -1152,7 +1180,7 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
   const namedPromptInputs = new Set(promptInputsForBlocks(planBlocks).map((item) => item.name));
   const add = (block: Block, what: string, offset: number, earlier: Block[]): void => {
     const sameBlockPrefix: Block = { ...block, source: block.source.slice(0, offset) };
-    if (matchingProducer(what, [...earlier, sameBlockPrefix])) return;
+    if (matchingProducer(pathExpressionAt(block.source, offset, what), [...earlier, sameBlockPrefix], namedPromptInputs)) return;
     if (measuredPathPreseed(pathExpressionAt(block.source, offset, what), [...earlier, sameBlockPrefix])) return;
     const key = `${block.file}:${shortStep(block)}:${what}`;
     if (seen.has(key)) return;
@@ -1173,9 +1201,15 @@ function discoverUnproducedReads(planBlocks: Block[]): UnproducedRead[] {
       if (shortStep(block) === "hm37-source-identity") continue;
       if (/^\$(?:CONTROL_ROOT|INPUT_ROOT)\//.test(match[0])) continue;
       const before = block.source.slice(0, match.index);
-      const currentLine = block.source.slice(block.source.lastIndexOf("\n", match.index) + 1, block.source.indexOf("\n", match.index));
+      const currentLine = logicalLineAt(block.source, match.index!).source;
       if (/^\s*[a-z][a-z0-9_]*\s*=\s*['"]/.test(currentLine)) continue;
+      // A relative filename embedded in a multiword label is data, not a
+      // resource path. Absolute/symbolic path assignments remain checked.
+      if (/^\s*[A-Z][A-Z0-9_]*="(?![/$])[^"`]*[ \t][^"`]*"\s*$/.test(currentLine) &&
+          !currentLine.includes("$(")) continue;
       if (/\btest\s+!\s+-[efLd]\b/.test(currentLine)) continue;
+      if (localCopyProducts({ ...block, source: currentLine }).some((copy) =>
+        copy.path === pathExpressionAt(block.source, match.index!, match[0]))) continue;
       if (/>/.test(currentLine.slice(0, currentLine.indexOf(match[0])))) continue;
       if (match[0].endsWith("human-session.json") && /open\(output, "wx"/.test(before)) continue;
       add(block, match[0], match.index!, earlier);
@@ -2712,6 +2746,45 @@ function shellWord(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
+// Validate the captured writer's input contract without inventing its stdout.
+// Its literal calculations and printf fields run only after the SSH producer
+// returns successfully. Static coverage describes SYNTHETICINPUT, not a receipt.
+function macCapturedWriterContract(block: Block, path: string): string {
+  const product = capturedMacProducts(block).find((product) => product.path === path);
+  assert.ok(product, `missing captured Mac producer for ${path}`);
+  const capture = product.producer.capture;
+  if (!capture?.localStateSource) return "# SYNTHETICINPUT Mac SSH stdout contract\n" + product.producer.command;
+  const source = capture.localStateSource;
+  const assignments = new Map([...source.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(.+)$/gm)]
+    .map((match) => [match[1]!, match[2]!]));
+  const prompts = new Set(promptInputs(block.file).map((input) => input.name));
+  const resolveInput = (name: string, seen = new Set<string>()): string | undefined => {
+    if (prompts.has(name) || name === "HOME") return name;
+    if (seen.has(name)) return undefined;
+    seen.add(name);
+    const assignment = assignments.get(name);
+    if (!assignment) return undefined;
+    const read = /^\$\(printf '%s\\n' "\$([A-Za-z_][A-Za-z0-9_]*)" \| sed -n 's\/\^([A-Z][A-Z0-9_]*)=\/\/p'\)$/.exec(assignment);
+    if (read) return read[1] === capture.name ? read[2] : undefined;
+    const transform = /^\$\(printf '%s' "\$([A-Za-z_][A-Za-z0-9_]*)" \| tr -d ':-'\)$/.exec(assignment);
+    if (transform) return resolveInput(transform[1]!, seen) ? name : undefined;
+    if (/^"[^"`]*"$/.test(assignment) && !assignment.includes("$(")) {
+      const refs = [...assignment.matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g)];
+      if (refs.length && refs.every((ref) => resolveInput(ref[1] ?? ref[2]!, new Set(seen)))) return name;
+    }
+    return undefined;
+  };
+  const fields = [...source.matchAll(/printf '([^'\n]*%q[^'\n]*)'([^\n]*)/g)];
+  assert.ok(fields.length, `captured Mac writer has no input fields for ${path}`);
+  for (const field of fields) {
+    const name = /^([A-Z][A-Z0-9_]*)=%q\\n$/.exec(field[1]!)?.[1];
+    const argument = /^\s+"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))"\s*$/.exec(field[2]!);
+    assert.ok(name && argument, `unmodeled captured Mac input field: ${field[1]}`);
+    assert.equal(resolveInput(argument[1] ?? argument[2]!), name, `unmodeled captured Mac input field: ${name}`);
+  }
+  return "# SYNTHETICINPUT Mac captured writer contract; no observation or receipt\n" + source;
+}
+
 function macLocalExecution(block: Block, fixture: Fixture, source: string): Execution {
   assert.ok(fixture.macLocalRoot, "Mac-local products require their own private root");
   const token = "@@MAC_LOCAL_ROOT@@";
@@ -2903,6 +2976,7 @@ function modelMacProducer(block: Block, fixture: Fixture): Execution | undefined
     stdout += execution.stdout;
     if ("remote" in operation && operation.remote.capture?.localStateSource) {
       const capture = operation.remote.capture;
+      for (const path of capturedMacProductPaths(block)) macCapturedWriterContract(block, path);
       const produced = macLocalExecution(block, fixture,
         shellAssignments({ [capture.name]: execution.stdout.replace(/\n+$/, "") }) + capture.localStateSource);
       if (produced.result === "failed") return produced;
@@ -4359,17 +4433,39 @@ test("controls: a window A copy without its GO producer reports GO.txt as UNPROD
   const report = discoverUnproducedReads(withoutGo);
   assert.ok(report.some((read) => read.what.endsWith("GO.txt")),
     `GO.txt was not reported:\n${report.map((read) => read.what).join("\n")}`);
+  const copy = planBlock(HM37B, "hm37b-hosted-auth-dependency-preflight");
+  const writer = '  cp "$HUMAN_SESSION_SOURCE" "$SECRET_ROOT/human-session.json"';
+  assert.ok(copy.source.includes(writer));
+  const sessionReads = (source: string): UnproducedRead[] => discoverUnproducedReads([{ ...copy, source }])
+    .filter((read) => read.what.endsWith("human-session.json"));
+  assert.deepEqual(sessionReads(copy.source), [], "the protected copy's destination was treated as a read");
+  for (const changed of [
+    copy.source.replace(writer, ""),
+    copy.source.replace(writer, writer.replace("$SECRET_ROOT/", "$OTHER_ROOT/")),
+    copy.source.replace(writer, writer.replace("$HUMAN_SESSION_SOURCE", "$UNDECLARED_SOURCE")),
+    copy.source.replace(writer + '\n  chmod 0600 "$SECRET_ROOT/human-session.json"',
+      '  chmod 0600 "$SECRET_ROOT/human-session.json"\n' + writer),
+  ]) assert.ok(sessionReads(changed).length, "a missing, unrelated, or late copy borrowed producer coverage");
+  assert.deepEqual(sessionReads(copy.source.replace(writer,
+    '  /bin/cp -- "$HUMAN_SESSION_SOURCE" \\\n    "$SECRET_ROOT/human-session.json"')), [], "a qualified continued copy lost its producer");
 });
 
 test("controls: a measured basename under a different directory remains UNPRODUCED", () => {
   const unmeasured = "/home/commonswarm/edge/releases/not-the-measured-release";
-  const report = discoverUnproducedReads([{
+  const block: Block = {
     file: HM37, step: "synthetic-unmeasured-path",
     marker: "yes", host: "box /bin/bash 5.2 as root", line: 1,
     source: `OTHER_EDGE='${unmeasured}'\ntest -f "$OTHER_EDGE/deploy/edge-runtime/compose.override.yaml"\n`,
-  }]);
+  };
+  assert.deepEqual(discoverUnproducedReads([{ ...block,
+    source: 'LABEL="deploy/edge-runtime/compose.override.yaml sha256=fixture accepted file"\n' }]), [],
+  "a relative filename inside a label became a file read");
+  const report = discoverUnproducedReads([block]);
   assert.ok(report.some((read) => read.what === "compose.override.yaml"),
     `unmeasured compose override was accepted:\n${report.map((read) => read.what).join("\n")}`);
+  assert.ok(discoverUnproducedReads([{ ...block,
+    source: `MISSING="${unmeasured}/deploy/edge-runtime/compose.override.yaml"\ntest -f "$MISSING"\n`,
+  }]).some((read) => read.what === "compose.override.yaml"), "a path assignment borrowed the label exemption");
 });
 
 test("controls: runbook-03 with a literal <sha> window.env path fails the runbook-03 check", () => {
@@ -6277,8 +6373,11 @@ function assertHandoffCoverage(inventory: Handoff[], fixtures: Map<string, Produ
       assert.ok(product, `Mac mode has no transfer for handoff ${label}`);
       assert.match(product.mode, /^0[0-7]{3}$/, `box mode has no exact mode for handoff ${label}`);
       assert.match(product.owner, /^(?:root:root|ops:ops|commonswarm:commonswarm)$/, `box mode has no owner for handoff ${label}`);
-      if (!product.remote && !capturedMacProductPaths(handoff.producer).includes(product.source)) {
-        assert.ok(macProductContent(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!).length,
+      if (!product.remote) {
+        const content = capturedMacProductPaths(handoff.producer).includes(product.source)
+          ? macCapturedWriterContract(handoff.producer as Block, product.source)
+          : macProductContent(product, handoff.producer as Block, fixtures.get(handoff.producer.file)!);
+        assert.ok(content.length,
           `box mode has no producer bytes for handoff ${label}`);
       } else if (product.remote) {
         assert.ok(macBoundaryOperations(handoff.producer).some((op) => "remote" in op), `box mode has no executable remote producer for ${label}`);
@@ -6498,6 +6597,16 @@ test("controls: the Mac site writer derives pin argv from captured clock bytes",
   const capture = macBoundaryOperations(open).flatMap((operation) =>
     "remote" in operation && operation.remote.capture?.localStateSource ? [operation.remote.capture] : []).at(0);
   assert.ok(capture, "the boundary dropped the Mac clock capture and its local writer");
+  const path = "$HOME/.commonswarm-site-window.env";
+  assert.ok(capturedMacProductPaths(open).includes(path), "the clock writer's retained state is missing");
+  assert.match(macCapturedWriterContract(open, path), /^# SYNTHETICINPUT/);
+  for (const source of [
+    open.source.replace('  } >"$SITE_WINDOW_FILE"', '  } >/dev/null'),
+    open.source.replace("printf 'SITE_EVIDENCE=%q\\n' \"$SITE_EVIDENCE\"", "printf 'UNKNOWN=%q\\n' \"$UNKNOWN\""),
+    open.source.replace("printf 'SITE_EVIDENCE=%q\\n' \"$SITE_EVIDENCE\"", "printf 'UNKNOWN=%q\\n' \"${UNKNOWN}\""),
+    open.source.replace("printf 'SITE_EVIDENCE=%q\\n' \"$SITE_EVIDENCE\"", "printf 'UNKNOWN=%q\\n' \"$(printf invented)\""),
+  ]) assert.throws(() => macCapturedWriterContract({ ...open, source }, path),
+    /missing captured Mac producer|unmodeled captured Mac input field/);
   const temporary = mkdtempSync(join(realpathSync(tmpdir()), "commonswarm-box-dry-run-h21-mac-writer-"));
   const home = join(temporary, "home");
   mkdirSync(home, { mode: 0o700 });
@@ -6710,6 +6819,9 @@ test("controls: opaque writer executables cannot silently omit cross-host produc
   const consumer: Block = { ...planBlock(RUNBOOK, "runbook-11"), source: `cat "${path}"` };
   const positive = crossHostHandoffs([producer, consumer]);
   assert.deepEqual(positive.map((item) => [item.path, item.producer, item.consumer]), [[path, producer, consumer]]);
+  const digest = { ...producer, source: `printf filenames | xargs -0 /usr/bin/sha256sum >"${path}"` };
+  assert.deepEqual(crossHostHandoffs([digest, consumer]).map((item) => [item.path, item.producer]), [[path, digest]],
+    "a known read-only filename-list command lost its stdout writer");
   for (const executable of ["$T", '"${T}"', "env LC_ALL=C $T", "sudo -n $T", "command $T",
     "$(echo /usr/bin/tee)", "`echo /usr/bin/tee`", "tee$EMPTY", "eval$EMPTY",
     "env LC_ALL=C $(echo /usr/bin/tee)", "sudo -n tee$EMPTY"]) {
@@ -6720,7 +6832,8 @@ test("controls: opaque writer executables cannot silently omit cross-host produc
     assert.throws(() => crossHostHandoffs([remote, { ...producer, source: `cat "${path}"` }]), /unknown writer executable form/);
     assert.throws(() => transferProducts(remote), /unknown writer executable form/);
   }
-  for (const wrapper of ["nice", "/usr/bin/nice -n 1", "nohup", "timeout 1", "stdbuf -oL", "ionice", "setsid", "chrt 1"]) {
+  for (const wrapper of ["nice", "/usr/bin/nice -n 1", "nohup", "timeout 1", "stdbuf -oL", "ionice", "setsid", "chrt 1",
+    "xargs", "/usr/bin/xargs", "time", "/usr/bin/time"]) {
     const source = `printf actual | ${wrapper} /usr/bin/tee "${path}"`;
     const remote = { ...consumer, source: `ssh ops@yulan-vps-1 'bash -s' <<'BOX'\n${source}\nBOX` };
     assert.throws(() => crossHostHandoffs([{ ...producer, source }, consumer]), /unknown writer executable wrapper/);
@@ -7069,7 +7182,8 @@ ssh ops@100.115.66.74 'sudo -n -i /bin/bash -s -- file-argument' <"$SCRIPT"` };
   // refusing with the producer identity prevents a remote-only success shape.
   for (const sink of ["tee", "/usr/bin/tee", '"/usr/bin/tee"', "/usr/bin/t\\ee",
     "LC_ALL=C /usr/bin/tee", "sudo -n /usr/bin/tee", "env LC_ALL=C /usr/bin/tee",
-    "command /usr/bin/tee", "exec /usr/bin/tee", "cat >"]) {
+    "command /usr/bin/tee", "exec /usr/bin/tee", "cat >", "xargs /usr/bin/tee", "/usr/bin/xargs /usr/bin/tee",
+    "time /usr/bin/tee", "/usr/bin/time /usr/bin/tee"]) {
     for (const tail of [`| ${sink} /tmp/ssh-pipe-product`,
       `|& ${sink} /tmp/ssh-pipe-product`,
       `| ${sink} /tmp/ssh-pipe-product >/tmp/pipe-stdout`,
@@ -7345,6 +7459,23 @@ test("controls: the OAuth database host line comes only from a measured fact", (
     const positive = run("{{.Image}}");
     assert.equal(positive.status, 0, String(positive.stderr));
     assert.equal(positive.stdout, `${OAUTH_IMAGE_EVIDENCE.local_image_id}\n`);
+    const measuredWorkdir = measuredProductionMatch(/oauth_workdir=([^\n]+)/);
+    const projected = { BOX_DRY_RUN_PART: "mac", BOX_DRY_RUN_IN_REMOTE: "1", BOX_DRY_RUN_BOX_ROOT: temporary,
+      BOX_DRY_RUN_USERLAND: USERLAND, BOX_DRY_RUN_OAUTH_WORKDIR: measuredWorkdir };
+    const labelFormat = '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}';
+    const label = run(labelFormat, projected);
+    assert.equal(label.status, 0, String(label.stderr));
+    assert.equal(label.stdout, `${join(temporary, measuredWorkdir)}\n`, "label and plan used different path namespaces");
+    const changedLabel = run(labelFormat, { ...projected, BOX_DRY_RUN_OAUTH_WORKDIR: measuredWorkdir + "-changed" });
+    assert.equal(changedLabel.status, 0, String(changedLabel.stderr));
+    assert.equal(changedLabel.stdout, `${join(temporary, measuredWorkdir + "-changed")}\n`);
+    assert.notEqual(changedLabel.stdout, label.stdout, "path projection hid a changed workdir");
+    const containerRead = spawnSync(join(bin, "docker"), ["exec", "dry-run-oauth", "node", "-e",
+      'process.exit(process.env.MCP_OAUTH_PUBLIC_AUTHORIZATION_ENABLED === "1" ? 1 : 0)'],
+    { encoding: "utf8", env: { ...env, ...projected }, timeout: 10_000 });
+    assert.equal(containerRead.status, 69, String(containerRead.stderr));
+    assert.match(String(containerRead.stderr), /^UNPRODUCED container program result$/m);
+    assert.equal(containerRead.stdout, "", "a workdir readback supplied an unmeasured OAuth authorization result");
     for (const extra of [{}, { BOX_DRY_RUN_OAUTH_DATABASE_HOST_LINE: "MCP_OAUTH_DATABASE_HOST=invented.invalid" }]) {
       const negative = run("{{range .Config.Env}}{{println .}}{{end}}", extra);
       assert.equal(negative.status, 69, String(negative.stderr));

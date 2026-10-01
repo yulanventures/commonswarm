@@ -472,9 +472,16 @@ function executableWords(command: string): string[] {
     if ((dynamicBasenames[0] && !casePattern) || capturedExecutable) {
       throw new Error(`unknown writer executable form: ${command.trim()}`);
     }
+    // This filename-list command only emits digests on stdout; its surrounding
+    // redirection is inventoried independently. No xargs operand can become a
+    // writer destination here. Other xargs programs still refuse visibly.
+    let utility = name(words[2]);
+    if (rawWords[2] === words[2]) utility = utility.replace(/\)$/, "");
+    if (words[0] === "xargs" && words.length === 3 && words[1] === "-0" &&
+        utility === "sha256sum" && !dynamicBasenames[2]) return [utility];
     // These utilities execute another argv. Until their option grammars are
     // supported, refusing the envelope keeps wrapped writers visible.
-    if (["nice", "nohup", "timeout", "stdbuf", "ionice", "setsid", "chrt"].includes(words[0]!)) {
+    if (["nice", "nohup", "timeout", "stdbuf", "ionice", "setsid", "chrt", "xargs", "time"].includes(words[0]!)) {
       throw new Error(`unknown writer executable wrapper: ${command.trim()}`);
     }
   }
@@ -688,18 +695,49 @@ function assertWriterDestination(path: string): void {
 // Mac-local SSH sinks and post-capture writers keep their producing operation,
 // so an unrelated transfer cannot borrow their coverage. Discovery supplies no
 // bytes: a later transfer still requires the writer's actual retained file.
-export function capturedMacProductPaths(block: HandoffBlock): string[] {
+export function capturedMacProducts(block: HandoffBlock): Array<{ path: string; producer: RemoteOperation }> {
   return macBoundaryOperations(block).flatMap((operation) => {
     if (!("remote" in operation)) return [];
     const local = operation.remote.localOutputPaths ?? [];
-    if (!operation.remote.capture?.localStateSource) return local;
-    const source = outsideHeredocs(operation.remote.capture.localStateSource);
-    const expand = expansions({ ...block, source });
+    if (!operation.remote.capture?.localStateSource) return local.map((path) => ({ path, producer: operation.remote }));
+    const source = operation.remote.capture.localStateSource;
+    const expand = expansions({ ...block, source: outsideHeredocs(source) });
     // /dev/null discards a probe's stdout; it is not a retained writer product
     // that a later transfer can consume or use to claim producer coverage.
     return [...local, ...writerSourceLines(source).flatMap((line) => outputPaths(line, expand).flatMap(expand))]
-      .filter((path) => path !== "/dev/null");
+      .filter((path) => path !== "/dev/null").map((path) => ({ path, producer: operation.remote }));
   });
+}
+
+export function capturedMacProductPaths(block: HandoffBlock): string[] {
+  return capturedMacProducts(block).map((product) => product.path);
+}
+
+// Local copies retain both operands. A read can claim this writer only when
+// its source is an input or an earlier product; a shared basename is not enough.
+export function localCopyProducts(block: HandoffBlock): Array<{ source: string; path: string }> {
+  // Read-discovery prefixes can end inside non-shell source or quoted data.
+  // Validate copy grammar only when the executable boundary actually has cp.
+  const commands = shellCommands(block.source.replace(/\\\n\s*/g, " "));
+  if (!commands.some((command) => executableWords(command)[0] === "cp")) return [];
+  const expand = expansions({ ...block, source: outsideHeredocs(block.source) });
+  return writerSourceLines(block.source).flatMap((line) => writerCommands(line, 0, expand).flatMap((command) => {
+    const words = executableWords(command);
+    if (words[0] !== "cp") return [];
+    const operands = words.slice(1);
+    while (operands[0]?.startsWith("-")) {
+      const option = operands.shift()!;
+      if (option === "--") break;
+      if (!/^-[apfrRv]+$/.test(option) && !["--reflink=auto", "--reflink=always", "--reflink=never"].includes(option)) {
+        throw new Error(`unknown local copy option: ${option}`);
+      }
+    }
+    if (operands.length !== 2) throw new Error(`unknown local copy form: ${command.trim()}`);
+    const sources = expand(operands[0]!), paths = expand(operands[1]!);
+    if (sources.length !== 1 || paths.length !== 1) throw new Error(`unknown local copy form: ${command.trim()}`);
+    assertWriterDestination(paths[0]!);
+    return [{ source: sources[0]!, path: paths[0]! }];
+  }));
 }
 
 function shellWrites(block: HandoffBlock): TransferProduct[] {
