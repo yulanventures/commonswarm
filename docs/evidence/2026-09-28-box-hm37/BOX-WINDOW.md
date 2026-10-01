@@ -1258,8 +1258,11 @@ PY
     "$EXPECTED_EDGE/deploy/edge-runtime"
   docker inspect --format '{{ range .Mounts }}{{ println .Source .Destination }}{{ end }}' "$EDGE_CID" \
     | grep -qF "$EXPECTED_EDGE/deploy/edge-runtime/main /home/deno/main"
-  docker exec "$EDGE_CID" deno eval \
-    'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+  # The previous image has edge-runtime, not a standalone deno executable.
+  # Inspect failure stops here; an absent flag remains DARK. Print no env values.
+  MCP_PUBLIC_STATE="$(docker inspect --format \
+    '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}' "$EDGE_CID")"
+  test -z "$MCP_PUBLIC_STATE"
 
   cat >"$APPLY_SQL" <<'SQL'
 \i /work/deploy/release-proofs/item-hm/20260928000002-catalog.sql
@@ -2218,12 +2221,14 @@ set -euo pipefail
 for value in "$@"; do
   case "$value" in ????????-????-4???-[89ab]???-????????????) ;; *) exit 1 ;; esac
 done
+# Pre-04 columns: supabase/migrations/20260723000001_p1_schema.sql:192-203.
+# This cleanup also runs on aborts before migration 04; it needs no 04 objects.
 SQL="BEGIN READ ONLY;
 WITH expected(principal_id) AS (VALUES ('$1'::uuid), ('$2'::uuid), ('$3'::uuid))
-SELECT expected.principal_id::text || '=' || count(tokens.id)::text
+SELECT expected.principal_id::text || '=' || count(tokens.token_id)::text
 FROM expected
 LEFT JOIN swarm.agent_tokens AS tokens
-  ON tokens.agent_principal_id = expected.principal_id
+  ON tokens.principal_id = expected.principal_id
  AND tokens.revoked_at IS NULL
  AND tokens.expires_at > now()
 GROUP BY expected.principal_id
@@ -2404,8 +2409,10 @@ copy-back manifest, records that disposition, and continues automatically.
     "/home/commonswarm/edge/releases/$SHA"
   test "$(cat /home/commonswarm/edge/current/RELEASE_SHA)" = "$SHA"
   test "$(docker inspect --format '{{.State.Health.Status}}' commonswarm-edge-edge-runtime-1)" = healthy
-  docker exec commonswarm-edge-edge-runtime-1 deno eval \
-    'Deno.exit(Deno.env.get("SWARM_MCP_PUBLIC_ENABLED") === "1" ? 1 : 0)'
+  # Inspect failure stops here; an absent flag remains DARK. Print no env values.
+  MCP_PUBLIC_STATE="$(docker inspect --format \
+    '{{range .Config.Env}}{{if eq . "SWARM_MCP_PUBLIC_ENABLED=1"}}enabled{{end}}{{end}}' commonswarm-edge-edge-runtime-1)"
+  test -z "$MCP_PUBLIC_STATE"
   test "$(release_psql_ro -Atq --command \
     "SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20260928000004';")" = 1
   test "$(cat "$PROOF_DIR/hm37-functional-after-control.txt")" = t
