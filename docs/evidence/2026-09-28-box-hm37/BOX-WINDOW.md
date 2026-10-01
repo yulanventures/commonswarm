@@ -2372,28 +2372,25 @@ BOX
   # A missing active proof is allowed only on an early abort without window state.
   REQUIRE_PROOF=no
   if [ -n "$EVIDENCE_DIR" ]; then REQUIRE_PROOF=yes; fi
-  TRANSFER_PY="$(cat <<'PYTRANSFER'
+  ssh -o BatchMode=yes ops@100.115.66.74 "sudo -n python3 -c '
 import os, pathlib, sys
-proof = pathlib.Path("/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922")
-required = sys.argv[1] == "yes"
+proof = pathlib.Path(\"/home/commonswarm/stack/release-proofs/eb2a87ac4b5ae357ebc6f1ab45ed37fffaaa4922\")
+required = sys.argv[1] == \"yes\"
 exists = proof.is_dir() and not proof.is_symlink()
-assert exists or (not required and not proof.exists() and not proof.is_symlink()), "FAIL hm37a-prep-cleanup-transfer: active proof missing or unsafe"
+assert exists or (not required and not proof.exists() and not proof.is_symlink()), \"FAIL hm37a-prep-cleanup-transfer: active proof missing or unsafe\"
 data = sys.stdin.buffer.read()
 if exists:
-    dest = proof / "hm37a-prep-cleanup.json"
-    assert not dest.is_symlink(), "FAIL hm37a-prep-cleanup-transfer: receipt symlink"
+    dest = proof / \"hm37a-prep-cleanup.json\"
+    assert not dest.is_symlink(), \"FAIL hm37a-prep-cleanup-transfer: receipt symlink\"
     dest.write_bytes(data)
     os.chown(dest, 0, 0)
     os.chmod(dest, 0o600)
     state = dest.stat()
-    assert dest.is_file() and dest.read_bytes() == data and (state.st_uid, state.st_gid, state.st_mode & 0o777) == (0, 0, 0o600), "FAIL hm37a-prep-cleanup-transfer: destination verification"
-    print("hm37a-prep-cleanup-transfer: verified")
+    assert dest.is_file() and dest.read_bytes() == data and (state.st_uid, state.st_gid, state.st_mode & 0o777) == (0, 0, 0o600), \"FAIL hm37a-prep-cleanup-transfer: destination verification\"
+    print(\"hm37a-prep-cleanup-transfer: verified\")
 else:
-    print("hm37a-prep-cleanup-transfer: early abort; Mac receipt retained")
-PYTRANSFER
-  )"
-  ssh -o BatchMode=yes ops@100.115.66.74 \
-    "sudo -n python3 -c '$TRANSFER_PY' '$REQUIRE_PROOF'" <"$CLEANUP_RECEIPT"
+    print(\"hm37a-prep-cleanup-transfer: early abort; Mac receipt retained\")
+' '$REQUIRE_PROOF'" <"$CLEANUP_RECEIPT"
   test "$DELETE_RESULT" != failed
 )
 ```
