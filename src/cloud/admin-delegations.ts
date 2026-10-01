@@ -41,6 +41,6 @@ export async function revokeAdminDelegation(
     body = await response.json() as Record<string, unknown>;
   } catch { throw new AdminRevokeUncertain(requestId); }
   if (response.status >= 500 || !body || typeof body !== "object") throw new AdminRevokeUncertain(requestId);
-  if (!response.ok || body.status !== "accepted" || body.ok !== true) throw new AdminRecoveryError("revoke_refused", `The grant was not revoked (HTTP ${response.status}). Sign in as the granting person and retry.`);
+  if (!response.ok || body.status !== "accepted") throw new AdminRecoveryError("revoke_refused", `The grant was not revoked (HTTP ${response.status}). Sign in as the granting person and retry.`);
   return { grant_id: grantId, request_id: requestId, state: "revoked" };
 }

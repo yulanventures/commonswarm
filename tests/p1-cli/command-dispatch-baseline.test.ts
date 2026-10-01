@@ -74,6 +74,7 @@ function dispatchBaselineShard(): number | null {
  * any drift from this inventory.
  */
 const LEGACY_COMMAND_ENTRY_COVERAGE: readonly CommandEntryCoverage[] = [
+  ...["grants", "history", "revoke", "refusal"].map(key => ({ key: `admin.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: "standard" as const, workspaceErrorJson: false })),
   // Item K's profile routes run through the focused dispatcher baseline below.
   ...["ls", "refusal"].map(key => ({ key: `profile.${key}`, variants: ["default"], profile: "refuse" as const, hostSessionId: "drop" as const, errorMode: key === "ls" ? "onboarding" as const : "standard" as const, workspaceErrorJson: false })),
   { key: "setup", variants: ["import", "version", "guide"], profile: "native", hostSessionId: "keep", errorMode: "onboarding", workspaceErrorJson: false },
@@ -166,6 +167,7 @@ async function commandEntryCoverage(): Promise<readonly CommandEntryCoverage[]> 
  * refusal coverage.
  */
 const GROUP_REFUSAL_SITES = [
+  "admin",
   "mcp",
   "receive",
   "hook",
@@ -255,6 +257,7 @@ const FILE_REFUSAL_JSON_ROUTES: readonly Fixture[] = [
 
 /** Every entry whose old position reached expandAgentProfile's refuse branch. */
 const REFUSE_PROFILE_ROUTES: readonly Fixture[] = [
+  { id: "refusal.profile.admin", argv: ["admin", "grants"] },
   { id: "refusal.profile.__listen-supervisor", argv: ["__listen-supervisor"] },
   { id: "refusal.profile.hook", argv: ["hook", "check"], input: "{}" },
   { id: "refusal.profile.login", argv: ["login"] },
@@ -302,6 +305,9 @@ function coreFixtures(): Fixture[] {
   const human = [...target, ...workspace];
   const agent = [...profile];
   return [
+    { id: "admin.grants", argv: ["admin", "grants", "--limit", "101"] },
+    { id: "admin.history", argv: ["admin", "history", "--before", "invalid"] },
+    { id: "admin.revoke", argv: ["admin", "revoke", "--grant-id", "invalid"] },
     { id: "refusal.unknown-verb", argv: ["invalidverb"] },
     { id: "refusal.unknown-option.device", argv: ["target", "show", ...target, "--device"] },
     { id: "feed.since.target-before-date", argv: ["feed", "--since", "yesterday", "--url", "<ORIGIN>"], env: { SWARM_CLOUD_ANON_KEY: "" } },
@@ -931,6 +937,43 @@ async function runFixture(root: string, origin: string, fixture: Fixture): Promi
 }
 
 test("the command dispatcher matches the recorded behavior baseline", { timeout: 600_000 }, async () => {
+  // UPDATE_DISPATCH_BASELINE=help refreshes only generated help and new admin
+  // refusals without a socket. Existing non-help behavior must stay byte-identical;
+  // UPDATE_DISPATCH_BASELINE=1 remains the complete network-backed generator.
+  if (process.env.UPDATE_DISPATCH_BASELINE === "help") {
+    const root = createLaneTempHome("dispatch-help-");
+    try {
+      const recorded = JSON.parse(await readFile(baselinePath, "utf8")) as BaselineRow[];
+      const byId = new Map(recorded.map(row => [row.id, row]));
+      const allFixtures = await fixtures();
+      const ids = new Set(allFixtures.map(fixture => fixture.id));
+      assert.ok(recorded.every(row => ids.has(row.id)), "help refresh cannot remove recorded routes");
+      const rows: BaselineRow[] = [];
+      for (const fixture of allFixtures) {
+        const prior = byId.get(fixture.id);
+        if (prior && ![prior.stdout, prior.stderr].some(value => /^cswarm <VERSION> \(protocol /mu.test(value))) {
+          assert.deepEqual(prior.argv, fixture.argv, fixture.id);
+          rows.push(prior);
+          continue;
+        }
+        if (!prior) assert.equal(fixture.argv[0], "admin", "help refresh only adds admin routes");
+        const row = await runFixture(root, "http://127.0.0.1:9", fixture);
+        if (prior) assert.deepEqual(
+          { ...row, stdout: withoutGeneratedHelp(row.stdout), stderr: withoutGeneratedHelp(row.stderr) },
+          { ...prior, stdout: withoutGeneratedHelp(prior.stdout), stderr: withoutGeneratedHelp(prior.stderr) },
+          `existing behavior changed: ${fixture.id}`,
+        );
+        else assert.equal(row.exitCode, 1, `new admin route must refuse: ${fixture.id}`);
+        rows.push(row);
+      }
+      await writeFile(baselinePath, `${JSON.stringify(rows, null, 2)}\n`);
+      await writeFile(baselineCountsPath, `${JSON.stringify({
+        total: rows.length, exitCodeZero: rows.filter(row => row.exitCode === 0).length,
+        exitCodeNonzero: rows.filter(row => row.exitCode !== 0).length,
+      }, null, 2)}\n`);
+    } finally { removeLaneTempHome(root); }
+    return;
+  }
   const root = createLaneTempHome("dispatch-baseline-");
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
