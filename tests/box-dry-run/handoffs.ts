@@ -294,8 +294,21 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
           ? { localStateSource: tail } : {}) };
     }
     const sshPipelines = shellCommands(line.slice(ssh.index), true);
-    if (shellCommands(line.slice(ssh.index)).slice(1).some((text) =>
-      /\bssh\b/.test(text) && executableWords(text)[0] === "ssh")) {
+    const refuse = (cause?: unknown): never => {
+      throw new Error(`${block.file}:${block.line} ${block.step}: unsupported Mac SSH pipeline: ${sshPipelines[0]!.trim()}`, { cause });
+    };
+    // The adjacency scan also parses pipe consumers when their argv mentions
+    // ssh. Keep those strict executable refusals at the owning pipeline's
+    // boundary; list-separated neighbors retain their own errors.
+    if (sshPipelines.some((pipeline, index) => {
+      const commands = shellCommands(pipeline);
+      if (index === 0) commands.shift();
+      try { return commands.some((text) => /\bssh\b/.test(text) && executableWords(text)[0] === "ssh"); }
+      catch (error) {
+        if (index === 0) return refuse(error);
+        throw error;
+      }
+    })) {
       throw new Error(`${block.file}:${block.line} ${block.step}: unknown transfer form: multiple SSH commands on one Mac line: ${line.trim()}`);
     }
     let sshText = sshPipelines[0]!.trim();
@@ -316,9 +329,6 @@ export function macBoundaryOperations(block: HandoffBlock, locals: Record<string
       // retained stdout writer has no replay here and must not borrow bytes
       // from an unrelated transfer. Non-stdout consumers (e.g. archive
       // extraction) retain their existing boundary handling.
-      const refuse = (cause?: unknown): never => {
-        throw new Error(`${block.file}:${block.line} ${block.step}: unsupported Mac SSH pipeline: ${sshText}`, { cause });
-      };
       let paths: string[];
       try { paths = outputPaths(sshText.slice(sshCommand.length), expand).flatMap(expand); }
       catch (error) { return refuse(error); }
