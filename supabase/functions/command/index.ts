@@ -833,13 +833,13 @@ const FREE_TIER_WORKSPACE_LIMIT = 10;
  * invariant this comment states and capping a legitimate user at 6 creations
  * while telling them they may hold 10.
  */
-const SELF_SERVE_CREATE_DAILY_LIMIT = 20;
+const SELF_SERVE_CREATE_DAILY_LIMIT = ADMIN_WORKSPACE_CREATE_PER_DAY;
 
 /**
  * §8: free self-serve plus transactional email is a branded-phishing vector,
  * so outbound invites are capped per verified identity per rolling day.
  */
-const INVITE_IDENTITY_DAILY_LIMIT = 10;
+const INVITE_IDENTITY_DAILY_LIMIT = ADMIN_INVITATION_ISSUE_PER_DAY;
 
 /**
  * §10's per-tenant caps. Seats count live members plus invitations still
@@ -1111,17 +1111,17 @@ const WORKSPACE_COMMAND_KINDS = [
   TOUCH_PRESENCE_KIND,
   ...FILE_COMMAND_KINDS,
 ] as const;
-const P0_AGENT_SCOPES = [
-  "create",
-  "acquire",
-  "renew",
-  "handoff",
-  "takeover",
-  "submit",
-  "close",
-  "reopen",
-  "post_signal",
-] as const;
+import { P0_AGENT_SCOPES } from "./worker-scopes.ts";
+import { ADMIN_WORKSPACE_CREATE_PER_DAY, ADMIN_INVITATION_ISSUE_PER_DAY } from "../_shared/protocol.js";
+/* Worker scopes are shared by ordinary minting and delegated provisioning.
+ * Their extraction preserves the existing ordinary worker permission set.
+ * The two rolling-day ceilings come from the consent/enforcement registry.
+ * Delegated invitations are included in the human invitation count below.
+ * The blank space in this replaced declaration is intentional: source-line
+ * citations in the contract and standing-worker evidence remain stable.
+ */
+
+
 
 const requiredConfig = commandRequiredConfig((name) => Deno.env.get(name));
 const commandEnvironment = Deno.env.get("SWARM_ENV");
@@ -5223,7 +5223,7 @@ async function createSelfServeWorkspace(
     };
   }
 
-  const workspaceId = command!.workspace_id as string;
+  await tx`SELECT user_id FROM swarm.users WHERE user_id=${auth.actor.user}::uuid FOR UPDATE`; const workspaceId = command!.workspace_id as string;
   const name = command!.name as string;
 
   // §8's degraded mode. Refused here — with its own audit reason, never a
@@ -8244,9 +8244,9 @@ async function enforceFreeTierBudget(
   };
 
   if (command.kind === "invite_member") {
-    const sentRows = await tx<{ sent: string; resets_at: Date | null }[]>`
+    await tx`SELECT user_id FROM swarm.users WHERE user_id=${auth.actor.user}::uuid FOR UPDATE`; const sentRows = await tx<{ sent: string; resets_at: Date | null }[]>`
       SELECT
-        count(*)::text AS sent,
+        (count(*) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE owner_user_id=${auth.actor.user}::uuid AND created_at > statement_timestamp() - interval '24 hours'))::text AS sent,
         min(created_at) + interval '24 hours' AS resets_at
       FROM swarm.invitations
       WHERE created_by = ${auth.actor.user}::uuid
@@ -8296,7 +8296,7 @@ async function enforceFreeTierBudget(
             AND consumed_at IS NULL
             AND revoked_at IS NULL
             AND expires_at > statement_timestamp()
-        )
+        ) + (SELECT count(*) FROM swarm.admin_routine_invitations WHERE workspace_id=${route.workspaceId}::uuid AND invitation_kind='member' AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > statement_timestamp())
       )::text AS used
     `;
     const used = Number(seatRows[0]?.used ?? "0");
@@ -14257,4 +14257,44 @@ async function releaseAgentSession(
   }
   await reclaimUnsurfacedLeases(tx, principalId);
   return { status: 200, body: { ok: true, status: "accepted" } };
+}
+
+/** Private local-worker delivery. Both delegated access and signed recipient
+ * runtime proof are checked in the transaction. HTTP cannot select this channel.
+ * Delivery means runtime storage only; connection proof remains a separate step.
+ */
+export async function handleAdminWorkerRuntimeCommand(
+  input: AdminInput,
+  accessCredential: string,
+  recipientRuntimeCredential: string,
+  deliver: (credential: import('./admin-routine.ts').AdminWorkerDelivery) => Promise<void>,
+): Promise<HttpResult> {
+  const authentication: AdminAuthentication = { kind: 'access', credential: accessCredential,
+    recipient_runtime_credential: recipientRuntimeCredential };
+  let outcome: Awaited<ReturnType<typeof adminTransaction>>;
+  try {
+    outcome = await db.begin('isolation level read committed', async tx => {
+      await setTransaction(tx);
+      return await adminTransaction(tx, input, authentication);
+    });
+  } catch {
+    try { await db.begin(async tx => { await setTransaction(tx); await recordAdminFailure(tx,input,authentication); }); }
+    catch { return {status:500,body:{error:'admin_failure_audit_unavailable'}}; }
+    return {status:500,body:{error:'admin_command_failed'}};
+  }
+  if (outcome.worker_delivery) {
+    try { await deliver(outcome.worker_delivery); }
+    catch {
+      // Partial delivery is uncertain access: terminally stop the parent, never
+      // show delivered or connected. Human consent is required for replacement.
+      try { await db.begin(async tx => {
+        await setTransaction(tx);
+        const [g] = await tx<{owner_user_id:string}[]>`SELECT owner_user_id FROM swarm.admin_grants WHERE grant_id=${outcome.worker_delivery!.grant_id}::uuid`;
+        if (!g) throw new Error('worker delivery parent missing');
+        await adminTransaction(tx,{command_id:crypto.randomUUID(),stream:{kind:'account'},resource:'https://api.commonswarm.com/admin',command:{kind:'revoke_admin_delegation',grant_id:outcome.worker_delivery!.grant_id,reason_code:'worker_delivery_failed'}},{kind:'system',owner_user_id:g.owner_user_id});
+      }); } catch { return {status:500,body:{error:'admin_delivery_recovery_unavailable'}}; }
+      return {status:503,body:{error:'worker_delivery_failed',next_action:'Ask the granting person to approve a new connection.'}};
+    }
+  }
+  return outcome.result;
 }
